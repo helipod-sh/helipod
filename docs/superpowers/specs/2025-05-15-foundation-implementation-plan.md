@@ -1,6 +1,6 @@
 ---
 title: Foundation Slice — Implementation Plan
-status: draft (synthesized; adversarial hardening pending)
+status: implemented — M0–M11 built + hardened (historical plan of record)
 date: 2025-05-15
 audience: engineering (internal)
 ---
@@ -98,5 +98,5 @@ M8 (codegen) can proceed in parallel after M0. M1 (codec + id) can split into tw
 ## Deferred past Foundation (do NOT build here)
 Range-precise invalidation · Tier 2 distributed sharding + sync fleet + coordinator (`ShardRouter`/`SyncShardMap` stay declared-only) · Postgres `DocStore` adapter · ephemeral/presence **implementation** beyond the in-process seam · auth · file storage · search/vector execution · multi-runtime hosts (Bun/CF) · binary wire codec · retention/compaction policy.
 
-## Pre-build gate (blocking)
-Before M0, **confirm the 4 open decisions** in design spec §12 (executor inline-vs-isolate, package granularity, runtime baseline, license). And: the **resumed adversarial workflow** (`Workflow({scriptPath:"/Volumes/Projects/concave-dev/.workflows/plan-foundation.mjs", resumeFromRunId:"wf_8ce0d361-02e"})`) should run after the session limit resets (04:40 IST) to harden this plan; fold its blocking findings in before starting M-series implementation.
+## Pre-build gate (historical — resolved)
+This slice has been **built (M0–M11) and hardened** — see [`../../dev/architecture/hardening-2025-05-15.md`](../../dev/architecture/hardening-2025-05-15.md). The 4 open decisions from design §12 were resolved during implementation: **executor inline-first** (isolates later), **separate packages**, **Node + Bun (Bun primary)**, **MIT** license. The originally-planned *design-level* `plan-foundation` adversarial re-run was **superseded** by the code-level hardening review and was not run.

@@ -1,13 +1,13 @@
 ---
 title: Foundation Slice — Design Spec
-status: draft (synthesized; adversarial hardening pending)
+status: implemented + hardened (built as M0–M11; the code is the source of truth)
 date: 2025-05-15
 audience: engineering (internal)
 ---
 
 # Foundation Slice — Design Spec
 
-> **Provenance.** The 12 component designs in [`../../dev/architecture/foundation/`](../../dev/architecture/foundation/) and the [scalability spectrum](../../dev/architecture/scalability-spectrum.md) were produced by the `plan-foundation` workflow. The workflow hit the session usage limit before its synthesis/red-team phases ran, so **this spec was synthesized directly from the component designs + the spectrum doc.** The full adversarial pass (per-component review, scale-stress, red-team, patch) is **pending** and will run via `Workflow({scriptPath, resumeFromRunId})` once the limit resets — completed agents return cached, so only the review/synthesis phases re-run. Treat the inline review in §10 as the interim substitute, not a replacement.
+> **Provenance & status.** This spec was synthesized from the 12 component designs in [`../../dev/architecture/foundation/`](../../dev/architecture/foundation/) and the [scalability spectrum](../../dev/architecture/scalability-spectrum.md) (produced by the `plan-foundation` workflow). The slice has since been **fully implemented (M0–M11)** under `packages/`, with a runnable example in `examples/chat`. The originally-planned *design-level* adversarial pass was **superseded** by an adversarial review of the **built code** (19 findings, 16 fixed) — see [`../../dev/architecture/hardening-2025-05-15.md`](../../dev/architecture/hardening-2025-05-15.md). Treat this spec as the historical design of record; **the code is the source of truth.**
 
 ## 1. Scope
 
