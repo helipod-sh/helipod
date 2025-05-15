@@ -1,0 +1,15 @@
+**/node_modules
+**/dist
+**/.turbo
+.git
+.gitignore
+.reference
+.remember
+.workflows
+.claude
+docs
+*.md
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.DS_Store

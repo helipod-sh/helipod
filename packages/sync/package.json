@@ -1,0 +1,38 @@
+{
+  "name": "@stackbase/sync",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@stackbase/values": "workspace:*"
+  },
+  "devDependencies": {
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/query-engine": "workspace:*",
+    "@stackbase/transactor": "workspace:*",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

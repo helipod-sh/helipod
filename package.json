@@ -1,0 +1,25 @@
+{
+  "name": "stackbase",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Stackbase — a Convex-compatible, self-hostable reactive backend. Lightweight by default, scalable on demand.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "dev": "turbo run dev",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

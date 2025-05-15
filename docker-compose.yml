@@ -1,0 +1,17 @@
+# Stackbase Tier 0 — one service, one volume. `docker compose up` is the whole backend.
+services:
+  stackbase:
+    build:
+      context: .
+      target: runtime
+    image: stackbase:dev
+    ports:
+      - "3000:3000"
+    environment:
+      STACKBASE_DATA_DIR: /data
+    volumes:
+      - stackbase-data:/data
+    restart: unless-stopped
+
+volumes:
+  stackbase-data:

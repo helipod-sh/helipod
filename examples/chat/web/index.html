@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stackbase Chat</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.5 system-ui, sans-serif;
+        background: #0b0c10;
+        color: #e6e7eb;
+        display: flex;
+        justify-content: center;
+      }
+      .app { width: 100%; max-width: 640px; height: 100dvh; display: flex; flex-direction: column; padding: 1rem; }
+      header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+      h1 { font-size: 1.25rem; margin: 0; }
+      .me { color: #8b8e98; font-size: 0.85rem; }
+      .messages {
+        list-style: none; margin: 1rem 0; padding: 0.5rem; flex: 1; overflow-y: auto;
+        background: #14161d; border: 1px solid #232734; border-radius: 12px; display: flex; flex-direction: column; gap: 0.4rem;
+      }
+      .status { color: #6b6f7a; font-style: italic; padding: 0.5rem; }
+      .msg { padding: 0.45rem 0.7rem; background: #1c2030; border-radius: 10px; max-width: 80%; align-self: flex-start; }
+      .msg.mine { background: #2563eb; align-self: flex-end; }
+      .author { display: block; font-size: 0.72rem; color: #9aa0ad; margin-bottom: 0.1rem; }
+      .msg.mine .author { color: #cfe0ff; }
+      form { display: flex; gap: 0.5rem; }
+      input {
+        flex: 1; padding: 0.6rem 0.8rem; border-radius: 10px; border: 1px solid #2a2f3d;
+        background: #14161d; color: inherit; font: inherit;
+      }
+      button { padding: 0.6rem 1.1rem; border: 0; border-radius: 10px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
+      button:hover { background: #1d4ed8; }
+      footer { color: #6b6f7a; font-size: 0.78rem; text-align: center; margin-top: 0.6rem; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

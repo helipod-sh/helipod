@@ -1,0 +1,78 @@
+import { describe, it, expect } from "vitest";
+import {
+  MemoryTableRegistry,
+  isSystemTableName,
+  getFullTableName,
+  parseFullTableName,
+  USER_TABLE_NUMBER_START,
+  DEFAULT_SHARD,
+  DefaultShardKeyResolver,
+  FieldShardKeyResolver,
+  SimpleShardRouter,
+  encodeStorageIndexId,
+  decodeStorageIndexId,
+} from "../src/index";
+
+describe("MemoryTableRegistry", () => {
+  it("allocates user tables from 10001 and is idempotent", () => {
+    const reg = new MemoryTableRegistry();
+    const messages = reg.allocate("messages");
+    const users = reg.allocate("users");
+    expect(messages.tableNumber).toBe(USER_TABLE_NUMBER_START);
+    expect(users.tableNumber).toBe(USER_TABLE_NUMBER_START + 1);
+    expect(reg.allocate("messages")).toBe(messages); // idempotent
+    expect(reg.getByName("messages")).toBe(messages);
+    expect(reg.getByNumber(messages.tableNumber)).toBe(messages);
+  });
+
+  it("allocates system tables in the 1–9999 range", () => {
+    const reg = new MemoryTableRegistry();
+    const sys = reg.allocate("_scheduled");
+    expect(sys.visibility).toBe("system");
+    expect(sys.tableNumber).toBeLessThan(10000);
+    expect(reg.allocate("messages").tableNumber).toBeGreaterThanOrEqual(USER_TABLE_NUMBER_START);
+  });
+
+  it("stores the shard key on the table (seam #1)", () => {
+    const reg = new MemoryTableRegistry();
+    const messages = reg.allocate("messages", { shardKey: "conversationId" });
+    expect(messages.shardKey).toBe("conversationId");
+  });
+});
+
+describe("table name helpers", () => {
+  it("recognizes system tables and component-qualified names", () => {
+    expect(isSystemTableName("_scheduled")).toBe(true);
+    expect(isSystemTableName("messages")).toBe(false);
+    expect(getFullTableName("messages", "chat")).toBe("chat/messages");
+    expect(parseFullTableName("chat/messages")).toEqual({ componentPath: "chat", name: "messages" });
+    expect(parseFullTableName("messages")).toEqual({ componentPath: "", name: "messages" });
+  });
+});
+
+describe("storage index ids", () => {
+  it("round-trips table number and index name", () => {
+    const id = encodeStorageIndexId(10001, "by_conversation");
+    expect(decodeStorageIndexId(id)).toEqual({ tableNumber: 10001, indexName: "by_conversation" });
+  });
+});
+
+describe("sharding seam (Tier 0)", () => {
+  it("DefaultShardKeyResolver never shards", () => {
+    expect(new DefaultShardKeyResolver().resolve()).toBeNull();
+  });
+
+  it("FieldShardKeyResolver extracts the configured field", () => {
+    const resolver = new FieldShardKeyResolver(new Map([["messages", "conversationId"]]));
+    expect(resolver.resolve({ table: "messages", document: { conversationId: "c1", body: "hi" } })).toBe("c1");
+    expect(resolver.resolve({ table: "users", document: { name: "x" } })).toBeNull();
+    expect(resolver.resolve({ table: "messages", document: { body: "hi" } })).toBeNull();
+  });
+
+  it("SimpleShardRouter always returns the default shard", () => {
+    const router = new SimpleShardRouter();
+    expect(router.getShardForKey("c1")).toBe(DEFAULT_SHARD);
+    expect(router.getShardForDocument("messages", "c1")).toBe(DEFAULT_SHARD);
+    expect(router.getSyncNodeId("client-123")).toBe("local");
+  });
+});

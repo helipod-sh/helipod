@@ -1,0 +1,32 @@
+# Reference material only — third-party sources studied for understanding.
+# NEVER ship or copy this into our own packages (see .reference/README.md).
+.reference/
+
+# deps / build
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# env / local
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# stackbase local data (Tier 0 embedded db)
+*.db
+*.db-wal
+*.db-shm
+.stackbase/
+
+# generated example web bundle (run `pnpm web:build`)
+examples/*/web/main.js
+examples/*/web/*.js.map
+
+# local agent / tooling / verification artifacts
+.playwright-mcp/
+.workflows/
+.remember/
+.claude/
+stackbase-chat-working.png
