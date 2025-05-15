@@ -11,6 +11,29 @@ Stackbase is **100% API compatible with Convex**. Existing Convex apps run uncha
 
 > These docs are derived from the original concave.dev documentation and rebranded for Stackbase. The Convex compatibility surface (the `convex/` directory, `convex/server`, `convex/values`, `_generated`, and links to the official Convex docs) is intentionally preserved — that compatibility is the whole point.
 
+## ⚠️ Implementation status (read this first)
+
+These pages describe the **target product surface** (inherited from the concave reference). The
+current build is the **Foundation slice (Tier 0)** — a single self-hosted process with embedded
+SQLite. Not everything below is built yet. Honest status:
+
+| Area | Status |
+|---|---|
+| Schema, queries, mutations, validators (`v`), generated types (`Doc`/`Id`/`api`) | ✅ Built |
+| Reactive `useQuery`/`useMutation` (React), client SDK, loopback + WebSocket transport | ✅ Built |
+| `stackbase dev` (codegen, hot reload, dashboard, HTTP `/api/run`) | ✅ Built |
+| Embedded SQLite storage (MVCC), single-writer OCC, cursor pagination | ✅ Built |
+| Self-host via Docker (single binary), runs on Bun (primary) + Node | ✅ Built (Tier 0) |
+| **Actions**, scheduled functions / **crons** | 🚧 Planned (engine seam reserved) |
+| **Auth** | 🚧 Planned |
+| **File storage** (blob), **full-text & vector search** | 🚧 Planned (adapter seams reserved) |
+| **Cloudflare** deploy (Workers / D1 / R2 / Vectorize), **desktop bundling** (Electron/Tauri/Electrobun) | 🚧 Planned |
+| **Distributed / multi-region scaling** (sharded sync fleet — "Tier 2") | 🚧 Designed, seams reserved; not built — see [scaling-reality](../dev/architecture/scaling-reality.md) |
+
+Pages under **Deploy** (beyond self-hosted Docker), **Auth**, and the search/vector parts of **Data
+Storage & Search** describe **planned** capabilities. The reactive core (Build + Local development)
+is real and runnable — see [`examples/chat`](../../examples/chat).
+
 ## Start here
 
 - [Quickstart](/quickstart) — install the CLI, init a project, run your first function, deploy.

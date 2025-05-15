@@ -1,18 +1,20 @@
 /**
- * The dev HTTP server — a thin `node:http` shell around the pure {@link handleHttpRequest}.
- * Works on Node and Bun (both implement `node:http`).
+ * The dev HTTP + WebSocket server. Two backends behind one interface:
+ *   - **Bun** (primary): `Bun.serve` with native (Zig/uWebSockets-class) WebSockets — far higher
+ *     connection density; the production path. See docs/dev/architecture/scaling-reality.md.
+ *   - **Node** (supported): `node:http` + the `ws` package.
+ * The HTTP routing ({@link handleHttpRequest}) and static-file resolution are shared and pure.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
-import { WebSocketServer } from "ws";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
+import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -24,8 +26,20 @@ const CONTENT_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-/** Serve a static file from `webDir` (with `/` → index.html), guarding against traversal. */
-function tryServeStatic(webDir: string, urlPath: string, res: ServerResponse): boolean {
+export interface DevServer {
+  url: string;
+  port: number;
+  close(): Promise<void>;
+}
+
+export interface DevServerOptions {
+  port: number;
+  ip: string;
+  webDir?: string;
+}
+
+/** Resolve a static file from `webDir` (with `/` → index.html), guarding against traversal. Pure. */
+function resolveStatic(webDir: string, urlPath: string): { contentType: string; body: Buffer } | null {
   const rel = urlPath === "/" ? "/index.html" : urlPath;
   let root: string;
   let resolved: string;
@@ -34,25 +48,20 @@ function tryServeStatic(webDir: string, urlPath: string, res: ServerResponse): b
     root = realpathSync(resolve(webDir));
     resolved = realpathSync(resolve(join(webDir, rel)));
   } catch {
-    return false; // missing file / broken symlink
+    return null;
   }
-  // Require the resolved path to be the root itself or strictly underneath it (`root + sep`),
-  // so a sibling like `<root>-evil` can't match by prefix.
-  if (resolved !== root && !resolved.startsWith(root + sep)) return false;
-  if (!statSync(resolved).isFile()) return false;
-  res.writeHead(200, { "content-type": CONTENT_TYPES[extname(resolved)] ?? "application/octet-stream" });
-  res.end(readFileSync(resolved));
-  return true;
+  // Require the resolved path to be the root itself or strictly underneath it (`root + sep`).
+  if (resolved !== root && !resolved.startsWith(root + sep)) return null;
+  if (!statSync(resolved).isFile()) return null;
+  return { contentType: CONTENT_TYPES[extname(resolved)] ?? "application/octet-stream", body: readFileSync(resolved) };
 }
 
-export interface DevServer {
-  url: string;
-  port: number;
-  close(): Promise<void>;
-}
+/* -------------------------------------------------------------------------- */
+/* Node backend (node:http + ws)                                              */
+/* -------------------------------------------------------------------------- */
 
 function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     req.on("data", (c: Buffer) => {
@@ -64,26 +73,26 @@ function readBody(req: IncomingMessage): Promise<string> {
       }
       chunks.push(c);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
 
-export async function startDevServer(
-  runtime: EmbeddedRuntime,
-  info: ServerInfo,
-  options: { port: number; ip: string; webDir?: string },
-): Promise<DevServer> {
+async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
+  const { WebSocketServer } = (await import("ws")) as typeof import("ws");
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
         const body = req.method === "POST" || req.method === "PUT" ? await readBody(req) : undefined;
-        const url = req.url ?? "/";
-        const path = url.split("?")[0] ?? "/";
+        const path = (req.url ?? "/").split("?")[0] ?? "/";
         const response = await handleHttpRequest(runtime, { method: req.method ?? "GET", path, body }, info);
-        // Fall back to the static web UI (if configured) for unmatched GETs.
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
-          if (tryServeStatic(options.webDir, path, res)) return;
+          const file = resolveStatic(options.webDir, path);
+          if (file) {
+            res.writeHead(200, { "content-type": file.contentType });
+            res.end(file.body);
+            return;
+          }
         }
         res.writeHead(response.status, response.headers);
         res.end(response.body);
@@ -94,7 +103,6 @@ export async function startDevServer(
     })();
   });
 
-  // Reactive sync over WebSocket: each connection is a session bound to the engine's handler.
   const wss = new WebSocketServer({ noServer: true });
   let sessionCounter = 0;
   server.on("upgrade", (req, socket, head) => {
@@ -114,23 +122,110 @@ export async function startDevServer(
       runtime.handler.connect(sessionId, syncSocket);
       ws.on("message", (data: Buffer) => void runtime.handler.handleMessage(sessionId, data.toString("utf8")));
       ws.on("close", () => runtime.handler.disconnect(sessionId));
-      // Without an error handler a socket 'error' (e.g. abrupt client drop) crashes the process.
       ws.on("error", () => runtime.handler.disconnect(sessionId));
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(options.port, options.ip, resolve));
+  await new Promise<void>((res) => server.listen(options.port, options.ip, res));
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : options.port;
-
   return {
     url: `http://${options.ip}:${port}`,
     port,
     close: () =>
-      new Promise<void>((resolve) => {
+      new Promise<void>((res) => {
         for (const c of wss.clients) c.terminate();
         wss.close();
-        server.close(() => resolve());
+        server.close(() => res());
       }),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Bun backend (Bun.serve native WebSockets) — primary                        */
+/* -------------------------------------------------------------------------- */
+
+interface BunWebSocket {
+  send(data: string): number;
+  close(): void;
+  getBufferedAmount(): number;
+  readonly data: { sessionId: string };
+}
+interface BunUpgradeServer {
+  upgrade(req: Request, options?: { data?: { sessionId: string } }): boolean;
+}
+interface BunServeHandle {
+  port: number;
+  stop(closeActiveConnections?: boolean): void;
+}
+interface BunServeOptions {
+  port: number;
+  hostname: string;
+  fetch(req: Request, server: BunUpgradeServer): Response | undefined | Promise<Response | undefined>;
+  websocket: {
+    open(ws: BunWebSocket): void;
+    message(ws: BunWebSocket, message: string | Uint8Array): void;
+    close(ws: BunWebSocket): void;
+  };
+}
+interface BunRuntime {
+  serve(options: BunServeOptions): BunServeHandle;
+}
+
+async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
+  const bun = (globalThis as { Bun?: BunRuntime }).Bun;
+  if (!bun) throw new Error("Bun runtime not available");
+  let sessionCounter = 0;
+
+  const handle = bun.serve({
+    port: options.port,
+    hostname: options.ip,
+    async fetch(req, server) {
+      const url = new URL(req.url);
+      const path = url.pathname;
+      if (path === SYNC_PATH) {
+        const sessionId = `ws-${++sessionCounter}`;
+        return server.upgrade(req, { data: { sessionId } }) ? undefined : new Response("upgrade failed", { status: 400 });
+      }
+      const body = req.method === "POST" || req.method === "PUT" ? await req.text() : undefined;
+      const response = await handleHttpRequest(runtime, { method: req.method, path, body }, info);
+      if (response.status === 404 && req.method === "GET" && options.webDir) {
+        const file = resolveStatic(options.webDir, path);
+        if (file) return new Response(new Uint8Array(file.body), { headers: { "content-type": file.contentType } });
+      }
+      return new Response(response.body, { status: response.status, headers: response.headers });
+    },
+    websocket: {
+      open(ws) {
+        const syncSocket: SyncWebSocket = {
+          send: (data) => void ws.send(data),
+          get bufferedAmount() {
+            return ws.getBufferedAmount();
+          },
+          close: () => ws.close(),
+        };
+        runtime.handler.connect(ws.data.sessionId, syncSocket);
+      },
+      message(ws, message) {
+        void runtime.handler.handleMessage(ws.data.sessionId, typeof message === "string" ? message : new TextDecoder().decode(message));
+      },
+      close(ws) {
+        runtime.handler.disconnect(ws.data.sessionId);
+      },
+    },
+  });
+
+  return {
+    url: `http://${options.ip}:${handle.port}`,
+    port: handle.port,
+    close: () => {
+      handle.stop(true);
+      return Promise.resolve();
+    },
+  };
+}
+
+/** Start the dev server using the best backend for the current runtime. */
+export function startDevServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
+  return detectRuntime() === "bun" ? startBunServer(runtime, info, options) : startNodeServer(runtime, info, options);
 }
