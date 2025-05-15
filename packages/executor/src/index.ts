@@ -23,3 +23,6 @@ export { query, mutation, action } from "./functions";
 
 export type { ExecutorDeps, RunOptions, UdfResult } from "./executor";
 export { InlineUdfExecutor } from "./executor";
+
+export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";
+export { InMemoryLogSink, NoopLogSink } from "./log-sink";
