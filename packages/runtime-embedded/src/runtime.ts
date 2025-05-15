@@ -77,7 +77,30 @@ export class EmbeddedRuntime {
       },
     };
 
-    const handler = new SyncProtocolHandler(syncExecutor);
+    // Reactivity is driven by the write fan-out (not inline in the mutation handler), so a
+    // commit from ANY path — WebSocket mutation OR `runtime.run()` / HTTP `/api/run` —
+    // invalidates live subscriptions. The async drain serializes notifies and runs them after
+    // the current call stack (so a MutationResponse is sent before its Transition).
+    const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false });
+    const queue: Array<{ tables: string[]; commitTs: number }> = [];
+    let draining = false;
+    const drain = async (): Promise<void> => {
+      if (draining) return;
+      draining = true;
+      try {
+        while (queue.length > 0) {
+          const inv = queue.shift()!;
+          await handler.notifyWrites(inv);
+        }
+      } finally {
+        draining = false;
+      }
+    };
+    adapter.subscribe((payload) => {
+      queue.push({ tables: payload.tables, commitTs: payload.commitTs });
+      void drain();
+    });
+
     return new EmbeddedRuntime(options.store, executor, handler, adapter, modules);
   }
 

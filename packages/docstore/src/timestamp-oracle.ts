@@ -6,14 +6,20 @@ import type { TimestampOracle } from "./types";
  * advance its clock past timestamps it learns from the change stream.
  */
 export class MonotonicTimestampOracle implements TimestampOracle {
-  private current: bigint;
+  private current: bigint; // last allocated (possibly in-flight)
+  private lastCommitted: bigint; // last fully applied
 
   constructor(start: bigint = 0n) {
     this.current = start;
+    this.lastCommitted = start;
   }
 
   getCurrentTimestamp(): bigint {
     return this.current;
+  }
+
+  getLastCommittedTimestamp(): bigint {
+    return this.lastCommitted;
   }
 
   allocateTimestamp(): bigint {
@@ -21,7 +27,12 @@ export class MonotonicTimestampOracle implements TimestampOracle {
     return this.current;
   }
 
+  publishCommitted(ts: bigint): void {
+    if (ts > this.lastCommitted) this.lastCommitted = ts;
+  }
+
   observeTimestamp(ts: bigint): void {
     if (ts > this.current) this.current = ts;
+    if (ts > this.lastCommitted) this.lastCommitted = ts;
   }
 }

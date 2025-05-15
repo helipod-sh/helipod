@@ -166,12 +166,11 @@ export class SqliteDocStore implements DocStore {
     sql += ` AND i.ts <= ? AND i.ts = (SELECT MAX(i2.ts) FROM indexes i2 WHERE i2.index_id = i.index_id AND i2.key = i.key AND i2.ts <= ?)`;
     params.push(readTimestamp, readTimestamp);
     sql += ` ORDER BY i.key ${dir}`;
-    if (limit !== undefined) {
-      sql += ` LIMIT ?`;
-      params.push(limit);
-    }
+    // NOTE: `limit` is applied AFTER skipping deletions/tombstones below — a SQL LIMIT would
+    // count deleted index entries and return short pages.
 
     const rows = this.prep(sql).all(...params);
+    let yielded = 0;
     for (const row of rows) {
       if (Number(row.deleted) === 1 || row.internal_id === null || row.table_id === null) continue;
       const docId: InternalDocumentId = {
@@ -179,7 +178,9 @@ export class SqliteDocStore implements DocStore {
         internalId: row.internal_id as Uint8Array,
       };
       const doc = await this.get(docId, readTimestamp);
-      if (doc !== null) yield [row.key as Uint8Array, doc] as const;
+      if (doc === null) continue; // resolved to a tombstone at this snapshot
+      yield [row.key as Uint8Array, doc] as const;
+      if (limit !== undefined && ++yielded >= limit) return;
     }
   }
 

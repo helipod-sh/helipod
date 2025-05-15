@@ -62,7 +62,9 @@ export function indexKeysEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 function encodeFloat64(n: number): Uint8Array {
   const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setFloat64(0, n, false); // big-endian
+  // Canonicalize NaN so every NaN (incl. sign-set / signaling) encodes identically — matching
+  // `compareValues`, which treats all NaN as equal and greater than every finite number.
+  new DataView(bytes.buffer).setFloat64(0, Number.isNaN(n) ? Number.NaN : n, false); // big-endian
   if (bytes[0]! & 0x80) {
     // negative: flip all bits so larger magnitude sorts lower
     for (let i = 0; i < 8; i++) bytes[i] = bytes[i]! ^ 0xff;

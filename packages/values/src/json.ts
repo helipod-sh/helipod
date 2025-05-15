@@ -67,7 +67,9 @@ export function convexToJson(value: Value): JSONValue {
       }
       if (Array.isArray(value)) return value.map(convexToJson);
       const out: { [key: string]: JSONValue } = {};
-      for (const [k, v] of Object.entries(value)) out[k] = convexToJson(v);
+      // Escape user keys starting with "$" so they can't be confused with the $integer/$float/
+      // $bytes type tags ($foo → $$foo); jsonToConvex reverses it.
+      for (const [k, v] of Object.entries(value)) out[k.startsWith("$") ? `$${k}` : k] = convexToJson(v);
       return out;
     }
     default:
@@ -95,7 +97,7 @@ export function jsonToConvex(json: JSONValue): Value {
         }
       }
       const out: { [key: string]: Value } = {};
-      for (const [key, v] of Object.entries(json)) out[key] = jsonToConvex(v);
+      for (const [key, v] of Object.entries(json)) out[key.startsWith("$$") ? key.slice(1) : key] = jsonToConvex(v);
       return out;
     }
     default:

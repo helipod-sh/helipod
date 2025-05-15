@@ -31,8 +31,15 @@ function html(body: string): HttpResponse {
   return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body };
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+}
+
 function dashboardHtml(info: ServerInfo): string {
-  const li = (items: string[]) => items.map((i) => `<li><code>${i}</code></li>`).join("") || "<li><em>none</em></li>";
+  const li = (items: string[]) => items.map((i) => `<li><code>${escapeHtml(i)}</code></li>`).join("") || "<li><em>none</em></li>";
   return `<!doctype html><html><head><meta charset="utf-8"><title>Stackbase</title>
 <style>body{font:14px system-ui;margin:2rem;max-width:48rem}code{background:#f4f4f5;padding:.1rem .3rem;border-radius:4px}</style>
 </head><body>

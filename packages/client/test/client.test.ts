@@ -4,8 +4,9 @@ import { encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi } from "../src/index";
+import { StackbaseClient, loopbackTransport, anyApi, type ClientTransport } from "../src/index";
 import type { Value } from "@stackbase/values";
+import type { ClientMessage, ServerMessage } from "@stackbase/sync";
 
 const MESSAGES = 10001;
 const byConversation: IndexSpec = {
@@ -92,5 +93,62 @@ describe("StackbaseClient — one-shot query and mutation", () => {
     const client = newClient("s1");
     const id = await client.mutation(api.messages.send, { conversationId: "c1", body: "hi" });
     expect(typeof id).toBe("string");
+  });
+});
+
+class MockTransport implements ClientTransport {
+  readonly sent: ClientMessage[] = [];
+  private readonly msg = new Set<(m: ServerMessage) => void>();
+  private readonly closers = new Set<() => void>();
+  send(m: ClientMessage): void {
+    this.sent.push(m);
+  }
+  onMessage(l: (m: ServerMessage) => void): () => void {
+    this.msg.add(l);
+    return () => this.msg.delete(l);
+  }
+  onClose(l: () => void): () => void {
+    this.closers.add(l);
+    return () => this.closers.delete(l);
+  }
+  close(): void {
+    for (const l of this.closers) l();
+  }
+  emit(m: ServerMessage): void {
+    for (const l of this.msg) l(m);
+  }
+}
+
+describe("StackbaseClient — protocol safety", () => {
+  it("a dropped transition (version gap) triggers a resync and never delivers stale values", async () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    const seen: Array<Array<{ body: string }>> = [];
+    client.subscribe(api.messages.list, { conversationId: "c1" }, (v) => seen.push(v as Array<{ body: string }>));
+
+    expect(t.sent[0]!.type).toBe("ModifyQuerySet");
+    // Initial transition (start {0,0} → {1,0}) — applied.
+    t.emit({ type: "Transition", startVersion: { querySet: 0, ts: 0 }, endVersion: { querySet: 1, ts: 0 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }] });
+    expect(seen.at(-1)).toEqual([]);
+
+    // A GAPPED transition (startVersion does not match the client's {1,0}).
+    const sentBefore = t.sent.length;
+    t.emit({ type: "Transition", startVersion: { querySet: 1, ts: 5 }, endVersion: { querySet: 1, ts: 6 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [{ body: "STALE" }] }] });
+
+    expect(seen.at(-1)).toEqual([]); // stale value NOT delivered
+    expect(t.sent.length).toBeGreaterThan(sentBefore); // resync re-subscribe sent
+    expect(t.sent.at(-1)!.type).toBe("ModifyQuerySet");
+
+    // The resync reply is adopted regardless of its start version.
+    t.emit({ type: "Transition", startVersion: { querySet: 99, ts: 99 }, endVersion: { querySet: 2, ts: 6 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [{ body: "fresh" }] }] });
+    expect(seen.at(-1)!.map((d) => d.body)).toEqual(["fresh"]);
+  });
+
+  it("rejects pending mutations when the transport closes (no hung promises)", async () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    const pending = client.mutation(api.messages.send, { conversationId: "c1", body: "x" });
+    t.close();
+    await expect(pending).rejects.toThrow(/connection closed/);
   });
 });

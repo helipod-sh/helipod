@@ -3,8 +3,10 @@
  * Works on Node and Bun (both implement `node:http`).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { extname, join, resolve, sep } from "node:path";
+
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
 import { WebSocketServer } from "ws";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
@@ -25,9 +27,19 @@ const CONTENT_TYPES: Record<string, string> = {
 /** Serve a static file from `webDir` (with `/` → index.html), guarding against traversal. */
 function tryServeStatic(webDir: string, urlPath: string, res: ServerResponse): boolean {
   const rel = urlPath === "/" ? "/index.html" : urlPath;
-  const resolved = resolve(join(webDir, rel));
-  const root = resolve(webDir);
-  if (!resolved.startsWith(root) || !existsSync(resolved) || !statSync(resolved).isFile()) return false;
+  let root: string;
+  let resolved: string;
+  try {
+    // realpath resolves symlinks too, so neither `..` nor a symlink can escape the web root.
+    root = realpathSync(resolve(webDir));
+    resolved = realpathSync(resolve(join(webDir, rel)));
+  } catch {
+    return false; // missing file / broken symlink
+  }
+  // Require the resolved path to be the root itself or strictly underneath it (`root + sep`),
+  // so a sibling like `<root>-evil` can't match by prefix.
+  if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+  if (!statSync(resolved).isFile()) return false;
   res.writeHead(200, { "content-type": CONTENT_TYPES[extname(resolved)] ?? "application/octet-stream" });
   res.end(readFileSync(resolved));
   return true;
@@ -42,7 +54,16 @@ export interface DevServer {
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
+    let total = 0;
+    req.on("data", (c: Buffer) => {
+      total += c.length;
+      if (total > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error("request body too large"));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
@@ -93,6 +114,8 @@ export async function startDevServer(
       runtime.handler.connect(sessionId, syncSocket);
       ws.on("message", (data: Buffer) => void runtime.handler.handleMessage(sessionId, data.toString("utf8")));
       ws.on("close", () => runtime.handler.disconnect(sessionId));
+      // Without an error handler a socket 'error' (e.g. abrupt client drop) crashes the process.
+      ws.on("error", () => runtime.handler.disconnect(sessionId));
     });
   });
 

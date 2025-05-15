@@ -133,7 +133,10 @@ export class SingleWriterTransactor implements Transactor {
     const headroomLimits = { ...this.defaultHeadroom, ...options.headroom };
 
     for (let attempt = 0; ; attempt++) {
-      const snapshotTs = this.oracle.getCurrentTimestamp();
+      // Snapshot from the last *fully-applied* commit, never an in-flight allocated ts —
+      // otherwise a new txn could snapshot at a commit ts whose writes aren't applied yet,
+      // and the strict `c.ts > snapshotTs` conflict check would miss it (lost update).
+      const snapshotTs = this.oracle.getLastCommittedTimestamp();
       this.retain(snapshotTs);
       try {
         const ctx = new TransactionContextImpl(
@@ -178,7 +181,10 @@ export class SingleWriterTransactor implements Transactor {
     // Phase 3 — apply: append staged revisions, chaining prev_ts to the snapshot revision.
     const entries: DocumentLogEntry[] = [];
     for (const w of ctx.staged.entries()) {
-      const prev = await this.docStore.get(w.id, snapshotTs);
+      // Chain prev_ts from the *latest committed* revision (we hold the single-writer lock,
+      // so this is race-free). Using the stale snapshot would fork the revision chain when
+      // two transactions blind-write the same document.
+      const prev = await this.docStore.get(w.id);
       entries.push({
         ts: commitTs,
         id: w.id,
@@ -190,6 +196,9 @@ export class SingleWriterTransactor implements Transactor {
     await this.docStore.write(entries, indexWrites, "Error", shardId);
 
     this.recentCommits.push({ ts: commitTs, writes: ctx.writeRanges });
+    // Advance the committed clock only now that writes are applied + recorded (still under
+    // the mutex), so a concurrent snapshot can never observe this commit before it's safe.
+    this.oracle.publishCommitted(commitTs);
     this.prune();
 
     const ranges = ctx.writeRanges.toArray();
@@ -199,7 +208,14 @@ export class SingleWriterTransactor implements Transactor {
       writtenRanges: ranges.map(serializeKeyRange),
       writtenTables: writtenTablesFromRanges(ranges),
     };
-    if (this.fanout) await this.fanout.publish(oplog);
+    // Fire-and-forget so a slow/failing subscriber never stalls or aborts the single writer.
+    if (this.fanout) {
+      try {
+        void this.fanout.publish(oplog);
+      } catch {
+        /* a fan-out failure must not fail the commit */
+      }
+    }
 
     return { value, committed: true, commitTs, shardId, oplog };
   }
@@ -217,7 +233,7 @@ export class SingleWriterTransactor implements Transactor {
   private minActiveSnapshot(): bigint {
     let min: bigint | null = null;
     for (const ts of this.activeSnapshots.keys()) if (min === null || ts < min) min = ts;
-    return min ?? this.oracle.getCurrentTimestamp();
+    return min ?? this.oracle.getLastCommittedTimestamp();
   }
 
   /** Drop commits that can no longer conflict with any active or future transaction. */

@@ -82,6 +82,31 @@ describe("OCC", () => {
     expect((final.value as { count: bigint }).count).toBe(3n);
   });
 
+  it("loses no updates under heavy concurrency (regression: snapshot must use the committed clock)", async () => {
+    // With the old bug (snapshot from the just-allocated ts), some increments silently lost
+    // under load because the strict `c.ts > snapshotTs` check missed an in-flight commit.
+    const { transactor } = await makeTransactor();
+    const id = newDocumentId(TABLE);
+    await transactor.runInTransaction(async (ctx) => ctx.put(id, { count: 0n }));
+
+    const N = 25;
+    // High retry budget so contention never *exhausts* retries — then a final count below N
+    // can only mean a silently-lost update (the bug), not an explicit conflict failure.
+    const increment = () =>
+      transactor.runInTransaction(
+        async (ctx) => {
+          const doc = await ctx.get(id);
+          const count = (doc as { count: bigint } | null)?.count ?? 0n;
+          ctx.put(id, { count: count + 1n });
+        },
+        { maxRetries: 100 },
+      );
+    await Promise.all(Array.from({ length: N }, increment));
+
+    const final = await transactor.runInTransaction(async (ctx) => ctx.get(id));
+    expect((final.value as { count: bigint }).count).toBe(BigInt(N));
+  });
+
   it("does NOT conflict on disjoint keys (concurrent writes to different docs both commit)", async () => {
     const { transactor } = await makeTransactor();
     const a = newDocumentId(TABLE);

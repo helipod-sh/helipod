@@ -37,6 +37,14 @@ function client(conn: { onMessage(l: (m: import("@stackbase/sync").ServerMessage
   return state;
 }
 
+async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 describe("embedded runtime — in-process reactive loop", () => {
   it("an in-process client subscribes and receives a reactive update when another client writes", async () => {
     const runtime = await makeRuntime();
@@ -49,6 +57,8 @@ describe("embedded runtime — in-process reactive loop", () => {
 
     await connB.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "hello" } });
 
+    // Reactivity is driven by the fan-out (async), so await the pushed transition.
+    await waitFor(() => (stateA.queries.get(1) as unknown[] | undefined)?.length === 1);
     expect(stateA.needsResync).toBe(false);
     expect((stateA.queries.get(1) as Array<{ body: string }>).map((d) => d.body)).toEqual(["hello"]);
   });
@@ -78,6 +88,7 @@ describe("embedded runtime — in-process reactive loop", () => {
     await connA.send({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "messages:list", args: { conversationId: "c1" } }], remove: [] });
     await connB.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "swapped" } });
 
+    await waitFor(() => (stateA.queries.get(1) as unknown[] | undefined)?.length === 1);
     expect((stateA.queries.get(1) as Array<{ body: string }>).map((d) => d.body)).toEqual(["swapped"]);
     expect(custom.published).toHaveLength(1); // the swapped adapter is the one in use
   });

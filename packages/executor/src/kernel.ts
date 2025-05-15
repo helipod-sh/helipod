@@ -4,7 +4,7 @@
  * that touch the transaction, query engine, and index maintenance. Because the boundary is
  * pure JSON strings, the exact same handlers work when the guest is a real V8 isolate.
  */
-import { ForbiddenOperationError, FunctionNotFoundError } from "@stackbase/errors";
+import { DocumentNotFoundError, ForbiddenOperationError, FunctionNotFoundError } from "@stackbase/errors";
 import {
   decodeDocumentId,
   encodeInternalDocumentId,
@@ -126,10 +126,11 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   const oldDoc = await ctx.txn.get(internalId);
+  if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
   const newDoc: DocumentValue = {
     ...(jsonToConvex(value) as DocumentValue),
     _id: id,
-    _creationTime: (oldDoc?.["_creationTime"] as number) ?? Number(ctx.snapshotTs),
+    _creationTime: (oldDoc["_creationTime"] as number) ?? Number(ctx.snapshotTs),
   };
   ctx.txn.put(internalId, newDoc);
   maintainIndexes(ctx, meta.name, oldDoc, newDoc, internalId);

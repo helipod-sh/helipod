@@ -120,8 +120,13 @@ export interface DocStore {
 
 /** Allocates the monotonic commit timestamps the log is ordered by (one per shard). */
 export interface TimestampOracle {
+  /** The latest *allocated* timestamp (may be an in-flight, not-yet-applied commit). */
   getCurrentTimestamp(): bigint;
+  /** The latest *fully-applied* commit timestamp — the safe snapshot for new transactions. */
+  getLastCommittedTimestamp(): bigint;
   allocateTimestamp(): bigint;
+  /** Mark a commit as fully applied (advances the last-committed clock). */
+  publishCommitted(ts: bigint): void;
   observeTimestamp(ts: bigint): void;
 }
 

@@ -4,12 +4,7 @@
  * resolves mutations against their `MutationResponse`. Subscriptions are reactive: when the
  * server pushes a `Transition`, the affected query's listeners fire with the new value.
  */
-import {
-  applyServerMessage,
-  createClientState,
-  type ServerMessage,
-  type SyncClientState,
-} from "@stackbase/sync";
+import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateModification, type StateVersion } from "@stackbase/sync";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { ClientTransport } from "./transport";
@@ -27,18 +22,21 @@ interface Subscription {
 
 export class StackbaseClient {
   private readonly transport: ClientTransport;
-  private readonly state: SyncClientState = createClientState();
+  private version: StateVersion = { ...INITIAL_VERSION };
+  private resyncing = false;
   private readonly subsByHash = new Map<string, Subscription>();
   private readonly subsById = new Map<number, Subscription>();
   private readonly pendingMutations = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly broadcastListeners = new Set<(topic: string, event: Value) => void>();
   private readonly disposeTransport: () => void;
+  private readonly disposeClose: () => void;
   private nextQueryId = 1;
   private nextRequestId = 1;
 
   constructor(transport: ClientTransport) {
     this.transport = transport;
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
+    this.disposeClose = transport.onClose(() => this.onTransportClosed());
   }
 
   /** Subscribe to a reactive query. `onUpdate` fires with the latest value (immediately if cached). */
@@ -102,22 +100,30 @@ export class StackbaseClient {
 
   close(): void {
     this.disposeTransport();
+    this.disposeClose();
     this.transport.close();
+    this.onTransportClosed();
   }
 
   private onServerMessage(msg: ServerMessage): void {
-    applyServerMessage(this.state, msg);
     switch (msg.type) {
       case "Transition": {
-        for (const mod of msg.modifications) {
-          if (mod.type === "QueryUpdated") {
-            const sub = this.subsById.get(mod.queryId);
-            if (sub) {
-              sub.value = jsonToConvex(mod.value);
-              for (const listener of sub.listeners) listener(sub.value);
-            }
-          }
+        // While resyncing, adopt the next transition as the new baseline (its modifications are
+        // the full re-subscribed results) regardless of its start version.
+        if (this.resyncing) {
+          this.applyModifications(msg.modifications);
+          this.version = msg.endVersion;
+          this.resyncing = false;
+          return;
         }
+        // Version-bracket guard: a non-contiguous start means a frame was dropped. Do NOT
+        // deliver the (post-gap) values — resync from scratch instead, preserving correctness.
+        if (!versionsEqual(msg.startVersion, this.version)) {
+          this.resync();
+          return;
+        }
+        this.applyModifications(msg.modifications);
+        this.version = msg.endVersion;
         return;
       }
       case "MutationResponse": {
@@ -137,5 +143,40 @@ export class StackbaseClient {
       default:
         return;
     }
+  }
+
+  private applyModifications(modifications: StateModification[]): void {
+    for (const mod of modifications) {
+      if (mod.type === "QueryUpdated") {
+        const sub = this.subsById.get(mod.queryId);
+        if (sub) {
+          sub.value = jsonToConvex(mod.value);
+          for (const listener of sub.listeners) listener(sub.value);
+        }
+      }
+      // QueryRemoved / QueryFailed: keep the last known value; a real UI would surface the error.
+    }
+  }
+
+  /** A frame was missed: reset and re-subscribe all live queries; adopt the server's next state. */
+  private resync(): void {
+    this.resyncing = true;
+    this.version = { ...INITIAL_VERSION };
+    const subs = [...this.subsById.values()];
+    if (subs.length === 0) {
+      this.resyncing = false;
+      return;
+    }
+    this.transport.send({
+      type: "ModifyQuerySet",
+      add: subs.map((s) => ({ queryId: s.queryId, udfPath: s.path, args: s.args })),
+      remove: [],
+    });
+  }
+
+  private onTransportClosed(): void {
+    // Never leave a mutation promise hanging when the connection drops.
+    for (const [, pending] of this.pendingMutations) pending.reject(new Error("connection closed"));
+    this.pendingMutations.clear();
   }
 }

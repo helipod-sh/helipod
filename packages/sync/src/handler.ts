@@ -40,6 +40,12 @@ export interface WriteInvalidation {
 export interface SyncProtocolHandlerOptions {
   /** Exclude the mutating session from the reactive transition (it has the MutationResponse). */
   excludeOriginFromTransition?: boolean;
+  /**
+   * Whether a mutation handled here triggers `notifyWrites` inline (default true). Set false
+   * when an external write-fan-out drives invalidation (so commits via OTHER paths — e.g. HTTP
+   * — also push, and there's no double-notify).
+   */
+  autoNotifyOnMutation?: boolean;
 }
 
 interface Session {
@@ -55,6 +61,7 @@ function errMessage(e: unknown): string {
 export class SyncProtocolHandler {
   private readonly sessions = new Map<string, Session>();
   private readonly subscriptions = new SubscriptionManager();
+  private notifyTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly executor: SyncUdfExecutor,
@@ -123,14 +130,26 @@ export class SyncProtocolHandler {
     try {
       const { value, tables, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args);
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: true, value: convexToJson(value) });
-      await this.notifyWrites({ tables, commitTs }, session.sessionId);
+      if (this.options.autoNotifyOnMutation !== false) {
+        await this.notifyWrites({ tables, commitTs }, session.sessionId);
+      }
     } catch (e) {
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: false, error: errMessage(e) });
     }
   }
 
-  /** Reactive fan-out: recompute subscriptions a write touched and push transitions. */
-  async notifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
+  /**
+   * Reactive fan-out: recompute subscriptions a write touched and push transitions. Calls are
+   * serialized so per-session version brackets advance monotonically (concurrent notifies
+   * would otherwise reorder and trigger false client resyncs).
+   */
+  notifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
+    const run = this.notifyTail.then(() => this.doNotifyWrites(invalidation, originSessionId));
+    this.notifyTail = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doNotifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
     const affected = this.subscriptions.findAffectedByTables(invalidation.tables);
 
     const bySession = new Map<string, Subscription[]>();
