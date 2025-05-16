@@ -14,6 +14,12 @@ describe("InMemoryLogSink", () => {
     expect(sink.query({ since: 1 }).map((e) => e.id)).toEqual([2]); // id > since
   });
 
+  it("caps results with limit (after newest-first ordering)", () => {
+    const sink = new InMemoryLogSink();
+    for (let i = 0; i < 3; i++) sink.push({ path: "f", kind: "query", ts: i, durationMs: 0, status: "ok" });
+    expect(sink.query({ limit: 2 }).map((e) => e.id)).toEqual([3, 2]); // newest 2, newest-first
+  });
+
   it("evicts oldest beyond capacity", () => {
     const sink = new InMemoryLogSink(2);
     for (let i = 0; i < 3; i++) sink.push({ path: "f", kind: "query", ts: i, durationMs: 0, status: "ok" });
