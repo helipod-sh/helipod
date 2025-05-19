@@ -16,16 +16,21 @@ import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter } from "./guest";
 import type { IndexCatalog } from "./catalog";
 import type { RegisteredFunction } from "./functions";
+import type { LogKind, LogSink } from "./log-sink";
 
 export interface ExecutorDeps {
   transactor: Transactor;
   queryRuntime: QueryRuntime;
   catalog: IndexCatalog;
+  logSink?: LogSink;
+  now?: () => number;
 }
 
 export interface RunOptions {
   /** Seed for the deterministic RNG (defaults to 0 so re-runs are reproducible). */
   seed?: number;
+  /** Function path, recorded in the execution log. */
+  path?: string;
 }
 
 export interface UdfResult<T = unknown> {
@@ -50,31 +55,48 @@ export class InlineUdfExecutor {
     }
     const profile = profileFor(fn.type);
     const seed = options.seed ?? 0;
-
-    const commit = await this.deps.transactor.runInTransaction(async (txn) => {
-      const kctx: KernelContext = {
-        profile,
-        txn,
-        queryRuntime: this.deps.queryRuntime,
-        catalog: this.deps.catalog,
-        snapshotTs: txn.snapshotTs,
-        random: createSeededRandom(seed),
-        logs: [],
-      };
-      const channel = new InlineSyscallChannel(this.router, kctx);
-      const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
-      const guestCtx = { db, random: () => kctx.random.next() };
-      const value = await fn.handler(guestCtx, args);
-      return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
-    });
-
-    return {
-      value: commit.value.value,
-      logs: commit.value.logs,
-      committed: commit.committed,
-      commitTs: commit.commitTs,
-      readRanges: commit.value.readRanges,
-      oplog: commit.oplog,
+    const clock = this.deps.now ?? Date.now;
+    const startedAt = clock();
+    const logEntry = (status: "ok" | "error", error?: string): void => {
+      this.deps.logSink?.push({
+        path: options.path ?? "<anonymous>",
+        kind: fn.type as LogKind,
+        ts: startedAt,
+        durationMs: clock() - startedAt,
+        status,
+        ...(error !== undefined ? { error } : {}),
+      });
     };
+
+    try {
+      const commit = await this.deps.transactor.runInTransaction(async (txn) => {
+        const kctx: KernelContext = {
+          profile,
+          txn,
+          queryRuntime: this.deps.queryRuntime,
+          catalog: this.deps.catalog,
+          snapshotTs: txn.snapshotTs,
+          random: createSeededRandom(seed),
+          logs: [],
+        };
+        const channel = new InlineSyscallChannel(this.router, kctx);
+        const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
+        const guestCtx = { db, random: () => kctx.random.next() };
+        const value = await fn.handler(guestCtx, args);
+        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
+      });
+      logEntry("ok");
+      return {
+        value: commit.value.value,
+        logs: commit.value.logs,
+        committed: commit.committed,
+        commitTs: commit.commitTs,
+        readRanges: commit.value.readRanges,
+        oplog: commit.oplog,
+      };
+    } catch (e) {
+      logEntry("error", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
   }
 }

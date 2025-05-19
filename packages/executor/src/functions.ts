@@ -10,20 +10,29 @@ export interface RegisteredFunction {
   handler: (ctx: unknown, args: unknown) => unknown | Promise<unknown>;
 }
 
-export function query<Args = unknown, Output = unknown>(def: {
-  handler: (ctx: QueryCtx, args: Args) => Output | Promise<Output>;
-}): RegisteredFunction {
-  return { type: "query", handler: def.handler as RegisteredFunction["handler"] };
+type QueryDef<Args, Output> =
+  | { handler: (ctx: QueryCtx, args: Args) => Output | Promise<Output> }
+  | ((ctx: QueryCtx, args: Args) => Output | Promise<Output>);
+
+export function query<Args = unknown, Output = unknown>(def: QueryDef<Args, Output>): RegisteredFunction {
+  const handler = typeof def === "function" ? def : def.handler;
+  return { type: "query", handler: handler as RegisteredFunction["handler"] };
 }
 
-export function mutation<Args = unknown, Output = unknown>(def: {
-  handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output>;
-}): RegisteredFunction {
-  return { type: "mutation", handler: def.handler as RegisteredFunction["handler"] };
+type MutationDef<Args, Output> =
+  | { handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output> }
+  | ((ctx: MutationCtx, args: Args) => Output | Promise<Output>);
+
+export function mutation<Args = unknown, Output = unknown>(def: MutationDef<Args, Output>): RegisteredFunction {
+  const handler = typeof def === "function" ? def : def.handler;
+  return { type: "mutation", handler: handler as RegisteredFunction["handler"] };
 }
 
-export function action<Args = unknown, Output = unknown>(def: {
-  handler: (ctx: unknown, args: Args) => Output | Promise<Output>;
-}): RegisteredFunction {
-  return { type: "action", handler: def.handler as RegisteredFunction["handler"] };
+type ActionDef<Args, Output> =
+  | { handler: (ctx: unknown, args: Args) => Output | Promise<Output> }
+  | ((ctx: unknown, args: Args) => Output | Promise<Output>);
+
+export function action<Args = unknown, Output = unknown>(def: ActionDef<Args, Output>): RegisteredFunction {
+  const handler = typeof def === "function" ? def : def.handler;
+  return { type: "action", handler: handler as RegisteredFunction["handler"] };
 }
