@@ -14,7 +14,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type IndexCatalog, type RegisteredFunction, type UdfResult } from "@stackbase/executor";
+import { InlineUdfExecutor, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -30,6 +30,7 @@ export interface EmbeddedRuntimeOptions {
   /** Swap the Tier 0 in-memory fan-out for a cross-process adapter (no app-code change). */
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
   originId?: string;
+  logSink?: LogSink;
 }
 
 export class EmbeddedRuntime {
@@ -51,7 +52,7 @@ export class EmbeddedRuntime {
 
     const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink });
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
@@ -64,11 +65,11 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args));
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
       async runMutation(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args));
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -119,7 +120,7 @@ export class EmbeddedRuntime {
   async run<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args));
+    return this.executor.run<T>(fn, jsonToConvex(args), { path });
   }
 }
 
