@@ -53,7 +53,7 @@ export class InMemoryLogSink implements LogSink {
 }
 
 export class NoopLogSink implements LogSink {
-  push(): void {}
+  push(_entry: Omit<ExecutionLogEntry, "id">): void {}
   query(): ExecutionLogEntry[] {
     return [];
   }
