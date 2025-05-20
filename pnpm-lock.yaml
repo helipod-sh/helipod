@@ -82,6 +82,40 @@ importers:
         specifier: 'catalog:'
         version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
 
+  packages/admin:
+    dependencies:
+      '@stackbase/errors':
+        specifier: workspace:*
+        version: link:../errors
+      '@stackbase/executor':
+        specifier: workspace:*
+        version: link:../executor
+      '@stackbase/id-codec':
+        specifier: workspace:*
+        version: link:../id-codec
+      '@stackbase/runtime-embedded':
+        specifier: workspace:*
+        version: link:../runtime-embedded
+      '@stackbase/values':
+        specifier: workspace:*
+        version: link:../values
+    devDependencies:
+      '@stackbase/docstore-sqlite':
+        specifier: workspace:*
+        version: link:../docstore-sqlite
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      tsup:
+        specifier: 'catalog:'
+        version: 8.5.1(postcss@8.5.16)(typescript@5.9.3)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
+
   packages/cli:
     dependencies:
       '@stackbase/codegen':
