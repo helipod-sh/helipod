@@ -86,4 +86,18 @@ export class AdminApi {
   queryLogs(filter?: LogFilter): ExecutionLogEntry[] {
     return this.deps.logSink.query(filter);
   }
+
+  async runFunction(path: string, args: JSONValue): Promise<{ value: JSONValue; committed: boolean }> {
+    const r = await this.deps.runtime.run(path, args);
+    return { value: convexToJson(r.value as Value), committed: r.committed };
+  }
+
+  async patchDocument(id: string, fields: Record<string, JSONValue>): Promise<JSONValue> {
+    const r = await this.deps.runtime.run("_system:patchDocument", { id, fields });
+    return convexToJson(r.value as Value);
+  }
+
+  async deleteDocument(id: string): Promise<void> {
+    await this.deps.runtime.run("_system:deleteDocument", { id });
+  }
 }
