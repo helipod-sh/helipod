@@ -10,6 +10,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
+import type { AdminApi } from "@stackbase/admin";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
 import { detectRuntime } from "./dev-options";
 
@@ -36,6 +37,7 @@ export interface DevServerOptions {
   port: number;
   ip: string;
   webDir?: string;
+  admin?: { api: AdminApi; key: string };
 }
 
 /** Resolve a static file from `webDir` (with `/` → index.html), guarding against traversal. Pure. */
@@ -84,8 +86,18 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
     void (async () => {
       try {
         const body = req.method === "POST" || req.method === "PUT" ? await readBody(req) : undefined;
-        const path = (req.url ?? "/").split("?")[0] ?? "/";
-        const response = await handleHttpRequest(runtime, { method: req.method ?? "GET", path, body }, info);
+        const rawUrl = req.url ?? "/";
+        const url = new URL(rawUrl, "http://x");
+        const path = url.pathname;
+        const query: Record<string, string> = {};
+        url.searchParams.forEach((val, key) => { query[key] = val; });
+        const authorization = req.headers.authorization ?? undefined;
+        const response = await handleHttpRequest(
+          runtime,
+          { method: req.method ?? "GET", path, body, query, authorization },
+          info,
+          options.admin,
+        );
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
           const file = resolveStatic(options.webDir, path);
           if (file) {
@@ -188,7 +200,15 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
         return server.upgrade(req, { data: { sessionId } }) ? undefined : new Response("upgrade failed", { status: 400 });
       }
       const body = req.method === "POST" || req.method === "PUT" ? await req.text() : undefined;
-      const response = await handleHttpRequest(runtime, { method: req.method, path, body }, info);
+      const query: Record<string, string> = {};
+      url.searchParams.forEach((val, key) => { query[key] = val; });
+      const authorization = req.headers.get("authorization") ?? undefined;
+      const response = await handleHttpRequest(
+        runtime,
+        { method: req.method, path, body, query, authorization },
+        info,
+        options.admin,
+      );
       if (response.status === 404 && req.method === "GET" && options.webDir) {
         const file = resolveStatic(options.webDir, path);
         if (file) return new Response(new Uint8Array(file.body), { headers: { "content-type": file.contentType } });

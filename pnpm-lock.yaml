@@ -118,6 +118,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@stackbase/admin':
+        specifier: workspace:*
+        version: link:../admin
       '@stackbase/codegen':
         specifier: workspace:*
         version: link:../codegen

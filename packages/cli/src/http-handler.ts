@@ -1,16 +1,19 @@
 /**
  * HTTP routing for the dev server — a pure function over the runtime so it's testable without
- * a socket. Routes: the `_dashboard` status page, a health check, and `POST /api/run` for
- * direct function invocation (the reactive WebSocket transport arrives with the client SDK).
+ * a socket. Routes: the `_dashboard` status page, a health check, `POST /api/run` for direct
+ * function invocation, and `/_admin/*` for the admin API (behind an admin key).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { getHttpStatus, toStackbaseError } from "@stackbase/errors";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { handleAdminRequest, type AdminApi } from "@stackbase/admin";
 
 export interface HttpRequest {
   method: string;
   path: string;
   body?: string;
+  query?: Record<string, string>;
+  authorization?: string;
 }
 
 export interface HttpResponse {
@@ -54,7 +57,18 @@ export async function handleHttpRequest(
   runtime: EmbeddedRuntime,
   req: HttpRequest,
   info: ServerInfo,
+  admin?: { api: AdminApi; key: string },
 ): Promise<HttpResponse> {
+  if (admin && req.path.startsWith("/_admin/")) {
+    const res = await handleAdminRequest(admin.api, admin.key, {
+      method: req.method,
+      path: req.path,
+      query: req.query ?? {},
+      body: req.body,
+      authorization: req.authorization,
+    });
+    return json(res.status, res.body);
+  }
   if (req.method === "GET" && (req.path === "/_dashboard" || req.path === "/_dashboard/")) {
     return html(dashboardHtml(info));
   }

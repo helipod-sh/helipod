@@ -7,6 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { writeGenerated } from "@stackbase/codegen";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { InMemoryLogSink } from "@stackbase/executor";
+import { AdminApi, generateAdminKey, systemModules } from "@stackbase/admin";
 import { resolveDevOptions, detectRuntime, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
 import { push } from "./push-pipeline";
@@ -40,13 +42,28 @@ export async function devCommand(args: string[]): Promise<number> {
   const { project, generated } = push(loaded);
   writeGenerated(generated.files, generatedDir);
 
-  const runtime = await createEmbeddedRuntime({ store: makeStore(opts.dataPath), catalog: project.catalog, modules: project.moduleMap });
+  const logSink = new InMemoryLogSink();
+  const adminKey = process.env.STACKBASE_ADMIN_KEY ?? generateAdminKey();
+  const runtime = await createEmbeddedRuntime({
+    store: makeStore(opts.dataPath),
+    catalog: project.catalog,
+    logSink,
+    modules: { ...project.moduleMap, ...systemModules() },
+  });
+  const adminApi = new AdminApi({
+    runtime,
+    schemaJson: project.schemaJson,
+    tableNumbers: project.tableNumbers,
+    manifest: project.manifest,
+    logSink,
+  });
   const server = await startDevServer(
     runtime,
     { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
-    { port: opts.port, ip: opts.ip, webDir: opts.webDir },
+    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey } },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
+  process.stdout.write(`admin key → ${adminKey}\n`);
   if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
 
   const watcher = createWatchLoop({
