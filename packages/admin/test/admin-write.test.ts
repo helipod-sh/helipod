@@ -29,8 +29,8 @@ async function makeApi() {
     modules: {
       "notes:add": mutation(async (ctx, a: { title: string }) => ctx.db.insert("notes", a)),
       "notes:list": query(async (ctx) => ctx.db.query("notes", "by_creation").collect()),
-      ...systemModules(),
     },
+    systemModules: systemModules(),
   });
   const api = new AdminApi({
     runtime,

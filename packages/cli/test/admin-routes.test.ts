@@ -19,8 +19,8 @@ async function setup() {
     logSink,
     modules: {
       "notes:add": mutation(async (ctx, a: { title: string }) => ctx.db.insert("notes", a)),
-      ...systemModules(),
     },
+    systemModules: systemModules(),
   });
   const api = new AdminApi({
     runtime,

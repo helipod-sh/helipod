@@ -93,11 +93,11 @@ export class AdminApi {
   }
 
   async patchDocument(id: string, fields: Record<string, JSONValue>): Promise<JSONValue> {
-    const r = await this.deps.runtime.run("_system:patchDocument", { id, fields });
+    const r = await this.deps.runtime.runSystem("_system:patchDocument", { id, fields });
     return convexToJson(r.value as Value);
   }
 
   async deleteDocument(id: string): Promise<void> {
-    await this.deps.runtime.run("_system:deleteDocument", { id });
+    await this.deps.runtime.runSystem("_system:deleteDocument", { id });
   }
 }

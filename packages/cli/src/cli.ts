@@ -48,7 +48,8 @@ export async function devCommand(args: string[]): Promise<number> {
     store: makeStore(opts.dataPath),
     catalog: project.catalog,
     logSink,
-    modules: { ...project.moduleMap, ...systemModules() },
+    modules: project.moduleMap,
+    systemModules: systemModules(),
   });
   const adminApi = new AdminApi({
     runtime,

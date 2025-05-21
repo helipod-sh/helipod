@@ -27,6 +27,8 @@ export interface EmbeddedRuntimeOptions {
   store: DocStore;
   catalog: IndexCatalog;
   modules: Record<string, RegisteredFunction>;
+  /** Privileged built-in functions (`_system:*`). Kept off the public run/sync surface. */
+  systemModules?: Record<string, RegisteredFunction>;
   /** Swap the Tier 0 in-memory fan-out for a cross-process adapter (no app-code change). */
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
   originId?: string;
@@ -42,6 +44,7 @@ export class EmbeddedRuntime {
     readonly handler: SyncProtocolHandler,
     readonly writeFanoutAdapter: EmbeddedWriteFanoutAdapter,
     private readonly modules: Record<string, RegisteredFunction>,
+    private readonly systemModules: Record<string, RegisteredFunction>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -57,7 +60,9 @@ export class EmbeddedRuntime {
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
+    const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
+      if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
       const fn = modules[path];
       if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
       return fn;
@@ -102,7 +107,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -118,8 +123,16 @@ export class EmbeddedRuntime {
 
   /** Directly invoke a function (for HTTP routes / the CLI `run` command). */
   async run<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+    if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    return this.executor.run<T>(fn, jsonToConvex(args), { path });
+  }
+
+  /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
+  async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+    const fn = this.systemModules[path];
+    if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
     return this.executor.run<T>(fn, jsonToConvex(args), { path });
   }
 }
