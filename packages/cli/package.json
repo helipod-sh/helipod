@@ -15,7 +15,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -34,7 +36,8 @@
     "@stackbase/runtime-embedded": "workspace:*",
     "@stackbase/sync": "workspace:*",
     "@stackbase/values": "workspace:*",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@stackbase/dashboard": "workspace:*"
   },
   "devDependencies": {
     "@stackbase/client": "workspace:*",

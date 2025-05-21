@@ -38,6 +38,16 @@ export interface DevServerOptions {
   ip: string;
   webDir?: string;
   admin?: { api: AdminApi; key: string };
+  /** The built dashboard SPA (HTML with the admin key already injected, + the JS bundle). */
+  dashboard?: { html: string; js: string };
+}
+
+/** Serve the dashboard SPA for `/_dashboard*`, or null if the path isn't a dashboard asset. */
+function serveDashboard(path: string, d: { html: string; js: string }): { contentType: string; body: string } | null {
+  if (path === "/_dashboard" || path === "/_dashboard/" || path === "/_dashboard/index.html")
+    return { contentType: "text/html; charset=utf-8", body: d.html };
+  if (path === "/_dashboard/app.js") return { contentType: "text/javascript; charset=utf-8", body: d.js };
+  return null;
 }
 
 /** Resolve a static file from `webDir` (with `/` → index.html), guarding against traversal. Pure. */
@@ -92,6 +102,14 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
         const query: Record<string, string> = {};
         url.searchParams.forEach((val, key) => { query[key] = val; });
         const authorization = req.headers.authorization ?? undefined;
+        if ((req.method ?? "GET") === "GET" && options.dashboard) {
+          const dash = serveDashboard(path, options.dashboard);
+          if (dash) {
+            res.writeHead(200, { "content-type": dash.contentType });
+            res.end(dash.body);
+            return;
+          }
+        }
         const response = await handleHttpRequest(
           runtime,
           { method: req.method ?? "GET", path, body, query, authorization },
@@ -198,6 +216,10 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
       if (path === SYNC_PATH) {
         const sessionId = `ws-${++sessionCounter}`;
         return server.upgrade(req, { data: { sessionId } }) ? undefined : new Response("upgrade failed", { status: 400 });
+      }
+      if (req.method === "GET" && options.dashboard) {
+        const dash = serveDashboard(path, options.dashboard);
+        if (dash) return new Response(dash.body, { headers: { "content-type": dash.contentType } });
       }
       const body = req.method === "POST" || req.method === "PUT" ? await req.text() : undefined;
       const query: Record<string, string> = {};

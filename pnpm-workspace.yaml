@@ -1,6 +1,7 @@
 packages:
   - "packages/*"
   - "examples/*"
+  - "apps/*"
 
 # Shared dependency versions (pnpm catalog). Reference as "catalog:" in package.json.
 catalog:

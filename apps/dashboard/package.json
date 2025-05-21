@@ -1,0 +1,22 @@
+{
+  "name": "@stackbase/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./dist": "./dist/index.html"
+  },
+  "scripts": {
+    "build": "bun build src/main.tsx --outfile dist/app.js --production && cp src/index.html dist/index.html",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stackbase Dashboard</title>
+    <!-- No external scripts/styles: self-hostable instances may have no internet. -->
+    <!-- the dev server injects window.__ADMIN_KEY__ before this comment -->
+    <style>
+      :root {
+        --bg: #0b0c10; --panel: #14161d; --panel2: #1c2030; --border: #232734;
+        --text: #e6e7eb; --muted: #8b8e98; --accent: #2563eb; --ok: #22c55e; --err: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+      .app { display: grid; grid-template-columns: 240px 1fr; height: 100dvh; }
+      .sidebar { background: var(--panel); border-right: 1px solid var(--border); padding: 1rem; overflow-y: auto; }
+      .brand { font-weight: 700; font-size: 1.05rem; margin: 0 0 1rem; }
+      .navsec { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 1rem 0 0.35rem; }
+      .navitem { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; border-radius: 8px; cursor: pointer; color: var(--text); }
+      .navitem:hover { background: var(--panel2); }
+      .navitem.active { background: var(--accent); }
+      .badge { background: var(--panel2); color: var(--muted); font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 999px; }
+      .navitem.active .badge { background: rgba(255,255,255,.2); color: #fff; }
+      .main { padding: 1.25rem 1.5rem; overflow: auto; }
+      .tabs { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); }
+      .tab { padding: 0.5rem 0.9rem; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+      .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+      h1 { font-size: 1.2rem; margin: 0 0 1rem; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); white-space: nowrap; max-width: 28rem; overflow: hidden; text-overflow: ellipsis; }
+      th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
+      tr:hover td { background: var(--panel); }
+      input, textarea, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; font: inherit; width: 100%; }
+      textarea { font-family: ui-monospace, monospace; min-height: 6rem; }
+      button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 0.5rem 1rem; font: inherit; cursor: pointer; }
+      button:hover { background: #1d4ed8; }
+      button.ghost { background: var(--panel2); }
+      .row { display: flex; gap: 0.6rem; align-items: center; }
+      .muted { color: var(--muted); }
+      .pill { font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px; }
+      .pill.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+      .pill.err { background: rgba(239,68,68,.15); color: var(--err); }
+      .pill.kind { background: var(--panel2); color: var(--muted); }
+      pre { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; overflow: auto; font-size: 12px; }
+      .empty { color: var(--muted); padding: 2rem; text-align: center; }
+      .toolbar { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.8rem; }
+      .toolbar input { max-width: 18rem; }
+      code { background: var(--panel2); padding: 0.05rem 0.3rem; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/_dashboard/app.js"></script>
+  </body>
+</html>

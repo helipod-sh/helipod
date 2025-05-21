@@ -24,6 +24,9 @@ dist/
 examples/*/web/main.js
 examples/*/web/*.js.map
 
+# built dashboard SPA bundle (run `pnpm --filter @stackbase/dashboard build`)
+apps/*/dist/
+
 # local agent / tooling / verification artifacts
 .playwright-mcp/
 .workflows/

@@ -2,7 +2,8 @@
  * `stackbase` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
-import { watch as fsWatch, mkdirSync } from "node:fs";
+import { watch as fsWatch, mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { writeGenerated } from "@stackbase/codegen";
@@ -26,6 +27,23 @@ function parseFlags(args: string[]): DevOptions {
     else if (a === "--web" && args[i + 1]) out.webDir = args[++i];
   }
   return out;
+}
+
+/**
+ * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
+ * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
+ */
+function loadDashboard(adminKey: string): { html: string; js: string } | undefined {
+  try {
+    const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
+    const distDir = dirname(indexPath);
+    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey)}</script>`;
+    const html = readFileSync(indexPath, "utf8").replace("</head>", `${inject}</head>`);
+    const js = readFileSync(join(distDir, "app.js"), "utf8");
+    return { html, js };
+  } catch {
+    return undefined;
+  }
 }
 
 function makeStore(dataPath: string): SqliteDocStore {
@@ -58,12 +76,14 @@ export async function devCommand(args: string[]): Promise<number> {
     manifest: project.manifest,
     logSink,
   });
+  const dashboard = loadDashboard(adminKey);
   const server = await startDevServer(
     runtime,
     { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
-    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey } },
+    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
+  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`pnpm --filter @stackbase/dashboard build\`)\n`);
   process.stdout.write(`admin key → ${adminKey}\n`);
   if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
 
