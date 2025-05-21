@@ -17,6 +17,11 @@ import { detectRuntime } from "./dev-options";
 const SYNC_PATH = "/api/sync";
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
+/** Methods that carry a request body the server must read (PATCH is used by the admin API). */
+export function hasBody(method: string | undefined): boolean {
+  return method === "POST" || method === "PUT" || method === "PATCH";
+}
+
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -95,7 +100,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
-        const body = req.method === "POST" || req.method === "PUT" ? await readBody(req) : undefined;
+        const body = hasBody(req.method) ? await readBody(req) : undefined;
         const rawUrl = req.url ?? "/";
         const url = new URL(rawUrl, "http://x");
         const path = url.pathname;
@@ -221,7 +226,7 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
         const dash = serveDashboard(path, options.dashboard);
         if (dash) return new Response(dash.body, { headers: { "content-type": dash.contentType } });
       }
-      const body = req.method === "POST" || req.method === "PUT" ? await req.text() : undefined;
+      const body = hasBody(req.method) ? await req.text() : undefined;
       const query: Record<string, string> = {};
       url.searchParams.forEach((val, key) => { query[key] = val; });
       const authorization = req.headers.get("authorization") ?? undefined;
