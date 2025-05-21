@@ -113,6 +113,9 @@ export interface DocStore {
   /** Count of live documents currently in a table. */
   count(tableId: string): Promise<number>;
 
+  /** The highest committed timestamp in the log (0 if empty) — the restart recovery high-water mark. */
+  maxTimestamp(): Promise<bigint>;
+
   getGlobal(key: string): Promise<JSONValue | null>;
   writeGlobal(key: string, value: JSONValue): Promise<void>;
   writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean>;

@@ -260,6 +260,12 @@ export class SqliteDocStore implements DocStore {
     return Number(row?.n ?? 0);
   }
 
+  async maxTimestamp(): Promise<bigint> {
+    const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
+    const m = row?.m;
+    return m === null || m === undefined ? 0n : asBigInt(m);
+  }
+
   async getGlobal(key: string): Promise<JSONValue | null> {
     const row = this.prep(`SELECT value FROM persistence_globals WHERE key = ?`).get(key);
     return row ? (JSON.parse(row.value as string) as JSONValue) : null;

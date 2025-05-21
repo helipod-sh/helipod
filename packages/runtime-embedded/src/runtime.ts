@@ -53,7 +53,10 @@ export class EmbeddedRuntime {
     const adapter = options.fanoutAdapter ?? new InMemoryWriteFanoutAdapter();
     const fanout = new EmbeddedWriteFanout(adapter, options.originId ?? "embedded");
 
-    const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(), { fanout });
+    // Recover the timestamp high-water mark from persisted data, so snapshot reads after a
+    // restart see existing documents (a fresh oracle at 0 would read `ts <= 0` and find nothing).
+    const startTs = await options.store.maxTimestamp();
+    const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
     const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink });
 
