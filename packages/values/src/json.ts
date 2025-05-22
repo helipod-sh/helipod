@@ -49,6 +49,16 @@ function bytesToFloat64(bytes: Uint8Array): number {
   return new DataView(bytes.buffer, bytes.byteOffset, 8).getFloat64(0, true);
 }
 
+/**
+ * Assign `obj[key] = value` without tripping the `__proto__` accessor — a plain `obj["__proto__"] = x`
+ * invokes the prototype setter and silently drops the field, losing a legitimately-named document
+ * field. `defineProperty` creates a normal own data property instead.
+ */
+function setObjectKey<T>(obj: { [k: string]: T }, key: string, value: T): void {
+  if (key === "__proto__") Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+  else obj[key] = value;
+}
+
 export function convexToJson(value: Value): JSONValue {
   if (value === null) return null;
   switch (typeof value) {
@@ -69,7 +79,7 @@ export function convexToJson(value: Value): JSONValue {
       const out: { [key: string]: JSONValue } = {};
       // Escape user keys starting with "$" so they can't be confused with the $integer/$float/
       // $bytes type tags ($foo → $$foo); jsonToConvex reverses it.
-      for (const [k, v] of Object.entries(value)) out[k.startsWith("$") ? `$${k}` : k] = convexToJson(v);
+      for (const [k, v] of Object.entries(value)) setObjectKey(out, k.startsWith("$") ? `$${k}` : k, convexToJson(v));
       return out;
     }
     default:
@@ -97,7 +107,7 @@ export function jsonToConvex(json: JSONValue): Value {
         }
       }
       const out: { [key: string]: Value } = {};
-      for (const [key, v] of Object.entries(json)) out[key.startsWith("$$") ? key.slice(1) : key] = jsonToConvex(v);
+      for (const [key, v] of Object.entries(json)) setObjectKey(out, key.startsWith("$$") ? key.slice(1) : key, jsonToConvex(v));
       return out;
     }
     default:

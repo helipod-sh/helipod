@@ -33,13 +33,15 @@ function parseFlags(args: string[]): DevOptions {
  * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
  * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
  */
-function loadDashboard(adminKey: string): { distDir: string; html: string } | undefined {
+function loadDashboard(adminKey: string | undefined): { distDir: string; html: string } | undefined {
   try {
     const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
     const distDir = dirname(indexPath);
-    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey)}</script>`;
-    const html = readFileSync(indexPath, "utf8").replace("</head>", `${inject}</head>`);
-    return { distDir, html };
+    const raw = readFileSync(indexPath, "utf8");
+    if (adminKey === undefined) return { distDir, html: raw }; // no key embedded → SPA prompts
+    // Escape `<` so a key value can never break out of the inline <script> (e.g. `</script>`).
+    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey).replace(/</g, "\\u003c")}</script>`;
+    return { distDir, html: raw.replace("</head>", `${inject}</head>`) };
   } catch {
     return undefined;
   }
@@ -60,7 +62,14 @@ export async function devCommand(args: string[]): Promise<number> {
   writeGenerated(generated.files, generatedDir);
 
   const logSink = new InMemoryLogSink();
-  const adminKey = process.env.STACKBASE_ADMIN_KEY ?? generateAdminKey();
+  // Treat an empty/whitespace STACKBASE_ADMIN_KEY as unset (a blank key would 401 everything).
+  const envKey = process.env.STACKBASE_ADMIN_KEY?.trim();
+  if (process.env.STACKBASE_ADMIN_KEY !== undefined && !envKey) {
+    process.stderr.write("⚠ STACKBASE_ADMIN_KEY is set but empty — generating an ephemeral key instead.\n");
+  }
+  const adminKey = envKey || generateAdminKey();
+  const ephemeralKey = !envKey; // a generated per-run key, not the operator's persistent secret
+  const loopback = ["127.0.0.1", "::1", "localhost"].includes(opts.ip);
   const runtime = await createEmbeddedRuntime({
     store: makeStore(opts.dataPath),
     catalog: project.catalog,
@@ -75,7 +84,10 @@ export async function devCommand(args: string[]): Promise<number> {
     manifest: project.manifest,
     logSink,
   });
-  const dashboard = loadDashboard(adminKey);
+  // Only inject the key into the (unauthenticated) dashboard HTML when it's an ephemeral key on a
+  // loopback bind — never embed a persistent STACKBASE_ADMIN_KEY where any network client can read
+  // it. Otherwise serve the SPA without a key so it prompts the operator (stored client-side).
+  const dashboard = loadDashboard(ephemeralKey && loopback ? adminKey : undefined);
   const server = await startDevServer(
     runtime,
     { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },

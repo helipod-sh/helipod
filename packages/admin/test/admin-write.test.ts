@@ -71,4 +71,17 @@ describe("AdminApi writes", () => {
     const list = await runtime.run<Array<{ title: string }>>("notes:list", {});
     expect(list.value.map((d) => d.title)).toEqual(["fresh"]);
   });
+
+  it("edit is a whole-document replace — a field omitted by the editor is removed", async () => {
+    const { api, runtime } = await makeApi();
+    const id = (await runtime.run<string>("notes:add", { title: "orig" })).value;
+    await api.patchDocument(id, { title: "orig", extra: "x" });
+    let doc = (await runtime.run<Array<Record<string, unknown>>>("notes:list", {})).value[0]!;
+    expect(doc.extra).toBe("x");
+
+    await api.patchDocument(id, { title: "orig" }); // editor dropped `extra`
+    doc = (await runtime.run<Array<Record<string, unknown>>>("notes:list", {})).value[0]!;
+    expect(doc.extra).toBeUndefined();
+    expect(doc.title).toBe("orig");
+  });
 });

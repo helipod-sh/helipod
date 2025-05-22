@@ -39,14 +39,8 @@ function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose:
     setSaving(true);
     setError(null);
     try {
-      const r = id
-        ? await adminSend<{ error?: string }>("PATCH", `/tables/${table}/docs/${id}`, fields)
-        : await adminSend<{ error?: string }>("POST", `/tables/${table}/docs`, fields);
-      if (r && typeof r === "object" && "error" in r && r.error) {
-        setError(String(r.error));
-        setSaving(false);
-        return;
-      }
+      if (id) await adminSend("PATCH", `/tables/${table}/docs/${id}`, fields);
+      else await adminSend("POST", `/tables/${table}/docs`, fields);
       await qc.invalidateQueries({ queryKey: ["data", table] });
       await qc.invalidateQueries({ queryKey: ["tables"] });
       onClose();
@@ -76,6 +70,7 @@ export function DataBrowser({ table }: { table: string }) {
   const [applied, setApplied] = useState("");
   const [editing, setEditing] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
+  const [opError, setOpError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["data", table, applied],
@@ -91,9 +86,14 @@ export function DataBrowser({ table }: { table: string }) {
 
   async function del(id: string) {
     if (!window.confirm("Delete this document?")) return;
-    await adminSend("DELETE", `/tables/${table}/docs/${id}`);
-    await qc.invalidateQueries({ queryKey: ["data", table] });
-    await qc.invalidateQueries({ queryKey: ["tables"] });
+    setOpError(null);
+    try {
+      await adminSend("DELETE", `/tables/${table}/docs/${id}`);
+      await qc.invalidateQueries({ queryKey: ["data", table] });
+      await qc.invalidateQueries({ queryKey: ["tables"] });
+    } catch (e) {
+      setOpError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   const columns = useMemo<ColumnDef<Row>[]>(() => {
@@ -137,6 +137,10 @@ export function DataBrowser({ table }: { table: string }) {
         <Button variant="secondary" onClick={() => setApplied(filter)}>Filter</Button>
         <Button onClick={() => setCreating(true)}>+ New</Button>
       </div>
+
+      {opError ? (
+        <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{opError}</div>
+      ) : null}
 
       {isLoading ? (
         <div className="py-12 text-center text-muted-foreground">loading…</div>

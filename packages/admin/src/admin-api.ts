@@ -59,8 +59,11 @@ export class AdminApi {
     const tableId = this.tableId(table);
     const page = opts.page ?? 0;
     const pageSize = opts.pageSize ?? 50;
+    // NOTE (v1): this scans the whole table into memory per request. Acceptable for Tier-0 dev
+    // dashboards; pushing pagination into the store (SQL LIMIT/cursor) is a planned optimization.
+    // Convert to JSON up front so the filter compares the SAME representation the UI displays.
     const docs = (await this.deps.runtime.store.scan(tableId)).map(
-      (d) => d.value.value as Record<string, Value>,
+      (d) => convexToJson(d.value.value) as Record<string, JSONValue>,
     );
 
     let rows = docs;
@@ -73,7 +76,7 @@ export class AdminApi {
 
     const total = rows.length;
     const start = page * pageSize;
-    const documents = rows.slice(start, start + pageSize).map((d) => convexToJson(d));
+    const documents = rows.slice(start, start + pageSize);
     return { documents, total, page, pageSize };
   }
 

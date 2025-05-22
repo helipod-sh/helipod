@@ -198,6 +198,7 @@ interface BunServeHandle {
 interface BunServeOptions {
   port: number;
   hostname: string;
+  maxRequestBodySize: number;
   fetch(req: Request, server: BunUpgradeServer): Response | undefined | Promise<Response | undefined>;
   websocket: {
     open(ws: BunWebSocket): void;
@@ -217,6 +218,7 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
   const handle = bun.serve({
     port: options.port,
     hostname: options.ip,
+    maxRequestBodySize: MAX_BODY_BYTES,
     async fetch(req, server) {
       const url = new URL(req.url);
       const path = url.pathname;

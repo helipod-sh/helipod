@@ -51,4 +51,14 @@ describe("convexToJson / jsonToConvex round-trip", () => {
     const restored = jsonToConvex(JSON.parse(JSON.stringify(json)));
     expect(valuesEqual(restored, { id: 7n, blob: bytes([1, 2]), name: "x" })).toBe(true);
   });
+
+  it("preserves a document field literally named __proto__ (no setter trap / no pollution)", () => {
+    // JSON.parse yields __proto__ as an own enumerable property; a naive out[key]=... would hit the
+    // prototype setter and silently drop the field.
+    const decoded = jsonToConvex(JSON.parse('{"__proto__": {"x": 1}, "name": "a"}')) as Record<string, Value>;
+    expect(Object.prototype.hasOwnProperty.call(decoded, "__proto__")).toBe(true);
+    expect(decoded["__proto__"]).toEqual({ x: 1 });
+    expect(decoded["name"]).toBe("a");
+    expect((Object.prototype as Record<string, unknown>).x).toBeUndefined(); // global proto untouched
+  });
 });
