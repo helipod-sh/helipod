@@ -53,9 +53,10 @@ function cell(v: unknown): string {
   return String(v);
 }
 
-function DocEditor({ table, doc, onClose, onSaved }: { table: string; doc: Record<string, unknown>; onClose: () => void; onSaved: () => void }) {
-  const id = String(doc._id);
+function DocEditor({ table, doc, onClose, onSaved }: { table: string; doc?: Record<string, unknown>; onClose: () => void; onSaved: () => void }) {
+  const id = doc ? String(doc._id) : null;
   const initial = useMemo(() => {
+    if (!doc) return "{\n  \n}";
     const { _id, _creationTime, ...rest } = doc;
     void _id;
     void _creationTime;
@@ -76,7 +77,9 @@ function DocEditor({ table, doc, onClose, onSaved }: { table: string; doc: Recor
     setSaving(true);
     setError(null);
     try {
-      const r = await adminSend<{ error?: string }>("PATCH", `/tables/${table}/docs/${id}`, fields);
+      const r = id
+        ? await adminSend<{ error?: string }>("PATCH", `/tables/${table}/docs/${id}`, fields)
+        : await adminSend<{ error?: string }>("POST", `/tables/${table}/docs`, fields);
       if (r && typeof r === "object" && "error" in r && r.error) {
         setError(String(r.error));
         setSaving(false);
@@ -92,8 +95,8 @@ function DocEditor({ table, doc, onClose, onSaved }: { table: string; doc: Recor
   return (
     <div className="modal" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>Edit document</h2>
-        <div className="muted" style={{ marginBottom: "0.5rem" }}><code>{id}</code></div>
+        <h2>{id ? "Edit document" : `New document in ${table}`}</h2>
+        {id ? <div className="muted" style={{ marginBottom: "0.5rem" }}><code>{id}</code></div> : null}
         <textarea value={text} onChange={(e) => setText(e.target.value)} style={{ minHeight: "12rem" }} />
         {error ? <div className="pill err" style={{ display: "inline-block", marginTop: "0.5rem" }}>{error}</div> : null}
         <div className="muted" style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}>Saving writes a real mutation to your database.</div>
@@ -111,6 +114,7 @@ function DataBrowser({ table }: { table: string }) {
   const [applied, setApplied] = useState("");
   const [nonce, setNonce] = useState(0);
   const [editing, setEditing] = useState<Record<string, unknown> | null>(null);
+  const [creating, setCreating] = useState(false);
   const q = useFetch<TableData>(
     () => adminGet(`/tables/${table}/data?pageSize=100${applied ? `&filter=${encodeURIComponent(applied)}` : ""}`),
     `data:${table}:${applied}:${nonce}`,
@@ -141,6 +145,7 @@ function DataBrowser({ table }: { table: string }) {
           onKeyDown={(e) => e.key === "Enter" && setApplied(filter)}
         />
         <button className="ghost" onClick={() => setApplied(filter)}>Filter</button>
+        <button onClick={() => setCreating(true)}>+ New</button>
       </div>
       {q.loading ? (
         <div className="empty">loading…</div>
@@ -162,12 +167,12 @@ function DataBrowser({ table }: { table: string }) {
           </tbody>
         </table>
       )}
-      {editing ? (
+      {editing || creating ? (
         <DocEditor
           table={table}
-          doc={editing}
-          onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); setNonce((n) => n + 1); }}
+          doc={editing ?? undefined}
+          onClose={() => { setEditing(null); setCreating(false); }}
+          onSaved={() => { setEditing(null); setCreating(false); setNonce((n) => n + 1); }}
         />
       ) : null}
     </div>

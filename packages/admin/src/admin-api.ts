@@ -100,4 +100,9 @@ export class AdminApi {
   async deleteDocument(id: string): Promise<void> {
     await this.deps.runtime.runSystem("_system:deleteDocument", { id });
   }
+
+  async createDocument(table: string, fields: Record<string, JSONValue>): Promise<JSONValue> {
+    const r = await this.deps.runtime.runSystem("_system:insertDocument", { table, fields });
+    return convexToJson(r.value as Value);
+  }
 }

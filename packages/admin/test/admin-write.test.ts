@@ -61,4 +61,14 @@ describe("AdminApi writes", () => {
     const left = await runtime.run<unknown[]>("notes:list", {});
     expect(left.value).toEqual([]);
   });
+
+  it("creates a document", async () => {
+    const { api, runtime } = await makeApi();
+    const created = await api.createDocument("notes", { title: "fresh" });
+    expect((created as any).title).toBe("fresh");
+    expect(typeof (created as any)._id).toBe("string");
+
+    const list = await runtime.run<Array<{ title: string }>>("notes:list", {});
+    expect(list.value.map((d) => d.title)).toEqual(["fresh"]);
+  });
 });

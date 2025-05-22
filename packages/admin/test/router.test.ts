@@ -11,6 +11,7 @@ const api: any = {
   runFunction: async () => ({ value: 1, committed: true }),
   patchDocument: async (_id: string, f: any) => ({ ...f, _id }),
   deleteDocument: async () => undefined,
+  createDocument: async (_t: string, f: any) => ({ ...f, _id: "new" }),
 };
 const KEY = "secret";
 const auth = { authorization: `Bearer ${KEY}` };
@@ -27,6 +28,12 @@ describe("handleAdminRequest", () => {
     expect((await handleAdminRequest(api, KEY, { method: "POST", path: "/_admin/run", query: {}, body: JSON.stringify({ path: "notes:list", args: {} }), ...auth })).status).toBe(200);
     const logs = await handleAdminRequest(api, KEY, { method: "GET", path: "/_admin/logs", query: {}, ...auth });
     expect(logs.status).toBe(200);
+  });
+
+  it("routes create / patch / delete on docs", async () => {
+    expect((await handleAdminRequest(api, KEY, { method: "POST", path: "/_admin/tables/notes/docs", query: {}, body: JSON.stringify({ title: "x" }), ...auth })).status).toBe(200);
+    expect((await handleAdminRequest(api, KEY, { method: "PATCH", path: "/_admin/tables/notes/docs/abc", query: {}, body: JSON.stringify({ title: "y" }), ...auth })).status).toBe(200);
+    expect((await handleAdminRequest(api, KEY, { method: "DELETE", path: "/_admin/tables/notes/docs/abc", query: {}, ...auth })).status).toBe(200);
   });
 
   it("404s an unknown admin route", async () => {

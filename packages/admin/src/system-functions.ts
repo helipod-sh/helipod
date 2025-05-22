@@ -15,5 +15,10 @@ export function systemModules(): Record<string, RegisteredFunction> {
       await ctx.db.delete(args.id);
       return null;
     }),
+    "_system:insertDocument": mutation(async (ctx, args: { table: string; fields: Record<string, unknown> }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const id = await ctx.db.insert(args.table, args.fields as any);
+      return await ctx.db.get(id);
+    }),
   };
 }

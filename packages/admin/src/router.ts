@@ -58,6 +58,10 @@ export async function handleAdminRequest(api: AdminApi, adminKey: string, req: A
       await api.deleteDocument(seg[3]!);
       return { status: 200, body: { ok: true } };
     }
+    if (req.method === "POST" && seg.length === 3 && seg[0] === "tables" && seg[2] === "docs") {
+      const fields = JSON.parse(req.body ?? "{}") as Record<string, JSONValue>;
+      return { status: 200, body: await api.createDocument(seg[1]!, fields) };
+    }
     return { status: 404, body: { error: "not found" } };
   } catch (e) {
     return { status: 400, body: { error: e instanceof Error ? e.message : String(e) } };
