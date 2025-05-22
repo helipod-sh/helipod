@@ -53,12 +53,67 @@ function cell(v: unknown): string {
   return String(v);
 }
 
+function DocEditor({ table, doc, onClose, onSaved }: { table: string; doc: Record<string, unknown>; onClose: () => void; onSaved: () => void }) {
+  const id = String(doc._id);
+  const initial = useMemo(() => {
+    const { _id, _creationTime, ...rest } = doc;
+    void _id;
+    void _creationTime;
+    return JSON.stringify(rest, null, 2);
+  }, [doc]);
+  const [text, setText] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    let fields: Record<string, unknown>;
+    try {
+      fields = JSON.parse(text);
+    } catch {
+      setError("Invalid JSON");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const r = await adminSend<{ error?: string }>("PATCH", `/tables/${table}/docs/${id}`, fields);
+      if (r && typeof r === "object" && "error" in r && r.error) {
+        setError(String(r.error));
+        setSaving(false);
+        return;
+      }
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h2>Edit document</h2>
+        <div className="muted" style={{ marginBottom: "0.5rem" }}><code>{id}</code></div>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} style={{ minHeight: "12rem" }} />
+        {error ? <div className="pill err" style={{ display: "inline-block", marginTop: "0.5rem" }}>{error}</div> : null}
+        <div className="muted" style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}>Saving writes a real mutation to your database.</div>
+        <div className="right">
+          <button className="ghost" onClick={onClose}>Cancel</button>
+          <button onClick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DataBrowser({ table }: { table: string }) {
   const [filter, setFilter] = useState("");
   const [applied, setApplied] = useState("");
+  const [nonce, setNonce] = useState(0);
+  const [editing, setEditing] = useState<Record<string, unknown> | null>(null);
   const q = useFetch<TableData>(
     () => adminGet(`/tables/${table}/data?pageSize=100${applied ? `&filter=${encodeURIComponent(applied)}` : ""}`),
-    `data:${table}:${applied}`,
+    `data:${table}:${applied}:${nonce}`,
   );
   const docs = q.data?.documents ?? [];
   const columns = useMemo(() => {
@@ -67,6 +122,12 @@ function DataBrowser({ table }: { table: string }) {
     const sys = ["_id", "_creationTime"];
     return [...[...seen].filter((k) => !sys.includes(k)).sort(), ...sys.filter((k) => seen.has(k))];
   }, [docs]);
+
+  async function del(id: string) {
+    if (!window.confirm("Delete this document?")) return;
+    await adminSend("DELETE", `/tables/${table}/docs/${id}`);
+    setNonce((n) => n + 1);
+  }
 
   return (
     <div>
@@ -87,14 +148,28 @@ function DataBrowser({ table }: { table: string }) {
         <div className="empty">No documents</div>
       ) : (
         <table>
-          <thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+          <thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}<th></th></tr></thead>
           <tbody>
             {docs.map((d) => (
-              <tr key={String(d._id)}>{columns.map((c) => <td key={c} title={cell(d[c])}>{cell(d[c])}</td>)}</tr>
+              <tr key={String(d._id)}>
+                {columns.map((c) => <td key={c} title={cell(d[c])}>{cell(d[c])}</td>)}
+                <td className="actions">
+                  <button className="mini" onClick={() => setEditing(d)}>Edit</button>
+                  <button className="mini danger" onClick={() => del(String(d._id))}>Del</button>
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
       )}
+      {editing ? (
+        <DocEditor
+          table={table}
+          doc={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); setNonce((n) => n + 1); }}
+        />
+      ) : null}
     </div>
   );
 }

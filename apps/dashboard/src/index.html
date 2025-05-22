@@ -47,6 +47,15 @@
       .toolbar { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.8rem; }
       .toolbar input { max-width: 18rem; }
       code { background: var(--panel2); padding: 0.05rem 0.3rem; border-radius: 4px; }
+      td.actions { white-space: nowrap; text-align: right; }
+      td.actions button { margin-left: 0.3rem; }
+      button.mini { padding: 0.18rem 0.5rem; font-size: 12px; background: var(--panel2); }
+      button.mini:hover { background: var(--accent); }
+      button.mini.danger:hover { background: var(--err); }
+      .modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; z-index: 10; }
+      .dialog { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; width: min(640px, 92vw); }
+      .dialog h2 { margin: 0 0 0.4rem; font-size: 1rem; }
+      .right { display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 0.8rem; }
     </style>
   </head>
   <body>
