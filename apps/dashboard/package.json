@@ -3,20 +3,32 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": {
-    "./dist": "./dist/index.html"
-  },
+  "exports": { "./dist": "./dist/index.html" },
   "scripts": {
-    "build": "bun build src/main.tsx --outfile dist/app.js --production && cp src/index.html dist/index.html",
+    "dev": "vite",
+    "build": "vite build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@base-ui-components/react": "^1.0.0-alpha.5",
+    "@tanstack/react-query": "^5.62.7",
+    "@tanstack/react-router": "^1.87.0",
+    "@tanstack/react-table": "^8.20.6",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.469.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "typescript": "catalog:"
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "catalog:",
+    "vite": "^6.0.7"
   }
 }

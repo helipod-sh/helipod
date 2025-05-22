@@ -43,15 +43,17 @@ export interface DevServerOptions {
   ip: string;
   webDir?: string;
   admin?: { api: AdminApi; key: string };
-  /** The built dashboard SPA (HTML with the admin key already injected, + the JS bundle). */
-  dashboard?: { html: string; js: string };
+  /** The built dashboard SPA: the dist dir (hashed Vite assets) + key-injected index.html. */
+  dashboard?: { distDir: string; html: string };
 }
 
-/** Serve the dashboard SPA for `/_dashboard*`, or null if the path isn't a dashboard asset. */
-function serveDashboard(path: string, d: { html: string; js: string }): { contentType: string; body: string } | null {
+/** Serve the dashboard SPA for `/_dashboard*` (index.html key-injected, assets from dist), or null. */
+function serveDashboard(path: string, d: { distDir: string; html: string }): { contentType: string; body: string | Buffer } | null {
   if (path === "/_dashboard" || path === "/_dashboard/" || path === "/_dashboard/index.html")
     return { contentType: "text/html; charset=utf-8", body: d.html };
-  if (path === "/_dashboard/app.js") return { contentType: "text/javascript; charset=utf-8", body: d.js };
+  if (path.startsWith("/_dashboard/")) {
+    return resolveStatic(d.distDir, path.slice("/_dashboard".length));
+  }
   return null;
 }
 
@@ -224,7 +226,10 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
       }
       if (req.method === "GET" && options.dashboard) {
         const dash = serveDashboard(path, options.dashboard);
-        if (dash) return new Response(dash.body, { headers: { "content-type": dash.contentType } });
+        if (dash) {
+          const body = typeof dash.body === "string" ? dash.body : new Uint8Array(dash.body);
+          return new Response(body, { headers: { "content-type": dash.contentType } });
+        }
       }
       const body = hasBody(req.method) ? await req.text() : undefined;
       const query: Record<string, string> = {};

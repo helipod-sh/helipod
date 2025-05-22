@@ -33,14 +33,13 @@ function parseFlags(args: string[]): DevOptions {
  * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
  * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
  */
-function loadDashboard(adminKey: string): { html: string; js: string } | undefined {
+function loadDashboard(adminKey: string): { distDir: string; html: string } | undefined {
   try {
     const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
     const distDir = dirname(indexPath);
     const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey)}</script>`;
     const html = readFileSync(indexPath, "utf8").replace("</head>", `${inject}</head>`);
-    const js = readFileSync(join(distDir, "app.js"), "utf8");
-    return { html, js };
+    return { distDir, html };
   } catch {
     return undefined;
   }
