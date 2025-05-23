@@ -1,5 +1,6 @@
 import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog } from "@stackbase/executor";
+import type { RegisteredFunction } from "@stackbase/executor";
 import type { SchemaDefinitionJSON } from "@stackbase/values";
 import type { ComponentDefinition } from "./define-component";
 
@@ -52,4 +53,20 @@ export function composeTables(input: ComposeInput): ComposedTables {
   addSchema(input.app.schemaJson, "", registry, catalog, tableNumbers); // app = component zero (bare names)
   for (const c of input.components) addSchema(c.schema.export(), c.name, registry, catalog, tableNumbers);
   return { tableNumbers, catalog };
+}
+
+export function composeModules(
+  appModules: Record<string, RegisteredFunction>,
+  components: ComponentDefinition[],
+): Record<string, RegisteredFunction> {
+  const out: Record<string, RegisteredFunction> = { ...appModules };
+  const appPrefixes = new Set(Object.keys(appModules).map((k) => k.slice(0, k.indexOf(":"))));
+  const seen = new Set<string>();
+  for (const c of components) {
+    if (seen.has(c.name)) throw new Error(`duplicate component name: ${c.name}`);
+    if (appPrefixes.has(c.name)) throw new Error(`component name "${c.name}" collides with an app module`);
+    seen.add(c.name);
+    for (const [fnName, fn] of Object.entries(c.modules)) out[`${c.name}:${fnName}`] = fn;
+  }
+  return out;
 }
