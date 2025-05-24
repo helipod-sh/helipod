@@ -11,6 +11,7 @@ import {
   encodeStorageTableId,
   newDocumentId,
   getFullTableName,
+  parseFullTableName,
 } from "@stackbase/id-codec";
 import { indexKeyspaceId, keySuccessor } from "@stackbase/index-key-codec";
 import {
@@ -77,6 +78,13 @@ function requireTable(ctx: KernelContext, name: string): { tableNumber: number; 
   return { tableNumber: meta.tableNumber, fullName };
 }
 
+/** Reject access to a document whose table is outside the running component's namespace. */
+function requireOwnTable(ctx: KernelContext, fullName: string): void {
+  if (parseFullTableName(fullName).componentPath !== ctx.namespace) {
+    throw new ForbiddenOperationError(`document is not in this component's namespace`);
+  }
+}
+
 /** Maintain every index of `table` for a document change, recording write ranges for reactivity. */
 function maintainIndexes(
   ctx: KernelContext,
@@ -102,7 +110,11 @@ function maintainIndexes(
 
 const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   const { id } = JSON.parse(argJson) as { id: string };
-  const value = await ctx.txn.get(decodeDocumentId(id));
+  const internalId = decodeDocumentId(id);
+  const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
+  if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
+  requireOwnTable(ctx, meta.name);
+  const value = await ctx.txn.get(internalId);
   return JSON.stringify(value === null ? null : convexToJson(value as Value));
 };
 
@@ -128,6 +140,7 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   const internalId = decodeDocumentId(id);
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
+  requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
   const newDoc: DocumentValue = {
@@ -146,6 +159,7 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   const internalId = decodeDocumentId(id);
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
+  requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
   ctx.txn.delete(internalId);
   maintainIndexes(ctx, meta.name, oldDoc, null, internalId);
