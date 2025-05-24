@@ -21,9 +21,14 @@ function addSchema(
   registry: MemoryTableRegistry,
   catalog: SimpleIndexCatalog,
   tableNumbers: Record<string, number>,
+  seen: Set<string>,
 ): void {
   for (const [tableName, tableDef] of Object.entries(schemaJson.tables)) {
+    if (tableName.includes("/") || tableName.includes(":"))
+      throw new Error(`table name "${tableName}" may not contain "/" or ":"`);
     const fullName = getFullTableName(tableName, componentName); // "" → bare; else "component/name"
+    if (seen.has(fullName)) throw new Error(`duplicate table: ${fullName}`);
+    seen.add(fullName);
     const info = registry.allocate(fullName, { shardKey: tableDef.shardKey });
     tableNumbers[fullName] = info.tableNumber;
     catalog.addTable(fullName, info.tableNumber);
@@ -50,8 +55,9 @@ export function composeTables(input: ComposeInput): ComposedTables {
   const registry = new MemoryTableRegistry();
   const catalog = new SimpleIndexCatalog();
   const tableNumbers: Record<string, number> = {};
-  addSchema(input.app.schemaJson, "", registry, catalog, tableNumbers); // app = component zero (bare names)
-  for (const c of input.components) addSchema(c.schema.export(), c.name, registry, catalog, tableNumbers);
+  const seen = new Set<string>();
+  addSchema(input.app.schemaJson, "", registry, catalog, tableNumbers, seen); // app = component zero (bare names)
+  for (const c of input.components) addSchema(c.schema.export(), c.name, registry, catalog, tableNumbers, seen);
   return { tableNumbers, catalog };
 }
 

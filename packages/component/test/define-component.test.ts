@@ -19,4 +19,9 @@ describe("defineComponent", () => {
     expect(() => defineComponent({ name: "_secret", schema, modules: {} })).toThrow(/reserved/);
     expect(() => defineComponent({ name: "app", schema, modules: {} })).toThrow(/reserved/);
   });
+
+  it("rejects names containing namespace separators", () => {
+    expect(() => defineComponent({ name: "auth/x", schema, modules: {} })).toThrow(/may contain only/);
+    expect(() => defineComponent({ name: "foo:bar", schema, modules: {} })).toThrow(/may contain only/);
+  });
 });

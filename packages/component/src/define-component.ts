@@ -13,5 +13,8 @@ export interface ComponentDefinition {
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
   if (!def.name) throw new Error("component name must be non-empty");
   if (def.name.startsWith("_") || def.name === "app") throw new Error(`component name "${def.name}" is reserved`);
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(def.name)) {
+    throw new Error(`component name "${def.name}" may contain only letters, digits, underscores (no "/" or ":")`);
+  }
   return def;
 }

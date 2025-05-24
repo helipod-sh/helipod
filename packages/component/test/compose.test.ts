@@ -23,4 +23,14 @@ describe("composeTables", () => {
     expect(catalog.getTable("messages")?.tableNumber).toBeGreaterThan(0);
     expect(catalog.getTable("auth/sessions")?.tableNumber).toBeGreaterThan(0);
   });
+
+  it("throws on a duplicate table full-name instead of silently aliasing", () => {
+    const dup = defineComponent({ name: "auth", schema: defineSchema({ sessions: defineTable({ y: v.string() }) }), modules: {} });
+    expect(() => composeTables({ app: { schemaJson: appSchema }, components: [auth, dup] })).toThrow(/duplicate table/);
+  });
+
+  it("rejects a table name containing a namespace separator", () => {
+    const bad = defineSchema({ "a/b": defineTable({ x: v.string() }) }).export();
+    expect(() => composeTables({ app: { schemaJson: bad }, components: [] })).toThrow(/may not contain/);
+  });
 });
