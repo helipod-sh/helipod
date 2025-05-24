@@ -31,6 +31,8 @@ export interface RunOptions {
   seed?: number;
   /** Function path, recorded in the execution log. */
   path?: string;
+  /** Component namespace prefix (e.g. "auth"); bare table names are resolved under this prefix. Defaults to "" (app root). */
+  namespace?: string;
 }
 
 export interface UdfResult<T = unknown> {
@@ -78,6 +80,7 @@ export class InlineUdfExecutor {
           snapshotTs: txn.snapshotTs,
           random: createSeededRandom(seed),
           logs: [],
+          namespace: options.namespace ?? "",
         };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);

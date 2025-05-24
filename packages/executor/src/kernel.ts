@@ -10,6 +10,7 @@ import {
   encodeInternalDocumentId,
   encodeStorageTableId,
   newDocumentId,
+  getFullTableName,
 } from "@stackbase/id-codec";
 import { indexKeyspaceId, keySuccessor } from "@stackbase/index-key-codec";
 import {
@@ -36,6 +37,7 @@ export interface KernelContext {
   readonly snapshotTs: bigint;
   readonly random: SeededRandom;
   readonly logs: string[];
+  readonly namespace: string;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -68,10 +70,11 @@ export class InlineSyscallChannel implements SyscallChannel {
   }
 }
 
-function requireTable(ctx: KernelContext, name: string): { tableNumber: number } {
-  const meta = ctx.catalog.getTable(name);
+function requireTable(ctx: KernelContext, name: string): { tableNumber: number; fullName: string } {
+  const fullName = getFullTableName(name, ctx.namespace);
+  const meta = ctx.catalog.getTable(fullName);
   if (!meta) throw new FunctionNotFoundError(`unknown table: ${name}`);
-  return meta;
+  return { tableNumber: meta.tableNumber, fullName };
 }
 
 /** Maintain every index of `table` for a document change, recording write ranges for reactivity. */
@@ -106,7 +109,7 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
 const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   if (!ctx.profile.capabilities.dbWrite) throw new ForbiddenOperationError("writes are not allowed here");
   const { table, value } = JSON.parse(argJson) as { table: string; value: JSONValue };
-  const { tableNumber } = requireTable(ctx, table);
+  const { tableNumber, fullName } = requireTable(ctx, table);
   const id = newDocumentId(tableNumber);
   const docId = encodeInternalDocumentId(id);
   const doc: DocumentValue = {
@@ -115,7 +118,7 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
     _creationTime: Number(ctx.snapshotTs),
   };
   ctx.txn.put(id, doc);
-  maintainIndexes(ctx, table, null, doc, id);
+  maintainIndexes(ctx, fullName, null, doc, id);
   return JSON.stringify({ id: docId });
 };
 
@@ -160,7 +163,7 @@ interface QuerySpecJson {
 
 const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   const spec = JSON.parse(argJson) as QuerySpecJson;
-  const indexSpec = ctx.catalog.getIndex(spec.table, spec.index);
+  const indexSpec = ctx.catalog.getIndex(getFullTableName(spec.table, ctx.namespace), spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
 
   const query: Query = {
@@ -184,7 +187,7 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
   const spec = JSON.parse(argJson) as QuerySpecJson & { cursor: string | null; pageSize: number };
-  const indexSpec = ctx.catalog.getIndex(spec.table, spec.index);
+  const indexSpec = ctx.catalog.getIndex(getFullTableName(spec.table, ctx.namespace), spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
 
   const query: Query = {
