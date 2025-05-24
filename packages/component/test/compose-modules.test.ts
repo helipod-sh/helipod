@@ -23,4 +23,9 @@ describe("composeModules", () => {
   it("rejects a component name that collides with an app module prefix", () => {
     expect(() => composeModules({ "auth:foo": query(async () => 1) }, [auth])).toThrow(/collides/);
   });
+
+  it("detects collision with a colon-free (bare) app module key", () => {
+    const bare = defineComponent({ name: "auth", schema: empty, modules: {} });
+    expect(() => composeModules({ auth: query(async () => 1) }, [bare])).toThrow(/collides/);
+  });
 });

@@ -60,7 +60,12 @@ export function composeModules(
   components: ComponentDefinition[],
 ): Record<string, RegisteredFunction> {
   const out: Record<string, RegisteredFunction> = { ...appModules };
-  const appPrefixes = new Set(Object.keys(appModules).map((k) => k.slice(0, k.indexOf(":"))));
+  const appPrefixes = new Set(
+    Object.keys(appModules).map((k) => {
+      const i = k.indexOf(":");
+      return i === -1 ? k : k.slice(0, i);
+    }),
+  );
   const seen = new Set<string>();
   for (const c of components) {
     if (seen.has(c.name)) throw new Error(`duplicate component name: ${c.name}`);
