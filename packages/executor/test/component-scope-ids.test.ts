@@ -30,6 +30,11 @@ describe("namespace-scoped ctx.db — id-based ops", () => {
     await expect(executor.run(steal, {}, { namespace: "auth" })).rejects.toThrow(/namespace|forbidden/i);
     const del = mutation(async (ctx) => ctx.db.delete(appId));
     await expect(executor.run(del, {}, { namespace: "auth" })).rejects.toThrow(/namespace|forbidden/i);
+    const repl = mutation(async (ctx) => {
+      await ctx.db.replace(appId, { body: "hacked" });
+      return null;
+    });
+    await expect(executor.run(repl, {}, { namespace: "auth" })).rejects.toThrow(/namespace|forbidden/i);
   });
 
   it("allows get of a document in the component's own namespace", async () => {
