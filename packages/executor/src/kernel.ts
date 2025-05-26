@@ -39,6 +39,7 @@ export interface KernelContext {
   readonly random: SeededRandom;
   readonly logs: string[];
   readonly namespace: string;
+  readonly privileged: boolean;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -72,7 +73,7 @@ export class InlineSyscallChannel implements SyscallChannel {
 }
 
 function requireTable(ctx: KernelContext, name: string): { tableNumber: number; fullName: string } {
-  const fullName = getFullTableName(name, ctx.namespace);
+  const fullName = ctx.privileged ? name : getFullTableName(name, ctx.namespace);
   const meta = ctx.catalog.getTable(fullName);
   if (!meta) throw new FunctionNotFoundError(`unknown table: ${name}`);
   return { tableNumber: meta.tableNumber, fullName };
@@ -80,6 +81,7 @@ function requireTable(ctx: KernelContext, name: string): { tableNumber: number; 
 
 /** Reject access to a document whose table is outside the running component's namespace. */
 function requireOwnTable(ctx: KernelContext, fullName: string): void {
+  if (ctx.privileged) return;
   if (parseFullTableName(fullName).componentPath !== ctx.namespace) {
     throw new ForbiddenOperationError(`document is not in this component's namespace`);
   }
@@ -177,7 +179,8 @@ interface QuerySpecJson {
 
 const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   const spec = JSON.parse(argJson) as QuerySpecJson;
-  const indexSpec = ctx.catalog.getIndex(getFullTableName(spec.table, ctx.namespace), spec.index);
+  const tableName = ctx.privileged ? spec.table : getFullTableName(spec.table, ctx.namespace);
+  const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
 
   const query: Query = {
@@ -201,7 +204,8 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
   const spec = JSON.parse(argJson) as QuerySpecJson & { cursor: string | null; pageSize: number };
-  const indexSpec = ctx.catalog.getIndex(getFullTableName(spec.table, ctx.namespace), spec.index);
+  const tableName = ctx.privileged ? spec.table : getFullTableName(spec.table, ctx.namespace);
+  const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
 
   const query: Query = {

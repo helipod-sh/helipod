@@ -33,6 +33,8 @@ export interface RunOptions {
   path?: string;
   /** Component namespace prefix (e.g. "auth"); bare table names are resolved under this prefix. Defaults to "" (app root). */
   namespace?: string;
+  /** When true, bypasses the namespace boundary — raw table names are used as-is and ownership checks are skipped. For admin/_system use only. */
+  privileged?: boolean;
 }
 
 export interface UdfResult<T = unknown> {
@@ -81,6 +83,7 @@ export class InlineUdfExecutor {
           random: createSeededRandom(seed),
           logs: [],
           namespace: options.namespace ?? "",
+          privileged: options.privileged ?? false,
         };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
