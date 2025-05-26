@@ -89,3 +89,19 @@ export function composeModules(
   }
   return out;
 }
+
+export interface ComposedProject {
+  catalog: SimpleIndexCatalog;
+  moduleMap: Record<string, RegisteredFunction>;
+  componentNames: ReadonlySet<string>;
+  tableNumbers: Record<string, number>;
+}
+
+export function composeComponents(
+  app: { schemaJson: SchemaDefinitionJSON; moduleMap: Record<string, RegisteredFunction> },
+  components: ComponentDefinition[],
+): ComposedProject {
+  const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components });
+  const moduleMap = composeModules(app.moduleMap, components);
+  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers };
+}
