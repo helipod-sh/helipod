@@ -61,6 +61,14 @@ export function composeTables(input: ComposeInput): ComposedTables {
   return { tableNumbers, catalog };
 }
 
+/** The namespace a function path runs in: its component name, or "" for an app module. */
+export function namespaceForPath(path: string, componentNames: ReadonlySet<string>): string {
+  const i = path.indexOf(":");
+  if (i === -1) return "";
+  const prefix = path.slice(0, i);
+  return componentNames.has(prefix) ? prefix : "";
+}
+
 export function composeModules(
   appModules: Record<string, RegisteredFunction>,
   components: ComponentDefinition[],
