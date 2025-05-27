@@ -303,6 +303,34 @@ importers:
         specifier: 'catalog:'
         version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
 
+  packages/component:
+    dependencies:
+      '@stackbase/errors':
+        specifier: workspace:*
+        version: link:../errors
+      '@stackbase/executor':
+        specifier: workspace:*
+        version: link:../executor
+      '@stackbase/id-codec':
+        specifier: workspace:*
+        version: link:../id-codec
+      '@stackbase/values':
+        specifier: workspace:*
+        version: link:../values
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      tsup:
+        specifier: 'catalog:'
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.16)(typescript@5.9.3)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
+
   packages/docstore:
     dependencies:
       '@stackbase/id-codec':
@@ -457,6 +485,9 @@ importers:
 
   packages/runtime-embedded:
     dependencies:
+      '@stackbase/component':
+        specifier: workspace:*
+        version: link:../component
       '@stackbase/docstore':
         specifier: workspace:*
         version: link:../docstore

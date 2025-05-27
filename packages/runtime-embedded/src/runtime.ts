@@ -7,6 +7,7 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
+import { namespaceForPath } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
 import { writtenTablesFromRanges } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
@@ -29,6 +30,8 @@ export interface EmbeddedRuntimeOptions {
   modules: Record<string, RegisteredFunction>;
   /** Privileged built-in functions (`_system:*`). Kept off the public run/sync surface. */
   systemModules?: Record<string, RegisteredFunction>;
+  /** Set of component names; used to resolve the namespace for each function path. */
+  componentNames?: ReadonlySet<string>;
   /** Swap the Tier 0 in-memory fan-out for a cross-process adapter (no app-code change). */
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
   originId?: string;
@@ -45,6 +48,7 @@ export class EmbeddedRuntime {
     readonly writeFanoutAdapter: EmbeddedWriteFanoutAdapter,
     private readonly modules: Record<string, RegisteredFunction>,
     private readonly systemModules: Record<string, RegisteredFunction>,
+    private readonly componentNames: ReadonlySet<string>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -62,6 +66,7 @@ export class EmbeddedRuntime {
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
+    const componentNames = options.componentNames ?? new Set<string>();
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
@@ -73,11 +78,11 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames) });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
       async runMutation(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames) });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -110,7 +115,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -129,14 +134,14 @@ export class EmbeddedRuntime {
     if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path });
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, this.componentNames) });
   }
 
   /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
   async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path });
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
   }
 }
 
