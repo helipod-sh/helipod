@@ -32,4 +32,11 @@ describe("auth: signUp / signIn", () => {
     await r.run("auth:signUp", { email: "a@b.co", password: "pw" });
     await expect(r.run("auth:signUp", { email: "a@b.co", password: "pw2" })).rejects.toThrow(/already exists/i);
   });
+  it("normalizes email casing/whitespace for signUp and signIn", async () => {
+    const r = await makeRuntime();
+    await r.run("auth:signUp", { email: "  Alice@B.co ", password: "pw" });
+    const ok = (await r.run<{ token: string }>("auth:signIn", { email: "alice@b.co", password: "pw" })).value;
+    expect(typeof ok.token).toBe("string");
+    await expect(r.run("auth:signUp", { email: "ALICE@b.co", password: "x" })).rejects.toThrow(/already exists/i);
+  });
 });
