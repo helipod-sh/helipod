@@ -1,4 +1,4 @@
-import { mutation } from "@stackbase/executor";
+import { mutation, query } from "@stackbase/executor";
 import { hashSecret, verifySecret, generateToken } from "./crypto";
 
 interface Creds { email: string; password: string }
@@ -21,4 +21,15 @@ export const signIn = mutation(async (ctx, { email, password }: Creds) => {
   const token = generateToken();
   await ctx.db.insert("sessions", { userId: account.userId as string, token });
   return { token, userId: account.userId as string };
+});
+
+export const signOut = mutation(async (ctx, { token }: { token: string }) => {
+  const [session] = await ctx.db.query("sessions", "byToken").eq("token", token).collect();
+  if (session) await ctx.db.delete(session._id as string);
+  return null;
+});
+
+export const getUserId = query(async (ctx, { token }: { token: string }) => {
+  const [session] = await ctx.db.query("sessions", "byToken").eq("token", token).collect();
+  return session ? (session.userId as string) : null;
 });
