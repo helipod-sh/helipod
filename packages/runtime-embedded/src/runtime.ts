@@ -15,7 +15,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult } from "@stackbase/executor";
+import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -36,6 +36,8 @@ export interface EmbeddedRuntimeOptions {
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
   originId?: string;
   logSink?: LogSink;
+  /** Context providers contributed by composed components; attached as ctx[name] on every function call. */
+  contextProviders?: ReadonlyArray<ContextProvider>;
 }
 
 export class EmbeddedRuntime {
@@ -49,6 +51,7 @@ export class EmbeddedRuntime {
     private readonly modules: Record<string, RegisteredFunction>,
     private readonly systemModules: Record<string, RegisteredFunction>,
     private readonly componentNames: ReadonlySet<string>,
+    private readonly contextProviders: ReadonlyArray<ContextProvider>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -67,6 +70,7 @@ export class EmbeddedRuntime {
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
     const componentNames = options.componentNames ?? new Set<string>();
+    const contextProviders = options.contextProviders ?? [];
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
@@ -78,11 +82,11 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames) });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
       async runMutation(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames) });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -115,7 +119,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -130,11 +134,16 @@ export class EmbeddedRuntime {
   }
 
   /** Directly invoke a function (for HTTP routes / the CLI `run` command). */
-  async run<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+  async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
     if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, this.componentNames) });
+    return this.executor.run<T>(fn, jsonToConvex(args), {
+      path,
+      namespace: namespaceForPath(path, this.componentNames),
+      contextProviders: this.contextProviders,
+      identity: opts?.identity ?? null,
+    });
   }
 
   /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
