@@ -21,7 +21,7 @@ export { GuestDatabaseReader, GuestDatabaseWriter, QueryBuilder } from "./guest"
 export type { RegisteredFunction } from "./functions";
 export { query, mutation, action } from "./functions";
 
-export type { ExecutorDeps, RunOptions, UdfResult } from "./executor";
+export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider } from "./executor";
 export { InlineUdfExecutor } from "./executor";
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";

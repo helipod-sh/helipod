@@ -40,6 +40,7 @@ export interface KernelContext {
   readonly logs: string[];
   readonly namespace: string;
   readonly privileged: boolean;
+  readonly identity: string | null;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;

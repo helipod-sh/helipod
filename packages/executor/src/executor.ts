@@ -26,6 +26,18 @@ export interface ExecutorDeps {
   now?: () => number;
 }
 
+export interface ComponentContext {
+  readonly db: GuestDatabaseReader;
+  readonly identity: string | null;
+}
+
+export interface ContextProvider {
+  readonly name: string;
+  /** The component's namespace; the facade's db reads here. */
+  readonly namespace: string;
+  readonly build: (cctx: ComponentContext) => Record<string, unknown>;
+}
+
 export interface RunOptions {
   /** Seed for the deterministic RNG (defaults to 0 so re-runs are reproducible). */
   seed?: number;
@@ -35,6 +47,10 @@ export interface RunOptions {
   namespace?: string;
   /** When true, bypasses the namespace boundary — raw table names are used as-is and ownership checks are skipped. For admin/_system use only. */
   privileged?: boolean;
+  /** Ambient session token for this request, exposed to context facades. */
+  identity?: string | null;
+  /** Enabled components' context facades, attached as ctx[name]. */
+  contextProviders?: ReadonlyArray<ContextProvider>;
 }
 
 export interface UdfResult<T = unknown> {
@@ -84,10 +100,17 @@ export class InlineUdfExecutor {
           logs: [],
           namespace: options.namespace ?? "",
           privileged: options.privileged ?? false,
+          identity: options.identity ?? null,
         };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
-        const guestCtx = { db, random: () => kctx.random.next() };
+        const guestCtx: Record<string, unknown> = { db, random: () => kctx.random.next() };
+        for (const p of options.contextProviders ?? []) {
+          if (p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
+          const pctx: KernelContext = { ...kctx, namespace: p.namespace, privileged: false };
+          const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
+          guestCtx[p.name] = Object.freeze(p.build({ db: preader, identity: kctx.identity }));
+        }
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
       });
