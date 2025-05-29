@@ -1,6 +1,6 @@
 import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog } from "@stackbase/executor";
-import type { RegisteredFunction } from "@stackbase/executor";
+import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinitionJSON } from "@stackbase/values";
 import type { ComponentDefinition } from "./define-component";
 
@@ -95,6 +95,7 @@ export interface ComposedProject {
   moduleMap: Record<string, RegisteredFunction>;
   componentNames: ReadonlySet<string>;
   tableNumbers: Record<string, number>;
+  contextProviders: ContextProvider[];
 }
 
 export function composeComponents(
@@ -103,5 +104,8 @@ export function composeComponents(
 ): ComposedProject {
   const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components });
   const moduleMap = composeModules(app.moduleMap, components);
-  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers };
+  const contextProviders: ContextProvider[] = components
+    .filter((c) => c.context)
+    .map((c) => ({ name: c.name, namespace: c.name, build: c.context! }));
+  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders };
 }

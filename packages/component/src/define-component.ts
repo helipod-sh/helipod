@@ -1,5 +1,6 @@
 import type { SchemaDefinition, Validator } from "@stackbase/values";
 import type { RegisteredFunction } from "@stackbase/executor";
+import type { ComponentContext } from "@stackbase/executor";
 
 export interface ComponentDefinition {
   name: string;
@@ -8,6 +9,8 @@ export interface ComponentDefinition {
   config?: Validator<unknown>;
   requires?: string[];
   grants?: Record<string, { read?: string[]; write?: string[] }>;
+  /** Optional facade contributed to every function's ctx as ctx[name]. Runs in this component's namespace. */
+  context?: (cctx: ComponentContext) => Record<string, unknown>;
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
