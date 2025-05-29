@@ -1,5 +1,5 @@
 import { mutation, query } from "@stackbase/executor";
-import { hashSecret, verifySecret, generateToken } from "./crypto";
+import { hashSecret, verifySecret, needsRehash, generateToken } from "./crypto";
 
 interface Creds { email: string; password: string }
 
@@ -13,7 +13,7 @@ export const signUp = mutation(async (ctx, { email, password }: Creds) => {
   const existing = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
   if (existing.length > 0) throw new Error("an account with that email already exists");
   const userId = await ctx.db.insert("users", { email: normEmail });
-  await ctx.db.insert("accounts", { userId, provider: "password", accountId: normEmail, secret: hashSecret(password) });
+  await ctx.db.insert("accounts", { userId, provider: "password", accountId: normEmail, secret: await hashSecret(password) });
   const token = generateToken();
   await ctx.db.insert("sessions", { userId, token });
   return { token, userId };
@@ -22,8 +22,11 @@ export const signUp = mutation(async (ctx, { email, password }: Creds) => {
 export const signIn = mutation(async (ctx, { email, password }: Creds) => {
   const normEmail = normalizeEmail(email);
   const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
-  if (!account || typeof account.secret !== "string" || !verifySecret(password, account.secret)) {
+  if (!account || typeof account.secret !== "string" || !await verifySecret(password, account.secret)) {
     throw new Error("invalid credentials");
+  }
+  if (needsRehash(account.secret)) {
+    await ctx.db.replace(account._id as string, { ...account, secret: await hashSecret(password) });
   }
   const token = generateToken();
   await ctx.db.insert("sessions", { userId: account.userId as string, token });

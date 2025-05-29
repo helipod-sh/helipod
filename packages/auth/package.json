@@ -11,7 +11,8 @@
     "@stackbase/component": "workspace:*",
     "@stackbase/errors": "workspace:*",
     "@stackbase/executor": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@stackbase/values": "workspace:*",
+    "hash-wasm": "^4.12.0"
   },
   "devDependencies": {
     "@stackbase/docstore-sqlite": "workspace:*",
