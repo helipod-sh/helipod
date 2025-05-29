@@ -107,7 +107,10 @@ export class InlineUdfExecutor {
         const guestCtx: Record<string, unknown> = { db, random: () => kctx.random.next() };
         for (const p of options.contextProviders ?? []) {
           if (p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
-          const pctx: KernelContext = { ...kctx, namespace: p.namespace, privileged: false };
+          // Two independent locks on writes: the facade gets a read-only GuestDatabaseReader (no write
+          // methods), AND a query profile so the kernel's dbWrite gate is closed regardless of the caller's
+          // type. A facade is the one sanctioned cross-namespace READ path — it must never write.
+          const pctx: KernelContext = { ...kctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
           const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
           guestCtx[p.name] = Object.freeze(p.build({ db: preader, identity: kctx.identity }));
         }
