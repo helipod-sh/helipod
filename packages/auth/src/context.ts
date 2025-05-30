@@ -7,7 +7,8 @@ export function authContext(cctx: ComponentContext) {
       const token = cctx.identity;
       if (!token) return null;
       const [session] = await cctx.db.query("sessions", "byToken").eq("token", token).collect();
-      return session ? (session.userId as string) : null;
+      if (!session || cctx.now > (session.expiresAt as number)) return null;
+      return session.userId as string;
     },
   };
 }

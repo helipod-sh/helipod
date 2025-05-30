@@ -1,6 +1,8 @@
 import { mutation, query } from "@stackbase/executor";
 import { hashSecret, verifySecret, needsRehash, generateToken } from "./crypto";
 
+export const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+
 interface Creds { email: string; password: string }
 
 export function normalizeEmail(email: string): string {
@@ -15,7 +17,7 @@ export const signUp = mutation(async (ctx, { email, password }: Creds) => {
   const userId = await ctx.db.insert("users", { email: normEmail });
   await ctx.db.insert("accounts", { userId, provider: "password", accountId: normEmail, secret: await hashSecret(password) });
   const token = generateToken();
-  await ctx.db.insert("sessions", { userId, token });
+  await ctx.db.insert("sessions", { userId, token, expiresAt: ctx.now() + THIRTY_DAYS });
   return { token, userId };
 });
 
@@ -29,7 +31,7 @@ export const signIn = mutation(async (ctx, { email, password }: Creds) => {
     await ctx.db.replace(account._id as string, { ...account, secret: await hashSecret(password) });
   }
   const token = generateToken();
-  await ctx.db.insert("sessions", { userId: account.userId as string, token });
+  await ctx.db.insert("sessions", { userId: account.userId as string, token, expiresAt: ctx.now() + THIRTY_DAYS });
   return { token, userId: account.userId as string };
 });
 
@@ -41,5 +43,6 @@ export const signOut = mutation(async (ctx, { token }: { token: string }) => {
 
 export const getUserId = query(async (ctx, { token }: { token: string }) => {
   const [session] = await ctx.db.query("sessions", "byToken").eq("token", token).collect();
-  return session ? (session.userId as string) : null;
+  if (!session || ctx.now() > (session.expiresAt as number)) return null;
+  return session.userId as string;
 });

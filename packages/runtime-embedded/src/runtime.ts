@@ -38,6 +38,8 @@ export interface EmbeddedRuntimeOptions {
   logSink?: LogSink;
   /** Context providers contributed by composed components; attached as ctx[name] on every function call. */
   contextProviders?: ReadonlyArray<ContextProvider>;
+  /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
+  now?: () => number;
 }
 
 export class EmbeddedRuntime {
@@ -65,7 +67,7 @@ export class EmbeddedRuntime {
     const startTs = await options.store.maxTimestamp();
     const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now });
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).

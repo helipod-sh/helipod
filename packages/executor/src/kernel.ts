@@ -41,6 +41,8 @@ export interface KernelContext {
   readonly namespace: string;
   readonly privileged: boolean;
   readonly identity: string | null;
+  /** Wall-clock ms captured once at execution start (fixed per OCC attempt). */
+  readonly now: number;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;

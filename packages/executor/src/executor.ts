@@ -29,6 +29,8 @@ export interface ExecutorDeps {
 export interface ComponentContext {
   readonly db: GuestDatabaseReader;
   readonly identity: string | null;
+  /** Wall-clock ms captured once at execution start (fixed per OCC attempt). */
+  readonly now: number;
 }
 
 export interface ContextProvider {
@@ -101,10 +103,11 @@ export class InlineUdfExecutor {
           namespace: options.namespace ?? "",
           privileged: options.privileged ?? false,
           identity: options.identity ?? null,
+          now: startedAt,
         };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
-        const guestCtx: Record<string, unknown> = { db, random: () => kctx.random.next() };
+        const guestCtx: Record<string, unknown> = { db, random: () => kctx.random.next(), now: () => kctx.now };
         for (const p of options.contextProviders ?? []) {
           if (p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
           // Two independent locks on writes: the facade gets a read-only GuestDatabaseReader (no write
@@ -112,7 +115,7 @@ export class InlineUdfExecutor {
           // type. A facade is the one sanctioned cross-namespace READ path — it must never write.
           const pctx: KernelContext = { ...kctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
           const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
-          guestCtx[p.name] = Object.freeze(p.build({ db: preader, identity: kctx.identity }));
+          guestCtx[p.name] = Object.freeze(p.build({ db: preader, identity: kctx.identity, now: kctx.now }));
         }
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };

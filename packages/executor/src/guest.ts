@@ -116,8 +116,10 @@ export class GuestDatabaseWriter extends GuestDatabaseReader {
 export interface QueryCtx {
   db: GuestDatabaseReader;
   random(): number;
+  now(): number;
 }
 export interface MutationCtx {
   db: GuestDatabaseWriter;
   random(): number;
+  now(): number;
 }
