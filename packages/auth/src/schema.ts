@@ -10,6 +10,8 @@ export const authSchema = defineSchema({
     provider: v.string(),
     accountId: v.string(), // for password: the email
     secret: v.string(),    // "salt:hash"
+    failedAttempts: v.number(),
+    lockedUntil: v.number(),
   }).index("byAccount", ["provider", "accountId"]),
   sessions: defineTable({ userId: v.id("users"), token: v.string(), expiresAt: v.number() }).index("byToken", ["token"]),
 });

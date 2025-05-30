@@ -66,6 +66,25 @@ export interface UdfResult<T = unknown> {
   oplog: OplogDelta | null;
 }
 
+/** Sentinel returned by a mutation handler to commit staged writes and then surface an error. */
+export interface CommitThenThrow {
+  readonly __commitThenThrow: string;
+}
+
+/** Build a CommitThenThrow sentinel — use inside a mutation to persist writes before erroring. */
+export function commitThenThrow(message: string): CommitThenThrow {
+  return { __commitThenThrow: message };
+}
+
+function isCommitThenThrow(value: unknown): value is CommitThenThrow {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "__commitThenThrow" in value &&
+    typeof (value as CommitThenThrow).__commitThenThrow === "string"
+  );
+}
+
 export class InlineUdfExecutor {
   private readonly router: SyscallRouter = createKernelRouter();
 
@@ -120,6 +139,13 @@ export class InlineUdfExecutor {
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
       });
+      // A mutation may return COMMIT_THEN_THROW to persist its writes (e.g. a failed-attempt
+      // counter) while still surfacing an error to the caller. The transaction is already
+      // committed at this point, so throwing here is safe.
+      if (isCommitThenThrow(commit.value.value)) {
+        logEntry("error", commit.value.value.__commitThenThrow);
+        throw new Error(commit.value.value.__commitThenThrow);
+      }
       logEntry("ok");
       return {
         value: commit.value.value,
