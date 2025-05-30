@@ -66,23 +66,16 @@ export interface UdfResult<T = unknown> {
   oplog: OplogDelta | null;
 }
 
-/** Sentinel returned by a mutation handler to commit staged writes and then surface an error. */
-export interface CommitThenThrow {
-  readonly __commitThenThrow: string;
+/** A sentinel a mutation can RETURN (not throw) to persist its writes and then surface an error.
+ * Returned → the transactor commits; the executor detects it post-commit and throws. instanceof
+ * detection makes it collision-proof vs. any application return value. */
+export class CommitThenThrow {
+  constructor(readonly message: string) {}
 }
 
-/** Build a CommitThenThrow sentinel — use inside a mutation to persist writes before erroring. */
+/** Build a CommitThenThrow sentinel — return it from a mutation to persist writes before erroring. */
 export function commitThenThrow(message: string): CommitThenThrow {
-  return { __commitThenThrow: message };
-}
-
-function isCommitThenThrow(value: unknown): value is CommitThenThrow {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "__commitThenThrow" in value &&
-    typeof (value as CommitThenThrow).__commitThenThrow === "string"
-  );
+  return new CommitThenThrow(message);
 }
 
 export class InlineUdfExecutor {
@@ -139,12 +132,12 @@ export class InlineUdfExecutor {
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
       });
-      // A mutation may return COMMIT_THEN_THROW to persist its writes (e.g. a failed-attempt
+      // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.
-      if (isCommitThenThrow(commit.value.value)) {
-        logEntry("error", commit.value.value.__commitThenThrow);
-        throw new Error(commit.value.value.__commitThenThrow);
+      if (commit.value.value instanceof CommitThenThrow) {
+        logEntry("error", commit.value.value.message);
+        throw new Error(commit.value.value.message);
       }
       logEntry("ok");
       return {
