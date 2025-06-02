@@ -44,7 +44,8 @@ export type ClientMessage =
   | { type: "Connect"; sessionId: string }
   | { type: "ModifyQuerySet"; add: QueryRequest[]; remove: number[] }
   | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue }
-  | { type: "EphemeralPublish"; topic: string; event: JSONValue };
+  | { type: "EphemeralPublish"; topic: string; event: JSONValue }
+  | { type: "SetAuth"; token: string | null };
 
 export type StateModification =
   | { type: "QueryUpdated"; queryId: number; value: JSONValue }

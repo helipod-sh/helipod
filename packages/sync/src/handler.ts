@@ -27,8 +27,8 @@ export interface SyncWebSocket {
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[] }>;
-  runMutation(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; commitTs: number }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[] }>;
+  runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; commitTs: number }>;
 }
 
 /** A committed write's invalidation — the transactor→sync fan-out payload (Tier 2: from a stream). */
@@ -52,6 +52,7 @@ interface Session {
   sessionId: string;
   socket: SyncWebSocket;
   version: StateVersion;
+  identity: string | null;
 }
 
 function errMessage(e: unknown): string {
@@ -69,7 +70,7 @@ export class SyncProtocolHandler {
   ) {}
 
   connect(sessionId: string, socket: SyncWebSocket): void {
-    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION } });
+    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null });
   }
 
   disconnect(sessionId: string): void {
@@ -95,6 +96,8 @@ export class SyncProtocolHandler {
       case "EphemeralPublish":
         this.publishEphemeral(msg.topic, msg.event, sessionId);
         return;
+      case "SetAuth":
+        return this.handleSetAuth(session, msg);
     }
   }
 
@@ -105,7 +108,7 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables } = await this.executor.runQuery(q.udfPath, q.args);
+        const { value, tables } = await this.executor.runQuery(q.udfPath, q.args, session.identity);
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables });
         modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: convexToJson(value) });
       } catch (e) {
@@ -128,7 +131,7 @@ export class SyncProtocolHandler {
     msg: Extract<ClientMessage, { type: "Mutation" }>,
   ): Promise<void> {
     try {
-      const { value, tables, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args);
+      const { value, tables, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args, session.identity);
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: true, value: convexToJson(value) });
       if (this.options.autoNotifyOnMutation !== false) {
         await this.notifyWrites({ tables, commitTs }, session.sessionId);
@@ -166,7 +169,7 @@ export class SyncProtocolHandler {
       const modifications: StateModification[] = [];
       for (const sub of subs) {
         try {
-          const { value, tables } = await this.executor.runQuery(sub.udfPath, sub.args);
+          const { value, tables } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
           this.subscriptions.add({ ...sub, tables }); // refresh the read set
           modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
         } catch (e) {
@@ -178,6 +181,25 @@ export class SyncProtocolHandler {
       session.version = end;
       this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
     }
+  }
+
+  private async handleSetAuth(session: Session, msg: Extract<ClientMessage, { type: "SetAuth" }>): Promise<void> {
+    session.identity = msg.token;
+    const subs = this.subscriptions.forSession(session.sessionId);
+    const modifications: StateModification[] = [];
+    for (const sub of subs) {
+      try {
+        const { value, tables } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
+        this.subscriptions.add({ ...sub, tables });
+        modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
+      } catch (e) {
+        modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
+      }
+    }
+    const start = session.version;
+    const end: StateVersion = { querySet: start.querySet + 1, ts: start.ts };
+    session.version = end;
+    this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
   }
 
   /** Ephemeral broadcast (presence/typing) — bypasses the engine entirely. */
