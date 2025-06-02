@@ -9,7 +9,7 @@ export const authSchema = defineSchema({
     userId: v.id("users"),
     provider: v.string(),
     accountId: v.string(), // for password: the email
-    secret: v.string(),    // "salt:hash"
+    secret: v.string(),    // argon2id PHC string (legacy "salt:hash" scrypt accepted + rehashed on next login)
     failedAttempts: v.number(),
     lockedUntil: v.number(),
   }).index("byAccount", ["provider", "accountId"]),

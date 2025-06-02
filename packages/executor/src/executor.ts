@@ -66,14 +66,22 @@ export interface UdfResult<T = unknown> {
   oplog: OplogDelta | null;
 }
 
-/** A sentinel a mutation can RETURN (not throw) to persist its writes and then surface an error.
- * Returned → the transactor commits; the executor detects it post-commit and throws. instanceof
- * detection makes it collision-proof vs. any application return value. */
+/**
+ * A sentinel a mutation RETURNS (never throws) to persist its writes and THEN surface an error.
+ * Returned → the transactor commits the staged writes (which FAN OUT to subscriptions, so reactive
+ * queries re-run) → the executor detects it (instanceof) post-commit and throws to the caller.
+ *
+ * ⚠️ The writes commit and become visible to subscribers even though the caller sees an error.
+ * Use ONLY for incidental side-effects that must survive a rejection — failed-attempt counters,
+ * audit rows, lockout state — NEVER for a mutation's primary effect (the client would believe it
+ * failed while subscribers see the change). UNSTABLE/internal primitive, not part of the frozen
+ * public component ABI; the export exists so first-party components (auth) can use it.
+ */
 export class CommitThenThrow {
   constructor(readonly message: string) {}
 }
 
-/** Build a CommitThenThrow sentinel — return it from a mutation to persist writes before erroring. */
+/** Build a CommitThenThrow sentinel — RETURN it from a mutation (see the class doc + its ⚠️). */
 export function commitThenThrow(message: string): CommitThenThrow {
   return new CommitThenThrow(message);
 }
