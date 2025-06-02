@@ -83,12 +83,12 @@ export class EmbeddedRuntime {
     };
 
     const syncExecutor: SyncUdfExecutor = {
-      async runQuery(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders });
+      async runQuery(path, args, identity) {
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, identity: identity ?? null });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
-      async runMutation(path, args) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders });
+      async runMutation(path, args, identity) {
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],

@@ -522,6 +522,9 @@ importers:
 
   packages/runtime-embedded:
     dependencies:
+      '@stackbase/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@stackbase/component':
         specifier: workspace:*
         version: link:../component
