@@ -87,6 +87,11 @@ export class StackbaseClient {
     });
   }
 
+  /** Set (or clear) the session identity for this connection; the server re-runs subscriptions under it. */
+  setAuth(token: string | null): void {
+    this.transport.send({ type: "SetAuth", token });
+  }
+
   /** Publish an ephemeral event (presence/typing) — bypasses the engine. */
   publishEphemeral(topic: string, event: Value): void {
     this.transport.send({ type: "EphemeralPublish", topic, event: convexToJson(event) });
