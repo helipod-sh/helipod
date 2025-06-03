@@ -1,14 +1,13 @@
-// packages/runtime-embedded/test/auth-reactive.test.ts
+// packages/auth/test/auth-reactive.test.ts
 import { describe, it, expect } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
 import { defineSchema } from "@stackbase/values";
 import { query } from "@stackbase/executor";
-import type { SyncWebSocket } from "@stackbase/sync";
-import { auth } from "@stackbase/auth";
-import { EmbeddedRuntime } from "../src/index";
+import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { auth } from "../src/component";
 
-function mockSocket(): SyncWebSocket & { sent: any[] } {
+function mockSocket(): { send(d: string): void; bufferedAmount: number; close(): void; sent: any[] } {
   const sent: any[] = [];
   return { sent, send: (d: string) => sent.push(JSON.parse(d)), bufferedAmount: 0, close: () => {} };
 }

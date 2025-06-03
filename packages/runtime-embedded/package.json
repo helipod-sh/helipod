@@ -37,13 +37,5 @@
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  },
-  "peerDependencies": {
-    "@stackbase/auth": "workspace:*"
-  },
-  "peerDependenciesMeta": {
-    "@stackbase/auth": {
-      "optional": true
-    }
   }
 }
