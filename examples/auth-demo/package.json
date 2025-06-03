@@ -1,0 +1,33 @@
+{
+  "name": "@stackbase/example-auth-demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "web:build": "bun build web/main.tsx --outfile web/main.js",
+    "dev": "bun server.ts"
+  },
+  "dependencies": {
+    "@stackbase/auth": "workspace:*",
+    "@stackbase/component": "workspace:*",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/values": "workspace:*"
+  },
+  "devDependencies": {
+    "@stackbase/admin": "workspace:*",
+    "@stackbase/cli": "workspace:*",
+    "@stackbase/client": "workspace:*",
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/runtime-embedded": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -91,6 +91,58 @@ importers:
         specifier: ^6.0.7
         version: 6.4.3(@types/node@22.20.0)(jiti@1.21.7)
 
+  examples/auth-demo:
+    dependencies:
+      '@stackbase/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@stackbase/component':
+        specifier: workspace:*
+        version: link:../../packages/component
+      '@stackbase/executor':
+        specifier: workspace:*
+        version: link:../../packages/executor
+      '@stackbase/values':
+        specifier: workspace:*
+        version: link:../../packages/values
+    devDependencies:
+      '@stackbase/admin':
+        specifier: workspace:*
+        version: link:../../packages/admin
+      '@stackbase/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@stackbase/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@stackbase/docstore-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/docstore-sqlite
+      '@stackbase/runtime-embedded':
+        specifier: workspace:*
+        version: link:../../packages/runtime-embedded
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      '@types/react':
+        specifier: ^18.3.18
+        version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.3.5
+        version: 18.3.7(@types/react@18.3.31)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
+
   examples/chat:
     dependencies:
       '@stackbase/executor':
