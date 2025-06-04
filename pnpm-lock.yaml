@@ -271,6 +271,9 @@ importers:
       '@stackbase/codegen':
         specifier: workspace:*
         version: link:../codegen
+      '@stackbase/component':
+        specifier: workspace:*
+        version: link:../component
       '@stackbase/dashboard':
         specifier: workspace:*
         version: link:../../apps/dashboard

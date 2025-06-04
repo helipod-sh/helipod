@@ -27,6 +27,7 @@
   "dependencies": {
     "@stackbase/admin": "workspace:*",
     "@stackbase/codegen": "workspace:*",
+    "@stackbase/component": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/errors": "workspace:*",

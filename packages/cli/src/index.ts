@@ -21,4 +21,6 @@ export type { WatchLoop, WatchLoopOptions, WatchTriggerReason } from "./watch";
 export { createWatchLoop } from "./watch";
 
 export { loadConvexDir } from "./load-modules";
+export type { StackbaseConfig } from "@stackbase/component";
+export { loadConfig } from "./load-config";
 export { runCli, devCommand, codegenCommand } from "./cli";
