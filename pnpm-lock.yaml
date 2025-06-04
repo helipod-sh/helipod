@@ -91,11 +91,48 @@ importers:
         specifier: ^6.0.7
         version: 6.4.3(@types/node@22.20.0)(jiti@1.21.7)
 
+  components/auth:
+    dependencies:
+      '@stackbase/component':
+        specifier: workspace:*
+        version: link:../../packages/component
+      '@stackbase/errors':
+        specifier: workspace:*
+        version: link:../../packages/errors
+      '@stackbase/executor':
+        specifier: workspace:*
+        version: link:../../packages/executor
+      '@stackbase/values':
+        specifier: workspace:*
+        version: link:../../packages/values
+      hash-wasm:
+        specifier: ^4.12.0
+        version: 4.12.0
+    devDependencies:
+      '@stackbase/docstore-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/docstore-sqlite
+      '@stackbase/runtime-embedded':
+        specifier: workspace:*
+        version: link:../../packages/runtime-embedded
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      tsup:
+        specifier: 'catalog:'
+        version: 8.5.1(jiti@1.21.7)(postcss@8.5.16)(typescript@5.9.3)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
+
   examples/auth-demo:
     dependencies:
       '@stackbase/auth':
         specifier: workspace:*
-        version: link:../../packages/auth
+        version: link:../../components/auth
       '@stackbase/component':
         specifier: workspace:*
         version: link:../../packages/component
@@ -213,43 +250,6 @@ importers:
       '@stackbase/docstore-sqlite':
         specifier: workspace:*
         version: link:../docstore-sqlite
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.20.0
-      tsup:
-        specifier: 'catalog:'
-        version: 8.5.1(jiti@1.21.7)(postcss@8.5.16)(typescript@5.9.3)
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-      vitest:
-        specifier: 'catalog:'
-        version: 2.1.9(@types/node@22.20.0)(jsdom@25.0.1)
-
-  packages/auth:
-    dependencies:
-      '@stackbase/component':
-        specifier: workspace:*
-        version: link:../component
-      '@stackbase/errors':
-        specifier: workspace:*
-        version: link:../errors
-      '@stackbase/executor':
-        specifier: workspace:*
-        version: link:../executor
-      '@stackbase/values':
-        specifier: workspace:*
-        version: link:../values
-      hash-wasm:
-        specifier: ^4.12.0
-        version: 4.12.0
-    devDependencies:
-      '@stackbase/docstore-sqlite':
-        specifier: workspace:*
-        version: link:../docstore-sqlite
-      '@stackbase/runtime-embedded':
-        specifier: workspace:*
-        version: link:../runtime-embedded
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
