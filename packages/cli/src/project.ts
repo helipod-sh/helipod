@@ -3,10 +3,11 @@
  * codegen need: the schema JSON, an index catalog (with table numbers assigned + an implicit
  * `by_creation` index per table), the `path:name → function` map, and the analyzed manifest.
  */
-import { MemoryTableRegistry, encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, type RegisteredFunction } from "@stackbase/executor";
+import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
 import type { AnalyzedFunction, AnalyzedFunctionManifest } from "@stackbase/codegen";
+import { composeComponents, type ComponentDefinition } from "@stackbase/component";
+import type { SimpleIndexCatalog } from "@stackbase/executor";
 
 export const DEFAULT_INDEX = "by_creation";
 
@@ -22,6 +23,8 @@ export interface ProjectArtifacts {
   moduleMap: Record<string, RegisteredFunction>;
   manifest: AnalyzedFunctionManifest;
   tableNumbers: Record<string, number>;
+  componentNames: ReadonlySet<string>;
+  contextProviders: ContextProvider[];
 }
 
 function isRegisteredFunction(x: unknown): x is RegisteredFunction {
@@ -33,42 +36,17 @@ function isRegisteredFunction(x: unknown): x is RegisteredFunction {
   );
 }
 
-export function loadProject(loaded: LoadedProject): ProjectArtifacts {
+export function loadProject(loaded: LoadedProject, components: ComponentDefinition[] = []): ProjectArtifacts {
   const schemaJson = loaded.schema.export();
-  const registry = new MemoryTableRegistry();
-  const catalog = new SimpleIndexCatalog();
-  const tableNumbers: Record<string, number> = {};
 
-  for (const [tableName, tableDef] of Object.entries(schemaJson.tables)) {
-    const info = registry.allocate(tableName, { shardKey: tableDef.shardKey });
-    tableNumbers[tableName] = info.tableNumber;
-    catalog.addTable(tableName, info.tableNumber);
-    // Implicit creation-order index, so table scans / default queries work.
-    catalog.addIndex({
-      table: tableName,
-      tableNumber: info.tableNumber,
-      index: DEFAULT_INDEX,
-      fields: [],
-      indexId: encodeStorageIndexId(info.tableNumber, DEFAULT_INDEX),
-    });
-    for (const idx of tableDef.indexes) {
-      catalog.addIndex({
-        table: tableName,
-        tableNumber: info.tableNumber,
-        index: idx.indexDescriptor,
-        fields: idx.fields,
-        indexId: encodeStorageIndexId(info.tableNumber, idx.indexDescriptor),
-      });
-    }
-  }
-
-  const moduleMap: Record<string, RegisteredFunction> = {};
+  // Build the app's moduleMap + manifest from loaded.modules (codegen needs the app manifest).
+  const appModuleMap: Record<string, RegisteredFunction> = {};
   const manifest: AnalyzedFunctionManifest = [];
   for (const [path, exports] of Object.entries(loaded.modules)) {
     const functions: AnalyzedFunction[] = [];
     for (const [name, value] of Object.entries(exports)) {
       if (!isRegisteredFunction(value)) continue;
-      moduleMap[`${path}:${name}`] = value;
+      appModuleMap[`${path}:${name}`] = value;
       if (value.type === "query" || value.type === "mutation" || value.type === "action") {
         functions.push({ name, type: value.type, visibility: "public" });
       }
@@ -82,5 +60,16 @@ export function loadProject(loaded: LoadedProject): ProjectArtifacts {
   }
   manifest.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-  return { schemaJson, catalog, moduleMap, manifest, tableNumbers };
+  // Compose app + components: allocates table numbers, merges module maps, collects context providers.
+  const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components);
+
+  return {
+    schemaJson,
+    catalog: composed.catalog,
+    moduleMap: composed.moduleMap,
+    manifest,
+    tableNumbers: composed.tableNumbers,
+    componentNames: composed.componentNames,
+    contextProviders: composed.contextProviders,
+  };
 }

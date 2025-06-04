@@ -12,6 +12,7 @@ import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, generateAdminKey, systemModules } from "@stackbase/admin";
 import { resolveDevOptions, detectRuntime, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
+import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { startDevServer } from "./server";
 import { createWatchLoop } from "./watch";
@@ -58,7 +59,8 @@ export async function devCommand(args: string[]): Promise<number> {
   const generatedDir = join(opts.convexDir, "_generated");
 
   const loaded = await loadConvexDir(opts.convexDir);
-  const { project, generated } = push(loaded);
+  const config = await loadConfig(dirname(opts.convexDir));
+  const { project, generated } = push(loaded, config.components);
   writeGenerated(generated.files, generatedDir);
 
   const logSink = new InMemoryLogSink();
@@ -76,6 +78,8 @@ export async function devCommand(args: string[]): Promise<number> {
     logSink,
     modules: project.moduleMap,
     systemModules: systemModules(),
+    componentNames: project.componentNames,
+    contextProviders: project.contextProviders,
   });
   const adminApi = new AdminApi({
     runtime,

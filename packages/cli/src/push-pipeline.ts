@@ -4,6 +4,7 @@
  * module map with the running engine — no restart).
  */
 import { generateAll, type GeneratedBundle } from "@stackbase/codegen";
+import type { ComponentDefinition } from "@stackbase/component";
 import { loadProject, type LoadedProject, type ProjectArtifacts } from "./project";
 
 export interface PushResult {
@@ -11,8 +12,8 @@ export interface PushResult {
   generated: GeneratedBundle;
 }
 
-export function push(loaded: LoadedProject): PushResult {
-  const project = loadProject(loaded);
+export function push(loaded: LoadedProject, components: ComponentDefinition[] = []): PushResult {
+  const project = loadProject(loaded, components);
   const generated = generateAll({ schema: project.schemaJson, manifest: project.manifest });
   return { project, generated };
 }
