@@ -11,9 +11,9 @@ import { query } from "@stackbase/executor";
 import { defineSchema } from "@stackbase/values";
 import { composeComponents } from "@stackbase/component";
 import { auth } from "@stackbase/auth";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { startDevServer } from "@stackbase/cli";
+import { startDevServer, detectRuntime } from "@stackbase/cli";
 import { systemModules } from "@stackbase/admin";
 
 // Empty app schema (auth component owns its tables)
@@ -41,9 +41,12 @@ const composed = composeComponents(
   [auth],
 );
 
+// Pick the SQLite adapter for the current runtime (bun:sqlite under Bun, node:sqlite under Node).
+const adapter = detectRuntime() === "bun" ? new BunSqliteAdapter() : new NodeSqliteAdapter();
+
 // Create runtime
 const runtime = await createEmbeddedRuntime({
-  store: new SqliteDocStore(new NodeSqliteAdapter()),
+  store: new SqliteDocStore(adapter),
   catalog: composed.catalog,
   modules: composed.moduleMap,
   systemModules: systemModules(),
