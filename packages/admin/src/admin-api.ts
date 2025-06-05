@@ -1,7 +1,7 @@
 import { encodeStorageTableId } from "@stackbase/id-codec";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { ExecutionLogEntry, LogFilter, LogSink } from "@stackbase/executor";
+import type { ExecutionLogEntry, IndexCatalog, LogFilter, LogSink } from "@stackbase/executor";
 
 export type SchemaJsonLike = {
   tables: Record<string, { indexes: { indexDescriptor: string }[]; shardKey?: string | null }>;
@@ -14,6 +14,8 @@ export interface AdminDeps {
   tableNumbers: Record<string, number>;
   manifest: ManifestLike;
   logSink: LogSink;
+  /** Optional — when provided, component tables (not in schemaJson) are enumerated. */
+  catalog?: IndexCatalog;
 }
 
 export interface TableInfo {
@@ -41,11 +43,25 @@ export class AdminApi {
 
   async listTables(): Promise<TableInfo[]> {
     const out: TableInfo[] = [];
-    for (const [name, def] of Object.entries(this.deps.schemaJson.tables)) {
+    for (const name of Object.keys(this.deps.tableNumbers).sort()) {
+      const schemaDef = this.deps.schemaJson.tables[name];
+      let indexes: string[];
+      let shardKey: string | undefined;
+      if (schemaDef) {
+        // App table — use the schema definition.
+        indexes = schemaDef.indexes.map((i) => i.indexDescriptor);
+        shardKey = schemaDef.shardKey ?? undefined;
+      } else {
+        // Component table — derive index info from the catalog.
+        indexes = this.deps.catalog
+          ? this.deps.catalog.indexesForTable(name).map((spec) => spec.index)
+          : [];
+        shardKey = undefined;
+      }
       out.push({
         name,
-        indexes: def.indexes.map((i) => i.indexDescriptor),
-        shardKey: def.shardKey ?? undefined,
+        indexes,
+        shardKey,
         documentCount: await this.deps.runtime.store.count(this.tableId(name)),
       });
     }

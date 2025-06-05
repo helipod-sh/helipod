@@ -87,6 +87,7 @@ export async function devCommand(args: string[]): Promise<number> {
     tableNumbers: project.tableNumbers,
     manifest: project.manifest,
     logSink,
+    catalog: project.catalog,
   });
   // Only inject the key into the (unauthenticated) dashboard HTML when it's an ephemeral key on a
   // loopback bind — never embed a persistent STACKBASE_ADMIN_KEY where any network client can read
