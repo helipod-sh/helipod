@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "web:build": "bun build web/main.tsx --outfile web/main.js",
-    "dev": "bun server.ts"
+    "dev": "bun ../../packages/cli/dist/bin.js dev --dir convex --web web --port 3211"
   },
   "dependencies": {
     "@stackbase/auth": "workspace:*",
