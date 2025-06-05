@@ -39,8 +39,8 @@ function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose:
     setSaving(true);
     setError(null);
     try {
-      if (id) await adminSend("PATCH", `/tables/${table}/docs/${id}`, fields);
-      else await adminSend("POST", `/tables/${table}/docs`, fields);
+      if (id) await adminSend("PATCH", `/tables/${encodeURIComponent(table)}/docs/${id}`, fields);
+      else await adminSend("POST", `/tables/${encodeURIComponent(table)}/docs`, fields);
       await qc.invalidateQueries({ queryKey: ["data", table] });
       await qc.invalidateQueries({ queryKey: ["tables"] });
       onClose();
@@ -74,7 +74,7 @@ export function DataBrowser({ table }: { table: string }) {
 
   const { data, isLoading } = useQuery({
     queryKey: ["data", table, applied],
-    queryFn: () => adminGet<TableData>(`/tables/${table}/data?pageSize=100${applied ? `&filter=${encodeURIComponent(applied)}` : ""}`),
+    queryFn: () => adminGet<TableData>(`/tables/${encodeURIComponent(table)}/data?pageSize=100${applied ? `&filter=${encodeURIComponent(applied)}` : ""}`),
   });
   const docs = useMemo(() => data?.documents ?? [], [data]);
 
@@ -88,7 +88,7 @@ export function DataBrowser({ table }: { table: string }) {
     if (!window.confirm("Delete this document?")) return;
     setOpError(null);
     try {
-      await adminSend("DELETE", `/tables/${table}/docs/${id}`);
+      await adminSend("DELETE", `/tables/${encodeURIComponent(table)}/docs/${id}`);
       await qc.invalidateQueries({ queryKey: ["data", table] });
       await qc.invalidateQueries({ queryKey: ["tables"] });
     } catch (e) {

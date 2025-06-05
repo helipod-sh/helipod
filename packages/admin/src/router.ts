@@ -35,7 +35,7 @@ export async function handleAdminRequest(api: AdminApi, adminKey: string, req: A
     if (req.method === "GET" && seg.length === 3 && seg[0] === "tables" && seg[2] === "data") {
       const page = req.query.page ? Number(req.query.page) : undefined;
       const pageSize = req.query.pageSize ? Number(req.query.pageSize) : undefined;
-      const data = await api.getTableData(seg[1]!, { page, pageSize, filter: req.query.filter });
+      const data = await api.getTableData(decodeURIComponent(seg[1]!), { page, pageSize, filter: req.query.filter });
       return { status: 200, body: data as unknown as JSONValue };
     }
     if (req.method === "GET" && seg.length === 1 && seg[0] === "functions") {
@@ -60,7 +60,7 @@ export async function handleAdminRequest(api: AdminApi, adminKey: string, req: A
     }
     if (req.method === "POST" && seg.length === 3 && seg[0] === "tables" && seg[2] === "docs") {
       const fields = JSON.parse(req.body ?? "{}") as Record<string, JSONValue>;
-      return { status: 200, body: await api.createDocument(seg[1]!, fields) };
+      return { status: 200, body: await api.createDocument(decodeURIComponent(seg[1]!), fields) };
     }
     return { status: 404, body: { error: "not found" } };
   } catch (e) {
