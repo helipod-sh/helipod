@@ -37,7 +37,7 @@ export interface ContextProvider {
   readonly name: string;
   /** The component's namespace; the facade's db reads here. */
   readonly namespace: string;
-  readonly build: (cctx: ComponentContext) => Record<string, unknown>;
+  readonly build: (cctx: ComponentContext) => object;
 }
 
 export interface RunOptions {

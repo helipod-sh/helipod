@@ -1,7 +1,11 @@
 import type { ComponentContext } from "@stackbase/executor";
 
+export interface AuthContext {
+  getUserId(): Promise<string | null>;
+}
+
 /** ctx.auth — resolves the ambient session token to the current user's id. */
-export function authContext(cctx: ComponentContext) {
+export function authContext(cctx: ComponentContext): AuthContext {
   return {
     getUserId: async (): Promise<string | null> => {
       const token = cctx.identity;

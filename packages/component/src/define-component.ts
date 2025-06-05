@@ -10,7 +10,9 @@ export interface ComponentDefinition {
   requires?: string[];
   grants?: Record<string, { read?: string[]; write?: string[] }>;
   /** Optional facade contributed to every function's ctx as ctx[name]. Runs in this component's namespace. */
-  context?: (cctx: ComponentContext) => Record<string, unknown>;
+  context?: (cctx: ComponentContext) => object;
+  /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
+  contextType?: { import: string; type: string };
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
