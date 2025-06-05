@@ -112,7 +112,7 @@ export async function devCommand(args: string[]): Promise<number> {
     onTrigger: async (reason) => {
       if (reason === "initial") return; // already pushed above
       try {
-        const next = push(await loadConvexDir(opts.convexDir));
+        const next = push(await loadConvexDir(opts.convexDir), config.components);
         writeGenerated(next.generated.files, generatedDir);
         runtime.setModules(next.project.moduleMap);
         process.stdout.write(`↻ pushed (${Object.keys(next.project.moduleMap).length} functions)\n`);
