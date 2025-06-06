@@ -2,3 +2,13 @@
 export { query, mutation, action } from "@stackbase/executor";
 export type { DataModel, TableNames, Doc, Id } from "./dataModel";
 export type { Api, FunctionReference } from "./api";
+
+// Component context contributions (ctx.<component>), typed.
+declare module "@stackbase/executor" {
+  interface QueryCtx {
+    auth: import("@stackbase/auth").AuthContext;
+  }
+  interface MutationCtx {
+    auth: import("@stackbase/auth").AuthContext;
+  }
+}

@@ -14,6 +14,10 @@ export interface PushResult {
 
 export function push(loaded: LoadedProject, components: ComponentDefinition[] = []): PushResult {
   const project = loadProject(loaded, components);
-  const generated = generateAll({ schema: project.schemaJson, manifest: project.manifest });
+  const generated = generateAll({
+    schema: project.schemaJson,
+    manifest: project.manifest,
+    components: components.map((c) => ({ name: c.name, contextType: c.contextType })),
+  });
   return { project, generated };
 }

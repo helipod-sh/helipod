@@ -131,7 +131,9 @@ export async function devCommand(args: string[]): Promise<number> {
 
 export async function codegenCommand(args: string[]): Promise<number> {
   const opts = resolveDevOptions(parseFlags(args));
-  const { generated } = push(await loadConvexDir(opts.convexDir));
+  const loaded = await loadConvexDir(opts.convexDir);
+  const config = await loadConfig(dirname(opts.convexDir));
+  const { generated } = push(loaded, config.components);
   writeGenerated(generated.files, join(opts.convexDir, "_generated"));
   process.stdout.write(`generated ${opts.convexDir}/_generated\n`);
   return 0;
