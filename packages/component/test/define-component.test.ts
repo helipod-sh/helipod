@@ -24,4 +24,10 @@ describe("defineComponent", () => {
     expect(() => defineComponent({ name: "auth/x", schema, modules: {} })).toThrow(/may contain only/);
     expect(() => defineComponent({ name: "foo:bar", schema, modules: {} })).toThrow(/may contain only/);
   });
+
+  it("rejects contextType without a context builder", () => {
+    expect(() =>
+      defineComponent({ name: "x", schema: defineSchema({}), modules: {}, contextType: { import: "@stackbase/x", type: "XContext" } }),
+    ).toThrow(/contextType but no context/);
+  });
 });

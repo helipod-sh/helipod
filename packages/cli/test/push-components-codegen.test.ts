@@ -9,6 +9,7 @@ describe("push with components passes contextType into codegen", () => {
       name: "auth",
       schema: defineSchema({}),
       modules: {},
+      context: () => ({}),
       contextType: { import: "@stackbase/auth", type: "AuthContext" },
     });
 

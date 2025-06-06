@@ -21,5 +21,10 @@ export function defineComponent(def: ComponentDefinition): ComponentDefinition {
   if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(def.name)) {
     throw new Error(`component name "${def.name}" may contain only letters, digits, underscores (no "/" or ":")`);
   }
+  if (def.contextType && !def.context) {
+    throw new Error(
+      `component "${def.name}" declares contextType but no context builder — ctx.${def.name} would be typed but undefined at runtime`,
+    );
+  }
   return def;
 }
