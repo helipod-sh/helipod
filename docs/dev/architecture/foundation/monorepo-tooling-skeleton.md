@@ -9,6 +9,15 @@ depends_on: []
 
 # Foundation — Monorepo & Tooling Skeleton
 
+> **Updated 2025-06-07 — migrated to Bun.** The repo now uses **Bun workspaces** (the package
+> manager + runtime) with **Turborepo** orchestration and **vitest** (run under Bun); `pnpm` is no
+> longer used. The workspace globs + the dependency `catalog` live in the root `package.json`
+> (`"workspaces": { "packages": [...], "catalog": {...} }`); the lockfile is `bun.lock`. Top-level
+> dirs: `packages/` (engine + SDK), `components/` (pluggable components), `apps/`, `examples/`.
+> Commands: `bun install`, `bun run build|test|typecheck`, `bun run --filter <pkg> <script>`.
+> The `pnpm`-specific details below are **historical** (the original design); the structure/intent
+> still applies, only the package manager changed.
+
 > Clean-room design. Where this doc names a Convex/`@concavejs` type, it is reproducing a
 > **public interop fact** (the validator JSON wire shape, the value total order, the document-id
 > string format) so our `AnalyzedModule` / schema export / value encoding are byte-compatible with

@@ -532,7 +532,7 @@ row type and reject unknown table names — the end-to-end safety the slice prom
 
 ## 5. Package / module / file layout
 
-`packages/codegen` (provided by `monorepo-tooling-skeleton`: pnpm workspace, shared `tsconfig.base`,
+`packages/codegen` (provided by `monorepo-tooling-skeleton`: Bun workspace, shared `tsconfig.base`,
 vitest, the `convex` peer dep). Engine logic never imports a DB driver; codegen never imports a
 runtime host.
 

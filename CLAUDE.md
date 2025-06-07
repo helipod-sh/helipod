@@ -10,7 +10,7 @@ It is loosely inspired by a now-defunct project, "concave.dev." There is **no re
 
 ## Status: Foundation slice BUILT (M0–M11 ✅)
 
-The reactive engine is implemented and working end-to-end: 14 packages under `packages/`, a runnable example under `examples/chat`, **131 passing tests**, build/typecheck green, on both Node and Bun. `pnpm build`, `pnpm test`, `pnpm typecheck` all work. The commands and package layout below are now **real**, not aspirational.
+The reactive engine is implemented and working end-to-end: 14 packages under `packages/`, a runnable example under `examples/chat`, **131 passing tests**, build/typecheck green, on both Node and Bun. `bun install`, `bun run build`, `bun run test`, `bun run typecheck` all work (Bun is the package manager + runtime; Turborepo orchestrates; vitest runs under Bun). The commands and package layout below are now **real**, not aspirational.
 
 What works: MVCC SQLite storage · single-writer OCC transactor · query engine with cursor pagination · isolate-safe syscall executor · reactive sync tier (subscribe→write→push) · embedded runtime + loopback/WebSocket transports · codegen (typed `Doc`/`Id`/`api` that compiles) · `stackbase dev` CLI (HTTP + hot reload) · client SDK with `useQuery`/`useMutation` · the `examples/chat` app (reactive, shard-key, pagination, ephemeral typing).
 
@@ -52,7 +52,7 @@ This is what makes the system "Convex-like" and is the easiest thing to design w
 
 ## Intended architecture (target monorepo layout)
 
-TypeScript monorepo (pnpm workspaces). Keep packages small and single-purpose — the engine should be understandable without reading the CLI, and vice versa.
+TypeScript monorepo (Bun workspaces + Turborepo). Keep packages small and single-purpose — the engine should be understandable without reading the CLI, and vice versa. Top-level dirs: `packages/` (engine + SDK), `components/` (pluggable components, e.g. `@stackbase/auth`), `apps/` (dashboard), `examples/`.
 
 - `packages/server` — the engine: function registry, transaction manager, read/write-set tracking, subscription invalidation, WebSocket sync server.
 - `packages/adapters/*` — `DatabaseAdapter` implementations (`sqlite`, `postgres`). One package per backend; engine depends only on the interface.
@@ -65,12 +65,12 @@ TypeScript monorepo (pnpm workspaces). Keep packages small and single-purpose �
 ## Commands (target — confirm they exist before use)
 
 ```bash
-pnpm install              # bootstrap workspace
-pnpm build                # build all packages (topological)
-pnpm dev                  # watch-build packages
-pnpm test                 # run all tests
-pnpm test <pattern>       # single test file / name filter (runner TBD: vitest)
-pnpm lint && pnpm typecheck
+bun install               # bootstrap workspace (Bun is the package manager + runtime)
+bun run build             # build all packages (Turborepo, topological)
+bun run dev               # watch-build packages
+bun run test              # run all tests (vitest, under Bun)
+bun run --filter <pkg> test    # single package's tests (e.g. --filter @stackbase/auth)
+bun run lint && bun run typecheck
 
 # end-user-facing CLI (what the DX is judged on):
 stackbase dev             # local: watch functions, push to engine, serve sync

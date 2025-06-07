@@ -99,7 +99,7 @@ export async function devCommand(args: string[]): Promise<number> {
     { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
-  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`pnpm --filter @stackbase/dashboard build\`)\n`);
+  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @stackbase/dashboard build\`)\n`);
   process.stdout.write(`admin key → ${adminKey}\n`);
   if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
 

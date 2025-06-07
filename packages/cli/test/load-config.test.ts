@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadConfig } from "../src/load-config";
 
-/** Resolve a package from the CLI's own node_modules (already linked by pnpm). */
+/** Resolve a package from the CLI's own node_modules (already linked by the workspace install). */
 function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../../node_modules");
 }

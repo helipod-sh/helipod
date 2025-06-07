@@ -18,21 +18,21 @@ docs/
 
 ## Develop
 
-Requires **Node ≥ 22** and **pnpm** (`corepack enable` or `npm i -g pnpm`).
+Requires **[Bun](https://bun.com) ≥ 1.2** (the package manager + runtime). Node ≥ 22 is a fully-supported *target*, but the dev workflow runs on Bun.
 
 ```bash
-pnpm install        # bootstrap the workspace
-pnpm build          # build every package (Turborepo, topological)
-pnpm test           # run all tests (vitest)
-pnpm typecheck      # tsc --noEmit across packages
-pnpm dev            # watch mode
+bun install         # bootstrap the workspace
+bun run build       # build every package (Turborepo, topological)
+bun run test        # run all tests (vitest, under Bun)
+bun run typecheck   # tsc --noEmit across packages
+bun run dev         # watch mode
 ```
 
 Single package, e.g. just the value system:
 
 ```bash
-pnpm --filter @stackbase/values test
-pnpm --filter @stackbase/values test -- compare   # one test file
+bun run --filter @stackbase/values test
+bun run --filter @stackbase/values test compare   # one test name/file filter
 ```
 
 ## Run (Tier 0)
