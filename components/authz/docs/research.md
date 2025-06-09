@@ -1,419 +1,584 @@
-# Stackbase Authorization: Roundtable Research
+# Stackbase Authorization: Which Model Should We Build Natively?
 
-## Framing the Question
-
-Stackbase is a Convex-like reactive Backend-as-a-Service: clients call TypeScript query and mutation functions, never tables. The reactive engine records each query's read-set, and when a committed mutation's write-set intersects that read-set, live subscriptions are re-run and pushed to clients over WebSocket. This architecture means the function is the trust boundary — not the database, not a middleware layer. "Which authorization approach fits?" is therefore non-obvious: models designed for direct-database access (Postgres RLS) enforce at the wrong layer, models that introduce out-of-process checks (OpenFGA, SpiceDB) leave no fingerprint in the read-set and break the reactive guarantee, and simple convention-based helpers (convex-authz) offer no structural "can't-forget" guarantee. The question demands an approach that is simultaneously at the function-execution layer, tracked by the reactive engine, adapter-agnostic across SQLite and Postgres, and shippable without adding a second service to a self-hosted deployment.
+Stackbase builds authorization natively — no external service, no middleware sidecar, no second process. The question is not which service to integrate or which ops topology to deploy; it is which **authorization model's logic and features** belong in `packages/authz`. Concretely: should the model's primitive be a role assigned to a user (RBAC), a boolean predicate evaluated over a row (ABAC / row-rules), or a relationship tuple traversed through a typed graph (ReBAC / Zanzibar)? Service integration and deployment topology were explicitly out of scope for this research. The answer turns entirely on which model's **check algorithm** fits Stackbase's reactive engine — where every query records a read-set, every write is measured against it, and the O(1) invalidation guarantee is the heart of the product.
 
 ---
 
 ## TL;DR Verdict
 
-> **Winner: Stackbase-native reactive authz component.**
-> Build a first-party authz component that slots rule evaluation into the kernel's existing `requireOwnTable` seam so enforcement is structurally impossible to forget and revocation is reactive by construction — then layer RBAC tables and an optional tuple store on top.
+> **Winner: the convex-authz model (RBAC + ABAC + ReBAC hybrid).**
+> Build authorization as typed application data in the MVCC store, with a permission vocabulary (`definePermissions`/`defineRoles`), scoped role assignment as a first-class multi-tenancy primitive, ABAC as plain TypeScript predicates (no CEL, no DSL), per-resource sharing via typed `grants`/relation rows, and an `effectivePermissions` pre-computed index that collapses every check to a single indexed point-read — the only model that is simultaneously read-set-precise, TypeScript-native, and broad enough to serve the full BaaS spectrum without a paradigm migration.
+
+---
+
+## The Authorization Models: A Primer
+
+Four contenders map to three paradigms. **RBAC** (Role-Based Access Control) assigns users to named roles; a permission check asks "does this user hold a role that grants this action?" Convex-authz is the RBAC representative here, enriched with ABAC and ReBAC layers. **ABAC** (Attribute-Based Access Control / row-predicate) evaluates a boolean function over the row being accessed and the caller's identity: `(viewer, row) => boolean`. Supabase's Row-Level Security is the canonical example. **ReBAC** (Relationship-Based Access Control, after the Google Zanzibar paper) stores authorization facts as typed relationship tuples `(subject, relation, object)` and answers permission checks by traversing the resulting graph. OpenFGA and SpiceDB are both Zanzibar descendants — OpenFGA is the lighter variant; SpiceDB adds a richer permission algebra and first-class caveats (ABAC conditions grafted onto tuples). All four are evaluated specifically against Stackbase's reactive engine constraint: the check must be a **precise, bounded data read** that enters the read-set and drives subscription invalidation correctly.
 
 ---
 
 ## The Contenders
 
-### 1. convex-authz (dbjpanda)
+### convex-authz (RBAC + ABAC + ReBAC hybrid)
 
-#### How It Works
+#### Model Logic
 
-convex-authz is a community library that stores authorization state (roles, attributes, relationships) in component-namespaced tables inside the Convex/Stackbase deployment. Checks happen as explicit TypeScript calls — `await authz.require(ctx, userId, "documents:update")` — inside function handlers. Three complementary models compose under one `Authz` class: RBAC (roles with inheritance), ABAC (async policy functions over user attributes and resource context), and ReBAC (Zanzibar-style subject/relation/object tuples). At assignment time, the library recomputes and writes pre-flattened `effectivePermissions`, `effectiveRoles`, and `effectiveRelationships` index tables, so permission checks at read-time are O(1) single-indexed lookups rather than graph traversals. Multi-tenancy uses `tenantId` as the leading index column. React hooks (`useCanUser`, `PermissionGate`) drive UI gating from the same live subscription machinery.
+The convex-authz model does not force a single paradigm. RBAC handles the everyday layer: `definePermissions` produces a typed `resource:action` registry; `defineRoles` maps named roles to subsets of that registry with inheritance and composition. Role assignment is **scoped** — a user can be "admin of team:123" without being a global admin, making multi-tenancy correct-by-construction. ABAC sits on top as inline TypeScript predicate functions: a policy receives the subject's identity, stored attributes, and optionally the resource, and returns a boolean — no DSL, no policy language, full TypeScript. ReBAC provides the graph layer: `addRelation`/`hasRelation` on `(subject, relation, object)` triples with configurable traversal rules.
 
-#### How It Maps to Stackbase
+The critical structural decision is the **`effectivePermissions` pre-computed index**. When a role is assigned or a relationship is added (a mutation), a step expands all affected permissions and writes them as indexed rows keyed by `[tenantId, userId, permission, scopeKey]`. A permission check then reads **exactly one row** from that index — a single point-read — recording exactly one read-set entry. When the role is revoked, that one row changes, the read-set intersection fires, and the subscribed query re-runs. The check is O(1); the read-set footprint is minimal and precise.
 
-The authz state lives in `authz/*` namespaced tables, accessible through `ctx.db`. A `ctx.authz` facade is injected via the component `context` builder. `authz.require(ctx, userId, perm)` is called at the top of each handler before any `ctx.db` write. Because `effectivePermissions` rows are read via `ctx.db`, they enter the query read-set automatically; revoking a role rewrites those rows, triggering read-set/write-set intersection and immediate subscription re-push. The pattern maps cleanly to Stackbase's component model.
+The three paradigms share the same index structure, the same audit log, the same expiration machinery, and the same `can`/`require` call surface — they are not bolted together post-hoc.
+
+#### Features
+
+- **`definePermissions`**: typed `resource:action` registry; permission strings are first-class TypeScript literal types, making typos compile errors
+- **`defineRoles`**: named roles as typed subsets of the permission registry, with inheritance (`inherits:`) and composition (`includes:`)
+- **Scoped role assignment**: `assignRole(userId, role, { type, id })` — the same role means different things in different resource scopes; multi-tenancy isolation is structural (tenantId as leading index key)
+- **`effectivePermissions` index**: traversal and role expansion happen at write time; checks are a single indexed point-read (O(1) read-set per check)
+- **ABAC via `definePolicies`**: inline TypeScript predicate functions at check time, receiving subject attributes and resource data — no separate policy language, testable with standard test runners
+- **ReBAC relation tuples**: `addRelation`/`hasRelation` on `(subject, relation, object)` with configurable traversal rules and bounded depth (`maxDepth`)
+- **Permission overrides**: `grantPermission`/`denyPermission` bypass or block role-derived access for individual users (deny-wins semantics, no role proliferation)
+- **Wildcard patterns**: `documents:*` or `*:read` grant/deny entire permission families in one operation
+- **Expiring grants**: role assignments and overrides carry `expiresAt` with scheduled cleanup
+- **Custom tenant-defined roles**: B2B tenants compose their own roles from a provider-approved permission whitelist
+- **`canAny` / bulk checks**: up to 100 permissions in one call, avoiding N+1 check patterns
+- **Full offboarding**: `deprovisionUser` removes all roles, overrides, attributes, and relationships transactionally
+- **Audit log**: every authorization change recorded with actor, action, target, scope, and reason; cursor-based pagination
+- **React integration**: `useCanUser`, `useUserRoles`, `useRequirePermission` hooks and `PermissionGate` component for reactive UI gating
+
+#### Expressiveness Walkthrough
+
+**Ownership** — ABAC policy covers this with zero schema changes: `ctx.resource?.ownerId === ctx.subject.userId`. The policy reads `ownerId`; Stackbase records that field in the read-set; ownership transfer automatically invalidates the subscription.
+
+**Scoped roles** — `assignRole(ctx, userId, "admin", { type: "org", id: orgId })`. The scope is part of the index key, so an org admin cannot leak into another org through a permission bug — isolation is structural.
+
+**Groups/teams** — `addRelation(ctx, {type:"user",id:alice}, "member", {type:"team",id:sales})`. Teams are assigned roles exactly like users via scoped role assignment. Membership changes update `effectivePermissions`, making reactive subscribers see the new access state immediately.
+
+**Folder→document hierarchy** — ReBAC traversal rules: `"document:viewer": [{ through: "folder", via: "parent", inherit: "viewer" }]`. A user with viewer access to a folder automatically inherits viewer access to all documents in it. Pre-computation at relationship-write time — not at check time.
+
+**Per-resource sharing** — `addRelation(ctx, {type:"user",id:bob}, "editor", {type:"document",id:docId})`. `relationPermissions` maps "document:editor" to the applicable actions. Revoke with `removeRelation`. The entire Google-Docs-style sharing UX is a single relation write.
+
+**Conditional rules** — TypeScript functions: `ctx.resource?.status === "draft"`, `new Date().getUTCHours() >= 9`. No configuration language, composable with existing TS utilities, debuggable with `console.log`.
+
+**Negation/exclusion** — `denyPermission` creates an explicit deny that overrides any role or relationship grant (deny-wins).
+
+**Public/wildcard** — `grantPermission(ctx, "anonymous", "documents:read", undefined)` or a policy that always returns true; wildcard patterns (`documents:*`) grant families without enumerating actions.
+
+#### How Stackbase Builds It
+
+`packages/authz` implements this model's logic natively. `definePermissions` and `defineRoles` are pure TypeScript — no runtime, no I/O. The `Authz` client wraps Stackbase's `DatabaseAdapter` interface, not any external service. The critical implementation decision mirrors the `effectivePermissions` pattern on Stackbase's MVCC log: role/relation writes expand into an `authz_effective_permissions` table keyed by `[tenantId, userId, permission, scopeKey]`; a check reads exactly one row from that index.
 
 ```typescript
-// Typical usage inside a mutation handler
-export const updateDocument = mutation({
-  args: { docId: v.id("documents"), content: v.string() },
-  handler: async (ctx, { docId, content }) => {
-    const userId = await getAuthUserId(ctx);
-    await authz.require(ctx, userId, "documents:update", {
-      type: "document",
-      id: docId,
-    });
-    await ctx.db.patch(docId, { content });
-  },
+// packages/authz/src/index.ts
+export const permissions = definePermissions({
+  documents: { create: true, read: true, update: true, delete: true },
+  comments:  { create: true, read: true, delete: true },
 });
-```
 
-#### Pros
+export const roles = defineRoles(permissions, {
+  owner:  { documents: ["create","read","update","delete"], comments: ["create","read","delete"] },
+  editor: { documents: ["read","update"], comments: ["create","read"] },
+  viewer: { documents: ["read"], comments: ["read"] },
+});
 
-- The function-layer check is the correct trust boundary for Stackbase's architecture.
-- Reactive revocation is automatic: `effectivePermissions` rows enter the read-set, so revocation immediately invalidates live subscriptions.
-- Storage-adapter-agnostic: all state is in ordinary indexed tables, identical on SQLite and Postgres.
-- No extra service: everything is component-namespaced tables inside the single binary.
-- O(1) checks at runtime via pre-flattened effective-permission tables.
-- TypeScript end-to-end: `definePermissions`/`defineRoles` return inferred types with autocomplete.
-- Ships expiring grants and audit log out of the box.
-- React hooks complete the full-stack loop.
+export const authz = new StackbaseAuthz({ permissions, roles });
 
-#### Cons
-
-- No "can't-forget" structural guarantee: if a developer adds a mutation and omits `authz.require`, data leaks silently. The engine does nothing to stop it.
-- Write amplification on `assignRole`: recomputing `effectivePermissions` for every permission × scope holds the single-writer lock for potentially thousands of row writes per role change — a meaningful latency risk at mid-scale.
-- The package is Convex-specific. Adopting it for Stackbase means forking it, not just wrapping it — the component ABI, table conventions, and deployment model differ. Stackbase would own a security-load-bearing fork of a one-developer's community project, echoing the concave.dev disappearance risk that this project exists to avoid.
-- ABAC policies that need external data (billing status, feature flags) cannot call the network (queries must be pure), so that data must be cached in Stackbase tables first — the cache-invalidation problem becomes the developer's.
-- No first-class answer for multi-hop relationship traversal without the ReBAC layer.
-
-#### Sharpest Rebuttal Point (Against It)
-
-The can't-forget failure is structural. A junior developer writes `export const getDocument = query({ handler: async (ctx, { id }) => ctx.db.get(id) })` and omits the authz call. The engine is silent. For a reactive product where a live subscription may stream that result to many clients indefinitely, this is a silent ongoing data leak, not a one-time error. Building load-bearing security on a convention-over-enforcement model is the precise risk this architecture should eliminate.
-
----
-
-### 2. OpenFGA
-
-#### How It Works
-
-OpenFGA is a CNCF-incubating, Apache-2.0-licensed authorization engine implementing Zanzibar-style Relationship-Based Access Control. You write an authorization model in a declarative DSL defining object types, named relations, and composition operators (union, intersection, difference, inheritance via `->` arrow). Relationship tuples — live data like "user:anne is viewer of doc:1" — are stored in OpenFGA's own datastore (Postgres, MySQL, SQLite-beta, or in-memory). The **Check API** traverses the tuple graph against the model to answer binary permit/deny questions. **ListObjects** returns all objects of a given type a user can access. **Contextual tuples** inject transient relationships per-request without persisting them.
-
-#### How It Maps to Stackbase
-
-An `authz` component would wrap OpenFGA's Check/Write/ListObjects calls behind a typed facade with two modes: embedded (OpenFGA process spawned as a sidecar during `stackbase dev`) and external (production, point at a deployed OpenFGA service). A synthetic read-set bridge is required: `ctx.authz.check(...)` records a synthetic read-set entry (`authz/<userId>/<object>/<relation>`), and tuple-write events write a matching synthetic entry so the sync tier's intersection logic can re-run affected subscriptions on revocation.
-
-```typescript
-// Authorization model (authz/model.fga) — version-controlled with the app
-model schema 1.1
-
-type document
-  relations
-    define owner: [user]
-    define viewer: [user, organization#member]
-    define can_read: viewer or owner
-    define can_write: owner
-```
-
-```typescript
-// Guard inside a query function
+// Inside a Stackbase query — the check is a single indexed read:
 export const getDocument = query({
   args: { docId: v.id("documents") },
   handler: async (ctx, { docId }) => {
-    const userId = await ctx.auth.getUserId();
-    await ctx.authz.check({ user: `user:${userId}`, relation: "can_read", object: `document:${docId}` });
-    return await ctx.db.get(docId);
+    const user = await ctx.auth.getUserIdentity();
+    // Single point-read into authz_effective_permissions — one read-set entry:
+    await authz.require(ctx, user.id, "documents:read", { type: "document", id: docId });
+    return ctx.db.get(docId);
+  },
+});
+
+// Inside a mutation — relation write triggers effectivePermissions update:
+export const shareDocument = mutation({
+  args: { docId: v.id("documents"), userId: v.string(), role: v.string() },
+  handler: async (ctx, { docId, userId, role }) => {
+    await authz.addRelation(ctx,
+      { type: "user", id: userId },
+      role,
+      { type: "document", id: docId }
+    );
+    // effectivePermissions row written; subscribed queries auto-invalidate.
   },
 });
 ```
 
+ABAC policies that read resource data (`document.ownerId`) add that document row to the read-set — correct reactive behavior, composing with the engine's invalidation machinery with no extra plumbing.
+
 #### Pros
 
-- Single version-controlled `.fga` model file is the authoritative source of truth — no permission logic scattered across mutation bodies.
-- Handles the full complexity spectrum in one system: simple ownership, multi-tenant org hierarchies, nested folder inheritance, cross-org sharing.
-- Apache-2.0, CNCF-governed; backed by Auth0/Okta with production use at Airbnb, Twilio, and GitHub.
-- Contextual tuples enable transient, request-scoped grants (draft previews, share links) without polluting the persistent store.
-- SQLite backend support (beta): theoretically zero-config for local dev.
-- Typed TypeScript SDK with codegen for relation/type inference.
+- **O(1) check read-set** — the `effectivePermissions` index means every check is a single indexed point-read, so the engine invalidates only the queries whose specific `user+permission` combination changed
+- **Unified three-paradigm surface** — one client interface from todo app to multi-tenant SaaS to Google-Docs-style sharing; no paradigm migration as the product grows
+- **Full TypeScript type safety** — `definePermissions`/`defineRoles` produce types that make permission string typos compile errors
+- **Scoped role assignment as a first-class primitive** — multi-tenancy isolation is structural (tenantId as leading index key), not an application-layer filter that can be accidentally omitted
+- **ABAC as plain TypeScript** — no DSL, no CEL, no YAML; composable, testable with standard runners, full IDE support
+- **Incremental adoption** — start with two lines (`definePermissions`/`defineRoles`), add ABAC policies for ownership, add ReBAC relations for sharing hierarchies; each layer is additive
+- **Expiring grants, wildcards, overrides, bulk operations** — cover the real lifecycle of authorization (contractor onboarding, temporary access, org-wide changes) without custom code
+- **Mental model maps to developer intuition** — "this user has the editor role on this document" is exactly what `addRelation`/`assignRole(scoped)` express
 
-#### Cons
+#### Cons (Model Limits)
 
-- Separate Go service: cannot be linked into a `bun build --compile` TypeScript binary. "Embedded mode" still requires shelling out to `openfga run` or bundling a Go native binary — neither is zero-config, neither preserves single-binary packaging.
-- Out-of-process checks leave no read-set fingerprint: an OpenFGA call does not call `ctx.txn.recordRead`. Revocation requires the synthetic mirror-table bridge, which is two systems pretending to be one with a divergence window on every write and no two-phase commit across stores.
-- Tuple/business writes are not atomic across two stores: if the business mutation commits but `ctx.authz.writeTuple()` fails (network blip), authorization state diverges from business state with no automatic recovery.
-- SQLite backend is beta-quality, underdocumented, and not what the OpenFGA team tests against; reliability for production self-host is unproven.
-- `ListObjects` reverse-traversal can be expensive for large graphs and returns IDs that require a second round-trip to the Stackbase database.
+- **Write amplification** — a role's permission-set change triggers re-expansion of `effectivePermissions` rows for every user holding that role; in large deployments with thousands of scoped role assignments, a single change may write many rows
+- **ABAC policy read-set surprise** — a policy that reads `document.ownerId` adds that row to the read-set; correct behavior, but can produce unexpected subscription re-runs if developers do not think of policy evaluation as a data read
+- **ReBAC traversal rules are code, not a declarable schema** — complex permission inheritance across many entity types can be hard to audit statically without additional tooling
+- **Custom tenant-defined roles add a second expansion path** — the runtime role-expansion for tenant-composed roles must be kept consistent with the pre-computed path; a correctness invariant requiring careful implementation
+- **Deep recursive group membership is not built-in** — for org-chart-deep hierarchies (groups containing groups to arbitrary depth), the model requires either bounding traversal depth or pre-computing transitive membership
 
-#### Sharpest Rebuttal Point (Against It)
+#### Sharpest Rebuttal Point
 
-The tuple-sync consistency hazard cannot be fully mitigated without a distributed transaction coordinator that OpenFGA does not provide. A mutation that inserts a document row and calls `ctx.authz.writeTuple()` are two separate operations with two separate failure modes. Getting them right requires application-level retry queues and reconciliation logic — complexity that belongs in the authz system's design, not in every application developer's operations runbook.
+The model's strongest critics claim the `effectivePermissions` pre-computation only trades graph-traversal cost at read time for write amplification at write time — and that a single `assignRole` on a large org triggers a transaction with hundreds of index writes, creating an OCC conflict surface and a window during which the index disagrees with the ground-truth tuples. The response: write-time expansion is bounded to the neighborhood of the changed tuple (not to all users globally), can be made incremental, and the synchronization window is within the same MVCC transaction — no stale results are pushed to clients. The ReBAC models (OpenFGA, SpiceDB) that avoid this by traversing at check time instead produce O(depth) read-set entries per check, directly breaking the O(1) invalidation guarantee. The write-amplification cost is the right trade for a reactive engine.
 
 ---
 
-### 3. Supabase Row-Level Security (Postgres RLS)
+### OpenFGA / Zanzibar Relationship Model (ReBAC)
 
-#### How It Works
+#### Model Logic
 
-Postgres RLS attaches POLICY objects directly to tables. Each policy is a SQL predicate evaluated by the query planner on every row access. SELECT policies use a `USING` clause (non-matching rows are silently filtered); INSERT/UPDATE/DELETE policies use `WITH CHECK`. Policies reference session-local GUC variables (typically `current_setting('request.jwt.claim.sub')`) for identity context. Supabase injects identity via `SET LOCAL request.jwt.claims = '...'` inside each transaction via PostgREST, enabling safe direct-browser-to-Postgres queries. Policy expressions can reference any column, call stable SQL functions, or join other tables via subqueries.
+OpenFGA represents authorization as a **bipartite graph of typed relationship tuples**: each tuple is a triple `(object#relation, subject)` — e.g. `doc:1#viewer@user:anne` — stored as first-class data. An authorization model DSL declares type definitions and composition rules. A permission check is a graph walk: starting from a `(user, relation, object)` question, the engine follows union/intersection/exclusion/arrow rules until it finds a satisfying tuple or exhausts the search.
 
-#### How It Maps to Stackbase
+The separation between **schema** (the model — declared once per deployment) and **data** (the tuples — written at runtime) is the key insight: permissions are stored data, not code. Changing who can do what is a data mutation, not a code deploy. The model language provides: (1) direct assignment (`define viewer: [user]`), (2) union (`define can_view: viewer or editor`), (3) intersection (`define can_publish: editor and org_member`), (4) exclusion (`define can_view: viewer but not blocked`), (5) tuple-to-userset arrow traversal (`define viewer: viewer from parent` — hierarchy with no recursive joins), and (6) conditions via Google CEL expressions attached to individual tuples for ABAC expressiveness.
 
-Honest answer: it doesn't map well. Implementation would require injecting `ctx.userId` into every Postgres connection via `SET LOCAL` inside the `DatabaseAdapter` transaction, defining policies in SQL migrations alongside DDL, and accepting that those policies duplicate checks already written in TypeScript function bodies.
+#### Features
 
-```sql
--- A policy that duplicates what the query function already does
-CREATE POLICY select_own_messages ON messages
-  FOR SELECT USING (
-    sender_id = current_setting('request.jwt.claim.sub')::uuid
-    OR EXISTS (
-      SELECT 1 FROM channel_members
-      WHERE channel_id = messages.channel_id
-        AND user_id = current_setting('request.jwt.claim.sub')::uuid
-    )
-  );
+- Relationship tuples as first-class stored data: `(object#relation, subject)` triples written by mutations
+- Typed authorization model DSL (schema 1.1): version-controlled type definitions, permitted relations, and composition rules
+- Direct assignment with type restrictions: `define viewer: [user, organization#member]` — only listed subject types can hold a relation
+- Union, intersection, exclusion operators
+- Tuple-to-userset arrow traversal (`from` keyword): delegates a relation on object A to a relation on object B that A relates to via another relation — hierarchy in O(depth) tuple reads
+- Conditions (ABAC via Google CEL): CEL expression attached to a relation, evaluated against context at check time
+- Contextual tuples: asserted only for a single check call (what-if reasoning without persistent writes)
+- Type-bound public access: `user:*` as a subject grants a relation to all users of a type
+- Userset subjects: `organization:acme#member` as a subject — a relation is granted to all members of a group without enumerating them
+- `ListObjects` and `ListUsers` APIs: reverse queries — "all docs user:anne can view," "all users who can view doc:1"
+- Modular model composition: split large authorization models into per-feature files
+
+#### Expressiveness Walkthrough
+
+**Ownership**: `define owner: [user]`. Write `doc:42#owner@user:anne`. One tuple, one read.
+
+**Roles within an org**: `define admin: [user]` on `organization`; `define can_view_project: member or admin from organization` on `project`. Write `org:acme#admin@user:bob`. Bob can view all projects under acme with no per-project tuple.
+
+**Groups/teams**: `define member: [user]` on `team`; `define viewer: [user, team#member]` on `document`. Write `team:eng#member@user:carol` and `doc:spec#viewer@team:eng`. Carol gets view because her group membership is resolved lazily at check time.
+
+**Hierarchy** (folder→document): `define viewer: [user, team#member] or viewer from parent` on `document`. Write `folder:design#viewer@team:design` and `doc:wireframes#parent@folder:design`. Design-team members view wireframes via arrow traversal — one tuple read per hierarchy level.
+
+**Per-resource sharing**: Write `doc:budget#editor@user:bob`. That is the entire feature.
+
+**Conditional/temporal access**: Attach a CEL condition to a tuple: `document:contract#viewer@user:dave` with `condition: {name: "non_expired_grant", context: {grant_time: ..., grant_duration: "72h"}}`. Pass `current_time` at check time.
+
+**Multi-tenancy**: Model `organization` as the root. All resource types carry an `organization` relation; a user in org:acme cannot traverse to org:beta resources — isolation is structural.
+
+**Public/wildcard**: Write `doc:public-readme#viewer@user:*`. One tuple.
+
+#### How Stackbase Would Build It
+
+Store relationship tuples in Stackbase's MVCC store (same store as all other data); interpret the authorization model schema at server startup. Tuples are rows — the existing transaction, reactive read-set, and codegen machinery applies with zero new infrastructure.
+
+```typescript
+// TypeScript builder API replaces the FGA DSL
+export const authModel = defineAuthModel({
+  document: type({
+    relations: {
+      owner:  direct("user"),
+      editor: union(direct("user", "organization#member"), fromRelation("editor", "parent")),
+      viewer: union(relation("editor"), relation("owner"), fromRelation("viewer", "parent")),
+      parent: direct("folder").optional(),
+      blocked: direct("user"),
+      can_view: exclude(relation("viewer"), relation("blocked")),
+    },
+  }),
+});
+
+// Query — check reads tuples, enters read-set, reactive
+export const getDocument = query(async (ctx, { docId }) => {
+  const allowed = await ctx.auth.check({
+    object: `document:${docId}`,
+    relation: "can_view",
+    subject: `user:${ctx.userId}`,
+  });
+  if (!allowed) throw new Error("Unauthorized");
+  return ctx.db.get("documents", docId);
+});
 ```
 
-The function is still the trust boundary and still filters rows — RLS adds a second, redundant filter below it, in a different language, on only one of Stackbase's two supported adapters.
-
 #### Pros
 
-- Database-enforced: structurally impossible for application code to bypass once enabled (on Postgres).
-- Declarative and colocated with schema in SQL migrations.
-- Mature and battle-hardened since Postgres 9.5; proven at Supabase's scale for the direct-browser-to-DB pattern.
-- Zero extra service: policies live inside Postgres itself.
-- Efficient for simple ownership predicates — compiles into the query plan, uses existing indexes.
+- Tuples are first-class stored data — fits the reactive model conceptually: tuple reads enter the read-set
+- Single unified primitive covers all patterns: ownership, roles, groups (userset subjects), hierarchy (arrow traversal), sharing (tuple write), public access (`user:*`)
+- Union/intersection/exclusion algebra is closed and composable
+- Arrow traversal handles arbitrary hierarchies in a fixed number of tuple reads bounded by the declared model depth
+- Conditions (CEL) add ABAC expressiveness without changing the tuple model
+- Typed DSL + codegen: invalid `(object-type, relation, subject-type)` combinations can be compile-time errors
+- Incremental adoption: tiny app uses `define owner: [user]`; large SaaS grows the same model to org/team/folder hierarchies
+- Multi-tenancy isolation is structural — provable by model inspection, not by trusting WHERE clauses
 
-#### Cons
+#### Cons (Model Limits)
 
-- **Postgres-only, no SQLite RLS**: Stackbase's primary zero-config dev tier uses the SQLite adapter. RLS cannot exist there at all. The result is two completely different security models depending on which adapter is configured — a correctness and auditing disaster that directly violates the locked "engine must NOT hard-depend on one database" constraint.
-- Architecturally inverted: Stackbase clients never touch the database. The function is the trust boundary. RLS fires below it, defending a surface no client can reach. At best it is redundant defense-in-depth; at worst it gives false confidence.
-- No reactive invalidation: when an RLS policy changes, Postgres has no mechanism to notify Stackbase's sync tier. Live subscriptions see stale data until they reconnect.
-- Identity injection via `SET LOCAL` session variables is fragile under connection pooling and couples the adapter to a specific Supabase-derived convention.
-- DX is alien: authz logic in SQL `CREATE POLICY` migrations requires context-switching away from TypeScript, breaks codegen, and makes authz invisible to the type system.
+- **Arrow traversal grows the read-set with hierarchy depth** — a 10-level folder tree means up to 10 tuple reads per check, all entering the read-set; a single high-level tuple change (org membership) fans out into mass re-evaluation of every subscription that traversed it — the read-set fan-out problem
+- **CEL evaluation adds a runtime expression interpreter** — a non-trivial embedded dependency
+- **Conceptual shift** — "authorization as a graph" requires learning a new mental model; the DSL is a second source of truth alongside the TypeScript schema
+- **`ListObjects` (reverse queries) fights Stackbase's reactive design** — "all docs user:anne can view" requires a full index scan or graph enumeration; expensive, non-reactive, unsuitable for the per-request reactive path
 
-#### Sharpest Rebuttal Point (Against It)
+#### Sharpest Rebuttal Point
 
-RLS is disqualified by a single locked architectural decision: "The engine must NOT hard-depend on one database." SQLite has no RLS. The default deployment target for every self-hosted Stackbase instance would have zero database-layer enforcement while the Postgres adapter has full enforcement — two completely different security models per adapter, with the most common one providing none. This is not a tradeoff; it is a categorical incompatibility.
+OpenFGA advocates claim that tuple reads "enter the read-set" and therefore the reactive loop is free. True but strategically misleading. For a three-level folder hierarchy with an org-role union arm, a single check traverses 6–12 tuple reads. All enter the read-set. When org membership for `org:acme` changes (one tuple write), every query that checked any permission on any resource inside that org re-evaluates — every subscription that traversed the org tuple, regardless of whether the effective permission changed. The `ListObjects` pattern (all docs I can see — the home screen of every document app) is explicitly conceded to be "non-reactive." For a reactive BaaS, "the most common pattern is non-reactive" is a serious model limitation.
 
 ---
 
-### 4. SpiceDB (Authzed)
+### Supabase RLS / Row-Predicate Model (ABAC)
 
-#### How It Works
+#### Model Logic
 
-SpiceDB is an Apache-2.0-licensed, open-source implementation of Google Zanzibar — the authorization system powering Google Docs, Drive, and YouTube. Permissions are declared in the Zed schema language: object types, named relations, and computed permission expressions using union, intersection, difference, and the `->` arrow for inheritance traversal. Live data is a graph of relationship tuples. Three primary APIs: `CheckPermission` (binary permit/deny), `LookupResources` (all resources of type T a user can access), and `LookupSubjects` (all subjects that can access resource R). Every response returns a `ZedToken` — a causally consistent cursor that solves the new-enemy and old-friend distributed consistency problems. Datastores: Postgres, CockroachDB, MySQL, Cloud Spanner. No SQLite backend.
+The row-predicate model represents authorization as a pure boolean function evaluated per table per operation: `(viewer: User, row: Row) => boolean`. The "policy" is a typed TypeScript predicate that can inspect any column of the row being accessed — `owner_id`, `tenant_id`, `status`, `is_public` — alongside any context about the calling user. Multiple policies compose by OR; separate `canRead` and `canWrite` predicates let you say "you can see draft rows you own but cannot see other people's drafts" without graph traversal.
 
-#### How It Maps to Stackbase
+The central insight is that authorization lives at the **data layer**, not the call layer. Declare once, per table, what "readable" means; every read automatically filters. Because each predicate is a data read — "does this membership row exist?" — it produces a precise read-set entry. When a user is added to a team, the membership row changes, the intersection fires, and every subscribed query that checked that membership re-runs automatically.
 
-SpiceDB fits as an optional advanced adapter, not the default. The authz component would expose an identical `ctx.authz` API surface whether backed by SpiceDB or the native implementation. A mirror-tuple bridge (`authz/permission_cache` keyed on `(userId, object, relation) → bool`) is required for reactive integration: SpiceDB Watch API events trigger mutations that update the mirror, and query functions read from the mirror (entering the read-set), so invalidation fires correctly.
+#### Features
 
-```zed
-// authz/schema.zed
+- Per-table, per-operation boolean predicates (`canRead`, `canWrite`, `canDelete`) declared once, enforced everywhere
+- Row attribute inspection: any column value is first-class predicate input
+- Sub-lookups as plain typed data reads: membership, grant, and role tables queried inside the predicate
+- Separate read and write predicates: `canRead` filters visibility; `canWrite` validates mutations independently
+- Multi-policy OR composition: access granted if any policy passes
+- Wildcard / public access: `row.is_public === true` requires no user context
+- Conditional / attribute-based rules: arbitrary boolean expressions over row fields and user claims
+- Multi-tenancy isolation: `tenant_id` column comparison is one indexed equality check
+- TypeScript-native declaration: predicates are typed closures co-located with the schema
+- Read-set composability: predicate sub-lookups extend the query's read-set automatically
+
+#### Expressiveness Walkthrough
+
+**Ownership**: `canRead: (viewer, row) => row.owner_id === viewer.id`. One comparison on a field already in scope.
+
+**Roles within an org**: `canRead: (viewer, row) => row.org_id === viewer.org_id && ['admin','editor','viewer'].includes(viewer.role)`. Still one expression; role is a claim on the viewer.
+
+**Groups/teams**: `canRead: (viewer, row) => db.query(memberships).filter(m => m.project_id === row.id && m.user_id === viewer.id).first() !== null`. One indexed sub-lookup, enters the read-set — reactive.
+
+**Hierarchy** (folder→document): `canRead: (viewer, row) => row.owner_id === viewer.id || db.query(grants).filter(g => g.resource_id === row.folder_id && g.grantee_id === viewer.id).exists()`. One level of hierarchy via a grants table.
+
+**Per-resource sharing**: `doc_grants` table with `(doc_id, grantee_id, role)`; `canRead` checks existence; `canWrite` additionally checks `role === 'editor'`. Share = insert a grant row; revoke = delete it.
+
+**Conditional rules**: `canRead: (viewer, row) => row.is_public || row.owner_id === viewer.id || (row.status === 'review' && viewer.role === 'reviewer')`. Three branches, one expression.
+
+**Negation**: `canRead: (viewer, row) => !blocks.exists({ blocker_id: row.author_id, blocked_id: viewer.id })`. Negation is `!` in TypeScript.
+
+**Public wildcard**: `canRead: (_viewer, row) => row.is_public`. Viewer unused; unauthenticated access works naturally.
+
+#### How Stackbase Would Build It
+
+A typed `policy()` call alongside the table schema definition, producing a `TablePolicy<T>` that the engine hooks into the query/mutation execution path:
+
+```typescript
+export const documents = defineTable({
+  owner_id: v.id('users'),
+  org_id: v.id('orgs'),
+  is_public: v.boolean(),
+  status: v.union(v.literal('draft'), v.literal('published')),
+}).policy({
+  canRead: (viewer, row, { db }) =>
+    row.is_public ||
+    row.owner_id === viewer.id ||
+    db.query('memberships')
+      .filter(m => m.org_id === row.org_id && m.user_id === viewer.id)
+      .exists(),
+
+  canWrite: (viewer, row, { db }) =>
+    row.owner_id === viewer.id ||
+    db.query('memberships')
+      .filter(m => m.org_id === row.org_id && m.user_id === viewer.id && m.role === 'admin')
+      .exists(),
+});
+```
+
+The `db` passed to the predicate is the same MVCC-scoped handle used by the surrounding query. Every `.query()` inside the predicate enters the read-set automatically. Engine integration is three hooks: (1) filter rows through `canRead` before returning from `db.query(table)`; (2) assert `canWrite` on the new row before committing an insert/update; (3) assert `canWrite` on the existing row before committing a delete.
+
+#### Pros
+
+- **Perfectly reactive by construction** — predicate sub-lookups are plain data reads that extend the read-set; authorization changes propagate as automatic re-runs with zero extra plumbing
+- **O(1) per-row check for the common cases** — ownership and tenancy are single indexed equality comparisons, never graph traversal
+- **TypeScript-native, no DSL** — predicates are typed closures co-located with the schema; full inference, autocomplete, refactoring, compiler enforcement
+- **Authorization at the data layer** — impossible to forget a check in one query function while covering it in another
+- **Incremental adoption** — `owner_id` check on day 1 grows to team lookup on day 30 grows to per-resource grants on day 90; all additive, no model migration
+- **Declarative read/write separation** — visibility and mutability constraints are independent predicates
+- **Multi-tenancy is a single equality check** — scales to arbitrarily many tenants with one indexed column comparison
+
+#### Cons (Model Limits)
+
+- **Deep hierarchy requires data model surgery** — a genuinely deep folder tree requires either a materialized ancestors column (write amplification at the application level) or recursive sub-lookups that fan the read-set proportionally to depth; no structural answer
+- **No permission vocabulary** — there is no canonical `editor` permission object to enumerate or audit externally; what "editor" means is implicit in predicate branches, making compliance and permission auditing harder
+- **Predicate logic can drift** — without discipline, a `canRead` predicate grows into a multi-branch function that is harder to audit than a named-policy list; the model does not enforce structure
+- **Join-through-memberships over-approximates the read-set** — a predicate that scans a membership table WHERE conditions may invalidate queries when unrelated membership rows change, because the index scan over the table enters the read-set more broadly than just the relevant row
+
+#### Sharpest Rebuttal Point
+
+The `canRead` predicate that joins through a memberships table — the "Day 30" growth path the model's own advocates describe — adds the entire membership-table index scan to the read-set, not just the relevant membership row. When any membership in the org changes (any user, any team), every subscribed query that performed that scan may be invalidated. This is coarse-grained invalidation dressed as precise read-set tracking. The model also has no answer to hierarchy without data model surgery, no built-in group propagation, and no enumerable permission vocabulary — real limitations that surface at scale.
+
+---
+
+### SpiceDB / Zanzibar Schema Model (ReBAC + Caveats)
+
+#### Model Logic
+
+SpiceDB's model is a **permission algebra layered on a typed relationship graph**. You declare object type definitions with named relations (typed edges from resource to subject) and computed permissions (named boolean expressions derived from those relations). The model never stores "who can do X" directly; it stores structural facts (Alice is a member of team Engineering; document readme has parent folder projects) and the schema's permission expressions compute the answer by traversing the graph.
+
+The permission algebra has four operators: **union** (`+`), **intersection** (`&`), **exclusion** (`-`), and **arrow traversal** (`->`). Arrow traversal is crucial: `parent->view` means "follow the `parent` relation to the linked object and check its `view` permission there" — hierarchical inheritance without denormalization. These operators compose recursively; any permission is a closed algebraic expression over the relation graph. **Caveats** attach ABAC-style conditions to individual tuples: a caveat is a named, typed CEL expression stored in the schema; a relationship carries it with partial context baked in; at check time the caller provides the remaining context. Caveats are first-class schema citizens, not an afterthought.
+
+#### Features
+
+- Typed object definitions — `definition resource {}` namespaces all relations and permissions for a resource kind
+- Relations with polymorphic subject types — `relation viewer: user | group#member | organization#admin`
+- Subject-set subjects — `document:readme#editor@team:engineering#member` — one write grants every current and future team member the permission
+- Union, intersection, and exclusion permission expressions
+- Arrow traversal — `permission view = reader + parent_folder->view` — walk a relation to another object and inherit its permission
+- Recursive / transitive closure — groups containing groups, folders containing folders
+- Wildcards — `user:*` — grant access to all users of a type
+- Caveats — named, typed CEL boolean expressions attached to tuples: `caveat within_hours(now timestamp, start int, end int) { ... }`
+- Caveat context split — partial context baked into the relationship at write time; remaining context supplied at check time
+- Rich caveat types — int, uint, bool, string, double, duration, timestamp, ipaddress, list, map
+- Intersection arrow `.all()` — require membership in ALL related groups simultaneously
+- Permission-level reuse — permissions reference other permissions within the same definition
+- Multi-tenancy isolation via subject-type scoping — all relations scope through the tenant object; cross-tenant traversal is structurally impossible
+
+#### Expressiveness Walkthrough
+
+**Ownership**:
+```
+definition task {
+  relation owner: user
+  permission edit = owner
+}
+```
+Write one tuple: `task:42#owner@user:alice`. One tuple, O(1) check. As terse as RLS but declared once in schema, not scattered across every query.
+
+**Roles within org**:
+```
+definition project {
+  relation org: organization
+  relation editor: user
+  permission edit = editor + org->admin
+}
+```
+Org admins automatically become editors of every project under that org via arrow traversal. Adding a new project to the org automatically inherits the org's admin set — zero additional writes.
+
+**Groups**:
+```
 definition document {
-  relation owner:  user
-  relation viewer: user | org#member
-  relation parent: org
-  permission view   = owner + viewer
-  permission edit   = owner
-  permission delete = owner + parent->manage
+  relation viewer: user | group#member
+  permission view = viewer
 }
 ```
+Write `document:spec#viewer@group:eng#member`. Every current and future member of the engineering group gets view access. Adding someone to the group is one tuple write; all downstream permissions update automatically.
+
+**Hierarchy** (Notion/Google Docs style):
+```
+definition document {
+  relation parent_folder: folder
+  relation viewer: user
+  permission view = viewer + parent_folder->view
+}
+```
+Arrow traversal handles arbitrarily deep folder nesting. A user with view on the root gets view on every nested document recursively.
+
+**Per-resource sharing**: Write `document:proposal#editor@user:bob`. Schema already declared the editor relation. Sharing is a single tuple write.
+
+**Conditional rules**:
+```
+caveat business_hours(request_time timestamp) {
+  request_time.getHours() >= 9 && request_time.getHours() < 17
+}
+definition document {
+  relation editor: user with business_hours
+  permission edit = editor
+}
+```
+Alice's editor relationship carries the caveat. Outside 9-5, she loses edit access — no schema or data changes required.
+
+**Negation**:
+```
+definition forum {
+  relation member: user
+  relation banned: user
+  permission post = member - banned
+}
+```
+Algebraic negation as a first-class operator — not a `NOT EXISTS` workaround.
+
+**Multi-tenancy**: Every resource type carries an `organization` relation; no path exists in the graph connecting tenant A's data to tenant B's user without an explicit cross-org tuple.
+
+#### How Stackbase Would Build It
+
+Relationship tuples are stored in Stackbase's MVCC store (same tables as app data). The schema's permission algebra is compiled to a traversal plan at server startup. A check is a graph walk over indexed tuple rows; every read enters the Stackbase read-set.
 
 ```typescript
-// Usage inside a Stackbase function
-export const listMyDocuments = query(async (ctx) => {
-  const userId = await ctx.auth.getUserId();
-  const allowedIds = await ctx.authz.lookupResources("document", "view");
-  return ctx.db.query("documents")
-    .filter(q => q.in(q.field("_id"), allowedIds))
-    .collect();
+export const authzSchema = defineAuthzSchema({
+  document: {
+    relations: {
+      owner: subject("user"),
+      editor: subject("user").or(subjectSet("organization", "admin")),
+      viewer: subject("user").or(subjectSet("organization", "member")).or(wildcard("user")),
+      parent: subject("folder"),
+    },
+    permissions: {
+      view: union("viewer", "editor", "owner", arrow("parent", "view")),
+      edit: union("editor", "owner", arrow("parent", "edit")),
+      delete: only("owner"),
+    },
+  },
+});
+
+export const getDocument = query({
+  args: { id: v.id("documents") },
+  handler: async (ctx, { id }) => {
+    await ctx.authz.check("document", id, "view", ctx.userId);
+    return ctx.db.get(id);
+  },
 });
 ```
 
-#### Pros
-
-- Highest expressiveness ceiling: union, intersection, exclusion, and arrow-traversal operators cover every known permission pattern — ownership, org hierarchies, inherited folder permissions, wildcard public access, cross-resource role bindings.
-- `LookupResources` returns exactly the IDs a caller can see, enabling correct and efficient list pages.
-- ZedTokens provide causal consistency across replicated systems — the new-enemy and old-friend problems are solved by design.
-- Single version-controlled schema is the authoritative source of truth, auditable by non-engineers.
-- Apache-2.0, battle-proven at Zanzibar scale, active CNCF community.
-- Caveats enable ABAC on top of the graph model without polluting mutation logic.
-
-#### Cons
-
-- **No SQLite backend**: SpiceDB requires Postgres, CockroachDB, MySQL, or Cloud Spanner. `stackbase dev` with SQLite cannot use SpiceDB without a full Postgres install, which destroys the zero-config local development experience and kills adoption.
-- Separate gRPC service: cannot be embedded in a `bun build --compile` TypeScript binary. Adds a second service, second availability budget, and second ops burden to every deployment.
-- Reactivity bridge is synthetic and introduces a divergence window between the SpiceDB write and the mirror-table update — neither is part of the same Stackbase OCC transaction.
-- Zed schema is a third language to learn alongside TypeScript and SQL, taxing the "DX is the feature" principle.
-- `LookupResources` returns IDs that require a second round-trip to Stackbase's DB; large allowed sets produce large `IN` clauses that stress the SQLite query planner.
-- ZedToken machinery solves a distributed-replication consistency problem that Stackbase's single-writer OCC transactor already eliminates — the complexity tax has no payoff at Tier 0/1.
-
-#### Sharpest Rebuttal Point (Against It)
-
-SpiceDB is disqualified for the default path by the absence of a SQLite backend. `stackbase dev` is the zero-config first-run experience that either earns or loses the developer. Requiring a full Postgres install before authz works at all puts a hard prerequisite on the most common onboarding path. SpiceDB's value proposition — correctness at Google-scale graph complexity — solves a problem the 99th-percentile Stackbase developer will never have, at an ops cost every Stackbase developer will pay.
-
----
-
-### 5. Stackbase-native (Reactive Component)
-
-#### How It Works
-
-A first-party authz component that models authorization as a reactive citizen of the engine itself — enforcing at the kernel seam all `ctx.db` operations already pass through, rather than relying on function authors to call a check helper. Three interlocking layers compose the full model.
-
-**Layer 1 — Declarative row rules.** Each table definition carries optional `read` and `write` predicates — pure TypeScript functions `(ctx, doc) => boolean` evaluated by the kernel before any document is returned or staged. The kernel already calls `requireOwnTable` on every `db.get`, `db.query`, `db.insert`, `db.replace`, and `db.delete` (verified in `packages/executor/src/kernel.ts`). Authz row rules slot into that seam: the kernel evaluates the predicate against `ctx.identity` and the fetched document, throwing `ForbiddenOperationError` on write-deny and returning `null` on read-deny. Because rule predicates touch `ctx.db`, their reads are recorded via `ctx.txn.recordRead(range)` (verified at kernel.ts:204/225), automatically entering the query's read-set. Revocation is reactive by construction with zero additional plumbing.
-
-**Layer 2 — RBAC via namespaced tables.** `authz/roles` and `authz/role_assignments` tables store role definitions and assignments. A typed `ctx.authz.can(permission, scope?)` facade is contributed through the component `contextType`/codegen path. Because `can()` reads from these tables via `ctx.db`, the role tables join the read-set automatically — revoking a role assignment invalidates every subscription that called `ctx.authz.can()` for that user.
-
-**Layer 3 — Optional tuple store.** An `authz/tuples` table stores `(subject, relation, object)` triples for complex sharing hierarchies. `ctx.authz.related(subject, relation, object)` does bounded-depth graph traversal over these tuples inside the current transaction, again through `ctx.db`, automatically extending the read-set.
-
-#### How It Maps to Stackbase
-
-This is a direct extension of existing, tested machinery. The kernel seam is already there. The component model (namespaced tables, `context` builder, `requires` dependency chain, codegen integration) is already there. The reactive engine (read-set recording, write-set intersection, subscription re-push) is already there. The authz component adds a rule-evaluation hook and three tables.
-
-```typescript
-// Schema definition with inline row rules (app's schema.ts)
-export default defineSchema({
-  messages: defineTable({
-    channelId: v.id("channels"),
-    authorId: v.string(),
-    body: v.string(),
-  })
-    .index("by_channel", ["channelId"])
-    .rowRules({
-      // This fires in the kernel on every db.get/db.query result row
-      // — structurally impossible to forget
-      read:  (ctx, doc) => ctx.authz.isMember(doc.channelId),
-      write: (ctx, doc) => doc.authorId === ctx.auth.getUserId(),
-    }),
-});
-```
-
-```typescript
-// ctx.authz facade (authz/context.ts)
-export function buildAuthzContext(cctx: ComponentContext) {
-  return {
-    async can(permission: string, scope?: string): Promise<boolean> {
-      const userId = cctx.identity;
-      if (!userId) return false;
-      const assignments = await cctx.db.query("role_assignments")
-        .withIndex("by_user_scope", q => q.eq("userId", userId).eq("scope", scope ?? null))
-        .collect();
-      for (const a of assignments) {
-        const role = await cctx.db.get(a.roleId);
-        if (role?.permissions.includes(permission)) return true;
-      }
-      return false;
-    },
-    async isMember(channelId: string): Promise<boolean> {
-      return this.can("channel:read", channelId);
-    },
-    async related(subject: string, relation: string, object: string): Promise<boolean> {
-      const direct = await cctx.db.query("tuples")
-        .withIndex("by_subject_rel", q => q.eq("subject", subject).eq("relation", relation))
-        .collect();
-      return direct.some(t => t.object === object);
-    },
-  };
-}
-```
-
-```typescript
-// Reactive revocation — zero extra plumbing
-// When admin calls mutation removeFromChannel:
-await ctx.db.delete(membershipId); // writes to authz/role_assignments
-// Transactor emits write-set covering authz/role_assignments.by_user_scope[userId, channelId].
-// Sync tier intersects against read-sets of live subscriptions that called ctx.authz.can().
-// Those subscriptions are immediately re-run and re-pushed.
-// The revoked user's client receives an empty result — no polling, no manual cache bust.
-```
+Schema compiler generates typed permission names — `"veiw"` (typo) is a TypeScript error. The traversal plan is pre-compiled; check executes a bounded, known set of indexed tuple lookups. Caveats evaluate as pure functions over supplied context with no additional I/O reads.
 
 #### Pros
 
-- **Can't-forget enforcement**: rules fire at the kernel seam that all `ctx.db` calls already pass through — structural guarantee, not developer discipline.
-- **Fully reactive by construction**: predicate reads enter the read-set via existing `ctx.txn.recordRead` machinery; revocation triggers automatic write-set/read-set intersection and immediate subscription re-push; zero bridge plumbing.
-- **Adapter-agnostic**: pure TypeScript through the DocStore seam; identical behavior on SQLite (Tier 0) and Postgres (Tier 2).
-- **Zero extra services**: compiles into the single binary, preserves the zero-config self-host story.
-- **Composable complexity ladder**: ownership row rule → RBAC `ctx.authz.can()` → tuple ReBAC — projects grow into expressiveness without switching systems.
-- **Typed end-to-end**: `contextType` declaration drives codegen; `ctx.authz` is fully typed in every function; row-rule predicates infer the correct `Doc<'tableName'>` type.
-- **Low marginal cost**: the reactive engine, component model, and kernel seam are already built and tested; the authz component adds a rule-evaluation hook and three namespaced tables.
+- **Richest abstract expressiveness** — union, intersection, exclusion, arrow traversal, and caveats compose to express every access pattern in the same schema language
+- **Caveats are first-class and typed** — conditions are named, reusable, schema-declared CEL expressions, not ad-hoc predicates scattered across function handlers
+- **Subject-sets make group-based access fully dynamic** — adding a user to a group automatically propagates permissions to all resources referencing that group, with zero additional writes
+- **Arrow traversal enables hierarchical inheritance with no denormalization** — folder permissions cascade to documents structurally
+- **Wildcard subjects** cleanly express public/anonymous access
+- **Exclusion operator** handles negation as a first-class algebraic operation
+- **Permission expressions are named** — a self-documenting vocabulary mapping directly to product language
+- **Multi-tenancy is structural** — isolation enforced by the graph's shape, not by remembered WHERE clauses
+- **Incremental adoption** — start with `define owner: [user]`, grow to org-roles + groups + hierarchy + caveats as the product matures
 
-#### Cons
+#### Cons (Model Limits)
 
-- **Rule predicate N+1 reads**: a `ctx.db.query` returning N rows triggers the rule predicate N times, each of which may do its own `ctx.db` read (e.g., a membership check). Without per-invocation memoization keyed on `(identity, scope, table)`, this multiplies DB reads. The memoization layer must be built carefully — getting it wrong produces stale permission decisions (security bug) or over-invalidation (performance bug).
-- **Pre-flattened effective-permission tables are needed**: if rule predicates traverse a role graph at check-time, every subscription re-run on invalidation pays that traversal cost. Permissions should be pre-flattened at write-time (as convex-authz does) so check-time is O(1). This is more design work than "just read the tables."
-- **Deep graph traversal fan-out**: multi-hop tuple traversal without explicit depth limits can produce very wide read-sets, causing over-invalidation (every write to any touched table re-runs every subscription with a deep traversal in its read-set).
-- **No external enforcement**: authz rules protect the function API. If a Postgres-adapter database is also exposed directly to a BI tool or `psql` session, those clients bypass the kernel. Lightweight Postgres ownership constraints or CHECK constraints would be needed as defense-in-depth for that scenario.
-- **Must be built**: unlike the external approaches, there is no existing implementation to wrap. However, the expensive part — the reactive engine — is already done.
+- **Schema compilation step required** — the permission algebra must be compiled to a traversal plan before checks run; adds a build-time artifact and a foreign DSL
+- **Arrow traversal grows the read-set with depth** — deeply nested trees produce longer traversal chains, all entering the read-set; same fan-out problem as OpenFGA at high-level tuple changes
+- **CEL evaluation at check time** — requires embedding a CEL interpreter; a non-trivial dependency
+- **Intersection arrows (`.all()`)** — requiring a user to be in ALL related groups is non-obvious; semantics easy to misread
+- **CEL is a foreign type system** — caveat parameters must be bridged manually from TypeScript to CEL context at every call site; a typo in a context key name is a runtime error, not a build error, breaking the TypeScript-native principle
 
-#### Sharpest Rebuttal Point (Against It)
+#### Sharpest Rebuttal Point
 
-The concession the native component owes: it has not been built yet, and the pre-flattened permission table model (needed for O(1) reactive re-execution), per-invocation memoization, and depth-bounded tuple traversal are all real engineering work — not boilerplate. The estimated scope is "a week of work for ownership + RBAC" but that estimate does not include the memoization layer or the edge cases (cycles in the tuple graph, wildcard grants, cross-tenant leakage) that a production authz component must handle. That said, the hard part — the reactive engine — is done. The authz component is implementation work, not research work.
+The schema compilation step and CEL dependency directly violate Stackbase's locked "TypeScript end-to-end" principle. The permission algebra must be compiled in a foreign DSL; caveat conditions are CEL, not TypeScript — two foreign type systems that sit outside the TypeScript compiler and break the "rename a table and the compiler tells you exactly what broke" story. Additionally, the check algorithm is still a runtime graph traversal whose read-set is determined by traversal depth, not the query's declared data dependencies. A high-level tuple change fans out into mass re-evaluation proportional to the number of resources under that node — the same fatal reactive fit problem as OpenFGA.
 
 ---
 
 ## The Cross-Fire
 
-### ReBAC-as-service vs. in-engine
+### Do Relationship Tuples Subsume Everything vs. Simpler Models Are Enough?
 
-OpenFGA and SpiceDB both argue that externalizing the relationship graph gives you a version-controlled, auditable, language-independent policy model that non-engineers can review. This is genuinely valuable. But for Stackbase, externalizing the graph breaks the reactive contract: an out-of-process Check call leaves no fingerprint in `ctx.txn`'s read-set. When the tuple changes, the sync tier has no write-set intersection to fire on. Both service advocates were forced to propose a synthetic mirror-table bridge — which concedes the entire reactive argument. If you must mirror authz state into Stackbase tables to get reactivity, you should keep it there natively and skip the external service. The "single authoritative model" discipline OpenFGA rightly values can be expressed as a typed TypeScript permission declaration (declare-once, no magic strings) without a separate DSL or service.
+The ReBAC advocates argue that all authorization patterns — ownership, roles, groups, hierarchy, sharing, conditions — can be expressed as relationship tuples, making them a universal primitive. The counter-argument is that expressiveness and fit are different. A ReBAC check for ownership is a tuple read; a predicate check is a field comparison on a row the query was already reading. The simpler model is genuinely simpler for the common case, and "simpler models are enough for 80% of BaaS apps" is the correct observation. The resolution: the ReBAC tuple primitive is the right graduation path for apps that need hierarchy and group delegation, not the mandatory starting point for every app.
 
-### RLS database-enforcement vs. function-model enforcement
+### Per-Row Predicates vs. Relationship Graph
 
-Supabase RLS's structural insight — that enforcement should fire at one authoritative layer impossible to bypass — is exactly right. But RLS chooses the database as that layer, which is correct for Supabase (clients query Postgres directly) and wrong for Stackbase (clients call functions, functions own all database access exclusively). The right layer to enforce "structurally impossible to bypass" in Stackbase is the function-execution kernel — the one path all `ctx.db` calls already flow through. The native component relocates RLS's structural guarantee from the database to the kernel and makes it adapter-agnostic. RLS's other valuable idea — lightweight Postgres ownership constraints as defense-in-depth when operators expose the DB port — remains valid as an optional hardening step, not the primary model.
+Predicates are maximally local: the authorization rule for a document lives next to the document's business logic, in the same file, readable without a separate mental model. The relationship graph is maximally expressive: once you learn the mental model, every authorization pattern is a consistent graph operation. The tension is DX vs. expressiveness. The resolution: per-row predicates belong at the engine's data layer as `canRead`/`canWrite` hooks (the "can't forget a check" guarantee), complemented by an explicit `require()` call at hot paths — the two styles are compatible and serve different ergonomic needs.
 
-### Library-convention vs. first-class-reactive
+### Graph-Traversal Checks vs. O(1) Reactive Reads
 
-convex-authz and the native component both use `ctx.db` tables, so both get reactive revocation "for free" via the read-set mechanism. The decisive difference is structural enforcement. convex-authz is a convention: `await authz.require(ctx, userId, perm)` at the top of each handler. The native component slots into the kernel seam: rules fire on every `ctx.db` call regardless of what the function body does. For a reactive product where a forgotten check streams stale or unauthorized data to live subscribers indefinitely, the gap between convention and structure is a security property gap, not just a code-quality preference. Additionally, convex-authz's write-amplification on role assignment (rewriting O(permissions × scopes) effective-permission rows per mutation) holds Stackbase's single-writer lock — the native component's pre-flattened model achieves the same O(1) check-time while keeping the write scope bounded.
+This is the decisive head-to-head for Stackbase. Graph-traversal checks (OpenFGA, SpiceDB) produce read-set entries proportional to hierarchy depth; a high-level tuple change fans out into mass subscription re-evaluation. Pre-computed `effectivePermissions` (convex-authz) collapses the check to a single indexed read — exactly one read-set entry — at the cost of write-time expansion. The reactive engine's correctness guarantee demands bounded, precise read-sets. Write amplification is bounded and manageable; read-set fan-out is unbounded and directly undermines the reactive guarantee. The O(1) read-path wins.
+
+### One Unified Model vs. A Layered Ladder
+
+Should Stackbase ship one model (the most expressive one) or a layered ladder (start simple, graduate to complex)? The ReBAC advocates prefer one unified model — "incremental adoption" within the same graph schema. The predicate model advocates prefer a flat, TS-native starting point. The synthesis: the layered ladder is correct, but the layers should share a unified declaration surface. Apps start with ownership predicates and scoped RBAC; they add the ReBAC graph layer as an opt-in for hierarchy and group delegation without migrating existing checks. The engine exposes both layers under one `packages/authz` API.
 
 ---
 
 ## Comparison Table
 
-| Approach | Fit Score | Function-model fit | Reactive | Works on SQLite + Postgres | No extra service | DX / typing | Expressiveness |
-|---|---|---|---|---|---|---|---|
-| Stackbase-native | 9/10 | Enforces at kernel seam — structurally impossible to forget | Yes — predicate reads enter read-set via existing `recordRead`; revocation auto-invalidates | Yes — pure TypeScript through DocStore seam, identical on both | Yes — single binary, zero config | Typed end-to-end via codegen; row-rule predicates infer `Doc<T>` | RBAC + ownership now; ReBAC tuples additive |
-| convex-authz (dbjpanda) | 7/10 | Correct layer but convention-only — forget one call and leak | Yes — effectivePermissions rows in read-set; revocation re-pushes | Yes — `ctx.db` tables, adapter-agnostic | Yes — component tables in same binary | TypeScript with `definePermissions`/`defineRoles` inference | RBAC + ABAC + ReBAC under one class |
-| OpenFGA | 3/10 | Guard call inside function is correct but check is out-of-process | No — out-of-process call leaves no read-set entry; synthetic bridge required | Partial — SQLite backend is beta and still a separate process | No — Go service cannot link into Bun binary; still requires shelling out | TypeScript SDK with type inference | Full Zanzibar: union, intersection, arrow-traversal |
-| SpiceDB | 2/10 | Guard call inside function is correct but check is out-of-process | No — same synthetic bridge problem as OpenFGA | No — no SQLite backend; Postgres required even for `stackbase dev` | No — separate gRPC service, own datastore | Zed DSL adds a third language to learn | Highest ceiling: all Zanzibar operators + caveats |
-| Supabase RLS | 1/10 | Wrong layer — fires below the function, which clients never bypass anyway | No — Postgres has no mechanism to notify the reactive sync tier | No — SQLite has no RLS; Postgres-only enforcement means two security models per adapter | Yes — lives inside Postgres | SQL `CREATE POLICY` breaks TypeScript DX; invisible to codegen | Limited to SQL predicates over row data |
+| Model | Expressiveness | Ownership | Roles | Groups | Hierarchy / Inheritance | Per-Resource Sharing | Conditional / ABAC | Reactive O(1) Fit | Mental Model | Typed DX |
+|---|---|---|---|---|---|---|---|---|---|---|
+| convex-authz (RBAC+ABAC+ReBAC hybrid) | ★★★★☆ | ★★★★★ | ★★★★★ | ★★★★☆ | ★★★☆☆ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★★★ |
+| Supabase RLS / row-predicate (ABAC) | ★★★☆☆ | ★★★★★ | ★★★☆☆ | ★★★☆☆ | ★★☆☆☆ | ★★★★☆ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★★☆ |
+| SpiceDB / Zanzibar schema (ReBAC + caveats) | ★★★★★ | ★★★★☆ | ★★★★☆ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★★☆ | ★★☆☆☆ | ★★★☆☆ | ★★★☆☆ |
+| OpenFGA / Zanzibar relationship (ReBAC) | ★★★★☆ | ★★★★☆ | ★★★★☆ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★☆☆ | ★★☆☆☆ | ★★★☆☆ | ★★★☆☆ |
+
+**Scoring notes:**
+- *Reactive O(1) Fit*: convex-authz and RLS score highest because checks are single indexed reads or field comparisons on already-read rows. SpiceDB and OpenFGA score lowest because their check algorithm is a runtime graph traversal whose read-set grows with hierarchy depth, producing fan-out on high-level tuple changes.
+- *Typed DX*: convex-authz scores highest because `definePermissions`/`defineRoles` produce TypeScript literal types enforced by the compiler with no foreign DSL. SpiceDB and OpenFGA score lower because the schema DSL and CEL condition language sit outside the TypeScript type system.
+- *Hierarchy*: SpiceDB and OpenFGA score highest because arrow traversal is a first-class schema primitive. convex-authz scores lower because deep hierarchy requires explicit data modeling (materialized ancestors or O(depth) subqueries).
+- *Groups*: SpiceDB and OpenFGA score highest because userset subjects (`group#member`) are a native primitive — adding a user to a group propagates permissions with zero additional writes. convex-authz requires a two-hop subquery or write-time expansion.
 
 ---
 
 ## The Judge's Verdict
 
-### Winner: Stackbase-native (reactive component)
+### Winning Model
 
-**Score: 9/10**
+**convex-authz (RBAC + ABAC + ReBAC hybrid)** — its logic wins as the basis for `packages/authz`.
 
 ### Scorecard
 
-| Criterion | Result |
-|---|---|
-| Reactive by construction | Pass — predicate reads enter `ctx.txn.recordRead` automatically |
-| Adapter-agnostic (SQLite + Postgres) | Pass — pure TypeScript through DocStore seam |
-| No extra service / single-binary | Pass — namespaced tables compile into the binary |
-| Can't-forget structural guarantee | Pass — kernel seam fires on every `ctx.db` call |
-| Typed end-to-end | Pass — `contextType` drives codegen |
-| Composable complexity | Pass — ownership → RBAC → tuples as layers |
-| Implementation cost | Acceptable — hard part (reactive engine) already exists |
+| Model | Score | Rationale |
+|---|---|---|
+| convex-authz (RBAC+ABAC+ReBAC hybrid) | **9/10** | Covers the full BaaS spectrum with a typed permission vocabulary, scoped roles, ABAC as plain TS, per-resource sharing via relation rows, and an `effectivePermissions` index that makes every check a single indexed point-read — exactly one precise read-set entry, the ideal reactive footprint. TypeScript-native, no DSL, no CEL. Incremental from two lines to multi-tenant SaaS without paradigm migration. Genuine gaps: deep hierarchy and recursive group membership require manual data modeling (addressable by grafting an opt-in ReBAC layer). |
+| Supabase RLS / row-predicate (ABAC) | **7/10** | Best read-set precision for the 80% case: ownership/tenancy checks read a field already in the query's read-set, adding zero fan-out. Authorization declared at the data layer, cannot forget a check, TS-native. Ceiling is real: no permission vocabulary, no compositional algebra, no first-class hierarchy or group propagation. Excellent as the engine-level `canRead`/`canWrite` hooks; insufficient alone as the primary model. |
+| SpiceDB / Zanzibar schema (ReBAC + caveats) | **6/10** | Highest abstract expressiveness; structural multi-tenant isolation; first-class hierarchy, groups, and caveats. But weakest reactive fit: check is a runtime graph traversal with read-set proportional to depth, not the query's declared reads — high-level tuple changes fan out into mass re-evaluation. Requires schema compilation and CEL (foreign DSL/runtime), violating the TS-end-to-end principle. Its algebra and arrow-traversal are the right things to borrow as an opt-in hierarchy layer. |
+| OpenFGA / Zanzibar relationship (ReBAC) | **6/10** | Single unified tuple primitive elegantly covers all patterns; tuples-as-data superficially fits the read-set model. Same fatal reactive fit problem as SpiceDB: depth-proportional read-set fan-out; `ListObjects` (all docs I can see — the home screen) is non-reactive. Separate authorization model DSL is two sources of truth. Type-restricted relations and userset subjects are worth borrowing; the model as a whole is not the right primary. |
 
-### Concrete Recommendation
+### The Concrete Model to Build
 
-Build a first-party native authz component shipping as a complexity ladder in three layers:
+**Logic:** Authorization is typed application data stored in Stackbase's MVCC store. Every permission check is a typed, indexed data read. The reactive loop is not special-cased for authorization — it is free because authorization IS data.
 
-**Layer 1 (ship first — ownership + row rules):** Add a `rowRules` declaration surface to table definitions. Inside the kernel's existing `requireOwnTable`/db-op handlers (verified present in `packages/executor/src/kernel.ts`), evaluate the rule predicate after fetching each document. Return `ForbiddenOperationError` on write-deny and `null` on read-deny. Rule predicates that touch `ctx.db` automatically extend the read-set via the existing `ctx.txn.recordRead` path — revocation is reactive with zero additional wiring. This seam is structurally impossible for a function author to bypass.
+**Features** (`packages/authz`):
 
-**Layer 2 (RBAC — ships after Layer 1 is stable):** Add `authz/roles` and `authz/role_assignments` namespaced tables. Expose `ctx.authz.can(permission, scope?)` via the component `contextType`/codegen path. The `auth` component is a declared dependency (`requires: ["auth"]`), using `ctx.auth.getUserId()` as the identity anchor. Pre-flatten effective permissions at assignment write-time (not at check read-time) so check cost is O(1) indexed read — critical because checks re-execute on every subscription invalidation.
+1. **Typed permission registry** — `definePermissions({ documents: { read, update, ... } })` producing `resource:action` string-literal TypeScript types; a typo is a compile error; a missing permission is a type error. This is the "permission vocabulary" that RLS lacks.
 
-**Layer 3 (ReBAC tuples — seam-reserved, implementation deferred):** Add `authz/tuples` table with `ctx.authz.related(subject, relation, object)` for bounded-depth graph traversal. This covers Google Docs-style sharing hierarchies without a separate service.
+2. **Named roles with inheritance and composition** — `defineRoles(permissions, { editor: {...}, viewer: {...}, admin: { inherits: "editor", ... } })`. Roles are typed subsets of the permission registry; inheritance is declared, not re-implemented per role.
 
-**Required engineering details surfaced by the cons:**
-- Per-invocation memoization keyed on `(identity, scope, table)` to bound predicate N+1 cost — getting this wrong produces stale permissions (security) or over-invalidation (performance).
-- Explicit traversal depth limits on tuple-graph walks to prevent read-set fan-out.
-- Atomic effective-permission recomputation within the same mutation transaction that changes a role assignment — must not hold the single-writer lock for O(permissions × scopes) writes.
+3. **Scoped role assignment as a first-class primitive** — `assignRole(ctx, userId, "admin", { type: "org", id })`. The scope is part of the index key; multi-tenant isolation is structural (tenantId as the leading key), not a remembered WHERE clause.
 
-**Optional escape hatch:** Publish `@stackbase-community/authz-openfga` (or SpiceDB variant) behind the identical `ctx.authz` interface for teams running centralized cross-service authz outside Stackbase. The interface contract must be stable before either adapter is written.
+4. **ABAC as plain TypeScript predicates** — `(ctx, resource) => resource.ownerId === ctx.userId`, `resource.status === "draft"`, `Date.now() < grant.expiresAt`. No DSL, no CEL. Conditions are TypeScript: type-checked, testable with vitest, and they read row data that lands precisely in the read-set.
 
-### What to Borrow from the Losers
+5. **Per-resource sharing via typed relation rows** — a typed `grants` table `{ resourceId, resourceType, userId, role }`; `addRelation`/`hasRelation`/`removeRelation` over `(subject, relation, object)` for the Notion/Google-Docs case. Share = insert one row; revoke = delete one row.
 
-**From convex-authz:** Take the pre-flattened `effectivePermissions` write-time-cost model — correct for a reactive system where checks re-run on every invalidation. Take the `definePermissions`/`defineRoles` typed-declaration ergonomics — declare permissions once as a TypeScript object, never scatter magic strings across mutation bodies. Consider the expiring grants and audit log patterns as Layer 2 additions.
+6. **Overrides and deny-wins semantics** — `grantPermission`/`denyPermission` for exceptions without role proliferation; `expiresAt` on grants for temporal access; wildcard patterns (`documents:*`) for family-wide grants.
 
-**From OpenFGA:** Take the principle that there should be ONE version-controlled authoritative declaration of every permission shape in the deployment — not logic spread across individual function bodies. Express this as a single TypeScript permission schema (not a separate `.fga` DSL), preserving the single-language DX.
+7. **`effectivePermissions` pre-computed index** — keyed `[tenantId, userId, permission, scopeKey]`. Role/relation writes expand into this index at write time; a check is a single indexed point-read — exactly one read-set entry, surgical invalidation. This is the decisive performance contract.
 
-**From SpiceDB:** Take the relationship-tuple shape and the arrow/inheritance idea for Layer 3. Note that Stackbase's single-writer OCC transactor already provides the causal consistency that ZedTokens exist to recover in a distributed system — adopt the tuple model, skip the token machinery.
+8. **Opt-in arrow-traversal layer** — for hierarchy-first apps: `viewer from parent` declares that the `viewer` relation on an object is inherited from a related object via the `parent` relation. Type-restricted relation declarations ensure invalid `(type, relation, subject-type)` combinations are compile-time errors. Apps adopt graph traversal only where they need it.
 
-**From RLS:** Take the load-bearing insight that enforcement must be structurally impossible to bypass — and relocate that guarantee from the database to the function-execution kernel (the actual trust boundary). Optionally document lightweight Postgres `CHECK` constraints or ownership policies as defense-in-depth for operators who expose the DB port directly, without requiring them as the primary model.
+**Declaration surface:** Pure TypeScript, co-located with the schema, consumed by codegen so that (a) every permission/role/relation name is a typed literal, (b) `authz.require(ctx, userId, "documents:read", { type, id })` and `authz.can(...)` are fully typed, and (c) codegen can enforce that tenant-scoped tables carry the tenant key. Checks live inside server-side query/mutation functions, entering the read-set automatically.
+
+### Features to Borrow from Each Model
+
+**From RLS (ABAC):**
+- Engine-level per-table `canRead`/`canWrite` predicate hooks enforced in the query/mutation execution path — authorization declared once at the data layer, impossible to forget at a call site. Predicates are plain typed TypeScript closures co-located with the schema.
+- Keep ABAC conditions as TypeScript (not CEL) — same type system, same compiler, reads row data that lands precisely in the read-set.
+
+**From SpiceDB / OpenFGA (ReBAC):**
+- Type-restricted relation declarations — invalid `(type, relation, subject-type)` combinations are compile-time errors; codegen enforces that every registered resource type has its authorization relations declared.
+- Userset subjects (`team#member` as a grantee) — dynamic group propagation with zero additional writes per group member.
+- `user:*` wildcard subjects for public/anonymous resources.
+- Opt-in arrow-traversal layer (`viewer from parent`) for hierarchy-first and recursive-group apps — composable in the same query as flat predicates.
+- Exclusion/deny-wins operator concept backing `grantPermission`/`denyPermission`.
+
+**Non-functional contract (both ReBAC camps' concessions, codified):**
+- Reverse "ListObjects" queries (all resources a user can access) are an **explicitly non-reactive, paginated administrative API**, never on the per-request reactive path.
+- The `effectivePermissions` write-time expansion is **bounded and observable** — expansion depth is limited by the declared relation graph, and expansion progress is logged for debugging.
 
 ---
 
-## What This Means for `components/authz`
+## Implications for `components/authz`
 
-The roundtable verdict implies the following concrete build steps for the `components/authz` directory:
+The model-level next steps for the `components/authz` layer are:
 
-1. **Kernel seam hook** — Add `rowRules` to the table definition surface in the schema package. Wire rule evaluation into `kernel.ts`'s existing `requireOwnTable` / db-op handlers. Write tests proving: (a) a query without any authz call is still blocked by a row rule, (b) revoking a role membership immediately invalidates a live subscription (reactive revocation), (c) rules are adapter-agnostic (run the same test against both SQLite and Postgres adapters).
+1. **Define the storage schema** — the `authz_effective_permissions` table keyed by `[tenantId, userId, permission, scopeKey]`; the `authz_relations` table for `(subject, relation, object)` tuples; the `authz_grants` table for per-resource sharing; the `authz_overrides` table for explicit grant/deny; and the `authz_audit_log` table. All tables live in the MVCC store behind the `DatabaseAdapter` interface — no database specifics leak out of `packages/adapters/*`.
 
-2. **Component schema** — Create `packages/components/authz/src/schema.ts` with `authz/roles`, `authz/role_assignments`, and a seam-reserved `authz/tuples` table (defined but not yet queried by default). Use Stackbase's existing `defineTable`/`defineSchema` surface.
+2. **Implement write-time expansion** — the mutation path that converts a `assignRole` or `addRelation` call into indexed `effectivePermissions` rows. Expansion must be transactional with the caller's mutation, bounded by the declared relation graph, and observable (logged, with a maximum expansion count per call that raises an explicit error rather than silently hanging).
 
-3. **Context facade** — Create `packages/components/authz/src/context.ts` exporting `buildAuthzContext`. Add `contextType` declaration pointing at the exported TypeScript types for codegen integration. Declare `requires: ["auth"]` to wire `ctx.auth.getUserId()` as the identity anchor.
+3. **Implement the `Authz` client** — `definePermissions`, `defineRoles`, `assignRole`, `addRelation`, `can`, `require`, `canAny`, `grantPermission`, `denyPermission`, `deprovisionUser`. TypeScript generics are constrained by the permission registry so that every call site is fully typed.
 
-4. **Per-invocation memoization** — Implement a lightweight request-scoped cache inside `buildAuthzContext` keyed on `(identity, scope, table)`. This is a prerequisite for Layer 1 correctness, not a Layer 2 optimization.
+4. **Codegen integration** — the typed permission/role/relation names produced by `definePermissions`/`defineRoles`/`defineAuthzSchema` feed into the existing codegen pipeline alongside the data schema, so the generated `api` object includes typed authz helpers.
 
-5. **Pre-flattened effective permissions** — Design the `authz/role_assignments` write path to recompute and cache a flat `authz/effective_permissions` index inside the same mutation transaction. All `ctx.authz.can()` checks read from this index (O(1)) rather than traversing the role graph at check-time.
+5. **Engine-level data-layer hooks** — integrate `canRead`/`canWrite` predicate hooks into the query/mutation execution path so that tables with a `.policy()` declaration are automatically predicate-gated; this is the "can't forget a check" guarantee borrowed from RLS.
 
-6. **Layer 3 seam** — Define the `authz/tuples` table and `ctx.authz.related()` stub that returns `false` with a clear TODO comment. This reserves the interface so app code that starts using it compiles today and gets real behavior when the traversal is implemented.
+6. **Opt-in arrow-traversal compiler** — a schema declaration of `viewer from parent` compiles to a traversal plan that the engine executes against the `authz_relations` table. For apps that do not declare any arrow relations, the traversal compiler is a no-op and adds zero overhead.
 
-7. **Community adapter interface** — Define and export a stable `AuthzAdapter` interface that both the native implementation and a future `@stackbase-community/authz-openfga` package would satisfy. Stability of this interface is a prerequisite for any external adapter work.
+7. **Reactive contract test** — a vitest suite that asserts: (a) a `can` check after `assignRole` returns true; (b) a subscribed query that calls `can` is invalidated and re-run when the role is revoked; (c) invalidation scope is exactly the affected `[tenantId, userId, permission, scopeKey]` row, not any broader table scan.
 
-8. **Security test suite** — Write tests covering: inherited permissions (role grant propagates to child scope), wildcard grants, cross-tenant isolation (tenant A's role assignment cannot satisfy tenant B's authz check), and revocation latency (revocation must invalidate within the same OCC transaction boundary, not eventually).
+8. **Design spec** — per the project's process rule, a full spec in `docs/superpowers/specs/` is required before code lands. The spec should document the storage schema, the expansion algorithm (with bounded-depth proof), the codegen contract, and the reactive performance guarantee — all at the model level, before any implementation begins.
