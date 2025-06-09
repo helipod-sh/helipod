@@ -563,6 +563,53 @@ Should Stackbase ship one model (the most expressive one) or a layered ladder (s
 
 ---
 
+## Prior Art: Lunora — a Shipped Reactive-Backend RLS
+
+After the roundtable we examined **[Lunora](https://lunora.sh/docs/concepts/rls)**, a *production* reactive backend in Stackbase's exact category (Convex-like server functions + real-time subscriptions + local-first sync). It is the closest existing prior art to what we are designing, and it independently arrived at almost exactly the model the roundtable recommended — which is strong validation — while also **refining two decisions we got slightly wrong.**
+
+### Lunora's model (verbatim shape)
+
+Policies are plain TypeScript via `definePolicy`, attached to procedures with an `rls(...)` middleware:
+
+```ts
+const ownDocuments = definePolicy({
+  table: "documents",
+  on: "read",
+  when: ({ auth }) => ({ ownerId: auth.userId }),   // returns a WHERE predicate, not a boolean
+});
+export const listDocuments = query.use(rls(definePolicies([ownDocuments])))
+  .query(async ({ ctx }) => ctx.db.findMany("documents"));
+```
+
+- **Reads:** the policy's `when()` returns a **`WhereInput` predicate** that is **AND-merged into the query** (`baseWhere`) — non-matching rows are simply invisible. It can return `true` (unrestricted), `false` (deny → zero rows), or `undefined` (opt out).
+- **Writes** (`insert`/`update`/`delete`): `when()` receives the candidate/pre-write `row` and returns a boolean; a mismatch throws `FORBIDDEN`.
+- **Roles:** `definePermission("posts:delete")` + `defineRole("admin", { permissions })` + `auth.can(permission)`; roles are unioned at request time and **fail closed for unknown roles**.
+- **Sharing / relationships:** Prisma-style **relation predicates** (`is`/`some`/`none`/`every`) inside the `WhereInput`, e.g. `{ members: { some: { userId: auth.userId } } }` — and these are **reactive**: a relation predicate stamps a read-dependency on the *child* table, so a write there re-runs the subscription.
+- **Reactive identity** is stamped at the **WebSocket upgrade** (connection-level), and subscriptions re-run under that verified identity.
+- **Posture:** **deny-by-default but opt-in per procedure** (only `.use(rls(...))` procedures are guarded), with an **`rls_uncovered_table` advisor** that warns about unguarded tables. Pure-function policy testing via `expectPolicy(policies).as({ userId })`.
+
+### What it confirms (our verdict holds)
+
+TypeScript predicates (no DSL/CEL), enforcement at the **function layer** (the actual trust boundary, not the DB), roles + per-row conditions + relation-based sharing as a **hybrid**, and **reactivity for free** because checks read data. Lunora is essentially our recommended model, shipped — which is about the strongest validation a design can get.
+
+### What it *refines* (two upgrades we should adopt)
+
+1. **Reads should return a query *predicate*, not a per-row boolean.** Our recommendation said "ABAC as `(ctx, doc) => boolean`." Lunora returns a `WhereInput` that is **AND-merged into the query** — which is strictly better and *fixes the exact cons the roundtable flagged*: the predicate **pushes into the index** (no scan-then-filter, no N+1) and its columns/relations become **precise read-dependencies** (no fan-out). So the model becomes: **read rules return a `WhereInput` merged into the query; write rules evaluate the candidate row → boolean/throw** (the per-row form is correct *only* for writes, where there's a single in-memory row and no fetcher — note Lunora explicitly disallows relation predicates on writes for this reason).
+
+2. **Relation predicates (`some`/`is`/...) are the reactive sweet-spot for sharing — often better than arrow-traversal.** A "share with Bob" or "members of this org" check is just a relation predicate in the read's `WhereInput`; it's index-friendly, composes with the rest of the filter, and is reactive via the child-table read-dep — **no graph-walk, no fan-out**. This means our "opt-in arrow-traversal compiler" should be reserved for genuinely *recursive* hierarchy (folder→subfolder→doc); the common one-hop sharing/membership case is a relation predicate.
+
+### Subtleties Lunora surfaced (bake these in)
+
+- **`count` on a row-filtered table leaks the count of rows you can't see** — Lunora throws `COUNT_RLS_UNSUPPORTED`. Our pagination/aggregation must special-case this.
+- **Nested hydration (`with`/joins) must re-filter children by the child table's own read policy** — or an `include` becomes a visibility leak.
+- **Deny-by-default**, plus an advisor/lint for unguarded tables.
+
+### The one real fork: opt-in vs. engine-default
+
+Lunora is **opt-in per procedure** (`.use(rls(...))`) + an advisor; our roundtable leaned **engine-global "can't-forget."** The synthesis I'd take: **default-ON at the engine for any table that declares a policy** (so you can't forget), with an **explicit per-query opt-out** for the rare intentional-bypass (admin tooling), and Lunora's **`rls_uncovered_table`-style advisor** to flag tables that have data but no policy. That's strictly stronger than opt-in while keeping the escape hatch.
+
+---
+
 ## Implications for `components/authz`
 
 The model-level next steps for the `components/authz` layer are:
