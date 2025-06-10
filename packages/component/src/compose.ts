@@ -102,6 +102,10 @@ export function composeComponents(
   app: { schemaJson: SchemaDefinitionJSON; moduleMap: Record<string, RegisteredFunction> },
   components: ComponentDefinition[],
 ): ComposedProject {
+  const names = new Set(components.map((c) => c.name));
+  for (const c of components) for (const req of c.requires ?? []) {
+    if (!names.has(req)) throw new Error(`component "${c.name}" requires "${req}", which is not enabled`);
+  }
   const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components });
   const moduleMap = composeModules(app.moduleMap, components);
   const contextProviders: ContextProvider[] = components
