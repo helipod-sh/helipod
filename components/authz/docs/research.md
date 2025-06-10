@@ -557,6 +557,12 @@ Should Stackbase ship one model (the most expressive one) or a layered ladder (s
 - Opt-in arrow-traversal layer (`viewer from parent`) for hierarchy-first and recursive-group apps — composable in the same query as flat predicates.
 - Exclusion/deny-wins operator concept backing `grantPermission`/`denyPermission`.
 
+**From Lunora (shipped reactive RLS — the closest prior art):**
+- **Read rules return a `WhereInput` predicate AND-merged into the query**, not a per-row boolean — index-pushdown, no scan-then-filter, and the predicate's columns/relations become *precise* read-dependencies (no over-invalidation). *(This supersedes the per-row-boolean form in "ABAC as plain TypeScript predicates" above; the per-row form is kept only for writes.)*
+- **Relation predicates** (`some`/`is`/`none`/`every`) as the reactive way to express one-hop sharing/membership (`{ members: { some: { userId } } }`) — index-friendly and reactive via a child-table read-dep, with no graph walk.
+- **Pure-function policy testing** (`expectPolicy(policies).as({ userId })`) — policies are testable in isolation with vitest, mirroring production evaluation.
+- **`count` / nested-hydration leak awareness** and a **`rls_uncovered_table`-style advisor** for tables that have data but no policy.
+
 **Non-functional contract (both ReBAC camps' concessions, codified):**
 - Reverse "ListObjects" queries (all resources a user can access) are an **explicitly non-reactive, paginated administrative API**, never on the per-request reactive path.
 - The `effectivePermissions` write-time expansion is **bounded and observable** — expansion depth is limited by the declared relation graph, and expansion progress is logged for debugging.
@@ -607,6 +613,43 @@ TypeScript predicates (no DSL/CEL), enforcement at the **function layer** (the a
 ### The one real fork: opt-in vs. engine-default
 
 Lunora is **opt-in per procedure** (`.use(rls(...))`) + an advisor; our roundtable leaned **engine-global "can't-forget."** The synthesis I'd take: **default-ON at the engine for any table that declares a policy** (so you can't forget), with an **explicit per-query opt-out** for the rare intentional-bypass (admin tooling), and Lunora's **`rls_uncovered_table`-style advisor** to flag tables that have data but no policy. That's strictly stronger than opt-in while keeping the escape hatch.
+
+---
+
+## Why This Model Dominates — and Where Every Con Went
+
+The honest test of "best of the best" is not a feature list — it is whether **every con raised anywhere in this document has a concrete engineering answer that removes it**, leaving the model dominant on the axes that matter (speed, DX, ease, error-resistance). Below, each con is mapped to the mechanism that eliminates it. This is the synthesis of all five models *plus* the engine-level enforcement only Stackbase can do — and it is why none of the borrowed models, on its own, reaches here.
+
+### Every con, and the mechanism that removes it
+
+| Con (and who raised it) | Why it normally hurts | The mechanism that removes it | Net result |
+|---|---|---|---|
+| **Per-row boolean read filter scans then filters** (our v1) | full table scan + N+1 predicate eval + read-set fan-out | **Read rules return a `WhereInput` AND-merged into the query** (from Lunora) — pushed into the index; columns become precise read-deps | Index-pushed, O(matched-rows), surgical invalidation |
+| **ReBAC check is a runtime graph traversal** (convex-authz vs SpiceDB/OpenFGA) | read-set grows with hierarchy depth → mass re-invalidation on high-level changes | **`effectivePermissions` materialized at *write* time**; a check is a single indexed point-read | O(1) check, exactly one read-set entry, zero traversal at read time |
+| **A materialized index can drift from source** (classic CQRS risk) | stale permissions = security bug | **Expansion runs inside the *same OCC mutation* that changes the role/relation** — atomic, deterministic | Drift is structurally impossible |
+| **Bulk hierarchy re-parent amplifies writes** (the cost of materialization) | re-parenting 10k descendants holds the single-writer lock | **Bounded, observable expansion** + **async background expansion above a threshold** (a "pending" marker), so the common case is transactional and the pathological case is non-blocking | O(1) reads always; bulk writes never block the writer |
+| **Deep/recursive hierarchy needs manual data modeling** (convex-authz gap) | hand-rolled ancestor tables, easy to get wrong | **Opt-in `viewer from parent` arrow-traversal** compiled to write-time closure expansion; **one-hop sharing via relation predicates** (from Lunora) | Recursion is declared, not hand-rolled; the common one-hop case needs no traversal at all |
+| **Group membership requires extra writes to propagate** (convex-authz vs ReBAC userset) | adding a user to a team should not require re-granting | **Userset subjects** (`team#member` as grantee, from ReBAC) expanded at write-time / joined via relation predicate | Add-to-group propagates with O(1) reads, no per-member writes |
+| **`count` on a filtered table leaks the hidden-row count** (Lunora throws) | size of invisible data is itself a leak | **The engine counts *through* the read predicate** (count of *visible* rows) — the predicate is already merged into the query | `count` works *and* leaks nothing — strictly better than Lunora's "throw" |
+| **Nested `include`/join can over-expose children** (Lunora warns) | a hydrated relation skips the child's policy | **Enforcement lives at the `ctx.db` kernel seam**, so *every* read — including hydrated/joined reads — is predicate-gated by construction | Joins cannot leak; no per-query discipline required |
+| **"Forgot to add the check"** (every function-level/opt-in model: convex-authz, Lunora, raw guards) | one missing guard = data breach | **Engine-default-ON for any table with a policy** + explicit per-query opt-out for intentional admin bypass + an `uncovered-table` advisor | Can't-forget by default; bypass is loud and intentional |
+| **Write rules can't do relationship checks** (Lunora: writes see one in-memory row, no fetcher) | "can edit only if member of the row's org" is unexpressible on writes | **Our write rule runs in a full mutation `ctx`** — it can `ctx.db` query to resolve relationships, and those reads join the transaction | Write rules are *more* capable than Lunora's |
+| **DSL/CEL is a second source of truth outside the type system** (SpiceDB/OpenFGA) | schema + condition language drift from app types; typos at runtime | **Pure TypeScript registry** (`definePermissions`/`defineRoles`) → string-literal types via codegen | A typo'd permission/role/relation is a *compile* error |
+| **DB-enforced RLS is Postgres-only and can't notify the reactive tier** (Supabase) | two security models per adapter; no live revocation | **Engine-level enforcement through the `DatabaseAdapter` seam** | Identical on SQLite + Postgres; revocation is reactive |
+| **"Too many concepts to learn"** (a hybrid has more surface than pure RBAC) | cognitive cost | **It's a ladder** — the simple case is one predicate object; roles, relations, arrows, overrides are each opt-in and only appear when needed | Two lines for a todo app; the same model scales to multi-tenant SaaS with no migration |
+
+There is no con in this table that survives as a *logical* defect on the common path or the reactive path — each is either eliminated outright or relocated to a bounded, observable, non-blocking write-time cost.
+
+### Best on each axis — earned, not asserted
+
+- **Fastest (the reactive check, the thing that runs constantly):** every check is either a single indexed point-read against `effectivePermissions` or an index-pushed `WhereInput` — **zero read-time graph traversal, zero scan**, and invalidation is exactly the affected `[tenantId, userId, permission, scopeKey]` row. ReBAC traverses on every check; Postgres-RLS can't drive the reactive tier at all; a per-row boolean scans. We pre-pay at write time so the hot path is O(1). *No alternative is faster on the reactive read path.*
+- **Best DX:** one language end-to-end (TypeScript), one type system, co-located with the schema, codegen-typed call sites — **no `.fga`/`.zed` schema, no CEL, no SQL `CREATE POLICY`**. SpiceDB/OpenFGA make you learn a modeling language *and* a condition language; Supabase makes you write SQL invisible to your types. Ours is the only model with no foreign surface.
+- **Easiest to write:** the floor is a single predicate object (`when: ({ auth }) => ({ ownerId: auth.userId })`); you reach for roles/relations/arrows only when an app needs them; and **policies are pure functions testable with `vitest`** in isolation. ReBAC demands an upfront model even for a todo app.
+- **Least error-prone:** **engine-default-ON** (can't forget) + **typed literals** (typos are compile errors) + **auto-gated joins and counts** (no hydration/count leak) + **deny-by-default** + **drift-proof transactional expansion** + an **uncovered-table advisor**. Safety here is *structural*, not a matter of developer discipline — which is the opposite of every opt-in/RLS-policy/guard-call model.
+
+### The one honest residual (stated, not hidden)
+
+The model is **read-optimized**: it pre-materializes effective permissions, so **role/relation/hierarchy *writes* do more work** than a system that traverses at read time. That is the deliberate, correct trade for a reactive backend — you optimize the operation that runs on *every* request and re-runs on *every* invalidation (the check), at the cost of the operation that runs rarely (granting/revoking/re-parenting). And even that cost is contained: expansion is bounded, observable, transactional for the common case, and **async-with-a-pending-marker** for pathological bulk changes so it never blocks the single writer. This is not a silent con — it is a conscious, bounded write-time cost that buys an O(1) reactive read path. No alternative avoids *some* version of this tradeoff; ours is the only one that puts the cost where it does the least harm.
 
 ---
 
