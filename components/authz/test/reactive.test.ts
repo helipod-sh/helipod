@@ -4,9 +4,19 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema } from "@stackbase/values";
-import { query } from "@stackbase/executor";
+import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import { auth } from "@stackbase/auth";
 import { defineAuthz } from "../src/define-authz";
+
+// Privileged bootstrap built-in — seeds the first admin directly (bypasses the namespace boundary).
+function systemModules(): Record<string, RegisteredFunction> {
+  return {
+    "_system:insertDocument": mutation(async (ctx, args: { table: string; fields: Record<string, unknown> }) =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await ctx.db.insert(args.table, args.fields as any)
+    ),
+  };
+}
 
 function mockSocket(): { send(d: string): void; bufferedAmount: number; close(): void; sent: any[] } {
   const sent: any[] = [];
@@ -22,7 +32,7 @@ const lastQueryValue = (sock: { sent: any[] }, queryId: number): unknown => {
   return undefined;
 };
 
-const authz = defineAuthz({ roles: { editor: { documents: ["update"] } } });
+const authz = defineAuthz({ roles: { editor: { documents: ["update"] }, admin: { authz: ["manage"] } } });
 
 describe("authz reactivity", () => {
   it("a subscribed can()-query re-runs when a role is assigned and revoked", async () => {
@@ -39,10 +49,14 @@ describe("authz reactivity", () => {
       store: new SqliteDocStore(new NodeSqliteAdapter()),
       catalog,
       modules: moduleMap,
+      systemModules: systemModules(),
       componentNames,
       contextProviders,
     });
 
+    // Bootstrap a global admin (the only party permitted to assign roles), then the ordinary user.
+    const admin = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "admin@b.co", password: "pw" })).value;
+    await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: admin.userId, role: "admin", scopeType: "", scopeId: "" } });
     const { token, userId } = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "a@b.co", password: "pw" })).value;
 
     const sock = mockSocket();
@@ -55,11 +69,11 @@ describe("authz reactivity", () => {
     }));
     expect(lastQueryValue(sock, 1)).toBe(false); // no role assigned yet
 
-    await r.run("authz:assignRole", { userId, role: "editor" }); // grant → subscription re-runs
+    await r.run("authz:assignRole", { userId, role: "editor" }, { identity: admin.token }); // grant → subscription re-runs
     await new Promise((res) => setTimeout(res, 50));
     expect(lastQueryValue(sock, 1)).toBe(true);
 
-    await r.run("authz:revokeRole", { userId, role: "editor" }); // revoke → subscription re-runs (headline)
+    await r.run("authz:revokeRole", { userId, role: "editor" }, { identity: admin.token }); // revoke → subscription re-runs (headline)
     await new Promise((res) => setTimeout(res, 50));
     expect(lastQueryValue(sock, 1)).toBe(false);
   });

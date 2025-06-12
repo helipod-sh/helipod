@@ -221,6 +221,10 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
 
 `ctx.authz.assignRole(userId, role, scope?)` / `revokeRole(userId, role, scope?)`. `scope` is `{ type: string, id: string }` (e.g. `{ type: "org", id }`); omitted = global. The scope is the leading component of the effective-permissions index key, making cross-tenant isolation structural. `auth.scopesWith(permission, type?)` returns the scope ids where the caller holds a permission (for read predicates).
 
+**Managing roles is itself a permission.** `assignRole`/`revokeRole` require the caller to hold `authz:manage` **in the target scope** (grant it through a role, e.g. `admin: { authz: ["manage"] }`) — so role management can't be used to escalate privilege, and a scope admin can only grant within their own scope. An explicit `scope` must have a non-empty `type` and `id`; `""` is reserved for the global scope (omit `scope` for global).
+
+**Bootstrapping the first admin.** There is deliberately no ungated path to the first role. Seed it out-of-band through the privileged admin surface (the `stackbase` CLI / admin API / dashboard), which writes the first `admin` assignment directly — e.g. `runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId, role: "admin", scopeType: "", scopeId: "" } })`. From then on, that admin manages everyone else through the gated mutations.
+
 ### Relations & sharing
 
 `ctx.authz.addRelation(subject, relation, object)` / `removeRelation(...)` / `hasRelation(subject, relation, object)`. `subject` is a user (`userId`) or a **userset** (`"team:eng#member"` — group membership, propagates with zero per-member writes). Per-resource sharing is one relation row; revoke is one delete. Relation predicates in read policies make sharing reactive via child-table read-dependencies.
