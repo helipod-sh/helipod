@@ -55,6 +55,25 @@
         "vitest": "catalog:",
       },
     },
+    "components/authz": {
+      "name": "@stackbase/authz",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/auth": "workspace:*",
+        "@stackbase/component": "workspace:*",
+        "@stackbase/errors": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "examples/auth-demo": {
       "name": "@stackbase/example-auth-demo",
       "version": "0.0.0",
@@ -567,6 +586,8 @@
     "@stackbase/admin": ["@stackbase/admin@workspace:packages/admin"],
 
     "@stackbase/auth": ["@stackbase/auth@workspace:components/auth"],
+
+    "@stackbase/authz": ["@stackbase/authz@workspace:components/authz"],
 
     "@stackbase/cli": ["@stackbase/cli@workspace:packages/cli"],
 

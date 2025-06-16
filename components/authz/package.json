@@ -1,0 +1,8 @@
+{
+  "name": "@stackbase/authz", "version": "0.0.0", "private": true, "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "main": "./dist/index.js", "types": "./dist/index.d.ts",
+  "scripts": { "build": "tsup", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "dependencies": { "@stackbase/auth": "workspace:*", "@stackbase/component": "workspace:*", "@stackbase/errors": "workspace:*", "@stackbase/executor": "workspace:*", "@stackbase/values": "workspace:*" },
+  "devDependencies": { "@stackbase/docstore-sqlite": "workspace:*", "@stackbase/runtime-embedded": "workspace:*", "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+}
