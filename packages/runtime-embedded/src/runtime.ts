@@ -15,7 +15,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult } from "@stackbase/executor";
+import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -38,6 +38,10 @@ export interface EmbeddedRuntimeOptions {
   logSink?: LogSink;
   /** Context providers contributed by composed components; attached as ctx[name] on every function call. */
   contextProviders?: ReadonlyArray<ContextProvider>;
+  /** Row-policy registry contributed by components; enforced on every non-privileged run. */
+  policyRegistry?: ReadonlyMap<string, TablePolicy>;
+  /** Policy context providers contributed by components; used to build rule context for row policies. */
+  policyProviders?: ReadonlyArray<PolicyContextProvider>;
   /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
   now?: () => number;
 }
@@ -54,6 +58,8 @@ export class EmbeddedRuntime {
     private readonly systemModules: Record<string, RegisteredFunction>,
     private readonly componentNames: ReadonlySet<string>,
     private readonly contextProviders: ReadonlyArray<ContextProvider>,
+    private readonly policyRegistry: ReadonlyMap<string, TablePolicy>,
+    private readonly policyProviders: ReadonlyArray<PolicyContextProvider>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -73,6 +79,8 @@ export class EmbeddedRuntime {
     // (preserving the store, oracle, and transactor — no data loss on reload).
     const componentNames = options.componentNames ?? new Set<string>();
     const contextProviders = options.contextProviders ?? [];
+    const policyRegistry = options.policyRegistry ?? new Map();
+    const policyProviders = options.policyProviders ?? [];
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
@@ -84,11 +92,11 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, identity: identity ?? null });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
       async runMutation(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -121,7 +129,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders, policyRegistry, policyProviders);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -144,6 +152,8 @@ export class EmbeddedRuntime {
       path,
       namespace: namespaceForPath(path, this.componentNames),
       contextProviders: this.contextProviders,
+      policyRegistry: this.policyRegistry,
+      policyProviders: this.policyProviders,
       identity: opts?.identity ?? null,
     });
   }
