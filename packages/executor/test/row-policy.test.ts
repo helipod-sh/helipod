@@ -56,3 +56,26 @@ describe("row read policy", () => {
     expect(none.value).toEqual([]);                                         // ownerId === null matches nothing
   });
 });
+
+describe("row write policy", () => {
+  const writeRegistry = new Map([
+    ["todos", { write: ({ auth }: { auth: { userId: string | null } }, row: Record<string, unknown>) => row.ownerId === auth.userId }],
+  ]);
+
+  it("blocks writing a row you don't own; allows your own; privileged bypasses", async () => {
+    const ex = await harness();
+    const opts = { policyRegistry: writeRegistry, policyProviders: asUser("u1") };
+
+    // insert as u1: own row ok, other's row Forbidden
+    await expect(ex.run(mutation(async (ctx) => ctx.db.insert("todos", { ownerId: "u1", text: "ok" })), {}, opts)).resolves.toBeDefined();
+    await expect(ex.run(mutation(async (ctx) => ctx.db.insert("todos", { ownerId: "u2", text: "no" })), {}, opts)).rejects.toThrow(/write policy on todos/);
+
+    // seed a u2 row privileged, then u1's replace/delete of it is Forbidden (pre-write row is u2's)
+    const u2 = (await ex.run<{ _id: string }>(mutation(async (ctx) => ({ _id: await ctx.db.insert("todos", { ownerId: "u2", text: "x" }) })), {}, { privileged: true })).value._id;
+    await expect(ex.run(mutation(async (ctx) => ctx.db.replace(u2, { ownerId: "u2", text: "y" })), {}, opts)).rejects.toThrow(/write policy on todos/);
+    await expect(ex.run(mutation(async (ctx) => ctx.db.delete(u2)), {}, opts)).rejects.toThrow(/write policy on todos/);
+
+    // privileged can delete it
+    await expect(ex.run(mutation(async (ctx) => ctx.db.delete(u2)), {}, { privileged: true })).resolves.toBeDefined();
+  });
+});

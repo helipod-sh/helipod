@@ -31,7 +31,7 @@ import type { IndexCatalog } from "./catalog";
 import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
 import type { PolicyRegistry, RuleContext } from "./policy";
-import { evalReadPolicy, mergeReadPolicy } from "./policy";
+import { evalReadPolicy, evalWritePolicy, mergeReadPolicy } from "./policy";
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -80,6 +80,14 @@ export class InlineSyscallChannel implements SyscallChannel {
   call(op: string, argJson: string): Promise<string> {
     return this.router.dispatch(this.ctx, op, argJson);
   }
+}
+
+async function enforceWrite(ctx: KernelContext, table: string, row: DocumentValue): Promise<void> {
+  if (ctx.privileged || !ctx.getRuleContext) return;
+  const policy = ctx.policyRegistry.get(table);
+  if (!policy?.write) return;
+  const ok = await evalWritePolicy(policy, await ctx.getRuleContext(), row as Record<string, unknown>);
+  if (!ok) throw new ForbiddenOperationError(`write policy on ${table}`);
 }
 
 function requireTable(ctx: KernelContext, name: string): { tableNumber: number; fullName: string } {
@@ -148,6 +156,7 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
     _id: docId,
     _creationTime: Number(ctx.snapshotTs),
   };
+  await enforceWrite(ctx, fullName, doc);
   ctx.txn.put(id, doc);
   maintainIndexes(ctx, fullName, null, doc, id);
   return JSON.stringify({ id: docId });
@@ -162,6 +171,7 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
+  await enforceWrite(ctx, meta.name, oldDoc);
   const newDoc: DocumentValue = {
     ...(jsonToConvex(value) as DocumentValue),
     _id: id,
@@ -180,6 +190,7 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
+  if (oldDoc !== null) await enforceWrite(ctx, meta.name, oldDoc);
   ctx.txn.delete(internalId);
   maintainIndexes(ctx, meta.name, oldDoc, null, internalId);
   return "{}";
