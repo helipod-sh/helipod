@@ -26,3 +26,5 @@ export { InlineUdfExecutor, commitThenThrow, CommitThenThrow } from "./executor"
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";
 export { InMemoryLogSink, NoopLogSink } from "./log-sink";
+
+export * from "./policy";
