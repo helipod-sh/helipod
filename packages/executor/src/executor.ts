@@ -17,6 +17,7 @@ import { GuestDatabaseReader, GuestDatabaseWriter } from "./guest";
 import type { IndexCatalog } from "./catalog";
 import type { RegisteredFunction } from "./functions";
 import type { LogKind, LogSink } from "./log-sink";
+import type { PolicyRegistry, PolicyContextProvider, RuleContext } from "./policy";
 
 export interface ExecutorDeps {
   transactor: Transactor;
@@ -55,6 +56,10 @@ export interface RunOptions {
   identity?: string | null;
   /** Enabled components' context facades, attached as ctx[name]. */
   contextProviders?: ReadonlyArray<ContextProvider>;
+  /** Table → policy, consulted by the kernel on non-privileged db ops. */
+  policyRegistry?: PolicyRegistry;
+  /** Components contributing rule-context fields (e.g. authz → `{ auth }`). */
+  policyProviders?: ReadonlyArray<PolicyContextProvider>;
 }
 
 export interface UdfResult<T = unknown> {
@@ -114,7 +119,9 @@ export class InlineUdfExecutor {
 
     try {
       const commit = await this.deps.transactor.runInTransaction(async (txn) => {
-        const kctx: KernelContext = {
+        // Base context: NO policy enforcement. Used for the facade readers and the rule-context's own
+        // db reader, so a policy's internal reads are never themselves re-gated (no re-entrancy).
+        const baseKctx: KernelContext = {
           profile,
           txn,
           queryRuntime: this.deps.queryRuntime,
@@ -126,22 +133,43 @@ export class InlineUdfExecutor {
           privileged: options.privileged ?? false,
           identity: options.identity ?? null,
           now: startedAt,
+          policyRegistry: new Map(),
+          getRuleContext: null,
         };
-        const channel = new InlineSyscallChannel(this.router, kctx);
-        const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
-        const guestCtx: Record<string, unknown> = { db, random: () => kctx.random.next(), now: () => kctx.now };
+
+        const reserved = new Set(["db", "random", "now"]);
+        const guestCtx: Record<string, unknown> = { random: () => baseKctx.random.next(), now: () => baseKctx.now };
         const builtFacades: Record<string, unknown> = {};
         for (const p of options.contextProviders ?? []) {
-          if (p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
-          // Two independent locks on writes: the facade gets a read-only GuestDatabaseReader (no write
-          // methods), AND a query profile so the kernel's dbWrite gate is closed regardless of the caller's
-          // type. A facade is the one sanctioned cross-namespace READ path — it must never write.
-          const pctx: KernelContext = { ...kctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
+          if (reserved.has(p.name) || p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
+          const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
           const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
-          const facade = Object.freeze(p.build({ db: preader, identity: kctx.identity, now: kctx.now, components: builtFacades }));
+          const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades }));
           guestCtx[p.name] = facade;
           builtFacades[p.name] = facade;
         }
+
+        // Memoized rule-context: built lazily on the first policy hit, once per call.
+        const policyProviders = options.policyProviders ?? [];
+        let rcCache: Promise<RuleContext> | undefined;
+        const getRuleContext: (() => Promise<RuleContext>) | null = policyProviders.length === 0 ? null : () =>
+          (rcCache ??= (async () => {
+            const merged: Record<string, unknown> = {};
+            for (const p of policyProviders) {
+              const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
+              const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
+              Object.assign(merged, await p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades }));
+            }
+            const db = new GuestDatabaseReader(new InlineSyscallChannel(this.router, { ...baseKctx, profile: profileFor("query") }));
+            return { ...merged, db } as RuleContext;
+          })());
+
+        // Main context: carries the registry + rule-context builder → policy enforcement is ON.
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext };
+        const channel = new InlineSyscallChannel(this.router, kctx);
+        const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
+        guestCtx.db = db;
+
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
       });

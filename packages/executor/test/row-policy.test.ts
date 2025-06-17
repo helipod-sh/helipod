@@ -1,0 +1,58 @@
+import { describe, it, expect } from "vitest";
+import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@stackbase/docstore";
+import { SingleWriterTransactor } from "@stackbase/transactor";
+import { QueryRuntime } from "@stackbase/query-engine";
+import { encodeStorageIndexId } from "@stackbase/id-codec";
+import { InlineUdfExecutor, SimpleIndexCatalog, mutation, query } from "../src/index";
+import type { PolicyRegistry, PolicyContextProvider } from "../src/policy";
+
+async function harness() {
+  const store = new SqliteDocStore(new NodeSqliteAdapter());
+  await store.setupSchema();
+  const transactor = new SingleWriterTransactor(store, new MonotonicTimestampOracle());
+  const queryRuntime = new QueryRuntime(store);
+  const catalog = new SimpleIndexCatalog();
+  catalog.addTable("todos", 5001);
+  catalog.addIndex({ table: "todos", tableNumber: 5001, index: "by_creation", fields: [], indexId: encodeStorageIndexId(5001, "by_creation") });
+  return new InlineUdfExecutor({ transactor, queryRuntime, catalog });
+}
+
+// Registry: todos are readable only when ownerId === the caller's userId.
+const registry: PolicyRegistry = new Map([
+  ["todos", { read: ({ auth }) => ({ ownerId: auth.userId }) }],
+]);
+// A synthetic provider that reports the caller as "u1".
+const asUser = (userId: string | null): PolicyContextProvider[] => [{
+  namespace: "authz",
+  build: () => ({ auth: { userId, identity: null, can: async () => false, roles: async () => [], scopesWith: async () => [] } }),
+}];
+
+describe("row read policy", () => {
+  it("filters query/get to visible rows; privileged bypasses", async () => {
+    const ex = await harness();
+    // seed two owners (privileged → full table, no policy)
+    const idU1 = (await ex.run<{ _id: string }>(mutation(async (ctx) => ({ _id: await ctx.db.insert("todos", { ownerId: "u1", text: "a" }) })), {}, { privileged: true })).value._id;
+    const idU2 = (await ex.run<{ _id: string }>(mutation(async (ctx) => ({ _id: await ctx.db.insert("todos", { ownerId: "u2", text: "b" }) })), {}, { privileged: true })).value._id;
+
+    const opts = { policyRegistry: registry, policyProviders: asUser("u1") };
+
+    const visible = await ex.run<any[]>(query(async (ctx) => ctx.db.query("todos", "by_creation").collect()), {}, opts);
+    expect(visible.value.map((d) => d.ownerId)).toEqual(["u1"]);            // only u1's row
+
+    const mine = await ex.run<any>(query(async (ctx) => ctx.db.get(idU1)), {}, opts);
+    expect(mine.value?.text).toBe("a");
+    const theirs = await ex.run<any>(query(async (ctx) => ctx.db.get(idU2)), {}, opts);
+    expect(theirs.value).toBeNull();                                        // hidden → null, no existence leak
+
+    const all = await ex.run<any[]>(query(async (ctx) => ctx.db.query("todos", "by_creation").collect()), {}, { privileged: true });
+    expect(all.value.length).toBe(2);                                       // privileged sees everything
+  });
+
+  it("anonymous (userId null) sees zero rows (deny-by-default via predicate)", async () => {
+    const ex = await harness();
+    await ex.run(mutation(async (ctx) => ctx.db.insert("todos", { ownerId: "u1", text: "a" })), {}, { privileged: true });
+    const none = await ex.run<any[]>(query(async (ctx) => ctx.db.query("todos", "by_creation").collect()), {}, { policyRegistry: registry, policyProviders: asUser(null) });
+    expect(none.value).toEqual([]);                                         // ownerId === null matches nothing
+  });
+});
