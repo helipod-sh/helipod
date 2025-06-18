@@ -57,6 +57,38 @@ describe("row read policy", () => {
   });
 });
 
+describe("row write policy — replace post-image", () => {
+  const writeRegistry: PolicyRegistry = new Map([
+    ["todos", { write: ({ auth }, row) => row["ownerId"] === auth.userId }],
+  ]);
+
+  it("blocks replace when the resulting row reassigns ownership (post-image check)", async () => {
+    const ex = await harness();
+    const opts = { policyRegistry: writeRegistry, policyProviders: asUser("u1") };
+
+    // seed a row owned by u1 (privileged insert bypasses policy)
+    const id = (await ex.run<{ _id: string }>(mutation(async (ctx) => ({ _id: await ctx.db.insert("todos", { ownerId: "u1", text: "orig" }) })), {}, { privileged: true })).value._id;
+
+    // u1 tries to hand the row to u2 — post-image check must REJECT this
+    await expect(
+      ex.run(mutation(async (ctx) => ctx.db.replace(id, { ownerId: "u2", text: "hijack" })), {}, opts),
+    ).rejects.toThrow(/write policy on todos/);
+  });
+
+  it("allows replace when ownership is preserved (pre- and post-image both pass)", async () => {
+    const ex = await harness();
+    const opts = { policyRegistry: writeRegistry, policyProviders: asUser("u1") };
+
+    // seed a row owned by u1 (privileged)
+    const id = (await ex.run<{ _id: string }>(mutation(async (ctx) => ({ _id: await ctx.db.insert("todos", { ownerId: "u1", text: "orig" }) })), {}, { privileged: true })).value._id;
+
+    // u1 edits the row keeping ownerId — should succeed
+    await expect(
+      ex.run(mutation(async (ctx) => ctx.db.replace(id, { ownerId: "u1", text: "edited" })), {}, opts),
+    ).resolves.toBeDefined();
+  });
+});
+
 describe("row write policy", () => {
   const writeRegistry = new Map([
     ["todos", { write: ({ auth }: { auth: { userId: string | null } }, row: Record<string, unknown>) => row.ownerId === auth.userId }],

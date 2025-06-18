@@ -177,6 +177,7 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
     _id: id,
     _creationTime: (oldDoc["_creationTime"] as number) ?? Number(ctx.snapshotTs),
   };
+  await enforceWrite(ctx, meta.name, newDoc); // post-image: the result must also satisfy the write policy
   ctx.txn.put(internalId, newDoc);
   maintainIndexes(ctx, meta.name, oldDoc, newDoc, internalId);
   return "{}";
