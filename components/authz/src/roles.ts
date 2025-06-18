@@ -1,7 +1,10 @@
+import type { TablePolicy } from "@stackbase/executor";
+
 export interface RoleDef { inherits?: string | string[]; [resource: string]: string[] | string | string[] | undefined }
 export interface AuthzConfig {
   permissions?: Record<string, string[]>;
   roles?: Record<string, RoleDef>;
+  policies?: Record<string, TablePolicy>;
 }
 
 /** Does `role` (via inheritance) grant `permission` (a "resource:action" string)? Supports `*`. */
