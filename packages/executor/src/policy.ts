@@ -48,8 +48,8 @@ export interface PolicyContextProvider {
   readonly build: (cctx: ComponentContext) => object | Promise<object>;
 }
 
-const ALWAYS_TRUE: FilterExpr = { op: "and", clauses: [] };
-const ALWAYS_FALSE: FilterExpr = { op: "or", clauses: [] };
+const ALWAYS_TRUE = Object.freeze({ op: "and" as const, clauses: Object.freeze([]) as unknown as FilterExpr[] });
+const ALWAYS_FALSE = Object.freeze({ op: "or" as const, clauses: Object.freeze([]) as unknown as FilterExpr[] });
 
 /** Compile a policy predicate to a post-filter. Returns null when the policy adds no restriction. */
 export function compileWhere(where: PolicyPredicate): FilterExpr | null {

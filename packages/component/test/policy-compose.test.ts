@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { defineComponent, composeComponents } from "../src/index";
 import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation } from "@stackbase/executor";
 
 const appSchema = defineSchema({ todos: defineTable({ ownerId: v.string(), text: v.string() }) });
 
