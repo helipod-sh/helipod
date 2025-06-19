@@ -1,6 +1,6 @@
 import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog } from "@stackbase/executor";
-import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
+import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider } from "@stackbase/executor";
 import type { SchemaDefinitionJSON } from "@stackbase/values";
 import type { ComponentDefinition } from "./define-component";
 
@@ -96,6 +96,8 @@ export interface ComposedProject {
   componentNames: ReadonlySet<string>;
   tableNumbers: Record<string, number>;
   contextProviders: ContextProvider[];
+  policyRegistry: ReadonlyMap<string, TablePolicy>;
+  policyProviders: PolicyContextProvider[];
 }
 
 export function composeComponents(
@@ -111,5 +113,16 @@ export function composeComponents(
   const contextProviders: ContextProvider[] = components
     .filter((c) => c.context)
     .map((c) => ({ name: c.name, namespace: c.name, build: c.context! }));
-  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders };
+  const policyRegistry = new Map<string, TablePolicy>();
+  const policyProviders: PolicyContextProvider[] = [];
+  for (const c of components) {
+    for (const [table, policy] of Object.entries(c.policies ?? {})) {
+      const key = getFullTableName(table, ""); // policies gate app (root) tables in v1
+      if (tableNumbers[key] === undefined) throw new Error(`component "${c.name}" declares a policy for unknown table "${table}"`);
+      if (policyRegistry.has(key)) throw new Error(`duplicate policy for table "${table}"`);
+      policyRegistry.set(key, policy);
+    }
+    if (c.policyContext) policyProviders.push({ namespace: c.name, build: c.policyContext });
+  }
+  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders };
 }

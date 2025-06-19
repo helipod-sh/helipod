@@ -1,5 +1,5 @@
 import type { SchemaDefinition, Validator } from "@stackbase/values";
-import type { RegisteredFunction } from "@stackbase/executor";
+import type { RegisteredFunction, TablePolicy, PolicyContextProvider } from "@stackbase/executor";
 import type { ComponentContext } from "@stackbase/executor";
 
 export interface ComponentDefinition {
@@ -13,6 +13,10 @@ export interface ComponentDefinition {
   context?: (cctx: ComponentContext) => object;
   /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
   contextType?: { import: string; type: string };
+  /** Row policies this component declares for app tables: table → { read?, write? }. */
+  policies?: Record<string, TablePolicy>;
+  /** Contributes fields to every row policy's rule-context (e.g. authz → `{ auth }`). */
+  policyContext?: PolicyContextProvider["build"];
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {

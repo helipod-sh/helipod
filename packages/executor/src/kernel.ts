@@ -17,6 +17,7 @@ import { indexKeyspaceId, keySuccessor } from "@stackbase/index-key-codec";
 import {
   computeIndexUpdates,
   extractIndexKey,
+  evaluateFilter,
   type ComparisonOp,
   type FilterExpr,
   type Query,
@@ -29,6 +30,8 @@ import type { QueryRuntime } from "@stackbase/query-engine";
 import type { IndexCatalog } from "./catalog";
 import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
+import type { PolicyRegistry, RuleContext } from "./policy";
+import { evalReadPolicy, evalWritePolicy, mergeReadPolicy } from "./policy";
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -43,6 +46,10 @@ export interface KernelContext {
   readonly identity: string | null;
   /** Wall-clock ms captured once at execution start (fixed per OCC attempt). */
   readonly now: number;
+  /** Table → policy; empty for facade / rule-context readers so enforcement never re-enters. */
+  readonly policyRegistry: PolicyRegistry;
+  /** Lazily builds (and memoizes) the rule-context; null when no policy provider is composed. */
+  readonly getRuleContext: (() => Promise<RuleContext>) | null;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -73,6 +80,14 @@ export class InlineSyscallChannel implements SyscallChannel {
   call(op: string, argJson: string): Promise<string> {
     return this.router.dispatch(this.ctx, op, argJson);
   }
+}
+
+async function enforceWrite(ctx: KernelContext, table: string, row: DocumentValue): Promise<void> {
+  if (ctx.privileged || !ctx.getRuleContext) return;
+  const policy = ctx.policyRegistry.get(table);
+  if (!policy?.write) return;
+  const ok = await evalWritePolicy(policy, await ctx.getRuleContext(), row as Record<string, unknown>);
+  if (!ok) throw new ForbiddenOperationError(`write policy on ${table}`);
 }
 
 function requireTable(ctx: KernelContext, name: string): { tableNumber: number; fullName: string } {
@@ -120,6 +135,13 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   const value = await ctx.txn.get(internalId);
+  if (value !== null && !ctx.privileged && ctx.getRuleContext) {
+    const policy = ctx.policyRegistry.get(meta.name);
+    if (policy?.read) {
+      const expr = await evalReadPolicy(policy, await ctx.getRuleContext());
+      if (expr && !evaluateFilter(value as DocumentValue, expr)) return JSON.stringify(null);
+    }
+  }
   return JSON.stringify(value === null ? null : convexToJson(value as Value));
 };
 
@@ -134,6 +156,7 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
     _id: docId,
     _creationTime: Number(ctx.snapshotTs),
   };
+  await enforceWrite(ctx, fullName, doc);
   ctx.txn.put(id, doc);
   maintainIndexes(ctx, fullName, null, doc, id);
   return JSON.stringify({ id: docId });
@@ -148,11 +171,13 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
+  await enforceWrite(ctx, meta.name, oldDoc);
   const newDoc: DocumentValue = {
     ...(jsonToConvex(value) as DocumentValue),
     _id: id,
     _creationTime: (oldDoc["_creationTime"] as number) ?? Number(ctx.snapshotTs),
   };
+  await enforceWrite(ctx, meta.name, newDoc); // post-image: the result must also satisfy the write policy
   ctx.txn.put(internalId, newDoc);
   maintainIndexes(ctx, meta.name, oldDoc, newDoc, internalId);
   return "{}";
@@ -166,6 +191,7 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
+  if (oldDoc !== null) await enforceWrite(ctx, meta.name, oldDoc);
   ctx.txn.delete(internalId);
   maintainIndexes(ctx, meta.name, oldDoc, null, internalId);
   return "{}";
@@ -200,6 +226,11 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
     limit: spec.limit,
   };
 
+  if (!ctx.privileged && ctx.getRuleContext) {
+    const policy = ctx.policyRegistry.get(tableName);
+    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await evalReadPolicy(policy, await ctx.getRuleContext()));
+  }
+
   const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs);
   for (const range of readSet.toArray()) ctx.txn.recordRead(range);
   return JSON.stringify({ docs: documents.map((d) => convexToJson(d as Value)) });
@@ -217,6 +248,11 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     order: spec.order,
     filters: spec.filters?.map((f) => ({ op: f.op, field: f.field, value: jsonToConvex(f.value) }) as FilterExpr),
   };
+
+  if (!ctx.privileged && ctx.getRuleContext) {
+    const policy = ctx.policyRegistry.get(tableName);
+    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await evalReadPolicy(policy, await ctx.getRuleContext()));
+  }
 
   const { page, nextCursor, hasMore, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
     cursor: spec.cursor,

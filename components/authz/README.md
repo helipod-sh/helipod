@@ -213,6 +213,12 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
 - **`read(ctx)` → `WhereInput | true | false`** — returns a query predicate that is **AND-merged into every read** of the table (`get`, `query`, `collect`, paginate, and hydrated joins). `true` = unrestricted; `false` = deny (zero rows); returning nothing = no restriction added by this policy.
 - **`write(ctx, row)` → `boolean | Promise<boolean>`** — receives the candidate row (on insert) or pre-write row (on update/delete) and returns allow/deny; `false`/throw → `Forbidden`. **Write rules may call `ctx.db`** to resolve relationships (e.g. "is the caller a member of the row's org?"), and those reads join the transaction.
 
+**Policy-author notes:**
+
+1. **Write policies gate both images on replace.** Insert checks the new row; replace checks **both** the existing row (you may modify it) **and** the resulting row (so you can't reassign it out of your own visibility); delete checks the existing row. This means a write rule like `row.ownerId === auth.userId` blocks an ownership reassignment even if the caller currently owns the document.
+2. **`scopesWith` returns scoped grants only, not global ones.** Pair it with a preceding `auth.can(permission)` check — a global grant makes `can` true and means unrestricted access — e.g. `auth.can("documents:read") ? true : { orgId: { in: await auth.scopesWith("documents:read") } }`.
+3. **`isNull: true` matches an explicit `null`, not a missing field.** A missing field is `undefined` in the document value, which is distinct from `null` — only explicit `null` values stored on a field match `{ field: { isNull: true } }`.
+
 **Rule context** (`ctx`): `auth.userId` (the resolved caller, `null` if anonymous), `auth.roles`, `auth.can(permission, scope?)`, `auth.scopesWith(permission, type?)`, `auth.identity` (raw claims), and `db` (a read-only `ctx.db` for relation lookups).
 
 **Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`, `contains`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
