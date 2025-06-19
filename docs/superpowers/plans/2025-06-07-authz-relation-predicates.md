@@ -37,7 +37,7 @@
 ## Task 1: Schema `.relation()` builder
 
 **Files:**
-- Modify: `packages/values/src/schema.ts`
+- Modify: `packages/values/src/schema.ts`, `packages/values/src/index.ts`
 - Test: `packages/values/test/relation.test.ts`
 
 **Interfaces:**
@@ -124,6 +124,8 @@ Add `relations` to the `export()` return object:
       relations: this.relationsList,
 ```
 
+Because the exported `TableDefinitionJSON` now references `RelationJSON`, export `RelationJSON` from the package index too, or the `.d.ts` build emit fails. In `packages/values/src/index.ts`, add `RelationJSON` to the `export type { … } from "./schema";` list (alongside `TableDefinitionJSON`).
+
 - [ ] **Step 4: Run — verify it passes**
 
 Run: `bun run --filter @stackbase/values test relation`
@@ -135,7 +137,7 @@ Run: `bun run build && bun run typecheck && bun run test`
 Expected: PASS (adding a required JSON field with a default `[]` doesn't break existing schema consumers — verify).
 
 ```bash
-git add packages/values/src/schema.ts packages/values/test/relation.test.ts
+git add packages/values/src/schema.ts packages/values/src/index.ts packages/values/test/relation.test.ts
 git commit -m "feat(values): TableDefinition.relation() — declare to-many relations in the schema"
 ```
 
