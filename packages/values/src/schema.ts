@@ -24,6 +24,14 @@ export interface VectorIndexDefinitionJSON {
   dimensions: number;
   filterFields: string[];
 }
+export interface RelationJSON {
+  /** Relation name used in policies (e.g. "sharedWith"). */
+  name: string;
+  /** The child table holding the back-reference rows. */
+  table: string;
+  /** The child field that references THIS table's `_id`. */
+  field: string;
+}
 export interface TableDefinitionJSON {
   documentType: ValidatorJSON;
   indexes: IndexDefinitionJSON[];
@@ -31,6 +39,8 @@ export interface TableDefinitionJSON {
   vectorIndexes: VectorIndexDefinitionJSON[];
   /** The document field used as the shard key (seam #1), or null. */
   shardKey: string | null;
+  /** Declared to-many relations (scale-seam #2 / row-policy relation predicates). */
+  relations: RelationJSON[];
 }
 export interface SchemaDefinitionJSON {
   tables: Record<string, TableDefinitionJSON>;
@@ -43,6 +53,7 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
   private readonly searchIndexes: SearchIndexDefinitionJSON[] = [];
   private readonly vectorIndexes: VectorIndexDefinitionJSON[] = [];
   private shardKeyField: string | null = null;
+  private readonly relationsList: RelationJSON[] = [];
 
   constructor(readonly fields: F) {
     this.documentValidator = v.object(fields) as unknown as Validator<unknown>;
@@ -88,6 +99,12 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
     return this;
   }
 
+  /** Declare a to-many relation: rows in `table` whose `field` references this table's `_id`. */
+  relation(name: string, spec: { table: string; field: string }): this {
+    this.relationsList.push({ name, table: spec.table, field: spec.field });
+    return this;
+  }
+
   export(): TableDefinitionJSON {
     return {
       documentType: this.documentValidator.toJSON(),
@@ -95,6 +112,7 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
       searchIndexes: this.searchIndexes,
       vectorIndexes: this.vectorIndexes,
       shardKey: this.shardKeyField,
+      relations: this.relationsList,
     };
   }
 }
