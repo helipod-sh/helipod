@@ -100,6 +100,12 @@ describe("resolveWhere — none / every / isNot", () => {
     // a doc whose orgId is o2 (not o1) matches
     expect(evaluateFilter({ _id: "y", orgId: "o2" } as never, expr!)).toBe(true);
   });
+
+  it("every is vacuously true — a parent with zero related rows is admitted", async () => {
+    const expr = await resolveWhere({ sharedWith: { every: { userId: "u1" } } }, ctx);
+    // "d_none" has no document_shares rows referencing it → not excluded → visible
+    expect(evaluateFilter({ _id: "d_none", title: "no shares" } as never, expr!)).toBe(true);
+  });
 });
 
 describe("resolveWhere — multi-level chains", () => {
