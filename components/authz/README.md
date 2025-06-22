@@ -223,6 +223,29 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
 
 **Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`, `contains`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
 
+**Relation predicates (`some` / `is`).** A read policy can filter by related rows:
+- `{ sharedWith: { some: { userId: auth.userId } } }` — to-many: a row in the related
+  child table names the caller. Declare the relation on the table:
+  `defineTable({...}).relation("sharedWith", { table: "document_shares", field: "documentId" })`.
+- `{ orgId: { is: { ownerId: auth.userId } } }` — to-one: follow a `v.id` field to its row
+  and test it (no declaration needed).
+
+Both are **reactive** — a write to the related table live-updates the subscription — and the leaf
+of a relation clause is field-predicates-only (nested relations are not yet supported). Performance
+note: v1 scans the related table per clause; declaring an index on the child's filtered field is
+recommended and will be used once index push-down lands.
+
+Two things to know when authoring relation predicates:
+
+- **The relation lookup ignores the related table's own read policy — by intent.** The semi-join
+  reads *all* rows of the child/target table to decide the parent's visibility, so a `read` policy on
+  `document_shares` does **not** hide share rows from the resolver. The authorization decision is made
+  from the true data, not the caller's filtered view (otherwise a user could be denied a resource they
+  were actually granted). Only the id-set is used — child rows are never returned to the caller.
+- **`NOT` over a relation clause is an anti-join.** `{ NOT: { sharedWith: { some: { userId: auth.userId } } } }`
+  reads as "rows *not* shared with me" — a valid but easy-to-misread negation. Prefer expressing
+  visibility positively (an `OR` of the ways a row *is* visible) and reach for `NOT` deliberately.
+
 ### Scoped role assignment
 
 `ctx.authz.assignRole(userId, role, scope?)` / `revokeRole(userId, role, scope?)`. `scope` is `{ type: string, id: string }` (e.g. `{ type: "org", id }`); omitted = global. The scope is the leading component of the effective-permissions index key, making cross-tenant isolation structural. `auth.scopesWith(permission, type?)` returns the scope ids where the caller holds a permission (for read predicates).

@@ -15,7 +15,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy } from "@stackbase/executor";
+import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -42,6 +42,8 @@ export interface EmbeddedRuntimeOptions {
   policyRegistry?: ReadonlyMap<string, TablePolicy>;
   /** Policy context providers contributed by components; used to build rule context for row policies. */
   policyProviders?: ReadonlyArray<PolicyContextProvider>;
+  /** Declared relations, consulted by the kernel when resolving relation predicates. */
+  relationRegistry?: RelationRegistry;
   /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
   now?: () => number;
 }
@@ -60,6 +62,7 @@ export class EmbeddedRuntime {
     private readonly contextProviders: ReadonlyArray<ContextProvider>,
     private readonly policyRegistry: ReadonlyMap<string, TablePolicy>,
     private readonly policyProviders: ReadonlyArray<PolicyContextProvider>,
+    private readonly relationRegistry: RelationRegistry | undefined,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -81,6 +84,7 @@ export class EmbeddedRuntime {
     const contextProviders = options.contextProviders ?? [];
     const policyRegistry = options.policyRegistry ?? new Map();
     const policyProviders = options.policyProviders ?? [];
+    const relationRegistry = options.relationRegistry;
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
@@ -92,11 +96,11 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
       },
       async runMutation(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -129,7 +133,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders, policyRegistry, policyProviders);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -154,6 +158,7 @@ export class EmbeddedRuntime {
       contextProviders: this.contextProviders,
       policyRegistry: this.policyRegistry,
       policyProviders: this.policyProviders,
+      relationRegistry: this.relationRegistry,
       identity: opts?.identity ?? null,
     });
   }

@@ -35,6 +35,7 @@ export {
   SchemaDefinition,
 } from "./schema";
 export type {
+  RelationJSON,
   IndexDefinitionJSON,
   SearchIndexDefinitionJSON,
   VectorIndexDefinitionJSON,

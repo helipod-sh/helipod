@@ -17,7 +17,7 @@ import { GuestDatabaseReader, GuestDatabaseWriter } from "./guest";
 import type { IndexCatalog } from "./catalog";
 import type { RegisteredFunction } from "./functions";
 import type { LogKind, LogSink } from "./log-sink";
-import type { PolicyRegistry, PolicyContextProvider, RuleContext } from "./policy";
+import type { PolicyRegistry, PolicyContextProvider, RuleContext, RelationRegistry } from "./policy";
 
 export interface ExecutorDeps {
   transactor: Transactor;
@@ -60,6 +60,8 @@ export interface RunOptions {
   policyRegistry?: PolicyRegistry;
   /** Components contributing rule-context fields (e.g. authz → `{ auth }`). */
   policyProviders?: ReadonlyArray<PolicyContextProvider>;
+  /** Declared relations, consulted by the kernel when resolving relation predicates. */
+  relationRegistry?: RelationRegistry;
 }
 
 export interface UdfResult<T = unknown> {
@@ -135,6 +137,7 @@ export class InlineUdfExecutor {
           now: startedAt,
           policyRegistry: new Map(),
           getRuleContext: null,
+          relationRegistry: { toMany: new Map(), toOne: new Map() },
         };
 
         const reserved = new Set(["db", "random", "now"]);
@@ -165,7 +168,7 @@ export class InlineUdfExecutor {
           })());
 
         // Main context: carries the registry + rule-context builder → policy enforcement is ON.
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext };
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;

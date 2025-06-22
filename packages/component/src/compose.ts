@@ -1,7 +1,7 @@
 import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog } from "@stackbase/executor";
-import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider } from "@stackbase/executor";
-import type { SchemaDefinitionJSON } from "@stackbase/values";
+import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@stackbase/executor";
+import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
 import type { ComponentDefinition } from "./define-component";
 
 const DEFAULT_INDEX = "by_creation";
@@ -98,6 +98,42 @@ export interface ComposedProject {
   contextProviders: ContextProvider[];
   policyRegistry: ReadonlyMap<string, TablePolicy>;
   policyProviders: PolicyContextProvider[];
+  relationRegistry: RelationRegistry;
+}
+
+function buildRelationRegistry(
+  appSchema: SchemaDefinitionJSON,
+  components: ComponentDefinition[],
+): RelationRegistry {
+  // Resolve every table's JSON keyed by its full name (app tables are bare; components prefixed).
+  const tableJson: Record<string, TableDefinitionJSON> = {};
+  for (const [name, tdef] of Object.entries(appSchema.tables)) tableJson[getFullTableName(name, "")] = tdef;
+  for (const c of components)
+    for (const [name, tdef] of Object.entries(c.schema.export().tables)) tableJson[getFullTableName(name, c.name)] = tdef;
+
+  const toMany = new Map<string, Map<string, { table: string; field: string }>>();
+  const toOne = new Map<string, Map<string, string>>();
+
+  for (const [full, tdef] of Object.entries(tableJson)) {
+    // to-one: v.id fields on this table
+    if (tdef.documentType.type === "object") {
+      const m = new Map<string, string>();
+      for (const [fieldName, f] of Object.entries(tdef.documentType.value))
+        if (f.fieldType.type === "id") m.set(fieldName, f.fieldType.tableName);
+      if (m.size > 0) toOne.set(full, m);
+    }
+    // to-many: declared relations (child tables are app/root tables in v1)
+    for (const rel of tdef.relations ?? []) {
+      const childFull = getFullTableName(rel.table, "");
+      const child = tableJson[childFull];
+      if (!child) throw new Error(`relation "${rel.name}" on "${full}" references unknown table "${rel.table}"`);
+      if (child.documentType.type === "object" && !(rel.field in child.documentType.value))
+        throw new Error(`relation "${rel.name}" on "${full}" references unknown field "${rel.field}" on "${rel.table}"`);
+      if (!toMany.has(full)) toMany.set(full, new Map());
+      toMany.get(full)!.set(rel.name, { table: childFull, field: rel.field });
+    }
+  }
+  return { toMany, toOne };
 }
 
 export function composeComponents(
@@ -124,5 +160,6 @@ export function composeComponents(
     }
     if (c.policyContext) policyProviders.push({ namespace: c.name, build: c.policyContext });
   }
-  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders };
+  const relationRegistry = buildRelationRegistry(app.schemaJson, components);
+  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry };
 }

@@ -30,8 +30,8 @@ import type { QueryRuntime } from "@stackbase/query-engine";
 import type { IndexCatalog } from "./catalog";
 import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
-import type { PolicyRegistry, RuleContext } from "./policy";
-import { evalReadPolicy, evalWritePolicy, mergeReadPolicy } from "./policy";
+import type { PolicyRegistry, RuleContext, RelationRegistry } from "./policy";
+import { evalWritePolicy, mergeReadPolicy, resolveReadPolicy } from "./policy";
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -50,6 +50,8 @@ export interface KernelContext {
   readonly policyRegistry: PolicyRegistry;
   /** Lazily builds (and memoizes) the rule-context; null when no policy provider is composed. */
   readonly getRuleContext: (() => Promise<RuleContext>) | null;
+  /** Declared relations (to-many + to-one), for resolving relation predicates in read policies. */
+  readonly relationRegistry: RelationRegistry;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -138,7 +140,7 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   if (value !== null && !ctx.privileged && ctx.getRuleContext) {
     const policy = ctx.policyRegistry.get(meta.name);
     if (policy?.read) {
-      const expr = await evalReadPolicy(policy, await ctx.getRuleContext());
+      const expr = await resolveReadPolicy(policy, await ctx.getRuleContext(), meta.name, ctx.relationRegistry);
       if (expr && !evaluateFilter(value as DocumentValue, expr)) return JSON.stringify(null);
     }
   }
@@ -228,7 +230,7 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
 
   if (!ctx.privileged && ctx.getRuleContext) {
     const policy = ctx.policyRegistry.get(tableName);
-    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await evalReadPolicy(policy, await ctx.getRuleContext()));
+    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
   }
 
   const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs);
@@ -251,7 +253,7 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
 
   if (!ctx.privileged && ctx.getRuleContext) {
     const policy = ctx.policyRegistry.get(tableName);
-    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await evalReadPolicy(policy, await ctx.getRuleContext()));
+    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
   }
 
   const { page, nextCursor, hasMore, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {

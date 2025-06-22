@@ -1,4 +1,4 @@
-import type { FilterExpr } from "@stackbase/query-engine";
+import { evaluateFilter, type FilterExpr } from "@stackbase/query-engine";
 import type { Value } from "@stackbase/values";
 import type { GuestDatabaseReader } from "./guest";
 import type { ComponentContext } from "./executor";
@@ -77,6 +77,8 @@ function isFieldOps(cond: unknown): cond is FieldOps {
 function compileField(field: string, cond: unknown): FilterExpr {
   if (!isFieldOps(cond)) return { op: "eq", field, value: cond as Value };
   const ops = cond;
+  if ("some" in ops || "is" in ops)
+    throw new Error(`relation clauses ("some"/"is") are only valid at the top level of a policy (resolved by resolveWhere); nested relations are not supported`);
   const clauses: FilterExpr[] = [];
   if ("eq" in ops) clauses.push({ op: "eq", field, value: ops.eq as Value });
   if ("ne" in ops) clauses.push({ op: "neq", field, value: ops.ne as Value });
@@ -107,4 +109,90 @@ export async function evalWritePolicy(
 ): Promise<boolean> {
   if (!policy.write) return true;
   return await policy.write(rc, row);
+}
+
+// ─── Relation predicate resolver (Layer 2) ───────────────────────────────────
+
+export type RelationClause = { some: WhereInput } | { is: WhereInput };
+
+export interface RelationRegistry {
+  /** parentTable → relationName → { child table, back-reference field }. */
+  toMany: ReadonlyMap<string, ReadonlyMap<string, { table: string; field: string }>>;
+  /** parentTable → fieldName → target table (derived from v.id fields). */
+  toOne: ReadonlyMap<string, ReadonlyMap<string, string>>;
+}
+
+export interface ResolveCtx {
+  parentTable: string;
+  relations: RelationRegistry;
+  db: GuestDatabaseReader;
+}
+
+function isRelationClause(cond: unknown): cond is RelationClause {
+  return cond !== null && typeof cond === "object" && !Array.isArray(cond) && !(cond instanceof ArrayBuffer)
+    && ("some" in cond || "is" in cond);
+}
+
+async function resolveSome(relName: string, leaf: WhereInput, ctx: ResolveCtx): Promise<FilterExpr> {
+  const rel = ctx.relations.toMany.get(ctx.parentTable)?.get(relName);
+  if (!rel) throw new Error(`unknown relation "${relName}" on table "${ctx.parentTable}"`);
+  const leafExpr = compileWhere(leaf);
+  const rows = await ctx.db.query(rel.table, "by_creation").collect();
+  const ids = new Set<Value>();
+  for (const row of rows) {
+    if (leafExpr === null || evaluateFilter(row, leafExpr)) {
+      const ref = (row as Record<string, unknown>)[rel.field];
+      if (ref !== undefined) ids.add(ref as Value);
+    }
+  }
+  return compileWhere({ _id: { in: [...ids] } }) ?? ALWAYS_FALSE;
+}
+
+async function resolveIs(fieldName: string, leaf: WhereInput, ctx: ResolveCtx): Promise<FilterExpr> {
+  const targetTable = ctx.relations.toOne.get(ctx.parentTable)?.get(fieldName);
+  if (!targetTable) throw new Error(`field "${fieldName}" is not a reference (v.id) on table "${ctx.parentTable}"`);
+  const leafExpr = compileWhere(leaf);
+  const rows = await ctx.db.query(targetTable, "by_creation").collect();
+  const ids = new Set<Value>();
+  for (const row of rows) {
+    if (leafExpr === null || evaluateFilter(row, leafExpr)) {
+      const id = (row as Record<string, unknown>)._id;
+      if (id !== undefined) ids.add(id as Value);
+    }
+  }
+  return compileWhere({ [fieldName]: { in: [...ids] } }) ?? ALWAYS_FALSE;
+}
+
+async function resolveClause(key: string, cond: unknown, ctx: ResolveCtx): Promise<FilterExpr> {
+  if (isRelationClause(cond)) {
+    if ("some" in cond) return resolveSome(key, cond.some, ctx);
+    return resolveIs(key, cond.is, ctx);
+  }
+  return compileWhere({ [key]: cond } as WhereInput) ?? ALWAYS_TRUE;
+}
+
+async function resolveNode(node: WhereInput, ctx: ResolveCtx): Promise<FilterExpr> {
+  const n = node as Record<string, unknown>;
+  if (Array.isArray(n.AND)) return { op: "and", clauses: await Promise.all((n.AND as WhereInput[]).map((c) => resolveNode(c, ctx))) };
+  if (Array.isArray(n.OR)) return { op: "or", clauses: await Promise.all((n.OR as WhereInput[]).map((c) => resolveNode(c, ctx))) };
+  if (n.NOT !== undefined) return { op: "not", clause: await resolveNode(n.NOT as WhereInput, ctx) };
+  const clauses: FilterExpr[] = [];
+  for (const [key, cond] of Object.entries(n)) clauses.push(await resolveClause(key, cond, ctx));
+  if (clauses.length === 0) return ALWAYS_TRUE;
+  return clauses.length === 1 ? clauses[0]! : { op: "and", clauses };
+}
+
+/** Async superset of compileWhere: resolves relation clauses via semi-join, then behaves like compileWhere. */
+export async function resolveWhere(where: PolicyPredicate, ctx: ResolveCtx): Promise<FilterExpr | null> {
+  if (where === undefined || where === true) return null;
+  if (where === false) return ALWAYS_FALSE;
+  return resolveNode(where, ctx);
+}
+
+/** Read-path entry: resolve a table's read policy (with relation clauses) to a post-filter. */
+export async function resolveReadPolicy(
+  policy: TablePolicy, rc: RuleContext, parentTable: string, relations: RelationRegistry,
+): Promise<FilterExpr | null> {
+  if (!policy.read) return null;
+  return resolveWhere(await policy.read(rc), { parentTable, relations, db: rc.db });
 }
