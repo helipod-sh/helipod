@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolveWhere, compileWhere, type RelationRegistry } from "../src/policy";
+import { evaluateFilter } from "@stackbase/query-engine";
 import type { GuestDatabaseReader } from "../src/guest";
 import type { DocumentValue } from "@stackbase/docstore";
 
@@ -18,7 +19,7 @@ const relations: RelationRegistry = {
   toMany: new Map([["documents", new Map([["sharedWith", { table: "document_shares", field: "documentId" }]])]]),
   toOne: new Map([["documents", new Map([["orgId", "orgs"]])]]),
 };
-const ctx = { parentTable: "documents", relations, db: fakeDb };
+const ctx = { parentTable: "documents", relations, db: fakeDb, depth: 0 };
 
 describe("resolveWhere", () => {
   it("some → parent `_id in [collected back-refs]`", async () => {
@@ -63,7 +64,81 @@ describe("resolveWhere", () => {
 
 describe("compileWhere relation-key guard", () => {
   it("throws on a some/is key (nested relations are a hard error, never silent-allow)", () => {
-    expect(() => compileWhere({ x: { some: { a: 1 } } })).toThrow(/relation clauses .* top level/);
-    expect(() => compileWhere({ x: { is: { a: 1 } } })).toThrow(/relation clauses .* top level/);
+    expect(() => compileWhere({ x: { some: { a: 1 } } })).toThrow(/relation clause/);
+    expect(() => compileWhere({ x: { is: { a: 1 } } })).toThrow(/relation clause/);
+  });
+});
+
+describe("resolveWhere — none / every / isNot", () => {
+  it("none → parent `_id notIn [matching back-refs]`", async () => {
+    expect(await resolveWhere({ sharedWith: { none: { userId: "u1" } } }, ctx)).toEqual({
+      op: "and", clauses: [{ op: "neq", field: "_id", value: "d3" }],
+    });
+  });
+
+  it("every → parent `_id notIn [back-refs of children FAILING the leaf]` (vacuously true for none)", async () => {
+    // children failing userId==u1 are s2 (userId u2) → back-ref d9 → notIn [d9]
+    expect(await resolveWhere({ sharedWith: { every: { userId: "u1" } } }, ctx)).toEqual({
+      op: "and", clauses: [{ op: "neq", field: "_id", value: "d9" }],
+    });
+  });
+
+  it("isNot → parent `<fk> notIn [matching target _ids]`", async () => {
+    expect(await resolveWhere({ orgId: { isNot: { ownerId: "u1" } } }, ctx)).toEqual({
+      op: "and", clauses: [{ op: "neq", field: "orgId", value: "o1" }],
+    });
+  });
+
+  it("empty match: none/isNot admit (notIn []→always-true)", async () => {
+    expect(await resolveWhere({ sharedWith: { none: { userId: "nobody" } } }, ctx)).toEqual({ op: "and", clauses: [] });
+  });
+
+  it("null/missing to-one fk is excluded from isNot (fail-closed)", async () => {
+    const expr = await resolveWhere({ orgId: { isNot: { ownerId: "u1" } } }, ctx); // orgId notIn [o1]
+    // a parent doc with NO orgId field must NOT match (missing field fails neq)
+    expect(evaluateFilter({ _id: "x", title: "no-org" } as never, expr!)).toBe(false);
+    // a doc whose orgId is o2 (not o1) matches
+    expect(evaluateFilter({ _id: "y", orgId: "o2" } as never, expr!)).toBe(true);
+  });
+});
+
+describe("resolveWhere — multi-level chains", () => {
+  // documents --sharedWith(some)--> document_shares --team(is)--> teams --members(some)--> team_members
+  const CHILD2 = {
+    document_shares: [{ _id: "s1", documentId: "d3", team: "t1", _creationTime: 1 }],
+    teams: [{ _id: "t1", _creationTime: 1 }, { _id: "t2", _creationTime: 2 }],
+    team_members: [{ _id: "m1", teamId: "t1", userId: "u1", _creationTime: 1 }],
+  } as Record<string, unknown[]>;
+  const db2 = { query: (t: string) => ({ collect: async () => CHILD2[t] ?? [] }) } as never;
+  const relations2 = {
+    toMany: new Map([
+      ["documents", new Map([["sharedWith", { table: "document_shares", field: "documentId" }]])],
+      ["teams", new Map([["members", { table: "team_members", field: "teamId" }]])],
+    ]),
+    toOne: new Map([["document_shares", new Map([["team", "teams"]])]]),
+  } as never;
+  const ctx2 = { parentTable: "documents", relations: relations2, db: db2, depth: 0 };
+
+  it("resolves a 3-hop chain to the correct parent membership", async () => {
+    // doc d3 is shared with team t1, and u1 is a member of t1 → d3 visible
+    expect(await resolveWhere(
+      { sharedWith: { some: { team: { is: { members: { some: { userId: "u1" } } } } } } }, ctx2,
+    )).toEqual({ op: "or", clauses: [{ op: "eq", field: "_id", value: "d3" }] });
+  });
+
+  it("throws when nesting exceeds max depth 4", async () => {
+    // self-referential node.parent chain, 5 `is` levels deep
+    const nodeRel = { toMany: new Map(), toOne: new Map([["node", new Map([["parent", "node"]])]]) } as never;
+    const nctx = { parentTable: "node", relations: nodeRel, db: { query: () => ({ collect: async () => [] }) } as never, depth: 0 };
+    const p5 = { parent: { is: { parent: { is: { parent: { is: { parent: { is: { parent: { is: { x: 1 } } } } } } } } } } };
+    await expect(resolveWhere(p5, nctx)).rejects.toThrow(/max depth 4/);
+  });
+});
+
+describe("compileWhere guard covers all relation keys", () => {
+  it("throws on none/every/isNot keys too", () => {
+    for (const k of ["none", "every", "isNot"]) {
+      expect(() => compileWhere({ x: { [k]: { a: 1 } } } as never)).toThrow(/relation clause/);
+    }
   });
 });

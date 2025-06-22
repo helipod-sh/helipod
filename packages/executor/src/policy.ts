@@ -77,8 +77,8 @@ function isFieldOps(cond: unknown): cond is FieldOps {
 function compileField(field: string, cond: unknown): FilterExpr {
   if (!isFieldOps(cond)) return { op: "eq", field, value: cond as Value };
   const ops = cond;
-  if ("some" in ops || "is" in ops)
-    throw new Error(`relation clauses ("some"/"is") are only valid at the top level of a policy (resolved by resolveWhere); nested relations are not supported`);
+  if ("some" in ops || "none" in ops || "every" in ops || "is" in ops || "isNot" in ops)
+    throw new Error(`relation clause keys (some/none/every/is/isNot) cannot appear in a field predicate — they are resolved only by resolveWhere`);
   const clauses: FilterExpr[] = [];
   if ("eq" in ops) clauses.push({ op: "eq", field, value: ops.eq as Value });
   if ("ne" in ops) clauses.push({ op: "neq", field, value: ops.ne as Value });
@@ -113,7 +113,9 @@ export async function evalWritePolicy(
 
 // ─── Relation predicate resolver (Layer 2) ───────────────────────────────────
 
-export type RelationClause = { some: WhereInput } | { is: WhereInput };
+export type RelationClause =
+  | { some: WhereInput } | { none: WhereInput } | { every: WhereInput }
+  | { is: WhereInput } | { isNot: WhereInput };
 
 export interface RelationRegistry {
   /** parentTable → relationName → { child table, back-reference field }. */
@@ -126,32 +128,47 @@ export interface ResolveCtx {
   parentTable: string;
   relations: RelationRegistry;
   db: GuestDatabaseReader;
+  depth: number;
+}
+
+const MAX_RELATION_DEPTH = 4;
+
+/** Build the child rule-context for resolving a relation clause's leaf, enforcing the depth cap. */
+function childCtx(ctx: ResolveCtx, table: string): ResolveCtx {
+  const depth = ctx.depth + 1;
+  if (depth > MAX_RELATION_DEPTH)
+    throw new Error(`relation nesting exceeds max depth ${MAX_RELATION_DEPTH} on "${ctx.parentTable}"`);
+  return { parentTable: table, relations: ctx.relations, db: ctx.db, depth };
 }
 
 function isRelationClause(cond: unknown): cond is RelationClause {
-  return cond !== null && typeof cond === "object" && !Array.isArray(cond) && !(cond instanceof ArrayBuffer)
-    && ("some" in cond || "is" in cond);
+  if (cond === null || typeof cond !== "object" || Array.isArray(cond) || cond instanceof ArrayBuffer) return false;
+  return "some" in cond || "none" in cond || "every" in cond || "is" in cond || "isNot" in cond;
 }
 
-async function resolveSome(relName: string, leaf: WhereInput, ctx: ResolveCtx): Promise<FilterExpr> {
+/** Collect the set of parent back-ref ids for a to-many relation whose child rows match (or, if
+ *  `negate`, FAIL) the recursively-resolved leaf. Used by some/none (matching) and every (negated). */
+async function collectToManyIds(relName: string, leaf: WhereInput, ctx: ResolveCtx, negate: boolean): Promise<Value[]> {
   const rel = ctx.relations.toMany.get(ctx.parentTable)?.get(relName);
   if (!rel) throw new Error(`unknown relation "${relName}" on table "${ctx.parentTable}"`);
-  const leafExpr = compileWhere(leaf);
+  const leafExpr = await resolveWhere(leaf, childCtx(ctx, rel.table));
   const rows = await ctx.db.query(rel.table, "by_creation").collect();
   const ids = new Set<Value>();
   for (const row of rows) {
-    if (leafExpr === null || evaluateFilter(row, leafExpr)) {
+    const matches = leafExpr === null ? true : evaluateFilter(row, leafExpr);
+    if (matches !== negate) {
       const ref = (row as Record<string, unknown>)[rel.field];
       if (ref !== undefined) ids.add(ref as Value);
     }
   }
-  return compileWhere({ _id: { in: [...ids] } }) ?? ALWAYS_FALSE;
+  return [...ids];
 }
 
-async function resolveIs(fieldName: string, leaf: WhereInput, ctx: ResolveCtx): Promise<FilterExpr> {
+/** Collect the set of matching target `_id`s for a to-one (v.id) field, against the resolved leaf. */
+async function collectToOneIds(fieldName: string, leaf: WhereInput, ctx: ResolveCtx): Promise<Value[]> {
   const targetTable = ctx.relations.toOne.get(ctx.parentTable)?.get(fieldName);
   if (!targetTable) throw new Error(`field "${fieldName}" is not a reference (v.id) on table "${ctx.parentTable}"`);
-  const leafExpr = compileWhere(leaf);
+  const leafExpr = await resolveWhere(leaf, childCtx(ctx, targetTable));
   const rows = await ctx.db.query(targetTable, "by_creation").collect();
   const ids = new Set<Value>();
   for (const row of rows) {
@@ -160,13 +177,16 @@ async function resolveIs(fieldName: string, leaf: WhereInput, ctx: ResolveCtx): 
       if (id !== undefined) ids.add(id as Value);
     }
   }
-  return compileWhere({ [fieldName]: { in: [...ids] } }) ?? ALWAYS_FALSE;
+  return [...ids];
 }
 
 async function resolveClause(key: string, cond: unknown, ctx: ResolveCtx): Promise<FilterExpr> {
   if (isRelationClause(cond)) {
-    if ("some" in cond) return resolveSome(key, cond.some, ctx);
-    return resolveIs(key, cond.is, ctx);
+    if ("some" in cond) return compileWhere({ _id: { in: await collectToManyIds(key, cond.some, ctx, false) } }) ?? ALWAYS_FALSE;
+    if ("none" in cond) return compileWhere({ _id: { notIn: await collectToManyIds(key, cond.none, ctx, false) } }) ?? ALWAYS_TRUE;
+    if ("every" in cond) return compileWhere({ _id: { notIn: await collectToManyIds(key, cond.every, ctx, true) } }) ?? ALWAYS_TRUE;
+    if ("is" in cond) return compileWhere({ [key]: { in: await collectToOneIds(key, cond.is, ctx) } }) ?? ALWAYS_FALSE;
+    return compileWhere({ [key]: { notIn: await collectToOneIds(key, cond.isNot, ctx) } }) ?? ALWAYS_TRUE;
   }
   return compileWhere({ [key]: cond } as WhereInput) ?? ALWAYS_TRUE;
 }
@@ -194,5 +214,5 @@ export async function resolveReadPolicy(
   policy: TablePolicy, rc: RuleContext, parentTable: string, relations: RelationRegistry,
 ): Promise<FilterExpr | null> {
   if (!policy.read) return null;
-  return resolveWhere(await policy.read(rc), { parentTable, relations, db: rc.db });
+  return resolveWhere(await policy.read(rc), { parentTable, relations, db: rc.db, depth: 0 });
 }
