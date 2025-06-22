@@ -235,6 +235,17 @@ of a relation clause is field-predicates-only (nested relations are not yet supp
 note: v1 scans the related table per clause; declaring an index on the child's filtered field is
 recommended and will be used once index push-down lands.
 
+Two things to know when authoring relation predicates:
+
+- **The relation lookup ignores the related table's own read policy — by intent.** The semi-join
+  reads *all* rows of the child/target table to decide the parent's visibility, so a `read` policy on
+  `document_shares` does **not** hide share rows from the resolver. The authorization decision is made
+  from the true data, not the caller's filtered view (otherwise a user could be denied a resource they
+  were actually granted). Only the id-set is used — child rows are never returned to the caller.
+- **`NOT` over a relation clause is an anti-join.** `{ NOT: { sharedWith: { some: { userId: auth.userId } } } }`
+  reads as "rows *not* shared with me" — a valid but easy-to-misread negation. Prefer expressing
+  visibility positively (an `OR` of the ways a row *is* visible) and reach for `NOT` deliberately.
+
 ### Scoped role assignment
 
 `ctx.authz.assignRole(userId, role, scope?)` / `revokeRole(userId, role, scope?)`. `scope` is `{ type: string, id: string }` (e.g. `{ type: "org", id }`); omitted = global. The scope is the leading component of the effective-permissions index key, making cross-tenant isolation structural. `auth.scopesWith(permission, type?)` returns the scope ids where the caller holds a permission (for read predicates).
