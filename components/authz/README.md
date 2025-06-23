@@ -221,7 +221,7 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
 
 **Rule context** (`ctx`): `auth.userId` (the resolved caller, `null` if anonymous), `auth.roles`, `auth.can(permission, scope?)`, `auth.scopesWith(permission, type?)`, `auth.identity` (raw claims), and `db` (a read-only `ctx.db` for relation lookups).
 
-**Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`, `contains`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
+**Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
 
 **Relation predicates (`some` / `is`).** A read policy can filter by related rows:
 - `{ sharedWith: { some: { userId: auth.userId } } }` — to-many: a row in the related

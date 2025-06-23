@@ -148,3 +148,18 @@ describe("compileWhere guard covers all relation keys", () => {
     }
   });
 });
+
+describe("compileWhere — unknown field operator guard", () => {
+  it("throws on an unrecognized field operator (e.g. contains)", () => {
+    expect(() => compileWhere({ x: { contains: "a" } } as never)).toThrow(/unknown field operator/);
+  });
+
+  it("a recognized field operator (eq) still compiles correctly", () => {
+    expect(compileWhere({ x: { eq: 1 } })).toEqual({ op: "eq", field: "x", value: 1 });
+  });
+
+  it("an empty FieldOps object does NOT throw and resolves to always-true", () => {
+    expect(() => compileWhere({ x: {} })).not.toThrow();
+    expect(compileWhere({ x: {} })).toEqual({ op: "and", clauses: [] });
+  });
+});

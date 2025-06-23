@@ -74,11 +74,16 @@ function isFieldOps(cond: unknown): cond is FieldOps {
   return cond !== null && typeof cond === "object" && !Array.isArray(cond) && !(cond instanceof ArrayBuffer);
 }
 
+const KNOWN_FIELD_OPS = new Set(["eq", "ne", "lt", "lte", "gt", "gte", "in", "notIn", "isNull"]);
+
 function compileField(field: string, cond: unknown): FilterExpr {
   if (!isFieldOps(cond)) return { op: "eq", field, value: cond as Value };
   const ops = cond;
   if ("some" in ops || "none" in ops || "every" in ops || "is" in ops || "isNot" in ops)
     throw new Error(`relation clause keys (some/none/every/is/isNot) cannot appear in a field predicate — they are resolved only by resolveWhere`);
+  const unknown = Object.keys(ops).filter((k) => !KNOWN_FIELD_OPS.has(k));
+  if (unknown.length > 0)
+    throw new Error(`unknown field operator(s) [${unknown.join(", ")}] on "${field}" — a field predicate may use only eq/ne/lt/lte/gt/gte/in/notIn/isNull`);
   const clauses: FilterExpr[] = [];
   if ("eq" in ops) clauses.push({ op: "eq", field, value: ops.eq as Value });
   if ("ne" in ops) clauses.push({ op: "neq", field, value: ops.ne as Value });
