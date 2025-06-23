@@ -90,3 +90,62 @@ describe("authz relation policy (sharing)", () => {
     expect(last()).toEqual([]);                                             // unshare → disappears live
   });
 });
+
+describe("authz multi-level relation policy (team sharing)", () => {
+  // documents --sharedWith--> document_shares --team(v.id)--> teams --members--> team_members
+  const authzTeam = defineAuthz({
+    policies: { documents: { read: ({ auth }) => ({
+      sharedWith: { some: { team: { is: { members: { some: { userId: auth.userId } } } } } },
+    }) } },
+  });
+  const schema = defineSchema({
+    documents: defineTable({ title: v.string() }).relation("sharedWith", { table: "document_shares", field: "documentId" }),
+    document_shares: defineTable({ documentId: v.id("documents"), team: v.id("teams") }),
+    teams: defineTable({ name: v.string() }).relation("members", { table: "team_members", field: "teamId" }),
+    team_members: defineTable({ teamId: v.id("teams"), userId: v.string() }),
+  });
+  async function makeRuntime() {
+    const c = composeComponents({ schemaJson: schema.export(), moduleMap: {
+      "docs:list": query(async (ctx) => ctx.db.query("documents", "by_creation").collect()),
+    } }, [auth, authzTeam]);
+    return EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()),
+      catalog: c.catalog, modules: c.moduleMap, systemModules: systemModules(),
+      componentNames: c.componentNames, contextProviders: c.contextProviders,
+      policyRegistry: c.policyRegistry, policyProviders: c.policyProviders, relationRegistry: c.relationRegistry,
+    });
+  }
+
+  it("a doc shared with a team the caller belongs to is visible; reactively on membership change", async () => {
+    const r = await makeRuntime();
+    const { token, userId } = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "u@b.co", password: "pw" })).value;
+    const team = (await r.runSystem<string>("_system:insertDocument", { table: "teams", fields: { name: "eng" } })).value;
+    const doc = (await r.runSystem<string>("_system:insertDocument", { table: "documents", fields: { title: "spec" } })).value;
+    await r.runSystem("_system:insertDocument", { table: "document_shares", fields: { documentId: doc, team } });
+
+    // Not a member yet → not visible.
+    expect((await r.run<any[]>("docs:list", {}, { identity: token })).value).toEqual([]);
+
+    // Subscribe, then add the caller to the team → the doc appears live (inner-relation reactivity).
+    const sent: any[] = [];
+    const sock = { sent, send: (x: string) => sent.push(JSON.parse(x)), bufferedAmount: 0, close: () => {} };
+    const last = (): unknown => {
+      for (let i = sent.length - 1; i >= 0; i--)
+        for (const m of [...(sent[i]?.modifications ?? [])].reverse())
+          if (m.type === "QueryUpdated" && m.queryId === 1) return m.value;
+      return undefined;
+    };
+    r.handler.connect("s1", sock);
+    await r.handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token }));
+    await r.handler.handleMessage("s1", JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "docs:list", args: {} }], remove: [] }));
+    expect(last()).toEqual([]);
+
+    const membership = (await r.runSystem<string>("_system:insertDocument", { table: "team_members", fields: { teamId: team, userId } })).value;
+    await new Promise((res) => setTimeout(res, 50));
+    expect((last() as any[]).map((d) => d.title)).toEqual(["spec"]);   // joined team → doc revealed live
+
+    await r.runSystem("_system:deleteDocument", { id: membership });
+    await new Promise((res) => setTimeout(res, 50));
+    expect(last()).toEqual([]);                                        // left team → doc hidden live
+  });
+});
