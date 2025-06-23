@@ -221,7 +221,7 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
 
 **Rule context** (`ctx`): `auth.userId` (the resolved caller, `null` if anonymous), `auth.roles`, `auth.can(permission, scope?)`, `auth.scopesWith(permission, type?)`, `auth.identity` (raw claims), and `db` (a read-only `ctx.db` for relation lookups).
 
-**Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`, `contains`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
+**Predicate operators** (in `WhereInput`): field operators `eq` (bare value), `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`; logical `AND` / `OR` / `NOT`; **relation predicates** `is` / `isNot` (to-one), `some` / `none` / `every` (to-many). All fully typed against `Doc<T>`.
 
 **Relation predicates (`some` / `is`).** A read policy can filter by related rows:
 - `{ sharedWith: { some: { userId: auth.userId } } }` — to-many: a row in the related
@@ -231,9 +231,23 @@ Apps that declare no arrow relations pay zero overhead — the traversal compile
   and test it (no declaration needed).
 
 Both are **reactive** — a write to the related table live-updates the subscription — and the leaf
-of a relation clause is field-predicates-only (nested relations are not yet supported). Performance
+of a relation clause may itself contain relation clauses (multi-level chains, see below). Performance
 note: v1 scans the related table per clause; declaring an index on the child's filtered field is
 recommended and will be used once index push-down lands.
+
+**More relation operators.** Beyond `some`/`is`, read policies support:
+- `{ rel: { none: leaf } }` — to-many: *no* related row matches `leaf`.
+- `{ rel: { every: leaf } }` — to-many: *all* related rows match `leaf`. This is **vacuously true** — a
+  parent with zero related rows matches. For "at least one AND all match", write
+  `{ AND: [{ rel: { some: {} } }, { rel: { every: leaf } }] }`.
+- `{ fkField: { isNot: leaf } }` — to-one: the referenced row does *not* match `leaf`. A row whose
+  `fkField` is null/absent is excluded from both `is` and `isNot` (there is no referenced row to test).
+
+**Multi-level chains.** A relation clause's leaf may itself contain relation clauses, e.g. a doc shared
+with a *team* you belong to:
+`{ sharedWith: { some: { team: { is: { members: { some: { userId: auth.userId } } } } } } }`.
+Each level is reactive — a write to any table on the chain (including joining/leaving the team) live-updates
+the subscription. Nesting is capped at **4 relational levels**; a deeper policy throws at query time.
 
 Two things to know when authoring relation predicates:
 
