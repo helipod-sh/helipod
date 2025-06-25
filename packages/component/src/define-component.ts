@@ -1,6 +1,8 @@
 import type { SchemaDefinition, Validator } from "@stackbase/values";
-import type { RegisteredFunction, TablePolicy, PolicyContextProvider } from "@stackbase/executor";
+import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter } from "@stackbase/executor";
 import type { ComponentContext } from "@stackbase/executor";
+
+export interface BootContext { db: GuestDatabaseWriter; now: number }
 
 export interface ComponentDefinition {
   name: string;
@@ -17,6 +19,8 @@ export interface ComponentDefinition {
   policies?: Record<string, TablePolicy>;
   /** Contributes fields to every row policy's rule-context (e.g. authz → `{ auth }`). */
   policyContext?: PolicyContextProvider["build"];
+  /** A once-per-process startup step (migrations/index rebuilds). Runs namespaced + non-user. */
+  boot?: (ctx: BootContext) => Promise<void>;
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {

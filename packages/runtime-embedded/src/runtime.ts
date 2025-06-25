@@ -15,7 +15,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
+import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -46,6 +46,8 @@ export interface EmbeddedRuntimeOptions {
   relationRegistry?: RelationRegistry;
   /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
   now?: () => number;
+  /** Component boot steps to run once at create, namespaced + non-user (before serving traffic). */
+  bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
 }
 
 export class EmbeddedRuntime {
@@ -77,6 +79,15 @@ export class EmbeddedRuntime {
     const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
     const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now });
+
+    // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
+    for (const step of options.bootSteps ?? []) {
+      const bootFn = mutation(async (ctx) => {
+        await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
+        return null;
+      });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null });
+    }
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
