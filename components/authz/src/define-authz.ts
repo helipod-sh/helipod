@@ -2,7 +2,7 @@ import { defineComponent, type ComponentDefinition } from "@stackbase/component"
 import { authzSchema } from "./schema";
 import type { AuthzConfig } from "./roles";
 import { authzContext } from "./context";
-import { assignRole, revokeRole } from "./functions";
+import { authzModules } from "./functions";
 import { buildRuleAuth } from "./policies";
 
 export function defineAuthz(config: AuthzConfig): ComponentDefinition {
@@ -10,7 +10,7 @@ export function defineAuthz(config: AuthzConfig): ComponentDefinition {
     name: "authz",
     requires: ["auth"],
     schema: authzSchema,
-    modules: { assignRole, revokeRole },
+    modules: authzModules(config),
     context: (cctx) => authzContext(cctx, config),
     contextType: { import: "@stackbase/authz", type: "AuthzContext" },
     policies: config.policies,
