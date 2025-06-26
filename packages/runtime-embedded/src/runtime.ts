@@ -9,7 +9,7 @@
  */
 import { namespaceForPath } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { writtenTablesFromRanges } from "@stackbase/index-key-codec";
+import { writtenTablesFromRanges, serializeKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
@@ -108,13 +108,18 @@ export class EmbeddedRuntime {
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
         const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
-        return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
+        return {
+          value: r.value as Value,
+          tables: writtenTablesFromRanges(r.readRanges),
+          readRanges: r.readRanges.map(serializeKeyRange),
+        };
       },
       async runMutation(path, args, identity) {
         const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
+          writeRanges: r.oplog?.writtenRanges ?? [],
           commitTs: Number(r.oplog?.commitTs ?? 0),
         };
       },
@@ -125,7 +130,7 @@ export class EmbeddedRuntime {
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
     const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false });
-    const queue: Array<{ tables: string[]; commitTs: number }> = [];
+    const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
       if (draining) return;
@@ -140,7 +145,7 @@ export class EmbeddedRuntime {
       }
     };
     adapter.subscribe((payload) => {
-      queue.push({ tables: payload.tables, commitTs: payload.commitTs });
+      queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
     });
 

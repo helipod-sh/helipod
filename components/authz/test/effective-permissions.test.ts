@@ -102,3 +102,70 @@ describe("can()/scopesWith read the index", () => {
     expect((await r.run<string[]>("me:scopes", { p: "documents:read", t: "org" }, { identity: dave.token })).value.sort()).toEqual(["o1", "o2"]);
   });
 });
+
+// Seed a bootstrap admin (both tables) into a runtime `r`, returning the admin's token/userId.
+async function seedAdmin(r: EmbeddedRuntime, email: string) {
+  const a = (await r.run<{ token: string; userId: string }>("auth:signUp", { email, password: "pw" })).value;
+  await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: a.userId, role: "admin", scopeType: "", scopeId: "" } });
+  await r.runSystem("_system:insertDocument", { table: "authz/effective_permissions", fields: { userId: a.userId, scopeType: "", scopeId: "", permission: "authz:manage" } });
+  return a;
+}
+
+describe("boot reconcile — config drift", () => {
+  it("rebuilds the index at boot when the roles config changed", async () => {
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    const build = async (buildConfig: Parameters<typeof defineAuthz>[0]) => {
+      const c = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {
+        "me:can": query(async (ctx, { p }: { p: string }) => (ctx as unknown as { authz: { can(p: string): Promise<boolean> } }).authz.can(p)),
+      } }, [auth, defineAuthz(buildConfig)]);
+      return { c, r: await EmbeddedRuntime.create({ store, catalog: c.catalog, modules: c.moduleMap, systemModules: systemModules(),
+        componentNames: c.componentNames, contextProviders: c.contextProviders, policyRegistry: c.policyRegistry,
+        policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps }) };
+    };
+    const cfgOld = { roles: { editor: { documents: ["read"] }, admin: { authz: ["manage"] } } };
+    const one = await build(cfgOld);
+    const admin = await seedAdmin(one.r, "a@b.co");
+    const bob = (await one.r.run<{ token: string; userId: string }>("auth:signUp", { email: "bob@b.co", password: "pw" })).value;
+    await one.r.run("authz:assignRole", { userId: bob.userId, role: "editor" }, { identity: admin.token });
+    expect((await one.r.run<boolean>("me:can", { p: "documents:delete" }, { identity: bob.token })).value).toBe(false);
+
+    // redeploy: editor now also grants documents:delete → new config hash → boot rebuild over the SAME store
+    const cfgNew = { roles: { editor: { documents: ["read", "delete"] }, admin: { authz: ["manage"] } } };
+    const two = await build(cfgNew);
+    expect((await two.r.run<boolean>("me:can", { p: "documents:delete" }, { identity: bob.token })).value).toBe(true);
+  });
+});
+
+describe("surgical invalidation", () => {
+  it("revoking a role re-runs only subscriptions checking an affected permission", async () => {
+    const cfg2 = { roles: { ra: { a: ["read"] }, rb: { b: ["read"] }, admin: { authz: ["manage"] } } };
+    const c = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {
+      "me:canA": query(async (ctx) => (ctx as unknown as { authz: { can(p: string): Promise<boolean> } }).authz.can("a:read")),
+      "me:canB": query(async (ctx) => (ctx as unknown as { authz: { can(p: string): Promise<boolean> } }).authz.can("b:read")),
+    } }, [auth, defineAuthz(cfg2)]);
+    const r = await EmbeddedRuntime.create({ store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      systemModules: systemModules(), componentNames: c.componentNames, contextProviders: c.contextProviders,
+      policyRegistry: c.policyRegistry, policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps });
+    const admin = await seedAdmin(r, "a@b.co");
+    const bob = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "bob@b.co", password: "pw" })).value;
+    await r.run("authz:assignRole", { userId: bob.userId, role: "ra" }, { identity: admin.token });
+    await r.run("authz:assignRole", { userId: bob.userId, role: "rb" }, { identity: admin.token });
+
+    const sent: unknown[] = [];
+    const sock = { sent, send: (x: string) => sent.push(JSON.parse(x)), bufferedAmount: 0, close: () => {} };
+    r.handler.connect("s1", sock);
+    await r.handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: bob.token }));
+    await r.handler.handleMessage("s1", JSON.stringify({ type: "ModifyQuerySet", add: [
+      { queryId: 1, udfPath: "me:canA", args: {} }, { queryId: 2, udfPath: "me:canB", args: {} },
+    ], remove: [] }));
+    const updates = (qid: number) => sent.flatMap((m) => (m as { modifications?: unknown[] }).modifications ?? []).filter((x) => (x as { type: string; queryId: number }).type === "QueryUpdated" && (x as { type: string; queryId: number }).queryId === qid);
+    expect((updates(1).at(-1) as { value: boolean } | undefined)?.value).toBe(true);
+    expect((updates(2).at(-1) as { value: boolean } | undefined)?.value).toBe(true);
+    const before2 = updates(2).length;
+
+    await r.run("authz:revokeRole", { userId: bob.userId, role: "ra" }, { identity: admin.token });
+    await new Promise((res) => setTimeout(res, 50));
+    expect((updates(1).at(-1) as { value: boolean } | undefined)?.value).toBe(false);   // a:read revoked → its subscription re-runs, now false
+    expect(updates(2).length).toBe(before2);        // b:read subscription did NOT re-run (its read keys don't intersect the deleted a:read row)
+  });
+});

@@ -63,3 +63,60 @@ export async function reconcileScope(
   }
   for (const p of desired) if (!have.has(p)) await db.insert("effective_permissions", { userId, scopeType, scopeId, permission: p });
 }
+
+/**
+ * Boot/rebuild: if the stored config hash differs from the current config, rebuild the whole
+ * effective_permissions index from role_assignments (reconcile every present (user,scope),
+ * drop orphans for (user,scope) with no assignment) and stamp the new hash.
+ *
+ * Transaction read semantics: db.query(...).collect() reads the COMMITTED snapshot.
+ * Orphan deletes target (user,scope) tuples that have NO assignment rows; reconcileScope
+ * calls target (user,scope) tuples that DO have assignments. These sets are DISJOINT, so
+ * the orphan deletes never interfere with reconcileScope reads.
+ */
+export async function reconcileEffectivePermissions(
+  ctx: { db: GuestDatabaseWriter },
+  config: AuthzConfig,
+): Promise<void> {
+  const db = ctx.db;
+  const metaRows = await db.query("meta", "by_creation").collect();
+  const meta = metaRows[0];
+  const current = configHash(config);
+  if (meta != null && (meta.configHash as string) === current) return; // steady state — nothing changed
+
+  // Group all role_assignments by (userId, scopeType, scopeId) with their roles
+  const assigns = await db.query("role_assignments", "by_creation").collect();
+  const scopeMap = new Map<string, { userId: string; scopeType: string; scopeId: string; roles: string[] }>();
+  for (const a of assigns) {
+    const userId = a.userId as string;
+    const scopeType = a.scopeType as string;
+    const scopeId = a.scopeId as string;
+    const role = a.role as string;
+    const key = `${userId}\0${scopeType}\0${scopeId}`;
+    const entry = scopeMap.get(key);
+    if (entry != null) {
+      entry.roles.push(role);
+    } else {
+      scopeMap.set(key, { userId, scopeType, scopeId, roles: [role] });
+    }
+  }
+
+  // Drop effective_permissions rows for any (user,scope) that no longer has an assignment
+  const allEff = await db.query("effective_permissions", "by_creation").collect();
+  for (const e of allEff) {
+    const key = `${e.userId as string}\0${e.scopeType as string}\0${e.scopeId as string}`;
+    if (!scopeMap.has(key)) await db.delete(e._id as string);
+  }
+
+  // Rebuild each assigned (user,scope) from its full set of roles
+  for (const s of scopeMap.values()) {
+    await reconcileScope(db, config, s.userId, s.scopeType, s.scopeId, s.roles);
+  }
+
+  // Stamp the new config hash
+  if (meta != null) {
+    await db.replace(meta._id as string, { configHash: current });
+  } else {
+    await db.insert("meta", { configHash: current });
+  }
+}

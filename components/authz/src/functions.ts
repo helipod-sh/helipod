@@ -1,7 +1,7 @@
 import { mutation, type RegisteredFunction, type GuestDatabaseWriter } from "@stackbase/executor";
 import type { AuthzContext } from "./context";
 import type { AuthzConfig } from "./roles";
-import { upsertPatterns, reconcileScope } from "./effective-permissions";
+import { upsertPatterns, reconcileScope, reconcileEffectivePermissions } from "./effective-permissions";
 
 interface Assign { userId: string; role: string; scope?: { type: string; id: string } }
 
@@ -49,5 +49,11 @@ export function authzModules(config: AuthzConfig): Record<string, RegisteredFunc
     return null;
   });
 
-  return { assignRole, revokeRole };
+  const rebuild = mutation(async (ctx) => {
+    await (ctx as unknown as WithAuthz).authz.require(MANAGE_PERMISSION);
+    await reconcileEffectivePermissions({ db: ctx.db as unknown as GuestDatabaseWriter }, config);
+    return null;
+  });
+
+  return { assignRole, revokeRole, rebuild };
 }

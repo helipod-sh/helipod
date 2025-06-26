@@ -4,7 +4,7 @@ import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime, type IndexSpec } from "@stackbase/query-engine";
 import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { writtenTablesFromRanges } from "@stackbase/index-key-codec";
+import { writtenTablesFromRanges, serializeKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import {
   InlineUdfExecutor,
@@ -83,11 +83,11 @@ beforeEach(async () => {
   const syncExec: SyncUdfExecutor = {
     async runQuery(path, args) {
       const r = await exec.run(modules[path]!, jsonToConvex(args));
-      return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
+      return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
     },
     async runMutation(path, args) {
       const r = await exec.run(modules[path]!, jsonToConvex(args));
-      return { value: r.value as Value, tables: r.oplog?.writtenTables ?? [], commitTs: Number(r.oplog?.commitTs ?? 0) };
+      return { value: r.value as Value, tables: r.oplog?.writtenTables ?? [], writeRanges: r.oplog?.writtenRanges ?? [], commitTs: Number(r.oplog?.commitTs ?? 0) };
     },
   };
 
@@ -120,7 +120,7 @@ describe("subscribe → reactive push", () => {
     expect(rows.map((d) => d.body)).toEqual(["hi"]);
   });
 
-  it("table-level invalidation is correct (if coarse): a write to another conversation recomputes but keeps the right result", async () => {
+  it("range-level invalidation: a write to another conversation (different index range) does NOT recompute the c1 subscription", async () => {
     await mutate("sB", "seed", "messages:send", { conversationId: "c1", body: "keep" });
     await subscribe("sA", 1, "messages:list", { conversationId: "c1" });
     const clientA = createClientState();
@@ -128,9 +128,9 @@ describe("subscribe → reactive push", () => {
 
     socketA.clear();
     await mutate("sB", "r2", "messages:send", { conversationId: "c2", body: "other" });
-    // sA is recomputed (same table) but its c1 result is unchanged.
-    expect(socketA.transitions().length).toBe(1);
-    drainTo(clientA, socketA);
+    // Surgical range-level invalidation: c2 write is in a different index range than c1 subscription — NO re-run.
+    expect(socketA.transitions().length).toBe(0);
+    // The c1 result is unchanged (1 message, unaffected).
     expect((clientA.queries.get(1) as Array<{ body: string }>).map((d) => d.body)).toEqual(["keep"]);
   });
 });

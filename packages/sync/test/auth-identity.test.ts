@@ -13,10 +13,10 @@ class RecordingExecutor implements SyncUdfExecutor {
   calls: Array<{ path: string; identity: string | null | undefined }> = [];
   async runQuery(path: string, _args: JSONValue, identity?: string | null) {
     this.calls.push({ path, identity });
-    return { value: (identity ?? "anon") as unknown as Value, tables: ["t"] };
+    return { value: (identity ?? "anon") as unknown as Value, tables: ["t"], readRanges: [] };
   }
   async runMutation(_p: string, _a: JSONValue, _i?: string | null) {
-    return { value: null as unknown as Value, tables: [], commitTs: 1 };
+    return { value: null as unknown as Value, tables: [], writeRanges: [], commitTs: 1 };
   }
 }
 

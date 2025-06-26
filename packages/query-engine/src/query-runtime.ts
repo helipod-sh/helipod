@@ -69,6 +69,7 @@ export class QueryRuntime {
     const readSet = new RangeSet();
     const documents: DocumentValue[] = [];
     let lastScanned: Uint8Array | null = null;
+    let hitLimit = false;
 
     for await (const [key, doc] of this.docStore.index_scan(
       query.index.indexId,
@@ -81,11 +82,18 @@ export class QueryRuntime {
       const value = doc.value.value;
       if (filters.every((f) => evaluateFilter(value, f))) {
         documents.push(value);
-        if (query.limit !== undefined && documents.length >= query.limit) break;
+        if (query.limit !== undefined && documents.length >= query.limit) { hitLimit = true; break; }
       }
     }
 
-    readSet.add(this.consumedRange(query.index, interval, order, lastScanned));
+    // For a no-limit (or limit-not-reached) collect, record the FULL scan interval as the read
+    // range so that any insertion anywhere in the range (including beyond the last result) correctly
+    // triggers reactive re-evaluation. Only trim to successor(lastKey) when the limit was reached
+    // (the scan stopped early — keys beyond lastKey were not read).
+    const scanRange = hitLimit
+      ? this.consumedRange(query.index, interval, order, lastScanned)
+      : { keyspace: this.keyspace(query.index), start: interval.start, end: interval.end };
+    readSet.add(scanRange);
     return { documents, readSet };
   }
 
