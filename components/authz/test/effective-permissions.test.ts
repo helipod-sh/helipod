@@ -46,12 +46,14 @@ function systemModules(): Record<string, RegisteredFunction> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await ctx.db.insert(a.table, a.fields as any)) };
 }
-const cfg = { roles: { editor: { documents: ["read", "update"] }, viewer: { documents: ["read"] }, admin: { authz: ["manage"] } } };
+const cfg = { roles: { editor: { documents: ["read", "update"] }, viewer: { documents: ["read"] }, admin: { authz: ["manage"] }, superadmin: { "*": ["*"] } } };
 const authz = defineAuthz(cfg);
 
 async function runtimeWithAdmin() {
   const c = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {
     "eff:list": query(async (ctx) => ctx.db.query("authz/effective_permissions", "by_creation").collect()),
+    "me:can": query(async (ctx, { p }: { p: string }) => (ctx as unknown as { authz: { can(p: string): Promise<boolean> } }).authz.can(p)),
+    "me:scopes": query(async (ctx, { p, t }: { p: string; t?: string }) => (ctx as unknown as { authz: { scopesWith(p: string, t?: string): Promise<string[]> } }).authz.scopesWith(p, t)),
   } }, [auth, authz]);
   const r = await EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
@@ -77,5 +79,26 @@ describe("assign/revoke maintain effective_permissions", () => {
     await r.run("authz:revokeRole", { userId: bob.userId, role: "editor" }, { identity: admin.token });
     // viewer still grants documents:read → it survives; documents:update is gone
     expect(await effFor(r, bob.userId)).toEqual(["documents:read"]);
+  });
+});
+
+describe("can()/scopesWith read the index", () => {
+  it("exact + wildcard grants answer via the index; anonymous denied", async () => {
+    const { r, admin } = await runtimeWithAdmin();
+    const carol = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "carol@b.co", password: "pw" })).value;
+    await r.run("authz:assignRole", { userId: carol.userId, role: "editor" }, { identity: admin.token });
+    expect((await r.run<boolean>("me:can", { p: "documents:read" }, { identity: carol.token })).value).toBe(true);
+    expect((await r.run<boolean>("me:can", { p: "billing:view" }, { identity: carol.token })).value).toBe(false);
+    expect((await r.run<boolean>("me:can", { p: "documents:read" })).value).toBe(false); // anonymous
+    await r.run("authz:assignRole", { userId: carol.userId, role: "superadmin" }, { identity: admin.token });
+    expect((await r.run<boolean>("me:can", { p: "anything:goes" }, { identity: carol.token })).value).toBe(true); // *:*
+  });
+
+  it("scopesWith returns the scope ids where a permission is held", async () => {
+    const { r, admin } = await runtimeWithAdmin();
+    const dave = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "dave@b.co", password: "pw" })).value;
+    await r.run("authz:assignRole", { userId: dave.userId, role: "editor", scope: { type: "org", id: "o1" } }, { identity: admin.token });
+    await r.run("authz:assignRole", { userId: dave.userId, role: "editor", scope: { type: "org", id: "o2" } }, { identity: admin.token });
+    expect((await r.run<string[]>("me:scopes", { p: "documents:read", t: "org" }, { identity: dave.token })).value.sort()).toEqual(["o1", "o2"]);
   });
 });

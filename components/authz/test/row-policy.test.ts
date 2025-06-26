@@ -40,6 +40,7 @@ async function makeRuntime() {
 async function makeAdmin(r: EmbeddedRuntime, email: string) {
   const who = (await r.run<{ token: string; userId: string }>("auth:signUp", { email, password: "pw" })).value;
   await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: who.userId, role: "admin", scopeType: "", scopeId: "" } });
+  await r.runSystem("_system:insertDocument", { table: "authz/effective_permissions", fields: { userId: who.userId, scopeType: "", scopeId: "", permission: "authz:manage" } });
   return who;
 }
 
