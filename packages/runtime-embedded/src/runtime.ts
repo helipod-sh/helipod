@@ -9,13 +9,13 @@
  */
 import { namespaceForPath } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { writtenTablesFromRanges } from "@stackbase/index-key-codec";
+import { writtenTablesFromRanges, serializeKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
+import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -46,6 +46,8 @@ export interface EmbeddedRuntimeOptions {
   relationRegistry?: RelationRegistry;
   /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
   now?: () => number;
+  /** Component boot steps to run once at create, namespaced + non-user (before serving traffic). */
+  bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
 }
 
 export class EmbeddedRuntime {
@@ -78,6 +80,15 @@ export class EmbeddedRuntime {
     const queryRuntime = new QueryRuntime(options.store);
     const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now });
 
+    // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
+    for (const step of options.bootSteps ?? []) {
+      const bootFn = mutation(async (ctx) => {
+        await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
+        return null;
+      });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null });
+    }
+
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
     // (preserving the store, oracle, and transactor — no data loss on reload).
     const componentNames = options.componentNames ?? new Set<string>();
@@ -97,13 +108,18 @@ export class EmbeddedRuntime {
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
         const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
-        return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges) };
+        return {
+          value: r.value as Value,
+          tables: writtenTablesFromRanges(r.readRanges),
+          readRanges: r.readRanges.map(serializeKeyRange),
+        };
       },
       async runMutation(path, args, identity) {
         const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
+          writeRanges: r.oplog?.writtenRanges ?? [],
           commitTs: Number(r.oplog?.commitTs ?? 0),
         };
       },
@@ -114,7 +130,7 @@ export class EmbeddedRuntime {
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
     const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false });
-    const queue: Array<{ tables: string[]; commitTs: number }> = [];
+    const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
       if (draining) return;
@@ -129,7 +145,7 @@ export class EmbeddedRuntime {
       }
     };
     adapter.subscribe((payload) => {
-      queue.push({ tables: payload.tables, commitTs: payload.commitTs });
+      queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
     });
 

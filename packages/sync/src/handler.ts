@@ -7,6 +7,7 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import {
   encodeServerMessage,
   parseClientMessage,
@@ -25,15 +26,17 @@ export interface SyncWebSocket {
   close(): void;
 }
 
-/** Runs UDFs for the sync tier. Backed by the executor; returns table sets for matching. */
+/** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[] }>;
-  runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; commitTs: number }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
+  runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number }>;
 }
 
 /** A committed write's invalidation — the transactor→sync fan-out payload (Tier 2: from a stream). */
 export interface WriteInvalidation {
   tables: string[];
+  /** Precise write ranges for surgical (range-level) invalidation. */
+  ranges: readonly SerializedKeyRange[];
   commitTs: number;
 }
 
@@ -108,8 +111,8 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables } = await this.executor.runQuery(q.udfPath, q.args, session.identity);
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables });
+        const { value, tables, readRanges } = await this.executor.runQuery(q.udfPath, q.args, session.identity);
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges });
         modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: convexToJson(value) });
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: q.queryId, error: errMessage(e) });
@@ -131,10 +134,10 @@ export class SyncProtocolHandler {
     msg: Extract<ClientMessage, { type: "Mutation" }>,
   ): Promise<void> {
     try {
-      const { value, tables, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args, session.identity);
+      const { value, tables, writeRanges, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args, session.identity);
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: true, value: convexToJson(value) });
       if (this.options.autoNotifyOnMutation !== false) {
-        await this.notifyWrites({ tables, commitTs }, session.sessionId);
+        await this.notifyWrites({ tables, ranges: writeRanges, commitTs }, session.sessionId);
       }
     } catch (e) {
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: false, error: errMessage(e) });
@@ -153,7 +156,8 @@ export class SyncProtocolHandler {
   }
 
   private async doNotifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
-    const affected = this.subscriptions.findAffectedByTables(invalidation.tables);
+    // Use surgical range-level matching: only re-run subscriptions whose read ranges overlap the write ranges.
+    const affected = this.subscriptions.findAffectedByRanges(invalidation.ranges ?? [], invalidation.tables);
 
     const bySession = new Map<string, Subscription[]>();
     for (const sub of affected) {
@@ -169,8 +173,8 @@ export class SyncProtocolHandler {
       const modifications: StateModification[] = [];
       for (const sub of subs) {
         try {
-          const { value, tables } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
-          this.subscriptions.add({ ...sub, tables }); // refresh the read set
+          const { value, tables, readRanges } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
+          this.subscriptions.add({ ...sub, tables, readRanges }); // refresh the read set
           modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
         } catch (e) {
           modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
@@ -189,8 +193,8 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
-        this.subscriptions.add({ ...sub, tables });
+        const { value, tables, readRanges } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
+        this.subscriptions.add({ ...sub, tables, readRanges });
         modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });

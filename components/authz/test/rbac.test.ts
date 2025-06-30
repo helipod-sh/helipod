@@ -35,10 +35,10 @@ async function makeRuntime() {
   return EmbeddedRuntime.create({ store: new SqliteDocStore(new NodeSqliteAdapter()), catalog, modules: moduleMap, systemModules: systemModules(), componentNames, contextProviders });
 }
 
-// Sign up a user and seed them as a global admin via the privileged path (the bootstrap).
+// Sign up a user and seed them as a global admin via the atomic bootstrap.
 async function makeAdmin(r: EmbeddedRuntime, email: string): Promise<{ token: string; userId: string }> {
   const who = (await r.run<{ token: string; userId: string }>("auth:signUp", { email, password: "pw" })).value;
-  await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: who.userId, role: "admin", scopeType: "", scopeId: "" } });
+  await r.run("authz:bootstrapFirstAdmin", { userId: who.userId, role: "admin" });
   return who;
 }
 

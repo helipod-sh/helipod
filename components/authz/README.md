@@ -299,6 +299,10 @@ Available in every query/mutation (typed via codegen):
 
 `assignRole` / `addRelation` / `grant` calls **expand at write time** into an `authz/effective_permissions` index keyed `[scopeKey, userId, permission]`. A `can(...)` check is then a single indexed point-read → exactly one read-set entry → surgical invalidation when that exact row changes. Expansion runs inside the *same* mutation transaction (so it can't drift), is bounded by the declared relation graph, and is observable (logged, with a max-expansion guard).
 
+**Boot reconcile (config drift).** When the component boots (or redeploys), `defineAuthz` registers a boot hook that hashes the current roles/permissions config. If the stored hash differs from the current one (because the config changed between deploys), it rebuilds the entire `effective_permissions` index from the current `role_assignments`, drops orphan rows for assignments that no longer exist, and stamps the new hash. The boot hook is idempotent — if the config is unchanged, it returns immediately without scanning any rows.
+
+**Out-of-band admin bootstrap.** There is no ungated path to the first role assignment; seed it with `_system:insertDocument` into both `authz/role_assignments` AND `authz/effective_permissions` (both must be seeded, or run `authz:rebuild` after seeding `role_assignments`). The `authz:rebuild` mutation is gated by `authz:manage` and can be called by an already-seeded admin to force a full rebuild at any time.
+
 ### Engine enforcement
 
 - **Default-ON.** Any table with a declared policy is auto-gated on every `ctx.db` op. You opt *out* explicitly (`ctx.db.unsafe(...)` for intentional admin bypass), and an **uncovered-table advisor** warns about tables that hold data but declare no policy.

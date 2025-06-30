@@ -18,7 +18,7 @@ export function roleGrants(config: AuthzConfig, role: string, permission: string
   return false;
 }
 
-function expandRole(config: AuthzConfig, role: string, seen: Set<string>): Set<string> {
+export function expandRole(config: AuthzConfig, role: string, seen: Set<string>): Set<string> {
   const out = new Set<string>();
   const def = config.roles?.[role];
   if (!def || seen.has(role)) return out;
