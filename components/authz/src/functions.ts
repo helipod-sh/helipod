@@ -63,6 +63,8 @@ export function authzModules(config: AuthzConfig): Record<string, RegisteredFunc
 
     // 2. TOFU gate — reject if ANY admin already exists.
     // Scan effective_permissions; if any row's permission is in candidateKeys(MANAGE_PERMISSION), throw.
+    // Note: ctx.db here is the component-scoped writer (same namespace as GuestDatabaseWriter below),
+    // so this scan and the upsertPatterns call address the same physical table.
     const manageKeys = new Set(candidateKeys(MANAGE_PERMISSION));
     const allEff = await ctx.db.query("effective_permissions", "by_creation").collect();
     for (const row of allEff) {
