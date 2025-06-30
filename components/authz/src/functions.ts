@@ -1,7 +1,7 @@
 import { mutation, type RegisteredFunction, type GuestDatabaseWriter } from "@stackbase/executor";
 import type { AuthzContext } from "./context";
-import type { AuthzConfig } from "./roles";
-import { upsertPatterns, reconcileScope, reconcileEffectivePermissions } from "./effective-permissions";
+import { roleGrants, type AuthzConfig } from "./roles";
+import { upsertPatterns, reconcileScope, reconcileEffectivePermissions, candidateKeys } from "./effective-permissions";
 
 interface Assign { userId: string; role: string; scope?: { type: string; id: string } }
 
@@ -55,5 +55,32 @@ export function authzModules(config: AuthzConfig): Record<string, RegisteredFunc
     return null;
   });
 
-  return { assignRole, revokeRole, rebuild };
+  const bootstrapFirstAdmin = mutation(async (ctx, { userId, role }: { userId: string; role: string }) => {
+    // 1. Validate role grants manage
+    if (!roleGrants(config, role, MANAGE_PERMISSION)) {
+      throw new Error(`authz: role "${role}" does not grant ${MANAGE_PERMISSION}`);
+    }
+
+    // 2. TOFU gate — reject if ANY admin already exists.
+    // Scan effective_permissions; if any row's permission is in candidateKeys(MANAGE_PERMISSION), throw.
+    const manageKeys = new Set(candidateKeys(MANAGE_PERMISSION));
+    const allEff = await ctx.db.query("effective_permissions", "by_creation").collect();
+    for (const row of allEff) {
+      if (manageKeys.has(row.permission as string)) {
+        throw new Error("authz: an admin already exists; use assignRole");
+      }
+    }
+
+    // 3. Seed BOTH tables atomically (same transaction), global scope (scopeType: "", scopeId: "").
+    const existing = await ctx.db.query("role_assignments", "byUserScope").eq("userId", userId).eq("scopeType", "").eq("scopeId", "").collect();
+    if (!existing.some((r) => r.role === role)) {
+      await ctx.db.insert("role_assignments", { userId, role, scopeType: "", scopeId: "" });
+    }
+    await upsertPatterns(ctx.db as unknown as GuestDatabaseWriter, config, userId, role, "", "");
+
+    // 4. Return null
+    return null;
+  });
+
+  return { assignRole, revokeRole, rebuild, bootstrapFirstAdmin };
 }

@@ -56,8 +56,7 @@ describe("authz reactivity", () => {
 
     // Bootstrap a global admin (the only party permitted to assign roles), then the ordinary user.
     const admin = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "admin@b.co", password: "pw" })).value;
-    await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: admin.userId, role: "admin", scopeType: "", scopeId: "" } });
-    await r.runSystem("_system:insertDocument", { table: "authz/effective_permissions", fields: { userId: admin.userId, scopeType: "", scopeId: "", permission: "authz:manage" } });
+    await r.run("authz:bootstrapFirstAdmin", { userId: admin.userId, role: "admin" });
     const { token, userId } = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "a@b.co", password: "pw" })).value;
 
     const sock = mockSocket();

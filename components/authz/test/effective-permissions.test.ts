@@ -61,9 +61,8 @@ async function runtimeWithAdmin() {
     policyRegistry: c.policyRegistry, policyProviders: c.policyProviders, relationRegistry: c.relationRegistry,
   });
   const admin = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "a@b.co", password: "pw" })).value;
-  // bootstrap: seed BOTH role_assignments AND effective_permissions for the admin's manage grant
-  await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: admin.userId, role: "admin", scopeType: "", scopeId: "" } });
-  await r.runSystem("_system:insertDocument", { table: "authz/effective_permissions", fields: { userId: admin.userId, scopeType: "", scopeId: "", permission: "authz:manage" } });
+  // bootstrap: seed BOTH role_assignments AND effective_permissions atomically
+  await r.run("authz:bootstrapFirstAdmin", { userId: admin.userId, role: "admin" });
   return { r, admin };
 }
 const effFor = async (r: EmbeddedRuntime, userId: string) =>
@@ -103,11 +102,45 @@ describe("can()/scopesWith read the index", () => {
   });
 });
 
+describe("bootstrapFirstAdmin", () => {
+  async function freshRuntime() {
+    const c = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {
+      "me:can": query(async (ctx, { p }: { p: string }) => (ctx as unknown as { authz: { can(p: string): Promise<boolean> } }).authz.can(p)),
+    } }, [auth, defineAuthz(cfg)]);
+    const r = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      systemModules: systemModules(), componentNames: c.componentNames, contextProviders: c.contextProviders,
+      policyRegistry: c.policyRegistry, policyProviders: c.policyProviders, relationRegistry: c.relationRegistry,
+    });
+    return r;
+  }
+
+  it("seeds both tables atomically and can() sees the manage permission", async () => {
+    const r = await freshRuntime();
+    const alice = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "alice@b.co", password: "pw" })).value;
+    await r.run("authz:bootstrapFirstAdmin", { userId: alice.userId, role: "admin" });
+    expect((await r.run<boolean>("me:can", { p: "authz:manage" }, { identity: alice.token })).value).toBe(true);
+  });
+
+  it("self-disables: a second call throws 'already exists'", async () => {
+    const r = await freshRuntime();
+    const alice = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "alice@b.co", password: "pw" })).value;
+    await r.run("authz:bootstrapFirstAdmin", { userId: alice.userId, role: "admin" });
+    const bob = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "bob@b.co", password: "pw" })).value;
+    await expect(r.run("authz:bootstrapFirstAdmin", { userId: bob.userId, role: "admin" })).rejects.toThrow(/already exists/);
+  });
+
+  it("rejects a role that does not grant authz:manage", async () => {
+    const r = await freshRuntime();
+    const alice = (await r.run<{ token: string; userId: string }>("auth:signUp", { email: "alice@b.co", password: "pw" })).value;
+    await expect(r.run("authz:bootstrapFirstAdmin", { userId: alice.userId, role: "editor" })).rejects.toThrow(/does not grant/);
+  });
+});
+
 // Seed a bootstrap admin (both tables) into a runtime `r`, returning the admin's token/userId.
 async function seedAdmin(r: EmbeddedRuntime, email: string) {
   const a = (await r.run<{ token: string; userId: string }>("auth:signUp", { email, password: "pw" })).value;
-  await r.runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId: a.userId, role: "admin", scopeType: "", scopeId: "" } });
-  await r.runSystem("_system:insertDocument", { table: "authz/effective_permissions", fields: { userId: a.userId, scopeType: "", scopeId: "", permission: "authz:manage" } });
+  await r.run("authz:bootstrapFirstAdmin", { userId: a.userId, role: "admin" });
   return a;
 }
 
