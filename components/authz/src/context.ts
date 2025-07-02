@@ -1,12 +1,16 @@
 import type { ComponentContext } from "@stackbase/executor";
 import { type AuthzConfig } from "./roles";
 import { candidateKeys } from "./effective-permissions";
+import { hasRelation as relHasRelation, objectsWith as relObjectsWith } from "./relations";
+import type { RelSubject, RelObject } from "./relations";
 
 export interface AuthzContext {
   can(permission: string, scope?: { type: string; id: string }): Promise<boolean>;
   require(permission: string, scope?: { type: string; id: string }): Promise<void>;
   roles(scope?: { type: string; id: string }): Promise<string[]>;
   scopesWith(permission: string, type?: string): Promise<string[]>;
+  hasRelation(subject: RelSubject, relation: string, object: RelObject): Promise<boolean>;
+  objectsWith(relation: string, objectType: string): Promise<string[]>;
 }
 
 interface AuthFacade { getUserId(): Promise<string | null> }
@@ -55,6 +59,13 @@ export function authzContext(cctx: ComponentContext, config: AuthzConfig): Authz
         if (keys.has(r.permission as string)) out.add(r.scopeId as string);
       }
       return [...out];
+    },
+    async hasRelation(subject, relation, object) {
+      return relHasRelation(cctx.db, subject, relation, object);
+    },
+    async objectsWith(relation, objectType) {
+      const u = await uid(); if (!u) return [];
+      return relObjectsWith(cctx.db, u, relation, objectType);
     },
   };
 }

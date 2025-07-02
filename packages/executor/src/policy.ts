@@ -12,6 +12,8 @@ export interface RuleAuth {
   can(permission: string, scope?: Scope): Promise<boolean>;
   roles(scope?: Scope): Promise<string[]>;
   scopesWith(permission: string, type?: string): Promise<string[]>;
+  objectsWith(relation: string, objectType: string): Promise<string[]>;
+  hasRelation(subject: { type: string; id: string; relation?: string }, relation: string, object: { type: string; id: string }): Promise<boolean>;
 }
 
 /** Context a policy receives. `db` is a read-only, txn-bound reader for relation lookups. */
