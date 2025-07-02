@@ -272,6 +272,20 @@ Two things to know when authoring relation predicates:
 
 `ctx.authz.addRelation(subject, relation, object)` / `removeRelation(...)` / `hasRelation(subject, relation, object)`. `subject` is a user (`userId`) or a **userset** (`"team:eng#member"` — group membership, propagates with zero per-member writes). Per-resource sharing is one relation row; revoke is one delete. Relation predicates in read policies make sharing reactive via child-table read-dependencies.
 
+**Relationship tuples & usersets.** `authz:addRelation({ subject, relation, object })` / `removeRelation(...)`
+write `(object, relation, subject)` tuples into `authz/relations`; both require `can(\`${object.type}:share\`,
+{ type, id })` (a per-object *share* permission — grant it to owners). `subject` is a user `{ type, id }` or a
+**userset** `{ type, id, relation }` (e.g. `{ type: "team", id: "eng", relation: "member" }` = `team:eng#member`).
+Membership is just a relation whose object is the group: `addRelation({ type:"user", id }, "member", { type:"team", id:"eng" })`.
+
+- `ctx.authz.hasRelation(subject, relation, object)` — a specific check (single-level userset expansion).
+- `ctx.authz.objectsWith(relation, objectType)` — the object ids the caller relates to (direct + via their groups),
+  for read policies: `read: ({ auth }) => ({ _id: { in: await auth.objectsWith("viewer", "document") } })`.
+
+Both are **reactive**: sharing/unsharing and membership changes live-update subscriptions — adding someone to a
+team reveals every resource shared with `team:…#member`, with zero per-resource writes. Only single-level usersets
+(user → group → object) are supported; nested groups are not yet. This coexists with the typed `.relation()` predicates.
+
 ### Overrides & negation
 
 `ctx.authz.grantPermission(userId, permission, scope?)` / `denyPermission(...)` for exceptions without proliferating roles. **Deny wins** over any grant. Grants accept an optional `expiresAt` for temporal access; expired grants are ignored (and a sweep prunes them).

@@ -2,6 +2,7 @@ import { mutation, type RegisteredFunction, type GuestDatabaseWriter } from "@st
 import type { AuthzContext } from "./context";
 import { roleGrants, type AuthzConfig } from "./roles";
 import { upsertPatterns, reconcileScope, reconcileEffectivePermissions, candidateKeys } from "./effective-permissions";
+import { addRelationTuple, removeRelationTuple, type RelSubject, type RelObject } from "./relations";
 
 interface Assign { userId: string; role: string; scope?: { type: string; id: string } }
 
@@ -84,5 +85,17 @@ export function authzModules(config: AuthzConfig): Record<string, RegisteredFunc
     return null;
   });
 
-  return { assignRole, revokeRole, rebuild, bootstrapFirstAdmin };
+  const addRelation = mutation(async (ctx, { subject, relation, object }: { subject: RelSubject; relation: string; object: RelObject }) => {
+    await (ctx as unknown as WithAuthz).authz.require(`${object.type}:share`, { type: object.type, id: object.id });
+    await addRelationTuple(ctx.db as unknown as GuestDatabaseWriter, subject, relation, object);
+    return null;
+  });
+
+  const removeRelation = mutation(async (ctx, { subject, relation, object }: { subject: RelSubject; relation: string; object: RelObject }) => {
+    await (ctx as unknown as WithAuthz).authz.require(`${object.type}:share`, { type: object.type, id: object.id });
+    await removeRelationTuple(ctx.db as unknown as GuestDatabaseWriter, subject, relation, object);
+    return null;
+  });
+
+  return { assignRole, revokeRole, rebuild, bootstrapFirstAdmin, addRelation, removeRelation };
 }
