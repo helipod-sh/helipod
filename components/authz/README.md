@@ -276,15 +276,19 @@ Two things to know when authoring relation predicates:
 write `(object, relation, subject)` tuples into `authz/relations`; both require `can(\`${object.type}:share\`,
 { type, id })` (a per-object *share* permission — grant it to owners). `subject` is a user `{ type, id }` or a
 **userset** `{ type, id, relation }` (e.g. `{ type: "team", id: "eng", relation: "member" }` = `team:eng#member`).
-Membership is just a relation whose object is the group: `addRelation({ type:"user", id }, "member", { type:"team", id:"eng" })`.
+A "group" is not a special kind — it is **any object others are related to**: the userset's middle node can be any
+`type` (`team`, `org`, `folder`, …), and its `relation` can be any relation (`member`, `owner`, …), not just `member`.
+Membership is just a relation whose object is that node: `addRelation({ type:"user", id }, "member", { type:"team", id:"eng" })`.
 
 - `ctx.authz.hasRelation(subject, relation, object)` — a specific check (single-level userset expansion).
 - `ctx.authz.objectsWith(relation, objectType)` — the object ids the caller relates to (direct + via their groups),
   for read policies: `read: ({ auth }) => ({ _id: { in: await auth.objectsWith("viewer", "document") } })`.
 
 Both are **reactive**: sharing/unsharing and membership changes live-update subscriptions — adding someone to a
-team reveals every resource shared with `team:…#member`, with zero per-resource writes. Only single-level usersets
-(user → group → object) are supported; nested groups are not yet. This coexists with the typed `.relation()` predicates.
+team reveals every resource shared with `team:…#member`, with zero per-resource writes. Only **one level** of userset
+indirection is expanded (a caller, then the groups they directly belong to, then the objects those groups relate to);
+nested groups (a group that is a member of another group) are not expanded yet. This coexists with the typed
+`.relation()` predicates.
 
 ### Overrides & negation
 
