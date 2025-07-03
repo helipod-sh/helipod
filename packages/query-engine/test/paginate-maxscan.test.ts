@@ -96,20 +96,36 @@ describe("paginate maxScan", () => {
       filters: [{ op: "eq", field: "n", value: 5 }],
     };
 
-    // First page: maxScan=3, scans n=0,1,2, doesn't reach n=5
-    const page1 = await qr.paginate(query, await store.maxTimestamp(), { pageSize: 5, maxScan: 3 });
-    expect(page1.scanCapped).toBe(true);
-    expect(page1.nextCursor).not.toBeNull();
+    // Walk all pages via capped cursors (maxScan=3 forces multiple capped pages).
+    // Collect every returned doc unconditionally — proves no row is skipped and
+    // no row is duplicated across page boundaries regardless of how many caps fire.
+    const snapshot = await store.maxTimestamp();
+    const allDocs: unknown[] = [];
+    let cursor: string | null = null;
+    let iterations = 0;
+    const MAX_ITERATIONS = 50; // guard against infinite loop if hasMore is bugged
 
-    // Second page resumes from cursor → should continue from n=3 onward
-    const page2 = await qr.paginate(query, await store.maxTimestamp(), { cursor: page1.nextCursor, pageSize: 5, maxScan: 3 });
-    // page2 scans n=3,4,5 (or hits the match sooner)
-    // Either way: if n=5 is within the next 3, we get it; if not, still capped
-    // The important guarantee: no rows are skipped (n=3 is not missed)
-    const allPages = [...page1.page, ...page2.page];
-    // The matching row (n=5) should appear eventually in sequential pages
-    if (!page2.scanCapped) {
-      expect(allPages.some((d) => d["n"] === 5)).toBe(true);
-    }
+    do {
+      const result = await qr.paginate(query, snapshot, {
+        cursor,
+        pageSize: 5,
+        maxScan: 3,
+      });
+      allDocs.push(...result.page);
+      cursor = result.nextCursor;
+      iterations++;
+      if (iterations > MAX_ITERATIONS) {
+        throw new Error(`paginate walk exceeded ${MAX_ITERATIONS} iterations — possible infinite loop`);
+      }
+      if (!result.hasMore) break;
+    } while (cursor !== null);
+
+    // The matching row (n===5) must appear in the collected set — unconditionally,
+    // even when every individual page was scanCapped.
+    expect(allDocs.some((d) => (d as Record<string, unknown>)["n"] === 5)).toBe(true);
+
+    // No duplicates: every doc identity (_id) appears exactly once.
+    const ids = allDocs.map((d) => (d as Record<string, unknown>)["_id"]);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
