@@ -99,5 +99,5 @@ export function wsTransport(url: string): AdminTransport {
 /** Derive the admin WebSocket URL from the current page origin (same host as the HTTP admin API). */
 export function adminWsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/sync`;
+  return `${proto}//${window.location.host}/api/sync`;
 }

@@ -9,7 +9,7 @@ import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/
 import { writeGenerated } from "@stackbase/codegen";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { InMemoryLogSink } from "@stackbase/executor";
-import { AdminApi, generateAdminKey, systemModules } from "@stackbase/admin";
+import { AdminApi, browseTableModule, generateAdminKey, systemModules, verifyAdminKey } from "@stackbase/admin";
 import { resolveDevOptions, detectRuntime, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
@@ -78,6 +78,8 @@ export async function devCommand(args: string[]): Promise<number> {
     logSink,
     modules: project.moduleMap,
     systemModules: systemModules(),
+    adminModules: { "_admin:browseTable": browseTableModule },
+    verifyAdmin: (key: string) => verifyAdminKey(adminKey, key),
     componentNames: project.componentNames,
     contextProviders: project.contextProviders,
   });
