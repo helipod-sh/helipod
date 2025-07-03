@@ -36,6 +36,7 @@ export interface PaginatedResult {
   page: DocumentValue[];
   nextCursor: string | null;
   hasMore: boolean;
+  scanCapped: boolean;
   readSet: RangeSet;
 }
 
@@ -100,7 +101,7 @@ export class QueryRuntime {
   async paginate(
     query: Query,
     readTimestamp: bigint,
-    opts: { cursor?: string | null; pageSize: number },
+    opts: { cursor?: string | null; pageSize: number; maxScan?: number },
   ): Promise<PaginatedResult> {
     const order = query.order ?? "asc";
     const filters = query.filters ?? [];
@@ -118,29 +119,31 @@ export class QueryRuntime {
     let lastIncluded: Uint8Array | null = null;
     let lastScanned: Uint8Array | null = null;
     let hasMore = false;
+    let scanned = 0;
+    let scanCapped = false;
 
-    for await (const [key, doc] of this.docStore.index_scan(
-      query.index.indexId,
-      tableId,
-      readTimestamp,
-      interval,
-      order,
-    )) {
+    for await (const [key, doc] of this.docStore.index_scan(query.index.indexId, tableId, readTimestamp, interval, order)) {
       lastScanned = key;
       const value = doc.value.value;
-      if (!filters.every((f) => evaluateFilter(value, f))) continue;
-      if (page.length >= opts.pageSize) {
-        hasMore = true;
+      if (filters.every((f) => evaluateFilter(value, f))) {
+        if (page.length >= opts.pageSize) { hasMore = true; break; }
+        page.push(value);
+        lastIncluded = key;
+      }
+      scanned++;
+      if (opts.maxScan !== undefined && scanned >= opts.maxScan) {
+        hasMore = true;                       // stopped early — there may be more
+        if (page.length < opts.pageSize) scanCapped = true;
         break;
       }
-      page.push(value);
-      lastIncluded = key;
     }
 
     const readSet = new RangeSet();
     readSet.add(this.consumedRange(query.index, interval, order, lastScanned));
-    const nextCursor = hasMore && lastIncluded ? bytesToBase64(lastIncluded) : null;
-    return { page, nextCursor, hasMore, readSet };
+    // When capped, resume past where we STOPPED scanning (lastScanned), not the last returned row.
+    const cursorKey = scanCapped ? lastScanned : hasMore ? lastIncluded : null;
+    const nextCursor = cursorKey ? bytesToBase64(cursorKey) : null;
+    return { page, nextCursor, hasMore, scanCapped, readSet };
   }
 
   /** The byte span actually read (so reactive invalidation isn't broader than necessary). */
