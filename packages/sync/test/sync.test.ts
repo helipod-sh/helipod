@@ -89,6 +89,9 @@ beforeEach(async () => {
       const r = await exec.run(modules[path]!, jsonToConvex(args));
       return { value: r.value as Value, tables: r.oplog?.writtenTables ?? [], writeRanges: r.oplog?.writtenRanges ?? [], commitTs: Number(r.oplog?.commitTs ?? 0) };
     },
+    async runAdminQuery() {
+      throw new Error("admin modules not configured");
+    },
   };
 
   handler = new SyncProtocolHandler(syncExec);

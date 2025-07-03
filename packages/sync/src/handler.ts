@@ -30,6 +30,7 @@ export interface SyncWebSocket {
 export interface SyncUdfExecutor {
   runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
   runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number }>;
+  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
 }
 
 /** A committed write's invalidation — the transactor→sync fan-out payload (Tier 2: from a stream). */
@@ -49,6 +50,8 @@ export interface SyncProtocolHandlerOptions {
    * — also push, and there's no double-notify).
    */
   autoNotifyOnMutation?: boolean;
+  /** Validate an admin key presented via `SetAdminAuth`. Defaults to `() => false` (no admin). */
+  verifyAdmin?: (key: string) => boolean;
 }
 
 interface Session {
@@ -56,6 +59,7 @@ interface Session {
   socket: SyncWebSocket;
   version: StateVersion;
   identity: string | null;
+  privileged: boolean;
 }
 
 function errMessage(e: unknown): string {
@@ -66,14 +70,17 @@ export class SyncProtocolHandler {
   private readonly sessions = new Map<string, Session>();
   private readonly subscriptions = new SubscriptionManager();
   private notifyTail: Promise<void> = Promise.resolve();
+  private readonly verifyAdmin: (key: string) => boolean;
 
   constructor(
     private readonly executor: SyncUdfExecutor,
     private readonly options: SyncProtocolHandlerOptions = {},
-  ) {}
+  ) {
+    this.verifyAdmin = options.verifyAdmin ?? (() => false);
+  }
 
   connect(sessionId: string, socket: SyncWebSocket): void {
-    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null });
+    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false });
   }
 
   disconnect(sessionId: string): void {
@@ -101,7 +108,18 @@ export class SyncProtocolHandler {
         return;
       case "SetAuth":
         return this.handleSetAuth(session, msg);
+      case "SetAdminAuth":
+        return this.handleSetAdminAuth(session, msg);
     }
+  }
+
+  /** Run a subscription's query — privileged for _admin:* on a privileged session; else identity-scoped. */
+  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }> {
+    if (udfPath.startsWith("_admin:")) {
+      if (!session.privileged) throw new Error("Forbidden: admin subscription requires admin auth");
+      return this.executor.runAdminQuery(udfPath, args);
+    }
+    return this.executor.runQuery(udfPath, args, session.identity);
   }
 
   private async handleModifyQuerySet(
@@ -111,7 +129,7 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables, readRanges } = await this.executor.runQuery(q.udfPath, q.args, session.identity);
+        const { value, tables, readRanges } = await this.execSub(session, q.udfPath, q.args);
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges });
         modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: convexToJson(value) });
       } catch (e) {
@@ -173,7 +191,7 @@ export class SyncProtocolHandler {
       const modifications: StateModification[] = [];
       for (const sub of subs) {
         try {
-          const { value, tables, readRanges } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
+          const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
           this.subscriptions.add({ ...sub, tables, readRanges }); // refresh the read set
           modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
         } catch (e) {
@@ -187,13 +205,18 @@ export class SyncProtocolHandler {
     }
   }
 
+  private async handleSetAdminAuth(session: Session, msg: Extract<ClientMessage, { type: "SetAdminAuth" }>): Promise<void> {
+    session.privileged = this.verifyAdmin(msg.key);
+    // The client sends SetAdminAuth before subscribing; no re-run needed here.
+  }
+
   private async handleSetAuth(session: Session, msg: Extract<ClientMessage, { type: "SetAuth" }>): Promise<void> {
     session.identity = msg.token;
     const subs = this.subscriptions.forSession(session.sessionId);
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges } = await this.executor.runQuery(sub.udfPath, sub.args, session.identity);
+        const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
         this.subscriptions.add({ ...sub, tables, readRanges });
         modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
       } catch (e) {

@@ -123,6 +123,9 @@ export class EmbeddedRuntime {
           commitTs: Number(r.oplog?.commitTs ?? 0),
         };
       },
+      async runAdminQuery() {
+        throw new Error("admin modules not configured");
+      },
     };
 
     // Reactivity is driven by the write fan-out (not inline in the mutation handler), so a

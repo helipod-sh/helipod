@@ -18,6 +18,10 @@ class RecordingExecutor implements SyncUdfExecutor {
   async runMutation(_p: string, _a: JSONValue, _i?: string | null) {
     return { value: null as unknown as Value, tables: [], writeRanges: [], commitTs: 1 };
   }
+  async runAdminQuery(_p: string, _a: JSONValue) {
+    throw new Error("admin modules not configured");
+    return { value: null as unknown as Value, tables: [], readRanges: [] };
+  }
 }
 
 describe("sync: per-session identity", () => {
