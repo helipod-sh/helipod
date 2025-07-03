@@ -139,7 +139,16 @@ export class QueryRuntime {
     }
 
     const readSet = new RangeSet();
-    readSet.add(this.consumedRange(query.index, interval, order, lastScanned));
+    // When the scan completed without hitting a page or scan cap (hasMore = false, scanCapped = false),
+    // record the FULL remaining interval as the read range — identical to the `collect` strategy —
+    // so that any insertion beyond the last result still triggers reactive re-evaluation.
+    // Only trim to successor(lastScanned) when we stopped early (hasMore=true or scanCapped=true).
+    const fullInterval = !hasMore && !scanCapped;
+    readSet.add(
+      fullInterval
+        ? { keyspace: this.keyspace(query.index), start: interval.start, end: interval.end }
+        : this.consumedRange(query.index, interval, order, lastScanned),
+    );
     // When capped, resume past where we STOPPED scanning (lastScanned), not the last returned row.
     const cursorKey = scanCapped ? lastScanned : hasMore ? lastIncluded : null;
     const nextCursor = cursorKey ? bytesToBase64(cursorKey) : null;

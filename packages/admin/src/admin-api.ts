@@ -2,6 +2,7 @@ import { encodeStorageTableId } from "@stackbase/id-codec";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { ExecutionLogEntry, IndexCatalog, LogFilter, LogSink } from "@stackbase/executor";
+import type { FilterCond } from "./browse";
 
 export type SchemaJsonLike = {
   tables: Record<string, { indexes: { indexDescriptor: string }[]; shardKey?: string | null }>;
@@ -27,9 +28,9 @@ export interface TableInfo {
 
 export interface TableDataPage {
   documents: JSONValue[];
-  total: number;
-  page: number;
-  pageSize: number;
+  nextCursor: string | null;
+  hasMore: boolean;
+  scanCapped: boolean;
 }
 
 export class AdminApi {
@@ -70,30 +71,13 @@ export class AdminApi {
 
   async getTableData(
     table: string,
-    opts: { page?: number; pageSize?: number; filter?: string } = {},
+    opts: { cursor?: string | null; pageSize?: number; filter?: FilterCond[] } = {},
   ): Promise<TableDataPage> {
-    const tableId = this.tableId(table);
-    const page = opts.page ?? 0;
-    const pageSize = opts.pageSize ?? 50;
-    // NOTE (v1): this scans the whole table into memory per request. Acceptable for Tier-0 dev
-    // dashboards; pushing pagination into the store (SQL LIMIT/cursor) is a planned optimization.
-    // Convert to JSON up front so the filter compares the SAME representation the UI displays.
-    const docs = (await this.deps.runtime.store.scan(tableId)).map(
-      (d) => convexToJson(d.value.value) as Record<string, JSONValue>,
-    );
-
-    let rows = docs;
-    if (opts.filter && opts.filter.includes(":")) {
-      const idx = opts.filter.indexOf(":");
-      const field = opts.filter.slice(0, idx);
-      const want = opts.filter.slice(idx + 1);
-      rows = rows.filter((d) => String(d[field] ?? "") === want);
-    }
-
-    const total = rows.length;
-    const start = page * pageSize;
-    const documents = rows.slice(start, start + pageSize);
-    return { documents, total, page, pageSize };
+    const args: Record<string, unknown> = { table, cursor: opts.cursor ?? null };
+    if (opts.pageSize !== undefined) args.pageSize = opts.pageSize;
+    if (opts.filter !== undefined) args.filter = opts.filter;
+    const r = await this.deps.runtime.runAdmin("_admin:browseTable", args as JSONValue);
+    return r.value as TableDataPage;
   }
 
   listFunctions(): { path: string; kind: string }[] {

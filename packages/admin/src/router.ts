@@ -33,9 +33,9 @@ export async function handleAdminRequest(api: AdminApi, adminKey: string, req: A
       return { status: 200, body: (await api.listTables()) as unknown as JSONValue };
     }
     if (req.method === "GET" && seg.length === 3 && seg[0] === "tables" && seg[2] === "data") {
-      const page = req.query.page ? Number(req.query.page) : undefined;
+      const cursor = req.query.cursor ?? null;
       const pageSize = req.query.pageSize ? Number(req.query.pageSize) : undefined;
-      const data = await api.getTableData(decodeURIComponent(seg[1]!), { page, pageSize, filter: req.query.filter });
+      const data = await api.getTableData(decodeURIComponent(seg[1]!), { cursor, pageSize });
       return { status: 200, body: data as unknown as JSONValue };
     }
     if (req.method === "GET" && seg.length === 1 && seg[0] === "functions") {

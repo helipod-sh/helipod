@@ -6,6 +6,7 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { encodeStorageIndexId } from "@stackbase/id-codec";
 import { AdminApi } from "../src/admin-api";
+import { browseTableModule } from "../src/browse";
 
 const schema = defineSchema({ notes: defineTable({ title: v.string(), done: v.boolean() }) });
 
@@ -30,6 +31,7 @@ async function makeApi() {
       "notes:add": mutation(async (ctx, a: { title: string; done: boolean }) => ctx.db.insert("notes", a)),
       "notes:list": query(async (ctx) => ctx.db.query("notes", "by_creation").collect()),
     },
+    adminModules: { "_admin:browseTable": browseTableModule },
   });
   const api = new AdminApi({
     runtime,
@@ -49,13 +51,20 @@ describe("AdminApi", () => {
     expect(tables).toEqual([{ name: "notes", indexes: [], shardKey: undefined, documentCount: 1 }]);
   });
 
-  it("paginates and filters table data", async () => {
+  it("paginates table data", async () => {
     const { api, runtime } = await makeApi();
     await runtime.run("notes:add", { title: "a", done: false });
     await runtime.run("notes:add", { title: "b", done: true });
     const page = await api.getTableData("notes", { pageSize: 10 });
-    expect(page.total).toBe(2);
-    const filtered = await api.getTableData("notes", { filter: "title:b" });
+    expect(page.documents).toHaveLength(2);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it("filters table data via FilterCond", async () => {
+    const { api, runtime } = await makeApi();
+    await runtime.run("notes:add", { title: "a", done: false });
+    await runtime.run("notes:add", { title: "b", done: true });
+    const filtered = await api.getTableData("notes", { filter: [{ field: "title", op: "eq", value: "b" }] });
     expect(filtered.documents.map((d: any) => d.title)).toEqual(["b"]);
   });
 
@@ -66,8 +75,18 @@ describe("AdminApi", () => {
     expect(api.queryLogs()[0]).toMatchObject({ path: "notes:list", status: "ok" });
   });
 
-  it("throws on an unknown table", async () => {
-    const { api } = await makeApi();
-    await expect(api.getTableData("ghost")).rejects.toThrow("unknown table: ghost");
+  it("throws on unknown admin function when no adminModules", async () => {
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    const catalog = new SimpleIndexCatalog();
+    const logSink = new InMemoryLogSink();
+    const runtime = await EmbeddedRuntime.create({ store, catalog, logSink, modules: {} });
+    const api = new AdminApi({
+      runtime,
+      schemaJson: { tables: {} },
+      tableNumbers: { notes: 10001 },
+      manifest: [],
+      logSink,
+    });
+    await expect(api.getTableData("notes")).rejects.toThrow("unknown admin function");
   });
 });

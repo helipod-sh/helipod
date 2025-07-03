@@ -30,6 +30,10 @@ export interface EmbeddedRuntimeOptions {
   modules: Record<string, RegisteredFunction>;
   /** Privileged built-in functions (`_system:*`). Kept off the public run/sync surface. */
   systemModules?: Record<string, RegisteredFunction>;
+  /** Privileged admin functions (`_admin:*`). Served over the admin sync channel. */
+  adminModules?: Record<string, RegisteredFunction>;
+  /** Validate an admin key presented via `SetAdminAuth`. Defaults to `() => false`. */
+  verifyAdmin?: (key: string) => boolean;
   /** Set of component names; used to resolve the namespace for each function path. */
   componentNames?: ReadonlySet<string>;
   /** Swap the Tier 0 in-memory fan-out for a cross-process adapter (no app-code change). */
@@ -60,6 +64,7 @@ export class EmbeddedRuntime {
     readonly writeFanoutAdapter: EmbeddedWriteFanoutAdapter,
     private readonly modules: Record<string, RegisteredFunction>,
     private readonly systemModules: Record<string, RegisteredFunction>,
+    private readonly adminModules: Record<string, RegisteredFunction>,
     private readonly componentNames: ReadonlySet<string>,
     private readonly contextProviders: ReadonlyArray<ContextProvider>,
     private readonly policyRegistry: ReadonlyMap<string, TablePolicy>,
@@ -98,6 +103,7 @@ export class EmbeddedRuntime {
     const relationRegistry = options.relationRegistry;
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
+    const adminModules: Record<string, RegisteredFunction> = { ...(options.adminModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
       if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
       const fn = modules[path];
@@ -123,8 +129,11 @@ export class EmbeddedRuntime {
           commitTs: Number(r.oplog?.commitTs ?? 0),
         };
       },
-      async runAdminQuery() {
-        throw new Error("admin modules not configured");
+      async runAdminQuery(path, args) {
+        const fn = adminModules[path];
+        if (!fn) throw new Error(`unknown admin function: ${path}`);
+        const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true });
+        return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
       },
     };
 
@@ -132,7 +141,7 @@ export class EmbeddedRuntime {
     // commit from ANY path — WebSocket mutation OR `runtime.run()` / HTTP `/api/run` —
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
-    const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false });
+    const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false, verifyAdmin: options.verifyAdmin });
     const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
@@ -152,7 +161,7 @@ export class EmbeddedRuntime {
       void drain();
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -186,6 +195,13 @@ export class EmbeddedRuntime {
   async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+  }
+
+  /** Run a privileged admin built-in (`_admin:*`) once (e.g. for the HTTP fallback). Trusted callers only. */
+  async runAdmin<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+    const fn = this.adminModules[path];
+    if (!fn) throw new FunctionNotFoundError(`unknown admin function: ${path}`);
     return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
   }
 }
