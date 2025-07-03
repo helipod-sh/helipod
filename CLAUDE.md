@@ -12,9 +12,9 @@ It is loosely inspired by a now-defunct project, "concave.dev." There is **no re
 
 The reactive engine is implemented and working end-to-end: 14 packages under `packages/`, a runnable example under `examples/chat`, **131 passing tests**, build/typecheck green, on both Node and Bun. `bun install`, `bun run build`, `bun run test`, `bun run typecheck` all work (Bun is the package manager + runtime; Turborepo orchestrates; vitest runs under Bun). The commands and package layout below are now **real**, not aspirational.
 
-What works: MVCC SQLite storage · single-writer OCC transactor · query engine with cursor pagination · isolate-safe syscall executor · reactive sync tier (subscribe→write→push) · embedded runtime + loopback/WebSocket transports · codegen (typed `Doc`/`Id`/`api` that compiles) · `stackbase dev` CLI (HTTP + hot reload) · client SDK with `useQuery`/`useMutation` · the `examples/chat` app (reactive, shard-key, pagination, ephemeral typing).
+What works: MVCC SQLite storage · single-writer OCC transactor · query engine with cursor pagination · isolate-safe syscall executor · reactive sync tier (subscribe→write→push) · embedded runtime + loopback/WebSocket transports · codegen (typed `Doc`/`Id`/`api` that compiles) · `stackbase dev` CLI (HTTP + hot reload) · client SDK with `useQuery`/`useMutation` · the `examples/chat` app (reactive, shard-key, pagination, ephemeral typing) · **dashboard** (`apps/dashboard`) with a **live** data browser (admin sync subscriptions — `_admin:browseTable`, cursor pagination, structured filter UI, scanCapped banner), logs viewer, and function runner.
 
-Honestly deferred (seams reserved, not built): true V8-isolate global sandboxing (the inline executor runs in-process; the syscall ABI is isolate-ready) · optimistic updates + full version-gap resync in the client · Tier 2 distributed sharding/sync fleet · file storage · search/vector · scheduled functions/crons. These are the remaining build-order slices (#2–#6). (Range-precise invalidation has since SHIPPED — the recorded read/write ranges now drive subscription invalidation, so a write only re-runs subscriptions whose read-set its range intersects; activated by the authz effectivePermissions slice.)
+Honestly deferred (seams reserved, not built): true V8-isolate global sandboxing (the inline executor runs in-process; the syscall ABI is isolate-ready) · optimistic updates + full version-gap resync in the client · Tier 2 distributed sharding/sync fleet · file storage · search/vector · scheduled functions/crons. (Range-precise invalidation has since SHIPPED — the recorded read/write ranges now drive subscription invalidation, so a write only re-runs subscriptions whose read-set its range intersects; activated by the authz effectivePermissions slice.)
 
 ## Locked decisions (do not relitigate without the user)
 
@@ -26,8 +26,8 @@ Honestly deferred (seams reserved, not built): true V8-isolate global sandboxing
 
 ## Build order (each is its own working slice, spec'd and built independently)
 
-1. **Foundation** *(current focus)* — reactive engine: schema + query/mutation function definitions, transactional execution via the DB adapter, WebSocket reactive subscriptions, the `stackbase dev` CLI that pushes functions, and a client SDK with a `useQuery` hook. This is the spine; build it fully working before anything else.
-2. Dashboard (data browser, logs, function runner)
+1. **Foundation** ✅ — reactive engine: schema + query/mutation function definitions, transactional execution via the DB adapter, WebSocket reactive subscriptions, the `stackbase dev` CLI that pushes functions, and a client SDK with a `useQuery` hook.
+2. **Dashboard** ✅ — `apps/dashboard`: live data browser (admin sync subscription, cursor pagination, structured filters, scanCapped banner), logs viewer, function runner. Table list via HTTP (lazy + manual refresh); doc edits via admin HTTP (live subscription reflects writes).
 3. Auth
 4. File storage
 5. Actions + scheduled functions / crons (side effects that run *outside* the transaction)
@@ -59,7 +59,7 @@ TypeScript monorepo (Bun workspaces + Turborepo). Keep packages small and single
 - `packages/client` — framework-agnostic client + sync protocol; `packages/react` (or a subpath) for `useQuery`/`useMutation` hooks.
 - `packages/cli` — `stackbase` CLI: `dev` (watch + push functions + run engine), `deploy`, codegen.
 - `packages/codegen` — generates typed API + schema types consumed by app code (the typed-client DX is a core selling point; treat it as load-bearing, not a nicety).
-- `apps/dashboard` — later slice.
+- `apps/dashboard` — live data browser, logs, and function runner (slice 2, shipped).
 - `examples/*` — runnable sample apps that double as integration tests.
 
 ## Commands (target — confirm they exist before use)

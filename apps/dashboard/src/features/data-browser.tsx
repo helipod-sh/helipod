@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useReactTable, getCoreRowModel, flexRender, type ColumnDef } from "@tanstack/react-table";
-import { adminGet, adminSend, type TableData } from "@/lib/admin";
+import { adminGet, adminSend, type TableInfo } from "@/lib/admin";
+import { AdminBrowse, wsTransport, adminWsUrl, type BrowsePage, type FilterCond } from "@/lib/ws-admin";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
 import { Dialog } from "@/components/ui/dialog";
@@ -9,14 +9,18 @@ import { Dialog } from "@/components/ui/dialog";
 type Row = Record<string, unknown>;
 const SYS = ["_id", "_creationTime"];
 
+const OPS: FilterCond["op"][] = ["eq", "ne", "lt", "lte", "gt", "gte"];
+
 function cell(v: unknown): string {
   if (v === null || v === undefined) return "";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
 
+// ---------------------------------------------------------------------------
+// DocEditor — writes via admin HTTP; live subscription reflects the result.
+// ---------------------------------------------------------------------------
 function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose: () => void }) {
-  const qc = useQueryClient();
   const id = doc ? String(doc._id) : null;
   const initial = useMemo(() => {
     if (!doc) return "{\n  \n}";
@@ -31,7 +35,7 @@ function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose:
   async function save() {
     let fields: Record<string, unknown>;
     try {
-      fields = JSON.parse(text);
+      fields = JSON.parse(text) as Record<string, unknown>;
     } catch {
       setError("Invalid JSON");
       return;
@@ -41,8 +45,7 @@ function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose:
     try {
       if (id) await adminSend("PATCH", `/tables/${encodeURIComponent(table)}/docs/${id}`, fields);
       else await adminSend("POST", `/tables/${encodeURIComponent(table)}/docs`, fields);
-      await qc.invalidateQueries({ queryKey: ["data", table] });
-      await qc.invalidateQueries({ queryKey: ["tables"] });
+      // No invalidateQueries — the live subscription reflects writes automatically.
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -64,19 +67,89 @@ function DocEditor({ table, doc, onClose }: { table: string; doc?: Row; onClose:
   );
 }
 
+// ---------------------------------------------------------------------------
+// FilterRow — one field/op/value condition
+// ---------------------------------------------------------------------------
+function FilterRow({
+  cond,
+  onChange,
+  onRemove,
+  fields,
+}: {
+  cond: FilterCond;
+  onChange: (c: FilterCond) => void;
+  onRemove: () => void;
+  fields: string[];
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        className="h-8 rounded-md border border-input bg-secondary/40 px-2 text-sm"
+        value={cond.field}
+        onChange={(e) => onChange({ ...cond, field: e.target.value })}
+      >
+        {fields.map((f) => <option key={f} value={f}>{f}</option>)}
+        {!fields.includes(cond.field) && <option value={cond.field}>{cond.field}</option>}
+      </select>
+      <select
+        className="h-8 rounded-md border border-input bg-secondary/40 px-2 text-sm"
+        value={cond.op}
+        onChange={(e) => onChange({ ...cond, op: e.target.value as FilterCond["op"] })}
+      >
+        {OPS.map((op) => <option key={op} value={op}>{op}</option>)}
+      </select>
+      <Input
+        className="h-8 max-w-48"
+        value={String(cond.value ?? "")}
+        onChange={(e) => onChange({ ...cond, value: e.target.value })}
+        placeholder="value"
+      />
+      <Button size="sm" variant="secondary" onClick={onRemove}>✕</Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DataBrowser — live grid via AdminBrowse subscription
+// ---------------------------------------------------------------------------
 export function DataBrowser({ table }: { table: string }) {
-  const qc = useQueryClient();
-  const [filter, setFilter] = useState("");
-  const [applied, setApplied] = useState("");
+  // Live page state
+  const [page, setPage] = useState<BrowsePage | null>(null);
+  // Cursor stack for prev navigation: stack[0] = initial (null), each push is a nextCursor
+  const [cursorStack, setCursorStack] = useState<Array<string | null>>([null]);
+  const cursorStackRef = useRef(cursorStack);
+  cursorStackRef.current = cursorStack;
+  const currentCursor = cursorStack.at(-1) ?? null;
+
+  // Structured filters
+  const [filterConds, setFilterConds] = useState<FilterCond[]>([]);
+  // Applied filters (committed on button press)
+  const [appliedFilter, setAppliedFilter] = useState<FilterCond[]>([]);
+
+  // Editor state
   const [editing, setEditing] = useState<Row | null>(null);
   const [creating, setCreating] = useState(false);
   const [opError, setOpError] = useState<string | null>(null);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["data", table, applied],
-    queryFn: () => adminGet<TableData>(`/tables/${encodeURIComponent(table)}/data?pageSize=100${applied ? `&filter=${encodeURIComponent(applied)}` : ""}`),
-  });
-  const docs = useMemo(() => data?.documents ?? [], [data]);
+  // AdminBrowse instance — one per table mount
+  const browseRef = useRef<AdminBrowse | null>(null);
+
+  useEffect(() => {
+    const browse = new AdminBrowse(wsTransport(adminWsUrl()), resolveAdminKey());
+    browseRef.current = browse;
+    return () => { browse.close(); browseRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table]);
+
+  // Re-subscribe when table, cursor, or filter changes
+  useEffect(() => {
+    const browse = browseRef.current;
+    if (!browse) return;
+    browse.subscribe(table, { cursor: currentCursor, filter: appliedFilter }, setPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table, currentCursor, appliedFilter]);
+
+  const docs = useMemo(() => page?.documents ?? [], [page]);
 
   const fieldKeys = useMemo(() => {
     const seen = new Set<string>();
@@ -89,11 +162,28 @@ export function DataBrowser({ table }: { table: string }) {
     setOpError(null);
     try {
       await adminSend("DELETE", `/tables/${encodeURIComponent(table)}/docs/${id}`);
-      await qc.invalidateQueries({ queryKey: ["data", table] });
-      await qc.invalidateQueries({ queryKey: ["tables"] });
+      // No invalidateQueries — the live subscription reflects writes automatically.
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  function goNext() {
+    if (!page?.hasMore || !page.nextCursor) return;
+    setCursorStack((s) => [...s, page.nextCursor]);
+  }
+
+  function goPrev() {
+    setCursorStack((s) => s.length > 1 ? s.slice(0, -1) : s);
+  }
+
+  function applyFilters() {
+    setCursorStack([null]); // reset to first page
+    setAppliedFilter([...filterConds]);
+  }
+
+  function addFilterCond() {
+    setFilterConds((f) => [...f, { field: fieldKeys[0] ?? "_id", op: "eq", value: "" }]);
   }
 
   const columns = useMemo<ColumnDef<Row>[]>(() => {
@@ -122,20 +212,46 @@ export function DataBrowser({ table }: { table: string }) {
 
   const tableModel = useReactTable({ data: docs, columns, getCoreRowModel: getCoreRowModel() });
 
+  const isLoading = page === null;
+  const hasPrev = cursorStack.length > 1;
+
   return (
     <div>
-      <div className="mb-4 flex items-center gap-3">
+      {/* Header row */}
+      <div className="mb-3 flex items-center gap-3">
         <h1 className="text-lg font-semibold">{table}</h1>
-        <span className="text-sm text-muted-foreground">{data?.total ?? "…"} docs</span>
-        <Input
-          className="ml-auto max-w-72"
-          placeholder="filter  field:value"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setApplied(filter)}
-        />
-        <Button variant="secondary" onClick={() => setApplied(filter)}>Filter</Button>
         <Button onClick={() => setCreating(true)}>+ New</Button>
+      </div>
+
+      {/* Scan-capped banner */}
+      {page?.scanCapped ? (
+        <div className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          Scan limit reached — narrow the filter to see all results.
+        </div>
+      ) : null}
+
+      {/* Structured filter UI */}
+      <div className="mb-3 space-y-2">
+        {filterConds.map((cond, i) => (
+          <FilterRow
+            key={i}
+            cond={cond}
+            fields={fieldKeys.length ? fieldKeys : ["_id"]}
+            onChange={(c) => setFilterConds((f) => f.map((x, j) => j === i ? c : x))}
+            onRemove={() => setFilterConds((f) => f.filter((_, j) => j !== i))}
+          />
+        ))}
+        <div className="flex gap-2">
+          <Button variant="secondary" size="sm" onClick={addFilterCond}>+ Filter</Button>
+          {filterConds.length > 0 && (
+            <Button variant="secondary" size="sm" onClick={applyFilters}>Apply</Button>
+          )}
+          {appliedFilter.length > 0 && (
+            <Button variant="secondary" size="sm" onClick={() => { setFilterConds([]); setAppliedFilter([]); setCursorStack([null]); }}>
+              Clear filters
+            </Button>
+          )}
+        </div>
       </div>
 
       {opError ? (
@@ -175,9 +291,84 @@ export function DataBrowser({ table }: { table: string }) {
         </div>
       )}
 
+      {/* Cursor pagination */}
+      <div className="mt-3 flex items-center gap-3">
+        <Button variant="secondary" size="sm" disabled={!hasPrev} onClick={goPrev}>← Prev</Button>
+        <Button variant="secondary" size="sm" disabled={!page?.hasMore} onClick={goNext}>Next →</Button>
+        {hasPrev && <span className="text-xs text-muted-foreground">Page {cursorStack.length}</span>}
+      </div>
+
       {editing || creating ? (
         <DocEditor table={table} doc={editing ?? undefined} onClose={() => { setEditing(null); setCreating(false); }} />
       ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// resolveAdminKey — mirrors admin.ts but without side effects on import
+// ---------------------------------------------------------------------------
+function resolveAdminKey(): string {
+  const injected = (window as unknown as { __ADMIN_KEY__?: string }).__ADMIN_KEY__;
+  if (typeof injected === "string" && injected) return injected;
+  const stored = sessionStorage.getItem("sb_admin_key");
+  if (stored) return stored;
+  return sessionStorage.getItem("sb_admin_key") ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// TableList — left-rail table list via HTTP (loaded once + manual refresh)
+// ---------------------------------------------------------------------------
+export function TableList({
+  selected,
+  onSelect,
+}: {
+  selected: string | null;
+  onSelect: (t: string) => void;
+}) {
+  const [tables, setTables] = useState<TableInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await adminGet<TableInfo[]>("/tables");
+      setTables(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between px-2 py-1">
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Tables</span>
+        <button
+          className="text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => void load()}
+          disabled={loading}
+          title="Refresh table list"
+        >
+          {loading ? "…" : "↺"}
+        </button>
+      </div>
+      {error ? <div className="px-2 text-xs text-destructive">{error}</div> : null}
+      {tables.map((t) => (
+        <button
+          key={t.name}
+          className={`w-full rounded px-2 py-1.5 text-left text-sm hover:bg-card/60 ${selected === t.name ? "bg-card font-medium" : ""}`}
+          onClick={() => onSelect(t.name)}
+        >
+          {t.name}
+          <span className="ml-1 text-xs text-muted-foreground">({t.documentCount})</span>
+        </button>
+      ))}
     </div>
   );
 }
