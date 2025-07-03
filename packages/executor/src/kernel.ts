@@ -239,7 +239,7 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
 };
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
-  const spec = JSON.parse(argJson) as QuerySpecJson & { cursor: string | null; pageSize: number };
+  const spec = JSON.parse(argJson) as QuerySpecJson & { cursor: string | null; pageSize: number; maxScan?: number };
   const tableName = ctx.privileged ? spec.table : getFullTableName(spec.table, ctx.namespace);
   const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
@@ -256,12 +256,13 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
   }
 
-  const { page, nextCursor, hasMore, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
+  const { page, nextCursor, hasMore, scanCapped, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
     cursor: spec.cursor,
     pageSize: spec.pageSize,
+    maxScan: spec.maxScan,
   });
   for (const range of readSet.toArray()) ctx.txn.recordRead(range);
-  return JSON.stringify({ page: page.map((d) => convexToJson(d as Value)), nextCursor, hasMore });
+  return JSON.stringify({ page: page.map((d) => convexToJson(d as Value)), nextCursor, hasMore, scanCapped });
 };
 
 const handleConsoleLog: SyscallHandler = async (ctx, argJson) => {

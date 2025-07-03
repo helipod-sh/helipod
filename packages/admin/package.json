@@ -15,11 +15,14 @@
     "@stackbase/errors": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
+    "@stackbase/query-engine": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
+    "@stackbase/component": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/query-engine": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

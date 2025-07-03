@@ -76,13 +76,11 @@ export class QueryBuilder {
   async paginate(opts: {
     cursor?: string | null;
     pageSize: number;
-  }): Promise<{ page: DocumentValue[]; nextCursor: string | null; hasMore: boolean }> {
-    const res = await this.channel.call(
-      "db.paginate",
-      JSON.stringify({ ...JSON.parse(this.serializeQuery()), cursor: opts.cursor ?? null, pageSize: opts.pageSize }),
-    );
-    const parsed = JSON.parse(res) as { page: JSONValue[]; nextCursor: string | null; hasMore: boolean };
-    return { page: parsed.page.map((d) => jsonToConvex(d) as DocumentValue), nextCursor: parsed.nextCursor, hasMore: parsed.hasMore };
+    maxScan?: number;
+  }): Promise<{ page: DocumentValue[]; nextCursor: string | null; hasMore: boolean; scanCapped: boolean }> {
+    const res = await this.channel.call("db.paginate", JSON.stringify({ ...JSON.parse(this.serializeQuery()), cursor: opts.cursor ?? null, pageSize: opts.pageSize, maxScan: opts.maxScan }));
+    const parsed = JSON.parse(res) as { page: JSONValue[]; nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
+    return { page: parsed.page.map((d) => jsonToConvex(d) as DocumentValue), nextCursor: parsed.nextCursor, hasMore: parsed.hasMore, scanCapped: parsed.scanCapped };
   }
 }
 
