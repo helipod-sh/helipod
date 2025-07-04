@@ -35,6 +35,12 @@ export interface ComponentDefinition {
   context?: (cctx: ComponentContext) => object;
   /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
   contextType?: { import: string; type: string };
+  /**
+   * Opt-in: when true, `context`'s facade gets a writable `cctx.db` during mutation calls (still
+   * read-only during queries), so the facade can write inside the calling mutation's transaction.
+   * Defaults to false (most facades, e.g. authz, are read-only by design).
+   */
+  contextWrite?: boolean;
   /** Row policies this component declares for app tables: table → { read?, write? }. */
   policies?: Record<string, TablePolicy>;
   /** Contributes fields to every row policy's rule-context (e.g. authz → `{ auth }`). */

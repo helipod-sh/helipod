@@ -38,9 +38,19 @@ export interface ComponentContext {
 
 export interface ContextProvider {
   readonly name: string;
-  /** The component's namespace; the facade's db reads here. */
+  /** The component's namespace; the facade's db reads (and, if `write`, writes) here. */
   readonly namespace: string;
   readonly build: (cctx: ComponentContext) => object;
+  /**
+   * Opt-in: when true AND the calling function is a mutation, `cctx.db` is a `GuestDatabaseWriter`
+   * (still namespaced to this component's own tables) so the facade can write inside the CALLING
+   * mutation's transaction — e.g. `ctx.scheduler.runAfter(...)` inserting a job row that rolls back
+   * with the rest of the mutation. During a query call the facade still only gets a read-only db
+   * (mutations are the only writers). Defaults to false: most facades are read-only (see "harden:
+   * facade runs under read-only profile (two locks on writes)"). `ComponentContext.db` stays typed
+   * as `GuestDatabaseReader`; a write-opted-in facade casts to `GuestDatabaseWriter` itself.
+   */
+  readonly write?: boolean;
 }
 
 export interface RunOptions {
@@ -145,8 +155,10 @@ export class InlineUdfExecutor {
         const builtFacades: Record<string, unknown> = {};
         for (const p of options.contextProviders ?? []) {
           if (reserved.has(p.name) || p.name in guestCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
-          const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor("query") };
-          const preader = new GuestDatabaseReader(new InlineSyscallChannel(this.router, pctx));
+          const canWrite = p.write === true && fn.type === "mutation";
+          const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor(canWrite ? "mutation" : "query") };
+          const channel = new InlineSyscallChannel(this.router, pctx);
+          const preader = canWrite ? new GuestDatabaseWriter(channel) : new GuestDatabaseReader(channel);
           const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades }));
           guestCtx[p.name] = facade;
           builtFacades[p.name] = facade;

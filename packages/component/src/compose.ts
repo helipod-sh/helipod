@@ -150,7 +150,7 @@ export function composeComponents(
   const moduleMap = composeModules(app.moduleMap, components);
   const contextProviders: ContextProvider[] = components
     .filter((c) => c.context)
-    .map((c) => ({ name: c.name, namespace: c.name, build: c.context! }));
+    .map((c) => ({ name: c.name, namespace: c.name, build: c.context!, write: c.contextWrite === true }));
   const policyRegistry = new Map<string, TablePolicy>();
   const policyProviders: PolicyContextProvider[] = [];
   for (const c of components) {
