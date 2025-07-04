@@ -30,4 +30,41 @@ describe("driver seam", () => {
     expect(commits.length).toBeGreaterThan(0);       // onCommit fired for the app:add commit
     expect(ran).toBeGreaterThan(0);                  // runFunction("toy:bump") executed
   });
+
+  it("if driver 1 throws on onCommit, driver 2 still receives the commit", async () => {
+    const driver1Commits: number[] = [];
+    const driver2Commits: number[] = [];
+    const driver1 = {
+      name: "driver1",
+      start(ctx: any) {
+        ctx.onCommit((inv: any) => {
+          driver1Commits.push(inv.commitTs);
+          throw new Error("driver1 throws");
+        });
+      },
+    };
+    const driver2 = {
+      name: "driver2",
+      start(ctx: any) {
+        ctx.onCommit((inv: any) => {
+          driver2Commits.push(inv.commitTs);
+        });
+      },
+    };
+    const schema = defineSchema({ counters: defineTable({ n: v.number() }) });
+    const c = composeComponents(
+      { schemaJson: schema.export(), moduleMap: { "app:add": mutation(async (ctx) => ctx.db.insert("counters", { n: 1 })) } },
+      [],
+    );
+    const r = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      componentNames: c.componentNames, contextProviders: c.contextProviders, policyRegistry: c.policyRegistry,
+      policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps,
+      drivers: [driver1, driver2],
+    });
+    await r.run("app:add", {});
+    await new Promise((res) => setTimeout(res, 100)); // let the async commit fan-out settle
+    expect(driver1Commits.length).toBeGreaterThan(0);  // driver1's onCommit was called (and threw)
+    expect(driver2Commits.length).toBeGreaterThan(0);  // driver2's onCommit was STILL called, not starved
+  });
 });

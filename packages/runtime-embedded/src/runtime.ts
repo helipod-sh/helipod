@@ -206,7 +206,14 @@ export class EmbeddedRuntime {
     adapter.subscribe((payload) => {
       queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
-      for (const cb of commitSubs) cb({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
+      for (const cb of commitSubs) {
+        try {
+          cb({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
+        } catch (e) {
+          // A driver's onCommit must never starve other drivers of the commit signal.
+          console.error("[runtime] driver onCommit callback threw:", e);
+        }
+      }
     });
 
     const drivers = options.drivers ?? [];
