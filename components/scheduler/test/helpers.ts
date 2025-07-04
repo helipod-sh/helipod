@@ -39,12 +39,14 @@ function systemModules(): Record<string, RegisteredFunction> {
  * controllable virtual clock (flows through to both `ctx.scheduler`'s facade and the driver's
  * internal `_peekDue`/`_claim`/`_complete` modules — see `executor.ts`'s `this.deps.now`), and the
  * returned `tick()` drives exactly one deterministic loop iteration via the scheduler driver's
- * `__tick()` test seam — no real timers/sleeps needed in assertions.
+ * `__tick()` test seam — no real timers/sleeps needed in assertions. `wake()` is the driver's
+ * `__wake()` test seam — the same fire-and-forget signal the reactive commit/timer paths send
+ * internally, for simulating one arriving at a precise moment (e.g. mid-`tick()`).
  */
 export async function makeRuntimeWithScheduler(
   appModules: Record<string, RegisteredFunction>,
   opts?: { now?: () => number },
-): Promise<{ runtime: EmbeddedRuntime; tick: () => Promise<void> }> {
+): Promise<{ runtime: EmbeddedRuntime; tick: () => Promise<void>; wake: () => void }> {
   const schema = defineSchema({});
   const c = composeComponents({ schemaJson: schema.export(), moduleMap: appModules }, [defineScheduler()]);
   const runtime = await EmbeddedRuntime.create({
@@ -63,7 +65,7 @@ export async function makeRuntimeWithScheduler(
   });
   const driver = c.drivers.find((d) => d.name === "scheduler") as SchedulerDriver | undefined;
   if (!driver) throw new Error("scheduler driver not wired — defineScheduler() must set `driver: schedulerDriver()`");
-  return { runtime, tick: () => driver.__tick() };
+  return { runtime, tick: () => driver.__tick(), wake: () => driver.__wake() };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

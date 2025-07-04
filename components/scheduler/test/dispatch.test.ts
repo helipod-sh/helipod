@@ -1,6 +1,8 @@
 // components/scheduler/test/dispatch.test.ts
 import { describe, it, expect } from "vitest";
 import { mutation } from "@stackbase/executor";
+import { jsonToConvex } from "@stackbase/values";
+import { _claim, type ClaimResult } from "../src/modules";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 describe("schedulerDriver — event-driven dispatch", () => {
@@ -74,6 +76,55 @@ describe("schedulerDriver — event-driven dispatch", () => {
     expect(jobs[0]).toMatchObject({ state: "success" });
   });
 
+  it("a mid-iteration enqueue is not stranded: the coalesced wake picks it up in the SAME tick", async () => {
+    // Regression test for the lost-wake race: `app:first`'s own mutation body enqueues
+    // `app:second` (due now) WHILE the driver is still inside its single `iterate()` pass (between
+    // the awaits of the `peekDue → claim → run → complete` loop), then fires the driver's
+    // `__wake()` test seam — the same fire-and-forget signal `DriverContext.onCommit` sends
+    // internally on a real commit — to simulate that commit notification landing at exactly that
+    // moment. (Driving this via a real `onCommit` round-trip isn't viable as a deterministic unit
+    // test: the reactive commit fan-out fires on the runtime's own schedule, not a moment the test
+    // controls, so `__wake()` is the seam that pins it precisely mid-iteration.) Before the fix,
+    // `wake()` while `running===true` was a pure no-op, and the pass's end-of-iteration timer
+    // re-arm reused the `earliestFutureTs` captured before the enqueue — either way `app:second`
+    // would sit `pending` until some unrelated wake. With the coalesced `pendingWake` bit, the
+    // SAME `tick()` call must pick it up and run it too.
+    const clock = 4_000_000;
+    const ran: string[] = [];
+    let wake: (() => void) | undefined;
+    const { runtime, tick, wake: driverWake } = await makeRuntimeWithScheduler(
+      {
+        "app:sched": mutation(async (ctx: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+          await ctx.scheduler.runAfter(0, "app:first", {});
+          return null;
+        }),
+        "app:first": mutation(async (ctx: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+          ran.push("first");
+          // Enqueued WHILE the driver's single iterate() pass is still in flight (we're inside
+          // the `await ctx.runFunction(claimed.fnPath, ...)` call for `app:first` itself).
+          await ctx.scheduler.runAfter(0, "app:second", {});
+          // Simulate the commit notification for the enqueue above landing right now, mid-pass.
+          wake?.();
+          return null;
+        }),
+        "app:second": mutation(async () => {
+          ran.push("second");
+          return null;
+        }),
+      },
+      { now: () => clock },
+    );
+    wake = driverWake;
+
+    await runtime.run("app:sched", {});
+    await tick(); // exactly ONE driver iteration — no second manual tick
+
+    expect(ran).toEqual(["first", "second"]);
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs).toHaveLength(2);
+    expect(jobs.every((j) => j.state === "success")).toBe(true);
+  });
+
   it("a kind:'action' job fails with 'unsupported' instead of running", async () => {
     const clock = 3_000_000;
     let ran = false;
@@ -105,5 +156,43 @@ describe("schedulerDriver — event-driven dispatch", () => {
     const signals = await readTable(runtime, "scheduler/signals");
     const complete = signals.find((s) => s.kind === "complete" && s.jobId === jobId);
     expect(complete?.payload).toMatchObject({ kind: "failed", error: "unsupported: action runtime not built" });
+  });
+
+  it("scheduler:_claim is the authoritative guard: a second claim on the same job sees state!=='pending'", async () => {
+    // The "two concurrent ticks" test above only proves the in-process `running` flag collapses
+    // overlapping driver iterations — it never exercises `_claim` itself with two claims actually
+    // reaching it. This test calls `scheduler:_claim` directly, twice, the same way the driver
+    // does (`DriverContext.runFunction` is a privileged, fully-qualified-table-name call — see
+    // `driver.ts`'s and `modules.ts`'s doc comments — mirrored here via the runtime's own
+    // `executor.run(fn, ..., { privileged: true })`), to prove the OCC-backed snapshot-read +
+    // exact `state === "pending"` check is what actually prevents double-dispatch, independent of
+    // the loop flag.
+    const clock = 6_000_000;
+    const { runtime } = await makeRuntimeWithScheduler({}, { now: () => clock });
+
+    const insertResult = await runtime.runSystem<string>("_system:insertJob", {
+      fnPath: "app:work",
+      kind: "mutation",
+      nextTs: clock,
+      args: {},
+    });
+    const jobId = insertResult.value;
+
+    const claim = () =>
+      runtime.executor.run<ClaimResult | null>(_claim, jsonToConvex({ jobId }), {
+        path: "scheduler:_claim",
+        privileged: true,
+      });
+
+    const first = await claim();
+    const second = await claim();
+
+    expect(first.value).not.toBeNull();
+    expect(first.value?.jobId).toBe(jobId);
+    expect(second.value).toBeNull(); // lost the race: sees state !== "pending", not the OCC layer
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs).toHaveLength(1); // claimed exactly once — no duplicate/second row
+    expect(jobs[0]).toMatchObject({ _id: jobId, state: "inProgress" });
   });
 });

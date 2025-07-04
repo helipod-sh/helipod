@@ -2,9 +2,18 @@ import type { Driver, DriverContext } from "@stackbase/component";
 import type { JSONValue } from "@stackbase/values";
 import type { ClaimResult, JobResult, PeekDueResult } from "./modules";
 
-/** A `schedulerDriver()` also exposes `__tick`, a deterministic test seam for one loop iteration (no real timers). */
+/**
+ * A `schedulerDriver()` also exposes:
+ *  - `__tick`: a deterministic test seam for one loop iteration (no real timers).
+ *  - `__wake`: the same fire-and-forget signal `DriverContext.onCommit`/timers use internally,
+ *    exposed so a test can simulate a commit notification landing at a precise moment (e.g. from
+ *    inside a job's own mutation body, to interleave with an in-flight `__tick()`) — the reactive
+ *    `onCommit` path itself can't be driven precisely from a test, since it fires off the real
+ *    commit fan-out on whatever schedule the runtime gives it.
+ */
 export interface SchedulerDriver extends Driver {
   __tick: () => Promise<void>;
+  __wake: () => void;
 }
 
 /**
@@ -28,6 +37,14 @@ export interface SchedulerDriver extends Driver {
  * transactor — even if two iterations somehow ran concurrently (e.g. two runtimes sharing a
  * store), at most one `_claim` call per job ever observes `"pending"`.
  *
+ * A wake that arrives while `running` is already true is NOT dropped: it sets a coalesced
+ * `pendingWake` bit that the in-flight iteration checks at the end of every pass, looping for one
+ * more fresh peek/claim/complete pass instead of exiting. Without this, a commit that lands
+ * mid-iteration (an app mutation enqueuing a due-now job between the loop's awaits) would be
+ * silently swallowed — the timer re-arm at the end of the pass would use the `earliestFutureTs`
+ * that pass captured, which doesn't account for the new job, and the job would sit `pending`
+ * until some unrelated future wake.
+ *
  * A job that throws while running is caught per-job (not allowed to escape the loop), so one bad
  * job can't wedge the whole batch or leave `running` stuck `true` — `_complete` is always called
  * (with a `failed` result) and the outer `try/finally` always clears `running`.
@@ -35,47 +52,69 @@ export interface SchedulerDriver extends Driver {
 export function schedulerDriver(): SchedulerDriver {
   let ctx: DriverContext;
   let running = false;
+  let pendingWake = false;
   let timer: number | null = null;
 
   function wake(): void {
     // Fire-and-forget from a sync callback (onCommit/setTimer); swallow+log rather than let an
     // unexpected internal error (a bug in _peekDue/_claim/_complete, not a job's own throw —
-    // those are caught per-job below) surface as an unhandled rejection.
+    // those are caught per-job below) surface as an unhandled rejection. If an iteration is
+    // already in flight, `iterate()`'s own guard below coalesces this into `pendingWake` instead
+    // of no-oping outright — see its comment.
     iterate().catch((e: unknown) => {
       console.error("[scheduler] driver iteration failed:", e);
     });
   }
 
   async function iterate(): Promise<void> {
-    if (running) return; // single-owner in-process guard — see class doc above
+    if (running) {
+      // A commit (or another wake) landed while a pass is already in flight — e.g. an app
+      // mutation enqueuing a due-now job between the in-flight pass's awaits. That pass may
+      // already have read a due set that doesn't include the new job, and its end-of-pass timer
+      // re-arm would otherwise use a stale `earliestFutureTs`, silently stranding the new job
+      // until some unrelated future wake. Coalesce into a bit the in-flight call checks before
+      // releasing `running`, so it loops for one more fresh pass instead of exiting — this call
+      // itself still returns immediately (cheap no-op kick).
+      pendingWake = true;
+      return;
+    }
     running = true;
     try {
-      const { due, earliestFutureTs } = (await ctx.runFunction("scheduler:_peekDue", {})) as PeekDueResult;
-      for (const job of due) {
-        const claimed = (await ctx.runFunction("scheduler:_claim", { jobId: job._id })) as ClaimResult | null;
-        if (claimed === null) continue; // lost the claim race → another caller got there first, skip
+      // Loop passes until a pass completes with no wake pending — a wake that arrives mid-pass
+      // (an app mutation enqueuing a due-now job between our awaits) sets `pendingWake`, and we
+      // re-run the peek/claim/complete cycle instead of exiting with a stale due set.
+      let earliestFutureTs: number | null = null;
+      do {
+        pendingWake = false;
+        const peeked = (await ctx.runFunction("scheduler:_peekDue", {})) as PeekDueResult;
+        earliestFutureTs = peeked.earliestFutureTs;
+        for (const job of peeked.due) {
+          const claimed = (await ctx.runFunction("scheduler:_claim", { jobId: job._id })) as ClaimResult | null;
+          if (claimed === null) continue; // lost the claim race → another caller got there first, skip
 
-        let result: JobResult;
-        if (claimed.kind === "action") {
-          // Actions run outside a transaction with native capabilities (CLAUDE.md build-order
-          // #5, not built yet) — fail cleanly instead of silently running an action as a mutation.
-          result = { kind: "failed", error: "unsupported: action runtime not built" };
-        } else {
-          try {
-            const value = await ctx.runFunction(claimed.fnPath, claimed.args);
-            result = { kind: "success", value };
-          } catch (e) {
-            result = { kind: "failed", error: String(e) };
+          let result: JobResult;
+          if (claimed.kind === "action") {
+            // Actions run outside a transaction with native capabilities (CLAUDE.md build-order
+            // #5, not built yet) — fail cleanly instead of silently running an action as a mutation.
+            result = { kind: "failed", error: "unsupported: action runtime not built" };
+          } else {
+            try {
+              const value = await ctx.runFunction(claimed.fnPath, claimed.args);
+              result = { kind: "success", value };
+            } catch (e) {
+              result = { kind: "failed", error: String(e) };
+            }
           }
+          // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
+          // `JSONValue` — it's already been through the same JSON syscall round-trip as any other
+          // UDF return, so this cast just bridges the gap TS can't see across.
+          await ctx.runFunction("scheduler:_complete", { jobId: job._id, result } as unknown as JSONValue);
         }
-        // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
-        // `JSONValue` — it's already been through the same JSON syscall round-trip as any other
-        // UDF return, so this cast just bridges the gap TS can't see across.
-        await ctx.runFunction("scheduler:_complete", { jobId: job._id, result } as unknown as JSONValue);
-      }
+      } while (pendingWake);
 
-      // Re-arm the timer to the earliest future job every pass (clearing any stale one first),
-      // so a wake that changed the due set still leaves the timer pointed at the right instant.
+      // Re-arm the timer to the LAST pass's fresh earliest future job (clearing any stale one
+      // first), so a wake that changed the due set still leaves the timer pointed at the right
+      // instant.
       if (timer !== null) {
         ctx.clearTimer(timer);
         timer = null;
@@ -99,5 +138,8 @@ export function schedulerDriver(): SchedulerDriver {
     // the caller (unlike `wake()`, used by the reactive/timer paths, which swallows+logs), so
     // tests see real failures instead of them being silently logged.
     __tick: () => iterate(),
+    // Test seam: the same fire-and-forget signal `onCommit`/timers send internally — see the
+    // interface doc above.
+    __wake: () => wake(),
   };
 }
