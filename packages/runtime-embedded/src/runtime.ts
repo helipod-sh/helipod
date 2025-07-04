@@ -9,6 +9,7 @@
  */
 import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
+import { decodeStorageTableId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
@@ -54,6 +55,15 @@ export interface EmbeddedRuntimeOptions {
   bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
   /** Component drivers to start once at create, after boot steps + the commit fan-out are wired. */
   drivers?: Driver[];
+  /**
+   * `fullTableName → tableNumber` (the same map `composeComponents`/`loadProject` produce).
+   * Used ONLY to translate the encoded storage-table ids on `adapter.subscribe`'s commit payload
+   * (e.g. `"3"`) back into full names (e.g. `"scheduler/jobs"`) before handing them to driver
+   * `onCommit` callbacks — drivers filter `inv.tables` by name (see `components/scheduler/src/
+   * driver.ts`), and a raw storage id never matches. Optional: a runtime with no components (or
+   * whose drivers don't inspect `inv.tables`) can omit it and driver callbacks just see raw ids.
+   */
+  tableNumbers?: Record<string, number>;
 }
 
 export class EmbeddedRuntime {
@@ -203,15 +213,34 @@ export class EmbeddedRuntime {
       now: () => options.now?.() ?? Date.now(),
     };
 
+    // Inverse of `tableNumbers` (tableNumber → fullTableName), built once: `payload.tables`
+    // (from `adapter.subscribe`) carries ENCODED STORAGE-TABLE IDS (`encodeStorageTableId`'s
+    // output, e.g. `"3"`), not full table names — the sync path (`queue`/`notifyWrites` above)
+    // works with those ids directly via range intersection, but drivers filter `inv.tables` by
+    // full name (e.g. `t.startsWith("scheduler/")`), so the driver fan-out below must translate.
+    const tableNumberToName = new Map<number, string>();
+    for (const [name, num] of Object.entries(options.tableNumbers ?? {})) tableNumberToName.set(num, name);
+    const namesForCommit = (tableIds: readonly string[]): string[] =>
+      tableIds.map((id) => {
+        try {
+          return tableNumberToName.get(decodeStorageTableId(id)) ?? id;
+        } catch {
+          return id; // not a decodable storage id — pass through rather than drop
+        }
+      });
+
     adapter.subscribe((payload) => {
       queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
-      for (const cb of commitSubs) {
-        try {
-          cb({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
-        } catch (e) {
-          // A driver's onCommit must never starve other drivers of the commit signal.
-          console.error("[runtime] driver onCommit callback threw:", e);
+      if (commitSubs.size > 0) {
+        const tables = namesForCommit(payload.tables);
+        for (const cb of commitSubs) {
+          try {
+            cb({ tables, ranges: payload.ranges, commitTs: payload.commitTs });
+          } catch (e) {
+            // A driver's onCommit must never starve other drivers of the commit signal.
+            console.error("[runtime] driver onCommit callback threw:", e);
+          }
         }
       }
     });

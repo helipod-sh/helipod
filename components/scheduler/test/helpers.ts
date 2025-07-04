@@ -61,6 +61,7 @@ export async function makeRuntimeWithScheduler(
     relationRegistry: c.relationRegistry,
     bootSteps: c.bootSteps,
     drivers: c.drivers,
+    tableNumbers: c.tableNumbers,
     now: opts?.now,
   });
   const driver = c.drivers.find((d) => d.name === "scheduler") as SchedulerDriver | undefined;

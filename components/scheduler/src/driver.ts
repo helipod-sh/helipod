@@ -48,12 +48,23 @@ export interface SchedulerDriver extends Driver {
  * A job that throws while running is caught per-job (not allowed to escape the loop), so one bad
  * job can't wedge the whole batch or leave `running` stuck `true` — `_complete` is always called
  * (with a `failed` result) and the outer `try/finally` always clears `running`.
+ *
+ * `iterate()` always returns a promise that settles when the due set it's responsible for has
+ * actually been drained — including a coalesced call. A caller that arrives while a pass is
+ * already in flight (setting `pendingWake` per above) gets back the SAME promise as the in-flight
+ * pass, not an already-resolved one: with the reactive `onCommit` wake now real (not dead code —
+ * see `packages/runtime-embedded/src/runtime.ts`), a test's `__tick()` frequently races an
+ * app-mutation's own commit, which fires `wake()` before `__tick()` gets a turn. If `__tick()`
+ * merely no-op'd on a coalesced call, tests would observe results before the real work finished.
+ * `wake()`'s callers (reactive `onCommit`/timer) never await this return value, so they're
+ * unaffected — this only changes behavior for synchronous callers like `__tick()`.
  */
 export function schedulerDriver(): SchedulerDriver {
   let ctx: DriverContext;
   let running = false;
   let pendingWake = false;
   let timer: number | null = null;
+  let inFlight: Promise<void> | null = null;
 
   function wake(): void {
     // Fire-and-forget from a sync callback (onCommit/setTimer); swallow+log rather than let an
@@ -66,7 +77,7 @@ export function schedulerDriver(): SchedulerDriver {
     });
   }
 
-  async function iterate(): Promise<void> {
+  function iterate(): Promise<void> {
     if (running) {
       // A commit (or another wake) landed while a pass is already in flight — e.g. an app
       // mutation enqueuing a due-now job between the in-flight pass's awaits. That pass may
@@ -74,55 +85,61 @@ export function schedulerDriver(): SchedulerDriver {
       // re-arm would otherwise use a stale `earliestFutureTs`, silently stranding the new job
       // until some unrelated future wake. Coalesce into a bit the in-flight call checks before
       // releasing `running`, so it loops for one more fresh pass instead of exiting — this call
-      // itself still returns immediately (cheap no-op kick).
+      // itself doesn't start a new pass; it hands back the in-flight pass's own promise (see the
+      // class doc above) so an awaiting caller still observes real completion.
       pendingWake = true;
-      return;
+      return inFlight ?? Promise.resolve();
     }
     running = true;
-    try {
-      // Loop passes until a pass completes with no wake pending — a wake that arrives mid-pass
-      // (an app mutation enqueuing a due-now job between our awaits) sets `pendingWake`, and we
-      // re-run the peek/claim/complete cycle instead of exiting with a stale due set.
-      let earliestFutureTs: number | null = null;
-      do {
-        pendingWake = false;
-        const peeked = (await ctx.runFunction("scheduler:_peekDue", {})) as PeekDueResult;
-        earliestFutureTs = peeked.earliestFutureTs;
-        for (const job of peeked.due) {
-          const claimed = (await ctx.runFunction("scheduler:_claim", { jobId: job._id })) as ClaimResult | null;
-          if (claimed === null) continue; // lost the claim race → another caller got there first, skip
-
-          let result: JobResult;
-          if (claimed.kind === "action") {
-            // Actions run outside a transaction with native capabilities (CLAUDE.md build-order
-            // #5, not built yet) — fail cleanly instead of silently running an action as a mutation.
-            result = { kind: "failed", error: "unsupported: action runtime not built" };
-          } else {
-            try {
-              const value = await ctx.runFunction(claimed.fnPath, claimed.args);
-              result = { kind: "success", value };
-            } catch (e) {
-              result = { kind: "failed", error: String(e) };
-            }
-          }
-          // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
-          // `JSONValue` — it's already been through the same JSON syscall round-trip as any other
-          // UDF return, so this cast just bridges the gap TS can't see across.
-          await ctx.runFunction("scheduler:_complete", { jobId: job._id, result } as unknown as JSONValue);
-        }
-      } while (pendingWake);
-
-      // Re-arm the timer to the LAST pass's fresh earliest future job (clearing any stale one
-      // first), so a wake that changed the due set still leaves the timer pointed at the right
-      // instant.
-      if (timer !== null) {
-        ctx.clearTimer(timer);
-        timer = null;
-      }
-      if (earliestFutureTs != null) timer = ctx.setTimer(earliestFutureTs, wake);
-    } finally {
+    const pass = runPass().finally(() => {
       running = false;
+      inFlight = null;
+    });
+    inFlight = pass;
+    return pass;
+  }
+
+  async function runPass(): Promise<void> {
+    // Loop passes until a pass completes with no wake pending — a wake that arrives mid-pass
+    // (an app mutation enqueuing a due-now job between our awaits) sets `pendingWake`, and we
+    // re-run the peek/claim/complete cycle instead of exiting with a stale due set.
+    let earliestFutureTs: number | null = null;
+    do {
+      pendingWake = false;
+      const peeked = (await ctx.runFunction("scheduler:_peekDue", {})) as PeekDueResult;
+      earliestFutureTs = peeked.earliestFutureTs;
+      for (const job of peeked.due) {
+        const claimed = (await ctx.runFunction("scheduler:_claim", { jobId: job._id })) as ClaimResult | null;
+        if (claimed === null) continue; // lost the claim race → another caller got there first, skip
+
+        let result: JobResult;
+        if (claimed.kind === "action") {
+          // Actions run outside a transaction with native capabilities (CLAUDE.md build-order
+          // #5, not built yet) — fail cleanly instead of silently running an action as a mutation.
+          result = { kind: "failed", error: "unsupported: action runtime not built" };
+        } else {
+          try {
+            const value = await ctx.runFunction(claimed.fnPath, claimed.args);
+            result = { kind: "success", value };
+          } catch (e) {
+            result = { kind: "failed", error: String(e) };
+          }
+        }
+        // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
+        // `JSONValue` — it's already been through the same JSON syscall round-trip as any other
+        // UDF return, so this cast just bridges the gap TS can't see across.
+        await ctx.runFunction("scheduler:_complete", { jobId: job._id, result } as unknown as JSONValue);
+      }
+    } while (pendingWake);
+
+    // Re-arm the timer to the LAST pass's fresh earliest future job (clearing any stale one
+    // first), so a wake that changed the due set still leaves the timer pointed at the right
+    // instant.
+    if (timer !== null) {
+      ctx.clearTimer(timer);
+      timer = null;
     }
+    if (earliestFutureTs != null) timer = ctx.setTimer(earliestFutureTs, wake);
   }
 
   return {
@@ -134,9 +151,11 @@ export function schedulerDriver(): SchedulerDriver {
       });
       wake();
     },
-    // Test seam: drives exactly one loop iteration synchronously and lets errors propagate to
-    // the caller (unlike `wake()`, used by the reactive/timer paths, which swallows+logs), so
-    // tests see real failures instead of them being silently logged.
+    // Test seam: drives a loop pass and awaits its actual completion (coalescing into an
+    // already-in-flight pass — e.g. one a same-turn reactive `onCommit` wake already started —
+    // rather than resolving early), and lets errors propagate to the caller (unlike `wake()`,
+    // used by the reactive/timer paths, which swallows+logs), so tests see real failures instead
+    // of them being silently logged.
     __tick: () => iterate(),
     // Test seam: the same fire-and-forget signal `onCommit`/timers send internally — see the
     // interface doc above.

@@ -158,6 +158,47 @@ describe("schedulerDriver — event-driven dispatch", () => {
     expect(complete?.payload).toMatchObject({ kind: "failed", error: "unsupported: action runtime not built" });
   });
 
+  it("REACTIVE WAKE (no manual tick): an enqueued due-now job runs on its own via the commit fan-out", async () => {
+    // This is the proving test for the headline feature: the driver's `onCommit` subscription
+    // (wired in `packages/runtime-embedded/src/runtime.ts`) must wake the driver on a REAL commit
+    // from `runtime.run()` — no `tick()`/`__tick()` anywhere in this test. Every other test in this
+    // file drives the driver manually via the `__tick()` test seam, which masks a bug where the
+    // fan-out delivered encoded storage-table ids (e.g. "3") instead of full table names (e.g.
+    // "scheduler/jobs") to `onCommit`, so `driver.ts`'s `inv.tables.some(t =>
+    // t.startsWith("scheduler/"))` filter never matched in production — the reactive wake was dead
+    // code, and only the timer path (or a test's manual `tick()`) ever ran jobs.
+    const clock = 7_000_000;
+    const ran: string[] = [];
+    const { runtime } = await makeRuntimeWithScheduler(
+      {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        "app:sched": mutation(async (ctx: any) => {
+          await ctx.scheduler.runAfter(0, "app:work", { tag: "reactive" });
+          return null;
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        "app:work": mutation(async (_ctx: any, a: { tag: string }) => {
+          ran.push(a.tag);
+          return null;
+        }),
+      },
+      { now: () => clock },
+    );
+
+    await runtime.run("app:sched", {});
+    // NO tick()/__tick() call here — the enqueue's commit must itself wake the driver.
+
+    const deadline = Date.now() + 2000;
+    while (ran.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(ran).toEqual(["reactive"]);
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ state: "success" });
+  });
+
   it("scheduler:_claim is the authoritative guard: a second claim on the same job sees state!=='pending'", async () => {
     // The "two concurrent ticks" test above only proves the in-process `running` flag collapses
     // overlapping driver iterations — it never exercises `_claim` itself with two claims actually

@@ -82,6 +82,7 @@ export async function devCommand(args: string[]): Promise<number> {
     verifyAdmin: (key: string) => verifyAdminKey(adminKey, key),
     componentNames: project.componentNames,
     contextProviders: project.contextProviders,
+    tableNumbers: project.tableNumbers,
   });
   const adminApi = new AdminApi({
     runtime,
