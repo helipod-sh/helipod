@@ -223,6 +223,7 @@
         "@stackbase/errors": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {

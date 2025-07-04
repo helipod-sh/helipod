@@ -2,7 +2,7 @@ import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@st
 import { SimpleIndexCatalog } from "@stackbase/executor";
 import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@stackbase/executor";
 import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
-import type { ComponentDefinition, BootContext } from "./define-component";
+import type { ComponentDefinition, BootContext, Driver } from "./define-component";
 
 const DEFAULT_INDEX = "by_creation";
 
@@ -100,6 +100,7 @@ export interface ComposedProject {
   policyProviders: PolicyContextProvider[];
   relationRegistry: RelationRegistry;
   bootSteps: { name: string; run: (ctx: BootContext) => Promise<void> }[];
+  drivers: Driver[];
 }
 
 function buildRelationRegistry(
@@ -163,5 +164,6 @@ export function composeComponents(
   }
   const relationRegistry = buildRelationRegistry(app.schemaJson, components);
   const bootSteps = components.filter((c) => c.boot).map((c) => ({ name: c.name, run: c.boot! }));
-  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps };
+  const drivers = components.filter((c) => c.driver).map((c) => c.driver!);
+  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps, drivers };
 }

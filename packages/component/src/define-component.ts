@@ -1,8 +1,28 @@
-import type { SchemaDefinition, Validator } from "@stackbase/values";
+import type { SchemaDefinition, Validator, JSONValue } from "@stackbase/values";
 import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter } from "@stackbase/executor";
 import type { ComponentContext } from "@stackbase/executor";
+import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 
 export interface BootContext { db: GuestDatabaseWriter; now: number }
+
+/** The capabilities a `Driver` gets to wake on commits/timers and act outside a request. */
+export interface DriverContext {
+  /** Runs a registered fn privileged + namespaced, outside a request. */
+  runFunction(path: string, args: JSONValue): Promise<unknown>;
+  /** Taps the commit fan-out (every committed write, across the whole runtime). Returns an unsubscribe. */
+  onCommit(cb: (inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }) => void): () => void;
+  /** Arms a wake at wall-clock `atMs`; returns a handle for `clearTimer`. */
+  setTimer(atMs: number, cb: () => void): number;
+  clearTimer(handle: number): void;
+  now(): number;
+}
+
+/** A recurring runtime seam: started once after boot, woken by commits and/or timers. */
+export interface Driver {
+  name: string;
+  start(ctx: DriverContext): void | Promise<void>;
+  stop?(): void | Promise<void>;
+}
 
 export interface ComponentDefinition {
   name: string;
@@ -21,6 +41,8 @@ export interface ComponentDefinition {
   policyContext?: PolicyContextProvider["build"];
   /** A once-per-process startup step (migrations/index rebuilds). Runs namespaced + non-user. */
   boot?: (ctx: BootContext) => Promise<void>;
+  /** A recurring driver, started once after boot; woken by commits and/or timers. */
+  driver?: Driver;
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
