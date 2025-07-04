@@ -1,43 +1,7 @@
 // components/scheduler/test/enqueue.test.ts
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { defineScheduler } from "../src/index";
-
-// Privileged raw-table scan — reads a fully-qualified table name (e.g. "scheduler/jobs")
-// bypassing the namespace boundary, so the test can assert on the component's own tables.
-function systemModules(): Record<string, RegisteredFunction> {
-  return {
-    "_system:scan": query(async (ctx, args: { table: string }) => await ctx.db.query(args.table, "by_creation").collect()),
-  };
-}
-
-async function makeRuntimeWithScheduler(appModules: Record<string, RegisteredFunction>) {
-  const schema = defineSchema({});
-  const c = composeComponents({ schemaJson: schema.export(), moduleMap: appModules }, [defineScheduler()]);
-  const runtime = await EmbeddedRuntime.create({
-    store: new SqliteDocStore(new NodeSqliteAdapter()),
-    catalog: c.catalog,
-    modules: c.moduleMap,
-    systemModules: systemModules(),
-    componentNames: c.componentNames,
-    contextProviders: c.contextProviders,
-    policyRegistry: c.policyRegistry,
-    policyProviders: c.policyProviders,
-    relationRegistry: c.relationRegistry,
-    bootSteps: c.bootSteps,
-  });
-  return { runtime };
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function readTable(runtime: EmbeddedRuntime, table: string): Promise<any[]> {
-  const r = await runtime.runSystem<unknown[]>("_system:scan", { table });
-  return r.value as any[]; // eslint-disable-line @typescript-eslint/no-explicit-any
-}
+import { mutation } from "@stackbase/executor";
+import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 describe("ctx.scheduler — transactional enqueue", () => {
   it("runAfter writes a pending job row inside the calling mutation's transaction", async () => {
