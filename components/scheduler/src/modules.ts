@@ -4,7 +4,7 @@ import type { JSONValue } from "@stackbase/values";
 import type { JobState, SignalKind } from "./facade";
 import { enqueueInternal, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
-import { computeNextRun, type CronSpec, type CatchUpPolicy } from "./crons";
+import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type CatchUpPolicy } from "./crons";
 
 /**
  * Internal modules for `@stackbase/scheduler` — registered on `defineScheduler()`'s `modules` map
@@ -24,6 +24,16 @@ import { computeNextRun, type CronSpec, type CatchUpPolicy } from "./crons";
 
 /** Cap on how many due jobs a single `_peekDue` batch returns, so one loop iteration can't run unbounded. */
 export const BATCH_CAP = 64;
+
+/**
+ * Hard ceiling on how many missed occurrences `_cronTick`'s `catchUp:"fireAll"` path will
+ * materialize (and fire a work job for) in a single tick — see `_cronTick`'s doc comment. Without
+ * this, a `"fireAll"` cron down for a long time on a fast interval could try to enqueue an
+ * unbounded number of work jobs synchronously inside one mutation. Occurrences beyond the cap are
+ * discarded (logged), not deferred to a later tick — the cron's cadence always re-anchors past
+ * the ENTIRE true backlog on the SAME tick, regardless of how much of it actually got fired.
+ */
+export const CATCHUP_CAP = 1000;
 
 /** How long a claim's lease is valid before it could be reclaimed by the sweep below. */
 export const LEASE_MS = 30_000;
@@ -246,57 +256,177 @@ const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler
  *  1. Read the `crons` row by `name` (via `by_name`) — a no-op if it's gone (the cron was
  *     deregistered by boot's `reconcileCrons` since this cadence job was scheduled; see
  *     `./crons.ts`).
- *  2. `anchor = lastScheduledTs` — CLOCK-ANCHORED, never `now()`: every occurrence this tick
+ *  2. Self-terminate check (duplicate-cadence-chain fix, belt-and-braces half): if `args.jobId`
+ *     is present and doesn't match `cron.cadenceJobId`, this invocation is a STALE duplicate
+ *     chain (one that slipped past `reconcileCrons`'s `hasLiveCadence` check some other way —
+ *     see that function's doc comment in `./crons.ts`) — return immediately without firing
+ *     anything or rescheduling, so at most one chain survives past its own next tick.
+ *  3. `anchor = lastScheduledTs` — CLOCK-ANCHORED, never `now()`: every occurrence this tick
  *     computes chains off the cron's own last-fired timestamp, not off whenever this mutation
  *     happens to run. A late dispatch (a busy driver, a slow prior tick) never shifts the phase
- *     of later occurrences — `computeNextRun` is called repeatedly from `anchor` forward until
- *     the result is past `now`, collecting every occurrence in between as `occurrences`.
- *  3. `catchUp` decides how many of a MULTI-occurrence backlog (downtime — more than one
- *     occurrence elapsed since the last tick) actually get a work job: `"skip"` fires none of
- *     them (jumps straight to the next future occurrence), `"fireOnce"` fires only the most
- *     recent, `"fireAll"` fires every one. The single-occurrence (on-time) case always fires
- *     regardless of policy — `catchUp` only matters when there's a backlog to decide about.
- *  4. Each fired occurrence gets its OWN work job via `enqueueInternal`, keyed
+ *     of later occurrences.
+ *  4. **Bounded catch-up** (unbounded-loop fix): unlike the old implementation, this NEVER steps
+ *     one occurrence at a time through however much backlog has accumulated — a fast interval
+ *     cron down for months could mean hundreds of millions of occurrences, and computing (let
+ *     alone materializing) that many synchronously inside one mutation would block the
+ *     single-writer transactor for the duration, even for `"skip"` whose entire point is to
+ *     discard the backlog. Instead:
+ *       - **Interval specs**: the occurrence count `n` since `anchor` is computed by O(1)
+ *         arithmetic (`Math.floor((now-anchor)/period)+1`), never a loop.
+ *       - **Cron-expression specs**: whether zero/one/many occurrences are due is determined by
+ *         at most two O(1) `cron-parser` calls (`computeNextRun` from `anchor`, then again from
+ *         that result) — no stepping through the backlog to count it.
+ *       - `"skip"` and `"fireOnce"` NEVER materialize a backlog array at all, for either spec
+ *         kind — `"fireOnce"`'s single catch-up fire and every kind's `next` reschedule point are
+ *         each an O(1) computation (`computePrevRun`/arithmetic for the most recent missed
+ *         occurrence, `computeNextRun`/arithmetic for the next future one).
+ *       - `"fireAll"` is the only policy that genuinely needs a list of occurrences to fire, and
+ *         its materialization loop is hard-capped at `CATCHUP_CAP` — occurrences beyond the cap
+ *         are discarded (logged), not deferred to a later tick.
+ *     In every case, `lastScheduledTs` (see step 6) re-anchors to the schedule's TRUE last
+ *     occurrence `<= now`, computed in O(1) regardless of catchUp policy — so even `"skip"` or a
+ *     capped `"fireAll"` never drifts the cron's future phase, only the discarded/skipped
+ *     occurrences themselves are lost.
+ *  5. Each fired occurrence gets its OWN work job via `enqueueInternal`, keyed
  *     `idempotencyKey: "${cronName}:${fireTs}"` — insert-or-noop, so two cadence fires that ever
  *     computed the same occurrence (shouldn't happen in normal operation, but is the deterministic
  *     safety net if it did) collapse into one work job rather than double-running it.
- *  5. The cadence reschedules ITSELF at `next` (the first occurrence strictly after `now`), and
- *     `lastScheduledTs` advances to the last occurrence this tick considered (fired or skipped) —
- *     so a `"skip"` catch-up still re-anchors to the real schedule instead of drifting to `now`.
+ *  6. The cadence reschedules ITSELF at `next` (the first occurrence strictly after `now`) via
+ *     `enqueueCadenceJob` (which embeds the new job's own id into its args — see that function's
+ *     doc comment in `./crons.ts` — powering step 2's self-terminate check on ITS next tick).
  */
-export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: string }): Promise<null> => {
+export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: string; jobId?: string }): Promise<null> => {
   const rows = await ctx.db.query("scheduler/crons", "by_name").eq("name", args.cronName).take(1).collect();
   const cron = rows[0];
   if (cron === undefined) return null; // deregistered since this cadence job was scheduled — stop, don't reschedule
+
+  // Belt-and-braces convergence: `args.jobId` is absent only for cadence jobs enqueued before
+  // this field existed (pre-fix rows mid-upgrade) — those fall back to trusting themselves,
+  // matching pre-fix behavior exactly. Otherwise, a mismatch means this is a stale duplicate
+  // chain; die quietly without touching the cron row or firing anything.
+  if (args.jobId !== undefined && cron.cadenceJobId !== undefined && cron.cadenceJobId !== args.jobId) {
+    return null;
+  }
 
   const now = ctx.now();
   const spec = JSON.parse(cron.spec as string) as CronSpec;
   const tz = cron.tz as string;
   const catchUp = cron.catchUp as CatchUpPolicy;
   const anchor = (cron.lastScheduledTs as number | undefined) ?? now;
-
-  const occurrences: number[] = [];
-  let cursor = anchor;
-  let next = computeNextRun(spec, tz, cursor);
-  while (next <= now) {
-    occurrences.push(next);
-    cursor = next;
-    next = computeNextRun(spec, tz, cursor);
-  }
-  // `next` is now the first occurrence strictly after `now` — the cadence reschedules there.
-
-  let toFire: number[];
-  if (occurrences.length <= 1) {
-    toFire = occurrences; // on-time (or first-ever) fire: always happens, independent of `catchUp`
-  } else if (catchUp === "fireAll") {
-    toFire = occurrences;
-  } else if (catchUp === "fireOnce") {
-    toFire = [occurrences[occurrences.length - 1] as number];
-  } else {
-    toFire = []; // "skip" (default) — jump past the backlog, fire nothing for it
-  }
-
   const nowFn = (): number => ctx.now();
+
+  // See step 4 above — every branch below is O(1) arithmetic / a small constant number of
+  // `cron-parser` calls, except `"fireAll"`'s materialization loop, explicitly capped at
+  // `CATCHUP_CAP`. Nothing here scales with how large the actual backlog is.
+  let toFire: number[];
+  let next: number; // first occurrence strictly after `now` — where the cadence reschedules
+  let newLastScheduledTs: number; // re-anchor point for the NEXT tick
+
+  if (spec.kind === "interval") {
+    const period = spec.ms;
+    const elapsed = now - anchor;
+    // How many occurrences have elapsed (<= now) since `anchor` — computed directly, never by
+    // stepping, so this is cheap even when `n` is in the hundreds of millions. (`anchor + i*period
+    // <= now` iff `i <= elapsed/period`, so the count of such `i >= 1` is `floor(elapsed/period)`.)
+    const n = elapsed >= 0 ? Math.floor(elapsed / period) : 0;
+
+    if (n === 0) {
+      // Nothing due yet (defensive: the driver only dispatches this job once its own `nextTs` is
+      // <= now, so this shouldn't normally happen — but a clock oddity shouldn't crash it).
+      toFire = [];
+      next = anchor + period;
+      newLastScheduledTs = anchor;
+    } else if (n === 1) {
+      // On-time (or first-ever) single fire — always happens, independent of `catchUp`.
+      const only = anchor + period;
+      toFire = [only];
+      next = only + period;
+      newLastScheduledTs = only;
+    } else {
+      // A backlog of `n` missed occurrences, `n` known exactly via O(1) arithmetic.
+      const lastOccurrence = anchor + n * period; // the TRUE last occurrence <= now
+      next = lastOccurrence + period; // strictly after `now`, by construction of `n`
+      newLastScheduledTs = lastOccurrence; // re-anchor to the real schedule regardless of `catchUp`
+
+      if (catchUp === "fireAll") {
+        // The only policy that genuinely needs a materialized list. Hard-capped at
+        // `CATCHUP_CAP` so even a multi-hundred-million-occurrence backlog does bounded work —
+        // fires the OLDEST `min(n, CATCHUP_CAP)` occurrences; anything beyond the cap is
+        // discarded for good (`newLastScheduledTs` above already re-anchors past the ENTIRE true
+        // backlog, not just the fired subset).
+        const fireCount = Math.min(n, CATCHUP_CAP);
+        toFire = [];
+        for (let i = 0; i < fireCount; i++) toFire.push(anchor + (i + 1) * period);
+        if (n > CATCHUP_CAP) {
+          console.warn(
+            `[scheduler] cron "${cron.name as string}": fireAll backlog of ${n} occurrences exceeded CATCHUP_CAP (${CATCHUP_CAP}) — fired the oldest ${CATCHUP_CAP}, discarded the rest.`,
+          );
+        }
+      } else if (catchUp === "fireOnce") {
+        toFire = [lastOccurrence];
+      } else {
+        toFire = []; // "skip" (default) — jump straight past the backlog, fire nothing for it
+      }
+    }
+  } else {
+    // spec.kind === "cron". `computeNextRun`/`computePrevRun` are each a single O(1) cron-parser
+    // call (field arithmetic, not calendar stepping), so every branch below stays bounded
+    // regardless of backlog length EXCEPT `"fireAll"`'s materialization loop (capped below).
+    const firstAfterAnchor = computeNextRun(spec, tz, anchor);
+
+    if (firstAfterAnchor > now) {
+      // Nothing due yet.
+      toFire = [];
+      next = firstAfterAnchor;
+      newLastScheduledTs = anchor;
+    } else {
+      const secondAfterAnchor = computeNextRun(spec, tz, firstAfterAnchor);
+      if (secondAfterAnchor > now) {
+        // Exactly one occurrence due — on-time (or first-ever) single fire.
+        toFire = [firstAfterAnchor];
+        next = secondAfterAnchor;
+        newLastScheduledTs = firstAfterAnchor;
+      } else {
+        // A backlog of 2+ occurrences. Unlike interval specs, the EXACT count isn't cheap to
+        // know for an arbitrary cron expression without stepping through it — so `"skip"` and
+        // `"fireOnce"` never do that: both get everything they need from two more O(1) calls
+        // (the real next occurrence, and the single most recent missed one). Only `"fireAll"`
+        // steps at all, and that step is hard-capped at `CATCHUP_CAP` iterations.
+        next = computeNextRun(spec, tz, now); // first real occurrence strictly after `now`
+        const lastOccurrence = computePrevRun(spec, tz, now); // most recent missed occurrence
+        newLastScheduledTs = lastOccurrence; // re-anchor to the real schedule regardless of `catchUp`
+
+        if (catchUp === "fireAll") {
+          toFire = [];
+          let cursor = firstAfterAnchor;
+          let truncated = false;
+          while (cursor <= now) {
+            if (toFire.length >= CATCHUP_CAP) {
+              truncated = true;
+              break;
+            }
+            toFire.push(cursor);
+            cursor = computeNextRun(spec, tz, cursor);
+          }
+          if (truncated) {
+            console.warn(
+              `[scheduler] cron "${cron.name as string}": fireAll backlog exceeded CATCHUP_CAP (${CATCHUP_CAP}) — fired the oldest ${CATCHUP_CAP}, discarded the rest.`,
+            );
+          }
+        } else if (catchUp === "fireOnce") {
+          toFire = [lastOccurrence];
+        } else {
+          // "skip" (default) — the exact missed count isn't tracked for cron-expression specs
+          // (see this branch's comment above); a log marker stands in for it.
+          toFire = [];
+          console.warn(
+            `[scheduler] cron "${cron.name as string}": skipped a downtime backlog (catchUp:"skip") — exact occurrence count not tracked for cron-expression specs.`,
+          );
+        }
+      }
+    }
+  }
+
   for (const fireTs of toFire) {
     await enqueueInternal(ctx.db, nowFn, CRON_TABLES, cron.workFnPath as string, cron.workArgs as JSONValue, {
       runAt: fireTs,
@@ -305,13 +435,13 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
     });
   }
 
-  const cadenceJobId = await enqueueInternal(ctx.db, nowFn, CRON_TABLES, "scheduler:_cronTick", { cronName: cron.name as string }, { runAt: next });
+  const cadenceJobId = await enqueueCadenceJob(ctx.db, nowFn, CRON_TABLES, cron.name as string, next);
 
   await ctx.db.replace(
     cron._id as string,
     compact({
       ...cron,
-      lastScheduledTs: occurrences.length > 0 ? (occurrences[occurrences.length - 1] as number) : anchor,
+      lastScheduledTs: newLastScheduledTs,
       cadenceJobId,
     }),
   );

@@ -24,6 +24,7 @@
 import { parseExpression } from "cron-parser";
 import type { JSONValue } from "@stackbase/values";
 import type { BootContext } from "@stackbase/component";
+import { GuestDatabaseWriter } from "@stackbase/executor";
 import { getFunctionPath, enqueueInternal, type FnRef, type EnqueueTables } from "./facade";
 
 export type CatchUpPolicy = "skip" | "fireOnce" | "fireAll";
@@ -152,6 +153,59 @@ export function computeNextRun(spec: CronSpec, tz: string, afterTs: number): num
 }
 
 /**
+ * Computes the LAST fire time AT-OR-BEFORE `atOrBeforeTs`, per `spec` — the mirror of
+ * `computeNextRun`, used only by `_cronTick`'s bounded catch-up path (`./modules.ts`, the
+ * unbounded-catch-up-loop fix) to find the single most recent missed occurrence in O(1) without
+ * stepping through a potentially enormous backlog. Only meaningful for `{kind:"cron"}` — an
+ * interval spec's "previous occurrence" is plain reverse arithmetic from its own numeric anchor,
+ * which `_cronTick` computes inline without a cron-parser round-trip, so this throws for
+ * `{kind:"interval"}` rather than silently doing the wrong thing.
+ *
+ * Implemented via `cron-parser`'s `.prev()`, called with `currentDate` one ms PAST
+ * `atOrBeforeTs` so an occurrence landing EXACTLY on `atOrBeforeTs` is still included —
+ * `cron-parser`'s `.next()`/`.prev()` are both strictly exclusive of `currentDate` itself
+ * (verified empirically, matching `computeNextRun`'s own "strictly after" contract on the other
+ * side).
+ */
+export function computePrevRun(spec: CronSpec, tz: string, atOrBeforeTs: number): number {
+  if (spec.kind === "interval") {
+    throw new Error(
+      "computePrevRun: interval specs are anchor-relative — compute their previous occurrence via arithmetic from the cron's own anchor instead of calling this",
+    );
+  }
+  const interval = parseExpression(spec.expr, { currentDate: new Date(atOrBeforeTs + 1), tz });
+  return interval.prev().toDate().getTime();
+}
+
+/**
+ * Enqueues (or re-enqueues) a cron's CADENCE job, embedding the resulting job's own id into its
+ * args (`{cronName, jobId}`) — the duplicate-cadence-chain fix's belt-and-braces half: a future
+ * `_cronTick` invocation can then recognize whether it's still the CURRENT canonical chain for
+ * this cron (by comparing its own `args.jobId` against `crons.cadenceJobId`) and self-terminate
+ * without rescheduling if not — see `_cronTick`'s doc comment in `./modules.ts`. This convergence
+ * check is a backstop even if `hasLiveCadence` (below) somehow still let two chains coexist.
+ *
+ * Two writes (insert, then patch `job_args`) rather than one, because the job's id isn't known
+ * until after the insert — self-referential args can't be supplied up front. This runs at most
+ * once per cadence tick (or once per boot-time reconcile), so the extra write is negligible.
+ */
+export async function enqueueCadenceJob(
+  db: GuestDatabaseWriter,
+  now: () => number,
+  tables: EnqueueTables,
+  cronName: string,
+  runAt: number,
+): Promise<string> {
+  const jobId = await enqueueInternal(db, now, tables, "scheduler:_cronTick", { cronName }, { runAt, name: cronName });
+  const rows = await db.query(tables.jobArgs, "by_job").eq("jobId", jobId).take(1).collect();
+  const row = rows[0];
+  if (row !== undefined) {
+    await db.replace(row._id as string, { ...row, args: { cronName, jobId } });
+  }
+  return jobId;
+}
+
+/**
  * How the app's `crons.ts` reaches this component (Task 5 design decision):
  *
  * The brief's straw man was a magic file-discovery mechanism ("the E2E-facing convention — a
@@ -220,7 +274,7 @@ export async function reconcileCrons(ctx: BootContext, registry: CronJobs | unde
         workArgs: entry.workArgs,
       });
       const firstRun = computeNextRun(entry.spec, entry.tz, now);
-      const cadenceJobId = await enqueueInternal(db, nowFn, tables, "scheduler:_cronTick", { cronName: entry.name }, { runAt: firstRun });
+      const cadenceJobId = await enqueueCadenceJob(db, nowFn, tables, entry.name, firstRun);
       await db.replace(cronId, {
         name: entry.name,
         spec: specJson,
@@ -252,7 +306,7 @@ export async function reconcileCrons(ctx: BootContext, registry: CronJobs | unde
         }
       }
       const firstRun = computeNextRun(entry.spec, entry.tz, now);
-      const cadenceJobId = await enqueueInternal(db, nowFn, tables, "scheduler:_cronTick", { cronName: entry.name }, { runAt: firstRun });
+      const cadenceJobId = await enqueueCadenceJob(db, nowFn, tables, entry.name, firstRun);
       await db.replace(existingRow._id as string, {
         ...existingRow,
         spec: specJson,
@@ -275,16 +329,35 @@ export async function reconcileCrons(ctx: BootContext, registry: CronJobs | unde
     // Idempotent-across-restarts: only (re)schedule a cadence job if this cron doesn't already
     // have one live. A restart that re-runs boot with an unchanged registry must NOT double the
     // cadence — `cadenceJobId` names the single currently-pending cadence job, if any.
+    //
+    // Duplicate-cadence-chain fix: `hasLiveCadence` must treat ANY non-terminal cadence job
+    // (`"pending"` OR `"inProgress"`) as live, not just `"pending"`. If the process dies between
+    // `_claim` and `_complete` of the cadence job (see `_cronTick`'s doc comment in
+    // `./modules.ts`), the job is left `"inProgress"` — that's still the live chain, just
+    // mid-flight, not a dead one. Treating only `"pending"` as live let a crash-mid-dispatch
+    // restart land here, see "no live cadence", and start a SECOND chain — while the first
+    // (inProgress, leased) chain was later revived by `scheduler:_reclaim`'s lease sweep, leaving
+    // two immortal chains both advancing `lastScheduledTs` forever.
+    //
+    // The cheapest sound fix given the schema: trust the single `cadenceJobId` pointer recorded
+    // on this row (an O(1) `db.get`) rather than a full scan over `jobs` for other
+    // `fnPath:"scheduler:_cronTick"` rows matching this cron by name — there's no index for that
+    // (args aren't indexed), so a scan would cost O(all non-terminal jobs) on every boot for
+    // every cron. Pointer-trust is O(1) but not airtight against every conceivable race, so
+    // `enqueueCadenceJob`'s embedded `{jobId}` + `_cronTick`'s self-terminate check (top of
+    // `_cronTick`, `./modules.ts`) is the belt-and-braces backstop: even if this check somehow
+    // still admits a duplicate, the stale chain dies at its very next tick instead of persisting
+    // forever.
     const cadenceJobId = existingRow.cadenceJobId as string | undefined;
     let hasLiveCadence = false;
     if (cadenceJobId !== undefined) {
       const job = await db.get(cadenceJobId);
-      hasLiveCadence = job !== null && job.state === "pending";
+      hasLiveCadence = job !== null && (job.state === "pending" || job.state === "inProgress");
     }
     if (!hasLiveCadence) {
       const anchor = (existingRow.lastScheduledTs as number | undefined) ?? now;
       const nextRun = computeNextRun(entry.spec, entry.tz, anchor);
-      const newCadenceJobId = await enqueueInternal(db, nowFn, tables, "scheduler:_cronTick", { cronName: entry.name }, { runAt: nextRun });
+      const newCadenceJobId = await enqueueCadenceJob(db, nowFn, tables, entry.name, nextRun);
       await db.replace(existingRow._id as string, { ...existingRow, cadenceJobId: newCadenceJobId });
     }
   }

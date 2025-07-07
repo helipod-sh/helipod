@@ -9,7 +9,7 @@ export * from "./schema";
 export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, SignalKind, EnqueueTables } from "./facade";
 export { getFunctionPath, enqueueInternal } from "./facade";
 export type { PeekDueResult, ClaimResult, JobResult, DueJob } from "./modules";
-export { BATCH_CAP, LEASE_MS, SWEEP_MS } from "./modules";
+export { BATCH_CAP, LEASE_MS, SWEEP_MS, CATCHUP_CAP } from "./modules";
 export type { SchedulerDriver } from "./driver";
 export { schedulerDriver } from "./driver";
 export type { BackoffOptions } from "./backoff";
@@ -28,7 +28,7 @@ export type {
   MonthlyAt,
   DayOfWeek,
 } from "./crons";
-export { cronJobs, computeNextRun } from "./crons";
+export { cronJobs, computeNextRun, computePrevRun, enqueueCadenceJob } from "./crons";
 
 /**
  * `defineScheduler()` — the `@stackbase/scheduler` component: the `jobs`/`job_args`/`crons`/

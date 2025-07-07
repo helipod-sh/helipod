@@ -2,7 +2,8 @@
 import { describe, it, expect } from "vitest";
 import { mutation } from "@stackbase/executor";
 import { anyApi } from "@stackbase/client";
-import { cronJobs, computeNextRun } from "../src/index";
+import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { cronJobs, computeNextRun, CATCHUP_CAP } from "../src/index";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 /**
@@ -141,6 +142,152 @@ describe("the cron cadence — clock-anchored, dual-job, catch-up, dedup", () =>
 
     const jobs = await readTable(runtime, "scheduler/jobs");
     expect(jobs.filter((j) => j.fnPath === "app:work")).toHaveLength(1); // one job, not two
+  });
+});
+
+describe("bounded catch-up — _cronTick never materializes an unbounded backlog", () => {
+  it('catchUp:"skip" with a ~10-year-old anchor on a 1-second interval completes fast and enqueues zero work jobs', async () => {
+    let clock = 1_000_000;
+    const crons = cronJobs();
+    crons.interval("fast", { seconds: 1 }, "app:fast", {}); // default catchUp: "skip"
+    const { tick, runtime } = await makeRuntimeWithScheduler({ "app:fast": mutation(async () => null) }, { now: () => clock, crons });
+
+    // ~315.4 million missed occurrences — the pre-fix implementation would step through (and, for
+    // "skip", still allocate an array for) every single one of these synchronously inside one
+    // mutation. The proof this test is bounded is that it finishes at all, quickly — not a step
+    // count assertion (this suite has no visibility into `_cronTick`'s internals).
+    const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+    clock += TEN_YEARS_MS;
+
+    const start = performance.now();
+    await drain(tick, 4);
+    const elapsedMs = performance.now() - start;
+    expect(elapsedMs).toBeLessThan(3000); // a per-occurrence loop over ~315M entries would never finish this fast
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs.filter((j) => j.fnPath === "app:fast")).toHaveLength(0); // "skip" discarded the whole backlog
+
+    const liveCadence = jobs.find(
+      (j) => j.fnPath === "scheduler:_cronTick" && (j.state === "pending" || j.state === "inProgress"),
+    );
+    expect(liveCadence).toBeDefined();
+    expect(liveCadence!.nextTs as number).toBeGreaterThan(clock); // re-anchored into the future, not stuck in the past
+
+    const cronRows = await readTable(runtime, "scheduler/crons");
+    const cron = cronRows.find((r) => r.name === "fast")!;
+    expect(cron.lastScheduledTs as number).toBeLessThanOrEqual(clock); // re-anchored to the real schedule, not left stale
+  });
+
+  it('catchUp:"fireAll" caps a backlog at exactly CATCHUP_CAP work jobs — a hard ceiling, not an unbounded materialization', async () => {
+    let clock = 2_000_000;
+    const period = 10_000;
+    const crons = cronJobs();
+    crons.interval("capped", { seconds: 10 }, "app:capped", {}, { catchUp: "fireAll" });
+    const { tick, runtime } = await makeRuntimeWithScheduler({ "app:capped": mutation(async () => null) }, { now: () => clock, crons });
+
+    // Comfortably more missed occurrences than CATCHUP_CAP.
+    clock += period * (CATCHUP_CAP + 500);
+    await drain(tick, 4);
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs.filter((j) => j.fnPath === "app:capped")).toHaveLength(CATCHUP_CAP);
+  });
+});
+
+describe("duplicate-cadence-chain fix — a crashed cadence job never spawns a second immortal chain", () => {
+  it("a cadence job left inProgress with an expired lease is treated as LIVE across a restart — no second chain", async () => {
+    const clock = { now: 5_000_000 };
+    const crons = cronJobs();
+    crons.interval("beat2", { seconds: 10 }, "app:beat2", {});
+    const appModules = { "app:beat2": mutation(async () => null) };
+
+    // Shared storage across two `EmbeddedRuntime` instances — simulates a process restart
+    // (mirrors `packages/runtime-embedded/test/runtime-restart.test.ts`'s pattern).
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    const rt1 = await makeRuntimeWithScheduler(appModules, { now: () => clock.now, crons, store });
+
+    let cronRows = await readTable(rt1.runtime, "scheduler/crons");
+    const originalCadenceJobId = cronRows.find((r) => r.name === "beat2")!.cadenceJobId as string;
+
+    // Simulate the crash: the driver `_claim`ed the cadence job (state -> inProgress, leased),
+    // then the process died before `_cronTick` ever ran (or before `_complete` ran) — force that
+    // state directly, bypassing the normal claim path.
+    await rt1.runtime.runSystem("_system:forceJobState", {
+      jobId: originalCadenceJobId,
+      state: "inProgress",
+      leaseExpiresAt: clock.now - 1, // already expired, so a later sweep can reclaim it
+    });
+    await rt1.runtime.stopDrivers();
+
+    // "Restart": a fresh EmbeddedRuntime over the SAME store re-runs `reconcileCrons` at boot.
+    const rt2 = await makeRuntimeWithScheduler(appModules, { now: () => clock.now, crons, store });
+
+    cronRows = await readTable(rt2.runtime, "scheduler/crons");
+    const cronAfterBoot = cronRows.find((r) => r.name === "beat2")!;
+    // `hasLiveCadence` must see the `inProgress` job as live — the pointer is untouched, no
+    // second chain was created.
+    expect(cronAfterBoot.cadenceJobId).toBe(originalCadenceJobId);
+
+    let jobs = await readTable(rt2.runtime, "scheduler/jobs");
+    let liveCadence = jobs.filter(
+      (j) => j.fnPath === "scheduler:_cronTick" && (j.state === "pending" || j.state === "inProgress"),
+    );
+    expect(liveCadence).toHaveLength(1); // still just the one (orphaned) job — no duplicate
+
+    // The lease-reclaim sweep + a tick lets the ORIGINAL chain continue.
+    await rt2.sweep();
+    await drain(rt2.tick);
+
+    jobs = await readTable(rt2.runtime, "scheduler/jobs");
+    liveCadence = jobs.filter((j) => j.fnPath === "scheduler:_cronTick" && (j.state === "pending" || j.state === "inProgress"));
+    expect(liveCadence).toHaveLength(1); // exactly one chain continues — no duplication
+
+    await rt2.runtime.stopDrivers();
+  });
+
+  it("self-terminate: two live cadence jobs for one cron — the stale one dies at its next tick without rescheduling", async () => {
+    const clock = { now: 6_000_000 };
+    const crons = cronJobs();
+    crons.interval("beat3", { seconds: 10 }, "app:beat3", {});
+    const { tick, runtime } = await makeRuntimeWithScheduler(
+      { "app:beat3": mutation(async () => null) },
+      { now: () => clock.now, crons },
+    );
+
+    const cronRowsBoot = await readTable(runtime, "scheduler/crons");
+    const cronBoot = cronRowsBoot.find((r) => r.name === "beat3")!;
+    const canonicalId = cronBoot.cadenceJobId as string; // the real chain from boot
+
+    const jobsBoot = await readTable(runtime, "scheduler/jobs");
+    const canonicalJob = jobsBoot.find((j) => j._id === canonicalId)!;
+    const dueAt = canonicalJob.nextTs as number;
+
+    // Craft a SECOND, stale cadence job for the same cron — due at the same instant, carrying a
+    // correct self-referential `jobId` in its args (so it WOULD normally proceed), except the
+    // cron row doesn't point at it — simulating a duplicate chain that slipped through some other
+    // way despite the `hasLiveCadence` fix.
+    const staleIdResult = await runtime.runSystem<string>("_system:insertJob", {
+      fnPath: "scheduler:_cronTick",
+      kind: "mutation",
+      nextTs: dueAt,
+      args: { cronName: "beat3" },
+    });
+    const staleId = staleIdResult.value as string;
+    await runtime.runSystem("_system:setJobArgs", { jobId: staleId, args: { cronName: "beat3", jobId: staleId } });
+
+    clock.now = dueAt; // both the canonical and stale cadence jobs are due now
+    await drain(tick, 6);
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    const liveCadence = jobs.filter((j) => j.fnPath === "scheduler:_cronTick" && (j.state === "pending" || j.state === "inProgress"));
+    expect(liveCadence).toHaveLength(1); // exactly one chain survives
+
+    const staleAfter = jobs.find((j) => j._id === staleId)!;
+    expect(staleAfter.state).toBe("success"); // self-terminated cleanly (returned null), not stuck/failed
+
+    const cronRowsAfter = await readTable(runtime, "scheduler/crons");
+    const cronAfter = cronRowsAfter.find((r) => r.name === "beat3")!;
+    expect(liveCadence[0]!._id).toBe(cronAfter.cadenceJobId); // the surviving chain is the canonical one
   });
 });
 

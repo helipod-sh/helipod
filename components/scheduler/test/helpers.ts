@@ -50,6 +50,38 @@ function systemModules(): Record<string, RegisteredFunction> {
         return jobId;
       },
     ),
+    // Test-only escape hatch, added for the duplicate-cadence-chain crash tests: forces an
+    // EXISTING job's `state`/lease directly (bypassing `_claim`/`_complete`) — used to simulate
+    // "the driver claimed this job and the process died before completing it" (an `inProgress`
+    // job with an expired lease) without needing a real crash.
+    "_system:forceJobState": mutation(
+      async (
+        ctx,
+        args: {
+          jobId: string;
+          state: "pending" | "inProgress" | "success" | "failed" | "canceled";
+          leaseExpiresAt?: number;
+        },
+      ) => {
+        const job = await ctx.db.get(args.jobId);
+        if (job === null) return null;
+        await ctx.db.replace(args.jobId, {
+          ...job,
+          state: args.state,
+          ...(args.leaseExpiresAt !== undefined ? { leaseHolder: "driver", leaseExpiresAt: args.leaseExpiresAt } : {}),
+        });
+        return null;
+      },
+    ),
+    // Test-only escape hatch: overwrites an existing job's `job_args.args` payload — used to craft
+    // a stale duplicate cadence job whose args embed a specific (self-referential) `jobId`, which
+    // `_system:insertJob` can't do directly (the job's id isn't known until after it's inserted).
+    "_system:setJobArgs": mutation(async (ctx, args: { jobId: string; args: JSONValue }) => {
+      const rows = await ctx.db.query("scheduler/job_args", "by_job").eq("jobId", args.jobId).take(1).collect();
+      const row = rows[0];
+      if (row !== undefined) await ctx.db.replace(row._id as string, { ...row, args: args.args });
+      return null;
+    }),
   };
 }
 
@@ -61,15 +93,23 @@ function systemModules(): Record<string, RegisteredFunction> {
  * `__tick()` test seam — no real timers/sleeps needed in assertions. `wake()` is the driver's
  * `__wake()` test seam — the same fire-and-forget signal the reactive commit/timer paths send
  * internally, for simulating one arriving at a precise moment (e.g. mid-`tick()`).
+ *
+ * `opts.store` — normally omitted (a fresh in-memory `SqliteDocStore` per call). Pass an existing
+ * one to simulate a process RESTART: call this twice with the SAME `store` (and the SAME `crons`
+ * registry, so `reconcileCrons`'s spec-diff sees no change), stopping the first runtime's drivers
+ * in between (`await runtime.stopDrivers()`) — the second call re-runs `composeComponents` +
+ * boot (`reconcileCrons`) against the already-populated store, exactly like a real restart. Used
+ * by the duplicate-cadence-chain crash tests (`crons.test.ts`). Mirrors the existing pattern in
+ * `packages/runtime-embedded/test/runtime-restart.test.ts`.
  */
 export async function makeRuntimeWithScheduler(
   appModules: Record<string, RegisteredFunction>,
-  opts?: { now?: () => number; crons?: CronJobs },
+  opts?: { now?: () => number; crons?: CronJobs; store?: SqliteDocStore },
 ): Promise<{ runtime: EmbeddedRuntime; tick: () => Promise<void>; wake: () => void; sweep: () => Promise<void> }> {
   const schema = defineSchema({});
   const c = composeComponents({ schemaJson: schema.export(), moduleMap: appModules }, [defineScheduler({ crons: opts?.crons })]);
   const runtime = await EmbeddedRuntime.create({
-    store: new SqliteDocStore(new NodeSqliteAdapter()),
+    store: opts?.store ?? new SqliteDocStore(new NodeSqliteAdapter()),
     catalog: c.catalog,
     modules: c.moduleMap,
     systemModules: systemModules(),
