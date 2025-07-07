@@ -15,7 +15,7 @@ export interface FunctionReference {
 export type FnRef = FunctionReference | string;
 
 /** Resolve a `fnRef` (string path or codegen ref) to its string path. Mirrors `@stackbase/client`'s `getFunctionPath`. */
-function getFunctionPath(ref: FnRef): string {
+export function getFunctionPath(ref: FnRef): string {
   return typeof ref === "string" ? ref : ref.__path;
 }
 
@@ -96,11 +96,98 @@ function currentJobId(): string | undefined {
 }
 
 /** Drop keys whose value is `undefined` — the wire codec (`convexToJson`) rejects `undefined`; omit rather than null it out. */
-function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
+export function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) if (v !== undefined) out[k] = v;
   return out as { [K in keyof T]: Exclude<T[K], undefined> };
 }
+
+/**
+ * The three `jobs`/`job_args`/`signals` table names `enqueueInternal` writes to — bare
+ * (`"jobs"`) when called from this file's own namespaced `ctx.scheduler` facade, or fully
+ * qualified (`"scheduler/jobs"`) when called from a privileged context (`_cronTick` in
+ * `./modules.ts`, and the boot-time cron reconciler in `./crons.ts`) that bypasses namespace
+ * prefixing entirely — see `./modules.ts`'s module doc comment for why those callers must use
+ * fully-qualified names.
+ */
+export interface EnqueueTables {
+  jobs: string;
+  jobArgs: string;
+  signals: string;
+}
+
+/**
+ * The shared enqueue path: inserts a `pending` `jobs` row (+ `job_args`) and an `enqueue`
+ * `signals` row, honoring the born-canceled check and, since Task 5, an idempotent insert-or-noop
+ * on `opts.idempotencyKey` (looked up via `by_idempotency`) — if a job with that key already
+ * exists, its id is returned unchanged and nothing new is inserted. This dedup is what makes the
+ * cron cadence's occurrence key (`${cronName}:${fireTs}`, `_cronTick` in `./modules.ts`) safe to
+ * call more than once for the same occurrence (e.g. a reclaim-driven re-run of a cadence job).
+ *
+ * Factored out of `schedulerContext` (which calls it with bare table names, scoped to the calling
+ * mutation's own transaction via `db`) so `_cronTick` and the boot-time cron reconciler — both of
+ * which write with fully-qualified table names outside a normal namespaced call — can reuse the
+ * exact same logic rather than a parallel reimplementation drifting out of sync.
+ */
+export async function enqueueInternal(
+  db: GuestDatabaseWriter,
+  now: () => number,
+  tables: EnqueueTables,
+  fnRef: FnRef,
+  args: JSONValue,
+  opts: EnqueueOpts,
+): Promise<string> {
+  const fnPath = getFunctionPath(fnRef);
+
+  if (opts.idempotencyKey !== undefined) {
+    const existing = await db.query(tables.jobs, "by_idempotency").eq("idempotencyKey", opts.idempotencyKey).take(1).collect();
+    const found = existing[0];
+    if (found) return found._id as string;
+  }
+
+  const parentId = currentJobId();
+  // Born-canceled: if the ambient parent job is already `canceled`, its children should never
+  // get a chance to run either — see the Task 4 design note above `JobState` for why
+  // `currentJobId()` is currently always `undefined` (making this branch unreachable today, but
+  // wired and correct for whenever a future slice sets the ambient for real).
+  let parentCanceled = false;
+  if (parentId !== undefined) {
+    const parent = await db.get(parentId);
+    parentCanceled = parent !== null && parent.state === "canceled";
+  }
+  const bornState: JobState = parentCanceled ? "canceled" : "pending";
+  const jobId = await db.insert(
+    tables.jobs,
+    compact({
+      fnPath,
+      kind: kindOf(fnPath),
+      state: bornState,
+      nextTs: opts.runAt ?? now(),
+      attempts: 0,
+      maxFailures: opts.retry?.maxFailures ?? 4,
+      leaseHolder: undefined,
+      leaseExpiresAt: undefined,
+      idempotencyKey: opts.idempotencyKey,
+      appVersion: currentAppVersion(),
+      name: opts.name,
+      hasArgs: true,
+      onComplete: opts.onComplete,
+      parentId,
+      completedTs: parentCanceled ? now() : undefined,
+    }),
+  );
+  await db.insert(tables.jobArgs, compact({ jobId, args, context: opts.context }));
+  // An append-only wake signal so the Task 3 driver's loop wakes precisely on this job's
+  // segment instead of polling `jobs` blindly. Appended even when born-canceled: harmless (the
+  // driver's `_peekDue` filters on `state:"pending"`, so a born-canceled job is never picked
+  // up), and keeps this signal's meaning simple ("a jobs row was written") rather than
+  // conditional.
+  await db.insert(tables.signals, { segment: segmentOf(now()), kind: "enqueue" as SignalKind, jobId });
+  return jobId;
+}
+
+/** Bare (namespaced-by-the-executor) table names — what `schedulerContext`'s facade writes through. */
+const FACADE_TABLES: EnqueueTables = { jobs: "jobs", jobArgs: "job_args", signals: "signals" };
 
 /**
  * Builds `ctx.scheduler`. Requires `contextWrite: true` on the component definition (see
@@ -115,55 +202,12 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
   const db = cctx.db as GuestDatabaseWriter;
   const now = (): number => cctx.now;
 
-  async function enqueueInternal(fnRef: FnRef, args: JSONValue, opts: EnqueueOpts): Promise<string> {
-    const fnPath = getFunctionPath(fnRef);
-    const parentId = currentJobId();
-    // Born-canceled: if the ambient parent job is already `canceled`, its children should never
-    // get a chance to run either — see the Task 4 design note above `JobState` for why
-    // `currentJobId()` is currently always `undefined` (making this branch unreachable today, but
-    // wired and correct for whenever a future slice sets the ambient for real).
-    let parentCanceled = false;
-    if (parentId !== undefined) {
-      const parent = await db.get(parentId);
-      parentCanceled = parent !== null && parent.state === "canceled";
-    }
-    const bornState: JobState = parentCanceled ? "canceled" : "pending";
-    const jobId = await db.insert(
-      "jobs",
-      compact({
-        fnPath,
-        kind: kindOf(fnPath),
-        state: bornState,
-        nextTs: opts.runAt ?? now(),
-        attempts: 0,
-        maxFailures: opts.retry?.maxFailures ?? 4,
-        leaseHolder: undefined,
-        leaseExpiresAt: undefined,
-        idempotencyKey: opts.idempotencyKey,
-        appVersion: currentAppVersion(),
-        name: opts.name,
-        hasArgs: true,
-        onComplete: opts.onComplete,
-        parentId,
-        completedTs: parentCanceled ? now() : undefined,
-      }),
-    );
-    await db.insert("job_args", compact({ jobId, args, context: opts.context }));
-    // An append-only wake signal so the Task 3 driver's loop wakes precisely on this job's
-    // segment instead of polling `jobs` blindly. Appended even when born-canceled: harmless (the
-    // driver's `_peekDue` filters on `state:"pending"`, so a born-canceled job is never picked
-    // up), and keeps this signal's meaning simple ("a jobs row was written") rather than
-    // conditional.
-    await db.insert("signals", { segment: segmentOf(now()), kind: "enqueue" as SignalKind, jobId });
-    return jobId;
-  }
-
   return {
     async runAfter(delayMs, fnRef, args) {
-      return enqueueInternal(fnRef, args, { runAt: now() + Math.max(0, delayMs) });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: now() + Math.max(0, delayMs) });
     },
     async runAt(ts, fnRef, args) {
-      return enqueueInternal(fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts });
     },
     async cancel(id) {
       const job = await db.get(id);
@@ -197,7 +241,7 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
       }
     },
     async enqueue(fnRef, args, opts) {
-      return enqueueInternal(fnRef, args, opts ?? {});
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {});
     },
   };
 }

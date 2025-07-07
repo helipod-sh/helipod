@@ -13,6 +13,12 @@ import { makeRuntimeWithScheduler, readTable } from "./helpers";
 const FIXED_RNG = createSeededRandom(0).next();
 
 describe("scheduler reliability — retries/backoff/dead-letter, lease reclaim, cascading cancel", () => {
+  it("computeBackoff(1, () => 0) is exactly 500 — the first retry at 0% jitter", () => {
+    // Direct, computable assertion (no rng/runtime needed): attempts=1 → initialBackoffMs(250) *
+    // base(2)^(1+1) = 1000, at 0% jitter (rng→0 ⇒ the 50% floor) = 500.
+    expect(computeBackoff(1, () => 0)).toBe(500);
+  });
+
   it("a failing job retries with backoff up to maxFailures, then dead-letters", async () => {
     let clock = 8_000_000;
     let flakyRuns = 0;

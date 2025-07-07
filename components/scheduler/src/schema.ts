@@ -38,7 +38,12 @@ export const schedulerSchema = defineSchema({
   })
     .index("by_next_ts", ["state", "nextTs"])
     .index("by_completed_ts", ["completedTs"])
-    .index("by_parent", ["parentId"]),
+    .index("by_parent", ["parentId"])
+    // Task 5: the idempotent-enqueue insert-or-noop lookup (`enqueueInternal` in `./facade.ts`)
+    // needs an indexed point-lookup on `idempotencyKey` — without this it'd be a full table scan
+    // on every enqueue that passes one, which the cron cadence (`_cronTick` in `./modules.ts`)
+    // does for every occurrence it schedules (`${cronName}:${fireTs}`).
+    .index("by_idempotency", ["idempotencyKey"]),
 
   job_args: defineTable({
     jobId: v.string(),
@@ -47,12 +52,17 @@ export const schedulerSchema = defineSchema({
   }).index("by_job", ["jobId"]),
 
   // Task 5: recurring/cron schedules. `cadenceJobId` points at the currently-pending `jobs` row
-  // for this cron (if any); the driver reschedules the next occurrence on completion.
+  // for this cron's CADENCE job (the dual-job design's self-rescheduling half — see
+  // `_cronTick` in `./modules.ts`); the work job(s) it fires are ordinary `jobs` rows, tracked
+  // only via their deterministic `idempotencyKey` (`${name}:${fireTs}`), not by this pointer.
+  // `spec` is a JSON-serialized `CronSpec` (`./crons.ts`) — either `{kind:"interval",ms}` or
+  // `{kind:"cron",expr}`. `catchUp` was originally typed `boolean`; Task 5 widened it to the
+  // three-way policy `_cronTick` actually implements (`skip` | `fireOnce` | `fireAll`).
   crons: defineTable({
     name: v.string(),
     spec: v.string(),
     tz: v.string(),
-    catchUp: v.boolean(),
+    catchUp: v.union(v.literal("skip"), v.literal("fireOnce"), v.literal("fireAll")),
     lastScheduledTs: v.optional(v.number()),
     workFnPath: v.string(),
     workArgs: v.any(),

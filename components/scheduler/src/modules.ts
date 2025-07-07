@@ -2,7 +2,9 @@ import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { JobState, SignalKind } from "./facade";
+import { enqueueInternal, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
+import { computeNextRun, type CronSpec, type CatchUpPolicy } from "./crons";
 
 /**
  * Internal modules for `@stackbase/scheduler` — registered on `defineScheduler()`'s `modules` map
@@ -176,6 +178,14 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   }
 
   // result.kind === "failed" — retry with backoff, or dead-letter at maxFailures.
+  // TODO(action-slice): once actions can execute (CLAUDE.md build-order #5), a "failed" result
+  // from a CLEANLY-failed action (its own code threw/rejected, as opposed to an infra kill —
+  // that's `_reclaim`'s job below) must NOT blind-retry through this same backoff path. An
+  // action's side effects aren't transactional like a mutation's, so retrying one that already
+  // ran partway could re-run those side effects — this branch's blanket "retry up to
+  // maxFailures" is only safe for `kind:"mutation"` today (the only kind that actually runs —
+  // see `driver.ts`'s action guard). Revisit this branch (and `_reclaim`'s, which has the same
+  // gap) when actions are real.
   const attempts = (job.attempts as number) + 1;
   const maxFailures = job.maxFailures as number;
   const lastError = args.result.error;
@@ -221,6 +231,93 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   return null;
 });
 
+/** Fully-qualified table names — see this file's module doc comment for why (`_cronTick` runs privileged, dispatched by the driver like any other due job). */
+const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler/job_args", signals: "scheduler/signals" };
+
+/**
+ * `scheduler:_cronTick` — a MUTATION: the dual-job cron cadence. Registered as an ordinary
+ * `jobs` row itself (`fnPath:"scheduler:_cronTick"`, `kind:"mutation"`) — the driver dispatches
+ * it through the exact same `_peekDue`/`_claim`/`_complete` path as any other due job (see
+ * `driver.ts`'s `runPass`), which is what makes it decoupled: a slow/failing WORK job (enqueued
+ * below) is a completely separate `jobs` row with its own lease/retry lifecycle, so it can never
+ * block or delay this cadence job's own on-time reschedule.
+ *
+ * Per fire:
+ *  1. Read the `crons` row by `name` (via `by_name`) — a no-op if it's gone (the cron was
+ *     deregistered by boot's `reconcileCrons` since this cadence job was scheduled; see
+ *     `./crons.ts`).
+ *  2. `anchor = lastScheduledTs` — CLOCK-ANCHORED, never `now()`: every occurrence this tick
+ *     computes chains off the cron's own last-fired timestamp, not off whenever this mutation
+ *     happens to run. A late dispatch (a busy driver, a slow prior tick) never shifts the phase
+ *     of later occurrences — `computeNextRun` is called repeatedly from `anchor` forward until
+ *     the result is past `now`, collecting every occurrence in between as `occurrences`.
+ *  3. `catchUp` decides how many of a MULTI-occurrence backlog (downtime — more than one
+ *     occurrence elapsed since the last tick) actually get a work job: `"skip"` fires none of
+ *     them (jumps straight to the next future occurrence), `"fireOnce"` fires only the most
+ *     recent, `"fireAll"` fires every one. The single-occurrence (on-time) case always fires
+ *     regardless of policy — `catchUp` only matters when there's a backlog to decide about.
+ *  4. Each fired occurrence gets its OWN work job via `enqueueInternal`, keyed
+ *     `idempotencyKey: "${cronName}:${fireTs}"` — insert-or-noop, so two cadence fires that ever
+ *     computed the same occurrence (shouldn't happen in normal operation, but is the deterministic
+ *     safety net if it did) collapse into one work job rather than double-running it.
+ *  5. The cadence reschedules ITSELF at `next` (the first occurrence strictly after `now`), and
+ *     `lastScheduledTs` advances to the last occurrence this tick considered (fired or skipped) —
+ *     so a `"skip"` catch-up still re-anchors to the real schedule instead of drifting to `now`.
+ */
+export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: string }): Promise<null> => {
+  const rows = await ctx.db.query("scheduler/crons", "by_name").eq("name", args.cronName).take(1).collect();
+  const cron = rows[0];
+  if (cron === undefined) return null; // deregistered since this cadence job was scheduled — stop, don't reschedule
+
+  const now = ctx.now();
+  const spec = JSON.parse(cron.spec as string) as CronSpec;
+  const tz = cron.tz as string;
+  const catchUp = cron.catchUp as CatchUpPolicy;
+  const anchor = (cron.lastScheduledTs as number | undefined) ?? now;
+
+  const occurrences: number[] = [];
+  let cursor = anchor;
+  let next = computeNextRun(spec, tz, cursor);
+  while (next <= now) {
+    occurrences.push(next);
+    cursor = next;
+    next = computeNextRun(spec, tz, cursor);
+  }
+  // `next` is now the first occurrence strictly after `now` — the cadence reschedules there.
+
+  let toFire: number[];
+  if (occurrences.length <= 1) {
+    toFire = occurrences; // on-time (or first-ever) fire: always happens, independent of `catchUp`
+  } else if (catchUp === "fireAll") {
+    toFire = occurrences;
+  } else if (catchUp === "fireOnce") {
+    toFire = [occurrences[occurrences.length - 1] as number];
+  } else {
+    toFire = []; // "skip" (default) — jump past the backlog, fire nothing for it
+  }
+
+  const nowFn = (): number => ctx.now();
+  for (const fireTs of toFire) {
+    await enqueueInternal(ctx.db, nowFn, CRON_TABLES, cron.workFnPath as string, cron.workArgs as JSONValue, {
+      runAt: fireTs,
+      idempotencyKey: `${cron.name as string}:${fireTs}`,
+      name: cron.name as string,
+    });
+  }
+
+  const cadenceJobId = await enqueueInternal(ctx.db, nowFn, CRON_TABLES, "scheduler:_cronTick", { cronName: cron.name as string }, { runAt: next });
+
+  await ctx.db.replace(
+    cron._id as string,
+    compact({
+      ...cron,
+      lastScheduledTs: occurrences.length > 0 ? (occurrences[occurrences.length - 1] as number) : anchor,
+      cadenceJobId,
+    }),
+  );
+  return null;
+});
+
 /**
  * `scheduler:_reclaim` — a MUTATION: the driver's safety-sweep backstop for infra kills. Scans
  * `inProgress` jobs whose lease has expired (`leaseExpiresAt < now` — the process that `_claim`ed
@@ -253,6 +350,14 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
     const attempts = (job.attempts as number) + 1;
     const lastError = "lease expired: driver did not complete the job before its lease deadline (infra kill)";
     if (job.kind === "mutation") {
+      // Deliberate gap, ticket-worthy: unlike `_complete`'s failed-path retry (which dead-letters
+      // once `attempts >= maxFailures`), this reclaim path has no such cap — a mutation that
+      // reliably crashes the process it's claimed on (rather than throwing, which `_complete`
+      // would catch) gets reclaimed to `pending` and re-dispatched forever, incrementing
+      // `attempts` each time but never comparing it to `maxFailures` here. A true crash-loop
+      // (not just a slow/flaky job) would retry indefinitely rather than dead-lettering. Bounding
+      // this (e.g. dead-letter once `attempts >= maxFailures` here too) is future work, not done
+      // in this task.
       await ctx.db.replace(
         jobId,
         compact({

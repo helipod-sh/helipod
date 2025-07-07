@@ -5,7 +5,7 @@ import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema } from "@stackbase/values";
 import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import type { JSONValue, Value } from "@stackbase/values";
-import { defineScheduler, type SchedulerDriver } from "../src/index";
+import { defineScheduler, type SchedulerDriver, type CronJobs } from "../src/index";
 
 // Privileged raw-table scan — reads a fully-qualified table name (e.g. "scheduler/jobs")
 // bypassing the namespace boundary, so tests can assert on the component's own tables.
@@ -64,10 +64,10 @@ function systemModules(): Record<string, RegisteredFunction> {
  */
 export async function makeRuntimeWithScheduler(
   appModules: Record<string, RegisteredFunction>,
-  opts?: { now?: () => number },
+  opts?: { now?: () => number; crons?: CronJobs },
 ): Promise<{ runtime: EmbeddedRuntime; tick: () => Promise<void>; wake: () => void; sweep: () => Promise<void> }> {
   const schema = defineSchema({});
-  const c = composeComponents({ schemaJson: schema.export(), moduleMap: appModules }, [defineScheduler()]);
+  const c = composeComponents({ schemaJson: schema.export(), moduleMap: appModules }, [defineScheduler({ crons: opts?.crons })]);
   const runtime = await EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
     catalog: c.catalog,

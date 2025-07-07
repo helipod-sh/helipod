@@ -85,6 +85,7 @@
         "cron-parser": "^4.9.0",
       },
       "devDependencies": {
+        "@stackbase/client": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",

@@ -8,6 +8,7 @@ import {
   validatorToTsType,
   generateDataModel,
   generateApi,
+  generateInternalApi,
   generateServer,
   generateAll,
   writeGenerated,
@@ -94,11 +95,42 @@ describe("generateApi", () => {
   });
 });
 
+describe("generateInternalApi", () => {
+  it("emits FunctionReferences for internal functions and excludes public ones", () => {
+    const internal = generateInternalApi(manifest);
+    expect(internal.content).toContain("export type Internal =");
+    expect(internal.content).toContain('"messages": {');
+    expect(internal.content).toContain('purge: FunctionReference<"mutation", "internal", any, any>;');
+    expect(internal.content).not.toContain("list:"); // public
+    expect(internal.content).not.toContain("send:"); // public
+  });
+});
+
 describe("generateServer", () => {
   it("re-exports the runtime function builders and the generated types", () => {
     const server = generateServer(schema);
     expect(server.content).toContain('export { query, mutation, action } from "@stackbase/executor";');
     expect(server.content).toContain('export type { DataModel, TableNames, Doc, Id } from "./dataModel";');
+    expect(server.content).toContain('export type { Internal } from "./internal";');
+  });
+
+  it("emits runtime `api`/`internal` proxy values typed against the generated Api/Internal", () => {
+    const server = generateServer(schema);
+    expect(server.content).toContain('import { anyApi } from "@stackbase/client";');
+    expect(server.content).toContain("export const api = anyApi as Api;");
+    expect(server.content).toContain("export const internal = anyApi as Internal;");
+  });
+
+  it("re-exports a component's serverExports from its contextType.import", () => {
+    const server = generateServer(schema, {
+      components: [{ name: "scheduler", contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" }, serverExports: ["cronJobs"] }],
+    });
+    expect(server.content).toContain('export { cronJobs } from "@stackbase/scheduler";');
+  });
+
+  it("does not emit a re-export for a component with serverExports but no contextType", () => {
+    const server = generateServer(schema, { components: [{ name: "noCtx", serverExports: ["something"] }] });
+    expect(server.content).not.toContain("something");
   });
 });
 
@@ -112,10 +144,11 @@ describe("generated output is syntactically valid TypeScript", () => {
     expect(errors.map((e) => ts.flattenDiagnosticMessageText(e.messageText, "\n")), `${name} should parse`).toEqual([]);
   };
 
-  it("dataModel, api, and server all parse cleanly", () => {
+  it("dataModel, api, internal, and server all parse cleanly", () => {
     const bundle = generateAll({ schema, manifest });
     assertParses(bundle.dataModel.content, "dataModel.d.ts");
     assertParses(bundle.api.content, "api.d.ts");
+    assertParses(bundle.internal.content, "internal.d.ts");
     assertParses(bundle.server.content, "server.ts");
   });
 });
@@ -125,9 +158,10 @@ describe("writeGenerated", () => {
     const bundle = generateAll({ schema, manifest });
     const dir = mkdtempSync(join(tmpdir(), "sb-codegen-"));
     const result = writeGenerated(bundle.files, dir);
-    expect(result.written).toHaveLength(3);
+    expect(result.written).toHaveLength(4);
     expect(existsSync(join(dir, "dataModel.d.ts"))).toBe(true);
     expect(existsSync(join(dir, "api.d.ts"))).toBe(true);
+    expect(existsSync(join(dir, "internal.d.ts"))).toBe(true);
     expect(readFileSync(join(dir, "server.ts"), "utf8")).toContain("query, mutation, action");
   });
 });

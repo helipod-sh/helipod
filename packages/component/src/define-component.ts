@@ -36,6 +36,13 @@ export interface ComponentDefinition {
   /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
   contextType?: { import: string; type: string };
   /**
+   * Extra named values this component wants codegen to re-export from `_generated/server.ts`,
+   * sourced from `contextType.import` — e.g. `@stackbase/scheduler` sets `["cronJobs"]` so an
+   * app's `crons.ts` can do `import { cronJobs } from "./_generated/server"` unchanged. Requires
+   * `contextType` (the import path is shared with it).
+   */
+  serverExports?: string[];
+  /**
    * Opt-in: when true, `context`'s facade gets a writable `cctx.db` during mutation calls (still
    * read-only during queries), so the facade can write inside the calling mutation's transaction.
    * Defaults to false (most facades, e.g. authz, are read-only by design).

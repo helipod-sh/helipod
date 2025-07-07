@@ -38,6 +38,7 @@ export interface GeneratedFile {
 export interface GeneratedBundle {
   dataModel: GeneratedFile;
   api: GeneratedFile;
+  internal: GeneratedFile;
   server: GeneratedFile;
   files: GeneratedFile[];
 }
@@ -45,6 +46,14 @@ export interface GeneratedBundle {
 export interface ComponentTypeInfo {
   name: string;
   contextType?: { import: string; type: string };
+  /**
+   * Extra named values this component wants re-exported from `_generated/server.ts`, sourced
+   * from `contextType.import` — e.g. `@stackbase/scheduler`'s `["cronJobs"]`, so an app's
+   * `crons.ts` can do `import { cronJobs } from "./_generated/server"` unchanged. Requires
+   * `contextType` to be set (the import path is shared with it); a component with
+   * `serverExports` but no `contextType` is a no-op here.
+   */
+  serverExports?: string[];
 }
 
 export interface CodegenOptions {
@@ -87,21 +96,7 @@ export type Doc<TableName extends TableNames> = DataModel[TableName]["document"]
   return { path: "dataModel.d.ts", content };
 }
 
-export function generateApi(manifest: AnalyzedFunctionManifest, options: CodegenOptions = {}): GeneratedFile {
-  const modules = manifest
-    .map((mod) => {
-      const fns = mod.functions
-        .filter((f) => f.visibility === "public")
-        .map(
-          (f) =>
-            `    ${f.name}: FunctionReference<"${f.type}", "public", ${f.argsType ?? "any"}, ${f.returnsType ?? "any"}>;`,
-        );
-      return `  ${JSON.stringify(mod.path)}: {\n${fns.join("\n")}\n  };`;
-    })
-    .join("\n");
-
-  const content = `${options.header ?? DEFAULT_HEADER}
-export type FunctionReference<
+const FUNCTION_REFERENCE_TYPE = `export type FunctionReference<
   Type extends "query" | "mutation" | "action",
   Vis extends "public" | "internal" = "public",
   Args = any,
@@ -111,17 +106,54 @@ export type FunctionReference<
   readonly __visibility: Vis;
   readonly __args: Args;
   readonly __returns: Returns;
-};
+};`;
+
+function emitApiModules(manifest: AnalyzedFunctionManifest, visibility: Visibility): string {
+  return manifest
+    .map((mod) => {
+      const fns = mod.functions
+        .filter((f) => f.visibility === visibility)
+        .map(
+          (f) =>
+            `    ${f.name}: FunctionReference<"${f.type}", "${visibility}", ${f.argsType ?? "any"}, ${f.returnsType ?? "any"}>;`,
+        );
+      return `  ${JSON.stringify(mod.path)}: {\n${fns.join("\n")}\n  };`;
+    })
+    .join("\n");
+}
+
+export function generateApi(manifest: AnalyzedFunctionManifest, options: CodegenOptions = {}): GeneratedFile {
+  const content = `${options.header ?? DEFAULT_HEADER}
+${FUNCTION_REFERENCE_TYPE}
 
 export type Api = {
-${modules}
+${emitApiModules(manifest, "public")}
 };
 `;
   return { path: "api.d.ts", content };
 }
 
+/**
+ * `internal.*` — the counterpart to `Api`/`generateApi`, listing only `visibility: "internal"`
+ * functions (a separate file, not folded into `api.d.ts`, so `Api` stays exactly what a
+ * client-facing caller should see — nothing internal leaks in by way of sharing a file). This is
+ * what `crons.ts` + `ctx.scheduler.runAfter(ms, internal.foo.bar, …)` type-check against — see
+ * `@stackbase/scheduler`'s design spec §5.2.
+ */
+export function generateInternalApi(manifest: AnalyzedFunctionManifest, options: CodegenOptions = {}): GeneratedFile {
+  const content = `${options.header ?? DEFAULT_HEADER}
+${FUNCTION_REFERENCE_TYPE}
+
+export type Internal = {
+${emitApiModules(manifest, "internal")}
+};
+`;
+  return { path: "internal.d.ts", content };
+}
+
 export function generateServer(_schema: SchemaDefinitionJSON, options: CodegenOptions = {}): GeneratedFile {
-  const ctxComponents = (options.components ?? []).filter((c) => c.contextType);
+  const components = options.components ?? [];
+  const ctxComponents = components.filter((c) => c.contextType);
   let augmentation = "";
   if (ctxComponents.length > 0) {
     const fields = ctxComponents
@@ -129,9 +161,34 @@ export function generateServer(_schema: SchemaDefinitionJSON, options: CodegenOp
       .join("\n");
     augmentation = `\n// Component context contributions (ctx.<component>), typed.\ndeclare module "@stackbase/executor" {\n  interface QueryCtx {\n${fields}\n  }\n  interface MutationCtx {\n${fields}\n  }\n}\n`;
   }
+
+  // Components can re-export extra named values through server.ts (e.g. `@stackbase/scheduler`'s
+  // `cronJobs`, so `import { cronJobs } from "./_generated/server"` resolves unchanged) — grouped
+  // by import path so one component contributing several names emits a single `export { ... }
+  // from "..."` line rather than one per name.
+  const exportsByImport = new Map<string, string[]>();
+  for (const c of components) {
+    if (!c.contextType || !c.serverExports || c.serverExports.length === 0) continue;
+    const names = exportsByImport.get(c.contextType.import) ?? [];
+    names.push(...c.serverExports);
+    exportsByImport.set(c.contextType.import, names);
+  }
+  const componentReexports = [...exportsByImport.entries()]
+    .map(([imp, names]) => `export { ${names.join(", ")} } from ${JSON.stringify(imp)};`)
+    .join("\n");
+
+  // `api`/`internal` — the runtime path-building proxy (`@stackbase/client`'s `anyApi`, typed at
+  // this cast site), so `api.messages.list`/`internal.maintenance.purge` are usable as VALUES
+  // (not just types) in app code — see `Api`/`Internal` (`./api.d.ts`/`./internal.d.ts`).
   const content = `${options.header ?? DEFAULT_HEADER}export { query, mutation, action } from "@stackbase/executor";
 export type { DataModel, TableNames, Doc, Id } from "./dataModel";
 export type { Api, FunctionReference } from "./api";
+export type { Internal } from "./internal";
+${componentReexports ? `${componentReexports}\n` : ""}import { anyApi } from "@stackbase/client";
+import type { Api } from "./api";
+import type { Internal } from "./internal";
+export const api = anyApi as Api;
+export const internal = anyApi as Internal;
 ${augmentation}`;
   return { path: "server.ts", content };
 }
@@ -139,6 +196,7 @@ ${augmentation}`;
 export function generateAll(input: CodegenInput, options: CodegenOptions = {}): GeneratedBundle {
   const dataModel = generateDataModel(input.schema, options);
   const api = generateApi(input.manifest, options);
+  const internal = generateInternalApi(input.manifest, options);
   const server = generateServer(input.schema, { ...options, components: input.components ?? options.components });
-  return { dataModel, api, server, files: [dataModel, api, server] };
+  return { dataModel, api, internal, server, files: [dataModel, api, internal, server] };
 }

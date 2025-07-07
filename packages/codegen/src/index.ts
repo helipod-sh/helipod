@@ -13,10 +13,11 @@ export type {
   AnalyzedFunctionManifest,
   GeneratedFile,
   GeneratedBundle,
+  ComponentTypeInfo,
   CodegenOptions,
   CodegenInput,
 } from "./generate";
-export { generateDataModel, generateApi, generateServer, generateAll } from "./generate";
+export { generateDataModel, generateApi, generateInternalApi, generateServer, generateAll } from "./generate";
 
 export type { WriteResult } from "./write";
 export { writeGenerated } from "./write";
