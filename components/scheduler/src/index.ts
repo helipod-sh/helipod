@@ -1,15 +1,17 @@
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { schedulerSchema } from "./schema";
 import { schedulerContext } from "./facade";
-import { _peekDue, _claim, _complete } from "./modules";
+import { _peekDue, _claim, _complete, _reclaim } from "./modules";
 import { schedulerDriver } from "./driver";
 
 export * from "./schema";
 export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, SignalKind } from "./facade";
 export type { PeekDueResult, ClaimResult, JobResult, DueJob } from "./modules";
-export { BATCH_CAP, LEASE_MS } from "./modules";
+export { BATCH_CAP, LEASE_MS, SWEEP_MS } from "./modules";
 export type { SchedulerDriver } from "./driver";
 export { schedulerDriver } from "./driver";
+export type { BackoffOptions } from "./backoff";
+export { computeBackoff, DEFAULT_BACKOFF_OPTIONS } from "./backoff";
 
 /**
  * `defineScheduler()` — the `@stackbase/scheduler` component: the `jobs`/`job_args`/`crons`/
@@ -26,7 +28,7 @@ export function defineScheduler(): ComponentDefinition {
   return defineComponent({
     name: "scheduler",
     schema: schedulerSchema,
-    modules: { _peekDue, _claim, _complete },
+    modules: { _peekDue, _claim, _complete, _reclaim },
     context: (cctx) => schedulerContext(cctx),
     contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" },
     contextWrite: true,

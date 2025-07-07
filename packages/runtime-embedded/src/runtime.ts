@@ -245,6 +245,17 @@ export class EmbeddedRuntime {
       }
     });
 
+    if ((options.drivers?.length ?? 0) > 0 && !options.tableNumbers) {
+      // Without `tableNumbers`, `namesForCommit` above can't translate the encoded storage-table
+      // ids a real commit carries back into full names, so `inv.tables` a driver's `onCommit`
+      // callback sees never matches a `t.startsWith("scheduler/")`-style filter — reactive wake
+      // silently degrades to timer-only. Warn once (per `create()` call) rather than fail: a
+      // driver relying purely on its own periodic timer still works, just not with ~0 latency.
+      console.warn(
+        "[runtime] drivers registered but no `tableNumbers` provided — driver reactive wake (onCommit) will not match table-name filters; drivers will fall back to their own timers only.",
+      );
+    }
+
     const drivers = options.drivers ?? [];
     for (const d of drivers) await d.start(driverCtx);
 

@@ -138,11 +138,17 @@ describe("schedulerDriver — event-driven dispatch", () => {
       { now: () => clock },
     );
 
+    // `maxFailures: 1` so the single "unsupported" failure dead-letters immediately instead of
+    // retrying (Task 4's retry/backoff applies uniformly to every `kind:"failed"` result,
+    // including this one — see components/scheduler/src/modules.ts's `_complete`; that retry
+    // behavior itself is covered by test/reliability.test.ts, so this test pins `maxFailures` to
+    // keep its own focus on "actions never actually dispatch").
     const insertResult = await runtime.runSystem<string>("_system:insertJob", {
       fnPath: "app:work",
       kind: "action",
       nextTs: clock,
       args: {},
+      maxFailures: 1,
     });
     const jobId = insertResult.value;
 

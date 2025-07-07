@@ -1,6 +1,7 @@
 import type { Driver, DriverContext } from "@stackbase/component";
 import type { JSONValue } from "@stackbase/values";
 import type { ClaimResult, JobResult, PeekDueResult } from "./modules";
+import { SWEEP_MS } from "./modules";
 
 /**
  * A `schedulerDriver()` also exposes:
@@ -10,10 +11,14 @@ import type { ClaimResult, JobResult, PeekDueResult } from "./modules";
  *    inside a job's own mutation body, to interleave with an in-flight `__tick()`) — the reactive
  *    `onCommit` path itself can't be driven precisely from a test, since it fires off the real
  *    commit fan-out on whatever schedule the runtime gives it.
+ *  - `__sweep`: runs the lease-reclaim sweep (`scheduler:_reclaim`) exactly once, without arming
+ *    (or waiting on) the real `SWEEP_MS`-interval timer — the deterministic test seam for Task 4's
+ *    infra-kill reclaim path.
  */
 export interface SchedulerDriver extends Driver {
   __tick: () => Promise<void>;
   __wake: () => void;
+  __sweep: () => Promise<void>;
 }
 
 /**
@@ -65,6 +70,11 @@ export function schedulerDriver(): SchedulerDriver {
   let pendingWake = false;
   let timer: number | null = null;
   let inFlight: Promise<void> | null = null;
+  // The ONLY periodic timer in this driver — everything else (dispatch) is reactive. Backstops
+  // infra kills: a process that `_claim`ed a job and died before `_complete`ing it leaves the job
+  // `inProgress` forever without this sweep. Kept on its own handle (separate from `timer`, the
+  // due-job wake timer) so re-arming one never clobbers the other.
+  let sweepTimer: number | null = null;
 
   function wake(): void {
     // Fire-and-forget from a sync callback (onCommit/setTimer); swallow+log rather than let an
@@ -94,6 +104,12 @@ export function schedulerDriver(): SchedulerDriver {
     const pass = runPass().finally(() => {
       running = false;
       inFlight = null;
+      // Closes a residual micro-window: a wake can land between the do/while loop's final
+      // `pendingWake` check (inside `runPass`, which already exited) and this `finally` running —
+      // e.g. another microtask's `wake()` call resolving in between. Without this, that wake would
+      // set `pendingWake` but nothing would ever consume it (the pass that would have looped on it
+      // already returned), stranding whatever it was signaling until some unrelated future wake.
+      if (pendingWake) void wake();
     });
     inFlight = pass;
     return pass;
@@ -142,14 +158,52 @@ export function schedulerDriver(): SchedulerDriver {
     if (earliestFutureTs != null) timer = ctx.setTimer(earliestFutureTs, wake);
   }
 
+  // Runs `scheduler:_reclaim` once, then re-arms itself `SWEEP_MS` out — the recurring safety
+  // sweep. Errors are swallowed+logged (mirroring `wake()`): a bug in `_reclaim` itself must never
+  // stop the sweep from re-arming, or the whole infra-kill backstop silently dies.
+  async function sweepOnce(): Promise<void> {
+    try {
+      await ctx.runFunction("scheduler:_reclaim", {});
+    } catch (e) {
+      console.error("[scheduler] lease-reclaim sweep failed:", e);
+    } finally {
+      armSweep();
+    }
+  }
+
+  function armSweep(): void {
+    if (sweepTimer !== null) {
+      ctx.clearTimer(sweepTimer);
+      sweepTimer = null;
+    }
+    sweepTimer = ctx.setTimer(ctx.now() + SWEEP_MS, () => {
+      void sweepOnce();
+    });
+  }
+
+  let unsubscribeCommit: (() => void) | null = null;
+
   return {
     name: "scheduler",
     start(c) {
       ctx = c;
-      c.onCommit((inv) => {
+      unsubscribeCommit = c.onCommit((inv) => {
         if (inv.tables.some((t) => t.startsWith("scheduler/"))) wake();
       });
       wake();
+      armSweep();
+    },
+    stop() {
+      unsubscribeCommit?.();
+      unsubscribeCommit = null;
+      if (timer !== null) {
+        ctx.clearTimer(timer);
+        timer = null;
+      }
+      if (sweepTimer !== null) {
+        ctx.clearTimer(sweepTimer);
+        sweepTimer = null;
+      }
     },
     // Test seam: drives a loop pass and awaits its actual completion (coalescing into an
     // already-in-flight pass — e.g. one a same-turn reactive `onCommit` wake already started —
@@ -160,5 +214,9 @@ export function schedulerDriver(): SchedulerDriver {
     // Test seam: the same fire-and-forget signal `onCommit`/timers send internally — see the
     // interface doc above.
     __wake: () => wake(),
+    // Test seam: runs the lease-reclaim sweep exactly once, without the real `SWEEP_MS` wait and
+    // without re-arming a live timer (unlike `armSweep`/`sweepOnce` above) — errors propagate
+    // (unlike the internal `sweepOnce`) so a test sees real `_reclaim` failures.
+    __sweep: () => ctx.runFunction("scheduler:_reclaim", {}).then(() => undefined),
   };
 }

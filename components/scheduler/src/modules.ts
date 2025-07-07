@@ -2,6 +2,7 @@ import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { JobState, SignalKind } from "./facade";
+import { computeBackoff } from "./backoff";
 
 /**
  * Internal modules for `@stackbase/scheduler` — registered on `defineScheduler()`'s `modules` map
@@ -22,8 +23,15 @@ import type { JobState, SignalKind } from "./facade";
 /** Cap on how many due jobs a single `_peekDue` batch returns, so one loop iteration can't run unbounded. */
 export const BATCH_CAP = 64;
 
-/** How long a claim's lease is valid before it could be reclaimed. Retry/reclaim-on-expiry is Task 4; this slice only stamps it. */
+/** How long a claim's lease is valid before it could be reclaimed by the sweep below. */
 export const LEASE_MS = 30_000;
+
+/**
+ * The driver's ONLY periodic timer: how often `scheduler:_reclaim` runs to sweep `inProgress`
+ * jobs whose lease has expired (an infra kill mid-run — the process that claimed the job died
+ * before completing it). Normal dispatch stays fully reactive/event-driven; this is a backstop.
+ */
+export const SWEEP_MS = 30_000;
 
 /** Mirrors `facade.ts`'s `segmentOf` — buckets wall-clock ms into 100ms windows for `signals.by_segment`. */
 function segmentOf(ms: number): number {
@@ -122,11 +130,18 @@ export const _claim = mutation(async (ctx: MutationCtx, args: { jobId: string })
 export type JobResult = { kind: "success"; value: unknown } | { kind: "failed"; error: string };
 
 /**
- * `scheduler:_complete` — a MUTATION: finalizes a claimed job. Sets the terminal `state`
- * (`success`/`failed` — retry/backoff on failure is Task 4; here a failure goes straight to
- * `failed`), stamps `completedTs`, and clears the lease (`leaseHolder`/`leaseExpiresAt` — the
- * "dispatch key" `_claim` set) since the job is no longer in flight. Appends a `complete` signal
- * carrying the outcome so a test (or, later, a UI) can observe it without re-reading `jobs`.
+ * `scheduler:_complete` — a MUTATION: finalizes a claimed job.
+ *
+ * - `result.kind === "success"` → terminal `state:"success"`, `completedTs`, lease cleared, a
+ *   `complete` signal carrying the outcome.
+ * - `result.kind === "failed"` → `attempts += 1`; if `attempts >= maxFailures`, terminal
+ *   `state:"failed"` (dead-letter) + `completedTs` + `lastError`, same as success but with the
+ *   error recorded. Otherwise, back to `state:"pending"` with `nextTs: now() +
+ *   computeBackoff(attempts, ctx.random)` (exponential backoff, jittered via the mutation's own
+ *   seeded PRNG — see `./backoff.ts`), lease cleared, `lastError` recorded, and an `enqueue`
+ *   signal appended (NOT `complete` — the job isn't done, and the driver needs the signal to
+ *   re-arm its wake timer for the retry; a `complete` signal here would be misleading to anything
+ *   watching `signals` for terminal outcomes).
  *
  * No-ops (returns `null`) if the job vanished or isn't `inProgress` — defensive against a stray
  * double-complete; `_claim`'s guard is what actually prevents double-dispatch.
@@ -135,26 +150,145 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   const job = await ctx.db.get(args.jobId);
   if (job === null || job.state !== "inProgress") return null;
   const now = ctx.now();
-  const state: JobState = args.result.kind === "success" ? "success" : "failed";
+
+  if (args.result.kind === "success") {
+    await ctx.db.replace(
+      args.jobId,
+      compact({
+        ...job,
+        state: "success" as JobState,
+        completedTs: now,
+        leaseHolder: undefined,
+        leaseExpiresAt: undefined,
+      }),
+    );
+    await ctx.db.insert("scheduler/signals", {
+      segment: segmentOf(now),
+      kind: "complete" as SignalKind,
+      jobId: args.jobId,
+      payload: args.result as unknown as JSONValue,
+    });
+    // TODO(Task 6): if (job.onComplete) enqueue the completion callback —
+    // `ctx.scheduler.runAfter(0, job.onComplete as string, { jobId: args.jobId, result: args.result })`.
+    // The payload contract (what shape `context`/`result` the onComplete callback receives) is
+    // Task 6's to define; not implemented here.
+    return null;
+  }
+
+  // result.kind === "failed" — retry with backoff, or dead-letter at maxFailures.
+  const attempts = (job.attempts as number) + 1;
+  const maxFailures = job.maxFailures as number;
+  const lastError = args.result.error;
+
+  if (attempts >= maxFailures) {
+    await ctx.db.replace(
+      args.jobId,
+      compact({
+        ...job,
+        state: "failed" as JobState,
+        attempts,
+        completedTs: now,
+        lastError,
+        leaseHolder: undefined,
+        leaseExpiresAt: undefined,
+      }),
+    );
+    await ctx.db.insert("scheduler/signals", {
+      segment: segmentOf(now),
+      kind: "complete" as SignalKind,
+      jobId: args.jobId,
+      payload: args.result as unknown as JSONValue,
+    });
+    return null;
+  }
+
+  const nextTs = now + computeBackoff(attempts, ctx.random);
   await ctx.db.replace(
     args.jobId,
     compact({
       ...job,
-      state,
-      completedTs: now,
+      state: "pending" as JobState,
+      attempts,
+      nextTs,
+      lastError,
       leaseHolder: undefined,
       leaseExpiresAt: undefined,
     }),
   );
-  await ctx.db.insert("scheduler/signals", {
-    segment: segmentOf(now),
-    kind: "complete" as SignalKind,
-    jobId: args.jobId,
-    payload: args.result as unknown as JSONValue,
-  });
-  // TODO(Task 6): if (job.onComplete) enqueue the completion callback —
-  // `ctx.scheduler.runAfter(0, job.onComplete as string, { jobId: args.jobId, result: args.result })`.
-  // The payload contract (what shape `context`/`result` the onComplete callback receives) is
-  // Task 6's to define; not implemented here.
+  // An `enqueue` signal (not `complete`) — the job is going back to `pending`, and the driver's
+  // reactive wake needs a scheduler/* commit to notice the retry and re-arm its timer to `nextTs`.
+  await ctx.db.insert("scheduler/signals", { segment: segmentOf(now), kind: "enqueue" as SignalKind, jobId: args.jobId });
   return null;
+});
+
+/**
+ * `scheduler:_reclaim` — a MUTATION: the driver's safety-sweep backstop for infra kills. Scans
+ * `inProgress` jobs whose lease has expired (`leaseExpiresAt < now` — the process that `_claim`ed
+ * them died, or is at least still holding a lease well past its promised deadline) and reclaims
+ * each:
+ *  - `kind:"mutation"` → safe to retry (mutations are deterministic/idempotent-by-replay in this
+ *    engine's model): `attempts += 1`, back to `state:"pending"` with `nextTs: now()` (immediate —
+ *    no backoff; an infra kill isn't the job's own fault) and an `enqueue` signal.
+ *  - `kind:"action"` → NOT safe to blindly retry (actions have arbitrary external side effects,
+ *    so at-most-once is the only safe default without idempotency-key support): `attempts += 1`,
+ *    terminal `state:"failed"` (dead-letter) with `lastError` + a `complete` signal.
+ *
+ * Uses the `by_next_ts` index (`["state","nextTs"]`) to scan `state:"inProgress"` cheaply, then a
+ * post-filter on `leaseExpiresAt` (not part of that index) — `inProgress` job counts are expected
+ * to be small (bounded by in-flight concurrency), so this is capped at `BATCH_CAP` per sweep
+ * rather than truly unbounded, consistent with `_peekDue`.
+ */
+export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: number }> => {
+  const now = ctx.now();
+  const expired = await ctx.db
+    .query("scheduler/jobs", "by_next_ts")
+    .eq("state", "inProgress")
+    .where("lt", "leaseExpiresAt", now)
+    .take(BATCH_CAP)
+    .collect();
+
+  let reclaimed = 0;
+  for (const job of expired) {
+    const jobId = job._id as string;
+    const attempts = (job.attempts as number) + 1;
+    const lastError = "lease expired: driver did not complete the job before its lease deadline (infra kill)";
+    if (job.kind === "mutation") {
+      await ctx.db.replace(
+        jobId,
+        compact({
+          ...job,
+          state: "pending" as JobState,
+          attempts,
+          nextTs: now, // immediate — the delay was the crash, not the job's own backoff
+          lastError,
+          leaseHolder: undefined,
+          leaseExpiresAt: undefined,
+        }),
+      );
+      await ctx.db.insert("scheduler/signals", { segment: segmentOf(now), kind: "enqueue" as SignalKind, jobId });
+    } else {
+      // kind:"action" — at-most-once: an expired lease means we can't tell whether the action's
+      // side effects already ran, so retrying could double-run them. Dead-letter instead.
+      await ctx.db.replace(
+        jobId,
+        compact({
+          ...job,
+          state: "failed" as JobState,
+          attempts,
+          completedTs: now,
+          lastError,
+          leaseHolder: undefined,
+          leaseExpiresAt: undefined,
+        }),
+      );
+      await ctx.db.insert("scheduler/signals", {
+        segment: segmentOf(now),
+        kind: "complete" as SignalKind,
+        jobId,
+        payload: { kind: "failed", error: lastError } as unknown as JSONValue,
+      });
+    }
+    reclaimed++;
+  }
+  return { reclaimed };
 });

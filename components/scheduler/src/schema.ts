@@ -33,6 +33,8 @@ export const schedulerSchema = defineSchema({
     onComplete: v.optional(v.string()),
     parentId: v.optional(v.string()),
     completedTs: v.optional(v.number()),
+    /** The most recent failure's `String(error)` — set on retry AND on dead-letter (Task 4). */
+    lastError: v.optional(v.string()),
   })
     .index("by_next_ts", ["state", "nextTs"])
     .index("by_completed_ts", ["completedTs"])
