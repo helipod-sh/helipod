@@ -6,7 +6,7 @@
 import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
 import type { AnalyzedFunction, AnalyzedFunctionManifest } from "@stackbase/codegen";
-import { composeComponents, type ComponentDefinition } from "@stackbase/component";
+import { composeComponents, type ComponentDefinition, type BootContext, type Driver } from "@stackbase/component";
 import type { SimpleIndexCatalog } from "@stackbase/executor";
 
 export const DEFAULT_INDEX = "by_creation";
@@ -25,6 +25,15 @@ export interface ProjectArtifacts {
   tableNumbers: Record<string, number>;
   componentNames: ReadonlySet<string>;
   contextProviders: ContextProvider[];
+  /** Component boot steps (e.g. the scheduler's cron reconciler) — must run once at engine create. */
+  bootSteps: { name: string; run: (ctx: BootContext) => Promise<void> }[];
+  /**
+   * Component drivers (e.g. the scheduler's event loop) — must be started at engine create for a
+   * composed component's background work to actually run. Omitting this from
+   * `createEmbeddedRuntime(...)` silently leaves drivers never started (jobs enqueue but never
+   * dispatch) — see `../test/scheduler-e2e.test.ts` for the proof this wiring matters.
+   */
+  drivers: Driver[];
 }
 
 function isRegisteredFunction(x: unknown): x is RegisteredFunction {
@@ -71,5 +80,7 @@ export function loadProject(loaded: LoadedProject, components: ComponentDefiniti
     tableNumbers: composed.tableNumbers,
     componentNames: composed.componentNames,
     contextProviders: composed.contextProviders,
+    bootSteps: composed.bootSteps,
+    drivers: composed.drivers,
   };
 }

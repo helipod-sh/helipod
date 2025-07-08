@@ -83,6 +83,8 @@ export async function devCommand(args: string[]): Promise<number> {
     componentNames: project.componentNames,
     contextProviders: project.contextProviders,
     tableNumbers: project.tableNumbers,
+    bootSteps: project.bootSteps,
+    drivers: project.drivers,
   });
   const adminApi = new AdminApi({
     runtime,

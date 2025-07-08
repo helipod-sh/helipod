@@ -2,7 +2,7 @@ import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { JobState, SignalKind } from "./facade";
-import { enqueueInternal, type EnqueueTables } from "./facade";
+import { enqueueInternal, fireOnComplete, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
 import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type CatchUpPolicy } from "./crons";
 
@@ -162,6 +162,7 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   const job = await ctx.db.get(args.jobId);
   if (job === null || job.state !== "inProgress") return null;
   const now = ctx.now();
+  const nowFn = (): number => now;
 
   if (args.result.kind === "success") {
     await ctx.db.replace(
@@ -180,10 +181,12 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
       jobId: args.jobId,
       payload: args.result as unknown as JSONValue,
     });
-    // TODO(Task 6): if (job.onComplete) enqueue the completion callback —
-    // `ctx.scheduler.runAfter(0, job.onComplete as string, { jobId: args.jobId, result: args.result })`.
-    // The payload contract (what shape `context`/`result` the onComplete callback receives) is
-    // Task 6's to define; not implemented here.
+    // Task 6 — workflow-ready onComplete/context round-trip: see `fireOnComplete`'s doc comment
+    // in `./facade.ts`. A no-op when `job.onComplete` is unset.
+    await fireOnComplete(ctx.db, nowFn, CRON_TABLES, args.jobId, job.onComplete as string | undefined, {
+      kind: "success",
+      value: args.result.value,
+    });
     return null;
   }
 
@@ -218,6 +221,12 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
       kind: "complete" as SignalKind,
       jobId: args.jobId,
       payload: args.result as unknown as JSONValue,
+    });
+    // Task 6 — dead-lettered (terminal) failure fires onComplete too, same as success; the
+    // back-to-"pending" retry branch below does NOT (the job isn't actually done yet).
+    await fireOnComplete(ctx.db, nowFn, CRON_TABLES, args.jobId, job.onComplete as string | undefined, {
+      kind: "failed",
+      error: lastError,
     });
     return null;
   }
@@ -272,7 +281,7 @@ const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler
  *     single-writer transactor for the duration, even for `"skip"` whose entire point is to
  *     discard the backlog. Instead:
  *       - **Interval specs**: the occurrence count `n` since `anchor` is computed by O(1)
- *         arithmetic (`Math.floor((now-anchor)/period)+1`), never a loop.
+ *         arithmetic (`Math.floor((now-anchor)/period)`), never a loop.
  *       - **Cron-expression specs**: whether zero/one/many occurrences are due is determined by
  *         at most two O(1) `cron-parser` calls (`computeNextRun` from `anchor`, then again from
  *         that result) — no stepping through the backlog to count it.

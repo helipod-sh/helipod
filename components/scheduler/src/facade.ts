@@ -190,6 +190,43 @@ export async function enqueueInternal(
 const FACADE_TABLES: EnqueueTables = { jobs: "jobs", jobArgs: "job_args", signals: "signals" };
 
 /**
+ * The terminal outcome an `onComplete` callback is invoked with — a strict superset of
+ * `./modules.ts`'s `JobResult` (which only ever carries `success`/`failed`, the two outcomes
+ * `_complete` itself produces) plus `canceled`, produced by `cancel()` below. Defined here (not
+ * `./modules.ts`) so `./modules.ts` — which already imports from this file — can reuse it without
+ * a circular import back the other way.
+ */
+export type OnCompleteResult = { kind: "success"; value: unknown } | { kind: "failed"; error: string } | { kind: "canceled" };
+
+/**
+ * Task 6 — the workflow-ready `onComplete`/`context` round-trip: if `job.onComplete` (a mutation
+ * path) is set, enqueue it with `{ jobId, context, result }`, where `context` is `job_args`'s
+ * `context` for THIS job read back verbatim (opaque to the scheduler — never interpreted, just
+ * round-tripped) and `result` is the terminal outcome. Enqueued via `runAt: now()` (the `runAfter:
+ * 0` semantics) so it's immediately due — the reactive wake picks it up on the very next
+ * commit-driven iteration, no extra latency beyond one dispatch pass.
+ *
+ * A no-op when `onComplete` is `undefined` (the common case — most jobs don't register a
+ * completion callback). Called from exactly two terminal transitions, never a retry:
+ *  - `./modules.ts`'s `_complete`, on `state:"success"` and on dead-lettered `state:"failed"`
+ *    (NOT on the back-to-`"pending"` retry branch — the job isn't actually done yet).
+ *  - `cancel()` below, for both the directly-canceled job and any cascaded-canceled descendant.
+ */
+export async function fireOnComplete(
+  db: GuestDatabaseWriter,
+  now: () => number,
+  tables: EnqueueTables,
+  jobId: string,
+  onComplete: string | undefined,
+  result: OnCompleteResult,
+): Promise<void> {
+  if (onComplete === undefined) return;
+  const argRows = await db.query(tables.jobArgs, "by_job").eq("jobId", jobId).take(1).collect();
+  const context = argRows[0]?.context as JSONValue | undefined;
+  await enqueueInternal(db, now, tables, onComplete, compact({ jobId, context, result }) as unknown as JSONValue, { runAt: now() });
+}
+
+/**
  * Builds `ctx.scheduler`. Requires `contextWrite: true` on the component definition (see
  * `defineScheduler` in `./index.ts`) — without it, `cctx.db` is a read-only `GuestDatabaseReader`
  * and every write below throws `ForbiddenOperationError`. With it, and ONLY during a mutation
@@ -214,6 +251,7 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
       if (job !== null && job.state === "pending") {
         await db.replace(id, { ...job, state: "canceled" as JobState, completedTs: now() });
         await db.insert("signals", { segment: segmentOf(now()), kind: "cancel" as SignalKind, jobId: id });
+        await fireOnComplete(db, now, FACADE_TABLES, id, job.onComplete as string | undefined, { kind: "canceled" });
       }
       // Cascading cancel: walk `id`'s descendants via the `by_parent` index and cancel any that
       // are still `pending` — regardless of whether `id` itself was cancelable above (it may
@@ -235,6 +273,7 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
           if (child.state === "pending") {
             await db.replace(childId, { ...child, state: "canceled" as JobState, completedTs: now() });
             await db.insert("signals", { segment: segmentOf(now()), kind: "cancel" as SignalKind, jobId: childId });
+            await fireOnComplete(db, now, FACADE_TABLES, childId, child.onComplete as string | undefined, { kind: "canceled" });
           }
           queue.push(childId); // walk deeper regardless of this child's own state
         }

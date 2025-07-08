@@ -6,8 +6,8 @@ import { schedulerDriver } from "./driver";
 import { reconcileCrons, type CronJobs } from "./crons";
 
 export * from "./schema";
-export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, SignalKind, EnqueueTables } from "./facade";
-export { getFunctionPath, enqueueInternal } from "./facade";
+export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, SignalKind, EnqueueTables, OnCompleteResult } from "./facade";
+export { getFunctionPath, enqueueInternal, fireOnComplete } from "./facade";
 export type { PeekDueResult, ClaimResult, JobResult, DueJob } from "./modules";
 export { BATCH_CAP, LEASE_MS, SWEEP_MS, CATCHUP_CAP } from "./modules";
 export type { SchedulerDriver } from "./driver";

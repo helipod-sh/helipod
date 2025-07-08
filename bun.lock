@@ -101,6 +101,7 @@
         "@stackbase/auth": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/executor": "workspace:*",
+        "@stackbase/scheduler": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
@@ -186,6 +187,7 @@
       },
       "devDependencies": {
         "@stackbase/client": "workspace:*",
+        "@stackbase/scheduler": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "tsup": "catalog:",
