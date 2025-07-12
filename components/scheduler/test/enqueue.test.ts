@@ -24,10 +24,6 @@ describe("ctx.scheduler — transactional enqueue", () => {
     const args = await readTable(runtime, "scheduler/job_args");
     expect(args.length).toBe(1);
     expect(args[0]).toMatchObject({ jobId: jobs[0]._id, args: { x: 1 } });
-
-    const signals = await readTable(runtime, "scheduler/signals");
-    expect(signals.length).toBe(1);
-    expect(signals[0]).toMatchObject({ kind: "enqueue", jobId: jobs[0]._id });
   });
 
   it("enqueue is transactional — a mutation that throws after scheduling leaves NO job", async () => {
@@ -44,7 +40,6 @@ describe("ctx.scheduler — transactional enqueue", () => {
 
     expect((await readTable(runtime, "scheduler/jobs")).length).toBe(0);
     expect((await readTable(runtime, "scheduler/job_args")).length).toBe(0);
-    expect((await readTable(runtime, "scheduler/signals")).length).toBe(0);
   });
 
   it("cancel marks a pending job canceled", async () => {
@@ -71,8 +66,5 @@ describe("ctx.scheduler — transactional enqueue", () => {
     expect(jobs.length).toBe(1);
     expect(jobs[0]).toMatchObject({ state: "canceled" });
     expect(jobs[0].completedTs).toBeGreaterThan(0);
-
-    const signals = await readTable(runtime, "scheduler/signals");
-    expect(signals.map((s) => s.kind)).toEqual(["enqueue", "cancel"]);
   });
 });

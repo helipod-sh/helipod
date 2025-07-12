@@ -198,9 +198,5 @@ describe("scheduler reliability — retries/backoff/dead-letter, lease reclaim, 
     expect(byId.get(childId)).toMatchObject({ state: "canceled" });
     expect(byId.get(grandchildId)).toMatchObject({ state: "canceled" });
     expect(byId.get(unrelatedId)).toMatchObject({ state: "pending" });
-
-    const signals = await readTable(runtime, "scheduler/signals");
-    const cancelSignalJobIds = signals.filter((s) => s.kind === "cancel").map((s) => s.jobId);
-    expect(cancelSignalJobIds.sort()).toEqual([parentId, childId, grandchildId].sort());
   });
 });

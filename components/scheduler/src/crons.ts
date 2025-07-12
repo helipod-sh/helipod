@@ -232,7 +232,7 @@ export async function reconcileCrons(ctx: BootContext, registry: CronJobs | unde
   const db = ctx.db;
   const now = ctx.now;
   const nowFn = (): number => now;
-  const tables: EnqueueTables = { jobs: "jobs", jobArgs: "job_args", signals: "signals" };
+  const tables: EnqueueTables = { jobs: "jobs", jobArgs: "job_args" };
 
   const desired = registry ? registry.__entries() : [];
   const desiredByName = new Map(desired.map((e) => [e.name, e]));

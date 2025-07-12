@@ -1,7 +1,7 @@
 import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
-import type { JobState, SignalKind } from "./facade";
+import type { JobState } from "./facade";
 import { enqueueInternal, fireOnComplete, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
 import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type CatchUpPolicy } from "./crons";
@@ -14,7 +14,7 @@ import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type 
  * `privileged: true`). Privileged calls bypass namespace prefixing entirely (`kernel.ts`'s
  * `requireTable`), so — unlike `facade.ts`, which runs namespaced and uses bare table names
  * (`"jobs"`, `"job_args"`) — these modules must use the fully-qualified names
- * (`"scheduler/jobs"`, `"scheduler/job_args"`, `"scheduler/signals"`).
+ * (`"scheduler/jobs"`, `"scheduler/job_args"`).
  *
  * `_peekDue`/`_claim`/`_complete` are internal by convention (the `_` prefix + being paired only
  * with the driver), not by enforced access control — see Task 3's research notes. That's an
@@ -44,11 +44,6 @@ export const LEASE_MS = 30_000;
  * before completing it). Normal dispatch stays fully reactive/event-driven; this is a backstop.
  */
 export const SWEEP_MS = 30_000;
-
-/** Mirrors `facade.ts`'s `segmentOf` — buckets wall-clock ms into 100ms windows for `signals.by_segment`. */
-function segmentOf(ms: number): number {
-  return Math.floor(ms / 100);
-}
 
 /** Drop `undefined`-valued keys before a `db.replace` (the wire codec rejects `undefined`; omit rather than null it out). Mirrors `facade.ts`'s `compact`. */
 function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
@@ -144,16 +139,13 @@ export type JobResult = { kind: "success"; value: unknown } | { kind: "failed"; 
 /**
  * `scheduler:_complete` — a MUTATION: finalizes a claimed job.
  *
- * - `result.kind === "success"` → terminal `state:"success"`, `completedTs`, lease cleared, a
- *   `complete` signal carrying the outcome.
+ * - `result.kind === "success"` → terminal `state:"success"`, `completedTs`, lease cleared.
  * - `result.kind === "failed"` → `attempts += 1`; if `attempts >= maxFailures`, terminal
  *   `state:"failed"` (dead-letter) + `completedTs` + `lastError`, same as success but with the
  *   error recorded. Otherwise, back to `state:"pending"` with `nextTs: now() +
  *   computeBackoff(attempts, ctx.random)` (exponential backoff, jittered via the mutation's own
- *   seeded PRNG — see `./backoff.ts`), lease cleared, `lastError` recorded, and an `enqueue`
- *   signal appended (NOT `complete` — the job isn't done, and the driver needs the signal to
- *   re-arm its wake timer for the retry; a `complete` signal here would be misleading to anything
- *   watching `signals` for terminal outcomes).
+ *   seeded PRNG — see `./backoff.ts`), lease cleared, `lastError` recorded — the driver's reactive
+ *   `onCommit` wake picks up the `state` transition and re-arms its timer for the retry.
  *
  * No-ops (returns `null`) if the job vanished or isn't `inProgress` — defensive against a stray
  * double-complete; `_claim`'s guard is what actually prevents double-dispatch.
@@ -175,12 +167,6 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
         leaseExpiresAt: undefined,
       }),
     );
-    await ctx.db.insert("scheduler/signals", {
-      segment: segmentOf(now),
-      kind: "complete" as SignalKind,
-      jobId: args.jobId,
-      payload: args.result as unknown as JSONValue,
-    });
     // Task 6 — workflow-ready onComplete/context round-trip: see `fireOnComplete`'s doc comment
     // in `./facade.ts`. A no-op when `job.onComplete` is unset.
     await fireOnComplete(ctx.db, nowFn, CRON_TABLES, args.jobId, job.onComplete as string | undefined, {
@@ -216,12 +202,6 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
         leaseExpiresAt: undefined,
       }),
     );
-    await ctx.db.insert("scheduler/signals", {
-      segment: segmentOf(now),
-      kind: "complete" as SignalKind,
-      jobId: args.jobId,
-      payload: args.result as unknown as JSONValue,
-    });
     // Task 6 — dead-lettered (terminal) failure fires onComplete too, same as success; the
     // back-to-"pending" retry branch below does NOT (the job isn't actually done yet).
     await fireOnComplete(ctx.db, nowFn, CRON_TABLES, args.jobId, job.onComplete as string | undefined, {
@@ -244,14 +224,11 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
       leaseExpiresAt: undefined,
     }),
   );
-  // An `enqueue` signal (not `complete`) — the job is going back to `pending`, and the driver's
-  // reactive wake needs a scheduler/* commit to notice the retry and re-arm its timer to `nextTs`.
-  await ctx.db.insert("scheduler/signals", { segment: segmentOf(now), kind: "enqueue" as SignalKind, jobId: args.jobId });
   return null;
 });
 
 /** Fully-qualified table names — see this file's module doc comment for why (`_cronTick` runs privileged, dispatched by the driver like any other due job). */
-const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler/job_args", signals: "scheduler/signals" };
+const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler/job_args" };
 
 /**
  * `scheduler:_cronTick` — a MUTATION: the dual-job cron cadence. Registered as an ordinary
@@ -464,10 +441,10 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
  * each:
  *  - `kind:"mutation"` → safe to retry (mutations are deterministic/idempotent-by-replay in this
  *    engine's model): `attempts += 1`, back to `state:"pending"` with `nextTs: now()` (immediate —
- *    no backoff; an infra kill isn't the job's own fault) and an `enqueue` signal.
+ *    no backoff; an infra kill isn't the job's own fault).
  *  - `kind:"action"` → NOT safe to blindly retry (actions have arbitrary external side effects,
  *    so at-most-once is the only safe default without idempotency-key support): `attempts += 1`,
- *    terminal `state:"failed"` (dead-letter) with `lastError` + a `complete` signal.
+ *    terminal `state:"failed"` (dead-letter) with `lastError`.
  *
  * Uses the `by_next_ts` index (`["state","nextTs"]`) to scan `state:"inProgress"` cheaply, then a
  * post-filter on `leaseExpiresAt` (not part of that index) — `inProgress` job counts are expected
@@ -509,7 +486,6 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
           leaseExpiresAt: undefined,
         }),
       );
-      await ctx.db.insert("scheduler/signals", { segment: segmentOf(now), kind: "enqueue" as SignalKind, jobId });
     } else {
       // kind:"action" — at-most-once: an expired lease means we can't tell whether the action's
       // side effects already ran, so retrying could double-run them. Dead-letter instead.
@@ -525,12 +501,6 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
           leaseExpiresAt: undefined,
         }),
       );
-      await ctx.db.insert("scheduler/signals", {
-        segment: segmentOf(now),
-        kind: "complete" as SignalKind,
-        jobId,
-        payload: { kind: "failed", error: lastError } as unknown as JSONValue,
-      });
     }
     reclaimed++;
   }

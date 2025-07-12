@@ -157,11 +157,11 @@ describe("schedulerDriver — event-driven dispatch", () => {
     expect(ran).toBe(false); // never dispatched — actions aren't runnable yet
     const jobs = await readTable(runtime, "scheduler/jobs");
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toMatchObject({ _id: jobId, state: "failed" });
-
-    const signals = await readTable(runtime, "scheduler/signals");
-    const complete = signals.find((s) => s.kind === "complete" && s.jobId === jobId);
-    expect(complete?.payload).toMatchObject({ kind: "failed", error: "unsupported: action runtime not built" });
+    expect(jobs[0]).toMatchObject({
+      _id: jobId,
+      state: "failed",
+      lastError: "unsupported: action runtime not built",
+    });
   });
 
   it("REACTIVE WAKE (no manual tick): an enqueued due-now job runs on its own via the commit fan-out", async () => {

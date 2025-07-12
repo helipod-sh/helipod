@@ -43,7 +43,6 @@ export function getFunctionPath(ref: FnRef): string {
  * directly. Revisit if/when a later slice needs real parent/child chaining from driver-run jobs.
  */
 export type JobState = "pending" | "inProgress" | "success" | "failed" | "canceled";
-export type SignalKind = "enqueue" | "complete" | "cancel";
 
 export interface EnqueueOpts {
   runAfter?: number;
@@ -61,11 +60,6 @@ export interface SchedulerContext {
   cancel(id: string): Promise<void>;
   /** Internal: the general enqueue path (workflow-style callers pass `opts` directly). */
   enqueue(fnRef: FnRef, args: JSONValue, opts?: EnqueueOpts): Promise<string>;
-}
-
-/** Signal segments bucket wall-clock ms into 100ms windows so the Task 3 driver can wake precisely on `by_segment` without scanning every job. */
-function segmentOf(ms: number): number {
-  return Math.floor(ms / 100);
 }
 
 /**
@@ -103,26 +97,24 @@ export function compact<T extends Record<string, unknown>>(obj: T): { [K in keyo
 }
 
 /**
- * The three `jobs`/`job_args`/`signals` table names `enqueueInternal` writes to — bare
- * (`"jobs"`) when called from this file's own namespaced `ctx.scheduler` facade, or fully
- * qualified (`"scheduler/jobs"`) when called from a privileged context (`_cronTick` in
- * `./modules.ts`, and the boot-time cron reconciler in `./crons.ts`) that bypasses namespace
- * prefixing entirely — see `./modules.ts`'s module doc comment for why those callers must use
- * fully-qualified names.
+ * The two `jobs`/`job_args` table names `enqueueInternal` writes to — bare (`"jobs"`) when
+ * called from this file's own namespaced `ctx.scheduler` facade, or fully qualified
+ * (`"scheduler/jobs"`) when called from a privileged context (`_cronTick` in `./modules.ts`, and
+ * the boot-time cron reconciler in `./crons.ts`) that bypasses namespace prefixing entirely —
+ * see `./modules.ts`'s module doc comment for why those callers must use fully-qualified names.
  */
 export interface EnqueueTables {
   jobs: string;
   jobArgs: string;
-  signals: string;
 }
 
 /**
- * The shared enqueue path: inserts a `pending` `jobs` row (+ `job_args`) and an `enqueue`
- * `signals` row, honoring the born-canceled check and, since Task 5, an idempotent insert-or-noop
- * on `opts.idempotencyKey` (looked up via `by_idempotency`) — if a job with that key already
- * exists, its id is returned unchanged and nothing new is inserted. This dedup is what makes the
- * cron cadence's occurrence key (`${cronName}:${fireTs}`, `_cronTick` in `./modules.ts`) safe to
- * call more than once for the same occurrence (e.g. a reclaim-driven re-run of a cadence job).
+ * The shared enqueue path: inserts a `pending` `jobs` row (+ `job_args`), honoring the
+ * born-canceled check and, since Task 5, an idempotent insert-or-noop on `opts.idempotencyKey`
+ * (looked up via `by_idempotency`) — if a job with that key already exists, its id is returned
+ * unchanged and nothing new is inserted. This dedup is what makes the cron cadence's occurrence
+ * key (`${cronName}:${fireTs}`, `_cronTick` in `./modules.ts`) safe to call more than once for
+ * the same occurrence (e.g. a reclaim-driven re-run of a cadence job).
  *
  * Factored out of `schedulerContext` (which calls it with bare table names, scoped to the calling
  * mutation's own transaction via `db`) so `_cronTick` and the boot-time cron reconciler — both of
@@ -177,17 +169,11 @@ export async function enqueueInternal(
     }),
   );
   await db.insert(tables.jobArgs, compact({ jobId, args, context: opts.context }));
-  // An append-only wake signal so the Task 3 driver's loop wakes precisely on this job's
-  // segment instead of polling `jobs` blindly. Appended even when born-canceled: harmless (the
-  // driver's `_peekDue` filters on `state:"pending"`, so a born-canceled job is never picked
-  // up), and keeps this signal's meaning simple ("a jobs row was written") rather than
-  // conditional.
-  await db.insert(tables.signals, { segment: segmentOf(now()), kind: "enqueue" as SignalKind, jobId });
   return jobId;
 }
 
 /** Bare (namespaced-by-the-executor) table names — what `schedulerContext`'s facade writes through. */
-const FACADE_TABLES: EnqueueTables = { jobs: "jobs", jobArgs: "job_args", signals: "signals" };
+const FACADE_TABLES: EnqueueTables = { jobs: "jobs", jobArgs: "job_args" };
 
 /**
  * The terminal outcome an `onComplete` callback is invoked with — a strict superset of
@@ -250,7 +236,6 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
       const job = await db.get(id);
       if (job !== null && job.state === "pending") {
         await db.replace(id, { ...job, state: "canceled" as JobState, completedTs: now() });
-        await db.insert("signals", { segment: segmentOf(now()), kind: "cancel" as SignalKind, jobId: id });
         await fireOnComplete(db, now, FACADE_TABLES, id, job.onComplete as string | undefined, { kind: "canceled" });
       }
       // Cascading cancel: walk `id`'s descendants via the `by_parent` index and cancel any that
@@ -272,7 +257,6 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
           seen.add(childId);
           if (child.state === "pending") {
             await db.replace(childId, { ...child, state: "canceled" as JobState, completedTs: now() });
-            await db.insert("signals", { segment: segmentOf(now()), kind: "cancel" as SignalKind, jobId: childId });
             await fireOnComplete(db, now, FACADE_TABLES, childId, child.onComplete as string | undefined, { kind: "canceled" });
           }
           queue.push(childId); // walk deeper regardless of this child's own state

@@ -6,7 +6,7 @@ import { schedulerDriver } from "./driver";
 import { reconcileCrons, type CronJobs } from "./crons";
 
 export * from "./schema";
-export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, SignalKind, EnqueueTables, OnCompleteResult } from "./facade";
+export type { SchedulerContext, FunctionReference, FnRef, EnqueueOpts, JobState, EnqueueTables, OnCompleteResult } from "./facade";
 export { getFunctionPath, enqueueInternal, fireOnComplete } from "./facade";
 export type { PeekDueResult, ClaimResult, JobResult, DueJob } from "./modules";
 export { BATCH_CAP, LEASE_MS, SWEEP_MS, CATCHUP_CAP } from "./modules";
@@ -31,8 +31,8 @@ export type {
 export { cronJobs, computeNextRun, computePrevRun, enqueueCadenceJob } from "./crons";
 
 /**
- * `defineScheduler()` — the `@stackbase/scheduler` component: the `jobs`/`job_args`/`crons`/
- * `signals` schema, the `ctx.scheduler` facade (`runAfter`/`runAt`/`cancel`/`enqueue`), the
+ * `defineScheduler()` — the `@stackbase/scheduler` component: the `jobs`/`job_args`/`crons`
+ * schema, the `ctx.scheduler` facade (`runAfter`/`runAt`/`cancel`/`enqueue`), the
  * internal `_peekDue`/`_claim`/`_complete`/`_cronTick` modules, and the `schedulerDriver`
  * event-loop that actually RUNS due jobs — reactive on commits touching `scheduler/*` plus a
  * wall-clock timer re-armed to the earliest future job (see `./driver.ts`).

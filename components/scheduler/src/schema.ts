@@ -7,8 +7,6 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  *   `by_next_ts` index) never carries the (possibly large) `args`/`context` payload.
  * - `crons`: declared here for the schema to be stable across Task 2→5; only Task 5's cron
  *   scheduler reads/writes it (`cadenceJobId` links a cron to its currently-pending job).
- * - `signals`: an append-only wake log. Every `enqueue`/`complete`/`cancel` appends a row so the
- *   Task 3 driver loop can wake precisely (via `by_segment`) instead of polling `jobs` blindly.
  */
 export const schedulerSchema = defineSchema({
   jobs: defineTable({
@@ -68,11 +66,4 @@ export const schedulerSchema = defineSchema({
     workArgs: v.any(),
     cadenceJobId: v.optional(v.string()),
   }).index("by_name", ["name"]),
-
-  signals: defineTable({
-    segment: v.number(),
-    kind: v.union(v.literal("enqueue"), v.literal("complete"), v.literal("cancel")),
-    jobId: v.string(),
-    payload: v.optional(v.any()),
-  }).index("by_segment", ["segment"]),
 });
