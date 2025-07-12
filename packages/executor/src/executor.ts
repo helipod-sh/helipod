@@ -4,8 +4,8 @@
  * engine ONLY via JSON syscalls, so swapping in a real V8 isolate is a drop-in change.
  *
  * Queries and mutations run inside `transactor.runInTransaction`, so OCC validation and
- * deterministic replay come for free. (Actions, which run outside a transaction with native
- * capabilities, are a later slice.)
+ * deterministic replay come for free. Actions run OUTSIDE any transaction (see `runActionFn`)
+ * with native capabilities and no `ctx.db` — they reach data only via `ctx.runQuery`/`runMutation`.
  */
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
