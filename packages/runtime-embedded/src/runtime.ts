@@ -97,7 +97,28 @@ export class EmbeddedRuntime {
     const startTs = await options.store.maxTimestamp();
     const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now });
+
+    // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:
+    // it resolves ANY registered path, including `_`-prefixed component-internal modules — unlike
+    // the public `run`/`runAction` below, which block `_`. The executor is constructed before
+    // `contextProviders`/`policyRegistry`/etc. below exist and before `modules` is populated, so
+    // `invoke` reads them through a mutable closure var (`executorRef`) to break the cycle.
+    let executorRef: InlineUdfExecutor;
+    const invoke = async (path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult> => {
+      const fn = modules[path];
+      if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+      return executorRef.run(fn, jsonToConvex(args), {
+        path,
+        namespace: namespaceForPath(path, componentNames),
+        contextProviders,
+        policyRegistry,
+        policyProviders,
+        relationRegistry,
+        identity: opts?.identity ?? null,
+      });
+    };
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
+    executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
     for (const step of options.bootSteps ?? []) {
@@ -278,6 +299,23 @@ export class EmbeddedRuntime {
     if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    return this.executor.run<T>(fn, jsonToConvex(args), {
+      path,
+      namespace: namespaceForPath(path, this.componentNames),
+      contextProviders: this.contextProviders,
+      policyRegistry: this.policyRegistry,
+      policyProviders: this.policyProviders,
+      relationRegistry: this.relationRegistry,
+      identity: opts?.identity ?? null,
+    });
+  }
+
+  /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks `_`-prefixed paths. */
+  async runAction<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
+    if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    const fn = this.modules[path];
+    if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (fn.type !== "action") throw new Error(`${path} is not an action`);
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
       namespace: namespaceForPath(path, this.componentNames),

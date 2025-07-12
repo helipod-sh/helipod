@@ -121,3 +121,26 @@ export interface MutationCtx {
   random(): number;
   now(): number;
 }
+
+/**
+ * A ref carries its resolved path (`__path`, set by the generated `api` proxy) or a caller
+ * passes the path string directly. Structural (not imported from `@stackbase/client`) to avoid
+ * a dependency cycle — `@stackbase/client` doesn't depend on the executor, but pulling it in
+ * here would still add an unnecessary package edge for a one-field shape.
+ */
+export interface FunctionReference {
+  __path: string;
+}
+
+/**
+ * The action GUEST context. Actions run OUTSIDE any transaction — no read/write-set tracking,
+ * no commit — so, structurally, there is NO `db`. All data access goes through `runQuery`/
+ * `runMutation`, each of which is a fresh, independent top-level run (its own transaction).
+ * Native capabilities (fetch, Date, Math.random, timers) are available because actions don't
+ * need deterministic replay the way queries/mutations do.
+ */
+export interface ActionCtx {
+  runQuery<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runMutation<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runAction<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+}

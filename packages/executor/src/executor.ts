@@ -10,14 +10,20 @@
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
 import type { KeyRange } from "@stackbase/index-key-codec";
+import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
-import { GuestDatabaseReader, GuestDatabaseWriter } from "./guest";
+import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
 import type { IndexCatalog } from "./catalog";
 import type { RegisteredFunction } from "./functions";
 import type { LogKind, LogSink } from "./log-sink";
 import type { PolicyRegistry, PolicyContextProvider, RuleContext, RelationRegistry } from "./policy";
+
+/** `ref` may be a path string or a codegen'd `FunctionReference` (which carries `__path`). */
+function resolveRef(ref: FunctionReference | string): string {
+  return typeof ref === "string" ? ref : ref.__path;
+}
 
 export interface ExecutorDeps {
   transactor: Transactor;
@@ -25,6 +31,13 @@ export interface ExecutorDeps {
   catalog: IndexCatalog;
   logSink?: LogSink;
   now?: () => number;
+  /**
+   * Trusted server re-entrancy: resolves ANY registered path — including `_`-prefixed
+   * component-internal modules — unlike the public `runtime.run`/`runAction`, which block `_`.
+   * An action's `runQuery`/`runMutation`/`runAction` go through this to start a fresh,
+   * independent top-level run (its own transaction, or its own action execution).
+   */
+  invoke?: (path: string, args: JSONValue, opts?: { identity?: string | null }) => Promise<UdfResult>;
 }
 
 export interface ComponentContext {
@@ -111,9 +124,8 @@ export class InlineUdfExecutor {
   constructor(private readonly deps: ExecutorDeps) {}
 
   async run<T = unknown>(fn: RegisteredFunction, args: unknown, options: RunOptions = {}): Promise<UdfResult<T>> {
-    if (fn.type === "action" || fn.type === "httpAction") {
-      throw new Error(`the inline executor does not yet run ${fn.type} functions (M5 scope)`);
-    }
+    if (fn.type === "httpAction") throw new Error("the inline executor does not yet run httpAction functions");
+    if (fn.type === "action") return this.runActionFn<T>(fn, args, options);
     const profile = profileFor(fn.type);
     const seed = options.seed ?? 0;
     const clock = this.deps.now ?? Date.now;
@@ -206,6 +218,39 @@ export class InlineUdfExecutor {
       };
     } catch (e) {
       logEntry("error", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+  }
+
+  /**
+   * Actions run OUTSIDE `transactor.runInTransaction` — no read/write-set tracking, no commit
+   * of their own. `ctx.db` is structurally absent (see `ActionCtx`); all data access goes
+   * through `runQuery`/`runMutation`/`runAction`, each a fresh top-level `invoke` — its own
+   * transaction (for query/mutation) or its own action execution.
+   */
+  private async runActionFn<T>(fn: RegisteredFunction, args: unknown, options: RunOptions): Promise<UdfResult<T>> {
+    const clock = this.deps.now ?? Date.now;
+    const startedAt = clock();
+    const invoke = this.deps.invoke;
+    if (!invoke) throw new Error("action execution requires an `invoke` runner (runtime wiring missing)");
+    const run = (_kind: "query" | "mutation" | "action") =>
+      async (ref: FunctionReference | string, a: Record<string, unknown> = {}) => {
+        const path = resolveRef(ref);
+        const res = await invoke(path, convexToJson(jsonToConvex(a as unknown as JSONValue) as Value) as JSONValue, { identity: options.identity ?? null });
+        return res.value;
+      };
+    const actionCtx: Record<string, unknown> = {
+      runQuery: run("query"),
+      runMutation: run("mutation"),
+      runAction: run("action"),
+      // Task 2 augments actionCtx with scheduler + component facades before the handler runs.
+    };
+    try {
+      const value = await fn.handler(actionCtx, args);
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
+      return { value: value as T, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null };
+    } catch (e) {
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;
     }
   }
