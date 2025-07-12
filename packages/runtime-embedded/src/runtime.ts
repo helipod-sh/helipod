@@ -7,9 +7,10 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
-import { namespaceForPath } from "@stackbase/component";
+import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { writtenTablesFromRanges, serializeKeyRange } from "@stackbase/index-key-codec";
+import { decodeStorageTableId } from "@stackbase/id-codec";
+import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
@@ -52,6 +53,17 @@ export interface EmbeddedRuntimeOptions {
   now?: () => number;
   /** Component boot steps to run once at create, namespaced + non-user (before serving traffic). */
   bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
+  /** Component drivers to start once at create, after boot steps + the commit fan-out are wired. */
+  drivers?: Driver[];
+  /**
+   * `fullTableName → tableNumber` (the same map `composeComponents`/`loadProject` produce).
+   * Used ONLY to translate the encoded storage-table ids on `adapter.subscribe`'s commit payload
+   * (e.g. `"3"`) back into full names (e.g. `"scheduler/jobs"`) before handing them to driver
+   * `onCommit` callbacks — drivers filter `inv.tables` by name (see `components/scheduler/src/
+   * driver.ts`), and a raw storage id never matches. Optional: a runtime with no components (or
+   * whose drivers don't inspect `inv.tables`) can omit it and driver callbacks just see raw ids.
+   */
+  tableNumbers?: Record<string, number>;
 }
 
 export class EmbeddedRuntime {
@@ -70,6 +82,8 @@ export class EmbeddedRuntime {
     private readonly policyRegistry: ReadonlyMap<string, TablePolicy>,
     private readonly policyProviders: ReadonlyArray<PolicyContextProvider>,
     private readonly relationRegistry: RelationRegistry | undefined,
+    private readonly drivers: ReadonlyArray<Driver>,
+    private readonly timers: Map<number, ReturnType<typeof setTimeout>>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -156,12 +170,96 @@ export class EmbeddedRuntime {
         draining = false;
       }
     };
+
+    // Driver lifecycle: component drivers wake on every committed write (across the whole
+    // runtime, not just their own tables — a driver decides for itself what it cares about)
+    // and/or on wall-clock timers. Wired to the SAME commit fan-out as `notifyWrites`, below.
+    const commitSubs = new Set<(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }) => void>();
+    const timers = new Map<number, ReturnType<typeof setTimeout>>();
+    let timerSeq = 0;
+    const driverCtx: DriverContext = {
+      runFunction: async (path, args) => {
+        const fn = modules[path];
+        if (!fn) throw new Error(`driver: unknown function ${path}`);
+        const ns = namespaceForPath(path, componentNames);
+        const res = await executor.run(fn, jsonToConvex(args), {
+          path,
+          namespace: ns,
+          contextProviders,
+          policyRegistry,
+          policyProviders,
+          relationRegistry,
+          identity: null,
+          privileged: true,
+        });
+        return res.value;
+      },
+      onCommit: (cb) => {
+        commitSubs.add(cb);
+        return () => commitSubs.delete(cb);
+      },
+      setTimer: (atMs, cb) => {
+        const h = ++timerSeq;
+        timers.set(h, setTimeout(cb, Math.max(0, atMs - (options.now?.() ?? Date.now()))));
+        return h;
+      },
+      clearTimer: (h) => {
+        const t = timers.get(h);
+        if (t) {
+          clearTimeout(t);
+          timers.delete(h);
+        }
+      },
+      now: () => options.now?.() ?? Date.now(),
+    };
+
+    // Inverse of `tableNumbers` (tableNumber → fullTableName), built once: `payload.tables`
+    // (from `adapter.subscribe`) carries ENCODED STORAGE-TABLE IDS (`encodeStorageTableId`'s
+    // output, e.g. `"3"`), not full table names — the sync path (`queue`/`notifyWrites` above)
+    // works with those ids directly via range intersection, but drivers filter `inv.tables` by
+    // full name (e.g. `t.startsWith("scheduler/")`), so the driver fan-out below must translate.
+    const tableNumberToName = new Map<number, string>();
+    for (const [name, num] of Object.entries(options.tableNumbers ?? {})) tableNumberToName.set(num, name);
+    const namesForCommit = (tableIds: readonly string[]): string[] =>
+      tableIds.map((id) => {
+        try {
+          return tableNumberToName.get(decodeStorageTableId(id)) ?? id;
+        } catch {
+          return id; // not a decodable storage id — pass through rather than drop
+        }
+      });
+
     adapter.subscribe((payload) => {
       queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
+      if (commitSubs.size > 0) {
+        const tables = namesForCommit(payload.tables);
+        for (const cb of commitSubs) {
+          try {
+            cb({ tables, ranges: payload.ranges, commitTs: payload.commitTs });
+          } catch (e) {
+            // A driver's onCommit must never starve other drivers of the commit signal.
+            console.error("[runtime] driver onCommit callback threw:", e);
+          }
+        }
+      }
     });
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry);
+    if ((options.drivers?.length ?? 0) > 0 && !options.tableNumbers) {
+      // Without `tableNumbers`, `namesForCommit` above can't translate the encoded storage-table
+      // ids a real commit carries back into full names, so `inv.tables` a driver's `onCommit`
+      // callback sees never matches a `t.startsWith("scheduler/")`-style filter — reactive wake
+      // silently degrades to timer-only. Warn once (per `create()` call) rather than fail: a
+      // driver relying purely on its own periodic timer still works, just not with ~0 latency.
+      console.warn(
+        "[runtime] drivers registered but no `tableNumbers` provided — driver reactive wake (onCommit) will not match table-name filters; drivers will fall back to their own timers only.",
+      );
+    }
+
+    const drivers = options.drivers ?? [];
+    for (const d of drivers) await d.start(driverCtx);
+
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers);
   }
 
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
@@ -203,6 +301,13 @@ export class EmbeddedRuntime {
     const fn = this.adminModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown admin function: ${path}`);
     return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+  }
+
+  /** Stop all component drivers and clear all pending driver timers. Call on runtime shutdown. */
+  async stopDrivers(): Promise<void> {
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
+    for (const d of this.drivers) await d.stop?.();
   }
 }
 

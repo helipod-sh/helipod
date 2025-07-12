@@ -1,8 +1,28 @@
-import type { SchemaDefinition, Validator } from "@stackbase/values";
+import type { SchemaDefinition, Validator, JSONValue } from "@stackbase/values";
 import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter } from "@stackbase/executor";
 import type { ComponentContext } from "@stackbase/executor";
+import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 
 export interface BootContext { db: GuestDatabaseWriter; now: number }
+
+/** The capabilities a `Driver` gets to wake on commits/timers and act outside a request. */
+export interface DriverContext {
+  /** Runs a registered fn privileged + namespaced, outside a request. */
+  runFunction(path: string, args: JSONValue): Promise<unknown>;
+  /** Taps the commit fan-out (every committed write, across the whole runtime). Returns an unsubscribe. */
+  onCommit(cb: (inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }) => void): () => void;
+  /** Arms a wake at wall-clock `atMs`; returns a handle for `clearTimer`. */
+  setTimer(atMs: number, cb: () => void): number;
+  clearTimer(handle: number): void;
+  now(): number;
+}
+
+/** A recurring runtime seam: started once after boot, woken by commits and/or timers. */
+export interface Driver {
+  name: string;
+  start(ctx: DriverContext): void | Promise<void>;
+  stop?(): void | Promise<void>;
+}
 
 export interface ComponentDefinition {
   name: string;
@@ -15,12 +35,27 @@ export interface ComponentDefinition {
   context?: (cctx: ComponentContext) => object;
   /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
   contextType?: { import: string; type: string };
+  /**
+   * Extra named values this component wants codegen to re-export from `_generated/server.ts`,
+   * sourced from `contextType.import` — e.g. `@stackbase/scheduler` sets `["cronJobs"]` so an
+   * app's `crons.ts` can do `import { cronJobs } from "./_generated/server"` unchanged. Requires
+   * `contextType` (the import path is shared with it).
+   */
+  serverExports?: string[];
+  /**
+   * Opt-in: when true, `context`'s facade gets a writable `cctx.db` during mutation calls (still
+   * read-only during queries), so the facade can write inside the calling mutation's transaction.
+   * Defaults to false (most facades, e.g. authz, are read-only by design).
+   */
+  contextWrite?: boolean;
   /** Row policies this component declares for app tables: table → { read?, write? }. */
   policies?: Record<string, TablePolicy>;
   /** Contributes fields to every row policy's rule-context (e.g. authz → `{ auth }`). */
   policyContext?: PolicyContextProvider["build"];
   /** A once-per-process startup step (migrations/index rebuilds). Runs namespaced + non-user. */
   boot?: (ctx: BootContext) => Promise<void>;
+  /** A recurring driver, started once after boot; woken by commits and/or timers. */
+  driver?: Driver;
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {

@@ -2,3 +2,9 @@
 export { query, mutation, action } from "@stackbase/executor";
 export type { DataModel, TableNames, Doc, Id } from "./dataModel";
 export type { Api, FunctionReference } from "./api";
+export type { Internal } from "./internal";
+import { anyApi } from "@stackbase/client";
+import type { Api } from "./api";
+import type { Internal } from "./internal";
+export const api = anyApi as Api;
+export const internal = anyApi as Internal;

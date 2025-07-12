@@ -14,6 +14,7 @@
     "@stackbase/auth": "workspace:*",
     "@stackbase/component": "workspace:*",
     "@stackbase/executor": "workspace:*",
+    "@stackbase/scheduler": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {

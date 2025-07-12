@@ -1,0 +1,70 @@
+// components/scheduler/test/enqueue.test.ts
+import { describe, it, expect } from "vitest";
+import { mutation } from "@stackbase/executor";
+import { makeRuntimeWithScheduler, readTable } from "./helpers";
+
+describe("ctx.scheduler — transactional enqueue", () => {
+  it("runAfter writes a pending job row inside the calling mutation's transaction", async () => {
+    const { runtime } = await makeRuntimeWithScheduler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:sched": mutation(async (ctx: any) => {
+        await ctx.scheduler.runAfter(60_000, "app:work", { x: 1 });
+        return null;
+      }),
+      "app:work": mutation(async () => null),
+    });
+
+    await runtime.run("app:sched", {});
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs.length).toBe(1);
+    expect(jobs[0]).toMatchObject({ fnPath: "app:work", state: "pending", kind: "mutation" });
+    expect(jobs[0].nextTs).toBeGreaterThan(0);
+
+    const args = await readTable(runtime, "scheduler/job_args");
+    expect(args.length).toBe(1);
+    expect(args[0]).toMatchObject({ jobId: jobs[0]._id, args: { x: 1 } });
+  });
+
+  it("enqueue is transactional — a mutation that throws after scheduling leaves NO job", async () => {
+    const { runtime } = await makeRuntimeWithScheduler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:boom": mutation(async (ctx: any) => {
+        await ctx.scheduler.runAfter(1000, "app:work", {});
+        throw new Error("rollback");
+      }),
+      "app:work": mutation(async () => null),
+    });
+
+    await expect(runtime.run("app:boom", {})).rejects.toThrow();
+
+    expect((await readTable(runtime, "scheduler/jobs")).length).toBe(0);
+    expect((await readTable(runtime, "scheduler/job_args")).length).toBe(0);
+  });
+
+  it("cancel marks a pending job canceled", async () => {
+    let scheduledId = "";
+    const { runtime } = await makeRuntimeWithScheduler({
+      "app:sched": mutation(async (ctx: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+        scheduledId = await ctx.scheduler.runAfter(60_000, "app:work", {});
+        return scheduledId;
+      }),
+      "app:cancel": mutation(async (ctx: any, { id }: { id: string }) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+        await ctx.scheduler.cancel(id);
+        return null;
+      }),
+      "app:work": mutation(async () => null),
+    });
+
+    const res = await runtime.run<string>("app:sched", {});
+    const id = res.value;
+    expect(id).toBe(scheduledId);
+
+    await runtime.run("app:cancel", { id });
+
+    const jobs = await readTable(runtime, "scheduler/jobs");
+    expect(jobs.length).toBe(1);
+    expect(jobs[0]).toMatchObject({ state: "canceled" });
+    expect(jobs[0].completedTs).toBeGreaterThan(0);
+  });
+});
