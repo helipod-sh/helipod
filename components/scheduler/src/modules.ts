@@ -231,6 +231,36 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
 const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler/job_args" };
 
 /**
+ * `scheduler:_enqueue` / `scheduler:_cancel` — internal (`_`-prefixed, so not client-callable)
+ * MUTATIONS that back the action-mode `ctx.scheduler` facade (`schedulerActionContext` in
+ * `./facade.ts`): an action has no `db`, so it can't write a `jobs` row itself — instead it calls
+ * `ctx.runMutation("scheduler:_enqueue"/"_cancel", ...)`, a fresh top-level mutation the trusted
+ * `invoke` seam resolves (see `ExecutorDeps.invoke`'s doc comment in `packages/executor/src/
+ * executor.ts` — it resolves ANY registered path, `_`-prefixed included, unlike the public
+ * `runtime.run`/`runAction`, which block `_`).
+ *
+ * Both run namespaced (NOT privileged) — `namespaceForPath("scheduler:_enqueue", ...)` resolves to
+ * `"scheduler"`, the same namespace `schedulerContext`'s facade runs in — so `ctx.scheduler` here
+ * is the ordinary in-txn facade from `./facade.ts`, writing through the SAME bare table names
+ * (`FACADE_TABLES`) as a normal mutation's `ctx.scheduler.runAfter(...)` call. `ctx: any` because
+ * `ctx.scheduler` isn't part of the exported `MutationCtx` shape (it's a dynamic per-component
+ * facade attached at run time — see `InlineUdfExecutor.run`'s `guestCtx` loop).
+ */
+export const _enqueue = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { fnPath: string; args: JSONValue; runAtMs: number }): Promise<string> =>
+    ctx.scheduler.runAt(a.runAtMs, a.fnPath, a.args),
+);
+
+export const _cancel = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { id: string }): Promise<null> => {
+    await ctx.scheduler.cancel(a.id);
+    return null;
+  },
+);
+
+/**
  * `scheduler:_cronTick` — a MUTATION: the dual-job cron cadence. Registered as an ordinary
  * `jobs` row itself (`fnPath:"scheduler:_cronTick"`, `kind:"mutation"`) — the driver dispatches
  * it through the exact same `_peekDue`/`_claim`/`_complete` path as any other due job (see

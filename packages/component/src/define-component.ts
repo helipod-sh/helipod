@@ -1,5 +1,5 @@
 import type { SchemaDefinition, Validator, JSONValue } from "@stackbase/values";
-import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter } from "@stackbase/executor";
+import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter, ActionApi } from "@stackbase/executor";
 import type { ComponentContext } from "@stackbase/executor";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 
@@ -35,6 +35,14 @@ export interface ComponentDefinition {
   context?: (cctx: ComponentContext) => object;
   /** The TS type this component contributes to ctx, for codegen: ctx[name]: import(import).type. */
   contextType?: { import: string; type: string };
+  /**
+   * Optional: the ACTION-mode counterpart to `context` — attached as `ctx[name]` inside an action
+   * instead of `context`'s in-txn facade (an action has no `db`). Must expose the SAME method
+   * signatures as `context`'s facade so a function body is portable between a mutation and an
+   * action — implemented by delegating to `api.runMutation`/`api.runQuery` of this component's own
+   * (typically `_`-prefixed) modules. See `ContextProvider.buildAction` in `@stackbase/executor`.
+   */
+  buildAction?: (api: ActionApi) => object;
   /**
    * Extra named values this component wants codegen to re-export from `_generated/server.ts`,
    * sourced from `contextType.import` — e.g. `@stackbase/scheduler` sets `["cronJobs"]` so an

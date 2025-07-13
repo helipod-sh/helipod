@@ -49,6 +49,20 @@ export interface ComponentContext {
   readonly components: Record<string, unknown>;
 }
 
+/**
+ * The api handed to `ContextProvider.buildAction` — mirrors `ActionCtx`'s `runQuery`/
+ * `runMutation`/`runAction` (each a fresh top-level `invoke`) plus the ambient `identity`. No
+ * `db`: actions have none (see `ActionCtx`'s doc comment in `./guest.ts`), so an action-mode
+ * facade can only reach data by delegating to `runMutation`/`runQuery` of its own component's
+ * (typically `_`-prefixed) modules.
+ */
+export interface ActionApi {
+  runQuery<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runMutation<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runAction<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  identity: string | null;
+}
+
 export interface ContextProvider {
   readonly name: string;
   /** The component's namespace; the facade's db reads (and, if `write`, writes) here. */
@@ -64,6 +78,16 @@ export interface ContextProvider {
    * as `GuestDatabaseReader`; a write-opted-in facade casts to `GuestDatabaseWriter` itself.
    */
   readonly write?: boolean;
+  /**
+   * Optional: the ACTION-mode counterpart to `build` — attached as `ctx[name]` inside an action
+   * instead of `build`'s in-txn facade (an action has no `db`, so `build` never runs there). Takes
+   * an `ActionApi` (no `db`) and must return a facade with the SAME method signatures as `build`'s,
+   * so a function body scheduling/calling through it is portable between a mutation and an action —
+   * e.g. `ctx.scheduler.runAfter(...)` delegates to `api.runMutation` of an internal `_`-prefixed
+   * mutation instead of writing `db` directly. Optional and additive: a component without it simply
+   * doesn't appear on the action ctx (see `InlineUdfExecutor.runActionFn`).
+   */
+  readonly buildAction?: (api: ActionApi) => object;
 }
 
 export interface RunOptions {
@@ -234,17 +258,26 @@ export class InlineUdfExecutor {
     const invoke = this.deps.invoke;
     if (!invoke) throw new Error("action execution requires an `invoke` runner (runtime wiring missing)");
     const run = (_kind: "query" | "mutation" | "action") =>
-      async (ref: FunctionReference | string, a: Record<string, unknown> = {}) => {
+      async <T = unknown>(ref: FunctionReference | string, a: Record<string, unknown> = {}): Promise<T> => {
         const path = resolveRef(ref);
         const res = await invoke(path, convexToJson(jsonToConvex(a as unknown as JSONValue) as Value) as JSONValue, { identity: options.identity ?? null });
-        return res.value;
+        return res.value as T;
       };
-    const actionCtx: Record<string, unknown> = {
-      runQuery: run("query"),
-      runMutation: run("mutation"),
-      runAction: run("action"),
-      // Task 2 augments actionCtx with scheduler + component facades before the handler runs.
-    };
+    const runQuery = run("query");
+    const runMutation = run("mutation");
+    const runAction = run("action");
+    const actionCtx: Record<string, unknown> = { runQuery, runMutation, runAction };
+
+    // Component facades: only providers with a `buildAction` appear on the action ctx (a `build`-
+    // only component — the common case, e.g. read-only facades — simply doesn't show up here; its
+    // `build` is never invoked, since an action has no `db` for it to read through). Same
+    // reserved-name collision check as the mutation path's `guestCtx` loop in `run()` above.
+    const reserved = new Set(["runQuery", "runMutation", "runAction"]);
+    for (const p of options.contextProviders ?? []) {
+      if (!p.buildAction) continue;
+      if (reserved.has(p.name) || p.name in actionCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
+      actionCtx[p.name] = Object.freeze(p.buildAction({ runQuery, runMutation, runAction, identity: options.identity ?? null }));
+    }
     try {
       const value = await fn.handler(actionCtx, args);
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "ok" });

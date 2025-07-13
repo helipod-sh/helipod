@@ -1,4 +1,4 @@
-import type { ComponentContext } from "@stackbase/executor";
+import type { ComponentContext, ActionApi } from "@stackbase/executor";
 import { GuestDatabaseWriter } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 
@@ -265,6 +265,49 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
     },
     async enqueue(fnRef, args, opts) {
       return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {});
+    },
+  };
+}
+
+/**
+ * The action-mode counterpart to `SchedulerContext` — same `runAfter`/`runAt`/`cancel` method
+ * signatures (so a function body scheduling work is portable between a mutation and an action),
+ * minus `enqueue` (the general opts-carrying path stays a mutation-only internal primitive; no
+ * action caller needs it yet). Deliberately NOT structurally assignable to `SchedulerContext` as a
+ * type (no `enqueue`) even though the three shared methods match exactly.
+ */
+export interface SchedulerActionContext {
+  runAfter(delayMs: number, fnRef: FnRef, args: JSONValue): Promise<string>;
+  runAt(ts: number | Date, fnRef: FnRef, args: JSONValue): Promise<string>;
+  cancel(id: string): Promise<void>;
+}
+
+/**
+ * Builds the action-mode `ctx.scheduler` — wired as `defineScheduler()`'s `buildAction` (see
+ * `./index.ts`). An action has no `db`, so `runAfter`/`runAt`/`cancel` can't write a `jobs` row
+ * directly the way `schedulerContext` above does; instead each delegates to `api.runMutation` of
+ * the internal `scheduler:_enqueue`/`scheduler:_cancel` mutations (`./modules.ts`), which run the
+ * SAME `enqueueInternal`/`cancel` logic inside their own fresh top-level transaction.
+ *
+ * `Date.now()` below (converting `runAfter`'s relative `delayMs` to an absolute `runAtMs`) is fine
+ * here even though queries/mutations must stay deterministic: an action is non-deterministic by
+ * design (see `ActionCtx`'s doc comment in `@stackbase/executor`), and the scheduler never
+ * recomputes anything from this timestamp — `scheduler:_enqueue` just stores it as `nextTs`.
+ */
+export function schedulerActionContext(api: ActionApi): SchedulerActionContext {
+  return {
+    async runAfter(delayMs, fnRef, args) {
+      return api.runMutation<string>("scheduler:_enqueue", { fnPath: getFunctionPath(fnRef), args, runAtMs: Date.now() + delayMs });
+    },
+    async runAt(ts, fnRef, args) {
+      return api.runMutation<string>("scheduler:_enqueue", {
+        fnPath: getFunctionPath(fnRef),
+        args,
+        runAtMs: ts instanceof Date ? ts.getTime() : ts,
+      });
+    },
+    async cancel(id) {
+      await api.runMutation("scheduler:_cancel", { id });
     },
   };
 }
