@@ -21,14 +21,14 @@ describe("schedulerDriver — scheduled actions execute", () => {
     await tick();
     expect(ran).toEqual(["x@y.z"]);
 
-    // Note: `ctx.scheduler.runAfter`'s `kindOf()` (facade.ts) always tags a job `kind:"mutation"`
-    // regardless of the target's real registered type — a documented, separate future-slice gap
-    // (registry lookup wiring), not part of this task. The driver's `runFunction` dispatch still
-    // routes `app:sendish` to the executor's action branch correctly either way (that's Task 1),
-    // which is what this test actually proves — so we assert on `ran`, not the job's `kind` field.
+    // Since Task 3b, `ctx.scheduler.runAfter`'s `kindOf()` (facade.ts) resolves the target's REAL
+    // registered kind via `cctx.functionKind` (threaded from the runtime's module registry) — so
+    // `app:sendish`, a real action, is correctly tagged `kind:"action"` here. (Prior to Task 3b
+    // this was always `kind:"mutation"`, a documented stub — see `action-at-most-once.test.ts` for
+    // the dedicated at-most-once coverage this fix unlocks.)
     const jobs = await readTable(runtime, "scheduler/jobs");
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toMatchObject({ state: "success" });
+    expect(jobs[0]).toMatchObject({ state: "success", kind: "action" });
   });
 
   it("a crash mid-action (inProgress + expired lease) is at-most-once — failed, not re-run", async () => {

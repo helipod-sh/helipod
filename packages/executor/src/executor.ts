@@ -47,6 +47,12 @@ export interface ComponentContext {
   readonly now: number;
   /** Facades of components built before this one (the ones it `requires` / can compose on). */
   readonly components: Record<string, unknown>;
+  /**
+   * Resolve a target function's registered kind by path (for schedulers tagging a job's
+   * `kind:"mutation"|"action"`). Undefined if the runtime didn't supply a resolver or the path
+   * is unknown. Optional + additive — facades/tests that build a cctx without it still work.
+   */
+  readonly functionKind?: (path: string) => "query" | "mutation" | "action" | "httpAction" | undefined;
 }
 
 /**
@@ -109,6 +115,8 @@ export interface RunOptions {
   policyProviders?: ReadonlyArray<PolicyContextProvider>;
   /** Declared relations, consulted by the kernel when resolving relation predicates. */
   relationRegistry?: RelationRegistry;
+  /** Resolve a target function's registered kind by path; threaded onto every `ComponentContext` built for `build(cctx)`. See `ComponentContext.functionKind`'s doc comment. */
+  functionKind?: (path: string) => "query" | "mutation" | "action" | "httpAction" | undefined;
 }
 
 export interface UdfResult<T = unknown> {
@@ -195,7 +203,7 @@ export class InlineUdfExecutor {
           const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor(canWrite ? "mutation" : "query") };
           const channel = new InlineSyscallChannel(this.router, pctx);
           const preader = canWrite ? new GuestDatabaseWriter(channel) : new GuestDatabaseReader(channel);
-          const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades }));
+          const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades, functionKind: options.functionKind }));
           guestCtx[p.name] = facade;
           builtFacades[p.name] = facade;
         }

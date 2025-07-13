@@ -128,6 +128,7 @@ export class EmbeddedRuntime {
         policyRegistry,
         policyProviders,
         relationRegistry,
+        functionKind,
         identity: opts?.identity ?? null,
       });
     };
@@ -153,6 +154,12 @@ export class EmbeddedRuntime {
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const adminModules: Record<string, RegisteredFunction> = { ...(options.adminModules ?? {}) };
+    // Resolves a target path's REAL registered kind — threaded onto every `ComponentContext` so
+    // component facades (e.g. `@stackbase/scheduler`'s `kindOf`) can tag a job's
+    // kind:"mutation"|"action" accurately instead of guessing. See `ComponentContext.functionKind`'s
+    // doc comment (packages/executor/src/executor.ts). A plain lookup against the SAME mutable
+    // `modules` map `setModules` hot-swaps in place, so it stays correct across a dev reload.
+    const functionKind = (path: string): "query" | "mutation" | "action" | "httpAction" | undefined => modules[path]?.type;
     const resolve = (path: string): RegisteredFunction => {
       if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
       const fn = modules[path];
@@ -162,7 +169,7 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
@@ -170,7 +177,7 @@ export class EmbeddedRuntime {
         };
       },
       async runMutation(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -224,6 +231,7 @@ export class EmbeddedRuntime {
           policyRegistry,
           policyProviders,
           relationRegistry,
+          functionKind,
           identity: null,
           privileged: true,
         });
@@ -297,6 +305,14 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers);
   }
 
+  /**
+   * Resolves a target path's REAL registered kind against the live `this.modules` map — same
+   * resolver shape as `create()`'s local `functionKind` closure, but bound to the instance so it
+   * stays correct across `setModules` hot-swaps. See `ComponentContext.functionKind`'s doc
+   * comment (packages/executor/src/executor.ts).
+   */
+  private functionKind = (path: string): "query" | "mutation" | "action" | "httpAction" | undefined => this.modules[path]?.type;
+
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
   setModules(modules: Record<string, RegisteredFunction>): void {
     for (const key of Object.keys(this.modules)) delete this.modules[key];
@@ -320,6 +336,7 @@ export class EmbeddedRuntime {
       policyRegistry: this.policyRegistry,
       policyProviders: this.policyProviders,
       relationRegistry: this.relationRegistry,
+      functionKind: this.functionKind,
       identity: opts?.identity ?? null,
     });
   }
@@ -337,6 +354,7 @@ export class EmbeddedRuntime {
       policyRegistry: this.policyRegistry,
       policyProviders: this.policyProviders,
       relationRegistry: this.relationRegistry,
+      functionKind: this.functionKind,
       identity: opts?.identity ?? null,
     });
   }

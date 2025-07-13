@@ -62,25 +62,6 @@ export interface SchedulerContext {
   enqueue(fnRef: FnRef, args: JSONValue, opts?: EnqueueOpts): Promise<string>;
 }
 
-/**
- * `kind` (mutation vs action) isn't derivable from a bare `fnPath` string without a function
- * registry lookup — every job scheduled through this public facade is stamped `kind:"mutation"`
- * for now, REGARDLESS of whether the target `fnPath` is actually registered as an action. The
- * driver's dispatch (`driver.ts`) doesn't actually depend on this field being accurate — it always
- * calls `ctx.runFunction(fnPath, args)`, which routes to the runtime and on to the executor's real
- * action/mutation branch based on the target's ACTUAL registered type — so a scheduled action still
- * runs correctly today despite this stub. What this stub gets wrong: `kind` also drives
- * `_reclaim`'s at-most-once-vs-retry choice on a lease-expiry crash (`modules.ts`) — a real action
- * whose job is mis-tagged `kind:"mutation"` would be blind-retried as if it were transactional,
- * which isn't safe for an action's non-transactional side effects. No public API can create a real
- * `kind:"action"` job yet (only the test-only `_system:insertJob` escape hatch can); a future
- * registry-lookup slice should replace this stub with a real `fnPath -> "mutation" | "action"`
- * lookup so `_reclaim` (and any future retry logic) sees the true kind.
- */
-function kindOf(_fnPath: string): "mutation" | "action" {
-  return "mutation";
-}
-
 /** App-version stamping (for rolling-deploy replay safety) is wired in a later slice. */
 function currentAppVersion(): string | undefined {
   return undefined;
@@ -138,6 +119,13 @@ export async function enqueueInternal(
   fnRef: FnRef,
   args: JSONValue,
   opts: EnqueueOpts,
+  /**
+   * Resolves the target's real kind for the job's `kind` column. Defaults to always-"mutation"
+   * — correct for every caller EXCEPT `schedulerContext`'s facade methods below, which pass a
+   * closure over `cctx.functionKind` (the only caller whose target might actually be an action;
+   * `_cronTick`'s cadence/work jobs and `fireOnComplete`'s callback are always mutations).
+   */
+  kindOf: (fnPath: string) => "mutation" | "action" = () => "mutation",
 ): Promise<string> {
   const fnPath = getFunctionPath(fnRef);
 
@@ -235,12 +223,21 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
   const db = cctx.db as GuestDatabaseWriter;
   const now = (): number => cctx.now;
 
+  // Resolves the target's REAL registered kind via the runtime-supplied `cctx.functionKind` (see
+  // its doc comment in `packages/executor/src/executor.ts`) — no longer a stub. Actions are the
+  // only non-transactional kind → the only one `_reclaim` (`./modules.ts`) must not blind-retry.
+  // A query is never a valid schedule target; treat anything not "action" as "mutation"
+  // (conservative: retryable). Unknown path (resolver absent, or the runtime didn't recognize the
+  // path) also defaults "mutation" — matches prior behavior; an unknown fn fails at dispatch
+  // regardless of what `kind` its job row was born with.
+  const kindOf = (fnPath: string): "mutation" | "action" => (cctx.functionKind?.(fnPath) === "action" ? "action" : "mutation");
+
   return {
     async runAfter(delayMs, fnRef, args) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: now() + Math.max(0, delayMs) });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: now() + Math.max(0, delayMs) }, kindOf);
     },
     async runAt(ts, fnRef, args) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts }, kindOf);
     },
     async cancel(id) {
       const job = await db.get(id);
@@ -274,7 +271,7 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
       }
     },
     async enqueue(fnRef, args, opts) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {});
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {}, kindOf);
     },
   };
 }
