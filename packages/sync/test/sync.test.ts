@@ -92,6 +92,10 @@ beforeEach(async () => {
     async runAdminQuery() {
       throw new Error("admin modules not configured");
     },
+    async runAction(path) {
+      const r = await exec.run(modules[path]!, jsonToConvex({}));
+      return { value: r.value as Value };
+    },
   };
 
   handler = new SyncProtocolHandler(syncExec);

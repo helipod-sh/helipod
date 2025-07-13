@@ -44,6 +44,7 @@ export type ClientMessage =
   | { type: "Connect"; sessionId: string }
   | { type: "ModifyQuerySet"; add: QueryRequest[]; remove: number[] }
   | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue }
+  | { type: "Action"; requestId: string; udfPath: string; args: JSONValue }
   | { type: "EphemeralPublish"; topic: string; event: JSONValue }
   | { type: "SetAuth"; token: string | null }
   | { type: "SetAdminAuth"; key: string };
@@ -57,6 +58,8 @@ export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }
   | { type: "MutationResponse"; requestId: string; success: true; value: JSONValue }
   | { type: "MutationResponse"; requestId: string; success: false; error: string }
+  | { type: "ActionResponse"; requestId: string; success: true; value: JSONValue }
+  | { type: "ActionResponse"; requestId: string; success: false; error: string }
   | { type: "Broadcast"; topic: string; event: JSONValue }
   | { type: "FatalError"; message: string }
   | { type: "Ping" };

@@ -191,6 +191,16 @@ export class EmbeddedRuntime {
         const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
       },
+      async runAction(path, args, identity) {
+        // `resolve` is the SAME public gate `runQuery`/`runMutation` use above — it throws on
+        // `_`-prefixed / namespaced-internal paths, so a client Action cannot reach internal
+        // modules (e.g. `scheduler:_enqueue`). Also enforce the action-only type check, matching
+        // the instance `runAction` (Task 1)'s public gate.
+        const fn = resolve(path);
+        if (fn.type !== "action") throw new Error(`${path} is not an action`);
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        return { value: r.value as Value };
+      },
     };
 
     // Reactivity is driven by the write fan-out (not inline in the mutation handler), so a

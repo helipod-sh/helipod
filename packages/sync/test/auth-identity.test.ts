@@ -22,6 +22,9 @@ class RecordingExecutor implements SyncUdfExecutor {
     throw new Error("admin modules not configured");
     return { value: null as unknown as Value, tables: [], readRanges: [] };
   }
+  async runAction(path: string) {
+    return { value: `acted:${path}` as unknown as Value };
+  }
 }
 
 describe("sync: per-session identity", () => {

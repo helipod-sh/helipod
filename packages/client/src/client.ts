@@ -27,6 +27,7 @@ export class StackbaseClient {
   private readonly subsByHash = new Map<string, Subscription>();
   private readonly subsById = new Map<number, Subscription>();
   private readonly pendingMutations = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
+  private readonly pendingActions = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly broadcastListeners = new Set<(topic: string, event: Value) => void>();
   private readonly disposeTransport: () => void;
   private readonly disposeClose: () => void;
@@ -87,6 +88,15 @@ export class StackbaseClient {
     });
   }
 
+  /** Run an action; resolves with its return value (or rejects with its error). Not reactive — an action has no subscription. */
+  action(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
+    const requestId = String(this.nextRequestId++);
+    return new Promise<Value>((resolve, reject) => {
+      this.pendingActions.set(requestId, { resolve, reject });
+      this.transport.send({ type: "Action", requestId, udfPath: getFunctionPath(ref), args: convexToJson(args as Value) });
+    });
+  }
+
   /** Set (or clear) the session identity for this connection; the server re-runs subscriptions under it. */
   setAuth(token: string | null): void {
     this.transport.send({ type: "SetAuth", token });
@@ -140,6 +150,15 @@ export class StackbaseClient {
         }
         return;
       }
+      case "ActionResponse": {
+        const pending = this.pendingActions.get(msg.requestId);
+        if (pending) {
+          this.pendingActions.delete(msg.requestId);
+          if (msg.success) pending.resolve(jsonToConvex(msg.value));
+          else pending.reject(new Error(msg.error));
+        }
+        return;
+      }
       case "Broadcast": {
         const event = jsonToConvex(msg.event);
         for (const listener of this.broadcastListeners) listener(msg.topic, event);
@@ -180,8 +199,10 @@ export class StackbaseClient {
   }
 
   private onTransportClosed(): void {
-    // Never leave a mutation promise hanging when the connection drops.
+    // Never leave a mutation/action promise hanging when the connection drops.
     for (const [, pending] of this.pendingMutations) pending.reject(new Error("connection closed"));
     this.pendingMutations.clear();
+    for (const [, pending] of this.pendingActions) pending.reject(new Error("connection closed"));
+    this.pendingActions.clear();
   }
 }

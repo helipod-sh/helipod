@@ -50,3 +50,12 @@ export function useMutation<T = Value>(
   const path = getFunctionPath(ref);
   return useCallback((args: Record<string, Value> = {}) => client.mutation(ref, args) as Promise<T>, [client, path]);
 }
+
+/** Returns a callback that runs an action and resolves with its return value. Not reactive — mirrors `useMutation`, not `useQuery`. */
+export function useAction<T = Value>(
+  ref: FunctionReference | string,
+): (args?: Record<string, Value>) => Promise<T> {
+  const client = useStackbaseClient();
+  const path = getFunctionPath(ref);
+  return useCallback((args: Record<string, Value> = {}) => client.action(ref, args) as Promise<T>, [client, path]);
+}
