@@ -1,6 +1,6 @@
 // components/scheduler/test/dispatch.test.ts
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
+import { action, mutation } from "@stackbase/executor";
 import { jsonToConvex } from "@stackbase/values";
 import { _claim, type ClaimResult } from "../src/modules";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
@@ -125,12 +125,20 @@ describe("schedulerDriver — event-driven dispatch", () => {
     expect(jobs.every((j) => j.state === "success")).toBe(true);
   });
 
-  it("a kind:'action' job fails with 'unsupported' instead of running", async () => {
+  it("a kind:'action' job dispatches and runs (the driver's action guard was removed)", async () => {
+    // Actions now execute (CLAUDE.md build-order #5's action runtime — see @stackbase/executor's
+    // action branch, Task 1 of the action-runtime slice), so the driver no longer special-cases
+    // `kind:"action"` jobs into an automatic "unsupported" failure — it dispatches them through
+    // the SAME `runFunction(claimed.fnPath, claimed.args)` path a mutation job uses. There's no
+    // public API yet to schedule a `kind:"action"` job directly (`ctx.scheduler`'s `kindOf()` still
+    // stubs every job to `kind:"mutation"` — a separate, later-slice registry-lookup gap), so this
+    // crafts one via the `_system:insertJob` escape hatch, exactly as the guard-proving version of
+    // this test did.
     const clock = 3_000_000;
     let ran = false;
     const { runtime, tick } = await makeRuntimeWithScheduler(
       {
-        "app:work": mutation(async () => {
+        "app:work": action(async () => {
           ran = true;
           return null;
         }),
@@ -138,29 +146,22 @@ describe("schedulerDriver — event-driven dispatch", () => {
       { now: () => clock },
     );
 
-    // `maxFailures: 1` so the single "unsupported" failure dead-letters immediately instead of
-    // retrying (Task 4's retry/backoff applies uniformly to every `kind:"failed"` result,
-    // including this one — see components/scheduler/src/modules.ts's `_complete`; that retry
-    // behavior itself is covered by test/reliability.test.ts, so this test pins `maxFailures` to
-    // keep its own focus on "actions never actually dispatch").
     const insertResult = await runtime.runSystem<string>("_system:insertJob", {
       fnPath: "app:work",
       kind: "action",
       nextTs: clock,
       args: {},
-      maxFailures: 1,
     });
     const jobId = insertResult.value;
 
     await tick();
 
-    expect(ran).toBe(false); // never dispatched — actions aren't runnable yet
+    expect(ran).toBe(true); // dispatched — actions are runnable now
     const jobs = await readTable(runtime, "scheduler/jobs");
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({
       _id: jobId,
-      state: "failed",
-      lastError: "unsupported: action runtime not built",
+      state: "success",
     });
   });
 

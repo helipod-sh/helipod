@@ -64,8 +64,18 @@ export interface SchedulerContext {
 
 /**
  * `kind` (mutation vs action) isn't derivable from a bare `fnPath` string without a function
- * registry lookup; every job is a mutation this slice (actions are a later slice — see
- * CLAUDE.md build order #5). Task 5/registry wiring can replace this with a real lookup.
+ * registry lookup — every job scheduled through this public facade is stamped `kind:"mutation"`
+ * for now, REGARDLESS of whether the target `fnPath` is actually registered as an action. The
+ * driver's dispatch (`driver.ts`) doesn't actually depend on this field being accurate — it always
+ * calls `ctx.runFunction(fnPath, args)`, which routes to the runtime and on to the executor's real
+ * action/mutation branch based on the target's ACTUAL registered type — so a scheduled action still
+ * runs correctly today despite this stub. What this stub gets wrong: `kind` also drives
+ * `_reclaim`'s at-most-once-vs-retry choice on a lease-expiry crash (`modules.ts`) — a real action
+ * whose job is mis-tagged `kind:"mutation"` would be blind-retried as if it were transactional,
+ * which isn't safe for an action's non-transactional side effects. No public API can create a real
+ * `kind:"action"` job yet (only the test-only `_system:insertJob` escape hatch can); a future
+ * registry-lookup slice should replace this stub with a real `fnPath -> "mutation" | "action"`
+ * lookup so `_reclaim` (and any future retry logic) sees the true kind.
  */
 function kindOf(_fnPath: string): "mutation" | "action" {
   return "mutation";

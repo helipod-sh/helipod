@@ -177,14 +177,15 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   }
 
   // result.kind === "failed" — retry with backoff, or dead-letter at maxFailures.
-  // TODO(action-slice): once actions can execute (CLAUDE.md build-order #5), a "failed" result
-  // from a CLEANLY-failed action (its own code threw/rejected, as opposed to an infra kill —
-  // that's `_reclaim`'s job below) must NOT blind-retry through this same backoff path. An
-  // action's side effects aren't transactional like a mutation's, so retrying one that already
-  // ran partway could re-run those side effects — this branch's blanket "retry up to
-  // maxFailures" is only safe for `kind:"mutation"` today (the only kind that actually runs —
-  // see `driver.ts`'s action guard). Revisit this branch (and `_reclaim`'s, which has the same
-  // gap) when actions are real.
+  // TODO(action-slice): actions now execute (CLAUDE.md build-order #5 — `driver.ts` no longer
+  // special-cases `kind:"action"`, it dispatches through this same path a mutation uses), so this
+  // gap is live, not hypothetical: a "failed" result from a CLEANLY-failed action (its own code
+  // threw/rejected, as opposed to an infra kill — that's `_reclaim`'s job below) still blind-retries
+  // through this same backoff path. An action's side effects aren't transactional like a
+  // mutation's, so retrying one that already ran partway could re-run those side effects — this
+  // branch's blanket "retry up to maxFailures" is only actually safe for `kind:"mutation"`.
+  // Revisit this branch (and `_reclaim`'s, which has the same gap) — not done as part of the
+  // guard-removal task.
   const attempts = (job.attempts as number) + 1;
   const maxFailures = job.maxFailures as number;
   const lastError = args.result.error;
