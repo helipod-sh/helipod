@@ -25,6 +25,20 @@ import {
 } from "./write-fanout";
 import { createLoopbackConnection, type LoopbackConnection } from "./loopback";
 
+/**
+ * Public-gate check: a path is internal (client-forbidden) if ANY colon-delimited segment
+ * starts with `_` — not just the whole path. `path.startsWith("_")` alone misses namespaced
+ * component-internal paths like `scheduler:_enqueue` (the string starts with "s"), letting a
+ * raw client dispatch privileged jobs directly. Blocks `_system:*`/`_admin:*` too (those have
+ * their own privileged/trusted entrypoints — `runSystem`/`runAdmin` — and must stay off this
+ * public surface). Do NOT use this to gate `invoke` (trusted server re-entrancy for actions'
+ * ctx.runQuery/runMutation/runAction) or the driver's `runFunction` — both MUST still reach
+ * `_`-prefixed modules.
+ */
+function isInternalPath(path: string): boolean {
+  return path.split(":").some((seg) => seg.startsWith("_"));
+}
+
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
   catalog: IndexCatalog;
@@ -140,7 +154,7 @@ export class EmbeddedRuntime {
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const adminModules: Record<string, RegisteredFunction> = { ...(options.adminModules ?? {}) };
     const resolve = (path: string): RegisteredFunction => {
-      if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+      if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
       const fn = modules[path];
       if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
       return fn;
@@ -296,7 +310,7 @@ export class EmbeddedRuntime {
 
   /** Directly invoke a function (for HTTP routes / the CLI `run` command). */
   async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
-    if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     return this.executor.run<T>(fn, jsonToConvex(args), {
@@ -312,7 +326,7 @@ export class EmbeddedRuntime {
 
   /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks `_`-prefixed paths. */
   async runAction<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
-    if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     if (fn.type !== "action") throw new Error(`${path} is not an action`);
