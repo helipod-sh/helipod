@@ -2,7 +2,7 @@ import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { JobState } from "./facade";
-import { enqueueInternal, fireOnComplete, type EnqueueTables } from "./facade";
+import { fireOnComplete, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
 import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type CatchUpPolicy } from "./crons";
 
@@ -177,14 +177,15 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   }
 
   // result.kind === "failed" — retry with backoff, or dead-letter at maxFailures.
-  // TODO(action-slice): once actions can execute (CLAUDE.md build-order #5), a "failed" result
-  // from a CLEANLY-failed action (its own code threw/rejected, as opposed to an infra kill —
-  // that's `_reclaim`'s job below) must NOT blind-retry through this same backoff path. An
-  // action's side effects aren't transactional like a mutation's, so retrying one that already
-  // ran partway could re-run those side effects — this branch's blanket "retry up to
-  // maxFailures" is only safe for `kind:"mutation"` today (the only kind that actually runs —
-  // see `driver.ts`'s action guard). Revisit this branch (and `_reclaim`'s, which has the same
-  // gap) when actions are real.
+  // TODO(action-slice): actions now execute (CLAUDE.md build-order #5 — `driver.ts` no longer
+  // special-cases `kind:"action"`, it dispatches through this same path a mutation uses), so this
+  // gap is live, not hypothetical: a "failed" result from a CLEANLY-failed action (its own code
+  // threw/rejected, as opposed to an infra kill — that's `_reclaim`'s job below) still blind-retries
+  // through this same backoff path. An action's side effects aren't transactional like a
+  // mutation's, so retrying one that already ran partway could re-run those side effects — this
+  // branch's blanket "retry up to maxFailures" is only actually safe for `kind:"mutation"`.
+  // Revisit this branch (and `_reclaim`'s, which has the same gap) — not done as part of the
+  // guard-removal task.
   const attempts = (job.attempts as number) + 1;
   const maxFailures = job.maxFailures as number;
   const lastError = args.result.error;
@@ -229,6 +230,36 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
 
 /** Fully-qualified table names — see this file's module doc comment for why (`_cronTick` runs privileged, dispatched by the driver like any other due job). */
 const CRON_TABLES: EnqueueTables = { jobs: "scheduler/jobs", jobArgs: "scheduler/job_args" };
+
+/**
+ * `scheduler:_enqueue` / `scheduler:_cancel` — internal (`_`-prefixed, so not client-callable)
+ * MUTATIONS that back the action-mode `ctx.scheduler` facade (`schedulerActionContext` in
+ * `./facade.ts`): an action has no `db`, so it can't write a `jobs` row itself — instead it calls
+ * `ctx.runMutation("scheduler:_enqueue"/"_cancel", ...)`, a fresh top-level mutation the trusted
+ * `invoke` seam resolves (see `ExecutorDeps.invoke`'s doc comment in `packages/executor/src/
+ * executor.ts` — it resolves ANY registered path, `_`-prefixed included, unlike the public
+ * `runtime.run`/`runAction`, which block `_`).
+ *
+ * Both run namespaced (NOT privileged) — `namespaceForPath("scheduler:_enqueue", ...)` resolves to
+ * `"scheduler"`, the same namespace `schedulerContext`'s facade runs in — so `ctx.scheduler` here
+ * is the ordinary in-txn facade from `./facade.ts`, writing through the SAME bare table names
+ * (`FACADE_TABLES`) as a normal mutation's `ctx.scheduler.runAfter(...)` call. `ctx: any` because
+ * `ctx.scheduler` isn't part of the exported `MutationCtx` shape (it's a dynamic per-component
+ * facade attached at run time — see `InlineUdfExecutor.run`'s `guestCtx` loop).
+ */
+export const _enqueue = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { fnPath: string; args: JSONValue; runAtMs: number }): Promise<string> =>
+    ctx.scheduler.runAt(a.runAtMs, a.fnPath, a.args),
+);
+
+export const _cancel = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { id: string }): Promise<null> => {
+    await ctx.scheduler.cancel(a.id);
+    return null;
+  },
+);
 
 /**
  * `scheduler:_cronTick` — a MUTATION: the dual-job cron cadence. Registered as an ordinary
@@ -413,8 +444,26 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
     }
   }
 
+  // Task 3c: route the WORK-job enqueue through `ctx.scheduler` (the scheduler's own
+  // `schedulerContext` facade, `./facade.ts`) rather than calling `enqueueInternal` directly as
+  // this loop used to. `_cronTick` is a mutation, so — exactly like `_enqueue`/`_cancel` above —
+  // the component's `context` provider is attached to its `ctx` regardless of the privileged
+  // dispatch (`InlineUdfExecutor.run` builds every context-provider facade unconditionally; see
+  // `packages/executor/src/executor.ts`'s `guestCtx` loop). That facade's `enqueue` closes over
+  // `cctx.functionKind` and resolves the target's REAL registered kind (facade.ts:233), so a work
+  // job whose `cron.workFnPath` is a registered action is correctly tagged `kind:"action"` instead
+  // of unconditionally defaulting to `"mutation"` the way a bare `enqueueInternal(...)` call (no
+  // `kindOf` arg) always did. VERIFIED equivalent to the old direct call: the facade's `db` runs
+  // namespaced under `namespace:"scheduler"` (not privileged), so its bare `"jobs"`/`"job_args"`
+  // table names resolve (via `getFullTableName`) to the exact same `"scheduler/jobs"`/
+  // `"scheduler/job_args"` physical tables `CRON_TABLES` names explicitly — and `EnqueueOpts`
+  // covers every opt this loop passes (`runAt`, `idempotencyKey`, `name`); it drops nothing.
+  // `ctx: any` mirrors `_enqueue`/`_cancel` below — `ctx.scheduler` isn't part of the exported
+  // `MutationCtx` shape (it's a dynamic per-component facade attached at run time).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const schedulerFacade = (ctx as any).scheduler as { enqueue(fnPath: string, args: JSONValue, opts: Record<string, unknown>): Promise<string> };
   for (const fireTs of toFire) {
-    await enqueueInternal(ctx.db, nowFn, CRON_TABLES, cron.workFnPath as string, cron.workArgs as JSONValue, {
+    await schedulerFacade.enqueue(cron.workFnPath as string, cron.workArgs as JSONValue, {
       runAt: fireTs,
       idempotencyKey: `${cron.name as string}:${fireTs}`,
       name: cron.name as string,

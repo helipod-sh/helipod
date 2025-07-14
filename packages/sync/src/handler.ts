@@ -31,6 +31,8 @@ export interface SyncUdfExecutor {
   runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
   runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number }>;
   runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
+  /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
+  runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
 }
 
 /** A committed write's invalidation — the transactor→sync fan-out payload (Tier 2: from a stream). */
@@ -103,6 +105,8 @@ export class SyncProtocolHandler {
         return this.handleModifyQuerySet(session, msg);
       case "Mutation":
         return this.handleMutation(session, msg);
+      case "Action":
+        return this.handleAction(session, msg);
       case "EphemeralPublish":
         this.publishEphemeral(msg.topic, msg.event, sessionId);
         return;
@@ -159,6 +163,23 @@ export class SyncProtocolHandler {
       }
     } catch (e) {
       this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: false, error: errMessage(e) });
+    }
+  }
+
+  /**
+   * A one-shot request→value call — NOT reactive (an action has no read/write set of its own).
+   * Deliberately does NOT call `notifyWrites`: any mutation the action invoked via
+   * `ctx.runMutation` already fanned out through that mutation's own commit.
+   */
+  private async handleAction(
+    session: Session,
+    msg: Extract<ClientMessage, { type: "Action" }>,
+  ): Promise<void> {
+    try {
+      const { value } = await this.executor.runAction(msg.udfPath, msg.args, session.identity);
+      this.send(session, { type: "ActionResponse", requestId: msg.requestId, success: true, value: convexToJson(value) });
+    } catch (e) {
+      this.send(session, { type: "ActionResponse", requestId: msg.requestId, success: false, error: errMessage(e) });
     }
   }
 

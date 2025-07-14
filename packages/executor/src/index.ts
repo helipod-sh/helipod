@@ -15,13 +15,13 @@ export { SyscallRouter, InlineSyscallChannel, createKernelRouter } from "./kerne
 export type { IndexCatalog, TableMeta } from "./catalog";
 export { SimpleIndexCatalog } from "./catalog";
 
-export type { DocId, QueryCtx, MutationCtx } from "./guest";
+export type { DocId, QueryCtx, MutationCtx, ActionCtx, FunctionReference } from "./guest";
 export { GuestDatabaseReader, GuestDatabaseWriter, QueryBuilder } from "./guest";
 
 export type { RegisteredFunction } from "./functions";
 export { query, mutation, action } from "./functions";
 
-export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider } from "./executor";
+export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi } from "./executor";
 export { InlineUdfExecutor, commitThenThrow, CommitThenThrow } from "./executor";
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";

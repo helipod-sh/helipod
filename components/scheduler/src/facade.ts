@@ -1,4 +1,4 @@
-import type { ComponentContext } from "@stackbase/executor";
+import type { ComponentContext, ActionApi } from "@stackbase/executor";
 import { GuestDatabaseWriter } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 
@@ -62,15 +62,6 @@ export interface SchedulerContext {
   enqueue(fnRef: FnRef, args: JSONValue, opts?: EnqueueOpts): Promise<string>;
 }
 
-/**
- * `kind` (mutation vs action) isn't derivable from a bare `fnPath` string without a function
- * registry lookup; every job is a mutation this slice (actions are a later slice — see
- * CLAUDE.md build order #5). Task 5/registry wiring can replace this with a real lookup.
- */
-function kindOf(_fnPath: string): "mutation" | "action" {
-  return "mutation";
-}
-
 /** App-version stamping (for rolling-deploy replay safety) is wired in a later slice. */
 function currentAppVersion(): string | undefined {
   return undefined;
@@ -128,6 +119,13 @@ export async function enqueueInternal(
   fnRef: FnRef,
   args: JSONValue,
   opts: EnqueueOpts,
+  /**
+   * Resolves the target's real kind for the job's `kind` column. Defaults to always-"mutation"
+   * — correct for every caller EXCEPT `schedulerContext`'s facade methods below, which pass a
+   * closure over `cctx.functionKind` (the only caller whose target might actually be an action;
+   * `_cronTick`'s cadence/work jobs and `fireOnComplete`'s callback are always mutations).
+   */
+  kindOf: (fnPath: string) => "mutation" | "action" = () => "mutation",
 ): Promise<string> {
   const fnPath = getFunctionPath(fnRef);
 
@@ -225,12 +223,21 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
   const db = cctx.db as GuestDatabaseWriter;
   const now = (): number => cctx.now;
 
+  // Resolves the target's REAL registered kind via the runtime-supplied `cctx.functionKind` (see
+  // its doc comment in `packages/executor/src/executor.ts`) — no longer a stub. Actions are the
+  // only non-transactional kind → the only one `_reclaim` (`./modules.ts`) must not blind-retry.
+  // A query is never a valid schedule target; treat anything not "action" as "mutation"
+  // (conservative: retryable). Unknown path (resolver absent, or the runtime didn't recognize the
+  // path) also defaults "mutation" — matches prior behavior; an unknown fn fails at dispatch
+  // regardless of what `kind` its job row was born with.
+  const kindOf = (fnPath: string): "mutation" | "action" => (cctx.functionKind?.(fnPath) === "action" ? "action" : "mutation");
+
   return {
     async runAfter(delayMs, fnRef, args) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: now() + Math.max(0, delayMs) });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: now() + Math.max(0, delayMs) }, kindOf);
     },
     async runAt(ts, fnRef, args) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts });
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, { runAt: ts instanceof Date ? ts.getTime() : ts }, kindOf);
     },
     async cancel(id) {
       const job = await db.get(id);
@@ -264,7 +271,50 @@ export function schedulerContext(cctx: ComponentContext): SchedulerContext {
       }
     },
     async enqueue(fnRef, args, opts) {
-      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {});
+      return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, opts ?? {}, kindOf);
+    },
+  };
+}
+
+/**
+ * The action-mode counterpart to `SchedulerContext` — same `runAfter`/`runAt`/`cancel` method
+ * signatures (so a function body scheduling work is portable between a mutation and an action),
+ * minus `enqueue` (the general opts-carrying path stays a mutation-only internal primitive; no
+ * action caller needs it yet). Deliberately NOT structurally assignable to `SchedulerContext` as a
+ * type (no `enqueue`) even though the three shared methods match exactly.
+ */
+export interface SchedulerActionContext {
+  runAfter(delayMs: number, fnRef: FnRef, args: JSONValue): Promise<string>;
+  runAt(ts: number | Date, fnRef: FnRef, args: JSONValue): Promise<string>;
+  cancel(id: string): Promise<void>;
+}
+
+/**
+ * Builds the action-mode `ctx.scheduler` — wired as `defineScheduler()`'s `buildAction` (see
+ * `./index.ts`). An action has no `db`, so `runAfter`/`runAt`/`cancel` can't write a `jobs` row
+ * directly the way `schedulerContext` above does; instead each delegates to `api.runMutation` of
+ * the internal `scheduler:_enqueue`/`scheduler:_cancel` mutations (`./modules.ts`), which run the
+ * SAME `enqueueInternal`/`cancel` logic inside their own fresh top-level transaction.
+ *
+ * `Date.now()` below (converting `runAfter`'s relative `delayMs` to an absolute `runAtMs`) is fine
+ * here even though queries/mutations must stay deterministic: an action is non-deterministic by
+ * design (see `ActionCtx`'s doc comment in `@stackbase/executor`), and the scheduler never
+ * recomputes anything from this timestamp — `scheduler:_enqueue` just stores it as `nextTs`.
+ */
+export function schedulerActionContext(api: ActionApi): SchedulerActionContext {
+  return {
+    async runAfter(delayMs, fnRef, args) {
+      return api.runMutation<string>("scheduler:_enqueue", { fnPath: getFunctionPath(fnRef), args, runAtMs: Date.now() + delayMs });
+    },
+    async runAt(ts, fnRef, args) {
+      return api.runMutation<string>("scheduler:_enqueue", {
+        fnPath: getFunctionPath(fnRef),
+        args,
+        runAtMs: ts instanceof Date ? ts.getTime() : ts,
+      });
+    },
+    async cancel(id) {
+      await api.runMutation("scheduler:_cancel", { id });
     },
   };
 }

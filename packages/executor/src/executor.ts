@@ -4,20 +4,26 @@
  * engine ONLY via JSON syscalls, so swapping in a real V8 isolate is a drop-in change.
  *
  * Queries and mutations run inside `transactor.runInTransaction`, so OCC validation and
- * deterministic replay come for free. (Actions, which run outside a transaction with native
- * capabilities, are a later slice.)
+ * deterministic replay come for free. Actions run OUTSIDE any transaction (see `runActionFn`)
+ * with native capabilities and no `ctx.db` — they reach data only via `ctx.runQuery`/`runMutation`.
  */
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
 import type { KeyRange } from "@stackbase/index-key-codec";
+import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
-import { GuestDatabaseReader, GuestDatabaseWriter } from "./guest";
+import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
 import type { IndexCatalog } from "./catalog";
 import type { RegisteredFunction } from "./functions";
 import type { LogKind, LogSink } from "./log-sink";
 import type { PolicyRegistry, PolicyContextProvider, RuleContext, RelationRegistry } from "./policy";
+
+/** `ref` may be a path string or a codegen'd `FunctionReference` (which carries `__path`). */
+function resolveRef(ref: FunctionReference | string): string {
+  return typeof ref === "string" ? ref : ref.__path;
+}
 
 export interface ExecutorDeps {
   transactor: Transactor;
@@ -25,6 +31,13 @@ export interface ExecutorDeps {
   catalog: IndexCatalog;
   logSink?: LogSink;
   now?: () => number;
+  /**
+   * Trusted server re-entrancy: resolves ANY registered path — including `_`-prefixed
+   * component-internal modules — unlike the public `runtime.run`/`runAction`, which block `_`.
+   * An action's `runQuery`/`runMutation`/`runAction` go through this to start a fresh,
+   * independent top-level run (its own transaction, or its own action execution).
+   */
+  invoke?: (path: string, args: JSONValue, opts?: { identity?: string | null }) => Promise<UdfResult>;
 }
 
 export interface ComponentContext {
@@ -34,6 +47,26 @@ export interface ComponentContext {
   readonly now: number;
   /** Facades of components built before this one (the ones it `requires` / can compose on). */
   readonly components: Record<string, unknown>;
+  /**
+   * Resolve a target function's registered kind by path (for schedulers tagging a job's
+   * `kind:"mutation"|"action"`). Undefined if the runtime didn't supply a resolver or the path
+   * is unknown. Optional + additive — facades/tests that build a cctx without it still work.
+   */
+  readonly functionKind?: (path: string) => "query" | "mutation" | "action" | "httpAction" | undefined;
+}
+
+/**
+ * The api handed to `ContextProvider.buildAction` — mirrors `ActionCtx`'s `runQuery`/
+ * `runMutation`/`runAction` (each a fresh top-level `invoke`) plus the ambient `identity`. No
+ * `db`: actions have none (see `ActionCtx`'s doc comment in `./guest.ts`), so an action-mode
+ * facade can only reach data by delegating to `runMutation`/`runQuery` of its own component's
+ * (typically `_`-prefixed) modules.
+ */
+export interface ActionApi {
+  runQuery<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runMutation<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runAction<T = unknown>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  identity: string | null;
 }
 
 export interface ContextProvider {
@@ -51,6 +84,16 @@ export interface ContextProvider {
    * as `GuestDatabaseReader`; a write-opted-in facade casts to `GuestDatabaseWriter` itself.
    */
   readonly write?: boolean;
+  /**
+   * Optional: the ACTION-mode counterpart to `build` — attached as `ctx[name]` inside an action
+   * instead of `build`'s in-txn facade (an action has no `db`, so `build` never runs there). Takes
+   * an `ActionApi` (no `db`) and must return a facade with the SAME method signatures as `build`'s,
+   * so a function body scheduling/calling through it is portable between a mutation and an action —
+   * e.g. `ctx.scheduler.runAfter(...)` delegates to `api.runMutation` of an internal `_`-prefixed
+   * mutation instead of writing `db` directly. Optional and additive: a component without it simply
+   * doesn't appear on the action ctx (see `InlineUdfExecutor.runActionFn`).
+   */
+  readonly buildAction?: (api: ActionApi) => object;
 }
 
 export interface RunOptions {
@@ -72,6 +115,8 @@ export interface RunOptions {
   policyProviders?: ReadonlyArray<PolicyContextProvider>;
   /** Declared relations, consulted by the kernel when resolving relation predicates. */
   relationRegistry?: RelationRegistry;
+  /** Resolve a target function's registered kind by path; threaded onto every `ComponentContext` built for `build(cctx)`. See `ComponentContext.functionKind`'s doc comment. */
+  functionKind?: (path: string) => "query" | "mutation" | "action" | "httpAction" | undefined;
 }
 
 export interface UdfResult<T = unknown> {
@@ -111,9 +156,8 @@ export class InlineUdfExecutor {
   constructor(private readonly deps: ExecutorDeps) {}
 
   async run<T = unknown>(fn: RegisteredFunction, args: unknown, options: RunOptions = {}): Promise<UdfResult<T>> {
-    if (fn.type === "action" || fn.type === "httpAction") {
-      throw new Error(`the inline executor does not yet run ${fn.type} functions (M5 scope)`);
-    }
+    if (fn.type === "httpAction") throw new Error("the inline executor does not yet run httpAction functions");
+    if (fn.type === "action") return this.runActionFn<T>(fn, args, options);
     const profile = profileFor(fn.type);
     const seed = options.seed ?? 0;
     const clock = this.deps.now ?? Date.now;
@@ -159,7 +203,7 @@ export class InlineUdfExecutor {
           const pctx: KernelContext = { ...baseKctx, namespace: p.namespace, privileged: false, profile: profileFor(canWrite ? "mutation" : "query") };
           const channel = new InlineSyscallChannel(this.router, pctx);
           const preader = canWrite ? new GuestDatabaseWriter(channel) : new GuestDatabaseReader(channel);
-          const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades }));
+          const facade = Object.freeze(p.build({ db: preader, identity: baseKctx.identity, now: baseKctx.now, components: builtFacades, functionKind: options.functionKind }));
           guestCtx[p.name] = facade;
           builtFacades[p.name] = facade;
         }
@@ -206,6 +250,48 @@ export class InlineUdfExecutor {
       };
     } catch (e) {
       logEntry("error", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+  }
+
+  /**
+   * Actions run OUTSIDE `transactor.runInTransaction` — no read/write-set tracking, no commit
+   * of their own. `ctx.db` is structurally absent (see `ActionCtx`); all data access goes
+   * through `runQuery`/`runMutation`/`runAction`, each a fresh top-level `invoke` — its own
+   * transaction (for query/mutation) or its own action execution.
+   */
+  private async runActionFn<T>(fn: RegisteredFunction, args: unknown, options: RunOptions): Promise<UdfResult<T>> {
+    const clock = this.deps.now ?? Date.now;
+    const startedAt = clock();
+    const invoke = this.deps.invoke;
+    if (!invoke) throw new Error("action execution requires an `invoke` runner (runtime wiring missing)");
+    const run = (_kind: "query" | "mutation" | "action") =>
+      async <T = unknown>(ref: FunctionReference | string, a: Record<string, unknown> = {}): Promise<T> => {
+        const path = resolveRef(ref);
+        const res = await invoke(path, convexToJson(jsonToConvex(a as unknown as JSONValue) as Value) as JSONValue, { identity: options.identity ?? null });
+        return res.value as T;
+      };
+    const runQuery = run("query");
+    const runMutation = run("mutation");
+    const runAction = run("action");
+    const actionCtx: Record<string, unknown> = { runQuery, runMutation, runAction };
+
+    // Component facades: only providers with a `buildAction` appear on the action ctx (a `build`-
+    // only component — the common case, e.g. read-only facades — simply doesn't show up here; its
+    // `build` is never invoked, since an action has no `db` for it to read through). Same
+    // reserved-name collision check as the mutation path's `guestCtx` loop in `run()` above.
+    const reserved = new Set(["runQuery", "runMutation", "runAction"]);
+    for (const p of options.contextProviders ?? []) {
+      if (!p.buildAction) continue;
+      if (reserved.has(p.name) || p.name in actionCtx) throw new Error(`context provider "${p.name}" collides with a reserved ctx key`);
+      actionCtx[p.name] = Object.freeze(p.buildAction({ runQuery, runMutation, runAction, identity: options.identity ?? null }));
+    }
+    try {
+      const value = await fn.handler(actionCtx, args);
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
+      return { value: value as T, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null };
+    } catch (e) {
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;
     }
   }

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
+import { SimpleIndexCatalog, query, mutation, action, type RegisteredFunction } from "@stackbase/executor";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { StackbaseClient, loopbackTransport, anyApi, type ClientTransport } from "../src/index";
@@ -24,11 +24,14 @@ const modules: Record<string, RegisteredFunction> = {
     handler: (ctx, { conversationId }) =>
       ctx.db.query("messages", "by_conversation").eq("conversationId", conversationId).collect(),
   }),
+  "messages:echo": action<{ body: string }, string>({
+    handler: async (_ctx, { body }) => `echo:${body}`,
+  }),
 };
 
 // Typed view of the runtime api proxy for the test.
 const api = anyApi as {
-  messages: { send: { __path: string }; list: { __path: string } };
+  messages: { send: { __path: string }; list: { __path: string }; echo: { __path: string } };
 };
 
 async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
@@ -94,6 +97,17 @@ describe("StackbaseClient — one-shot query and mutation", () => {
     const id = await client.mutation(api.messages.send, { conversationId: "c1", body: "hi" });
     expect(typeof id).toBe("string");
   });
+
+  it("action() resolves with the function's return value (one-shot, not reactive)", async () => {
+    const client = newClient("s1");
+    const value = await client.action(api.messages.echo, { body: "hi" });
+    expect(value).toBe("echo:hi");
+  });
+
+  it("action() rejects when the target is an internal module (client can't reach `_`-paths)", async () => {
+    const client = newClient("s1");
+    await expect(client.action("scheduler:_enqueue", {})).rejects.toThrow();
+  });
 });
 
 class MockTransport implements ClientTransport {
@@ -148,6 +162,24 @@ describe("StackbaseClient — protocol safety", () => {
     const t = new MockTransport();
     const client = new StackbaseClient(t);
     const pending = client.mutation(api.messages.send, { conversationId: "c1", body: "x" });
+    t.close();
+    await expect(pending).rejects.toThrow(/connection closed/);
+  });
+
+  it("action() sends an Action message and resolves on the matching ActionResponse", async () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    const pending = client.action(api.messages.echo, { body: "hi" });
+    expect(t.sent.at(-1)).toMatchObject({ type: "Action", udfPath: "messages:echo", args: { body: "hi" } });
+    const requestId = (t.sent.at(-1) as any).requestId;
+    t.emit({ type: "ActionResponse", requestId, success: true, value: "echo:hi" });
+    await expect(pending).resolves.toBe("echo:hi");
+  });
+
+  it("rejects pending actions when the transport closes (no hung promises)", async () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    const pending = client.action(api.messages.echo, { body: "x" });
     t.close();
     await expect(pending).rejects.toThrow(/connection closed/);
   });

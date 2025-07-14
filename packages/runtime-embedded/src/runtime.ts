@@ -25,6 +25,20 @@ import {
 } from "./write-fanout";
 import { createLoopbackConnection, type LoopbackConnection } from "./loopback";
 
+/**
+ * Public-gate check: a path is internal (client-forbidden) if ANY colon-delimited segment
+ * starts with `_` — not just the whole path. `path.startsWith("_")` alone misses namespaced
+ * component-internal paths like `scheduler:_enqueue` (the string starts with "s"), letting a
+ * raw client dispatch privileged jobs directly. Blocks `_system:*`/`_admin:*` too (those have
+ * their own privileged/trusted entrypoints — `runSystem`/`runAdmin` — and must stay off this
+ * public surface). Do NOT use this to gate `invoke` (trusted server re-entrancy for actions'
+ * ctx.runQuery/runMutation/runAction) or the driver's `runFunction` — both MUST still reach
+ * `_`-prefixed modules.
+ */
+function isInternalPath(path: string): boolean {
+  return path.split(":").some((seg) => seg.startsWith("_"));
+}
+
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
   catalog: IndexCatalog;
@@ -97,7 +111,29 @@ export class EmbeddedRuntime {
     const startTs = await options.store.maxTimestamp();
     const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
     const queryRuntime = new QueryRuntime(options.store);
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now });
+
+    // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:
+    // it resolves ANY registered path, including `_`-prefixed component-internal modules — unlike
+    // the public `run`/`runAction` below, which block `_`. The executor is constructed before
+    // `contextProviders`/`policyRegistry`/etc. below exist and before `modules` is populated, so
+    // `invoke` reads them through a mutable closure var (`executorRef`) to break the cycle.
+    let executorRef: InlineUdfExecutor;
+    const invoke = async (path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult> => {
+      const fn = modules[path];
+      if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+      return executorRef.run(fn, jsonToConvex(args), {
+        path,
+        namespace: namespaceForPath(path, componentNames),
+        contextProviders,
+        policyRegistry,
+        policyProviders,
+        relationRegistry,
+        functionKind,
+        identity: opts?.identity ?? null,
+      });
+    };
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
+    executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
     for (const step of options.bootSteps ?? []) {
@@ -118,8 +154,14 @@ export class EmbeddedRuntime {
     const modules: Record<string, RegisteredFunction> = { ...options.modules };
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const adminModules: Record<string, RegisteredFunction> = { ...(options.adminModules ?? {}) };
+    // Resolves a target path's REAL registered kind — threaded onto every `ComponentContext` so
+    // component facades (e.g. `@stackbase/scheduler`'s `kindOf`) can tag a job's
+    // kind:"mutation"|"action" accurately instead of guessing. See `ComponentContext.functionKind`'s
+    // doc comment (packages/executor/src/executor.ts). A plain lookup against the SAME mutable
+    // `modules` map `setModules` hot-swaps in place, so it stays correct across a dev reload.
+    const functionKind = (path: string): "query" | "mutation" | "action" | "httpAction" | undefined => modules[path]?.type;
     const resolve = (path: string): RegisteredFunction => {
-      if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+      if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
       const fn = modules[path];
       if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
       return fn;
@@ -127,7 +169,7 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
@@ -135,7 +177,7 @@ export class EmbeddedRuntime {
         };
       },
       async runMutation(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -148,6 +190,16 @@ export class EmbeddedRuntime {
         if (!fn) throw new Error(`unknown admin function: ${path}`);
         const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
+      },
+      async runAction(path, args, identity) {
+        // `resolve` is the SAME public gate `runQuery`/`runMutation` use above — it throws on
+        // `_`-prefixed / namespaced-internal paths, so a client Action cannot reach internal
+        // modules (e.g. `scheduler:_enqueue`). Also enforce the action-only type check, matching
+        // the instance `runAction` (Task 1)'s public gate.
+        const fn = resolve(path);
+        if (fn.type !== "action") throw new Error(`${path} is not an action`);
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        return { value: r.value as Value };
       },
     };
 
@@ -189,6 +241,7 @@ export class EmbeddedRuntime {
           policyRegistry,
           policyProviders,
           relationRegistry,
+          functionKind,
           identity: null,
           privileged: true,
         });
@@ -262,6 +315,14 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers);
   }
 
+  /**
+   * Resolves a target path's REAL registered kind against the live `this.modules` map — same
+   * resolver shape as `create()`'s local `functionKind` closure, but bound to the instance so it
+   * stays correct across `setModules` hot-swaps. See `ComponentContext.functionKind`'s doc
+   * comment (packages/executor/src/executor.ts).
+   */
+  private functionKind = (path: string): "query" | "mutation" | "action" | "httpAction" | undefined => this.modules[path]?.type;
+
   /** Hot-swap the function map (dev reload) without disturbing the store/transactor. */
   setModules(modules: Record<string, RegisteredFunction>): void {
     for (const key of Object.keys(this.modules)) delete this.modules[key];
@@ -275,7 +336,7 @@ export class EmbeddedRuntime {
 
   /** Directly invoke a function (for HTTP routes / the CLI `run` command). */
   async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
-    if (path.startsWith("_")) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     return this.executor.run<T>(fn, jsonToConvex(args), {
@@ -285,6 +346,25 @@ export class EmbeddedRuntime {
       policyRegistry: this.policyRegistry,
       policyProviders: this.policyProviders,
       relationRegistry: this.relationRegistry,
+      functionKind: this.functionKind,
+      identity: opts?.identity ?? null,
+    });
+  }
+
+  /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks `_`-prefixed paths. */
+  async runAction<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
+    if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    const fn = this.modules[path];
+    if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (fn.type !== "action") throw new Error(`${path} is not an action`);
+    return this.executor.run<T>(fn, jsonToConvex(args), {
+      path,
+      namespace: namespaceForPath(path, this.componentNames),
+      contextProviders: this.contextProviders,
+      policyRegistry: this.policyRegistry,
+      policyProviders: this.policyProviders,
+      relationRegistry: this.relationRegistry,
+      functionKind: this.functionKind,
       identity: opts?.identity ?? null,
     });
   }

@@ -128,18 +128,19 @@ export function schedulerDriver(): SchedulerDriver {
         const claimed = (await ctx.runFunction("scheduler:_claim", { jobId: job._id })) as ClaimResult | null;
         if (claimed === null) continue; // lost the claim race → another caller got there first, skip
 
+        // Mutations and actions dispatch through the identical path: `ctx.runFunction` routes to
+        // the runtime, which routes to the executor's action branch for a `kind:"action"` fnPath
+        // (CLAUDE.md build-order #5's action runtime — see @stackbase/executor) — the driver
+        // itself doesn't need to know which kind it claimed. At-most-once for actions is NOT this
+        // try/catch's job: it's already guaranteed by `_claim` committing `state:"inProgress"`
+        // BEFORE this call runs, so a crash mid-action leaves the job for `_reclaim`'s lease sweep
+        // to dead-letter (`modules.ts`'s `_reclaim`) rather than ever re-dispatching it here.
         let result: JobResult;
-        if (claimed.kind === "action") {
-          // Actions run outside a transaction with native capabilities (CLAUDE.md build-order
-          // #5, not built yet) — fail cleanly instead of silently running an action as a mutation.
-          result = { kind: "failed", error: "unsupported: action runtime not built" };
-        } else {
-          try {
-            const value = await ctx.runFunction(claimed.fnPath, claimed.args);
-            result = { kind: "success", value };
-          } catch (e) {
-            result = { kind: "failed", error: String(e) };
-          }
+        try {
+          const value = await ctx.runFunction(claimed.fnPath, claimed.args);
+          result = { kind: "success", value };
+        } catch (e) {
+          result = { kind: "failed", error: String(e) };
         }
         // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
         // `JSONValue` — it's already been through the same JSON syscall round-trip as any other
