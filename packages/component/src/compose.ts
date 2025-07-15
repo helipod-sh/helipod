@@ -138,6 +138,50 @@ function buildRelationRegistry(
   return { toMany, toOne };
 }
 
+/**
+ * Stable topological sort of `components` by `requires`: every component ends up AFTER all
+ * components it `requires`. Kahn's algorithm, processing the ready queue in original input order,
+ * so a config with no cross-dependencies (or ties among ready nodes) is left in input order —
+ * only `requires` edges force a reorder. Presence of `requires` targets is validated by the
+ * caller before this runs; unresolvable targets are simply skipped here (no edge added).
+ */
+function topoSortByRequires(components: ComponentDefinition[]): ComponentDefinition[] {
+  const byName = new Map(components.map((c) => [c.name, c]));
+  const indeg = new Map<string, number>();
+  const dependents = new Map<string, string[]>(); // req -> [names that require it]
+  for (const c of components) indeg.set(c.name, 0);
+  for (const c of components) {
+    for (const req of c.requires ?? []) {
+      if (!byName.has(req)) continue; // presence already validated by the caller; guard anyway
+      indeg.set(c.name, (indeg.get(c.name) ?? 0) + 1);
+      (dependents.get(req) ?? dependents.set(req, []).get(req)!).push(c.name);
+    }
+  }
+  // ready queue in ORIGINAL order for stability
+  const ready = components.filter((c) => (indeg.get(c.name) ?? 0) === 0).map((c) => c.name);
+  const out: ComponentDefinition[] = [];
+  while (ready.length) {
+    const name = ready.shift()!; // FIFO on original order = stable
+    out.push(byName.get(name)!);
+    for (const dep of dependents.get(name) ?? []) {
+      const n = (indeg.get(dep) ?? 0) - 1;
+      indeg.set(dep, n);
+      if (n === 0) {
+        // insert preserving original order among newly-ready nodes
+        const origIdx = components.findIndex((c) => c.name === dep);
+        let i = 0;
+        while (i < ready.length && components.findIndex((c) => c.name === ready[i]) < origIdx) i++;
+        ready.splice(i, 0, dep);
+      }
+    }
+  }
+  if (out.length !== components.length) {
+    const cyc = components.filter((c) => !out.includes(c)).map((c) => c.name);
+    throw new Error(`component requires form a cycle (unresolvable order): ${cyc.join(", ")}`);
+  }
+  return out;
+}
+
 export function composeComponents(
   app: { schemaJson: SchemaDefinitionJSON; moduleMap: Record<string, RegisteredFunction> },
   components: ComponentDefinition[],
@@ -146,14 +190,15 @@ export function composeComponents(
   for (const c of components) for (const req of c.requires ?? []) {
     if (!names.has(req)) throw new Error(`component "${c.name}" requires "${req}", which is not enabled`);
   }
-  const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components });
-  const moduleMap = composeModules(app.moduleMap, components);
-  const contextProviders: ContextProvider[] = components
+  const ordered = topoSortByRequires(components);
+  const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components: ordered });
+  const moduleMap = composeModules(app.moduleMap, ordered);
+  const contextProviders: ContextProvider[] = ordered
     .filter((c) => c.context)
     .map((c) => ({ name: c.name, namespace: c.name, build: c.context!, write: c.contextWrite === true, buildAction: c.buildAction }));
   const policyRegistry = new Map<string, TablePolicy>();
   const policyProviders: PolicyContextProvider[] = [];
-  for (const c of components) {
+  for (const c of ordered) {
     for (const [table, policy] of Object.entries(c.policies ?? {})) {
       const key = getFullTableName(table, ""); // policies gate app (root) tables in v1
       if (tableNumbers[key] === undefined) throw new Error(`component "${c.name}" declares a policy for unknown table "${table}"`);
@@ -162,8 +207,8 @@ export function composeComponents(
     }
     if (c.policyContext) policyProviders.push({ namespace: c.name, build: c.policyContext });
   }
-  const relationRegistry = buildRelationRegistry(app.schemaJson, components);
-  const bootSteps = components.filter((c) => c.boot).map((c) => ({ name: c.name, run: c.boot! }));
-  const drivers = components.filter((c) => c.driver).map((c) => c.driver!);
-  return { catalog, moduleMap, componentNames: new Set(components.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps, drivers };
+  const relationRegistry = buildRelationRegistry(app.schemaJson, ordered);
+  const bootSteps = ordered.filter((c) => c.boot).map((c) => ({ name: c.name, run: c.boot! }));
+  const drivers = ordered.filter((c) => c.driver).map((c) => c.driver!);
+  return { catalog, moduleMap, componentNames: new Set(ordered.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps, drivers };
 }
