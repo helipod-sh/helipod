@@ -109,15 +109,35 @@ export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
     const outcome = await runReplay(def.handler, wf.args, journal);
     const sched = schedulerFacade(ctx);
 
+    // OCC guard (double-advance case): `runReplay` drains the handler through a REAL microtask/
+    // timer barrier (`drainMicrotasks` in `./replay.ts`) that can take real wall-clock time, during
+    // which another transaction — e.g. `ctx.workflow.cancel` — could have committed and bumped
+    // `generationNumber` (or moved `state` off `"running"` entirely). Re-read the row and recheck
+    // before writing anything, so a stale replay outcome can't clobber a since-canceled/restarted
+    // run. `wf.state !== "running"` at the top of this function only catches a cancel that landed
+    // BEFORE this poll started; this catches one that lands DURING it.
+    const fresh = await ctx.db.get(a.workflowId);
+    if (!fresh || fresh.state !== "running" || fresh.generationNumber !== gen) return null;
+
     if (outcome.kind === "completed") {
-      await ctx.db.replace(a.workflowId, { ...wf, state: "completed", result: outcome.result, completedTs: ctx.now() });
-      await fireWorkflowOnComplete(ctx, wf, { kind: "success", value: outcome.result });
+      await ctx.db.replace(a.workflowId, { ...fresh, state: "completed", result: outcome.result, completedTs: ctx.now() });
+      await fireWorkflowOnComplete(ctx, fresh, { kind: "success", value: outcome.result });
     } else if (outcome.kind === "failed") {
-      await ctx.db.replace(a.workflowId, { ...wf, state: "failed", error: outcome.error, completedTs: ctx.now() });
-      await fireWorkflowOnComplete(ctx, wf, { kind: "failed", error: outcome.error });
+      await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error: outcome.error, completedTs: ctx.now() });
+      await fireWorkflowOnComplete(ctx, fresh, { kind: "failed", error: outcome.error });
+    } else if (outcome.newSteps.length === 0 && !journal.some((row) => row.state === "pending")) {
+      // Silent-stall guard: the handler suspended (didn't return/throw) but journaled no new step
+      // AND no previously-dispatched step is still in flight to ever re-enqueue `_advance`. The
+      // only way to reach this state is a handler that `await`ed something other than `step.*` —
+      // a raw promise/timer/etc — a determinism violation (see `step.ts`'s determinism discipline).
+      // Left alone this would hang forever with no error; fail loudly instead.
+      const error =
+        "workflow suspended with no pending step — the handler likely awaited a non-step promise (determinism violation)";
+      await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error, completedTs: ctx.now() });
+      await fireWorkflowOnComplete(ctx, fresh, { kind: "failed", error });
     } else {
       for (const ns of outcome.newSteps) {
-        await ctx.db.insert(STEPS_TABLE, {
+        const stepId = await ctx.db.insert(STEPS_TABLE, {
           workflowId: a.workflowId,
           stepNumber: ns.stepNumber,
           name: ns.name,
@@ -126,10 +146,14 @@ export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
           state: "pending",
           startedTs: ctx.now(),
         });
-        await sched.enqueue(ns.name, ns.args, {
+        const jobId = await sched.enqueue(ns.name, ns.args, {
           onComplete: "workflow:_stepDone",
           context: { workflowId: a.workflowId, stepNumber: ns.stepNumber, generationNumber: gen } as unknown as JSONValue,
         });
+        // Stamp the dispatched job's id back onto the journal row so `ctx.workflow.cancel`
+        // (`./facade.ts`) can cascade-cancel it later via `ctx.scheduler.cancel(scheduledJobId)`.
+        const stepRow = await ctx.db.get(stepId);
+        await ctx.db.replace(stepId, { ...stepRow, scheduledJobId: jobId });
       }
     }
     return null;

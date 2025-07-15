@@ -31,7 +31,23 @@ export async function makeRuntimeWithWorkflow(
   appModules: Record<string, RegisteredFunction>,
   workflows: WorkflowRegistry,
   opts?: { now?: () => number; store?: SqliteDocStore },
-): Promise<{ runtime: EmbeddedRuntime; tick: () => Promise<void>; wake: () => void; sweep: () => Promise<void> }> {
+): Promise<{
+  runtime: EmbeddedRuntime;
+  tick: () => Promise<void>;
+  wake: () => void;
+  sweep: () => Promise<void>;
+  /**
+   * The composed scheduler driver itself — exposed (beyond the `tick`/`wake`/`sweep` seams above)
+   * so a test that needs to freeze the event-driven cascade mid-flight (e.g. to observe a step's
+   * scheduler job while it's still genuinely `"pending"`, not yet auto-claimed by the reactive
+   * `onCommit` wake) can call `driver.stop()` right after setup, then drive everything by hand via
+   * `tick()` — with `onCommit` unsubscribed, each `tick()` call processes exactly the jobs due at
+   * that moment (no nested wake-triggered cascade to a job created mid-pass), instead of the
+   * default fully-reactive behavior where a single `tick()`/commit can cascade a whole multi-step
+   * workflow to completion in one pass.
+   */
+  driver: SchedulerDriver;
+}> {
   const schema = defineSchema({});
   const c = composeComponents(
     { schemaJson: schema.export(), moduleMap: appModules },
@@ -54,7 +70,7 @@ export async function makeRuntimeWithWorkflow(
   });
   const driver = c.drivers.find((d) => d.name === "scheduler") as SchedulerDriver | undefined;
   if (!driver) throw new Error("scheduler driver not wired — defineScheduler() must set `driver: schedulerDriver()`");
-  return { runtime, tick: () => driver.__tick(), wake: () => driver.__wake(), sweep: () => driver.__sweep() };
+  return { runtime, tick: () => driver.__tick(), wake: () => driver.__wake(), sweep: () => driver.__sweep(), driver };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

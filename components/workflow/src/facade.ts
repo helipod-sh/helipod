@@ -14,7 +14,11 @@ export type { FnRef } from "@stackbase/scheduler";
 export interface WorkflowContext {
   /** Starts a new workflow run, returning its `runId` (the `workflows` row id). */
   start(ref: FnRef, args: JSONValue): Promise<string>;
-  /** Cancels a running workflow. STUB in Task 1 — full impl (cascading step/event cleanup) is Task 3. */
+  /**
+   * Cancels a running workflow: bumps `generationNumber`, sets `state:"canceled"`, and cascades
+   * cancel to any in-flight step jobs. A no-op if the run is already terminal. Full impl landed
+   * Task 3 — see `workflowContext` below.
+   */
   cancel(runId: string): Promise<void>;
 }
 
@@ -58,10 +62,28 @@ export function workflowContext(cctx: ComponentContext): WorkflowContext {
       await scheduler.enqueue("workflow:_advance", { workflowId }, { runAt: now() });
       return workflowId as string;
     },
-    async cancel(_runId) {
-      // Task 1 is the skeleton slice — cancel's cascading step/event cleanup is Task 3. Fail
-      // loudly rather than silently no-op, so a caller can't mistake this for a real cancel.
-      throw new Error("ctx.workflow.cancel: not implemented yet (Task 3)");
+    async cancel(runId) {
+      // Task 3: the real cancel. Reads the `workflows` row, bumps `generationNumber` (this is
+      // what makes any in-flight step's later `_stepDone` — which carries the OLD generation as
+      // part of its `onComplete` context, stamped by `_advance` — self-discard rather than
+      // resurrect the run; see `_stepDone`'s OCC guard in `./modules.ts`), and flips `state` to
+      // `"canceled"`. Then cascades the cancel to every `steps` row still `"pending"` with a
+      // `scheduledJobId` — the scheduler's own `cancel()` (`@stackbase/scheduler`'s
+      // `schedulerContext`) further cascades to that job's own descendants (e.g. a retry chain),
+      // so we only need to walk OUR direct step jobs here, not recurse ourselves.
+      const wf = await db.get(runId);
+      if (wf === null) throw new Error(`ctx.workflow.cancel: no such workflow ${runId}`);
+      if (wf.state !== "running") return; // already terminal (completed/failed/canceled) — idempotent no-op
+      const gen = wf.generationNumber as number;
+      await db.replace(runId, { ...wf, state: "canceled", generationNumber: gen + 1, completedTs: now() });
+
+      const scheduler = cctx.components.scheduler as SchedulerContext;
+      const steps = await db.query("steps", "by_workflow").eq("workflowId", runId).collect();
+      for (const s of steps) {
+        if (s.state === "pending" && typeof s.scheduledJobId === "string") {
+          await scheduler.cancel(s.scheduledJobId);
+        }
+      }
     },
   };
 }
