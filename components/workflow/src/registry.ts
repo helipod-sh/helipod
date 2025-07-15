@@ -2,15 +2,13 @@
  * The workflow authoring surface's registry types — mirrors `@stackbase/scheduler`'s job registry
  * shape, but for durable multi-step workflow handlers rather than one-shot scheduled functions.
  *
- * `WorkflowHandlerCtx` is deliberately `unknown`-shaped here — it's the `step` object a workflow
- * handler receives (`step.runMutation(...)`, `step.sleep(...)`, etc.), filled in by Task 2's
- * replay loop. Task 1 only needs the registry SHAPE (so `workflow.define({...})` type-checks and
- * `defineWorkflow({ workflows })` can look handlers up by path) — `_advance` never actually calls
- * a handler yet (see `./modules.ts`'s `makeAdvance` stub).
+ * `WorkflowHandlerCtx` is the `step` object a workflow handler receives (`step.runMutation(...)`,
+ * `step.runQuery(...)`, …) — Task 2's replay loop (`./replay.ts`) fills it in as `StepApi`
+ * (`runAction`/`sleep`/`waitForEvent` are added in Tasks 4/6). `import type` only, to avoid a
+ * runtime circular import: `./replay.ts` imports `WorkflowHandler` from here.
  */
-export interface WorkflowHandlerCtx {
-  // Filled in by Task 2 — the `step` object (`step.runMutation`/`step.runAction`/`step.sleep`/…).
-}
+import type { StepApi as WorkflowHandlerCtx } from "./replay";
+export type { WorkflowHandlerCtx };
 
 export type WorkflowHandler = (step: WorkflowHandlerCtx, args: unknown) => Promise<unknown>;
 

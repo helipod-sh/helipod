@@ -1,13 +1,15 @@
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
-import { status, makeAdvance } from "./modules";
+import { status, makeAdvance, _stepDone } from "./modules";
 import { define, type WorkflowRegistry } from "./registry";
 
 export * from "./schema";
 export type { WorkflowHandlerCtx, WorkflowHandler, WorkflowDefinition, WorkflowRegistry } from "./registry";
 export type { WorkflowContext, WorkflowActionContext, FnRef } from "./facade";
 export { workflowContext, workflowActionContext } from "./facade";
+export type { StepApi, JournalRow, NewStep, ReplayOutcome } from "./replay";
+export { runReplay } from "./replay";
 
 /** `workflow.define({ handler })` — the authoring surface an app's workflow module calls. */
 export const workflow = { define };
@@ -26,16 +28,17 @@ export const workflow = { define };
  * lets `start` write (via the calling mutation's own transaction) instead of only reading — see
  * `workflowContext` in `./facade.ts`.
  *
- * Task 1 is the skeleton slice: `_advance` (`makeAdvance` in `./modules.ts`) is a deliberate
- * no-op stub — the real replay loop that actually runs a workflow's registered handler forward
- * through the durable `steps` journal is Task 2.
+ * Task 2 replaced `_advance`'s Task-1 no-op stub with the real deterministic-replay loop
+ * (`makeAdvance` in `./modules.ts`, driving `./replay.ts`'s `runReplay`) and added `_stepDone`,
+ * the scheduler `onComplete` callback that journals a finished step's result and re-enqueues
+ * `_advance` — see those files' doc comments for the full mechanism.
  */
 export function defineWorkflow(opts: { workflows: WorkflowRegistry }): ComponentDefinition {
   return defineComponent({
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows), status },
+    modules: { _advance: makeAdvance(opts.workflows), _stepDone, status },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,
