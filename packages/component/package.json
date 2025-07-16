@@ -14,5 +14,14 @@
     "@stackbase/index-key-codec": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
-  "devDependencies": { "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+  "devDependencies": {
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/query-engine": "workspace:*",
+    "@stackbase/transactor": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
 }

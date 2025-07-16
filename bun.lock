@@ -94,6 +94,25 @@
         "vitest": "catalog:",
       },
     },
+    "components/workflow": {
+      "name": "@stackbase/workflow",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/component": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/scheduler": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/client": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "examples/auth-demo": {
       "name": "@stackbase/example-auth-demo",
       "version": "0.0.0",
@@ -103,6 +122,7 @@
         "@stackbase/executor": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
         "@stackbase/values": "workspace:*",
+        "@stackbase/workflow": "workspace:*",
       },
       "devDependencies": {
         "@stackbase/admin": "workspace:*",
@@ -188,6 +208,7 @@
       "devDependencies": {
         "@stackbase/client": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
+        "@stackbase/workflow": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "tsup": "catalog:",
@@ -248,6 +269,10 @@
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/query-engine": "workspace:*",
+        "@stackbase/transactor": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -650,6 +675,8 @@
     "@stackbase/transactor": ["@stackbase/transactor@workspace:packages/transactor"],
 
     "@stackbase/values": ["@stackbase/values@workspace:packages/values"],
+
+    "@stackbase/workflow": ["@stackbase/workflow@workspace:components/workflow"],
 
     "@tanstack/history": ["@tanstack/history@1.162.0", "", {}, "sha512-79pf/RkhteYZTRgcR4F9kbk84P2N8rugQJswxfIqovlbRiT3yI7eBE+5QorIrZaOKktsgzRlXh1l/du/xpl4iA=="],
 
