@@ -53,6 +53,9 @@ export const _sleep = mutation(async () => null);
  */
 const STEPS_TABLE = "workflow/steps";
 
+/** `makeAdvance`'s default fan-out cap when `defineWorkflow({ maxParallelism })` doesn't set one — see `makeAdvance`'s doc comment. */
+const DEFAULT_MAX_PARALLELISM = 16;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function schedulerFacade(ctx: any): SchedulerContext {
   return ctx.scheduler as SchedulerContext;
@@ -105,8 +108,18 @@ async function fireWorkflowOnComplete(
  *
  * No-ops if the workflow is missing or already terminal (`state !== "running"`) — a stale
  * `_advance` re-poll (e.g. racing a cancel) shouldn't resurrect a finished run.
+ *
+ * `maxParallelism` (Task 5, default `DEFAULT_MAX_PARALLELISM`) caps how many of `outcome.newSteps`
+ * get journaled + dispatched THIS poll when a fan-out (`Promise.all([step.a(), step.b(), ...])`)
+ * emits more new steps than that in one go. `runReplay` itself has no notion of a cap — it always
+ * returns every synchronously-emitted new step (see `./replay.ts`'s doc comment) — so the cap is
+ * enforced here, at dispatch time: only the first `maxParallelism` are journaled/enqueued; the rest
+ * are left un-journaled and simply re-emitted (as "new" all over again, since `runReplay` replays
+ * the handler from the top every poll) once `_stepDone` re-enqueues `_advance` after this wave's
+ * steps complete. No steps are silently dropped — every one eventually dispatches, just spread
+ * across `ceil(newSteps.length / maxParallelism)` polls instead of one.
  */
-export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
+export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number = DEFAULT_MAX_PARALLELISM): RegisteredFunction {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mutation(async (ctx: any, a: { workflowId: string }): Promise<null> => {
     const wf = await ctx.db.get(a.workflowId);
@@ -146,7 +159,17 @@ export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
       await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error, completedTs: ctx.now() });
       await fireWorkflowOnComplete(ctx, fresh, { kind: "failed", error });
     } else {
-      for (const ns of outcome.newSteps) {
+      // Task 5 fan-out cap: dispatch at most `maxParallelism` of this poll's new steps. The
+      // remainder (if any) are simply left un-journaled — `runReplay` will emit them again as
+      // "new" on the NEXT `_advance` poll (triggered once this wave's steps `_stepDone`), so
+      // nothing is dropped, it's just spread across more polls. See `makeAdvance`'s doc comment.
+      const toDispatch = outcome.newSteps.slice(0, maxParallelism);
+      if (outcome.newSteps.length > maxParallelism) {
+        console.warn(
+          `[workflow] fan-out of ${outcome.newSteps.length} new steps exceeded maxParallelism (${maxParallelism}) — dispatched the first ${maxParallelism} this poll, the remaining ${outcome.newSteps.length - maxParallelism} will dispatch on subsequent polls.`,
+        );
+      }
+      for (const ns of toDispatch) {
         const stepId = await ctx.db.insert(STEPS_TABLE, {
           workflowId: a.workflowId,
           stepNumber: ns.stepNumber,

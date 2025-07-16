@@ -47,7 +47,7 @@ function systemModules(): Record<string, RegisteredFunction> {
 export async function makeRuntimeWithWorkflow(
   appModules: Record<string, RegisteredFunction>,
   workflows: WorkflowRegistry,
-  opts?: { now?: () => number; store?: SqliteDocStore },
+  opts?: { now?: () => number; store?: SqliteDocStore; maxParallelism?: number },
 ): Promise<{
   runtime: EmbeddedRuntime;
   tick: () => Promise<void>;
@@ -68,7 +68,7 @@ export async function makeRuntimeWithWorkflow(
   const schema = defineSchema({});
   const c = composeComponents(
     { schemaJson: schema.export(), moduleMap: appModules },
-    [defineScheduler(), defineWorkflow({ workflows })],
+    [defineScheduler(), defineWorkflow({ workflows, maxParallelism: opts?.maxParallelism })],
   );
   const runtime = await EmbeddedRuntime.create({
     store: opts?.store ?? new SqliteDocStore(new NodeSqliteAdapter()),

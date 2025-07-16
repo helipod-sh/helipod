@@ -32,13 +32,18 @@ export const workflow = { define };
  * (`makeAdvance` in `./modules.ts`, driving `./replay.ts`'s `runReplay`) and added `_stepDone`,
  * the scheduler `onComplete` callback that journals a finished step's result and re-enqueues
  * `_advance` — see those files' doc comments for the full mechanism.
+ *
+ * `maxParallelism` (Task 5, default 16 — see `./modules.ts`'s `DEFAULT_MAX_PARALLELISM`) caps how
+ * many new steps a `Promise.all([step.a(), step.b(), ...])` fan-out dispatches in a single
+ * `_advance` poll; see `makeAdvance`'s doc comment for why exceeding it is safe (spread across more
+ * polls, nothing dropped) rather than an error.
  */
-export function defineWorkflow(opts: { workflows: WorkflowRegistry }): ComponentDefinition {
+export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParallelism?: number }): ComponentDefinition {
   return defineComponent({
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows), _stepDone, _sleep, status },
+    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, status },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,

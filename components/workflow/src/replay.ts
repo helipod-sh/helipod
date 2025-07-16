@@ -54,7 +54,7 @@ export interface JournalRow {
 
 /** Options carried from `step.*` through to `_advance`'s `sched.enqueue` call (`./modules.ts`). */
 export interface NewStepOpts {
-  /** Absolute dispatch time (epoch ms) — set by `runAction`'s caller-supplied delay or `sleep`/`sleepUntil`. */
+  /** Absolute dispatch time (epoch ms) — set by `sleep`/`sleepUntil` (`now + ms` / `ts`); `runAction` never sets this (it only takes `{maxAttempts?}`, no delay option). */
   runAt?: number;
   /** -> `EnqueueOpts.retry.maxFailures`. */
   maxAttempts?: number;
