@@ -1,7 +1,7 @@
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
-import { status, makeAdvance, _stepDone, _sleep } from "./modules";
+import { status, makeAdvance, _stepDone, _sleep, _start, _cancel } from "./modules";
 import { _sendEvent } from "./events";
 import { define, type WorkflowRegistry } from "./registry";
 
@@ -44,19 +44,25 @@ export const workflow = { define };
  * `waitForEvent` step parks with NO scheduler job (an `events` row instead), and `sendEvent`
  * resolves it by journaling the step and re-enqueuing `_advance`, riding the same commit-fan-out
  * wake every other step already does.
+ *
+ * Task 7 added the action-mode `ctx.workflow` (`workflowActionContext`, wired below as
+ * `buildAction`) plus its two remaining internal delegate targets, `_start`/`_cancel`
+ * (`./modules.ts`; `_sendEvent` already existed from Task 6) — `ctx.workflow.start`/`cancel`/
+ * `sendEvent` now work from an ACTION, not just a mutation, exactly like `ctx.scheduler` does.
  */
 export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParallelism?: number }): ComponentDefinition {
   return defineComponent({
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, _sendEvent, status },
+    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, _sendEvent, _start, _cancel, status },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,
-    // Full impl (delegating `start`/`cancel` to an internal `_`-prefixed mutation, mirroring
-    // `@stackbase/scheduler`'s `schedulerActionContext`) is Task 7; a minimal stub is fine now —
-    // see `workflowActionContext`'s doc comment in `./facade.ts`.
+    // Task 7: the action-mode `ctx.workflow` — `start`/`cancel`/`sendEvent` each delegate to one
+    // of the internal `_start`/`_cancel`/`_sendEvent` mutations above via `api.runMutation`,
+    // mirroring `@stackbase/scheduler`'s `schedulerActionContext` — see `workflowActionContext`'s
+    // doc comment in `./facade.ts`.
     buildAction: (api) => workflowActionContext(api),
   });
 }

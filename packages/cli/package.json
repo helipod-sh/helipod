@@ -43,6 +43,7 @@
   "devDependencies": {
     "@stackbase/client": "workspace:*",
     "@stackbase/scheduler": "workspace:*",
+    "@stackbase/workflow": "workspace:*",
     "@types/node": "catalog:",
     "@types/ws": "^8.5.13",
     "tsup": "catalog:",

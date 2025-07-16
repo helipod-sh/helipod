@@ -6,14 +6,22 @@
 //  - `workflowContext.sendEvent` (`./facade.ts`) — the mutation-mode path, called directly by
 //    `ctx.workflow.sendEvent(...)` from within a mutation. Runs against the CALLING mutation's own
 //    `cctx.db` (namespaced/bare table names: "events"/"steps"), exactly like `start`/`cancel`.
-//  - `_sendEvent` below — the privileged, registered-module counterpart (fully-qualified table
-//    names: "workflow/events"/"workflow/steps"), reserved for action-mode delegation
-//    (`workflowActionContext.sendEvent`, stubbed in `./facade.ts` for Task 7 — an action has no
-//    direct `db`, so it will call this via `api.runMutation("workflow:_sendEvent", ...)`, the same
-//    pattern `workflowActionContext.start`/`cancel` are stubbed for).
+//  - `_sendEvent` below — the registered-module counterpart backing action-mode delegation
+//    (`workflowActionContext.sendEvent`, `./facade.ts`, Task 7): an action has no direct `db`, so
+//    it calls this via `api.runMutation("workflow:_sendEvent", ...)`. That's the `ActionApi`/
+//    `invoke` seam, which NEVER sets `privileged` (see `packages/executor/src/executor.ts`'s
+//    `runActionFn`) — so `_sendEvent` runs namespaced under `"workflow"`, exactly like any normal
+//    mutation, NOT privileged like `_advance`/`_stepDone` (which are dispatched exclusively by the
+//    scheduler driver, the only call site that sets `privileged: true`). Consequently `_sendEvent`
+//    below delegates to the namespaced `ctx.workflow.sendEvent(...)` facade — the SAME bare-table
+//    in-txn path `workflowContext.sendEvent` uses — rather than calling `sendEventImpl` directly
+//    against fully-qualified table names (which would double-prefix under non-privileged
+//    namespaced dispatch and throw `FunctionNotFoundError`; see `./modules.ts`'s `_start`/
+//    `_cancel` doc comment for the identical reasoning).
 //
 // Splitting the table names out into `EventTables` rather than hardcoding either variant is what
-// lets both entry points share this one function instead of drifting.
+// lets `sendEventImpl`'s two remaining callers (the mutation-mode facade here doc-commented above,
+// and any future privileged caller) share this one function instead of drifting.
 import { mutation, type GuestDatabaseWriter } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { SchedulerContext } from "@stackbase/scheduler";
@@ -29,14 +37,11 @@ interface EventRow {
   createdTs: number;
 }
 
-/** Table names `sendEventImpl` operates on — differ between the privileged `_sendEvent` module (fully-qualified) and the namespaced `ctx.workflow.sendEvent` facade (bare). */
+/** Table names `sendEventImpl` operates on — bare (namespaced-by-the-executor), matching every other in-txn `cctx.db` call this component makes. `_sendEvent` below no longer needs a fully-qualified variant — see its doc comment for why. */
 export interface EventTables {
   events: string;
   steps: string;
 }
-
-/** `_sendEvent`'s own (privileged) table names — mirrors `./modules.ts`'s `STEPS_TABLE` convention. */
-export const PRIVILEGED_EVENT_TABLES: EventTables = { events: "workflow/events", steps: "workflow/steps" };
 
 /**
  * Resolves a running workflow's `step.waitForEvent(name)`: finds the `"waiting"` `events` row for
@@ -79,19 +84,25 @@ export async function sendEventImpl(
 }
 
 /**
- * `workflow:_sendEvent` — the internal, privileged registered-module counterpart to
- * `ctx.workflow.sendEvent` (`./facade.ts`). Mutation-mode does NOT dispatch through this module —
- * `workflowContext.sendEvent` calls `sendEventImpl` directly against the calling mutation's own
- * `cctx.db`, exactly like `start`/`cancel` do. This module exists so a FUTURE action-mode
- * `ctx.workflow.sendEvent` (Task 7) has a real internal mutation to delegate to via
- * `api.runMutation`, without a second implementation of the event-resolution logic. Registered
- * privileged (dispatched the same way `_advance`/`_stepDone` are — see `./modules.ts`'s doc
- * comment on why those use fully-qualified table names), so it uses `PRIVILEGED_EVENT_TABLES`.
+ * `workflow:_sendEvent` — the internal, `_`-prefixed (client-blocked) registered-module
+ * counterpart to `ctx.workflow.sendEvent` (`./facade.ts`), Task 7's action-mode delegate target
+ * (`workflowActionContext.sendEvent` calls `api.runMutation("workflow:_sendEvent", ...)`).
+ * Mutation-mode does NOT dispatch through this module — `workflowContext.sendEvent` calls
+ * `sendEventImpl` directly against the calling mutation's own `cctx.db`, exactly like
+ * `start`/`cancel` do.
+ *
+ * Delegates to `ctx.workflow.sendEvent(...)` (the SAME namespaced in-txn facade a normal
+ * mutation's own `ctx.workflow.sendEvent` call reaches) rather than calling `sendEventImpl`
+ * directly: the action `invoke` seam that dispatches this module never sets `privileged`, so
+ * `ctx.db` here is namespaced under `"workflow"`, not privileged — see this file's module doc
+ * comment above for the full reasoning (mirrors `./modules.ts`'s `_start`/`_cancel`). `ctx: any`
+ * because `ctx.workflow` isn't part of the exported `MutationCtx` shape (it's a dynamic
+ * per-component facade attached at run time).
  */
 export const _sendEvent = mutation(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async (ctx: any, a: { workflowId: string; name: string; payload?: JSONValue }): Promise<null> => {
-    await sendEventImpl(ctx.db, ctx.scheduler as SchedulerContext, () => ctx.now(), PRIVILEGED_EVENT_TABLES, a);
+    await ctx.workflow.sendEvent(a.workflowId, a.name, a.payload);
     return null;
   },
 );

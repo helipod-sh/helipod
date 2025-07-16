@@ -9,12 +9,31 @@ import { runReplay, type JournalRow } from "./replay";
  * `workflow:status` — a QUERY: reads a `workflows` row by id and projects it down to the
  * client-facing shape (`state`/`result`/`error`), or `null` if the run doesn't exist. Read-only,
  * so it needs no `contextWrite` — registered directly on `defineWorkflow()`'s `modules` map (see
- * `./index.ts`), reachable at `workflow:status`.
+ * `./index.ts`), reachable at `workflow:status`, and LIVE like any other query — a subscribed
+ * client's view reactively re-runs/re-pushes on every write to this run's `workflows` row (the
+ * commit fan-out this whole component's `_advance`/`_stepDone` cascade rides).
+ *
+ * `result`/`error` are OMITTED (not included as `undefined`) while the run hasn't reached that
+ * outcome yet — an in-process `runtime.run("workflow:status", ...)` call (every unit test in this
+ * package) never serializes its return value, so a raw `undefined` field passed silently; the real
+ * client subscription path does NOT — `SyncProtocolHandler`'s `execSub` JSON-encodes every query
+ * result via `convexToJson` before pushing it as a `QueryUpdated` modification, and `convexToJson`
+ * throws `TypeError: Cannot encode value of type undefined` on an `undefined`-valued object key
+ * (`packages/values/src/json.ts`). This was a real gap this component's Task 7 E2E
+ * (`packages/cli/test/workflow-e2e.test.ts`) caught: subscribing to `workflow:status` for a
+ * freshly-started (still-`"running"`, no `result`/`error` yet) run failed with `QueryFailed`
+ * instead of `QueryUpdated` — every prior task's tests called `runtime.run(...)` directly and never
+ * exercised the wire-serialization path. Mirrors the `compact()` helper every other component
+ * (`@stackbase/scheduler`'s `facade.ts`/`modules.ts`) already uses before a `db.insert`/`replace`;
+ * this is the same discipline applied to a QUERY's return value instead.
  */
 export const status = query(async (ctx: QueryCtx, a: { runId: string }) => {
   const wf = await ctx.db.get(a.runId);
   if (wf === null) return null;
-  return { state: wf.state as string, result: wf.result, error: wf.error as string | undefined };
+  const out: { state: string; result?: unknown; error?: string } = { state: wf.state as string };
+  if (wf.result !== undefined) out.result = wf.result;
+  if (wf.error !== undefined) out.error = wf.error as string;
+  return out;
 });
 
 /**
@@ -264,6 +283,40 @@ export const _stepDone = mutation(
       });
     }
     await schedulerFacade(ctx).enqueue("workflow:_advance", { workflowId: a.context.workflowId } as unknown as JSONValue, {});
+    return null;
+  },
+);
+
+/**
+ * `workflow:_start` / `workflow:_cancel` — internal (`_`-prefixed, so not client-callable)
+ * MUTATIONS backing the action-mode `ctx.workflow` facade (`workflowActionContext` in
+ * `./facade.ts`, Task 7): an action has no `db`, so it can't write a new `workflows` row or
+ * cascade-cancel one itself — instead it calls `ctx.runMutation("workflow:_start"/"_cancel", ...)`,
+ * a fresh top-level mutation the trusted `invoke` seam resolves (see `ExecutorDeps.invoke`'s doc
+ * comment in `packages/executor/src/executor.ts` — it resolves ANY registered path, `_`-prefixed
+ * included, unlike the public `runtime.run`/`runAction`, which block `_` via `isInternalPath`).
+ * Mirrors `@stackbase/scheduler`'s `_enqueue`/`_cancel` (`components/scheduler/src/modules.ts`)
+ * exactly: both run namespaced (NOT privileged) — the action `invoke` seam
+ * (`ActionApi.runMutation`, `packages/executor/src/executor.ts`'s `runActionFn`) never sets
+ * `privileged` (defaults `false`), so `ctx.workflow` here is the SAME namespaced, bare-table-name
+ * in-txn facade `workflowContext` builds for a normal mutation's own `ctx.workflow.start(...)`
+ * call — delegating to it (rather than reimplementing against fully-qualified `"workflow/..."`
+ * table names the way privileged, driver-dispatched `_advance`/`_stepDone` do) is what keeps this
+ * correct regardless of dispatch site: fully-qualified names would double-prefix under this
+ * non-privileged namespaced dispatch and throw `FunctionNotFoundError`.
+ *
+ * `ctx: any` because `ctx.workflow` isn't part of the exported `MutationCtx` shape (it's a dynamic
+ * per-component facade attached at run time — see `InlineUdfExecutor.run`'s `guestCtx` loop).
+ */
+export const _start = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { workflowFnPath: string; args: JSONValue }): Promise<string> => ctx.workflow.start(a.workflowFnPath, a.args),
+);
+
+export const _cancel = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { runId: string }): Promise<null> => {
+    await ctx.workflow.cancel(a.runId);
     return null;
   },
 );

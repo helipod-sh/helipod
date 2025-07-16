@@ -7,7 +7,7 @@ import { sendEventImpl } from "./events";
 
 export type { FnRef } from "@stackbase/scheduler";
 
-/** Bare (namespaced) table names `workflowContext.sendEvent` operates on — resolved to `"workflow/events"`/`"workflow/steps"` the same way every other `cctx.db` call on this facade already is. Mirrors `./events.ts`'s `PRIVILEGED_EVENT_TABLES`. */
+/** Bare (namespaced) table names `workflowContext.sendEvent` operates on — resolved to `"workflow/events"`/`"workflow/steps"` the same way every other `cctx.db` call on this facade already is. `./events.ts`'s `_sendEvent` (the action-mode delegate, dispatched non-privileged) uses this SAME shape via `ctx.workflow.sendEvent`, not a fully-qualified variant — see that module's doc comment. */
 const FACADE_EVENT_TABLES = { events: "events", steps: "steps" };
 
 /**
@@ -107,26 +107,31 @@ export function workflowContext(cctx: ComponentContext): WorkflowContext {
 
 /**
  * The action-mode `ctx.workflow` — wired as `defineWorkflow()`'s `buildAction`. An action has no
- * `db`, so `start` can't insert the `workflows` row directly the way `workflowContext` above does;
- * a real implementation delegates to an internal `workflow:_start`-style mutation via
+ * `db`, so `start`/`cancel`/`sendEvent` can't touch `cctx.db` directly the way `workflowContext`
+ * above does; each delegates to an internal `workflow:_start`/`_cancel`/`_sendEvent` mutation via
  * `api.runMutation`, exactly like `@stackbase/scheduler`'s `schedulerActionContext` delegates to
- * `scheduler:_enqueue`. Not built in Task 1 (no such internal mutation exists yet — `start` writes
- * directly in the facade, see `workflowContext`'s doc comment) — full impl is Task 7. Stubbed here
- * (rather than omitted) so `defineWorkflow()`'s `buildAction` wiring — and codegen's action-ctx
- * typing — is in place from the start.
+ * `scheduler:_enqueue`/`_cancel` (`components/scheduler/src/facade.ts`).
+ *
+ * `_start`/`_cancel` are registered in `./modules.ts`; `_sendEvent` in `./events.ts`. All three
+ * are ordinary (non-privileged) mutations — the action `invoke` seam (`ActionApi`'s
+ * `runQuery`/`runMutation`/`runAction`, `packages/executor/src/executor.ts`'s `runActionFn`)
+ * never sets `privileged`, so each runs namespaced under `"workflow"`, exactly like a normal
+ * mutation's own `ctx.workflow.start(...)` call — see `./modules.ts`'s doc comment on `_start`/
+ * `_cancel` for why they delegate to the SAME `ctx.workflow` facade rather than hand-rolling
+ * fully-qualified table access (that would double-prefix and throw `FunctionNotFoundError`; only
+ * driver-dispatched modules like `_advance`/`_stepDone`, which run with `privileged: true`
+ * unconditionally, use fully-qualified names).
  */
-export function workflowActionContext(_api: ActionApi): WorkflowActionContext {
+export function workflowActionContext(api: ActionApi): WorkflowActionContext {
   return {
-    async start() {
-      throw new Error("ctx.workflow.start from an action is not supported yet (Task 7)");
+    async start(ref, args) {
+      return api.runMutation<string>("workflow:_start", { workflowFnPath: getFunctionPath(ref), args });
     },
-    async cancel() {
-      throw new Error("ctx.workflow.cancel from an action is not supported yet (Task 7)");
+    async cancel(runId) {
+      await api.runMutation("workflow:_cancel", { runId });
     },
-    async sendEvent() {
-      // Task 7 wires this to `api.runMutation("workflow:_sendEvent", ...)` — see `./events.ts`'s
-      // `_sendEvent` doc comment for why that module already exists ahead of this call site.
-      throw new Error("ctx.workflow.sendEvent from an action is not supported yet (Task 7)");
+    async sendEvent(runId, name, payload) {
+      await api.runMutation("workflow:_sendEvent", { workflowId: runId, name, payload });
     },
   };
 }
