@@ -3,7 +3,7 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema } from "@stackbase/values";
-import { query, type RegisteredFunction } from "@stackbase/executor";
+import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import { defineScheduler, type SchedulerDriver } from "@stackbase/scheduler";
 import { defineWorkflow, type WorkflowRegistry } from "../src/index";
 
@@ -12,6 +12,23 @@ import { defineWorkflow, type WorkflowRegistry } from "../src/index";
 function systemModules(): Record<string, RegisteredFunction> {
   return {
     "_system:scan": query(async (ctx, args: { table: string }) => await ctx.db.query(args.table, "by_creation").collect()),
+    // Test-only escape hatch (mirrors `components/scheduler/test/helpers.ts`'s identically-named
+    // one): forces an EXISTING scheduler job's `state`/lease directly, bypassing `_claim`/
+    // `_complete` — used to simulate "the driver claimed this job and the process died before
+    // completing it" (an `inProgress` job with an expired lease) for the action-step at-most-once
+    // crash test, without needing a real crash.
+    "_system:forceJobState": mutation(
+      async (ctx, args: { jobId: string; state: "pending" | "inProgress" | "success" | "failed" | "canceled"; leaseExpiresAt?: number }) => {
+        const job = await ctx.db.get(args.jobId);
+        if (job === null) return null;
+        await ctx.db.replace(args.jobId, {
+          ...job,
+          state: args.state,
+          ...(args.leaseExpiresAt !== undefined ? { leaseHolder: "driver", leaseExpiresAt: args.leaseExpiresAt } : {}),
+        });
+        return null;
+      },
+    ),
   };
 }
 

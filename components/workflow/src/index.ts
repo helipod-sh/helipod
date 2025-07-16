@@ -1,7 +1,7 @@
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
-import { status, makeAdvance, _stepDone } from "./modules";
+import { status, makeAdvance, _stepDone, _sleep } from "./modules";
 import { define, type WorkflowRegistry } from "./registry";
 
 export * from "./schema";
@@ -38,7 +38,7 @@ export function defineWorkflow(opts: { workflows: WorkflowRegistry }): Component
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows), _stepDone, status },
+    modules: { _advance: makeAdvance(opts.workflows), _stepDone, _sleep, status },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,

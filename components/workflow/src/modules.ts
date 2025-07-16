@@ -18,6 +18,16 @@ export const status = query(async (ctx: QueryCtx, a: { runId: string }) => {
 });
 
 /**
+ * `workflow:_sleep` — the dispatch target for every `step.sleep`/`step.sleepUntil` call (see
+ * `./replay.ts`'s `SLEEP_FN`). A trivial no-op MUTATION: `step.sleep` doesn't need this function
+ * to actually DO anything — the durability comes entirely from the scheduler's `runAt`, the same
+ * way `runMutation`/`runAction` steps derive theirs from a real dispatched job. The step
+ * "completes" (unblocking replay) the instant this job fires and its `onComplete:
+ * "workflow:_stepDone"` callback journals the (uninteresting, always-`null`) result.
+ */
+export const _sleep = mutation(async () => null);
+
+/**
  * `_advance`/`_stepDone` are dispatched EXCLUSIVELY by the scheduler driver (`workflow:_advance`
  * is enqueued as an ordinary scheduler job — `ctx.workflow.start`, `_stepDone`'s own re-enqueue at
  * the bottom of this file), so they always run PRIVILEGED (`DriverContext.runFunction` in
@@ -106,7 +116,7 @@ export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
     if (!def) throw new Error(`unknown workflow ${wf.workflowFnPath as string}`);
 
     const journal = (await ctx.db.query(STEPS_TABLE, "by_workflow").eq("workflowId", a.workflowId).collect()) as JournalRow[];
-    const outcome = await runReplay(def.handler, wf.args, journal);
+    const outcome = await runReplay(def.handler, wf.args, journal, ctx.now());
     const sched = schedulerFacade(ctx);
 
     // OCC guard (double-advance case): `runReplay` drains the handler through a REAL microtask/
@@ -146,7 +156,14 @@ export function makeAdvance(workflows: WorkflowRegistry): RegisteredFunction {
           state: "pending",
           startedTs: ctx.now(),
         });
+        // Task 4: thread `ns.opts` through — `runAt` (an action's caller-supplied delay, or a
+        // `sleep`/`sleepUntil` step's due time) and `maxAttempts` (-> the scheduler's own
+        // `retry.maxFailures` backoff/dead-letter dispatch; not a new retry mechanism). Both are
+        // `undefined` for a plain `runMutation`/`runQuery` step, matching the pre-Task-4 behavior
+        // (`enqueueInternal` defaults `runAt` to `now()` and `retry.maxFailures` to 4).
         const jobId = await sched.enqueue(ns.name, ns.args, {
+          runAt: ns.opts?.runAt,
+          retry: ns.opts?.maxAttempts !== undefined ? { maxFailures: ns.opts.maxAttempts } : undefined,
           onComplete: "workflow:_stepDone",
           context: { workflowId: a.workflowId, stepNumber: ns.stepNumber, generationNumber: gen } as unknown as JSONValue,
         });

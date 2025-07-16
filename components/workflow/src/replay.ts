@@ -4,14 +4,37 @@ import { getFunctionPath, type FnRef } from "@stackbase/scheduler";
 import type { WorkflowHandler } from "./registry";
 
 /**
- * `step.runMutation`/`step.runQuery` — the object a workflow handler receives as its first
- * argument. `runAction`/`sleep`/`waitForEvent` are added in Tasks 4/6; this task only needs the
- * two synchronous-dispatch step kinds.
+ * `step.runMutation`/`step.runQuery`/`step.runAction`/`step.sleep`/`step.sleepUntil` — the object
+ * a workflow handler receives as its first argument. `waitForEvent` is added in Task 6.
+ *
+ * `runAction` dispatches a `kind:"action"` scheduler job — same journal/dispatch mechanism as
+ * `runMutation`/`runQuery`, just a different target kind. Actions are AT-MOST-ONCE (the
+ * scheduler's contract for `kind:"action"` jobs — a crash mid-flight dead-letters rather than
+ * blind-retries, see `@stackbase/scheduler`'s `_reclaim`), so a step built on it inherits that
+ * same at-most-once guarantee; nothing in this file adds action-specific retry-on-crash logic.
+ *
+ * `sleep`/`sleepUntil` are durable timers: a `NewStep` with `kind:"sleep"` whose dispatched
+ * target is the trivial internal no-op mutation `workflow:_sleep` (registered in `./modules.ts`),
+ * carrying `opts.runAt` — the step "completes" (and the replay proceeds past it) only once that
+ * delayed job actually fires, riding the scheduler's own `runAt` semantics rather than any new
+ * timer mechanism.
+ *
+ * `opts?.maxAttempts` (any step kind) threads into `NewStep.opts.maxAttempts`, which `_advance`
+ * (`./modules.ts`) turns into the scheduler's `retry: { maxFailures }` — reusing the scheduler's
+ * existing retry/backoff dispatch, not a new one.
  */
 export interface StepApi {
   runMutation<T = unknown>(ref: FnRef, args?: Record<string, unknown>): Promise<T>;
   runQuery<T = unknown>(ref: FnRef, args?: Record<string, unknown>): Promise<T>;
+  runAction<T = unknown>(ref: FnRef, args?: Record<string, unknown>, opts?: { maxAttempts?: number }): Promise<T>;
+  /** Parks the workflow for `ms` milliseconds, computed from the current poll's fixed clock (not `Date.now()` — see `runReplay`'s `now` param). */
+  sleep(ms: number): Promise<void>;
+  /** Parks the workflow until wall-clock time `ts` (epoch ms). */
+  sleepUntil(ts: number): Promise<void>;
 }
+
+/** A step kind — `"sleep"` is a durable timer (target `workflow:_sleep`), the rest dispatch a real UDF. */
+export type StepKind = "mutation" | "query" | "action" | "sleep";
 
 /** A `steps` row as read back from the durable journal (`by_workflow`, ordered by `stepNumber`). */
 export interface JournalRow {
@@ -19,7 +42,7 @@ export interface JournalRow {
   workflowId: string;
   stepNumber: number;
   name: string;
-  kind: "mutation" | "query";
+  kind: StepKind;
   args: JSONValue;
   result?: JSONValue;
   error?: string;
@@ -29,12 +52,21 @@ export interface JournalRow {
   completedTs?: number;
 }
 
+/** Options carried from `step.*` through to `_advance`'s `sched.enqueue` call (`./modules.ts`). */
+export interface NewStepOpts {
+  /** Absolute dispatch time (epoch ms) — set by `runAction`'s caller-supplied delay or `sleep`/`sleepUntil`. */
+  runAt?: number;
+  /** -> `EnqueueOpts.retry.maxFailures`. */
+  maxAttempts?: number;
+}
+
 /** A NOT-yet-journaled step the handler emitted this poll — `_advance` journals + dispatches these. */
 export interface NewStep {
   stepNumber: number;
   name: string;
-  kind: "mutation" | "query";
+  kind: StepKind;
   args: JSONValue;
+  opts?: NewStepOpts;
 }
 
 export type ReplayOutcome =
@@ -46,6 +78,9 @@ export type ReplayOutcome =
 function resolveRef(ref: FnRef): string {
   return getFunctionPath(ref);
 }
+
+/** The dispatch target for every `step.sleep`/`step.sleepUntil` call — a trivial no-op mutation registered in `./modules.ts`; the step "completes" (and unblocks replay) once its delayed job fires. */
+const SLEEP_FN = "workflow:_sleep";
 
 /**
  * Structural equality for journal-arg validation (a cached step's replayed call must match the
@@ -99,11 +134,18 @@ export async function runReplay(
   handler: WorkflowHandler,
   handlerArgs: unknown,
   journal: ReadonlyArray<JournalRow>,
+  /**
+   * The fixed per-invocation clock (`ctx.now()` from `_advance`'s calling mutation) — used ONLY to
+   * compute `sleep`/`sleepUntil`'s `NewStep.opts.runAt` on first dispatch. Never `Date.now()`: a
+   * mutation's clock must be deterministic across replay. Defaults to `0` for callers (e.g. the
+   * `occ-guard` mismatch unit test) that construct a journal by hand and never call `step.sleep`.
+   */
+  now: number = 0,
 ): Promise<ReplayOutcome> {
   let cursor = 0;
   const newSteps: NewStep[] = [];
 
-  const requestStep = (kind: "mutation" | "query", ref: FnRef, args: JSONValue): Promise<unknown> => {
+  const requestStep = (kind: StepKind, ref: FnRef, args: JSONValue, opts?: NewStepOpts): Promise<unknown> => {
     const name = resolveRef(ref);
     const idx = cursor++;
     const cached = journal[idx];
@@ -120,7 +162,7 @@ export async function runReplay(
       return new Promise(() => {});
     }
     // New step: record it for `_advance` to journal + dispatch, and suspend the handler here.
-    newSteps.push({ stepNumber: idx, name, kind, args });
+    newSteps.push({ stepNumber: idx, name, kind, args, ...(opts ? { opts } : {}) });
     return new Promise(() => {});
   };
 
@@ -129,6 +171,15 @@ export async function runReplay(
       requestStep("mutation", ref, args as JSONValue) as Promise<T>,
     runQuery: <T>(ref: FnRef, args: Record<string, unknown> = {}) =>
       requestStep("query", ref, args as JSONValue) as Promise<T>,
+    runAction: <T>(ref: FnRef, args: Record<string, unknown> = {}, opts?: { maxAttempts?: number }) =>
+      requestStep(
+        "action",
+        ref,
+        args as JSONValue,
+        opts?.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : undefined,
+      ) as Promise<T>,
+    sleep: (ms: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: now + ms }) as Promise<void>,
+    sleepUntil: (ts: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: ts }) as Promise<void>,
   };
 
   const settle: Promise<ReplayOutcome> = handler(step, handlerArgs).then(

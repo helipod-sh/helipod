@@ -493,7 +493,10 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
  *    no backoff; an infra kill isn't the job's own fault).
  *  - `kind:"action"` → NOT safe to blindly retry (actions have arbitrary external side effects,
  *    so at-most-once is the only safe default without idempotency-key support): `attempts += 1`,
- *    terminal `state:"failed"` (dead-letter) with `lastError`.
+ *    terminal `state:"failed"` (dead-letter) with `lastError`. Fires `onComplete` (if set) with a
+ *    `"failed"` result — same as `_complete`'s dead-letter branch — so a caller relying on the
+ *    onComplete round-trip (e.g. `@stackbase/workflow`'s `_stepDone`) actually observes the
+ *    terminal failure instead of hanging forever waiting for a callback that never fires.
  *
  * Uses the `by_next_ts` index (`["state","nextTs"]`) to scan `state:"inProgress"` cheaply, then a
  * post-filter on `leaseExpiresAt` (not part of that index) — `inProgress` job counts are expected
@@ -502,6 +505,7 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
  */
 export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: number }> => {
   const now = ctx.now();
+  const nowFn = (): number => now;
   const expired = await ctx.db
     .query("scheduler/jobs", "by_next_ts")
     .eq("state", "inProgress")
@@ -550,6 +554,12 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
           leaseExpiresAt: undefined,
         }),
       );
+      // Terminal (dead-lettered) failure fires onComplete, mirroring `_complete`'s dead-letter
+      // branch — a no-op when `job.onComplete` is unset.
+      await fireOnComplete(ctx.db, nowFn, CRON_TABLES, jobId, job.onComplete as string | undefined, {
+        kind: "failed",
+        error: lastError,
+      });
     }
     reclaimed++;
   }
