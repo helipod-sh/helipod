@@ -13,9 +13,9 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  *   executing, keyed by `(workflowId, stepNumber)`. `kind` distinguishes step flavors (e.g.
  *   `"runMutation"`/`"runAction"`/`"sleep"`/`"waitForEvent"`) added as Task 2+ builds out the
  *   replay loop's `step` object.
- * - `events`: external signals delivered into a running workflow (`ctx.workflow`'s
- *   `sendEvent`/a workflow's `step.waitForEvent`, wired in a later task) — kept here now so the
- *   schema is stable across tasks rather than migrated later.
+ * - `events`: external signals delivered into a running workflow — one row per `step.waitForEvent`
+ *   call, `state:"waiting"` until `ctx.workflow.sendEvent(runId, name, payload)` flips it
+ *   `"received"` (Task 6, `./events.ts`/`./facade.ts`).
  * - `config`: a single-row tuning table, optional for Task 1 (deferred — no row is written or
  *   read yet); reserved for `maxJournalSteps`/`maxRecoveryAttempts` once the replay loop needs them.
  */

@@ -53,6 +53,9 @@ export const _sleep = mutation(async () => null);
  */
 const STEPS_TABLE = "workflow/steps";
 
+/** `_advance`'s privileged, fully-qualified `events` table — see `STEPS_TABLE`'s doc comment above; written when a new `waitForEvent` step dispatches (see `makeAdvance`'s dispatch loop). */
+const EVENTS_TABLE = "workflow/events";
+
 /** `makeAdvance`'s default fan-out cap when `defineWorkflow({ maxParallelism })` doesn't set one — see `makeAdvance`'s doc comment. */
 const DEFAULT_MAX_PARALLELISM = 16;
 
@@ -154,6 +157,12 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
       // only way to reach this state is a handler that `await`ed something other than `step.*` —
       // a raw promise/timer/etc — a determinism violation (see `step.ts`'s determinism discipline).
       // Left alone this would hang forever with no error; fail loudly instead.
+      //
+      // Task 6 note: a workflow parked on `step.waitForEvent` is NOT this case, even though it too
+      // has no scheduler job in flight. Its `waitForEvent` step's `steps` row is `"pending"` (see
+      // the dispatch loop below), so `journal.some(pending)` is true and this branch is correctly
+      // skipped — the row itself (not a scheduler job) is what's "in flight": `ctx.workflow.
+      // sendEvent` (`./events.ts`) is what eventually re-enqueues `_advance`, not a job callback.
       const error =
         "workflow suspended with no pending step — the handler likely awaited a non-step promise (determinism violation)";
       await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error, completedTs: ctx.now() });
@@ -179,6 +188,23 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
           state: "pending",
           startedTs: ctx.now(),
         });
+
+        if (ns.kind === "waitForEvent") {
+          // Task 6: THE differentiator — no scheduler job. The step just parks: write an `events`
+          // row (`state:"waiting"`) and leave `scheduledJobId` unset. `ctx.workflow.sendEvent`
+          // (`./events.ts`'s `sendEventImpl`) is what later flips this row `"received"`, journals
+          // this `steps` row `"success"`, and re-enqueues `_advance` itself — nothing to dispatch
+          // here. (Also means `ctx.workflow.cancel`'s cascade below correctly skips it: it only
+          // cancels `pending` steps that carry a `scheduledJobId`.)
+          await ctx.db.insert(EVENTS_TABLE, {
+            workflowId: a.workflowId,
+            name: ns.name,
+            state: "waiting",
+            createdTs: ctx.now(),
+          });
+          continue;
+        }
+
         // Task 4: thread `ns.opts` through — `runAt` (an action's caller-supplied delay, or a
         // `sleep`/`sleepUntil` step's due time) and `maxAttempts` (-> the scheduler's own
         // `retry.maxFailures` backoff/dead-letter dispatch; not a new retry mechanism). Both are

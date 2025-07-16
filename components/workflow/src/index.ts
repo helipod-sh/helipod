@@ -2,6 +2,7 @@ import { defineComponent, type ComponentDefinition } from "@stackbase/component"
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
 import { status, makeAdvance, _stepDone, _sleep } from "./modules";
+import { _sendEvent } from "./events";
 import { define, type WorkflowRegistry } from "./registry";
 
 export * from "./schema";
@@ -37,13 +38,19 @@ export const workflow = { define };
  * many new steps a `Promise.all([step.a(), step.b(), ...])` fan-out dispatches in a single
  * `_advance` poll; see `makeAdvance`'s doc comment for why exceeding it is safe (spread across more
  * polls, nothing dropped) rather than an error.
+ *
+ * Task 6 added `step.waitForEvent` (`./replay.ts`) + `ctx.workflow.sendEvent` (`./facade.ts`) + the
+ * internal `_sendEvent` module (`./events.ts`) — the durable-signal differentiator: a
+ * `waitForEvent` step parks with NO scheduler job (an `events` row instead), and `sendEvent`
+ * resolves it by journaling the step and re-enqueuing `_advance`, riding the same commit-fan-out
+ * wake every other step already does.
  */
 export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParallelism?: number }): ComponentDefinition {
   return defineComponent({
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, status },
+    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, _sendEvent, status },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,

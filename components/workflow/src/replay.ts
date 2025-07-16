@@ -4,8 +4,8 @@ import { getFunctionPath, type FnRef } from "@stackbase/scheduler";
 import type { WorkflowHandler } from "./registry";
 
 /**
- * `step.runMutation`/`step.runQuery`/`step.runAction`/`step.sleep`/`step.sleepUntil` — the object
- * a workflow handler receives as its first argument. `waitForEvent` is added in Task 6.
+ * `step.runMutation`/`step.runQuery`/`step.runAction`/`step.sleep`/`step.sleepUntil`/
+ * `step.waitForEvent` — the object a workflow handler receives as its first argument.
  *
  * `runAction` dispatches a `kind:"action"` scheduler job — same journal/dispatch mechanism as
  * `runMutation`/`runQuery`, just a different target kind. Actions are AT-MOST-ONCE (the
@@ -22,6 +22,15 @@ import type { WorkflowHandler } from "./registry";
  * `opts?.maxAttempts` (any step kind) threads into `NewStep.opts.maxAttempts`, which `_advance`
  * (`./modules.ts`) turns into the scheduler's `retry: { maxFailures }` — reusing the scheduler's
  * existing retry/backoff dispatch, not a new one.
+ *
+ * `waitForEvent` is THE differentiator (no scheduler job, no Convex/DBOS workflow engine has this):
+ * a brand-new `waitForEvent` step is emitted as a `NewStep` exactly like every other step kind —
+ * `requestStep` below doesn't special-case it at all — but `_advance` (`./modules.ts`), when it
+ * sees `kind:"waitForEvent"` among the new steps to dispatch, does NOT call `sched.enqueue`; it
+ * writes an `events` row (`{workflowId, name, state:"waiting"}`) instead and leaves the `steps` row
+ * `scheduledJobId`-less. `ctx.workflow.sendEvent` (`./events.ts`) is what eventually flips that
+ * `events` row to `"received"` and journals the step `"success"` with the payload as its result —
+ * only THEN does the cached-step branch below resolve it, same as any other step.
  */
 export interface StepApi {
   runMutation<T = unknown>(ref: FnRef, args?: Record<string, unknown>): Promise<T>;
@@ -31,10 +40,18 @@ export interface StepApi {
   sleep(ms: number): Promise<void>;
   /** Parks the workflow until wall-clock time `ts` (epoch ms). */
   sleepUntil(ts: number): Promise<void>;
+  /**
+   * Durably parks the workflow until `ctx.workflow.sendEvent(runId, name, payload)` is called —
+   * resolves with that call's `payload`. No scheduler job is dispatched for this step (see this
+   * interface's doc comment above); the workflow sits idle (no timer, no polling) until an
+   * external signal arrives. `opts?.timeoutMs` is NOT implemented yet (Task 6 v1 scope is an
+   * unbounded wait, matching the brief) — passing it throws rather than silently ignoring it.
+   */
+  waitForEvent<T = unknown>(name: string, opts?: { timeoutMs?: number }): Promise<T>;
 }
 
-/** A step kind — `"sleep"` is a durable timer (target `workflow:_sleep`), the rest dispatch a real UDF. */
-export type StepKind = "mutation" | "query" | "action" | "sleep";
+/** A step kind — `"sleep"` is a durable timer (target `workflow:_sleep`), `"waitForEvent"` dispatches no job at all (parks on an `events` row instead — see `StepApi.waitForEvent`'s doc comment), the rest dispatch a real UDF. */
+export type StepKind = "mutation" | "query" | "action" | "sleep" | "waitForEvent";
 
 /** A `steps` row as read back from the durable journal (`by_workflow`, ordered by `stepNumber`). */
 export interface JournalRow {
@@ -180,6 +197,19 @@ export async function runReplay(
       ) as Promise<T>,
     sleep: (ms: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: now + ms }) as Promise<void>,
     sleepUntil: (ts: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: ts }) as Promise<void>,
+    waitForEvent: <T>(name: string, opts?: { timeoutMs?: number }) => {
+      if (opts?.timeoutMs !== undefined) {
+        // Not built yet — see `StepApi.waitForEvent`'s doc comment. Throwing (rather than
+        // silently dispatching an unbounded wait) keeps an unsupported option loud, not a footgun.
+        throw new Error("step.waitForEvent's timeoutMs is not implemented yet (Task 6 scope: unbounded wait only)");
+      }
+      // `name` IS the event name, not a function path — but it's already a plain string, and
+      // `resolveRef`/`getFunctionPath` pass a string straight through unchanged, so reusing
+      // `requestStep`'s generic cursor/journal machinery (cached-success/failed/pending/new-step,
+      // see `runReplay`'s doc comment) needs no special-casing at all: a `waitForEvent` step is
+      // just a step whose "args" are always `{}` and whose "name" happens to be an event name.
+      return requestStep("waitForEvent", name, {} as JSONValue) as Promise<T>;
+    },
   };
 
   const settle: Promise<ReplayOutcome> = handler(step, handlerArgs).then(

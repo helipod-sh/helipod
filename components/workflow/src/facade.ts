@@ -3,13 +3,16 @@ import { GuestDatabaseWriter } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { FnRef, SchedulerContext } from "@stackbase/scheduler";
 import { getFunctionPath } from "@stackbase/scheduler";
+import { sendEventImpl } from "./events";
 
 export type { FnRef } from "@stackbase/scheduler";
 
+/** Bare (namespaced) table names `workflowContext.sendEvent` operates on — resolved to `"workflow/events"`/`"workflow/steps"` the same way every other `cctx.db` call on this facade already is. Mirrors `./events.ts`'s `PRIVILEGED_EVENT_TABLES`. */
+const FACADE_EVENT_TABLES = { events: "events", steps: "steps" };
+
 /**
- * `ctx.workflow` — the durable multi-step orchestration facade. Task 1 ships `start`/`cancel`
- * only; `sendEvent`/`status`-as-a-facade-method/etc. land in later tasks (`status` is a QUERY
- * module instead — see `./modules.ts` — since it's read-only and needs no `contextWrite`).
+ * `ctx.workflow` — the durable multi-step orchestration facade. `status` is a QUERY module
+ * instead (see `./modules.ts`) since it's read-only and needs no `contextWrite`.
  */
 export interface WorkflowContext {
   /** Starts a new workflow run, returning its `runId` (the `workflows` row id). */
@@ -20,12 +23,19 @@ export interface WorkflowContext {
    * Task 3 — see `workflowContext` below.
    */
   cancel(runId: string): Promise<void>;
+  /**
+   * Resolves a running workflow's `step.waitForEvent(name)` (`./replay.ts`) with `payload`. A
+   * no-op if there's no matching `"waiting"` `events` row (already delivered / not reached yet /
+   * unknown workflow) — see `./events.ts`'s `sendEventImpl` doc comment. Task 6.
+   */
+  sendEvent(runId: string, name: string, payload?: JSONValue): Promise<void>;
 }
 
 /** Action-mode counterpart to `WorkflowContext` — see `workflowActionContext` below. */
 export interface WorkflowActionContext {
   start(ref: FnRef, args: JSONValue): Promise<string>;
   cancel(runId: string): Promise<void>;
+  sendEvent(runId: string, name: string, payload?: JSONValue): Promise<void>;
 }
 
 /**
@@ -85,6 +95,13 @@ export function workflowContext(cctx: ComponentContext): WorkflowContext {
         }
       }
     },
+    async sendEvent(runId, name, payload) {
+      // Runs directly against the calling mutation's own `cctx.db` — same transaction, same
+      // `contextWrite` story as `start`/`cancel` above. `sendEventImpl` (`./events.ts`) is the one
+      // shared implementation; this just supplies the bare (namespaced) table names.
+      const scheduler = cctx.components.scheduler as SchedulerContext;
+      await sendEventImpl(db, scheduler, now, FACADE_EVENT_TABLES, { workflowId: runId, name, payload });
+    },
   };
 }
 
@@ -105,6 +122,11 @@ export function workflowActionContext(_api: ActionApi): WorkflowActionContext {
     },
     async cancel() {
       throw new Error("ctx.workflow.cancel from an action is not supported yet (Task 7)");
+    },
+    async sendEvent() {
+      // Task 7 wires this to `api.runMutation("workflow:_sendEvent", ...)` — see `./events.ts`'s
+      // `_sendEvent` doc comment for why that module already exists ahead of this call site.
+      throw new Error("ctx.workflow.sendEvent from an action is not supported yet (Task 7)");
     },
   };
 }
