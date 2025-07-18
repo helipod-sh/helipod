@@ -23,6 +23,12 @@ import type { WorkflowHandler } from "./registry";
  * (`./modules.ts`) turns into the scheduler's `retry: { maxFailures }` — reusing the scheduler's
  * existing retry/backoff dispatch, not a new one.
  *
+ * `opts?.compensate` (`runMutation`/`runAction`, saga slice) resolves to a function path via the
+ * same `resolveRef` used for the step's own name, and threads into `NewStep.opts.compensateFnPath`
+ * -> `_advance` stamps it onto the step's journal row at dispatch (`./modules.ts`). Purely additive
+ * for now — nothing reads it back yet (Task 2 of the saga slice builds the reverse-order unwind
+ * that does); a step declared with `{ compensate }` behaves identically to one without it.
+ *
  * `waitForEvent` is THE differentiator (no scheduler job, no Convex/DBOS workflow engine has this):
  * a brand-new `waitForEvent` step is emitted as a `NewStep` exactly like every other step kind —
  * `requestStep` below doesn't special-case it at all — but `_advance` (`./modules.ts`), when it
@@ -33,9 +39,9 @@ import type { WorkflowHandler } from "./registry";
  * only THEN does the cached-step branch below resolve it, same as any other step.
  */
 export interface StepApi {
-  runMutation<T = unknown>(ref: FnRef, args?: Record<string, unknown>): Promise<T>;
+  runMutation<T = unknown>(ref: FnRef, args?: Record<string, unknown>, opts?: { maxAttempts?: number; compensate?: FnRef }): Promise<T>;
   runQuery<T = unknown>(ref: FnRef, args?: Record<string, unknown>): Promise<T>;
-  runAction<T = unknown>(ref: FnRef, args?: Record<string, unknown>, opts?: { maxAttempts?: number }): Promise<T>;
+  runAction<T = unknown>(ref: FnRef, args?: Record<string, unknown>, opts?: { maxAttempts?: number; compensate?: FnRef }): Promise<T>;
   /** Parks the workflow for `ms` milliseconds, computed from the current poll's fixed clock (not `Date.now()` — see `runReplay`'s `now` param). */
   sleep(ms: number): Promise<void>;
   /** Parks the workflow until wall-clock time `ts` (epoch ms). */
@@ -75,6 +81,8 @@ export interface NewStepOpts {
   runAt?: number;
   /** -> `EnqueueOpts.retry.maxFailures`. */
   maxAttempts?: number;
+  /** The step's `{ compensate }` option, resolved to a function path via `resolveRef` — stamped onto the journal row at dispatch (`./modules.ts`'s `_advance`); unread until the saga slice's Task 2 unwind. */
+  compensateFnPath?: string;
 }
 
 /** A NOT-yet-journaled step the handler emitted this poll — `_advance` journals + dispatches these. */
@@ -183,18 +191,23 @@ export async function runReplay(
     return new Promise(() => {});
   };
 
+  // Turns `{ maxAttempts?, compensate? }` into a `NewStepOpts` (or `undefined` if both are unset,
+  // matching the pre-saga-slice behavior of omitting `opts` entirely for a plain step).
+  const toNewStepOpts = (opts?: { maxAttempts?: number; compensate?: FnRef }): NewStepOpts | undefined => {
+    if (opts?.maxAttempts === undefined && opts?.compensate === undefined) return undefined;
+    return {
+      ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
+      ...(opts.compensate !== undefined ? { compensateFnPath: resolveRef(opts.compensate) } : {}),
+    };
+  };
+
   const step: StepApi = {
-    runMutation: <T>(ref: FnRef, args: Record<string, unknown> = {}) =>
-      requestStep("mutation", ref, args as JSONValue) as Promise<T>,
+    runMutation: <T>(ref: FnRef, args: Record<string, unknown> = {}, opts?: { maxAttempts?: number; compensate?: FnRef }) =>
+      requestStep("mutation", ref, args as JSONValue, toNewStepOpts(opts)) as Promise<T>,
     runQuery: <T>(ref: FnRef, args: Record<string, unknown> = {}) =>
       requestStep("query", ref, args as JSONValue) as Promise<T>,
-    runAction: <T>(ref: FnRef, args: Record<string, unknown> = {}, opts?: { maxAttempts?: number }) =>
-      requestStep(
-        "action",
-        ref,
-        args as JSONValue,
-        opts?.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : undefined,
-      ) as Promise<T>,
+    runAction: <T>(ref: FnRef, args: Record<string, unknown> = {}, opts?: { maxAttempts?: number; compensate?: FnRef }) =>
+      requestStep("action", ref, args as JSONValue, toNewStepOpts(opts)) as Promise<T>,
     sleep: (ms: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: now + ms }) as Promise<void>,
     sleepUntil: (ts: number) => requestStep("sleep", SLEEP_FN, {} as JSONValue, { runAt: ts }) as Promise<void>,
     waitForEvent: <T>(name: string, opts?: { timeoutMs?: number }) => {

@@ -198,15 +198,21 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
         );
       }
       for (const ns of toDispatch) {
-        const stepId = await ctx.db.insert(STEPS_TABLE, {
-          workflowId: a.workflowId,
-          stepNumber: ns.stepNumber,
-          name: ns.name,
-          kind: ns.kind,
-          args: ns.args,
-          state: "pending",
-          startedTs: ctx.now(),
-        });
+        const stepId = await ctx.db.insert(
+          STEPS_TABLE,
+          compact({
+            workflowId: a.workflowId,
+            stepNumber: ns.stepNumber,
+            name: ns.name,
+            kind: ns.kind,
+            args: ns.args,
+            state: "pending",
+            startedTs: ctx.now(),
+            // Saga slice: recorded for every step kind (including "waitForEvent", which never
+            // dispatches a scheduler job below) — unread until Task 2's unwind loop exists.
+            compensateFnPath: ns.opts?.compensateFnPath,
+          }),
+        );
 
         if (ns.kind === "waitForEvent") {
           // Task 6: THE differentiator — no scheduler job. The step just parks: write an `events`
