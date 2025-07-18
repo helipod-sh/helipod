@@ -1,7 +1,7 @@
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
-import { status, makeAdvance, _stepDone, _sleep, _start, _cancel } from "./modules";
+import { status, makeAdvance, _stepDone, _sleep, _start, _cancel, _compensate, _compensateDone } from "./modules";
 import { _sendEvent } from "./events";
 import { define, type WorkflowRegistry } from "./registry";
 
@@ -49,13 +49,30 @@ export const workflow = { define };
  * `buildAction`) plus its two remaining internal delegate targets, `_start`/`_cancel`
  * (`./modules.ts`; `_sendEvent` already existed from Task 6) — `ctx.workflow.start`/`cancel`/
  * `sendEvent` now work from an ACTION, not just a mutation, exactly like `ctx.scheduler` does.
+ *
+ * The saga/compensation slice's Task 2 added `_compensate`/`_compensateDone` (`./modules.ts`) —
+ * the reverse-order unwind loop: on failure, `_advance`'s `failOrCompensate` helper reroutes into
+ * a `"compensating"` state instead of terminal-failing whenever a completed step still owes a
+ * `{ compensate }` handler a run; `_compensate`/`_compensateDone` then walk the `steps` journal
+ * backwards, dispatching each owed compensation via the scheduler, mirroring `_advance`/
+ * `_stepDone`'s dispatch-then-re-enqueue shape exactly (see those functions' doc comments).
  */
 export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParallelism?: number }): ComponentDefinition {
   return defineComponent({
     name: "workflow",
     schema: workflowSchema,
     requires: ["scheduler"],
-    modules: { _advance: makeAdvance(opts.workflows, opts.maxParallelism), _stepDone, _sleep, _sendEvent, _start, _cancel, status },
+    modules: {
+      _advance: makeAdvance(opts.workflows, opts.maxParallelism),
+      _stepDone,
+      _compensate,
+      _compensateDone,
+      _sleep,
+      _sendEvent,
+      _start,
+      _cancel,
+      status,
+    },
     context: (cctx) => workflowContext(cctx),
     contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
     contextWrite: true,

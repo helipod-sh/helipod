@@ -73,6 +73,12 @@ export interface JournalRow {
   scheduledJobId?: string;
   startedTs: number;
   completedTs?: number;
+  /** Saga slice (Task 1): the resolved path of the step's `{ compensate }` option, if any — see `./schema.ts`'s `steps.compensateFnPath` doc comment. */
+  compensateFnPath?: string;
+  /** Saga slice (Task 2): whether `_compensate`'s reverse unwind has already run this step's compensation. */
+  compensated?: boolean;
+  /** Saga slice (Task 2): the scheduler job id of the DISPATCHED compensation itself — see `./schema.ts`'s `steps.compensationJobId` doc comment. */
+  compensationJobId?: string;
 }
 
 /** Options carried from `step.*` through to `_advance`'s `sched.enqueue` call (`./modules.ts`). */
