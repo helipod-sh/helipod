@@ -29,6 +29,21 @@ function systemModules(): Record<string, RegisteredFunction> {
         return null;
       },
     ),
+    // Test-only escape hatch: patches arbitrary fields onto an existing doc by id, bypassing
+    // whatever mutation would normally write them. `db.get`/`db.replace` resolve purely from the
+    // id (no table name needed), so this works for any table's rows regardless of namespace — used
+    // by the saga slice's crash-resume test (`saga.test.ts`) to force a `steps` row's
+    // `compensated: true` directly, simulating "this compensation already ran in a prior process"
+    // without driving the real unwind to that point.
+    "_system:patchDoc": mutation(async (ctx, args: { id: string; patch: Record<string, unknown> }) => {
+      const doc = await ctx.db.get(args.id);
+      if (doc === null) return null;
+      // `Record<string, unknown>` (the patch) isn't structurally a `DocumentValue`
+      // (`Record<string, Value>`) as far as the type checker can see — this is a test-only escape
+      // hatch that deliberately writes arbitrary fields, so the cast is the point.
+      await ctx.db.replace(args.id, { ...doc, ...args.patch } as Parameters<typeof ctx.db.replace>[1]);
+      return null;
+    }),
   };
 }
 

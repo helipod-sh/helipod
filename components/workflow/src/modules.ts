@@ -97,6 +97,11 @@ function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: E
  * scheduler's). A no-op when `onComplete` is unset — the common case; a full workflow-of-workflows
  * slice (chaining a parent workflow's own `step` off a child's completion) is future work, this is
  * just the round-trip primitive.
+ *
+ * `result` already accepts a `{kind:"canceled"}` outcome — it's typed as the scheduler's full
+ * `OnCompleteResult` union and passed through opaquely, so no change was needed here for the saga
+ * slice's `"canceled"` compensation target (Task 3); every CALLER in this file passes `"failed"`
+ * today, `"canceled"` is exercised once `ctx.workflow.cancel` routes through `failOrCompensate`.
  */
 async function fireWorkflowOnComplete(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -111,6 +116,44 @@ async function fireWorkflowOnComplete(
     compact({ workflowId: wf._id, context: wf.context, result }) as unknown as JSONValue,
     { runAt: ctx.now() },
   );
+}
+
+/**
+ * `failOrCompensate` — the shared decision point every failure path in this file routes through
+ * (both `_advance`'s `outcome.kind === "failed"` branch and its silent-stall determinism-violation
+ * branch below, plus — Task 3 — `ctx.workflow.cancel`). Reads the journal for ANY completed step
+ * that still has an unwound compensation (`state:"success"`, `compensateFnPath` set, `!compensated`):
+ *
+ *  - None found → nothing to undo. Terminal directly, exactly the pre-saga-slice behavior: flip
+ *    `workflows.state` to `target` (`"failed"`/`"canceled"`), record `error`, fire `onComplete`.
+ *  - At least one found → the workflow does NOT go terminal yet. It enters `"compensating"`
+ *    (`error` and `compensationTarget` recorded so the eventual terminal transition — once the
+ *    unwind finishes, in `_compensate` below — knows both what to report and which terminal state
+ *    to land in), and `workflow:_compensate` is enqueued to start walking the journal backwards.
+ *
+ * `target` is `"canceled"` only from Task 3's cancel path; every caller in this file passes
+ * `"failed"`.
+ *
+ * NOT called from Task 3's `ctx.workflow.cancel` (`./facade.ts`) directly, even though cancel's
+ * compensating branch is logically identical to this function's `hasComp` branch: this function
+ * runs PRIVILEGED with fully-qualified table names (`STEPS_TABLE = "workflow/steps"`), while
+ * `cancel` runs namespaced (as the calling mutation's own in-txn facade) with bare table names
+ * (`"steps"`) — calling this helper from `cancel` would double-prefix and throw
+ * `FunctionNotFoundError`. `cancel` instead replicates the small compensating-entry write inline,
+ * against its own bare-name `cctx.db` — see `workflowContext.cancel`'s doc comment in `./facade.ts`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function failOrCompensate(ctx: any, wf: any, originalError: string, target: "failed" | "canceled"): Promise<void> {
+  const steps = (await ctx.db.query(STEPS_TABLE, "by_workflow").eq("workflowId", wf._id).collect()) as JournalRow[];
+  const hasComp = steps.some((s) => s.state === "success" && s.compensateFnPath && !s.compensated);
+  if (!hasComp) {
+    // nothing to undo — terminal directly (unchanged behavior)
+    await ctx.db.replace(wf._id, { ...wf, state: target, error: originalError, completedTs: ctx.now() });
+    await fireWorkflowOnComplete(ctx, wf, target === "canceled" ? { kind: "canceled" } : { kind: "failed", error: originalError });
+    return;
+  }
+  await ctx.db.replace(wf._id, { ...wf, state: "compensating", error: originalError, compensationTarget: target });
+  await schedulerFacade(ctx).enqueue("workflow:_compensate", { workflowId: wf._id } as unknown as JSONValue, {});
 }
 
 /**
@@ -168,8 +211,10 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
       await ctx.db.replace(a.workflowId, { ...fresh, state: "completed", result: outcome.result, completedTs: ctx.now() });
       await fireWorkflowOnComplete(ctx, fresh, { kind: "success", value: outcome.result });
     } else if (outcome.kind === "failed") {
-      await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error: outcome.error, completedTs: ctx.now() });
-      await fireWorkflowOnComplete(ctx, fresh, { kind: "failed", error: outcome.error });
+      // Saga slice: a failure no longer terminal-fails unconditionally — `failOrCompensate` checks
+      // the journal for any completed step still owed a compensation and, if so, reroutes into the
+      // `"compensating"` unwind instead (see its doc comment above).
+      await failOrCompensate(ctx, fresh, outcome.error, "failed");
     } else if (outcome.newSteps.length === 0 && !journal.some((row) => row.state === "pending")) {
       // Silent-stall guard: the handler suspended (didn't return/throw) but journaled no new step
       // AND no previously-dispatched step is still in flight to ever re-enqueue `_advance`. The
@@ -182,10 +227,11 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
       // the dispatch loop below), so `journal.some(pending)` is true and this branch is correctly
       // skipped — the row itself (not a scheduler job) is what's "in flight": `ctx.workflow.
       // sendEvent` (`./events.ts`) is what eventually re-enqueues `_advance`, not a job callback.
+      // A determinism-violation failure should still roll back any already-completed work, same
+      // as an ordinary handler-thrown failure — route through `failOrCompensate` too.
       const error =
         "workflow suspended with no pending step — the handler likely awaited a non-step promise (determinism violation)";
-      await ctx.db.replace(a.workflowId, { ...fresh, state: "failed", error, completedTs: ctx.now() });
-      await fireWorkflowOnComplete(ctx, fresh, { kind: "failed", error });
+      await failOrCompensate(ctx, fresh, error, "failed");
     } else {
       // Task 5 fan-out cap: dispatch at most `maxParallelism` of this poll's new steps. The
       // remainder (if any) are simply left un-journaled — `runReplay` will emit them again as
@@ -198,15 +244,24 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
         );
       }
       for (const ns of toDispatch) {
-        const stepId = await ctx.db.insert(STEPS_TABLE, {
-          workflowId: a.workflowId,
-          stepNumber: ns.stepNumber,
-          name: ns.name,
-          kind: ns.kind,
-          args: ns.args,
-          state: "pending",
-          startedTs: ctx.now(),
-        });
+        const stepId = await ctx.db.insert(
+          STEPS_TABLE,
+          compact({
+            workflowId: a.workflowId,
+            stepNumber: ns.stepNumber,
+            name: ns.name,
+            kind: ns.kind,
+            args: ns.args,
+            state: "pending",
+            startedTs: ctx.now(),
+            // Saga slice: recorded for every step kind (including "waitForEvent", which never
+            // dispatches a scheduler job below) — unread until Task 2's unwind loop exists.
+            compensateFnPath: ns.opts?.compensateFnPath,
+            // Task 3: journal the author's declared retry cap so it also governs this step's
+            // eventual compensation dispatch — see `./schema.ts`'s `steps.maxAttempts` doc comment.
+            maxAttempts: ns.opts?.maxAttempts,
+          }),
+        );
 
         if (ns.kind === "waitForEvent") {
           // Task 6: THE differentiator — no scheduler job. The step just parks: write an `events`
@@ -288,6 +343,124 @@ export const _stepDone = mutation(
 );
 
 /**
+ * `workflow:_compensate` — the reverse-walk driver, MIRRORING `_advance` exactly, run backwards:
+ * where `_advance` replays the handler forward from the top through `runReplay`, `_compensate`
+ * instead reads the durable `steps` journal directly and walks it BACKWARDS — no handler replay
+ * here, since the handler already threw (or the workflow was canceled); re-running it would just
+ * re-throw (or re-run already-completed side effects). Compensation is purely a journal walk.
+ *
+ * (Re-)enqueued by `failOrCompensate` (on entering `"compensating"`) and by `_compensateDone`
+ * below (after each compensation lands, to advance to the next one) — the same "dispatch one unit
+ * of work, let its `onComplete` re-enqueue the driver" shape `_advance`/`_stepDone` use.
+ *
+ * No-ops if the workflow is missing or has left `"compensating"` (terminal/superseded) — mirrors
+ * `_advance`'s `wf.state !== "running"` guard.
+ *
+ * Finds the HIGHEST-`stepNumber` step that is `state:"success"`, has a `compensateFnPath`, and
+ * isn't yet `compensated` — the innermost not-yet-undone success, i.e. reverse order. If none
+ * remain, the unwind is complete: transition to the terminal state recorded in
+ * `wf.compensationTarget` (`"failed"`/`"canceled"`, defaulting to `"failed"` if somehow unset),
+ * preserving the ORIGINAL error (`wf.error`, stamped by `failOrCompensate` before compensation
+ * started — never overwritten by anything in this file), and fire `onComplete`.
+ *
+ * Otherwise, dispatch that step's compensation via the scheduler, passing `{ args: step.args,
+ * result: step.result }` — the original step's own inputs AND output, so the undo handler knows
+ * exactly what to reverse (e.g. a refund needs the charge amount AND the charge's id/receipt).
+ * `onComplete: "workflow:_compensateDone"` carries `{workflowId, stepNumber, generationNumber}`,
+ * the same context shape `_advance` stamps for a forward step, read back by `_compensateDone`.
+ * The dispatched job's id is stamped onto the step row as `compensationJobId` (distinct from the
+ * forward step's own `scheduledJobId`, which belongs to a job that's already terminal by now) —
+ * unread until Task 3's cascade-cancel.
+ */
+export const _compensate = mutation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async (ctx: any, a: { workflowId: string }): Promise<null> => {
+    const wf = await ctx.db.get(a.workflowId);
+    if (!wf || wf.state !== "compensating") return null; // terminal/superseded
+    const gen = wf.generationNumber as number;
+    const steps = (await ctx.db.query(STEPS_TABLE, "by_workflow").eq("workflowId", a.workflowId).collect()) as JournalRow[];
+    // highest stepNumber, success, has a compensation, not yet compensated
+    const next = steps
+      .filter((s) => s.state === "success" && s.compensateFnPath && !s.compensated)
+      .sort((x, y) => (y.stepNumber as number) - (x.stepNumber as number))[0];
+    if (!next) {
+      // unwind complete → terminal
+      const target = (wf.compensationTarget as string) === "canceled" ? "canceled" : "failed";
+      await ctx.db.replace(a.workflowId, { ...wf, state: target, completedTs: ctx.now() });
+      await fireWorkflowOnComplete(
+        ctx,
+        wf,
+        target === "canceled" ? { kind: "canceled" } : { kind: "failed", error: wf.error as string },
+      );
+      return null;
+    }
+    const jobId = await schedulerFacade(ctx).enqueue(
+      next.compensateFnPath as string,
+      { args: next.args, result: next.result } as unknown as JSONValue,
+      {
+        // Task 3: the forward step's own journaled `maxAttempts` (if declared) also caps its
+        // compensation's retries — see `./schema.ts`'s `steps.maxAttempts` doc comment. Without
+        // this, a throwing compensation would blind-retry with the scheduler's default
+        // `maxFailures: 4` real-wall-clock exponential backoff, which a synchronous `tick()`-driven
+        // test (or a caller who explicitly capped the forward step) can't outlast/doesn't want.
+        retry: next.maxAttempts !== undefined ? { maxFailures: next.maxAttempts } : undefined,
+        onComplete: "workflow:_compensateDone",
+        context: { workflowId: a.workflowId, stepNumber: next.stepNumber, generationNumber: gen } as unknown as JSONValue,
+      },
+    );
+    // For cascade-cancel (Task 3) — a distinct field from the forward step's `scheduledJobId`.
+    await ctx.db.replace(next._id, { ...next, compensationJobId: jobId });
+    return null;
+  },
+);
+
+/**
+ * `workflow:_compensateDone` — the scheduler's `onComplete` callback for a compensation job
+ * (dispatched by `_compensate` above). Receives exactly `{ jobId, context: {workflowId,
+ * stepNumber, generationNumber}, result }`, same shape as `_stepDone`'s.
+ *
+ * On success: marks the step row `compensated: true` and re-enqueues `workflow:_compensate` to
+ * advance the walk to the next (lower-`stepNumber`) not-yet-compensated success — mirroring
+ * `_stepDone`'s own re-enqueue-to-continue of `_advance`.
+ *
+ * On failure: HALTS the unwind — a compensation itself failing means the saga can't safely
+ * continue undoing (Task 3 finalizes this branch's exact terminal-error text and adds its
+ * dedicated test; this is a placeholder that still reaches a terminal `"failed"` state rather than
+ * leaving the workflow stuck `"compensating"` forever).
+ *
+ * `wf.generationNumber !== a.context.generationNumber` is the same OCC guard `_stepDone` uses.
+ */
+export const _compensateDone = mutation(
+  async (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ctx: any,
+    a: { jobId: string; context: { workflowId: string; stepNumber: number; generationNumber: number }; result: OnCompleteResult },
+  ): Promise<null> => {
+    const wf = await ctx.db.get(a.context.workflowId);
+    if (!wf || wf.generationNumber !== a.context.generationNumber) return null; // OCC guard
+    const steps = (await ctx.db.query(STEPS_TABLE, "by_workflow").eq("workflowId", a.context.workflowId).collect()) as JournalRow[];
+    const row = steps.find((s) => s.stepNumber === a.context.stepNumber);
+    if (!row) return null;
+    if (a.result.kind === "success") {
+      await ctx.db.replace(row._id, { ...row, compensated: true });
+      await schedulerFacade(ctx).enqueue("workflow:_compensate", { workflowId: a.context.workflowId } as unknown as JSONValue, {});
+    } else {
+      // Compensation itself failed → HALT (Task 3 finalizes this branch's terminal-error text and
+      // its dedicated test).
+      const cerr = a.result.kind === "failed" ? a.result.error : "canceled";
+      await ctx.db.replace(a.context.workflowId, {
+        ...wf,
+        state: "failed",
+        completedTs: ctx.now(),
+        error: `compensation failed at step ${a.context.stepNumber}: ${cerr}; original workflow error: ${(wf.error as string | undefined) ?? ""}`,
+      });
+      await fireWorkflowOnComplete(ctx, wf, { kind: "failed", error: `compensation failed at step ${a.context.stepNumber}` });
+    }
+    return null;
+  },
+);
+
+/**
  * `workflow:_start` / `workflow:_cancel` — internal (`_`-prefixed, so not client-callable)
  * MUTATIONS backing the action-mode `ctx.workflow` facade (`workflowActionContext` in
  * `./facade.ts`, Task 7): an action has no `db`, so it can't write a new `workflows` row or
@@ -315,8 +488,8 @@ export const _start = mutation(
 
 export const _cancel = mutation(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async (ctx: any, a: { runId: string }): Promise<null> => {
-    await ctx.workflow.cancel(a.runId);
+  async (ctx: any, a: { runId: string; compensate?: boolean }): Promise<null> => {
+    await ctx.workflow.cancel(a.runId, a.compensate !== undefined ? { compensate: a.compensate } : undefined);
     return null;
   },
 );
