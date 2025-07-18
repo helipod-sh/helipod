@@ -56,6 +56,14 @@ export const workflow = { define };
  * `{ compensate }` handler a run; `_compensate`/`_compensateDone` then walk the `steps` journal
  * backwards, dispatching each owed compensation via the scheduler, mirroring `_advance`/
  * `_stepDone`'s dispatch-then-re-enqueue shape exactly (see those functions' doc comments).
+ *
+ * Task 3 finished the saga/compensation slice: a compensation that itself exhausts its retries
+ * HALTS the unwind (terminal `"failed"`, preserving the original error alongside the halt reason —
+ * `_compensateDone`'s failure branch); `ctx.workflow.cancel` (`./facade.ts`) now compensates by
+ * default (opt out with `{ compensate: false }`), is idempotent against a workflow that's already
+ * `"compensating"`, and cascade-cancels an in-flight compensation job the same way it already
+ * cascade-canceled a pending forward step job. A step's own `{ maxAttempts }` now also caps its
+ * compensation's retries (journaled `steps.maxAttempts` -> `_compensate`'s `retry.maxFailures`).
  */
 export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParallelism?: number }): ComponentDefinition {
   return defineComponent({

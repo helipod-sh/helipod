@@ -133,6 +133,14 @@ async function fireWorkflowOnComplete(
  *
  * `target` is `"canceled"` only from Task 3's cancel path; every caller in this file passes
  * `"failed"`.
+ *
+ * NOT called from Task 3's `ctx.workflow.cancel` (`./facade.ts`) directly, even though cancel's
+ * compensating branch is logically identical to this function's `hasComp` branch: this function
+ * runs PRIVILEGED with fully-qualified table names (`STEPS_TABLE = "workflow/steps"`), while
+ * `cancel` runs namespaced (as the calling mutation's own in-txn facade) with bare table names
+ * (`"steps"`) — calling this helper from `cancel` would double-prefix and throw
+ * `FunctionNotFoundError`. `cancel` instead replicates the small compensating-entry write inline,
+ * against its own bare-name `cctx.db` — see `workflowContext.cancel`'s doc comment in `./facade.ts`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function failOrCompensate(ctx: any, wf: any, originalError: string, target: "failed" | "canceled"): Promise<void> {
@@ -249,6 +257,9 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
             // Saga slice: recorded for every step kind (including "waitForEvent", which never
             // dispatches a scheduler job below) — unread until Task 2's unwind loop exists.
             compensateFnPath: ns.opts?.compensateFnPath,
+            // Task 3: journal the author's declared retry cap so it also governs this step's
+            // eventual compensation dispatch — see `./schema.ts`'s `steps.maxAttempts` doc comment.
+            maxAttempts: ns.opts?.maxAttempts,
           }),
         );
 
@@ -387,6 +398,12 @@ export const _compensate = mutation(
       next.compensateFnPath as string,
       { args: next.args, result: next.result } as unknown as JSONValue,
       {
+        // Task 3: the forward step's own journaled `maxAttempts` (if declared) also caps its
+        // compensation's retries — see `./schema.ts`'s `steps.maxAttempts` doc comment. Without
+        // this, a throwing compensation would blind-retry with the scheduler's default
+        // `maxFailures: 4` real-wall-clock exponential backoff, which a synchronous `tick()`-driven
+        // test (or a caller who explicitly capped the forward step) can't outlast/doesn't want.
+        retry: next.maxAttempts !== undefined ? { maxFailures: next.maxAttempts } : undefined,
         onComplete: "workflow:_compensateDone",
         context: { workflowId: a.workflowId, stepNumber: next.stepNumber, generationNumber: gen } as unknown as JSONValue,
       },
@@ -471,8 +488,8 @@ export const _start = mutation(
 
 export const _cancel = mutation(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async (ctx: any, a: { runId: string }): Promise<null> => {
-    await ctx.workflow.cancel(a.runId);
+  async (ctx: any, a: { runId: string; compensate?: boolean }): Promise<null> => {
+    await ctx.workflow.cancel(a.runId, a.compensate !== undefined ? { compensate: a.compensate } : undefined);
     return null;
   },
 );

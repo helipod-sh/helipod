@@ -25,6 +25,11 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  *   which is the original forward step's job — terminal by the time compensation runs, so reusing
  *   it would conflate two different jobs) — stamped by `_compensate` so a future cancel cascade
  *   (Task 3) can cancel an in-flight compensation the same way it cancels a pending forward step.
+ *   `maxAttempts` (Task 3) is the author's declared `{ maxAttempts }` from the forward step's own
+ *   options (`ns.opts?.maxAttempts`), journaled here so it ALSO governs the retry cap of that same
+ *   step's compensation dispatch (`_compensate`'s `sched.enqueue(..., { retry })`) — one declared
+ *   cap covers both the forward step and its undo, rather than the compensation silently inheriting
+ *   the scheduler's default `maxFailures: 4` with real exponential backoff.
  * - `events`: external signals delivered into a running workflow — one row per `step.waitForEvent`
  *   call, `state:"waiting"` until `ctx.workflow.sendEvent(runId, name, payload)` flips it
  *   `"received"` (Task 6, `./events.ts`/`./facade.ts`).
@@ -62,6 +67,7 @@ export const workflowSchema = defineSchema({
     compensateFnPath: v.optional(v.string()),
     compensated: v.optional(v.boolean()),
     compensationJobId: v.optional(v.string()),
+    maxAttempts: v.optional(v.number()),
   }).index("by_workflow", ["workflowId", "stepNumber"]),
 
   events: defineTable({

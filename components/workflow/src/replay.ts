@@ -79,6 +79,8 @@ export interface JournalRow {
   compensated?: boolean;
   /** Saga slice (Task 2): the scheduler job id of the DISPATCHED compensation itself — see `./schema.ts`'s `steps.compensationJobId` doc comment. */
   compensationJobId?: string;
+  /** Saga slice (Task 3): the forward step's own `{ maxAttempts }`, journaled so it also caps its compensation's retry — see `./schema.ts`'s `steps.maxAttempts` doc comment. */
+  maxAttempts?: number;
 }
 
 /** Options carried from `step.*` through to `_advance`'s `sched.enqueue` call (`./modules.ts`). */
