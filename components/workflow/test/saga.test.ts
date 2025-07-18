@@ -127,10 +127,18 @@ describe("saga — reverse-order unwind on failure", () => {
 });
 
 describe("saga — Task 3: halt on failed compensation, cancel compensates, fan-out reverse order", () => {
-  it("a compensation that exhausts retries HALTS the unwind — terminal failed with a clear error", async () => {
+  it("a compensation that exhausts retries HALTS the unwind — terminal failed with a clear error, and the walk STOPS (an earlier-in-reverse step's compensation never runs)", async () => {
     const log: string[] = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const flow = workflow.define({ handler: async (step: any) => {
+      // 4 steps (stepNumbers 0..3), each with a compensation except s3 (the one that throws
+      // forward). Reverse unwind order is c2 (step2) -> c1 (step1) -> c0 (step0). c1 ALWAYS
+      // throws, so the walk must HALT there — c0 (an earlier-in-reverse-order step) must NEVER
+      // run. This is what distinguishes "halted" from merely "nothing left to compensate": the
+      // original (pre-tightening) version of this test had its throwing compensation LAST in
+      // reverse order, so it couldn't empirically prove the halt actually stopped the walk short
+      // rather than just reaching the end naturally.
+      await step.runMutation("app:s0", {}, { compensate: "app:c0" });
       // maxAttempts: 1 on s1 — journaled onto s1's step row (Task 3) and threaded into its
       // compensation's (c1's) own retry cap, so c1 dead-letters on its FIRST failure instead of
       // blind-retrying with the scheduler's default real-wall-clock exponential backoff (see
@@ -144,20 +152,23 @@ describe("saga — Task 3: halt on failed compensation, cancel compensates, fan-
     const { runtime, tick } = await makeRuntimeWithWorkflow(
       { // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "app:kick": mutation(async (ctx: any) => ctx.workflow.start("app:flow", {})),
+        "app:s0": mutation(async () => { log.push("s0"); return "r0"; }),
         "app:s1": mutation(async () => { log.push("s1"); return "r1"; }),
         "app:s2": mutation(async () => { log.push("s2"); return "r2"; }),
         "app:s3": mutation(async () => { throw new Error("boom"); }),
+        "app:c0": mutation(async () => { log.push("c0"); return null; }),
         "app:c1": mutation(async () => { log.push("c1"); throw new Error("c1 always fails"); }),
         "app:c2": mutation(async () => { log.push("c2"); return null; }) },
       { "app:flow": flow });
     const runId = (await runtime.run("app:kick", {})).value as string;
-    for (let i = 0; i < 12; i++) await tick();
+    for (let i = 0; i < 14; i++) await tick();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const st = (await runtime.run("workflow:status", { runId })).value as any;
     expect(st.state).toBe("failed");
-    expect(st.error).toMatch(/compensation failed at step 0/); // s1 is stepNumber 0
+    expect(st.error).toMatch(/compensation failed at step 1/); // s1 is stepNumber 1
     expect(st.error).toMatch(/boom/); // original failure preserved alongside the halt reason
-    expect(log).toEqual(["s1", "s2", "c2", "c1"]); // c2 ran (success), c1 attempted then halted
+    expect(log).toEqual(["s0", "s1", "s2", "c2", "c1"]); // c2 ran (success), c1 attempted then halted
+    expect(log).not.toContain("c0"); // the halt STOPPED the walk before reaching step0's compensation
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const steps = (await readTable(runtime, "workflow/steps")).filter((s: any) => s.workflowId === runId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -196,6 +207,51 @@ describe("saga — Task 3: halt on failed compensation, cancel compensates, fan-
     const st = (await runtime.run("workflow:status", { runId })).value as any;
     expect(st.state).toBe("canceled");
     expect(log).toEqual(["s1", "s2", "c2", "c1"]); // reverse-order compensation ran before reaching canceled
+  });
+
+  it("a SECOND cancel(runId) while already compensating is an idempotent no-op — the unwind isn't stranded, nothing double-runs", async () => {
+    // Regression test for the guard in `workflowContext.cancel` (`./src/facade.ts`): a non-
+    // "running" workflow (already terminal, OR already "compensating" from a prior cancel) is a
+    // no-op BEFORE any write — critically, it does NOT bump `generationNumber` again. If it did,
+    // the in-flight `_compensateDone` callback (which carries the gen captured when the unwind
+    // started) would self-discard via its own OCC guard and strand the unwind forever with no one
+    // left to drive it forward. `cancel` is itself a mutation that commits synchronously before
+    // returning, so calling it twice back-to-back (no `tick()` in between) reliably lands the
+    // second call while `state === "compensating"` — no fiddly mid-unwind timing needed.
+    const log: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flow = workflow.define({ handler: async (step: any) => {
+      await step.runMutation("app:s1", {}, { compensate: "app:c1" });
+      await step.runMutation("app:s2", {}, { compensate: "app:c2" });
+      await step.sleep(1_000_000); // parks the run so it's still "running" when we cancel it
+      return "unreached";
+    }});
+    const { runtime, tick } = await makeRuntimeWithWorkflow(
+      { // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        "app:kick": mutation(async (ctx: any) => ctx.workflow.start("app:flow", {})),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        "app:cancel": mutation(async (ctx: any, a: { runId: string }) => { await ctx.workflow.cancel(a.runId); return null; }),
+        "app:s1": mutation(async () => { log.push("s1"); return "r1"; }),
+        "app:s2": mutation(async () => { log.push("s2"); return "r2"; }),
+        "app:c1": mutation(async () => { log.push("c1"); return null; }),
+        "app:c2": mutation(async () => { log.push("c2"); return null; }) },
+      { "app:flow": flow });
+    const runId = (await runtime.run("app:kick", {})).value as string;
+    for (let i = 0; i < 8; i++) await tick(); // runs s1, s2, then parks on the sleep
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(((await runtime.run("workflow:status", { runId })).value as any).state).toBe("running");
+
+    await runtime.run("app:cancel", { runId }); // first cancel: running -> compensating
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(((await runtime.run("workflow:status", { runId })).value as any).state).toBe("compensating");
+
+    await runtime.run("app:cancel", { runId }); // second cancel: must be a no-op, not a second gen-bump
+    for (let i = 0; i < 12; i++) await tick(); // drives the unwind to completion
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const st = (await runtime.run("workflow:status", { runId })).value as any;
+    expect(st.state).toBe("canceled"); // reached terminal — the unwind was NOT stranded
+    expect(log).toEqual(["s1", "s2", "c2", "c1"]); // each compensation ran exactly once — no double-undo
   });
 
   it("cancel(runId, { compensate: false }) skips compensation — canceled immediately, no undo runs", async () => {
