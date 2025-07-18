@@ -16,6 +16,7 @@ How the systems we draw from actually work, and the one transferable idea from e
 - [SpacetimeDB](./research/spacetimedb.md) — in-memory hot path, incremental subscription eval, binary deltas; why it's fast.
 - [Supabase](./research/supabase.md) — schema-as-source-of-truth + RLS; and the operational weight to avoid.
 - [PocketBase](./research/pocketbase.md) — single binary + embedded SQLite; the lightweight tier.
+- [Lunora](./research/lunora.md) — the closest *shipped* prior art (Convex-style backend on Cloudflare DOs, alpha); client-sync playbook (watermarks, bookmark resume, offline), poke/membership-diff protocol, advisory guardrails. Authz-specific deep-dive lives in [`components/authz/docs/research.md`](../../components/authz/docs/research.md).
 
 ## The design goals (user brief)
 
