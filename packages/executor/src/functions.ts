@@ -36,3 +36,17 @@ export function action<Args = unknown, Output = unknown>(def: ActionDef<Args, Ou
   const handler = typeof def === "function" ? def : def.handler;
   return { type: "action", handler: handler as RegisteredFunction["handler"] };
 }
+
+type HttpActionDef =
+  | { handler: (ctx: unknown, request: Request) => Response | Promise<Response> }
+  | ((ctx: unknown, request: Request) => Response | Promise<Response>);
+
+/**
+ * `httpAction` — an action whose I/O is a raw Web `Request` -> `Response` (instead of JSON
+ * args -> value). Same non-deterministic context as `action` (runQuery/runMutation/runAction,
+ * native fetch/clock; NO ctx.db); routed by the public HTTP router (see `./http-router.ts`).
+ */
+export function httpAction(def: HttpActionDef): RegisteredFunction {
+  const handler = typeof def === "function" ? def : def.handler;
+  return { type: "httpAction", handler: handler as RegisteredFunction["handler"] };
+}

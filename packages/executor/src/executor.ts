@@ -156,7 +156,7 @@ export class InlineUdfExecutor {
   constructor(private readonly deps: ExecutorDeps) {}
 
   async run<T = unknown>(fn: RegisteredFunction, args: unknown, options: RunOptions = {}): Promise<UdfResult<T>> {
-    if (fn.type === "httpAction") throw new Error("the inline executor does not yet run httpAction functions");
+    if (fn.type === "httpAction") return this.runActionFn<T>(fn, args, options, "httpAction");
     if (fn.type === "action") return this.runActionFn<T>(fn, args, options);
     const profile = profileFor(fn.type);
     const seed = options.seed ?? 0;
@@ -260,7 +260,12 @@ export class InlineUdfExecutor {
    * through `runQuery`/`runMutation`/`runAction`, each a fresh top-level `invoke` — its own
    * transaction (for query/mutation) or its own action execution.
    */
-  private async runActionFn<T>(fn: RegisteredFunction, args: unknown, options: RunOptions): Promise<UdfResult<T>> {
+  private async runActionFn<T>(
+    fn: RegisteredFunction,
+    args: unknown,
+    options: RunOptions,
+    logKind: LogKind = "action",
+  ): Promise<UdfResult<T>> {
     const clock = this.deps.now ?? Date.now;
     const startedAt = clock();
     const invoke = this.deps.invoke;
@@ -288,10 +293,10 @@ export class InlineUdfExecutor {
     }
     try {
       const value = await fn.handler(actionCtx, args);
-      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
       return { value: value as T, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null };
     } catch (e) {
-      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: "action", ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
+      this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;
     }
   }
