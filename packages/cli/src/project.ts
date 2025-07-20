@@ -34,6 +34,17 @@ export interface ProjectArtifacts {
    * dispatch) — see `../test/scheduler-e2e.test.ts` for the proof this wiring matters.
    */
   drivers: Driver[];
+  /** The app's `http.ts` router, resolved to `path:name` function paths for dispatch. */
+  routes: ResolvedRoute[];
+}
+
+/** A single `http.ts` route, with its handler resolved from a `RegisteredFunction` value to the
+ * `path:name` string that `runtime.runHttpAction` looks up in `composed.moduleMap`. */
+export interface ResolvedRoute {
+  method: string;
+  path?: string;
+  pathPrefix?: string;
+  handlerPath: string;
 }
 
 function isRegisteredFunction(x: unknown): x is RegisteredFunction {
@@ -56,7 +67,7 @@ export function loadProject(loaded: LoadedProject, components: ComponentDefiniti
     for (const [name, value] of Object.entries(exports)) {
       if (!isRegisteredFunction(value)) continue;
       appModuleMap[`${path}:${name}`] = value;
-      if (value.type === "query" || value.type === "mutation" || value.type === "action") {
+      if (value.type === "query" || value.type === "mutation" || value.type === "action" || value.type === "httpAction") {
         functions.push({ name, type: value.type, visibility: "public" });
       }
     }
@@ -72,6 +83,33 @@ export function loadProject(loaded: LoadedProject, components: ComponentDefiniti
   // Compose app + components: allocates table numbers, merges module maps, collects context providers.
   const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components);
 
+  // Extract + resolve the `http.ts` router (if any): its `default` export is an `HttpRouter` whose
+  // route handlers are `RegisteredFunction` VALUES — resolve each to its `path:name` function path
+  // by identity over `appModuleMap` (the same objects the router references), for
+  // `runtime.runHttpAction` to look up in `composed.moduleMap`.
+  const routes: ResolvedRoute[] = [];
+  const router = loaded.modules["http"]?.default as
+    | { routes?: Array<{ method: string; path?: string; pathPrefix?: string; handler: RegisteredFunction }> }
+    | undefined;
+  if (router?.routes) {
+    const pathByFn = new Map<RegisteredFunction, string>();
+    for (const [path, fn] of Object.entries(appModuleMap)) pathByFn.set(fn, path);
+    for (const r of router.routes) {
+      const handlerPath = pathByFn.get(r.handler);
+      if (!handlerPath) {
+        const where = r.path ?? r.pathPrefix ?? "?";
+        throw new Error(
+          `http.route handler for "${where}" must be an exported httpAction (declare it as a named export of an app module)`,
+        );
+      }
+      routes.push({
+        method: r.method,
+        ...(r.path !== undefined ? { path: r.path } : { pathPrefix: r.pathPrefix }),
+        handlerPath,
+      });
+    }
+  }
+
   return {
     schemaJson,
     catalog: composed.catalog,
@@ -82,5 +120,6 @@ export function loadProject(loaded: LoadedProject, components: ComponentDefiniti
     contextProviders: composed.contextProviders,
     bootSteps: composed.bootSteps,
     drivers: composed.drivers,
+    routes,
   };
 }
