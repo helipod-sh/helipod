@@ -101,7 +101,7 @@ export async function devCommand(args: string[]): Promise<number> {
   const server = await startDevServer(
     runtime,
     { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
-    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard },
+    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
   if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @stackbase/dashboard build\`)\n`);
@@ -121,6 +121,7 @@ export async function devCommand(args: string[]): Promise<number> {
         const next = push(await loadConvexDir(opts.convexDir), config.components);
         writeGenerated(next.generated.files, generatedDir);
         runtime.setModules(next.project.moduleMap);
+        server.setRoutes(next.project.routes);
         process.stdout.write(`↻ pushed (${Object.keys(next.project.moduleMap).length} functions)\n`);
       } catch (e) {
         process.stderr.write(`✗ reload failed: ${e instanceof Error ? e.message : String(e)}\n`);
