@@ -369,6 +369,26 @@ export class EmbeddedRuntime {
     });
   }
 
+  /** Directly invoke an httpAction (for the public HTTP router). Passes the raw `Request` through
+   *  untouched and returns the handler's `Response`. Public gate: blocks `_`-prefixed paths. */
+  async runHttpAction(path: string, request: Request, opts?: { identity?: string | null }): Promise<Response> {
+    if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    const fn = this.modules[path];
+    if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (fn.type !== "httpAction") throw new Error(`${path} is not an httpAction`);
+    const result = await this.executor.run<Response>(fn, request as unknown as never, {
+      path,
+      namespace: namespaceForPath(path, this.componentNames),
+      contextProviders: this.contextProviders,
+      policyRegistry: this.policyRegistry,
+      policyProviders: this.policyProviders,
+      relationRegistry: this.relationRegistry,
+      functionKind: this.functionKind,
+      identity: opts?.identity ?? null,
+    });
+    return result.value;
+  }
+
   /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
   async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
