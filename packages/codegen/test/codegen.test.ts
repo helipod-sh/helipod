@@ -109,7 +109,7 @@ describe("generateInternalApi", () => {
 describe("generateServer", () => {
   it("re-exports the runtime function builders and the generated types", () => {
     const server = generateServer(schema);
-    expect(server.content).toContain('export { query, mutation, action } from "@stackbase/executor";');
+    expect(server.content).toContain('export { query, mutation, action, httpAction, httpRouter } from "@stackbase/executor";');
     expect(server.content).toContain('export type { DataModel, TableNames, Doc, Id } from "./dataModel";');
     expect(server.content).toContain('export type { Internal } from "./internal";');
   });

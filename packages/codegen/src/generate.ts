@@ -183,7 +183,7 @@ export function generateServer(_schema: SchemaDefinitionJSON, options: CodegenOp
   // `api`/`internal` — the runtime path-building proxy (`@stackbase/client`'s `anyApi`, typed at
   // this cast site), so `api.messages.list`/`internal.maintenance.purge` are usable as VALUES
   // (not just types) in app code — see `Api`/`Internal` (`./api.d.ts`/`./internal.d.ts`).
-  const content = `${options.header ?? DEFAULT_HEADER}export { query, mutation, action } from "@stackbase/executor";
+  const content = `${options.header ?? DEFAULT_HEADER}export { query, mutation, action, httpAction, httpRouter } from "@stackbase/executor";
 export type { DataModel, TableNames, Doc, Id } from "./dataModel";
 export type { Api, FunctionReference } from "./api";
 export type { Internal } from "./internal";
