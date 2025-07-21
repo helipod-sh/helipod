@@ -10,6 +10,11 @@ The recurring question: *Convex's engine is Rust; we built ours in JS/Bun. Won't
 under millions of simultaneous socket connections, where Erlang/Rust shine?* Here is the honest,
 numbers-grounded answer, so we don't re-litigate it from intuition.
 
+> This doc covers the **connection tier** specifically. For the *whole-system* language decision
+> (engine language ≠ user language, "could users still use it like a package?", deploying to the
+> edge / a droplet / with or without Docker), see
+> [`deployment-and-language.md`](./deployment-and-language.md).
+
 ## The conflation to avoid
 
 "Scale" bundles **two different problems** that have different answers:

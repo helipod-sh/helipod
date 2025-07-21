@@ -16,7 +16,9 @@ audience: engineering (internal)
 > It is the companion to the [system design](./system-design.md) (the North Star) and the
 > end-user [scaling blueprint](../../enduser/deploy/scaling.md) (the deployment view). This doc
 > is the *internal* bridge: it maps a real WhatsApp-class workload onto our reactive-transaction
-> model and proves the seams are sufficient.
+> model and proves the seams are sufficient. For the concrete **deployment matrix** (single binary,
+> npm without Docker, Docker, a droplet, Railway/Fly, edge) and the **language decision** behind it,
+> see [`deployment-and-language.md`](./deployment-and-language.md).
 
 ## 1. The two endpoints
 

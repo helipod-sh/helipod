@@ -6,6 +6,12 @@ Internal engineering docs for **building** Stackbase. (End-user product docs liv
 
 - **[Architecture: System Design (North Star)](./architecture/system-design.md)** — the synthesized Stackbase architecture: the reactive-transaction core primitive, the storage seam, and the tiered (lightweight → scalable) model that reconciles all four design goals.
 
+## Scaling & deployment
+
+- [Deployment Topologies & the TypeScript-vs-Rust Question](./architecture/deployment-and-language.md) — the deployment matrix (single binary · npm without Docker · Docker · a DigitalOcean droplet · Railway/Fly · edge), the whole-system language decision ("could we have used Rust? could users still use it like a package?"), how the single binary scales, and an honest snapshot of what ships vs. what's designed.
+- [Scalability Spectrum](./architecture/scalability-spectrum.md) — Tier 0 → Tier 2, per-conversation write sharding, the connection-sharded sync fleet, and the seams the Foundation must reserve.
+- [Scaling Reality](./architecture/scaling-reality.md) — the numbers-grounded answer to "won't a JS/Bun engine fall over at WhatsApp-class connection counts?" (the connection-tier half of the language question).
+
 ## Reference research
 
 How the systems we draw from actually work, and the one transferable idea from each:
