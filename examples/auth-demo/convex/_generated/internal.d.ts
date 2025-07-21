@@ -12,11 +12,11 @@ export type FunctionReference<
   readonly __returns: Returns;
 };
 
-export type Api = {
+export type Internal = {
   "http": {
 
   };
   "whoami": {
-    get: FunctionReference<"query", "public", any, any>;
+
   };
 };

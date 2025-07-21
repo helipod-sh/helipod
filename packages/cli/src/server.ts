@@ -12,6 +12,7 @@ import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
+import type { ResolvedRoute } from "./project";
 import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
@@ -36,6 +37,8 @@ export interface DevServer {
   url: string;
   port: number;
   close(): Promise<void>;
+  /** Replace the httpAction route table, e.g. after a hot reload re-resolves `http.ts`. */
+  setRoutes(routes: ResolvedRoute[]): void;
 }
 
 export interface DevServerOptions {
@@ -45,6 +48,8 @@ export interface DevServerOptions {
   admin?: { api: AdminApi; key: string };
   /** The built dashboard SPA: the dist dir (hashed Vite assets) + key-injected index.html. */
   dashboard?: { distDir: string; html: string };
+  /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
+  routes?: ResolvedRoute[];
 }
 
 /** Serve the dashboard SPA for `/_dashboard*` (index.html key-injected, assets from dist), or null. */
@@ -99,6 +104,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
   const { WebSocketServer } = (await import("ws")) as typeof import("ws");
+  let currentRoutes = options.routes ?? [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
@@ -109,6 +115,9 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
         const query: Record<string, string> = {};
         url.searchParams.forEach((val, key) => { query[key] = val; });
         const authorization = req.headers.authorization ?? undefined;
+        const headers = Object.fromEntries(
+          Object.entries(req.headers).filter((e): e is [string, string] => typeof e[1] === "string"),
+        );
         if ((req.method ?? "GET") === "GET" && options.dashboard) {
           const dash = serveDashboard(path, options.dashboard);
           if (dash) {
@@ -119,9 +128,10 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
         }
         const response = await handleHttpRequest(
           runtime,
-          { method: req.method ?? "GET", path, body, query, authorization },
+          { method: req.method ?? "GET", path, body, query, authorization, headers },
           info,
           options.admin,
+          currentRoutes,
         );
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
           const file = resolveStatic(options.webDir, path);
@@ -169,6 +179,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
   return {
     url: `http://${options.ip}:${port}`,
     port,
+    setRoutes: (r) => { currentRoutes = r; },
     close: () =>
       new Promise<void>((res) => {
         for (const c of wss.clients) c.terminate();
@@ -214,6 +225,7 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
   const bun = (globalThis as { Bun?: BunRuntime }).Bun;
   if (!bun) throw new Error("Bun runtime not available");
   let sessionCounter = 0;
+  let currentRoutes = options.routes ?? [];
 
   const handle = bun.serve({
     port: options.port,
@@ -237,11 +249,14 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
       const query: Record<string, string> = {};
       url.searchParams.forEach((val, key) => { query[key] = val; });
       const authorization = req.headers.get("authorization") ?? undefined;
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => { headers[k] = v; });
       const response = await handleHttpRequest(
         runtime,
-        { method: req.method, path, body, query, authorization },
+        { method: req.method, path, body, query, authorization, headers },
         info,
         options.admin,
+        currentRoutes,
       );
       if (response.status === 404 && req.method === "GET" && options.webDir) {
         const file = resolveStatic(options.webDir, path);
@@ -272,6 +287,7 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
   return {
     url: `http://${options.ip}:${handle.port}`,
     port: handle.port,
+    setRoutes: (r) => { currentRoutes = r; },
     close: () => {
       handle.stop(true);
       return Promise.resolve();

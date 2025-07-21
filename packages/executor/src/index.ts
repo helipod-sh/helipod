@@ -19,7 +19,10 @@ export type { DocId, QueryCtx, MutationCtx, ActionCtx, FunctionReference } from 
 export { GuestDatabaseReader, GuestDatabaseWriter, QueryBuilder } from "./guest";
 
 export type { RegisteredFunction } from "./functions";
-export { query, mutation, action } from "./functions";
+export { query, mutation, action, httpAction } from "./functions";
+
+export type { HttpRouter, RouteSpec, RouteEntry } from "./http-router";
+export { httpRouter, matchRoute, isReservedHttpPath } from "./http-router";
 
 export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi } from "./executor";
 export { InlineUdfExecutor, commitThenThrow, CommitThenThrow } from "./executor";

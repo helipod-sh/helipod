@@ -9,7 +9,7 @@
 import type { SchemaDefinitionJSON, TableDefinitionJSON, ValidatorJSON } from "@stackbase/values";
 import { validatorToTsType } from "./validator-to-ts";
 
-export type UdfType = "query" | "mutation" | "action";
+export type UdfType = "query" | "mutation" | "action" | "httpAction";
 export type Visibility = "public" | "internal";
 
 export interface AnalyzedFunction {
@@ -112,7 +112,10 @@ function emitApiModules(manifest: AnalyzedFunctionManifest, visibility: Visibili
   return manifest
     .map((mod) => {
       const fns = mod.functions
-        .filter((f) => f.visibility === visibility)
+        // httpActions are HTTP endpoints (dispatched by route, not by path) — never invoked via
+        // ctx.run*/client.query|mutation|action, so they're excluded from the callable api object
+        // even though they're listed in the manifest (for codegen/dashboard visibility).
+        .filter((f) => f.visibility === visibility && f.type !== "httpAction")
         .map(
           (f) =>
             `    ${f.name}: FunctionReference<"${f.type}", "${visibility}", ${f.argsType ?? "any"}, ${f.returnsType ?? "any"}>;`,
@@ -180,7 +183,7 @@ export function generateServer(_schema: SchemaDefinitionJSON, options: CodegenOp
   // `api`/`internal` — the runtime path-building proxy (`@stackbase/client`'s `anyApi`, typed at
   // this cast site), so `api.messages.list`/`internal.maintenance.purge` are usable as VALUES
   // (not just types) in app code — see `Api`/`Internal` (`./api.d.ts`/`./internal.d.ts`).
-  const content = `${options.header ?? DEFAULT_HEADER}export { query, mutation, action } from "@stackbase/executor";
+  const content = `${options.header ?? DEFAULT_HEADER}export { query, mutation, action, httpAction, httpRouter } from "@stackbase/executor";
 export type { DataModel, TableNames, Doc, Id } from "./dataModel";
 export type { Api, FunctionReference } from "./api";
 export type { Internal } from "./internal";

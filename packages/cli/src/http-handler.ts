@@ -5,8 +5,10 @@
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { getHttpStatus, toStackbaseError } from "@stackbase/errors";
+import { matchRoute } from "@stackbase/executor";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { handleAdminRequest, type AdminApi } from "@stackbase/admin";
+import type { ResolvedRoute } from "./project";
 
 export interface HttpRequest {
   method: string;
@@ -14,6 +16,7 @@ export interface HttpRequest {
   body?: string;
   query?: Record<string, string>;
   authorization?: string;
+  headers?: Record<string, string>;
 }
 
 export interface HttpResponse {
@@ -58,6 +61,7 @@ export async function handleHttpRequest(
   req: HttpRequest,
   info: ServerInfo,
   admin?: { api: AdminApi; key: string },
+  routes?: ResolvedRoute[],
 ): Promise<HttpResponse> {
   if (admin && req.path.startsWith("/_admin/")) {
     const res = await handleAdminRequest(admin.api, admin.key, {
@@ -86,5 +90,33 @@ export async function handleHttpRequest(
       return json(getHttpStatus(err), { error: err.message, code: err.code });
     }
   }
+  // User httpAction routes — matched AFTER the built-ins, only for non-reserved paths.
+  const match = routes && routes.length > 0 ? matchRoute(routes, req.method, req.path) : undefined;
+  if (match) {
+    try {
+      const headers = new Headers(req.headers ?? {});
+      if (req.authorization && !headers.has("authorization")) headers.set("authorization", req.authorization);
+      const qs = req.query && Object.keys(req.query).length ? "?" + new URLSearchParams(req.query).toString() : "";
+      const host = headers.get("host") ?? "localhost";
+      const url = `http://${host}${req.path}${qs}`;
+      const hasBody = req.method !== "GET" && req.method !== "HEAD" && req.body !== undefined;
+      const request = new Request(url, { method: req.method, headers, ...(hasBody ? { body: req.body } : {}) });
+
+      const auth = headers.get("authorization") ?? "";
+      const identity = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
+
+      const response = await runtime.runHttpAction(match.handlerPath, request, { identity });
+      if (!(response instanceof Response)) {
+        return json(500, { error: "httpAction must return a Response" });
+      }
+      const outHeaders: Record<string, string> = {};
+      response.headers.forEach((v, k) => { outHeaders[k] = v; });
+      return { status: response.status, headers: outHeaders, body: await response.text() };
+    } catch (e) {
+      const err = toStackbaseError(e);
+      return json(getHttpStatus(err), { error: err.message, code: err.code });
+    }
+  }
+
   return json(404, { error: "not found" });
 }

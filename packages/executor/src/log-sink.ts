@@ -1,4 +1,4 @@
-export type LogKind = "query" | "mutation" | "action";
+export type LogKind = "query" | "mutation" | "action" | "httpAction";
 
 export interface ExecutionLogEntry {
   id: number;
