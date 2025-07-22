@@ -1,16 +1,19 @@
-# Stackbase Tier 0 — one service, one volume. `docker compose up` is the whole backend.
+# Stackbase self-host — the generic engine image + your app's convex/ bind-mounted.
 services:
   stackbase:
     build:
       context: .
-      target: runtime
-    image: stackbase:dev
+      target: runner
+    image: stackbase:latest
     ports:
       - "3000:3000"
     environment:
+      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}
       STACKBASE_DATA_DIR: /data
     volumes:
+      - ./convex:/app/convex:ro
       - stackbase-data:/data
+    command: ["serve", "--dir", "/app/convex", "--data", "/data/db.sqlite"]
     restart: unless-stopped
 
 volumes:
