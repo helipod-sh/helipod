@@ -2,20 +2,18 @@
  * `stackbase` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
-import { watch as fsWatch, mkdirSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { watch as fsWatch } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { writeGenerated } from "@stackbase/codegen";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { InMemoryLogSink } from "@stackbase/executor";
-import { AdminApi, browseTableModule, generateAdminKey, systemModules, verifyAdminKey } from "@stackbase/admin";
-import { resolveDevOptions, detectRuntime, type DevOptions } from "./dev-options";
+import { generateAdminKey } from "@stackbase/admin";
+import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
+import { bootProject, loadDashboard } from "./boot";
 import { startDevServer } from "./server";
 import { createWatchLoop } from "./watch";
+import { serveCommand } from "./serve";
 
 function parseFlags(args: string[]): DevOptions {
   const out: DevOptions = {};
@@ -30,40 +28,12 @@ function parseFlags(args: string[]): DevOptions {
   return out;
 }
 
-/**
- * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
- * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
- */
-function loadDashboard(adminKey: string | undefined): { distDir: string; html: string } | undefined {
-  try {
-    const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
-    const distDir = dirname(indexPath);
-    const raw = readFileSync(indexPath, "utf8");
-    if (adminKey === undefined) return { distDir, html: raw }; // no key embedded → SPA prompts
-    // Escape `<` so a key value can never break out of the inline <script> (e.g. `</script>`).
-    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey).replace(/</g, "\\u003c")}</script>`;
-    return { distDir, html: raw.replace("</head>", `${inject}</head>`) };
-  } catch {
-    return undefined;
-  }
-}
-
-function makeStore(dataPath: string): SqliteDocStore {
-  mkdirSync(dirname(resolve(dataPath)), { recursive: true });
-  const adapter = detectRuntime() === "bun" ? new BunSqliteAdapter({ path: dataPath }) : new NodeSqliteAdapter({ path: dataPath });
-  return new SqliteDocStore(adapter);
-}
-
 export async function devCommand(args: string[]): Promise<number> {
   const opts = resolveDevOptions(parseFlags(args));
   const generatedDir = join(opts.convexDir, "_generated");
 
-  const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
-  const { project, generated } = push(loaded, config.components);
-  writeGenerated(generated.files, generatedDir);
 
-  const logSink = new InMemoryLogSink();
   // Treat an empty/whitespace STACKBASE_ADMIN_KEY as unset (a blank key would 401 everything).
   const envKey = process.env.STACKBASE_ADMIN_KEY?.trim();
   if (process.env.STACKBASE_ADMIN_KEY !== undefined && !envKey) {
@@ -72,28 +42,14 @@ export async function devCommand(args: string[]): Promise<number> {
   const adminKey = envKey || generateAdminKey();
   const ephemeralKey = !envKey; // a generated per-run key, not the operator's persistent secret
   const loopback = ["127.0.0.1", "::1", "localhost"].includes(opts.ip);
-  const runtime = await createEmbeddedRuntime({
-    store: makeStore(opts.dataPath),
-    catalog: project.catalog,
-    logSink,
-    modules: project.moduleMap,
-    systemModules: systemModules(),
-    adminModules: { "_admin:browseTable": browseTableModule },
-    verifyAdmin: (key: string) => verifyAdminKey(adminKey, key),
-    componentNames: project.componentNames,
-    contextProviders: project.contextProviders,
-    tableNumbers: project.tableNumbers,
-    bootSteps: project.bootSteps,
-    drivers: project.drivers,
+
+  const { runtime, adminApi, project, generated, store, logSink } = await bootProject({
+    convexDir: opts.convexDir,
+    dataPath: opts.dataPath,
+    adminKey,
   });
-  const adminApi = new AdminApi({
-    runtime,
-    schemaJson: project.schemaJson,
-    tableNumbers: project.tableNumbers,
-    manifest: project.manifest,
-    logSink,
-    catalog: project.catalog,
-  });
+  writeGenerated(generated.files, generatedDir);
+
   // Only inject the key into the (unauthenticated) dashboard HTML when it's an ephemeral key on a
   // loopback bind — never embed a persistent STACKBASE_ADMIN_KEY where any network client can read
   // it. Otherwise serve the SPA without a key so it prompts the operator (stored client-side).
@@ -154,6 +110,7 @@ function printHelp(): void {
       "",
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
+      "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
       "  codegen    Regenerate convex/_generated types",
       "  help       Show this help",
       "",
@@ -168,6 +125,8 @@ export async function runCli(argv: string[]): Promise<number> {
   switch (cmd) {
     case "dev":
       return devCommand(rest);
+    case "serve":
+      return serveCommand(rest);
     case "codegen":
       return codegenCommand(rest);
     case "help":

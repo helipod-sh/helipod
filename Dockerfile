@@ -31,12 +31,15 @@ FROM base AS runner
 ENV NODE_ENV=production \
     STACKBASE_DATA_DIR=/data
 COPY --from=builder --chown=bun:bun /app .
+# Create /data owned by the non-root `bun` user BEFORE dropping privileges. A fresh named
+# volume initializes its ownership from this image dir; without the chown it would be root:root
+# and the uid-1000 `bun` user could not create /data/db.sqlite (EACCES → crash-loop on the first
+# `docker compose up`). chown needs root, so it must run before `USER bun`.
+RUN mkdir -p /data && chown bun:bun /data
 USER bun
 # Embedded SQLite database lives on a single mounted volume.
 VOLUME ["/data"]
 EXPOSE 3000
-# NOTE: the production server entrypoint (`stackbase serve`) arrives at milestone M7/M9.
-# The CLI is built at packages/cli/dist/bin.js — run it directly until then, e.g.:
-#   docker run -v $PWD:/app/project stackbase \
-#     bun packages/cli/dist/bin.js dev --dir project/convex --ip 0.0.0.0 --port 3000
-CMD ["bun", "-e", "console.log('Stackbase image built (Turborepo-pruned, Bun). Production `serve` entrypoint arrives at M7/M9; until then run packages/cli/dist/bin.js directly.')"]
+# Production entrypoint: serve the app mounted at /app/convex, SQLite on the /data volume.
+ENTRYPOINT ["bun", "packages/cli/dist/bin.js"]
+CMD ["serve", "--dir", "/app/convex", "--data", "/data/db.sqlite"]

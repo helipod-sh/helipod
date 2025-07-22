@@ -285,4 +285,9 @@ export class SqliteDocStore implements DocStore {
     );
     return r.changes > 0;
   }
+
+  /** Close the underlying database adapter (checkpoint + release the file). Used by graceful shutdown. */
+  close(): void {
+    this.db.close();
+  }
 }
