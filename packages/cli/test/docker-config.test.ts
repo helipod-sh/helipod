@@ -13,9 +13,9 @@ describe("docker config", () => {
     expect(dockerfile).toMatch(new RegExp(`AS\\s+${target}\\b`));   // e.g. "FROM base AS runner"
   });
   it("the runtime image invokes `serve`", () => {
-    // CMD or ENTRYPOINT+CMD must run the serve subcommand.
-    expect(dockerfile).toMatch(/serve/);
-    expect(dockerfile).toMatch(/bin\.js|stackbase/);
+    // ENTRYPOINT/CMD must run the serve subcommand as a literal array element —
+    // anchored so a prose placeholder that merely mentions "serve" can't false-green this.
+    expect(dockerfile).toMatch(/^(ENTRYPOINT|CMD)\s*\[.*"serve"/m);
   });
   it("compose mounts the app dir and a data volume and requires the admin key", () => {
     expect(compose).toMatch(/\/app\/convex/);

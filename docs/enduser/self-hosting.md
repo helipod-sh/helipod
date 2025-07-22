@@ -16,7 +16,8 @@ database on a named volume so data survives container restarts.
   fast if `convex/_generated/server.ts` is missing. Run codegen before building/deploying:
 
   ```bash
-  bun run --filter @stackbase/cli stackbase codegen --dir convex
+  bun run build
+  bun packages/cli/dist/bin.js codegen --dir convex
   # or, once the CLI is installed as `stackbase`:
   stackbase codegen --dir convex
   ```
