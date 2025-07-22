@@ -2,8 +2,7 @@
  * `stackbase` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
-import { watch as fsWatch, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { watch as fsWatch } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@stackbase/codegen";
 import { generateAdminKey } from "@stackbase/admin";
@@ -11,9 +10,10 @@ import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
-import { bootProject } from "./boot";
+import { bootProject, loadDashboard } from "./boot";
 import { startDevServer } from "./server";
 import { createWatchLoop } from "./watch";
+import { serveCommand } from "./serve";
 
 function parseFlags(args: string[]): DevOptions {
   const out: DevOptions = {};
@@ -26,24 +26,6 @@ function parseFlags(args: string[]): DevOptions {
     else if (a === "--web" && args[i + 1]) out.webDir = args[++i];
   }
   return out;
-}
-
-/**
- * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
- * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
- */
-function loadDashboard(adminKey: string | undefined): { distDir: string; html: string } | undefined {
-  try {
-    const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
-    const distDir = dirname(indexPath);
-    const raw = readFileSync(indexPath, "utf8");
-    if (adminKey === undefined) return { distDir, html: raw }; // no key embedded → SPA prompts
-    // Escape `<` so a key value can never break out of the inline <script> (e.g. `</script>`).
-    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey).replace(/</g, "\\u003c")}</script>`;
-    return { distDir, html: raw.replace("</head>", `${inject}</head>`) };
-  } catch {
-    return undefined;
-  }
 }
 
 export async function devCommand(args: string[]): Promise<number> {
@@ -128,6 +110,7 @@ function printHelp(): void {
       "",
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
+      "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
       "  codegen    Regenerate convex/_generated types",
       "  help       Show this help",
       "",
@@ -142,6 +125,8 @@ export async function runCli(argv: string[]): Promise<number> {
   switch (cmd) {
     case "dev":
       return devCommand(rest);
+    case "serve":
+      return serveCommand(rest);
     case "codegen":
       return codegenCommand(rest);
     case "help":

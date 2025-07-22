@@ -4,7 +4,8 @@
  * codegen nor starts a server — the callers own those (dev writes _generated + watches; serve
  * hardens + serves).
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
@@ -61,4 +62,23 @@ export async function bootProject(opts: { convexDir: string; dataPath: string; a
     catalog: project.catalog,
   });
   return { runtime, adminApi, project, generated, store, logSink };
+}
+
+/**
+ * Load the built dashboard SPA and inject the admin key (same-origin, local-only) so it can call
+ * `/_admin` without a login prompt. Returns undefined if the dashboard isn't built (→ stub).
+ * Shared by `dev` (ephemeral loopback key) and `serve` (no key — the SPA prompts the operator).
+ */
+export function loadDashboard(adminKey: string | undefined): { distDir: string; html: string } | undefined {
+  try {
+    const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
+    const distDir = dirname(indexPath);
+    const raw = readFileSync(indexPath, "utf8");
+    if (adminKey === undefined) return { distDir, html: raw }; // no key embedded → SPA prompts
+    // Escape `<` so a key value can never break out of the inline <script> (e.g. `</script>`).
+    const inject = `<script>window.__ADMIN_KEY__=${JSON.stringify(adminKey).replace(/</g, "\\u003c")}</script>`;
+    return { distDir, html: raw.replace("</head>", `${inject}</head>`) };
+  } catch {
+    return undefined;
+  }
 }
