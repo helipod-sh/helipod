@@ -31,6 +31,11 @@ FROM base AS runner
 ENV NODE_ENV=production \
     STACKBASE_DATA_DIR=/data
 COPY --from=builder --chown=bun:bun /app .
+# Create /data owned by the non-root `bun` user BEFORE dropping privileges. A fresh named
+# volume initializes its ownership from this image dir; without the chown it would be root:root
+# and the uid-1000 `bun` user could not create /data/db.sqlite (EACCES → crash-loop on the first
+# `docker compose up`). chown needs root, so it must run before `USER bun`.
+RUN mkdir -p /data && chown bun:bun /data
 USER bun
 # Embedded SQLite database lives on a single mounted volume.
 VOLUME ["/data"]
