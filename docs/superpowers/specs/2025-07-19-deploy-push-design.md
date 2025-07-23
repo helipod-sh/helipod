@@ -60,10 +60,9 @@ stackbase serve --allow-deploy            # enable the deploy endpoint (or STACK
 The deploy handler is registered only when `allowDeploy` is true (threaded from `serve` through `startDevServer`). On `POST /_admin/deploy`, after the existing admin-key check:
 1. If `allowDeploy` is false → `403 { ok:false, kind:"not-enabled", error:"deploy endpoint disabled — start serve with --allow-deploy" }`. (When disabled the route is not registered at all, so this is belt-and-suspenders; the primary gate is non-registration.)
 2. Write `files[]` under a fresh `deployRoot/<rev>/` where `deployRoot` is a writable dir a sibling-chain away from the engine's `node_modules` (in the image, under `/app`, e.g. `/app/.stackbase-deploy/`; in dev/tests, a temp dir under the project root) so `@stackbase/*` resolves. `rev` = content hash of the files.
-3. `loadConvexDir(<rev>/)` → `push(loaded, components)` → new `ProjectArtifacts` (`moduleMap`, `schemaJson`, `tableNumbers`, `routes`, `manifest`). A throw here (syntax error, bad import, unknown component) → `400 { kind:"load-error", error:<message> }`, **no swap**.
-4. **Component-set guard:** if the newly composed component set differs from the running one (a component added or removed), → `400 { kind:"load-error", error:"changing the component set requires a restart" }`, no swap. (Deploy hot-swaps functions + routes + additive schema only.)
-5. `diffSchema(current, next)` (§4c). Destructive → `400 { kind:"schema-incompatible", error:<diff> }`, no swap.
-6. **Atomic swap** (only after 3–5 pass): `runtime.setModules(next.moduleMap)`; `currentRoutes = next.routes` (the same mutable the server reads, via `server.setRoutes`); `adminApi.setSchema(next.schemaJson, next.tableNumbers, next.manifest)`. Respond `200 { ok:true, rev, functions: Object.keys(next.moduleMap).length }`.
+3. `loadConvexDir(<rev>/)` → `push(loaded, components)` → new `ProjectArtifacts` (`moduleMap`, `schemaJson`, `tableNumbers`, `routes`, `manifest`). **`components` is the server's boot-time set** (the payload carries only `convex/`, not the project-root `stackbase.config.ts`, so the component set cannot change on a deploy). A throw here (syntax error, bad import, or a function referencing a component the server didn't boot with) → `400 { kind:"load-error", error:<message> }`, **no swap**. (This is how "component-set changes require a restart" is enforced — a pushed app that needs a different component surfaces as a load-error, not a silent swap.)
+4. `diffSchema(current, next)` (§4c). Destructive → `400 { kind:"schema-incompatible", error:<diff> }`, no swap.
+5. **Atomic swap** (only after 3–4 pass): `runtime.setModules(next.moduleMap)`; `runtime.setTableNumbers(next.tableNumbers)`; `server.setRoutes(next.routes)`; `adminApi.setSchema(next.schemaJson, next.tableNumbers, next.manifest)`. Respond `200 { ok:true, rev, functions: Object.keys(next.moduleMap).length }`.
 
 **(c) Schema-diff — `packages/cli/src/schema-diff.ts`.**
 Pure function `diffSchema(current, next): { ok: true } | { ok: false, reason: string }`. Given two `{ tables: { [name]: { tableNumber, fields } } }` shapes (derived from `schemaJson` + `tableNumbers`):
@@ -96,8 +95,7 @@ Unit-tested in isolation (no server).
 - **Missing `--url`/`STACKBASE_DEPLOY_URL` or blank `STACKBASE_ADMIN_KEY`** → CLI fail-fast, exit 1, clear stderr.
 - **Target unreachable / non-2xx** → CLI prints the status + server error body, exit 1.
 - **`--allow-deploy` off on the target** → the route isn't registered → 404/403; CLI translates to "deploy not enabled on target (start serve with --allow-deploy)".
-- **Pushed app fails to load** (syntax error, bad import, unknown component) → remote `400 kind:load-error`, **no swap**; CLI prints the message.
-- **Component set changed** → remote `400 kind:load-error` ("changing the component set requires a restart"), no swap.
+- **Pushed app fails to load** (syntax error, bad import, or a reference to a component the server didn't boot with — the component set is fixed at boot since `stackbase.config.ts` isn't in the payload) → remote `400 kind:load-error`, **no swap**; CLI prints the message.
 - **Destructive schema change** → remote `400 kind:schema-incompatible` with the offending table/field, no swap; CLI prints it.
 - **Atomicity:** load + component-check + schema-diff all complete **before** the first swap call; the swap itself is a synchronous `setModules`/`setRoutes`/`setSchema` sequence on already-validated artifacts. A failed deploy never leaves a half-applied state; the previous version stays live.
 
