@@ -31,6 +31,27 @@ FROM base AS runner
 ENV NODE_ENV=production \
     STACKBASE_DATA_DIR=/data
 COPY --from=builder --chown=bun:bun /app .
+# Link workspace @stackbase/* packages into the ROOT node_modules so a BIND-MOUNTED app can
+# resolve them. turbo-prune + bun keep workspace links nested per-package
+# (/app/packages/cli/node_modules/@stackbase/*), never at /app/node_modules — but a mounted
+# /app/convex is not under any package, so its bare `import "@stackbase/values"` (every schema.ts)
+# and the `_generated/server` re-exports walk up to /app/node_modules and fail without these links.
+RUN <<'EOF'
+bun -e '
+  const fs = require("fs");
+  fs.mkdirSync("node_modules/@stackbase", { recursive: true });
+  for (const base of ["packages", "components"]) {
+    if (!fs.existsSync(base)) continue;
+    for (const d of fs.readdirSync(base)) {
+      const pj = base + "/" + d + "/package.json";
+      if (!fs.existsSync(pj)) continue;
+      const name = JSON.parse(fs.readFileSync(pj, "utf8")).name;
+      if (!name || !name.startsWith("@stackbase/")) continue;
+      try { fs.symlinkSync("/app/" + base + "/" + d, "node_modules/" + name); } catch {}
+    }
+  }
+'
+EOF
 # Create /data owned by the non-root `bun` user BEFORE dropping privileges. A fresh named
 # volume initializes its ownership from this image dir; without the chown it would be root:root
 # and the uid-1000 `bun` user could not create /data/db.sqlite (EACCES → crash-loop on the first
