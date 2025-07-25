@@ -19,12 +19,13 @@ function fieldsOf(s: DeploySchema, table: string): Record<string, ObjectFieldJSO
   return s.schemaJson.tables[table]?.documentType?.value ?? {};
 }
 
-// A field-type change is compatible only when the tag is unchanged, or the new validator widens
-// (a union, or `any`). Anything else (string→number) is rejected. Over-rejection is safe — it fails
-// the deploy, never corrupts data.
+// v1 rejects ANY field-type change — including apparent "widenings" like string→union or any→string.
+// The simplified field shape here doesn't carry union members, so we can't safely verify a widening
+// is actually sound (e.g. any→string would invalidate existing non-string rows; string→union isn't
+// safe unless the old type is provably a member of the new union, which we can't check). Strict
+// equality is over-rejection-safe: it only fails a deploy, never corrupts data.
 function compatibleType(cur: { type: string }, next: { type: string }): boolean {
-  if (cur.type === next.type) return true;
-  return next.type === "union" || next.type === "any" || cur.type === "any";
+  return cur.type === next.type;
 }
 
 export function diffSchema(current: DeploySchema, next: DeploySchema): SchemaDiff {
@@ -40,6 +41,8 @@ export function diffSchema(current: DeploySchema, next: DeploySchema): SchemaDif
       if (nxtV === undefined) return { ok: false, reason: `field "${name}.${field}" was removed (destructive)` };
       if (!compatibleType(curV.fieldType, nxtV.fieldType))
         return { ok: false, reason: `field "${name}.${field}" changed type ${curV.fieldType.type}→${nxtV.fieldType.type} (destructive)` };
+      if (curV.optional && !nxtV.optional)
+        return { ok: false, reason: `field "${name}.${field}" became required (destructive — existing rows may omit it)` };
     }
     for (const [field, nxtV] of Object.entries(nxt)) {
       if (cur[field] === undefined && !nxtV.optional)

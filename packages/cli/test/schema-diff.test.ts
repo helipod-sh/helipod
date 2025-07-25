@@ -52,4 +52,18 @@ describe("diffSchema", () => {
     const twoField = schema({ users: { num: 1, fields: { name: { type: "string" }, nick: { type: "string", optional: true } } } });
     expect(diffSchema(twoField, base).ok).toBe(false);
   });
+  it("rejects an any→string narrowing on an existing field (was a false-accept)", () => {
+    const anyBase = schema({ users: { num: 1, fields: { name: { type: "string" }, meta: { type: "any" } } } });
+    const next = schema({ users: { num: 1, fields: { name: { type: "string" }, meta: { type: "string" } } } });
+    expect(diffSchema(anyBase, next).ok).toBe(false);
+  });
+  it("rejects an existing field flipping optional→required", () => {
+    const optBase = schema({ users: { num: 1, fields: { name: { type: "string" }, nick: { type: "string", optional: true } } } });
+    const next = schema({ users: { num: 1, fields: { name: { type: "string" }, nick: { type: "string", optional: false } } } });
+    expect(diffSchema(optBase, next).ok).toBe(false);
+  });
+  it("allows an existing field flipping required→optional (safe widening)", () => {
+    const next = schema({ users: { num: 1, fields: { name: { type: "string", optional: true } } } });
+    expect(diffSchema(base, next)).toEqual({ ok: true });
+  });
 });
