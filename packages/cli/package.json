@@ -37,6 +37,7 @@
     "@stackbase/runtime-embedded": "workspace:*",
     "@stackbase/sync": "workspace:*",
     "@stackbase/values": "workspace:*",
+    "esbuild": "^0.27.0",
     "ws": "^8.18.0",
     "@stackbase/dashboard": "workspace:*"
   },
