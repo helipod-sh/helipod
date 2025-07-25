@@ -98,6 +98,13 @@ export class EmbeddedRuntime {
     private readonly relationRegistry: RelationRegistry | undefined,
     private readonly drivers: ReadonlyArray<Driver>,
     private readonly timers: Map<number, ReturnType<typeof setTimeout>>,
+    /**
+     * Inverse of `tableNumbers` (tableNumber → fullTableName). Mutable (not `readonly`) so
+     * `setTableNumbers` can rebuild it in place after an additive deploy — the very same `Map`
+     * object `create()`'s `namesForCommit` closure captured, so mutating it here (rather than
+     * reassigning the field) keeps that closure correct without any circular-reference dance.
+     */
+    private tableNumberToName: Map<number, string>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -266,11 +273,15 @@ export class EmbeddedRuntime {
       now: () => options.now?.() ?? Date.now(),
     };
 
-    // Inverse of `tableNumbers` (tableNumber → fullTableName), built once: `payload.tables`
-    // (from `adapter.subscribe`) carries ENCODED STORAGE-TABLE IDS (`encodeStorageTableId`'s
-    // output, e.g. `"3"`), not full table names — the sync path (`queue`/`notifyWrites` above)
-    // works with those ids directly via range intersection, but drivers filter `inv.tables` by
-    // full name (e.g. `t.startsWith("scheduler/")`), so the driver fan-out below must translate.
+    // Inverse of `tableNumbers` (tableNumber → fullTableName), seeded here from
+    // `options.tableNumbers` and later rebuildable via the instance method `setTableNumbers`
+    // (after an additive deploy): `payload.tables` (from `adapter.subscribe`) carries ENCODED
+    // STORAGE-TABLE IDS (`encodeStorageTableId`'s output, e.g. `"3"`), not full table names — the
+    // sync path (`queue`/`notifyWrites` above) works with those ids directly via range
+    // intersection, but drivers filter `inv.tables` by full name (e.g. `t.startsWith("scheduler/")`),
+    // so the driver fan-out below must translate. This `Map` object is also handed to the
+    // constructor as `this.tableNumberToName` — `setTableNumbers` mutates it in place (not a
+    // reassignment), so this closure's `namesForCommit` stays correct after a later rebuild.
     const tableNumberToName = new Map<number, string>();
     for (const [name, num] of Object.entries(options.tableNumbers ?? {})) tableNumberToName.set(num, name);
     const namesForCommit = (tableIds: readonly string[]): string[] =>
@@ -312,7 +323,7 @@ export class EmbeddedRuntime {
     const drivers = options.drivers ?? [];
     for (const d of drivers) await d.start(driverCtx);
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers);
+    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName);
   }
 
   /**
@@ -327,6 +338,17 @@ export class EmbeddedRuntime {
   setModules(modules: Record<string, RegisteredFunction>): void {
     for (const key of Object.keys(this.modules)) delete this.modules[key];
     Object.assign(this.modules, modules);
+  }
+
+  /**
+   * Rebuild the tableNumber→name map after an additive deploy so driver commit fan-out
+   * (`namesForCommit` in `create()`, which closed over this same `Map` instance) keeps
+   * translating newly-added tables' encoded storage ids to their full names correctly.
+   * Additive deploys keep existing numbers, so this only ever adds entries in practice.
+   */
+  setTableNumbers(tableNumbers: Record<string, number>): void {
+    this.tableNumberToName.clear();
+    for (const [name, num] of Object.entries(tableNumbers)) this.tableNumberToName.set(num, name);
   }
 
   /** Open an in-process connection an unmodified client can talk to. */

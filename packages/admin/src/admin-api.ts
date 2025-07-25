@@ -108,4 +108,16 @@ export class AdminApi {
     const r = await this.deps.runtime.runSystem("_system:insertDocument", { table, fields });
     return convexToJson(r.value as Value);
   }
+
+  /** Swap the schema/tableNumbers/manifest the data browser + validation read — after a live deploy. */
+  setSchema(schemaJson: AdminDeps["schemaJson"], tableNumbers: Record<string, number>, manifest: AdminDeps["manifest"]): void {
+    this.deps.schemaJson = schemaJson;
+    this.deps.tableNumbers = tableNumbers;
+    this.deps.manifest = manifest;
+  }
+
+  /** The live schema + tableNumbers — a deploy diffs its new schema against this. */
+  getSchema(): { schemaJson: AdminDeps["schemaJson"]; tableNumbers: Record<string, number> } {
+    return { schemaJson: this.deps.schemaJson, tableNumbers: this.deps.tableNumbers };
+  }
 }
