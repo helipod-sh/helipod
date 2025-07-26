@@ -68,7 +68,9 @@ The deploy handler is registered only when `allowDeploy` is true (threaded from 
 Pure function `diffSchema(current, next): { ok: true } | { ok: false, reason: string }`. Given two `{ tables: { [name]: { tableNumber, fields } } }` shapes (derived from `schemaJson` + `tableNumbers`):
 - **Reject** if any table present in `current` is absent in `next` (dropped/renamed) → destructive.
 - **Reject** if a table's `tableNumber` changed between `current` and `next` (identity break).
-- **Reject** if a field that exists in both changed to an **incompatible** validator (e.g. `string`→`number`; a widening like adding a union member or making a field optional is allowed; a required-field ADD on an existing table is destructive because existing rows lack it — reject unless the new field is optional).
+- **Reject** any field-type change on an existing field (v1 uses strict type-tag equality — no widening detection, since the diff doesn't carry union member lists; over-rejection is safe, it only fails a deploy). E.g. `string`→`number` and `any`→`string` both reject.
+- **Reject** an existing field flipping `optional`→required (existing rows may omit it). `required`→`optional` is a safe widening and is allowed.
+- **Reject** a required-field ADD on an existing table (existing rows lack it) — allowed only if the new field is optional.
 - **Allow** new tables, and new **optional** fields on existing tables. Return `{ ok:true }`.
 Unit-tested in isolation (no server).
 
