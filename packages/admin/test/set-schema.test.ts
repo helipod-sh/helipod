@@ -5,7 +5,7 @@ import { InMemoryLogSink, SimpleIndexCatalog, mutation, query } from "@stackbase
 import { defineSchema, defineTable, v } from "@stackbase/values";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { AdminApi } from "../src/admin-api";
+import { AdminApi, type SchemaJsonLike } from "../src/admin-api";
 import { browseTableModule } from "../src/browse";
 
 const schema = defineSchema({ notes: defineTable({ title: v.string(), done: v.boolean() }) });
@@ -32,7 +32,7 @@ async function makeApi() {
     },
     adminModules: { "_admin:browseTable": browseTableModule },
   });
-  const schemaJson = schema.export() as never;
+  const schemaJson: SchemaJsonLike = schema.export();
   const manifest = [{ path: "notes", functions: [{ name: "add", type: "mutation" }, { name: "list", type: "query" }] }];
   const api = new AdminApi({
     runtime,
@@ -51,12 +51,12 @@ describe("AdminApi.setSchema / getSchema", () => {
     const before = await api.listTables();
     expect(before.map((t) => t.name)).toEqual(["notes"]);
 
-    const newSchemaJson = {
+    const newSchemaJson: SchemaJsonLike = {
       tables: {
         ...schemaJson.tables,
         events: { indexes: [{ indexDescriptor: "by_creation" }], shardKey: null },
       },
-    } as never;
+    };
     api.setSchema(newSchemaJson, { notes: 10001, events: 10002 }, manifest);
 
     const after = await api.listTables();
@@ -70,12 +70,12 @@ describe("AdminApi.setSchema / getSchema", () => {
     expect(live.schemaJson).toBe(schemaJson);
     expect(live.tableNumbers).toEqual({ notes: 10001 });
 
-    const newSchemaJson = {
+    const newSchemaJson: SchemaJsonLike = {
       tables: {
         ...schemaJson.tables,
         events: { indexes: [], shardKey: null },
       },
-    } as never;
+    };
     const newTableNumbers = { notes: 10001, events: 10002 };
     api.setSchema(newSchemaJson, newTableNumbers, manifest);
 

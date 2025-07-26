@@ -44,7 +44,8 @@ describe("loadConvexDir — .js support", () => {
     expect(loaded.schema).toBeDefined();
     expect(loaded.schema.export().tables).toHaveProperty("items");
     expect(Object.keys(loaded.modules)).toContain("foo");
-    expect(loaded.modules.foo.list).toBeDefined();
+    expect(loaded.modules.foo).toBeDefined();
+    expect(loaded.modules.foo!.list).toBeDefined();
   });
 
   it("still loads an all-.ts project (no regression)", async () => {

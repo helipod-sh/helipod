@@ -39,6 +39,17 @@ function isInternalPath(path: string): boolean {
   return path.split(":").some((seg) => seg.startsWith("_"));
 }
 
+/**
+ * Single source of truth for building the tableNumber→name map (`fullTableName → tableNumber`
+ * inverted) — used both by `create()` (seeding the map before the instance exists) and by the
+ * instance method `setTableNumbers` (rebuilding it after an additive deploy), so the two never
+ * drift by duplicating the loop.
+ */
+function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record<string, number>): void {
+  map.clear();
+  for (const [name, num] of Object.entries(tableNumbers)) map.set(num, name);
+}
+
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
   catalog: IndexCatalog;
@@ -283,7 +294,7 @@ export class EmbeddedRuntime {
     // constructor as `this.tableNumberToName` — `setTableNumbers` mutates it in place (not a
     // reassignment), so this closure's `namesForCommit` stays correct after a later rebuild.
     const tableNumberToName = new Map<number, string>();
-    for (const [name, num] of Object.entries(options.tableNumbers ?? {})) tableNumberToName.set(num, name);
+    rebuildTableNumberToName(tableNumberToName, options.tableNumbers ?? {});
     const namesForCommit = (tableIds: readonly string[]): string[] =>
       tableIds.map((id) => {
         try {
@@ -347,8 +358,7 @@ export class EmbeddedRuntime {
    * Additive deploys keep existing numbers, so this only ever adds entries in practice.
    */
   setTableNumbers(tableNumbers: Record<string, number>): void {
-    this.tableNumberToName.clear();
-    for (const [name, num] of Object.entries(tableNumbers)) this.tableNumberToName.set(num, name);
+    rebuildTableNumberToName(this.tableNumberToName, tableNumbers);
   }
 
   /** Open an in-process connection an unmodified client can talk to. */
