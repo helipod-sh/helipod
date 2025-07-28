@@ -120,5 +120,7 @@ If step 5 shows the data you wrote in step 4, the persistent-volume story works 
 - [`stackbase dev`](/local/dev-server) — the local development server (auto-codegen, hot reload,
   embedded admin key). `serve` is its production counterpart: no codegen, `0.0.0.0`, required key,
   graceful shutdown on `SIGTERM`/`SIGINT`.
-- Postgres adapter, `stackbase deploy` (push-based deploys), and TLS/multi-node are not part of this
-  slice — see the repo `CLAUDE.md` for what's shipped vs. deferred.
+- [`stackbase deploy`](/deploying) — push functions + additive schema to an already-running `serve`
+  deployment, live, no restart. Opt-in per deployment via `--allow-deploy`.
+- The Postgres adapter and TLS/multi-node are not part of this slice — see the repo `CLAUDE.md` for
+  what's shipped vs. deferred.
