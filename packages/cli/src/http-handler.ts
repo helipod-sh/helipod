@@ -7,8 +7,9 @@ import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { getHttpStatus, toStackbaseError } from "@stackbase/errors";
 import { matchRoute } from "@stackbase/executor";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { handleAdminRequest, type AdminApi } from "@stackbase/admin";
+import { handleAdminRequest, verifyAdminKey, type AdminApi } from "@stackbase/admin";
 import type { ResolvedRoute } from "./project";
+import type { DeployResult } from "./deploy-apply";
 
 export interface HttpRequest {
   method: string;
@@ -37,6 +38,11 @@ function html(body: string): HttpResponse {
   return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body };
 }
 
+function bearer(authorization?: string): string | undefined {
+  const m = /^Bearer (.+)$/.exec(authorization ?? "");
+  return m ? m[1] : undefined;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(
     /[&<>"']/g,
@@ -62,7 +68,19 @@ export async function handleHttpRequest(
   info: ServerInfo,
   admin?: { api: AdminApi; key: string },
   routes?: ResolvedRoute[],
+  deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> },
 ): Promise<HttpResponse> {
+  if (admin && deploy && req.method === "POST" && req.path === "/_admin/deploy") {
+    if (!verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { ok: false, error: "unauthorized" });
+    let files: Array<{ path: string; code: string }>;
+    try {
+      files = (JSON.parse(req.body ?? "{}") as { files?: Array<{ path: string; code: string }> }).files ?? [];
+    } catch {
+      return json(400, { ok: false, kind: "load-error", error: "invalid deploy payload" });
+    }
+    const result = await deploy.apply(files);
+    return json(result.ok ? 200 : result.kind === "schema-incompatible" ? 409 : 400, result);
+  }
   if (admin && req.path.startsWith("/_admin/")) {
     const res = await handleAdminRequest(admin.api, admin.key, {
       method: req.method,

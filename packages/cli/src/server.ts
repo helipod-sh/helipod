@@ -13,6 +13,7 @@ import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
 import type { ResolvedRoute } from "./project";
+import type { DeployResult } from "./deploy-apply";
 import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
@@ -50,6 +51,8 @@ export interface DevServerOptions {
   dashboard?: { distDir: string; html: string };
   /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
   routes?: ResolvedRoute[];
+  /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
+  deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
 }
 
 /** Serve the dashboard SPA for `/_dashboard*` (index.html key-injected, assets from dist), or null. */
@@ -132,6 +135,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
           info,
           options.admin,
           currentRoutes,
+          options.deploy,
         );
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
           const file = resolveStatic(options.webDir, path);
@@ -257,6 +261,7 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
         info,
         options.admin,
         currentRoutes,
+        options.deploy,
       );
       if (response.status === 404 && req.method === "GET" && options.webDir) {
         const file = resolveStatic(options.webDir, path);
