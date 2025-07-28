@@ -12,8 +12,12 @@ export interface PushResult {
   generated: GeneratedBundle;
 }
 
-export function push(loaded: LoadedProject, components: ComponentDefinition[] = []): PushResult {
-  const project = loadProject(loaded, components);
+export function push(
+  loaded: LoadedProject,
+  components: ComponentDefinition[] = [],
+  existingTableNumbers?: Record<string, number>,
+): PushResult {
+  const project = loadProject(loaded, components, existingTableNumbers);
   const generated = generateAll({
     schema: project.schemaJson,
     manifest: project.manifest,

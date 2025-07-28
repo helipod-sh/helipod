@@ -96,6 +96,13 @@ functions and additive schema against that fixed component set, but it cannot ad
 components on a live server — changing `stackbase.config.ts`'s component list requires a restart
 (redeploy the container / restart the process).
 
+## Known limitation: functions must be top-level under `convex/`
+
+The function loader is top-level only — it does not recurse into subdirectories of `convex/`.
+Keep your query/mutation/action modules directly under `convex/*.ts` (e.g. `convex/items.ts`), not
+nested under a subfolder (e.g. `convex/lib/items.ts`); nested modules are silently not loaded. This
+applies to `stackbase dev`/`stackbase serve` as well as `stackbase deploy`.
+
 ## Reverse proxy / TLS
 
 Same as `serve` itself: Stackbase speaks plain HTTP, so `stackbase deploy --url` should point at

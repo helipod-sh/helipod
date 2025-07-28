@@ -38,6 +38,32 @@ describe("MemoryTableRegistry", () => {
     const messages = reg.allocate("messages", { shardKey: "conversationId" });
     expect(messages.shardKey).toBe("conversationId");
   });
+
+  it("preassign seeds a known number, is idempotent, and never collides with later allocate()", () => {
+    const reg = new MemoryTableRegistry();
+    const jobs = reg.preassign("scheduler/jobs", 10002);
+    expect(jobs.tableNumber).toBe(10002);
+    expect(jobs.visibility).toBe("user");
+    expect(reg.getByName("scheduler/jobs")).toBe(jobs);
+    expect(reg.getByNumber(10002)).toBe(jobs);
+
+    // idempotent: re-preassigning the same name with a different number is a no-op.
+    expect(reg.preassign("scheduler/jobs", 99999)).toBe(jobs);
+    expect(jobs.tableNumber).toBe(10002);
+
+    // a NEW name allocated afterward gets a number above the seeded max — no collision.
+    const tags = reg.allocate("tags");
+    expect(tags.tableNumber).toBeGreaterThan(10002);
+    expect(tags.tableNumber).not.toBe(10002);
+  });
+
+  it("preassign bumps the system counter too, and defaults visibility from the name", () => {
+    const reg = new MemoryTableRegistry();
+    const sys = reg.preassign("_scheduled", 42);
+    expect(sys.visibility).toBe("system");
+    const nextSys = reg.allocate("_other");
+    expect(nextSys.tableNumber).toBeGreaterThan(42);
+  });
 });
 
 describe("table name helpers", () => {

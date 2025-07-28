@@ -50,7 +50,7 @@ export async function applyDeploy(
       writeFileSync(abs, f.code);
     }
     const loaded = await loadConvexDir(dir);
-    project = push(loaded, deps.components).project;
+    project = push(loaded, deps.components, deps.current().tableNumbers).project;
   } catch (e) {
     return { ok: false, kind: "load-error", error: e instanceof Error ? e.message : String(e) };
   }

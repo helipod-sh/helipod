@@ -28,6 +28,12 @@ export interface TableRegistry {
   list(): TableInfo[];
 }
 
+export interface PreassignOptions {
+  visibility?: TableVisibility;
+  shardKey?: string | null;
+  state?: TableState;
+}
+
 export const SYSTEM_TABLE_NUMBER_MIN = 1;
 export const SYSTEM_TABLE_NUMBER_MAX = 9999;
 export const USER_TABLE_NUMBER_START = 10001;
@@ -87,5 +93,36 @@ export class MemoryTableRegistry implements TableRegistry {
 
   list(): TableInfo[] {
     return [...this.byName.values()];
+  }
+
+  /**
+   * Pre-register a table at a KNOWN (already-live) number, so a later `allocate(name)` for the
+   * same name returns this number instead of minting a fresh one — used to seed a fresh registry
+   * with a running deploy's table numbers before composing a new schema, so existing tables
+   * (app AND component) never renumber; only genuinely-new tables get numbers above the seeded
+   * max. Idempotent/no-op if `name` is already known (first registration wins, matching
+   * `allocate`'s idempotency). Bumps the relevant `next*` counter so future `allocate` calls
+   * never collide with a preassigned number.
+   */
+  preassign(name: string, tableNumber: number, options: PreassignOptions = {}): TableInfo {
+    const existing = this.byName.get(name);
+    if (existing) return existing;
+
+    const visibility = options.visibility ?? (isSystemTableName(name) ? "system" : "user");
+    const info: TableInfo = {
+      name,
+      tableNumber,
+      visibility,
+      state: options.state ?? "active",
+      shardKey: options.shardKey ?? null,
+    };
+    this.byName.set(name, info);
+    this.byNumber.set(tableNumber, info);
+    if (visibility === "system") {
+      this.nextSystem = Math.max(this.nextSystem, tableNumber + 1);
+    } else {
+      this.nextUser = Math.max(this.nextUser, tableNumber + 1);
+    }
+    return info;
   }
 }

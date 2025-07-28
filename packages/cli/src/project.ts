@@ -56,7 +56,11 @@ function isRegisteredFunction(x: unknown): x is RegisteredFunction {
   );
 }
 
-export function loadProject(loaded: LoadedProject, components: ComponentDefinition[] = []): ProjectArtifacts {
+export function loadProject(
+  loaded: LoadedProject,
+  components: ComponentDefinition[] = [],
+  existingTableNumbers?: Record<string, number>,
+): ProjectArtifacts {
   const schemaJson = loaded.schema.export();
 
   // Build the app's moduleMap + manifest from loaded.modules (codegen needs the app manifest).
@@ -81,7 +85,7 @@ export function loadProject(loaded: LoadedProject, components: ComponentDefiniti
   manifest.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   // Compose app + components: allocates table numbers, merges module maps, collects context providers.
-  const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components);
+  const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components, existingTableNumbers);
 
   // Extract + resolve the `http.ts` router (if any): its `default` export is an `HttpRouter` whose
   // route handlers are `RegisteredFunction` VALUES — resolve each to its `path:name` function path

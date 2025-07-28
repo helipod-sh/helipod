@@ -14,6 +14,8 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineComponent } from "@stackbase/component";
 import { bootProject } from "../src/boot";
 import { packageApp } from "../src/deploy";
 import { applyDeploy, type DeployDeps } from "../src/deploy-apply";
@@ -85,6 +87,27 @@ const SCHEMA_V4_DESTRUCTIVE = `
 import { defineSchema } from "@stackbase/values";
 export default defineSchema({});
 `;
+
+// v5: additive — adds a brand NEW app table ("notes") alongside the existing "items" table. Used
+// to prove a deploy that adds a table doesn't renumber an already-composed component's tables
+// (the tableNumber-renumber bug: a fresh MemoryTableRegistry allocates app tables first, then
+// component tables, positionally — adding one app table used to shift every component table's
+// number by one, and diffSchema then rejected the deploy for a table the developer never touched).
+const SCHEMA_V5_NEW_TABLE = `
+import { v, defineSchema, defineTable } from "@stackbase/values";
+export default defineSchema({
+  items: defineTable({ name: v.string() }),
+  notes: defineTable({ body: v.string() }),
+});
+`;
+
+// A minimal fake component (mirrors a real component like @stackbase/scheduler's "jobs" table)
+// used to prove its table number survives an app-only deploy that adds a new table.
+const fakeComponent = defineComponent({
+  name: "scheduler",
+  schema: defineSchema({ jobs: defineTable({ x: v.string() }) }),
+  modules: {},
+});
 
 describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
   const base = mkdtempSync(join(cliDir(), "tmp-deploy-apply-"));
@@ -259,6 +282,56 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
 
       const list = await runtime.run<string[]>("items:list", {});
       expect(list.value).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("adding a new app table does NOT renumber (and thus does not reject) a composed component's table", async () => {
+    const v1Dir = join(base, "add-table-v1");
+    mkdirSync(v1Dir);
+    write(v1Dir, "schema.ts", SCHEMA_V1);
+    write(v1Dir, "items.ts", ITEMS_V1);
+
+    const { runtime, adminApi, store } = await bootProject({
+      convexDir: v1Dir,
+      dataPath: join(base, "add-table-db.sqlite"),
+      adminKey: "k",
+    });
+    try {
+      // The "current" live state as if a component ("scheduler", table "jobs") were composed
+      // alongside the app at boot — "items" at 10001, "scheduler/jobs" at 10002 (positional,
+      // component after app, matching composeTables' default order for a from-scratch compose).
+      const liveSchema = {
+        schemaJson: (await schemaOf(v1Dir)).schemaJson,
+        tableNumbers: { items: 10001, "scheduler/jobs": 10002 },
+      };
+      let liveRoutes: unknown[] = [];
+      const deps: DeployDeps = {
+        runtime,
+        adminApi,
+        setRoutes: (r) => { liveRoutes = r; },
+        components: [fakeComponent],
+        current: () => liveSchema,
+        deployRoot: join(base, "add-table-deployRoot"),
+      };
+
+      const v5SrcDir = join(base, "add-table-v5-src");
+      mkdirSync(v5SrcDir);
+      write(v5SrcDir, "schema.ts", SCHEMA_V5_NEW_TABLE);
+      write(v5SrcDir, "items.ts", ITEMS_V1);
+      const filesV5 = await packageApp(v5SrcDir);
+
+      const result = await applyDeploy(deps, filesV5);
+      // Before the fix: composeTables allocates from a fresh registry positionally (all app
+      // tables, THEN component tables) — adding "notes" would shift "scheduler/jobs" from 10002
+      // to 10003, and diffSchema would reject this as a destructive tableNumber change on a table
+      // the deploy never touched. After the fix (seeding the registry with `deps.current().tableNumbers`
+      // before composing), "items" and "scheduler/jobs" keep their numbers and only "notes" is new.
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(`deploy unexpectedly rejected: ${result.kind} — ${result.error}`);
+      expect(liveRoutes).toEqual([]);
+      expect(adminApi.getSchema().tableNumbers.items).toBe(10001);
     } finally {
       store.close();
     }
