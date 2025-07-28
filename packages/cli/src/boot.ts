@@ -12,6 +12,7 @@ import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
 import type { GeneratedBundle } from "@stackbase/codegen";
+import type { ComponentDefinition } from "@stackbase/component";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
@@ -31,6 +32,8 @@ export interface BootResult {
   generated: GeneratedBundle;
   store: SqliteDocStore;
   logSink: InMemoryLogSink;
+  /** The boot-time component set (from stackbase.config.ts) — `applyDeploy` re-composes against it. */
+  components: ComponentDefinition[];
 }
 
 export async function bootProject(opts: { convexDir: string; dataPath: string; adminKey: string }): Promise<BootResult> {
@@ -61,7 +64,7 @@ export async function bootProject(opts: { convexDir: string; dataPath: string; a
     logSink,
     catalog: project.catalog,
   });
-  return { runtime, adminApi, project, generated, store, logSink };
+  return { runtime, adminApi, project, generated, store, logSink, components: config.components };
 }
 
 /**

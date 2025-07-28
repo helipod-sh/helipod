@@ -12,7 +12,7 @@
  * files array.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bootProject } from "../src/boot";
 import { packageApp } from "../src/deploy";
@@ -181,6 +181,84 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
       expect(list3.value.sort()).toEqual(["a", "b"]);
       // `setRoutes` was only ever called for the successful v2 swap (an empty array — no http.ts).
       expect(liveRoutes).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a path-traversal payload before writing anything outside the per-rev deploy dir", async () => {
+    const v1Dir = join(base, "traversal-v1");
+    mkdirSync(v1Dir);
+    write(v1Dir, "schema.ts", SCHEMA_V1);
+    write(v1Dir, "items.ts", ITEMS_V1);
+
+    const { runtime, adminApi, store } = await bootProject({
+      convexDir: v1Dir,
+      dataPath: join(base, "traversal-db.sqlite"),
+      adminKey: "k",
+    });
+    try {
+      let liveRoutes: unknown[] = [];
+      const liveSchema = await schemaOf(v1Dir);
+      const deployRoot = join(base, "traversal-deployRoot");
+      const deps: DeployDeps = {
+        runtime,
+        adminApi,
+        setRoutes: (r) => { liveRoutes = r; },
+        components: [],
+        current: () => liveSchema,
+        deployRoot,
+      };
+
+      const result = await applyDeploy(deps, [{ path: "../escape.js", code: "export const x = 1;" }]);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.kind).toBe("load-error");
+      expect(result.error).toMatch(/invalid deploy payload/);
+
+      // No swap: the original function is still live, and no file landed outside deployRoot.
+      const list = await runtime.run<string[]>("items:list", {});
+      expect(list.value).toEqual([]);
+      expect(liveRoutes).toEqual([]);
+      expect(existsSync(join(deployRoot, "escape.js"))).toBe(false);
+      expect(existsSync(join(base, "escape.js"))).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a non-string code payload before writing anything", async () => {
+    const v1Dir = join(base, "badcode-v1");
+    mkdirSync(v1Dir);
+    write(v1Dir, "schema.ts", SCHEMA_V1);
+    write(v1Dir, "items.ts", ITEMS_V1);
+
+    const { runtime, adminApi, store } = await bootProject({
+      convexDir: v1Dir,
+      dataPath: join(base, "badcode-db.sqlite"),
+      adminKey: "k",
+    });
+    try {
+      const liveSchema = await schemaOf(v1Dir);
+      const deps: DeployDeps = {
+        runtime,
+        adminApi,
+        setRoutes: () => {},
+        components: [],
+        current: () => liveSchema,
+        deployRoot: join(base, "badcode-deployRoot"),
+      };
+
+      const result = await applyDeploy(deps, [
+        { path: "items.js", code: 123 as unknown as string },
+      ]);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.kind).toBe("load-error");
+      expect(result.error).toMatch(/invalid deploy payload/);
+
+      const list = await runtime.run<string[]>("items:list", {});
+      expect(list.value).toEqual([]);
     } finally {
       store.close();
     }

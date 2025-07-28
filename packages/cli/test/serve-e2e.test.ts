@@ -172,6 +172,7 @@ describe("stackbase serve — end-to-end through the real production server", ()
       port: 0,
       adminKey: "k",
       dashboard: false,
+      allowDeploy: false,
     });
     try {
       const wsUrl1 = `ws://127.0.0.1:${round1.server.port}/api/sync`;
@@ -212,6 +213,7 @@ describe("stackbase serve — end-to-end through the real production server", ()
       port: 0,
       adminKey: "k",
       dashboard: false,
+      allowDeploy: false,
     });
     try {
       const wsUrl2 = `ws://127.0.0.1:${round2.server.port}/api/sync`;

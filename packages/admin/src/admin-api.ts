@@ -1,11 +1,22 @@
 import { encodeStorageTableId } from "@stackbase/id-codec";
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import { convexToJson, type JSONValue, type Value, type ValidatorJSON } from "@stackbase/values";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { ExecutionLogEntry, IndexCatalog, LogFilter, LogSink } from "@stackbase/executor";
 import type { FilterCond } from "./browse";
 
 export type SchemaJsonLike = {
-  tables: Record<string, { indexes: { indexDescriptor: string }[]; shardKey?: string | null }>;
+  tables: Record<
+    string,
+    {
+      indexes: { indexDescriptor: string }[];
+      shardKey?: string | null;
+      // The real schema always sets this (see SchemaDefinitionJSON in @stackbase/values); optional
+      // here only because callers that build a SchemaJsonLike by hand (tests, component tables with
+      // no app-level schema entry) don't always carry it. `stackbase deploy`'s schema diff reads it
+      // off the live `AdminApi.getSchema()` snapshot — see DeployDeps["current"] in deploy-apply.ts.
+      documentType?: ValidatorJSON;
+    }
+  >;
 };
 export type ManifestLike = { path: string; functions: { name: string; type: string }[] }[];
 
