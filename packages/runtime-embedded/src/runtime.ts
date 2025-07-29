@@ -361,6 +361,20 @@ export class EmbeddedRuntime {
     rebuildTableNumberToName(this.tableNumberToName, tableNumbers);
   }
 
+  /**
+   * Live view of the registered app+component function paths. Reads the same mutable `modules`
+   * map `setModules` hot-swaps in place, so counts stay correct across a dev reload or deploy
+   * (the boot-time snapshot the server used to cache went stale after the first hot-swap).
+   */
+  functionPaths(): string[] {
+    return Object.keys(this.modules);
+  }
+
+  /** Live view of the registered table names (mirrors `functionPaths`, reads the live map). */
+  tableNames(): string[] {
+    return [...this.tableNumberToName.values()];
+  }
+
   /** Open an in-process connection an unmodified client can talk to. */
   connect(sessionId?: string): LoopbackConnection {
     return createLoopbackConnection(this.handler, sessionId ?? `session-${++this.sessionCounter}`);
