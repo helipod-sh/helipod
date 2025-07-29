@@ -8,6 +8,9 @@ import { join } from "node:path";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
 import { bootProject, loadDashboard } from "./boot";
+import { applyDeploy } from "./deploy-apply";
+import type { DeploySchema } from "./schema-diff";
+import type { SchemaJsonLike } from "@stackbase/admin";
 import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 
@@ -17,6 +20,9 @@ export interface ServeOptions {
   ip: string;
   port: number;
   dashboard: boolean;
+  /** Enable `POST /_admin/deploy` (`stackbase deploy`'s hot-swap target). Off by default — a running
+   * `serve` only accepts live code changes when explicitly opted in. */
+  allowDeploy: boolean;
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
@@ -25,6 +31,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let ip = "0.0.0.0";
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
   let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
+  let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -32,25 +39,65 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--ip" && args[i + 1]) ip = args[++i] as string;
     else if (a === "--port" && args[i + 1]) port = Number(args[++i]);
     else if (a === "--no-dashboard") dashboard = false;
+    else if (a === "--allow-deploy") allowDeploy = true;
   }
-  return { convexDir, dataPath, ip, port, dashboard };
+  return { convexDir, dataPath, ip, port, dashboard, allowDeploy };
+}
+
+/**
+ * Adapt `AdminApi.getSchema()`'s `SchemaJsonLike` (the data-browser's schema shape) into
+ * `DeploySchema["schemaJson"]` (the schema-diff's narrower, required-`documentType` shape) —
+ * `AdminApi`'s live schema always carries a real `documentType` for app tables, this just narrows
+ * the type safely instead of asserting it.
+ */
+function toDeploySchema(schemaJson: SchemaJsonLike): DeploySchema["schemaJson"] {
+  const tables: DeploySchema["schemaJson"]["tables"] = {};
+  for (const [name, t] of Object.entries(schemaJson.tables)) {
+    const dt = t.documentType;
+    tables[name] = { documentType: dt && dt.type === "object" ? dt : { type: "object", value: {} } };
+  }
+  return { tables };
 }
 
 /** Testable core: boot + start the server. No signals, no exit, does not block. */
 export async function startServe(
   opts: ServeOptions & { adminKey: string },
 ): Promise<{ server: DevServer; store: SqliteDocStore; runtime: EmbeddedRuntime }> {
-  const { runtime, adminApi, project, store } = await bootProject({
+  const { runtime, adminApi, project, store, components } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey: opts.adminKey,
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
-  const server = await startDevServer(
+
+  // `server` is assigned below by `startDevServer`; `setRoutes` only runs on a LATER deploy
+  // request, by which time it is set. `current` reads AdminApi's live schema — no serve-side
+  // bookkeeping to keep in sync.
+  let server: DevServer;
+  const deploy = opts.allowDeploy
+    ? {
+        apply: (files: Array<{ path: string; code: string }>) =>
+          applyDeploy(
+            {
+              runtime,
+              adminApi,
+              setRoutes: (r) => server.setRoutes(r),
+              components,
+              current: () => {
+                const live = adminApi.getSchema();
+                return { schemaJson: toDeploySchema(live.schemaJson), tableNumbers: live.tableNumbers };
+              },
+              deployRoot: join(process.cwd(), ".stackbase-deploy"),
+            },
+            files,
+          ),
+      }
+    : undefined;
+  server = await startDevServer(
     runtime,
     { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
-    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes },
+    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, deploy },
   );
   return { server, store, runtime };
 }
@@ -71,8 +118,15 @@ export async function serveCommand(args: string[]): Promise<number> {
   }
   const { server, store } = await startServe({ ...opts, adminKey });
   process.stdout.write(
-    JSON.stringify({ level: "info", msg: "stackbase serve", url: server.url, dir: opts.convexDir, data: opts.dataPath, dashboard: opts.dashboard }) +
-      "\n",
+    JSON.stringify({
+      level: "info",
+      msg: "stackbase serve",
+      url: server.url,
+      dir: opts.convexDir,
+      data: opts.dataPath,
+      dashboard: opts.dashboard,
+      allowDeploy: opts.allowDeploy,
+    }) + "\n",
   );
 
   let closing = false;

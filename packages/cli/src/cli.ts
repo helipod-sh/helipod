@@ -14,6 +14,7 @@ import { bootProject, loadDashboard } from "./boot";
 import { startDevServer } from "./server";
 import { createWatchLoop } from "./watch";
 import { serveCommand } from "./serve";
+import { deployCommand } from "./deploy";
 
 function parseFlags(args: string[]): DevOptions {
   const out: DevOptions = {};
@@ -111,6 +112,7 @@ function printHelp(): void {
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
       "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
+      "  deploy     Push convex/ to a running `serve --allow-deploy` and hot-swap it live",
       "  codegen    Regenerate convex/_generated types",
       "  help       Show this help",
       "",
@@ -127,6 +129,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return devCommand(rest);
     case "serve":
       return serveCommand(rest);
+    case "deploy":
+      return deployCommand(rest);
     case "codegen":
       return codegenCommand(rest);
     case "help":

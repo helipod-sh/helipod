@@ -19,6 +19,7 @@ dist/
 *.db-wal
 *.db-shm
 .stackbase/
+.stackbase-deploy/
 
 # generated example web bundle (run `pnpm web:build`)
 examples/*/web/main.js

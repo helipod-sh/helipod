@@ -78,6 +78,7 @@ describe("startServe", () => {
       port: 0,
       adminKey: "k",
       dashboard: false,
+      allowDeploy: false,
     });
     try {
       const res = await fetch(`${server.url}/api/health`);

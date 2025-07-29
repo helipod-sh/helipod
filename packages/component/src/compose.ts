@@ -9,6 +9,15 @@ const DEFAULT_INDEX = "by_creation";
 export interface ComposeInput {
   app: { schemaJson: SchemaDefinitionJSON };
   components: ComponentDefinition[];
+  /**
+   * Seed the registry with a running deploy's table numbers (full name -> number) before
+   * allocating. `MemoryTableRegistry.allocate` is idempotent by name, so a seeded name keeps its
+   * number and only genuinely-new tables get fresh ones — this is what makes `stackbase deploy`
+   * safe to add an app table without renumbering (and thus rejecting) untouched component tables
+   * that share the "user" visibility counter. Absent (default): today's from-scratch positional
+   * allocation, unchanged.
+   */
+  existingTableNumbers?: Record<string, number>;
 }
 export interface ComposedTables {
   tableNumbers: Record<string, number>;
@@ -53,6 +62,11 @@ function addSchema(
 
 export function composeTables(input: ComposeInput): ComposedTables {
   const registry = new MemoryTableRegistry();
+  if (input.existingTableNumbers) {
+    for (const [fullName, tableNumber] of Object.entries(input.existingTableNumbers)) {
+      registry.preassign(fullName, tableNumber);
+    }
+  }
   const catalog = new SimpleIndexCatalog();
   const tableNumbers: Record<string, number> = {};
   const seen = new Set<string>();
@@ -185,13 +199,18 @@ function topoSortByRequires(components: ComponentDefinition[]): ComponentDefinit
 export function composeComponents(
   app: { schemaJson: SchemaDefinitionJSON; moduleMap: Record<string, RegisteredFunction> },
   components: ComponentDefinition[],
+  existingTableNumbers?: Record<string, number>,
 ): ComposedProject {
   const names = new Set(components.map((c) => c.name));
   for (const c of components) for (const req of c.requires ?? []) {
     if (!names.has(req)) throw new Error(`component "${c.name}" requires "${req}", which is not enabled`);
   }
   const ordered = topoSortByRequires(components);
-  const { tableNumbers, catalog } = composeTables({ app: { schemaJson: app.schemaJson }, components: ordered });
+  const { tableNumbers, catalog } = composeTables({
+    app: { schemaJson: app.schemaJson },
+    components: ordered,
+    existingTableNumbers,
+  });
   const moduleMap = composeModules(app.moduleMap, ordered);
   const contextProviders: ContextProvider[] = ordered
     .filter((c) => c.context)
