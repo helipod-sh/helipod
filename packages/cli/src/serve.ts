@@ -96,7 +96,6 @@ export async function startServe(
     : undefined;
   server = await startDevServer(
     runtime,
-    { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
     { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, deploy },
   );
   return { server, store, runtime };

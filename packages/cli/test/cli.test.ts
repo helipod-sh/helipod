@@ -99,8 +99,8 @@ describe("HTTP routing", () => {
 
 describe("dev server (real node:http)", () => {
   it("boots and responds over HTTP", async () => {
-    const { runtime, functions, tables } = await makeRuntime();
-    const server = await startDevServer(runtime, { functions, tables }, { port: 0, ip: "127.0.0.1" });
+    const { runtime } = await makeRuntime();
+    const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     try {
       const dash = await fetch(`${server.url}/_dashboard`);
       expect(dash.status).toBe(200);
@@ -113,6 +113,25 @@ describe("dev server (real node:http)", () => {
       });
       expect(run.status).toBe(200);
       expect(typeof (await run.json()).value).toBe("string");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("reports live function/table counts after a hot-swap, not a stale boot snapshot", async () => {
+    const { runtime } = await makeRuntime();
+    const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
+    try {
+      const before = await (await fetch(`${server.url}/api/health`)).json();
+      expect(before.functions).toBe(2); // messages:list + messages:send
+
+      // Hot-swap in an extra function, as a deploy / dev reload does. Health must reflect it live —
+      // the count was previously a boot-time snapshot that went stale after the first setModules.
+      const base = loadProject(loaded).moduleMap;
+      runtime.setModules({ ...base, "messages:extra": base["messages:list"]! });
+
+      const after = await (await fetch(`${server.url}/api/health`)).json();
+      expect(after.functions).toBe(3);
     } finally {
       await server.close();
     }

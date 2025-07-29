@@ -57,7 +57,6 @@ export async function devCommand(args: string[]): Promise<number> {
   const dashboard = loadDashboard(ephemeralKey && loopback ? adminKey : undefined);
   const server = await startDevServer(
     runtime,
-    { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
     { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);

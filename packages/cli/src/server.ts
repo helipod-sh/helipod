@@ -105,7 +105,7 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
+async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
   const { WebSocketServer } = (await import("ws")) as typeof import("ws");
   let currentRoutes = options.routes ?? [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -129,6 +129,9 @@ async function startNodeServer(runtime: EmbeddedRuntime, info: ServerInfo, optio
             return;
           }
         }
+        // Derive server info live per request from the runtime — a boot-time snapshot goes stale
+        // after the first setModules hot-swap (dev reload / deploy).
+        const info: ServerInfo = { functions: runtime.functionPaths(), tables: runtime.tableNames() };
         const response = await handleHttpRequest(
           runtime,
           { method: req.method ?? "GET", path, body, query, authorization, headers },
@@ -225,7 +228,7 @@ interface BunRuntime {
   serve(options: BunServeOptions): BunServeHandle;
 }
 
-async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
+async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
   const bun = (globalThis as { Bun?: BunRuntime }).Bun;
   if (!bun) throw new Error("Bun runtime not available");
   let sessionCounter = 0;
@@ -255,6 +258,9 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
       const authorization = req.headers.get("authorization") ?? undefined;
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => { headers[k] = v; });
+      // Derive server info live per request from the runtime — a boot-time snapshot goes stale
+      // after the first setModules hot-swap (dev reload / deploy).
+      const info: ServerInfo = { functions: runtime.functionPaths(), tables: runtime.tableNames() };
       const response = await handleHttpRequest(
         runtime,
         { method: req.method, path, body, query, authorization, headers },
@@ -301,6 +307,6 @@ async function startBunServer(runtime: EmbeddedRuntime, info: ServerInfo, option
 }
 
 /** Start the dev server using the best backend for the current runtime. */
-export function startDevServer(runtime: EmbeddedRuntime, info: ServerInfo, options: DevServerOptions): Promise<DevServer> {
-  return detectRuntime() === "bun" ? startBunServer(runtime, info, options) : startNodeServer(runtime, info, options);
+export function startDevServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
+  return detectRuntime() === "bun" ? startBunServer(runtime, options) : startNodeServer(runtime, options);
 }

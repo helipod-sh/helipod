@@ -131,7 +131,6 @@ describe("public HTTP router — end-to-end through the real dev server", () => 
     // (closes the reload-wiring coverage gap Task 5's tests didn't exercise).
     const server = await startDevServer(
       runtime,
-      { functions: Object.keys(project.moduleMap), tables: Object.keys(project.tableNumbers) },
       { port: 0, ip: "127.0.0.1" },
     );
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
