@@ -24,6 +24,13 @@ describe("docker config", () => {
     expect(dockerfile).toMatch(/node_modules\/@stackbase/);
     expect(dockerfile).toMatch(/symlinkSync/);
   });
+  it("the runtime image makes the deploy scratch dir writable by the non-root user", () => {
+    // `stackbase deploy` writes the pushed tree under /app/.stackbase-deploy; /app's dir node is
+    // root-owned (COPY chowns only its contents), so the runner stage must chown /app + create the
+    // deploy dir before USER bun — else deploy fails with EACCES (verified via real docker deploy).
+    expect(dockerfile).toMatch(/\.stackbase-deploy/);
+    expect(dockerfile).toMatch(/chown bun:bun[^\n]*\/app/);
+  });
   it("compose mounts the app dir and a data volume and requires the admin key", () => {
     expect(compose).toMatch(/\/app\/convex/);
     expect(compose).toMatch(/STACKBASE_ADMIN_KEY/);
