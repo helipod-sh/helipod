@@ -52,11 +52,14 @@ bun -e '
   }
 '
 EOF
-# Create /data owned by the non-root `bun` user BEFORE dropping privileges. A fresh named
-# volume initializes its ownership from this image dir; without the chown it would be root:root
-# and the uid-1000 `bun` user could not create /data/db.sqlite (EACCES → crash-loop on the first
-# `docker compose up`). chown needs root, so it must run before `USER bun`.
-RUN mkdir -p /data && chown bun:bun /data
+# Create /data (SQLite volume) and /app/.stackbase-deploy (the `stackbase deploy` scratch tree),
+# both owned by the non-root `bun` user, BEFORE dropping privileges. Two distinct EACCES traps:
+#   - A fresh named /data volume inherits this dir's ownership; without the chown, uid-1000 `bun`
+#     can't create /data/db.sqlite (crash-loop on first `docker compose up`).
+#   - `/app`'s DIR NODE is still root-owned (the COPY above chowned only its CONTENTS), so `bun`
+#     can't create /app/.stackbase-deploy when `stackbase deploy` writes the pushed tree there.
+# chown needs root, so this must run before `USER bun`.
+RUN mkdir -p /data /app/.stackbase-deploy && chown bun:bun /data /app /app/.stackbase-deploy
 USER bun
 # Embedded SQLite database lives on a single mounted volume.
 VOLUME ["/data"]
