@@ -76,7 +76,9 @@ export async function buildCommand(args: string[]): Promise<number> {
   const entryPath = join(buildDir, "entry.ts");
   writeFileSync(entryPath, entrySrc);
   // 3. Compile.
-  const bunArgs = ["build", "--compile", "--minify", "--bytecode"];
+  // NOTE: no --bytecode — `bun build --compile --bytecode` rejects the entry's top-level await. Cold-start
+  // speed is negligible for a long-running self-hosted server binary; revisit if the entry drops TLA.
+  const bunArgs = ["build", "--compile", "--minify"];
   if (opts.target) bunArgs.push(`--target=${bunTargetFor(opts.target)}`);
   const outfile = opts.target === "windows-x64" && !opts.outfile.endsWith(".exe") ? `${opts.outfile}.exe` : opts.outfile;
   bunArgs.push(`--outfile=${resolve(outfile)}`, entryPath);
