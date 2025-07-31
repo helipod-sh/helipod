@@ -13,6 +13,17 @@ import { startDevServer, type DevServer } from "./server";
 
 export interface BinaryOptions { port: number; ip: string; dataDir: string; adminKey: string }
 
+/** The materialized embedded dashboard: key-injected HTML plus the urlPath→embedded-path asset map. */
+export interface EmbeddedDashboard { html: string; assets: Record<string, string> }
+
+/** Minimal structural surface of `Bun.file(path)`, reached only inside a compiled binary. */
+interface BunFileLike {
+  text(): Promise<string>;
+}
+interface BunFileRuntime {
+  file(path: string): BunFileLike;
+}
+
 export function resolveBinaryOptions(argv: string[], env: Record<string, string | undefined>): BinaryOptions {
   let port = env.PORT ? Number(env.PORT) : 3000;
   let ip = "0.0.0.0";
@@ -31,15 +42,24 @@ export async function startBinaryServer(
   loaded: LoadedProject,
   components: ComponentDefinition[],
   opts: BinaryOptions,
-  dashboard?: unknown, // tightened to EmbeddedDashboard in Task 6
+  dashboard?: Record<string, string>,
 ): Promise<{ server: DevServer; store: SqliteDocStore; runtime: EmbeddedRuntime }> {
   const boot = await bootLoaded({ loaded, components, dataPath: join(opts.dataDir, "db.sqlite"), adminKey: opts.adminKey });
+  let dash: EmbeddedDashboard | undefined;
+  if (dashboard) {
+    const bun = (globalThis as { Bun?: BunFileRuntime }).Bun;
+    if (!bun) throw new Error("Bun runtime not available to read the embedded dashboard");
+    const indexPath = dashboard["/"];
+    if (!indexPath) throw new Error("embedded dashboard map is missing its \"/\" (index.html) entry");
+    const html = await bun.file(indexPath).text();
+    dash = { html, assets: dashboard };
+  }
   const server = await startDevServer(boot.runtime, {
     port: opts.port,
     ip: opts.ip,
     admin: { api: boot.adminApi, key: opts.adminKey },
     routes: boot.project.routes,
-    // dashboard wired in Task 6
+    dashboard: dash,
   });
   return { server, store: boot.store, runtime: boot.runtime };
 }
@@ -47,7 +67,7 @@ export async function startBinaryServer(
 export async function runBinaryServer(
   loaded: LoadedProject,
   components: ComponentDefinition[],
-  dashboard?: unknown,
+  dashboard?: Record<string, string>,
 ): Promise<void> {
   const opts = resolveBinaryOptions(process.argv.slice(2), process.env);
   if (!opts.adminKey) {

@@ -47,22 +47,66 @@ export interface DevServerOptions {
   ip: string;
   webDir?: string;
   admin?: { api: AdminApi; key: string };
-  /** The built dashboard SPA: the dist dir (hashed Vite assets) + key-injected index.html. */
-  dashboard?: { distDir: string; html: string };
+  /**
+   * The dashboard SPA. Two variants:
+   *  - `dev`/`serve`: `{ distDir, html }` — dist dir (hashed Vite assets) + key-injected index.html,
+   *    served under `/_dashboard*` via `resolveStatic`.
+   *  - a compiled `stackbase build` binary: `{ assets, html }` — a urlPath→embedded-`$bunfs`-path
+   *    map (see `binary-main.ts`'s `EmbeddedDashboard`), served at the site root via `Bun.file`.
+   */
+  dashboard?: { distDir: string; html: string } | { assets: Record<string, string>; html: string };
   /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
   routes?: ResolvedRoute[];
   /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
 }
 
-/** Serve the dashboard SPA for `/_dashboard*` (index.html key-injected, assets from dist), or null. */
-function serveDashboard(path: string, d: { distDir: string; html: string }): { contentType: string; body: string | Buffer } | null {
-  if (path === "/_dashboard" || path === "/_dashboard/" || path === "/_dashboard/index.html")
-    return { contentType: "text/html; charset=utf-8", body: d.html };
-  if (path.startsWith("/_dashboard/")) {
-    return resolveStatic(d.distDir, path.slice("/_dashboard".length));
+/** Content-type for an embedded dashboard asset, derived from its extension. */
+const EMBEDDED_CONTENT_TYPES: Record<string, string> = {
+  ".js": "application/javascript",
+  ".css": "text/css",
+  ".html": "text/html",
+  ".svg": "image/svg+xml",
+};
+
+/** Minimal structural surface of `Bun.file(path)`, reached only inside a compiled binary. */
+interface BunFileLike {
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+interface BunFileRuntime {
+  file(path: string): BunFileLike;
+}
+
+/**
+ * Serve the dashboard SPA, or null (falls through to a 404).
+ *  - `distDir` variant (`dev`/`serve`): unchanged — served under `/_dashboard*`, assets from dist.
+ *  - `assets` variant (compiled binary): served at the site root — `/` and `/index.html` return the
+ *    embedded `html`; any other path is looked up in the urlPath→embedded-path map and read via
+ *    `Bun.file` (only reachable here, inside a compiled Bun binary — dev/serve never pass this variant).
+ */
+async function serveDashboard(
+  path: string,
+  d: { distDir: string; html: string } | { assets: Record<string, string>; html: string },
+): Promise<{ contentType: string; body: string | Buffer | Uint8Array } | null> {
+  if ("distDir" in d) {
+    if (path === "/_dashboard" || path === "/_dashboard/" || path === "/_dashboard/index.html")
+      return { contentType: "text/html; charset=utf-8", body: d.html };
+    if (path.startsWith("/_dashboard/")) {
+      return resolveStatic(d.distDir, path.slice("/_dashboard".length));
+    }
+    return null;
   }
-  return null;
+  if (path === "/" || path === "/index.html") return { contentType: "text/html", body: d.html };
+  // The dashboard's `index.html` is built with vite `base: "/_dashboard/"` (the dev/serve mount
+  // point), so its <script>/<link> tags reference `/_dashboard/assets/...` even though the embedded
+  // asset map's keys are root-relative (`/assets/...`). Fall back to the un-prefixed key so those
+  // requests still resolve when the dashboard is served at the site root.
+  const embeddedPath = d.assets[path] ?? (path.startsWith("/_dashboard/") ? d.assets[path.slice("/_dashboard".length)] : undefined);
+  if (!embeddedPath) return null;
+  const bun = (globalThis as { Bun?: BunFileRuntime }).Bun;
+  if (!bun) return null; // unreachable outside a compiled Bun binary
+  const body = new Uint8Array(await bun.file(embeddedPath).arrayBuffer());
+  return { contentType: EMBEDDED_CONTENT_TYPES[extname(embeddedPath)] ?? "application/octet-stream", body };
 }
 
 /** Resolve a static file from `webDir` (with `/` → index.html), guarding against traversal. Pure. */
@@ -122,7 +166,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           Object.entries(req.headers).filter((e): e is [string, string] => typeof e[1] === "string"),
         );
         if ((req.method ?? "GET") === "GET" && options.dashboard) {
-          const dash = serveDashboard(path, options.dashboard);
+          const dash = await serveDashboard(path, options.dashboard);
           if (dash) {
             res.writeHead(200, { "content-type": dash.contentType });
             res.end(dash.body);
@@ -246,7 +290,7 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
         return server.upgrade(req, { data: { sessionId } }) ? undefined : new Response("upgrade failed", { status: 400 });
       }
       if (req.method === "GET" && options.dashboard) {
-        const dash = serveDashboard(path, options.dashboard);
+        const dash = await serveDashboard(path, options.dashboard);
         if (dash) {
           const body = typeof dash.body === "string" ? dash.body : new Uint8Array(dash.body);
           return new Response(body, { headers: { "content-type": dash.contentType } });

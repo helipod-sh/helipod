@@ -61,4 +61,22 @@ describe("stackbase build (real compiled binary)", () => {
     expect(rc).toBe(0);
     expect(statSync(`${OUT}-linux`).size).toBeGreaterThan(1_000_000);
   }, 120_000);
+
+  it("embeds the dashboard by default (served) and omits it with --no-dashboard", async () => {
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/convex", "--outfile", `${OUT}-dash`]); // dashboard ON
+    expect(rc).toBe(0);
+    const proc = spawn(`${OUT}-dash`, ["--port", "3601", "--hostname", "127.0.0.1", "--data-dir", `${DATA}-dash`], {
+      env: { ...process.env, STACKBASE_ADMIN_KEY: "e2e" },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    try {
+      const { url } = await readReadyLine(proc.stdout!);
+      const root = await fetch(`${url}/`);
+      expect(root.status).toBe(200);
+      expect((await root.text()).toLowerCase()).toContain("stackbase");
+    } finally {
+      proc.kill("SIGTERM");
+      await new Promise((r) => proc.once("exit", r));
+    }
+  }, 120_000);
 });
