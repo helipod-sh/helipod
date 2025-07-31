@@ -67,6 +67,12 @@ const EMBEDDED_CONTENT_TYPES: Record<string, string> = {
   ".css": "text/css",
   ".html": "text/html",
   ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".json": "application/json",
+  ".map": "application/json",
 };
 
 /** Minimal structural surface of `Bun.file(path)`, reached only inside a compiled binary. */

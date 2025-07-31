@@ -73,7 +73,19 @@ describe("stackbase build (real compiled binary)", () => {
       const { url } = await readReadyLine(proc.stdout!);
       const root = await fetch(`${url}/`);
       expect(root.status).toBe(200);
-      expect((await root.text()).toLowerCase()).toContain("stackbase");
+      const html = await root.text();
+      expect(html.toLowerCase()).toContain("stackbase");
+
+      // Regression guard: index.html (vite base:"/_dashboard/") references its JS bundle at
+      // `/_dashboard/assets/index-<hash>.js`, but the embedded asset map's keys are root-relative
+      // (`/assets/...`). `serveDashboard`'s fallback strips the `/_dashboard` prefix before the map
+      // lookup — assert that fallback actually resolves a real asset end-to-end, not just that `/` 200s.
+      const jsMatch = html.match(/src="([^"]+\.js)"/);
+      if (!jsMatch) throw new Error("no JS bundle <script src> found in embedded dashboard index.html");
+      const jsUrl = jsMatch[1];
+      const asset = await fetch(`${url}${jsUrl}`);
+      expect(asset.status).toBe(200);
+      expect(asset.headers.get("content-type")).toContain("javascript");
     } finally {
       proc.kill("SIGTERM");
       await new Promise((r) => proc.once("exit", r));
