@@ -13,15 +13,25 @@ import type { LoadedProject } from "./project";
 
 const CACHE_BUST = () => `?t=${Date.now()}`;
 
-export async function loadConvexDir(dir: string): Promise<LoadedProject> {
-  const absDir = resolve(dir);
+/** The module key `stackbase` uses to address a convex/ function file — strips the extension. */
+export function moduleKeyForFile(file: string): string {
+  return file.replace(/\.(ts|js)$/, "");
+}
+
+/** List a convex/ dir's function module files (excludes schema.{ts,js}, `_`-prefixed, and .d.ts). */
+export function listConvexModuleFiles(absDir: string): string[] {
   const isModule = (f: string) =>
     (f.endsWith(".ts") || f.endsWith(".js")) &&
     !f.endsWith(".d.ts") &&
     !f.startsWith("_") &&
     f !== "schema.ts" &&
     f !== "schema.js";
-  const entries = readdirSync(absDir).filter(isModule);
+  return readdirSync(absDir).filter(isModule);
+}
+
+export async function loadConvexDir(dir: string): Promise<LoadedProject> {
+  const absDir = resolve(dir);
+  const entries = listConvexModuleFiles(absDir);
 
   const schemaFile = existsSync(join(absDir, "schema.ts")) ? "schema.ts" : "schema.js";
   const schemaModule = (await import(pathToFileURL(join(absDir, schemaFile)).href + CACHE_BUST())) as {
@@ -30,7 +40,7 @@ export async function loadConvexDir(dir: string): Promise<LoadedProject> {
 
   const modules: Record<string, Record<string, unknown>> = {};
   for (const file of entries) {
-    const path = file.replace(/\.(ts|js)$/, "");
+    const path = moduleKeyForFile(file);
     modules[path] = (await import(pathToFileURL(join(absDir, file)).href + CACHE_BUST())) as Record<string, unknown>;
   }
 

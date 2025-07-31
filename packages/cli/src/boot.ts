@@ -17,7 +17,7 @@ import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { detectRuntime } from "./dev-options";
-import type { ProjectArtifacts } from "./project";
+import type { ProjectArtifacts, LoadedProject } from "./project";
 
 export function makeStore(dataPath: string): SqliteDocStore {
   mkdirSync(dirname(resolve(dataPath)), { recursive: true });
@@ -36,10 +36,13 @@ export interface BootResult {
   components: ComponentDefinition[];
 }
 
-export async function bootProject(opts: { convexDir: string; dataPath: string; adminKey: string }): Promise<BootResult> {
-  const loaded = await loadConvexDir(opts.convexDir);
-  const config = await loadConfig(dirname(opts.convexDir));
-  const { project, generated } = push(loaded, config.components);
+export async function bootLoaded(opts: {
+  loaded: LoadedProject;
+  components: ComponentDefinition[];
+  dataPath: string;
+  adminKey: string;
+}): Promise<BootResult> {
+  const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
   const store = makeStore(opts.dataPath);
   const runtime = await createEmbeddedRuntime({
@@ -64,7 +67,13 @@ export async function bootProject(opts: { convexDir: string; dataPath: string; a
     logSink,
     catalog: project.catalog,
   });
-  return { runtime, adminApi, project, generated, store, logSink, components: config.components };
+  return { runtime, adminApi, project, generated, store, logSink, components: opts.components };
+}
+
+export async function bootProject(opts: { convexDir: string; dataPath: string; adminKey: string }): Promise<BootResult> {
+  const loaded = await loadConvexDir(opts.convexDir);
+  const config = await loadConfig(dirname(opts.convexDir));
+  return bootLoaded({ loaded, components: config.components, dataPath: opts.dataPath, adminKey: opts.adminKey });
 }
 
 /**

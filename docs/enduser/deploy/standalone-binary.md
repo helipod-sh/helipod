@@ -4,140 +4,180 @@ title: Standalone Binary
 
 # Standalone Binary
 
-> Compile Stackbase into a single executable with stackbase build.
+> Compile Stackbase into a single executable with `stackbase build`.
 
-Package Stackbase as a standalone binary using `stackbase build`. The result is a single executable that bundles the Bun runtime, Stackbase core, SQLite, your Convex functions, and all dependencies. No runtime installation or `convex/` directory needed at deployment time.
+Package Stackbase as a standalone binary using `stackbase build`. The result is a single
+self-contained executable — the Bun runtime, the Stackbase engine, `bun:sqlite`, your app's
+`convex/` functions and schema, and any components composed in `stackbase.config.ts` are all
+embedded at compile time via `bun build --compile`. No `bun`/`node` install and no `convex/`
+directory needed at deployment time — only the binary and a data directory for SQLite.
 
 ## What's in the binary
 
 | Component | Bundled? | Notes |
 |-----------|----------|-------|
-| Bun runtime | Yes | Full runtime including `bun:sqlite`, `Bun.serve()` |
-| Stackbase core | Yes | Query engine, transaction system, sync protocol |
+| Bun runtime | Yes | `bun build --compile` embeds the full runtime |
+| Stackbase engine | Yes | Query engine, transaction system, sync protocol |
 | SQLite (`bun:sqlite`) | Yes | Built into Bun — no external dependency |
-| npm dependencies | Yes | `convex`, `jose`, etc. are bundled |
-| User UDF code (`convex/`) | **Yes** | Embedded at compile time via dynamic imports |
-| Dashboard | Optional | Included by default, exclude with `--no-dashboard` |
-
-User code **is** bundled into the binary. At deploy time, the only thing you need is the binary itself and a data directory for SQLite.
+| Your `convex/` functions + schema | Yes | Embedded at compile time via a generated static-import entrypoint |
+| Composed components (`@stackbase/scheduler`, `@stackbase/workflow`, ...) | Yes | Whatever `stackbase.config.ts` composes |
+| Dashboard | Optional | Included by default; exclude with `--no-dashboard` |
+| SQLite **database file** | **No** | Lives on disk under `--data-dir`, external to the binary |
 
 ## Prerequisites
 
-Install the CLI and runtime dependencies:
+Install the CLI (and any components your app composes) as ordinary dependencies:
 
 ```bash
-bun add @stackbase/cli convex
-bun add @stackbase/runtime-bun @stackbase/docstore-bun-sqlite @stackbase/blobstore-bun-fs @stackbase/core
+bun add @stackbase/cli
+
+# only if your stackbase.config.ts composes them:
+bun add @stackbase/scheduler @stackbase/workflow
 ```
 
-Initialize your project if you haven't already:
-
-```bash
-bunx stackbase init
-```
-
-Generate types before building:
-
-```bash
-bunx stackbase codegen
-```
+There is no `stackbase init` scaffolder — you just need a `convex/` directory (schema +
+functions) and, optionally, a `stackbase.config.ts` next to it (see
+`examples/auth-demo/stackbase.config.ts` for the reference pattern). `stackbase build` runs
+its own codegen internally, so there's no separate codegen step to run first.
 
 ## Build
 
 ### For the current platform
 
 ```bash
-bunx stackbase build
+stackbase build
 ```
 
-Output: `./stackbase-server` (~60MB self-contained binary)
+Output: `./stackbase-server`.
 
 ### Custom output path
 
 ```bash
-bunx stackbase build --outfile ./dist/my-backend
+stackbase build --outfile ./dist/my-backend
 ```
 
 ### Cross-compilation
 
 ```bash
 # Linux x64
-bunx stackbase build --target linux-x64 --outfile ./dist/server-linux
+stackbase build --target linux-x64 --outfile ./dist/server-linux
+
+# Linux ARM64
+stackbase build --target linux-arm64 --outfile ./dist/server-linux-arm64
 
 # macOS Apple Silicon
-bunx stackbase build --target darwin-arm64 --outfile ./dist/server-macos
+stackbase build --target darwin-arm64 --outfile ./dist/server-macos
+
+# macOS Intel
+stackbase build --target darwin-x64 --outfile ./dist/server-macos-x64
 
 # Windows x64
-bunx stackbase build --target windows-x64 --outfile ./dist/server-windows.exe
+stackbase build --target windows-x64 --outfile ./dist/server-windows.exe
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--dir <path>` | `convex` | Path to the app's `convex/` directory to build |
 | `--outfile <path>` | `./stackbase-server` | Output path for the binary |
-| `--target <platform>` | Current platform | Cross-compile target (e.g., `linux-x64`, `darwin-arm64`) |
+| `--target <platform>` | current platform | One of `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64` |
 | `--no-dashboard` | — | Exclude the dashboard UI from the binary |
-| `--verbose` | — | Show detailed build output |
+| `--verbose` | — | Stream the underlying `bun build --compile` output |
 
-## Usage
+Note: the compile step deliberately omits `--bytecode` — the generated entrypoint uses a
+top-level `await` (to boot the runtime before serving), which `bun build --compile --bytecode`
+rejects. Cold-start speed is negligible for a long-running self-hosted server binary.
+
+## Run
 
 ```bash
-./stackbase-server --port 3000 --data-dir ./data
+STACKBASE_ADMIN_KEY=your-strong-secret ./stackbase-server --port 3000 --hostname 0.0.0.0 --data-dir ./data
 ```
+
+`STACKBASE_ADMIN_KEY` is **required** — the binary fails fast (exit 1) if it isn't set. Unlike
+`stackbase dev`, it is never auto-generated; this is production-facing, same as `stackbase serve`.
 
 ### CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port` | `3000` | Port to listen on. |
-| `--hostname` | `127.0.0.1` | Hostname to bind to. Use `0.0.0.0` for all interfaces. |
-| `--data-dir` | `./data` | Directory for SQLite database and blob storage. |
-| `--help` | — | Show help message. |
+| `--port` | `3000` (or `$PORT`) | Port to listen on |
+| `--hostname` | `0.0.0.0` | Address to bind to |
+| `--data-dir` | `./data` | Directory holding the SQLite database (`db.sqlite`) |
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|--------------|
+| `STACKBASE_ADMIN_KEY` | **Yes** | Bearer token for the dashboard + admin API. No default — the binary refuses to start without it. |
+| `PORT` | No | Fallback for `--port` when the flag isn't passed |
 
 ## Machine-readable startup
 
-On successful startup, the binary outputs a single JSON line to stdout:
+On successful startup, the binary writes exactly one JSON line to stdout, after the listener is
+up:
 
 ```json
-{"ready":true,"port":3000,"url":"http://127.0.0.1:3000"}
+{"ready":true,"port":3000,"url":"http://0.0.0.0:3000"}
 ```
 
-This is designed for parent process integration. Electron, Tauri, and other wrappers can parse this line to know when the server is ready and on which port to connect.
+This is designed for a parent process (Electron, Tauri, a supervisor script) to read stdout and
+know exactly when the server is ready and which port it bound.
+
+## Graceful shutdown
+
+The binary handles `SIGINT` and `SIGTERM`: it stops the server, closes the SQLite database, and
+exits with code 0.
 
 ## Deployment patterns
 
 ### Standalone server
 
-Run the binary directly on a VPS or bare metal server:
+Run the binary directly on a VPS or bare metal:
 
 ```bash
-./stackbase-server --hostname 0.0.0.0 --port 8080
+STACKBASE_ADMIN_KEY=your-strong-secret ./stackbase-server --hostname 0.0.0.0 --port 8080 --data-dir /var/lib/stackbase
 ```
 
-Pair with a frontend served from a CDN or the same machine.
+### Minimal Docker image
 
-### Docker
+The runtime-based image described in [Self-Hosting](/self-hosting) bind-mounts `convex/` into a
+generic Bun image. If you'd rather ship one tiny, immutable image with nothing but the compiled
+binary, build for `linux-x64`/`linux-arm64` and copy just that executable into a distroless (or
+`scratch`) base — no Bun, no `node_modules`, no source:
+
+```bash
+stackbase build --target linux-x64 --outfile ./dist/stackbase-server
+```
 
 ```dockerfile
-FROM ubuntu:24.04
+# Dockerfile.binary
+FROM gcr.io/distroless/base-debian12
 
-COPY stackbase-server /usr/local/bin/stackbase-server
+COPY dist/stackbase-server /stackbase-server
 
-VOLUME /app/data
 EXPOSE 3000
+VOLUME /data
 
-CMD ["stackbase-server", "--data-dir", "/app/data", "--hostname", "0.0.0.0"]
+ENTRYPOINT ["/stackbase-server", "--hostname", "0.0.0.0", "--data-dir", "/data"]
 ```
 
-No Bun, Node.js, or `convex/` directory needed in the container — the binary is fully self-contained.
+```bash
+docker build -f Dockerfile.binary -t my-app-binary .
+docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=your-strong-secret -v stackbase-data:/data my-app-binary
+```
+
+This is the tiny-image alternative to the runtime-based image in [Self-Hosting](/self-hosting):
+build once per target platform, ship a single executable, no bind-mounted `convex/` at all
+(it's already embedded).
 
 ### Embedded in desktop apps
 
-The standalone binary is the foundation for desktop deployment:
+The standalone binary works as a sidecar for desktop app wrappers:
 
-- **[Tauri](/deploy/tauri)** — Build with `stackbase build --outfile src-tauri/binaries/stackbase` and spawn as a sidecar
-- **[Electron](/deploy/electron)** — Use `@stackbase/runtime-node` + `better-sqlite3` directly in the main process, or spawn the binary as a child process
+- **[Tauri](/deploy/tauri)** — build with `stackbase build --outfile src-tauri/binaries/stackbase` and spawn as a sidecar, parsing the `{"ready":...}` line for the URL.
+- **[Electrobun](/deploy/electrobun)** — prefers running Stackbase in-process in the Bun main process, but the binary can be spawned as a child process instead if you want process isolation.
 
 ### systemd service
 
@@ -148,7 +188,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/stackbase/server --data-dir /var/lib/stackbase --hostname 0.0.0.0
+Environment=STACKBASE_ADMIN_KEY=your-strong-secret
+ExecStart=/opt/stackbase/stackbase-server --data-dir /var/lib/stackbase --hostname 0.0.0.0
 Restart=on-failure
 User=stackbase
 
@@ -156,36 +197,16 @@ User=stackbase
 WantedBy=multi-user.target
 ```
 
-## What works in compiled binaries
-
-`bun build --compile` produces a fully functional single-file executable. Everything Stackbase needs works:
-
-| Feature | Status |
-|---------|--------|
-| `bun:sqlite` | Built into Bun runtime |
-| `Bun.serve()` | HTTP + WebSocket on the same port |
-| Dynamic `import()` | User modules embedded at compile time |
-| `node:fs` | Bun's Node.js compat layer |
-| `AsyncLocalStorage` | Used by Stackbase for request context |
-| npm packages | Bundled into the binary at compile time |
-
-## Graceful shutdown
-
-The binary handles `SIGINT` (Ctrl+C) and `SIGTERM` for clean shutdown:
-
-1. Stops accepting new connections
-2. Drains in-flight requests
-3. Closes the SQLite database
-4. Exits with code 0
-
 ## Full example
 
-See [`examples/standalone`](https://github.com/stackbase/stackbase/tree/main/examples/standalone) for a React app powered by the standalone binary.
+There is no packaged `examples/standalone` app yet — any of the existing `examples/*` apps'
+`convex/` directory can be pointed at with `stackbase build --dir <path>`.
 
 ## Limitations
 
-- **Binary size.** ~60MB due to the bundled Bun runtime.
-- **Single instance.** SQLite requires exclusive file access. For horizontal scaling, use [Cloudflare Workers](/deploy/cloudflare).
+- **Single instance.** SQLite requires exclusive file access — one binary process per data directory.
+- **No live hot-swap.** Unlike `stackbase serve --allow-deploy`, the binary doesn't expose `POST /_admin/deploy` — functions, schema, and the composed component set are all fixed at build time. Shipping a change means rebuilding and redeploying the binary, not `stackbase deploy`.
+- **The component set is fixed at build time.** Composing a new component (e.g. adding `@stackbase/workflow`) requires a rebuild.
+- **No Postgres adapter yet.** SQLite only (slice 6c is unbuilt).
 
 ---
-

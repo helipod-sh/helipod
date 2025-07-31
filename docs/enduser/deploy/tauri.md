@@ -111,7 +111,7 @@ If you prefer a server process instead of running in-process, you can use a `sta
 
 ```bash
 # Build the standalone binary
-bunx stackbase build --outfile src-tauri/binaries/stackbase
+stackbase build --outfile src-tauri/binaries/stackbase
 ```
 
 Configure `tauri.conf.json`:
