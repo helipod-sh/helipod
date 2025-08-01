@@ -44,6 +44,7 @@ function normalizeRows(rows: Record<string, unknown>[]): PgRow[] {
 export class NodePgClient implements PgClient {
   private readonly client: pg.Client;
   private connected = false;
+  private connectPromise?: Promise<void>;
 
   constructor(opts: { connectionString: string }) {
     this.client = new Client({
@@ -58,11 +59,14 @@ export class NodePgClient implements PgClient {
     });
   }
 
-  private async ensure(): Promise<void> {
-    if (!this.connected) {
-      await this.client.connect();
+  private ensure(): Promise<void> {
+    // Memoize the in-flight connect promise so concurrent first-callers (e.g.
+    // Promise.all([store.get(a), store.get(b)]) before any awaited setup) all
+    // await the SAME connect() rather than each racing check-then-await-then-set
+    // and calling this.client.connect() twice (pg rejects the second call).
+    return (this.connectPromise ??= this.client.connect().then(() => {
       this.connected = true;
-    }
+    }));
   }
 
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
@@ -97,6 +101,7 @@ export class NodePgClient implements PgClient {
     if (this.connected) {
       await this.client.end();
       this.connected = false;
+      this.connectPromise = undefined;
     }
   }
 }
