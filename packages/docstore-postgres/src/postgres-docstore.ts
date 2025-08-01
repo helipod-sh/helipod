@@ -57,16 +57,97 @@ export class PostgresDocStore implements DocStore {
   }
 
   async write(
-    _documents: readonly DocumentLogEntry[],
-    _indexUpdates: readonly IndexWrite[],
-    _conflictStrategy: ConflictStrategy,
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    conflictStrategy: ConflictStrategy,
     _shardId?: ShardId,
   ): Promise<void> {
-    throw new Error("not implemented");
+    // Dedup last-wins to mirror SQLite INSERT OR REPLACE and avoid ON CONFLICT double-affect.
+    const docByKey = new Map<string, DocumentLogEntry>();
+    for (const e of documents) {
+      docByKey.set(`${encodeStorageTableId(e.id.tableNumber)}|${Buffer.from(e.id.internalId).toString("hex")}|${e.ts}`, e);
+    }
+    const idxByKey = new Map<string, IndexWrite>();
+    for (const w of indexUpdates) {
+      idxByKey.set(`${w.update.indexId}|${Buffer.from(w.update.key).toString("hex")}|${w.ts}`, w);
+    }
+
+    await this.db.transaction(async (tx) => {
+      const docs = [...docByKey.values()];
+      if (docs.length > 0) {
+        const cols = 5;
+        const rowsSql = docs
+          .map((_, i) => `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5})`)
+          .join(",");
+        const params: PgValue[] = [];
+        for (const e of docs) {
+          params.push(
+            encodeStorageTableId(e.id.tableNumber),
+            e.id.internalId,
+            e.ts,
+            e.prev_ts,
+            e.value === null ? null : this.serializeValue(e.value.value),
+          );
+        }
+        const conflict =
+          conflictStrategy === "Overwrite"
+            ? ` ON CONFLICT (table_id, internal_id, ts) DO UPDATE SET prev_ts = EXCLUDED.prev_ts, value = EXCLUDED.value`
+            : ``; // "Error": plain INSERT — a PK collision raises, matching the strategy.
+        await tx.query(
+          `INSERT INTO documents (table_id, internal_id, ts, prev_ts, value) VALUES ${rowsSql}${conflict}`,
+          params,
+        );
+      }
+
+      const idxs = [...idxByKey.values()];
+      if (idxs.length > 0) {
+        const cols = 6;
+        const rowsSql = idxs
+          .map(
+            (_, i) =>
+              `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5},$${i * cols + 6})`,
+          )
+          .join(",");
+        const params: PgValue[] = [];
+        for (const { ts, update } of idxs) {
+          const v = update.value;
+          params.push(
+            update.indexId,
+            update.key,
+            ts,
+            v.type === "NonClustered" ? encodeStorageTableId(v.docId.tableNumber) : null,
+            v.type === "NonClustered" ? v.docId.internalId : null,
+            v.type !== "NonClustered", // deleted = true for a "Deleted" entry
+          );
+        }
+        await tx.query(
+          `INSERT INTO indexes (index_id, key, ts, table_id, internal_id, deleted) VALUES ${rowsSql}` +
+            ` ON CONFLICT (index_id, key, ts) DO UPDATE SET table_id = EXCLUDED.table_id, internal_id = EXCLUDED.internal_id, deleted = EXCLUDED.deleted`,
+          params,
+        );
+      }
+    });
   }
 
-  async get(_id: InternalDocumentId, _readTimestamp?: bigint): Promise<LatestDocument | null> {
-    throw new Error("not implemented");
+  async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {
+    const tableId = encodeStorageTableId(id.tableNumber);
+    const rows =
+      readTimestamp === undefined
+        ? await this.db.query(
+            `SELECT ts, prev_ts, value FROM documents WHERE table_id = $1 AND internal_id = $2 ORDER BY ts DESC LIMIT 1`,
+            [tableId, id.internalId],
+          )
+        : await this.db.query(
+            `SELECT ts, prev_ts, value FROM documents WHERE table_id = $1 AND internal_id = $2 AND ts <= $3 ORDER BY ts DESC LIMIT 1`,
+            [tableId, id.internalId, readTimestamp],
+          );
+    const row = rows[0];
+    if (!row || row.value === null) return null; // missing or tombstone
+    return {
+      ts: asBigInt(row.ts),
+      prev_ts: asBigIntOrNull(row.prev_ts),
+      value: { id, value: this.parseValue(row.value as string) },
+    };
   }
 
   async *index_scan(
