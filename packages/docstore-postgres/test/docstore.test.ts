@@ -5,6 +5,7 @@ import { PgliteClient } from "./pglite-client";
 
 // Always: hermetic PGlite (real Postgres semantics, no Docker, runs under Node).
 runDocStoreConformance(
+  "postgres (pglite)",
   async () => {
     const s = new PostgresDocStore(new PgliteClient());
     await s.setupSchema();
@@ -19,6 +20,7 @@ runDocStoreConformance(
 const REAL_PG = process.env.STACKBASE_TEST_DATABASE_URL;
 if (REAL_PG) {
   runDocStoreConformance(
+    "postgres (real)",
     async () => {
       const s = new PostgresDocStore(new NodePgClient({ connectionString: REAL_PG }));
       await s.setupSchema();
