@@ -57,6 +57,9 @@ export class PostgresDocStore implements DocStore {
     // One idempotent statement per query() — portable across single-statement (PGlite) and
     // multi-statement (pg) drivers. Engine-authored text, no interpolation.
     for (const stmt of SCHEMA_STATEMENTS) await this.db.query(stmt);
+    // Single-writer invariant — fail fast if another engine already holds the advisory lock.
+    // No-op under PGlite (single in-process connection); real guard under NodePgClient.
+    await this.db.acquireWriterLock();
   }
 
   async write(
