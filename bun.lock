@@ -288,6 +288,7 @@
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
+        "@stackbase/index-key-codec": "workspace:*",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",

@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-support/conformance": {
+      "types": "./test-support/conformance.ts",
+      "default": "./test-support/conformance.ts"
     }
   },
   "files": ["dist"],
@@ -25,6 +29,7 @@
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
+    "@stackbase/index-key-codec": "workspace:*",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
