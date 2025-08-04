@@ -6,11 +6,12 @@
  *   indexes  (index_id, key, ts, table_id, internal_id, deleted)  -- MVCC index entries
  *   persistence_globals(key, value)                          -- engine metadata KV
  *
- * `setupSchema`/`write`/`get` (tasks 1-2) and `scan`/`count`/`maxTimestamp`/`getGlobal`/
- * `writeGlobal`/`writeGlobalIfAbsent` (task 3, set-based via `DISTINCT ON`) are implemented.
- * `index_scan`/`load_documents`/`previous_revisions` remain transitional
- * `throw new Error("not implemented")` stubs with the correct signature — later tasks replace
- * each one with a real implementation over the async `PgClient` seam.
+ * `setupSchema`/`write`/`get` (tasks 1-2), `scan`/`count`/`maxTimestamp`/`getGlobal`/
+ * `writeGlobal`/`writeGlobalIfAbsent` (task 3, set-based via `DISTINCT ON`), and
+ * `index_scan`/`load_documents`/`previous_revisions` (task 4, set-based: `DISTINCT ON` +
+ * `LEFT JOIN LATERAL` for the index scan with tombstones filtered before `LIMIT`, an ordered
+ * range scan for the change feed, and a batched `VALUES` + `LATERAL` join for the OCC
+ * previous-revisions lookup) are all implemented over the async `PgClient` seam.
  */
 import type {
   ConflictStrategy,
@@ -153,22 +154,115 @@ export class PostgresDocStore implements DocStore {
   }
 
   async *index_scan(
-    _indexId: string,
+    indexId: string,
     _tableId: string,
-    _readTimestamp: bigint,
-    _interval: Interval,
-    _order: Order,
-    _limit?: number,
+    readTimestamp: bigint,
+    interval: Interval,
+    order: Order,
+    limit?: number,
   ): AsyncGenerator<readonly [Uint8Array, LatestDocument]> {
-    throw new Error("not implemented");
+    const dir = order === "desc" ? "DESC" : "ASC";
+    const params: PgValue[] = [indexId, interval.start, readTimestamp];
+    let endClause = "";
+    if (interval.end !== null) {
+      endClause = ` AND i.key < $4`;
+      params.push(interval.end);
+    }
+    // DISTINCT ON (i.key) with ORDER BY i.key <dir>, i.ts DESC → newest entry per key ≤ readTimestamp.
+    // LATERAL resolves the pointed doc's newest visible revision. Filter dead rows, THEN limit —
+    // a raw SQL LIMIT here would count deleted/tombstoned entries and return short pages.
+    let sql =
+      `SELECT idx.key AS key, doc.ts AS ts, doc.prev_ts AS prev_ts, doc.value AS value,
+              idx.table_id AS table_id, idx.internal_id AS internal_id
+       FROM (
+         SELECT DISTINCT ON (i.key) i.key, i.table_id, i.internal_id, i.deleted
+         FROM indexes i
+         WHERE i.index_id = $1 AND i.key >= $2 AND i.ts <= $3${endClause}
+         ORDER BY i.key ${dir}, i.ts DESC
+       ) idx
+       LEFT JOIN LATERAL (
+         SELECT d.ts, d.prev_ts, d.value FROM documents d
+         WHERE d.table_id = idx.table_id AND d.internal_id = idx.internal_id AND d.ts <= $3
+         ORDER BY d.ts DESC LIMIT 1
+       ) doc ON TRUE
+       WHERE idx.deleted = FALSE AND idx.internal_id IS NOT NULL AND doc.value IS NOT NULL
+       ORDER BY idx.key ${dir}`;
+    if (limit !== undefined) {
+      sql += ` LIMIT $${params.length + 1}`;
+      params.push(Number(limit));
+    }
+
+    const rows = await this.db.query(sql, params);
+    for (const row of rows) {
+      const docId: InternalDocumentId = {
+        tableNumber: decodeStorageTableId(row.table_id as string),
+        internalId: row.internal_id as Uint8Array,
+      };
+      const doc: LatestDocument = {
+        ts: asBigInt(row.ts),
+        prev_ts: asBigIntOrNull(row.prev_ts),
+        value: { id: docId, value: this.parseValue(row.value as string) },
+      };
+      yield [row.key as Uint8Array, doc] as const;
+    }
   }
 
-  async *load_documents(_range: TimestampRange, _order: Order): AsyncGenerator<DocumentLogEntry> {
-    throw new Error("not implemented");
+  async *load_documents(range: TimestampRange, order: Order): AsyncGenerator<DocumentLogEntry> {
+    const dir = order === "desc" ? "DESC" : "ASC";
+    const rows = await this.db.query(
+      `SELECT table_id, internal_id, ts, prev_ts, value FROM documents WHERE ts >= $1 AND ts < $2
+       ORDER BY ts ${dir}, table_id ${dir}, internal_id ${dir}`,
+      [range.minInclusive, range.maxExclusive],
+    );
+    for (const row of rows) {
+      const id: InternalDocumentId = {
+        tableNumber: decodeStorageTableId(row.table_id as string),
+        internalId: row.internal_id as Uint8Array,
+      };
+      const value: ResolvedDocument | null =
+        row.value === null ? null : { id, value: this.parseValue(row.value as string) };
+      yield { ts: asBigInt(row.ts), id, value, prev_ts: asBigIntOrNull(row.prev_ts) };
+    }
   }
 
-  async previous_revisions(_queries: readonly PrevRevQuery[]): Promise<Map<string, DocumentLogEntry>> {
-    throw new Error("not implemented");
+  async previous_revisions(queries: readonly PrevRevQuery[]): Promise<Map<string, DocumentLogEntry>> {
+    const out = new Map<string, DocumentLogEntry>();
+    if (queries.length === 0) return out;
+    // One round trip: a VALUES list (with an ordinality tag) LATERAL-joined to the newest visible rev.
+    const cols = 4;
+    const valuesSql = queries
+      .map((_, i) =>
+        i === 0
+          ? `($${i * cols + 1}::int, $${i * cols + 2}::text, $${i * cols + 3}::bytea, $${i * cols + 4}::bigint)`
+          : `($${i * cols + 1}, $${i * cols + 2}, $${i * cols + 3}, $${i * cols + 4})`,
+      )
+      .join(",");
+    const params: PgValue[] = [];
+    queries.forEach((q, i) => {
+      params.push(i, encodeStorageTableId(q.id.tableNumber), q.id.internalId, q.ts);
+    });
+    const rows = await this.db.query(
+      `SELECT q.ord AS ord, d.ts AS ts, d.prev_ts AS prev_ts, d.value AS value
+       FROM (VALUES ${valuesSql}) AS q(ord, table_id, internal_id, ts)
+       JOIN LATERAL (
+         SELECT dd.ts, dd.prev_ts, dd.value FROM documents dd
+         WHERE dd.table_id = q.table_id AND dd.internal_id = q.internal_id AND dd.ts <= q.ts
+         ORDER BY dd.ts DESC LIMIT 1
+       ) d ON TRUE`,
+      params,
+    );
+    for (const row of rows) {
+      const q = queries[Number(row.ord)]!;
+      const value: ResolvedDocument | null =
+        row.value === null ? null : { id: q.id, value: this.parseValue(row.value as string) };
+      out.set(getPrevRevQueryKey(q.id, q.ts), {
+        ts: asBigInt(row.ts),
+        id: q.id,
+        value,
+        prev_ts: asBigIntOrNull(row.prev_ts),
+      });
+    }
+    return out;
   }
 
   async scan(tableId: string, readTimestamp?: bigint): Promise<LatestDocument[]> {
