@@ -6,8 +6,10 @@
  *   indexes  (index_id, key, ts, table_id, internal_id, deleted)  -- MVCC index entries
  *   persistence_globals(key, value)                          -- engine metadata KV
  *
- * Only `setupSchema` is implemented in this task. Every other `DocStore` method is a transitional
- * `throw new Error("not implemented")` stub with the correct signature — later tasks (2-5) replace
+ * `setupSchema`/`write`/`get` (tasks 1-2) and `scan`/`count`/`maxTimestamp`/`getGlobal`/
+ * `writeGlobal`/`writeGlobalIfAbsent` (task 3, set-based via `DISTINCT ON`) are implemented.
+ * `index_scan`/`load_documents`/`previous_revisions` remain transitional
+ * `throw new Error("not implemented")` stubs with the correct signature — later tasks replace
  * each one with a real implementation over the async `PgClient` seam.
  */
 import type {
@@ -169,28 +171,73 @@ export class PostgresDocStore implements DocStore {
     throw new Error("not implemented");
   }
 
-  async scan(_tableId: string, _readTimestamp?: bigint): Promise<LatestDocument[]> {
-    throw new Error("not implemented");
+  async scan(tableId: string, readTimestamp?: bigint): Promise<LatestDocument[]> {
+    const tableNumber = decodeStorageTableId(tableId);
+    const rows =
+      readTimestamp === undefined
+        ? await this.db.query(
+            `SELECT internal_id, ts, prev_ts, value FROM (
+               SELECT DISTINCT ON (internal_id) internal_id, ts, prev_ts, value
+               FROM documents WHERE table_id = $1
+               ORDER BY internal_id ASC, ts DESC
+             ) latest WHERE value IS NOT NULL ORDER BY internal_id ASC`,
+            [tableId],
+          )
+        : await this.db.query(
+            `SELECT internal_id, ts, prev_ts, value FROM (
+               SELECT DISTINCT ON (internal_id) internal_id, ts, prev_ts, value
+               FROM documents WHERE table_id = $1 AND ts <= $2
+               ORDER BY internal_id ASC, ts DESC
+             ) latest WHERE value IS NOT NULL ORDER BY internal_id ASC`,
+            [tableId, readTimestamp],
+          );
+    return rows.map((row) => {
+      const id: InternalDocumentId = { tableNumber, internalId: row.internal_id as Uint8Array };
+      return {
+        ts: asBigInt(row.ts),
+        prev_ts: asBigIntOrNull(row.prev_ts),
+        value: { id, value: this.parseValue(row.value as string) },
+      };
+    });
   }
 
-  async count(_tableId: string): Promise<number> {
-    throw new Error("not implemented");
+  async count(tableId: string): Promise<number> {
+    const rows = await this.db.query(
+      `SELECT COUNT(*)::bigint AS n FROM (
+         SELECT DISTINCT ON (internal_id) value FROM documents WHERE table_id = $1
+         ORDER BY internal_id ASC, ts DESC
+       ) latest WHERE value IS NOT NULL`,
+      [tableId],
+    );
+    return Number(rows[0]?.n ?? 0);
   }
 
   async maxTimestamp(): Promise<bigint> {
-    throw new Error("not implemented");
+    const rows = await this.db.query(`SELECT MAX(ts) AS m FROM documents`);
+    const m = rows[0]?.m;
+    return m === null || m === undefined ? 0n : asBigInt(m);
   }
 
-  async getGlobal(_key: string): Promise<JSONValue | null> {
-    throw new Error("not implemented");
+  async getGlobal(key: string): Promise<JSONValue | null> {
+    const rows = await this.db.query(`SELECT value FROM persistence_globals WHERE key = $1`, [key]);
+    return rows[0] ? (JSON.parse(rows[0].value as string) as JSONValue) : null;
   }
 
-  async writeGlobal(_key: string, _value: JSONValue): Promise<void> {
-    throw new Error("not implemented");
+  async writeGlobal(key: string, value: JSONValue): Promise<void> {
+    await this.db.query(
+      `INSERT INTO persistence_globals (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [key, JSON.stringify(value)],
+    );
   }
 
-  async writeGlobalIfAbsent(_key: string, _value: JSONValue): Promise<boolean> {
-    throw new Error("not implemented");
+  async writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean> {
+    const rows = await this.db.query(
+      `INSERT INTO persistence_globals (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO NOTHING RETURNING key`,
+      [key, JSON.stringify(value)],
+    );
+    return rows.length > 0; // a row is RETURNED only when the insert actually happened
   }
 
   async close(): Promise<void> {
