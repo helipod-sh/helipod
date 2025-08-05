@@ -69,6 +69,11 @@ export class PostgresDocStore implements DocStore {
     _shardId?: ShardId,
   ): Promise<void> {
     // Dedup last-wins to mirror SQLite INSERT OR REPLACE and avoid ON CONFLICT double-affect.
+    // Note: under the "Error" conflict strategy, SQLite's per-row INSERT would throw on a
+    // duplicate (table_id, internal_id, ts) within one batch, but this dedup silently keeps
+    // the last write instead. That divergence is intentional and safe here: the transactor
+    // allocates exactly one commit `ts` per transaction and stages at most one revision per
+    // document, so a genuine duplicate key never reaches write() within a single batch.
     const docByKey = new Map<string, DocumentLogEntry>();
     for (const e of documents) {
       docByKey.set(`${encodeStorageTableId(e.id.tableNumber)}|${Buffer.from(e.id.internalId).toString("hex")}|${e.ts}`, e);

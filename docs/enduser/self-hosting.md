@@ -161,6 +161,23 @@ are *data*, not DDL. Adding a table, adding a field, or changing your `schema.ts
 needs no `ALTER TABLE`/migration step against Postgres — the physical schema never changes shape
 underneath you.
 
+### Known limitations
+
+- **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
+  connection for its lifetime — the same connection the single-writer advisory lock and
+  transaction pinning depend on. If that connection drops (a network blip, a Postgres restart,
+  a failover), the engine does **not** transparently reconnect; restart the Stackbase process to
+  re-establish it. SQLite, being a local file, has no equivalent failure mode — this is a
+  trade-off that comes with talking to Postgres over the network.
+- **An unclean process kill can briefly hold the lock.** The single-writer guard is a
+  **session-level** `pg_advisory_lock`. A graceful shutdown (`SIGTERM`) releases it immediately.
+  But if the process is killed uncleanly (`SIGKILL`, a crash), an immediate restart against the
+  same database may briefly fail with "another engine already connected" until Postgres notices
+  the dead session and releases the lock — typically within seconds.
+
+Neither of these is a clustering/HA limitation — they're consequences of the single-node,
+single-writer durability story already described above, not new constraints on top of it.
+
 ## Reverse proxy / TLS
 
 Stackbase serves plain HTTP — `serve` has no TLS support built in. For a public deployment, put a
