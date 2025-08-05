@@ -11,7 +11,7 @@ import { bootProject, loadDashboard } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
+import type { DocStore } from "@stackbase/docstore";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 
 export interface ServeOptions {
@@ -23,6 +23,8 @@ export interface ServeOptions {
   /** Enable `POST /_admin/deploy` (`stackbase deploy`'s hot-swap target). Off by default — a running
    * `serve` only accepts live code changes when explicitly opted in. */
   allowDeploy: boolean;
+  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  databaseUrl?: string;
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
@@ -32,6 +34,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
   let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
   let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
+  let databaseUrl = process.env.STACKBASE_DATABASE_URL;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -40,8 +43,9 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--port" && args[i + 1]) port = Number(args[++i]);
     else if (a === "--no-dashboard") dashboard = false;
     else if (a === "--allow-deploy") allowDeploy = true;
+    else if (a === "--database-url" && args[i + 1]) databaseUrl = args[++i] as string;
   }
-  return { convexDir, dataPath, ip, port, dashboard, allowDeploy };
+  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl };
 }
 
 /**
@@ -62,11 +66,12 @@ function toDeploySchema(schemaJson: SchemaJsonLike): DeploySchema["schemaJson"] 
 /** Testable core: boot + start the server. No signals, no exit, does not block. */
 export async function startServe(
   opts: ServeOptions & { adminKey: string },
-): Promise<{ server: DevServer; store: SqliteDocStore; runtime: EmbeddedRuntime }> {
+): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime }> {
   const { runtime, adminApi, project, store, components } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey: opts.adminKey,
+    databaseUrl: opts.databaseUrl,
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -134,7 +139,7 @@ export async function serveCommand(args: string[]): Promise<number> {
     closing = true;
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
     await server.close();
-    store.close();
+    await store.close();
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown());

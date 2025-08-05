@@ -195,6 +195,7 @@
         "@stackbase/component": "workspace:*",
         "@stackbase/dashboard": "workspace:*",
         "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-postgres": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/errors": "workspace:*",
         "@stackbase/executor": "workspace:*",

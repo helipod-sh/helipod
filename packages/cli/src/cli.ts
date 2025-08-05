@@ -26,6 +26,7 @@ function parseFlags(args: string[]): DevOptions {
     else if (a === "--dir" && args[i + 1]) out.convexDir = args[++i];
     else if (a === "--data" && args[i + 1]) out.dataPath = args[++i];
     else if (a === "--web" && args[i + 1]) out.webDir = args[++i];
+    else if (a === "--database-url" && args[i + 1]) out.databaseUrl = args[++i];
   }
   return out;
 }
@@ -49,6 +50,7 @@ export async function devCommand(args: string[]): Promise<number> {
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey,
+    databaseUrl: opts.databaseUrl,
   });
   writeGenerated(generated.files, generatedDir);
 
@@ -117,7 +119,7 @@ function printHelp(): void {
       "  codegen    Regenerate convex/_generated types",
       "  help       Show this help",
       "",
-      "Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>",
+      "Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>",
       "",
     ].join("\n"),
   );

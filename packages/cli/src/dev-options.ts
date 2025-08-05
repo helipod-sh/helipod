@@ -11,6 +11,8 @@ export interface DevOptions {
   runtime?: RuntimeKind;
   /** Optional static web UI directory to serve alongside the API/WebSocket. */
   webDir?: string;
+  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  databaseUrl?: string;
 }
 
 export interface ResolvedDevOptions {
@@ -20,6 +22,7 @@ export interface ResolvedDevOptions {
   dataPath: string;
   runtime: RuntimeKind;
   webDir: string | undefined;
+  databaseUrl: string | undefined;
 }
 
 export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions {
@@ -30,6 +33,7 @@ export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions 
     dataPath: options.dataPath ?? ".stackbase/data.db",
     runtime: options.runtime ?? "auto",
     webDir: options.webDir,
+    databaseUrl: options.databaseUrl ?? process.env.STACKBASE_DATABASE_URL,
   };
 }
 

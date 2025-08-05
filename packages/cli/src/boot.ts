@@ -8,6 +8,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
+import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
+import type { DocStore } from "@stackbase/docstore";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
@@ -19,9 +21,18 @@ import { push } from "./push-pipeline";
 import { detectRuntime } from "./dev-options";
 import type { ProjectArtifacts, LoadedProject } from "./project";
 
-export function makeStore(dataPath: string): SqliteDocStore {
-  mkdirSync(dirname(resolve(dataPath)), { recursive: true });
-  const adapter = detectRuntime() === "bun" ? new BunSqliteAdapter({ path: dataPath }) : new NodeSqliteAdapter({ path: dataPath });
+/** True when `s` looks like a `postgres://`/`postgresql://` connection string (pure — no I/O). */
+export function isPostgresUrl(s: string | undefined): boolean {
+  return !!s && /^postgres(ql)?:\/\//.test(s);
+}
+
+export function makeStore(opts: { dataPath: string; databaseUrl?: string }): DocStore {
+  if (isPostgresUrl(opts.databaseUrl)) {
+    return new PostgresDocStore(new NodePgClient({ connectionString: opts.databaseUrl! }));
+  }
+  mkdirSync(dirname(resolve(opts.dataPath)), { recursive: true });
+  const adapter =
+    detectRuntime() === "bun" ? new BunSqliteAdapter({ path: opts.dataPath }) : new NodeSqliteAdapter({ path: opts.dataPath });
   return new SqliteDocStore(adapter);
 }
 
@@ -30,7 +41,7 @@ export interface BootResult {
   adminApi: AdminApi;
   project: ProjectArtifacts;
   generated: GeneratedBundle;
-  store: SqliteDocStore;
+  store: DocStore;
   logSink: InMemoryLogSink;
   /** The boot-time component set (from stackbase.config.ts) — `applyDeploy` re-composes against it. */
   components: ComponentDefinition[];
@@ -41,10 +52,12 @@ export async function bootLoaded(opts: {
   components: ComponentDefinition[];
   dataPath: string;
   adminKey: string;
+  /** Postgres connection string; when unset, falls back to the zero-config SQLite file store. */
+  databaseUrl?: string;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
-  const store = makeStore(opts.dataPath);
+  const store = makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
   const runtime = await createEmbeddedRuntime({
     store,
     catalog: project.catalog,
@@ -70,10 +83,21 @@ export async function bootLoaded(opts: {
   return { runtime, adminApi, project, generated, store, logSink, components: opts.components };
 }
 
-export async function bootProject(opts: { convexDir: string; dataPath: string; adminKey: string }): Promise<BootResult> {
+export async function bootProject(opts: {
+  convexDir: string;
+  dataPath: string;
+  adminKey: string;
+  databaseUrl?: string;
+}): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
-  return bootLoaded({ loaded, components: config.components, dataPath: opts.dataPath, adminKey: opts.adminKey });
+  return bootLoaded({
+    loaded,
+    components: config.components,
+    dataPath: opts.dataPath,
+    adminKey: opts.adminKey,
+    databaseUrl: opts.databaseUrl,
+  });
 }
 
 /**
