@@ -6,12 +6,19 @@
 import { join } from "node:path";
 import type { ComponentDefinition } from "@stackbase/component";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
+import type { DocStore } from "@stackbase/docstore";
 import type { LoadedProject } from "./project";
 import { bootLoaded } from "./boot";
 import { startDevServer, type DevServer } from "./server";
 
-export interface BinaryOptions { port: number; ip: string; dataDir: string; adminKey: string }
+export interface BinaryOptions {
+  port: number;
+  ip: string;
+  dataDir: string;
+  adminKey: string;
+  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  databaseUrl?: string;
+}
 
 /** The materialized embedded dashboard: key-injected HTML plus the urlPath→embedded-path asset map. */
 export interface EmbeddedDashboard { html: string; assets: Record<string, string> }
@@ -28,14 +35,16 @@ export function resolveBinaryOptions(argv: string[], env: Record<string, string 
   let port = env.PORT ? Number(env.PORT) : 3000;
   let ip = "0.0.0.0";
   let dataDir = "./data";
+  let databaseUrl = env.STACKBASE_DATABASE_URL;
   const adminKey = (env.STACKBASE_ADMIN_KEY ?? "").trim();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--port" && argv[i + 1] !== undefined) port = Number(argv[++i]);
     else if (a === "--hostname" && argv[i + 1] !== undefined) ip = argv[++i] as string;
     else if (a === "--data-dir" && argv[i + 1] !== undefined) dataDir = argv[++i] as string;
+    else if (a === "--database-url" && argv[i + 1] !== undefined) databaseUrl = argv[++i] as string;
   }
-  return { port, ip, dataDir, adminKey };
+  return { port, ip, dataDir, adminKey, databaseUrl };
 }
 
 export async function startBinaryServer(
@@ -43,8 +52,14 @@ export async function startBinaryServer(
   components: ComponentDefinition[],
   opts: BinaryOptions,
   dashboard?: Record<string, string>,
-): Promise<{ server: DevServer; store: SqliteDocStore; runtime: EmbeddedRuntime }> {
-  const boot = await bootLoaded({ loaded, components, dataPath: join(opts.dataDir, "db.sqlite"), adminKey: opts.adminKey });
+): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime }> {
+  const boot = await bootLoaded({
+    loaded,
+    components,
+    dataPath: join(opts.dataDir, "db.sqlite"),
+    adminKey: opts.adminKey,
+    databaseUrl: opts.databaseUrl,
+  });
   let dash: EmbeddedDashboard | undefined;
   if (dashboard) {
     const bun = (globalThis as { Bun?: BunFileRuntime }).Bun;
@@ -81,7 +96,7 @@ export async function runBinaryServer(
     if (closing) return;
     closing = true;
     await server.close();
-    store.close();
+    await store.close();
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown());

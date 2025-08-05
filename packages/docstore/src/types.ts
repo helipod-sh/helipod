@@ -119,6 +119,9 @@ export interface DocStore {
   getGlobal(key: string): Promise<JSONValue | null>;
   writeGlobal(key: string, value: JSONValue): Promise<void>;
   writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean>;
+
+  /** Release the backend (checkpoint/close file, or end the Postgres connection). */
+  close(): void | Promise<void>;
 }
 
 /** Allocates the monotonic commit timestamps the log is ordered by (one per shard). */

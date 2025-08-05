@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/docstore",
+  "name": "@stackbase/docstore-postgres",
   "version": "0.0.0",
   "type": "module",
   "license": "MIT",
@@ -11,25 +11,26 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./test-support/conformance": {
-      "types": "./test-support/conformance.ts",
-      "default": "./test-support/conformance.ts"
     }
   },
   "files": ["dist"],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "pg": "^8.13.1",
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/values": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@stackbase/index-key-codec": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/index-key-codec": "workspace:*",
+    "@electric-sql/pglite": "^0.2.17",
+    "@types/pg": "^8.11.10",
+    "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

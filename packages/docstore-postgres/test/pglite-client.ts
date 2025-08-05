@@ -1,0 +1,46 @@
+import { PGlite } from "@electric-sql/pglite";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "../src/pg-client";
+import { ADVISORY_LOCK_KEY } from "../src/pg-client";
+
+/**
+ * Test-only PgClient over PGlite (real Postgres in WASM, in-process, single connection).
+ *
+ * Empirically verified (2026-07): PGlite's default int8 (OID 20) decoding is INCONSISTENT —
+ * small values come back as JS `number` and values exceeding Number.MAX_SAFE_INTEGER come back
+ * as `bigint`, so a `k.endsWith("ts")`-style heuristic on the already-decoded value is not just
+ * fragile, it also has to fight PGlite's own type-dependent behavior. PGlite's typed-parsers
+ * option (`parsers: { 20: (v) => BigInt(v) } }` — OID 20 is int8) makes int8 decode to `bigint`
+ * UNCONDITIONALLY, for every value including small ones and NULLs; confirmed with a scratch probe.
+ * bytea (OID 17) is already `Uint8Array` both ways with no parser needed, and BOOLEAN already
+ * decodes to a native JS `boolean`. So normalization here is just: register the OID 20 parser at
+ * construction time and pass rows through unchanged — no per-row/per-key guessing.
+ */
+export class PgliteClient implements PgClient {
+  private readonly pg = new PGlite({ parsers: { 20: (v: string) => BigInt(v) } });
+
+  async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
+    const res = await this.pg.query(text, params as unknown[] | undefined);
+    return res.rows as PgRow[];
+  }
+
+  async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {
+    await this.pg.query("BEGIN");
+    try {
+      const result = await fn(this);
+      await this.pg.query("COMMIT");
+      return result;
+    } catch (e) {
+      await this.pg.query("ROLLBACK");
+      throw e;
+    }
+  }
+
+  async acquireWriterLock(): Promise<void> {
+    // Single in-process connection: contention is unobservable. No-op. (Real guard: Task 6 + E2E.)
+    void ADVISORY_LOCK_KEY;
+  }
+
+  async close(): Promise<void> {
+    await this.pg.close();
+  }
+}

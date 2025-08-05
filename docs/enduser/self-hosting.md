@@ -85,6 +85,99 @@ docker build -t myapp:latest .
 docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=... -v stackbase-data:/data myapp:latest
 ```
 
+## Using Postgres
+
+SQLite is the zero-config default — the sections above work as-is with no extra setup. Postgres is
+an **opt-in** alternative storage backend for when you want a managed database (durability,
+backups, replicas managed outside the container) instead of the SQLite file on a Docker volume.
+
+Point `serve` at a Postgres database with the `--database-url` flag or the `STACKBASE_DATABASE_URL`
+environment variable (the flag wins if both are set):
+
+```bash
+# flag
+stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+
+# or env var
+STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir convex
+```
+
+Leave both unset and `serve` falls back to SQLite (`--data`/`db.sqlite`) exactly as described above.
+
+### Compose with a `postgres:16` service
+
+Add a `postgres` service to `docker-compose.yml` and drop the `--data` flag / SQLite volume in favor
+of `STACKBASE_DATABASE_URL`:
+
+```yaml
+services:
+  stackbase:
+    build:
+      context: .
+      target: runner
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./convex:/app/convex:ro
+    environment:
+      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY}
+      STACKBASE_DATABASE_URL: postgres://stackbase:stackbase@postgres:5432/stackbase
+    command: serve --dir /app/convex
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stackbase
+      POSTGRES_PASSWORD: stackbase
+      POSTGRES_DB: stackbase
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
+```
+
+`docker compose up` now persists to the `postgres-data` named volume instead of `stackbase-data`;
+the rest of the guide (admin key, dashboard, `docker compose down`/`up` persistence) applies
+unchanged.
+
+### Single-writer constraint
+
+Exactly **one** Stackbase engine may be connected to a given Postgres database at a time. On boot,
+the engine takes a `pg_advisory_lock`; a second `serve`/`dev` process pointed at the same database
+fails fast with an error instead of silently corrupting state. This is a **single-node durability**
+story — a stronger, externally-managed database for a single writer — **not** clustering or
+multi-node write scale-out. Running two engines against the same Postgres database for high
+availability is not supported; that's out of scope until the distributed-sync tier.
+
+### No schema migrations
+
+The Postgres adapter is **physically schemaless**: it stores documents in a small, fixed set of
+internal tables (the same MVCC-log shape the SQLite adapter uses), so your app's tables and fields
+are *data*, not DDL. Adding a table, adding a field, or changing your `schema.ts` as the app evolves
+needs no `ALTER TABLE`/migration step against Postgres — the physical schema never changes shape
+underneath you.
+
+### Known limitations
+
+- **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
+  connection for its lifetime — the same connection the single-writer advisory lock and
+  transaction pinning depend on. If that connection drops (a network blip, a Postgres restart,
+  a failover), the engine does **not** transparently reconnect; restart the Stackbase process to
+  re-establish it. SQLite, being a local file, has no equivalent failure mode — this is a
+  trade-off that comes with talking to Postgres over the network.
+- **An unclean process kill can briefly hold the lock.** The single-writer guard is a
+  **session-level** `pg_advisory_lock`. A graceful shutdown (`SIGTERM`) releases it immediately.
+  But if the process is killed uncleanly (`SIGKILL`, a crash), an immediate restart against the
+  same database may briefly fail with "another engine already connected" until Postgres notices
+  the dead session and releases the lock — typically within seconds.
+
+Neither of these is a clustering/HA limitation — they're consequences of the single-node,
+single-writer durability story already described above, not new constraints on top of it.
+
 ## Reverse proxy / TLS
 
 Stackbase serves plain HTTP — `serve` has no TLS support built in. For a public deployment, put a
@@ -122,5 +215,7 @@ If step 5 shows the data you wrote in step 4, the persistent-volume story works 
   graceful shutdown on `SIGTERM`/`SIGINT`.
 - [`stackbase deploy`](/deploying) — push functions + additive schema to an already-running `serve`
   deployment, live, no restart. Opt-in per deployment via `--allow-deploy`.
-- The Postgres adapter and TLS/multi-node are not part of this slice — see the repo `CLAUDE.md` for
-  what's shipped vs. deferred.
+- [Using Postgres](#using-postgres) above — opt-in Postgres storage backend, single-writer guard, no
+  migrations needed.
+- TLS termination and multi-node are not part of this slice — see the repo `CLAUDE.md` for what's
+  shipped vs. deferred.
