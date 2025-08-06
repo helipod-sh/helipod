@@ -183,6 +183,16 @@
         "vitest": "catalog:",
       },
     },
+    "packages/blobstore": {
+      "name": "@stackbase/blobstore",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/cli": {
       "name": "@stackbase/cli",
       "version": "0.0.0",
@@ -663,6 +673,8 @@
     "@stackbase/auth": ["@stackbase/auth@workspace:components/auth"],
 
     "@stackbase/authz": ["@stackbase/authz@workspace:components/authz"],
+
+    "@stackbase/blobstore": ["@stackbase/blobstore@workspace:packages/blobstore"],
 
     "@stackbase/cli": ["@stackbase/cli@workspace:packages/cli"],
 
