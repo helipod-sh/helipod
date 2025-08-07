@@ -57,4 +57,34 @@ describe("FsBlobStore specifics", () => {
     await expect(store.store("k", readable)).rejects.toThrow("boom");
     expect(await store.read("k")).toBeNull();
   });
+
+  it("rejects a path-traversal key (../) rather than escaping root", async () => {
+    const store = new FsBlobStore({ root: mkdtempSync(join(tmpdir(), "sb-fs-blob5-")) });
+    const bytes = new Uint8Array([1, 2, 3]);
+
+    await expect(store.store("../evil", bytes)).rejects.toThrow("invalid storage key");
+    await expect(store.read("../evil")).rejects.toThrow("invalid storage key");
+  });
+
+  it("rejects an absolute-path key rather than escaping root", async () => {
+    const store = new FsBlobStore({ root: mkdtempSync(join(tmpdir(), "sb-fs-blob6-")) });
+    const bytes = new Uint8Array([1, 2, 3]);
+
+    await expect(store.store("/etc/passwd", bytes)).rejects.toThrow("invalid storage key");
+    await expect(store.read("/etc/passwd")).rejects.toThrow("invalid storage key");
+  });
+
+  it("still allows a legitimate nested key (single subdirectory) to round-trip", async () => {
+    const store = new FsBlobStore({ root: mkdtempSync(join(tmpdir(), "sb-fs-blob7-")) });
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+
+    const result = await store.store("sub/dir/file", bytes);
+    expect(result.size).toBe(bytes.byteLength);
+
+    const readBack = await store.read("sub/dir/file");
+    expect(readBack).not.toBeNull();
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of readBack as any) chunks.push(chunk as Uint8Array);
+    expect(Buffer.concat(chunks.map((c) => Buffer.from(c)))).toEqual(Buffer.from(bytes));
+  });
 });

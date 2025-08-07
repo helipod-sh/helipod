@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, stat, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import type {
   BlobStore,
@@ -19,7 +19,12 @@ export class FsBlobStore implements BlobStore {
   }
 
   private path(key: string): string {
-    return join(this.root, key);
+    const root = resolve(this.root);
+    const p = resolve(root, key);
+    if (p !== root && !p.startsWith(root + sep)) {
+      throw new Error(`invalid storage key: ${key}`);
+    }
+    return p;
   }
 
   async createUploadTarget(_key: string, _opts: CreateUploadTargetOpts): Promise<UploadTarget> {
@@ -50,8 +55,9 @@ export class FsBlobStore implements BlobStore {
   }
 
   async finalizeUpload(key: string): Promise<StoredBlob | null> {
+    const p = this.path(key);
     try {
-      const s = await stat(this.path(key));
+      const s = await stat(p);
       return { size: s.size, sha256: null };
     } catch {
       return null;
@@ -59,12 +65,13 @@ export class FsBlobStore implements BlobStore {
   }
 
   async read(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
+    const p = this.path(key);
     try {
-      await stat(this.path(key));
+      await stat(p);
     } catch {
       return null;
     }
-    const node = createReadStream(this.path(key), range ? { start: range.start, end: range.end } : {});
+    const node = createReadStream(p, range ? { start: range.start, end: range.end } : {});
     return Readable.toWeb(node) as unknown as ReadableStream<Uint8Array>;
   }
 
