@@ -34,12 +34,15 @@ export class FsBlobStore implements BlobStore {
     const out = createWriteStream(p);
     const source = bytes instanceof Uint8Array ? Readable.from([bytes]) : Readable.fromWeb(bytes as any);
     await new Promise<void>((resolve, reject) => {
+      const onError = (err: unknown) => {
+        rm(p, { force: true }).finally(() => reject(err));
+      };
       source.on("data", (chunk: Buffer) => {
         hash.update(chunk);
         size += chunk.byteLength;
       });
-      source.on("error", reject);
-      out.on("error", reject);
+      source.on("error", onError);
+      out.on("error", onError);
       out.on("finish", resolve);
       source.pipe(out);
     });
