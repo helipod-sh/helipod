@@ -30,4 +30,19 @@ describe("S3BlobStore specifics", () => {
     const withBase = new S3BlobStore({ bucket: "b", publicBaseUrl: "https://cdn.example.com/files/" });
     expect(withBase.publicUrl("some/key")).toBe("https://cdn.example.com/files/some/key");
   });
+
+  it("read() propagates a non-404 error (e.g. connection failure) instead of returning null", async () => {
+    // Unreachable endpoint: a connection-refused error is NOT a "not found" — it must
+    // surface, not be silently swallowed into a `null` that looks like a missing blob.
+    const store = new S3BlobStore({
+      bucket: "x",
+      endpoint: "http://127.0.0.1:1",
+      forcePathStyle: true,
+      region: "us-east-1",
+      accessKeyId: "dummy",
+      secretAccessKey: "dummy",
+    });
+
+    await expect(store.read("k")).rejects.toThrow();
+  }, 10000);
 });

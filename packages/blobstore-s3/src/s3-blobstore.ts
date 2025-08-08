@@ -28,6 +28,11 @@ export interface S3Config {
   publicBaseUrl?: string; // CDN/public base; enables publicUrl()
 }
 
+function isNotFound(err: unknown): boolean {
+  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return e?.name === "NotFound" || e?.name === "NoSuchKey" || e?.$metadata?.httpStatusCode === 404;
+}
+
 async function toBuffer(bytes: ReadableStream<Uint8Array> | Uint8Array): Promise<Uint8Array> {
   if (bytes instanceof Uint8Array) return bytes;
   const reader = bytes.getReader();
@@ -85,8 +90,9 @@ export class S3BlobStore implements BlobStore {
     try {
       const h = await this.s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
       return { size: h.ContentLength ?? 0, sha256: null };
-    } catch {
-      return null;
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
     }
   }
 
@@ -101,8 +107,9 @@ export class S3BlobStore implements BlobStore {
       );
       if (!r.Body) return null;
       return Readable.toWeb(r.Body as Readable) as unknown as ReadableStream<Uint8Array>;
-    } catch {
-      return null;
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
     }
   }
 
