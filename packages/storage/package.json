@@ -28,6 +28,8 @@
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/runtime-embedded": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
