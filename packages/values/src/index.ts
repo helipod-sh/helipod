@@ -43,4 +43,10 @@ export type {
   SchemaDefinitionJSON,
 } from "./schema";
 
+export {
+  storageDocumentFields,
+  SYSTEM_TABLE_FIELDS,
+  SYSTEM_TABLE_DEFINITIONS,
+} from "./system-tables";
+
 export { ConvexError } from "./convex-error";

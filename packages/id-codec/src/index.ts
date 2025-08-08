@@ -50,5 +50,6 @@ export {
   SYSTEM_TABLE_NUMBER_MIN,
   SYSTEM_TABLE_NUMBER_MAX,
   USER_TABLE_NUMBER_START,
+  STORAGE_TABLE_NUMBER,
 } from "./table-registry";
 export type { TableVisibility, TableState, TableInfo, AllocateOptions, TableRegistry } from "./table-registry";

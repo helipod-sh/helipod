@@ -38,6 +38,15 @@ export const SYSTEM_TABLE_NUMBER_MIN = 1;
 export const SYSTEM_TABLE_NUMBER_MAX = 9999;
 export const USER_TABLE_NUMBER_START = 10001;
 
+/**
+ * Reserved table numbers for built-in app-namespace system tables. These MUST stay stable
+ * forever: a persisted `Id<"_storage">` encodes this number, so it must always decode back to
+ * the same table. Registry seeding pins them with `preassign(name, number)` before any other
+ * system table is auto-allocated, keeping their numbers deterministic across runs regardless of
+ * registration order. `_storage` (the file-storage feature's document table) is 20.
+ */
+export const STORAGE_TABLE_NUMBER = 20;
+
 export function isSystemTableName(name: string): boolean {
   return name.startsWith("_");
 }

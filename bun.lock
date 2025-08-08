@@ -455,6 +455,23 @@
         "vitest": "catalog:",
       },
     },
+    "packages/storage": {
+      "name": "@stackbase/storage",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/blobstore": "workspace:*",
+        "@stackbase/component": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/sync": {
       "name": "@stackbase/sync",
       "version": "0.0.0",
@@ -791,6 +808,8 @@
     "@stackbase/runtime-embedded": ["@stackbase/runtime-embedded@workspace:packages/runtime-embedded"],
 
     "@stackbase/scheduler": ["@stackbase/scheduler@workspace:components/scheduler"],
+
+    "@stackbase/storage": ["@stackbase/storage@workspace:packages/storage"],
 
     "@stackbase/sync": ["@stackbase/sync@workspace:packages/sync"],
 
