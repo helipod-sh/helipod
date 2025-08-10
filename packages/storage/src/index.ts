@@ -5,3 +5,17 @@
  * on.
  */
 export { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "./system-table";
+export {
+  storageContextProvider,
+  storageEndpointPath,
+  signUploadToken,
+  verifyUploadToken,
+} from "./context";
+export type {
+  StorageProviderOpts,
+  GenerateUploadUrlOpts,
+  StorageWriter,
+  StorageActionWriter,
+} from "./context";
+export { storageModules } from "./modules";
+export type { StorageDoc } from "./modules";
