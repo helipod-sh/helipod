@@ -60,11 +60,22 @@ export const _createPending = mutation(
  * "pending" phase to model, unlike `_createPending`'s streamed-upload use case. `expiresAt` is
  * always `null` here: a directly-stored blob is never provisional/reapable the way a
  * not-yet-finalized pending upload is.
+ *
+ * `sha256` is `string | null` (not just `string`) because `BlobStore.store`'s `StoredBlob.sha256`
+ * can itself be `null` (a store that doesn't hash on write) — this mirrors that so a blob store
+ * returning `null` persists cleanly on the `ready` row instead of being a type mismatch at the
+ * `store()` call site.
  */
 export const _insertReady = mutation(
   async (
     ctx: MutationCtx,
-    args: { key: string; size: number; sha256: string; contentType: string | null; visibility: "private" | "public" },
+    args: {
+      key: string;
+      size: number;
+      sha256: string | null;
+      contentType: string | null;
+      visibility: "private" | "public";
+    },
   ): Promise<string> =>
     ctx.db.insert(STORAGE_TABLE, {
       status: "ready",

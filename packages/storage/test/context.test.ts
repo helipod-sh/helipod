@@ -107,7 +107,7 @@ async function makeRuntime(
     modules: { ...appModules, ...storageModules },
     systemModules: storageModules,
     componentNames: c.componentNames,
-    contextProviders: [...c.contextProviders, storageContextProvider(blobStore)],
+    contextProviders: [...c.contextProviders, storageContextProvider(blobStore, { signingKey: "test-signing-key" })],
     policyRegistry: c.policyRegistry,
     policyProviders: c.policyProviders,
     relationRegistry: c.relationRegistry,
@@ -158,7 +158,7 @@ describe("ctx.storage — mutation/query facade (build)", () => {
     expect(value.target.kind).toBe("proxied");
     // The proxied URL carries the capability token + its expiry over the row id.
     const exp = NOW + UPLOAD_TTL_MS;
-    const expectedToken = signUploadToken("stackbase-dev-storage-signing-key", { id: value.storageId, exp });
+    const expectedToken = signUploadToken("test-signing-key", { id: value.storageId, exp });
     expect(value.target.url).toContain(`exp=${exp}`);
     expect(value.target.url).toContain(`token=${expectedToken}`);
 

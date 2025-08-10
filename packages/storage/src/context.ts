@@ -37,23 +37,16 @@ import type { StorageDoc } from "./modules";
 /** Default upload-URL validity: 1h — a generous window for a client to finish an upload. */
 const DEFAULT_UPLOAD_TTL_MS = 3_600_000;
 
-/**
- * Fallback capability-signing key used when `storageContextProvider` is constructed without an
- * explicit `signingKey`. A real deployment threads its admin/deployment key through `opts.signingKey`
- * so the Task 7/8 endpoints verify against the SAME secret; this constant only keeps dev/tests
- * self-consistent (sign + verify with the same default).
- */
-const DEFAULT_SIGNING_KEY = "stackbase-dev-storage-signing-key";
-
 export interface StorageProviderOpts {
   /** Upload-URL validity window in ms (default 1h). */
   uploadTtlMs?: number;
   /**
    * Secret for the proxied-upload capability token. Must match the secret the upload endpoint
-   * (Task 7) verifies with. Defaults to a fixed dev key so sign/verify stay self-consistent when
-   * unset.
+   * (Task 7/8) verifies with. REQUIRED — there is no default. This repo is open-source, so a
+   * hardcoded fallback key would be public and would let anyone forge upload capability tokens;
+   * the caller (deployment boot, Task 10) must thread its own admin/deployment signing key in.
    */
-  signingKey?: string;
+  signingKey: string;
 }
 
 export interface GenerateUploadUrlOpts {
@@ -126,16 +119,21 @@ function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
 }
 
 /**
- * `storageContextProvider(blobStore, opts?)` — the `ctx.storage` context provider.
+ * `storageContextProvider(blobStore, opts)` — the `ctx.storage` context provider.
+ *
+ * `opts.signingKey` is REQUIRED (no default — see `StorageProviderOpts.signingKey`'s doc comment):
+ * the caller must thread the same deployment/admin signing key in here AND into `verifyUploadToken`
+ * on the endpoint side (Task 7/8), or issued tokens won't verify.
  *
  * `write: true` is load-bearing: without it `cctx.db` is a read-only reader and every write in
  * `build` throws (see `ContextProvider.write` in `@stackbase/executor`). With it, and only during a
  * mutation, `cctx.db` is a `GuestDatabaseWriter` scoped to the calling mutation's transaction — so
  * `generateUploadUrl`/`delete` are transactional and fan out reactively on commit like any write.
  */
-export function storageContextProvider(blobStore: BlobStore, opts?: StorageProviderOpts): ContextProvider {
-  const uploadTtlMs = opts?.uploadTtlMs ?? DEFAULT_UPLOAD_TTL_MS;
-  const signingKey = opts?.signingKey ?? DEFAULT_SIGNING_KEY;
+export function storageContextProvider(blobStore: BlobStore, opts: StorageProviderOpts): ContextProvider {
+  if (!opts.signingKey) throw new Error("storage: signingKey is required");
+  const uploadTtlMs = opts.uploadTtlMs ?? DEFAULT_UPLOAD_TTL_MS;
+  const signingKey = opts.signingKey;
 
   const build = (cctx: ComponentContext): StorageWriter => {
     const db = cctx.db as GuestDatabaseWriter;
