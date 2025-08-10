@@ -23,6 +23,7 @@
   "dependencies": {
     "@stackbase/blobstore": "workspace:*",
     "@stackbase/component": "workspace:*",
+    "@stackbase/errors": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
     "@stackbase/values": "workspace:*"

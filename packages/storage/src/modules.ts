@@ -1,5 +1,6 @@
 import { query, mutation } from "@stackbase/executor";
 import type { QueryCtx, MutationCtx } from "@stackbase/executor";
+import { DocumentNotFoundError } from "@stackbase/errors";
 import { STORAGE_TABLE } from "./system-table";
 
 /**
@@ -92,7 +93,7 @@ export const _insertReady = mutation(
 export const _finalize = mutation(
   async (ctx: MutationCtx, args: { id: string; size: number; sha256: string }): Promise<StorageDoc> => {
     const existing = await ctx.db.get(args.id);
-    if (existing === null) throw new Error(`_storage:_finalize: no such document ${args.id}`);
+    if (existing === null) throw new DocumentNotFoundError(`_storage:_finalize: no such document ${args.id}`);
     if (existing["status"] === "ready") return existing as unknown as StorageDoc; // idempotent no-op
     const updated = { ...existing, status: "ready" as const, size: args.size, sha256: args.sha256 };
     await ctx.db.replace(args.id, updated);
@@ -106,7 +107,7 @@ export const _finalize = mutation(
  */
 export const _delete = mutation(async (ctx: MutationCtx, args: { id: string }): Promise<{ key: string }> => {
   const existing = await ctx.db.get(args.id);
-  if (existing === null) throw new Error(`_storage:_delete: no such document ${args.id}`);
+  if (existing === null) throw new DocumentNotFoundError(`_storage:_delete: no such document ${args.id}`);
   await ctx.db.delete(args.id);
   return { key: existing["key"] as string };
 });
