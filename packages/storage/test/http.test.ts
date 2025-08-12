@@ -48,6 +48,8 @@ async function toBytes(bytes: ReadableStream<Uint8Array> | Uint8Array): Promise<
 
 class FakeBlobStore implements BlobStore {
   readonly blobs = new Map<string, Uint8Array>();
+  /** Counts `read()` calls — lets access-control tests assert bytes are never touched on a denial. */
+  readCalls = 0;
 
   async createUploadTarget(key: string, _opts: CreateUploadTargetOpts): Promise<UploadTarget> {
     return { kind: "proxied", url: `/api/storage/upload?id=${encodeURIComponent(key)}`, method: "POST" };
@@ -62,6 +64,7 @@ class FakeBlobStore implements BlobStore {
     return buf ? { size: buf.byteLength, sha256: createHash("sha256").update(buf).digest("hex") } : null;
   }
   async read(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
+    this.readCalls++;
     const buf = this.blobs.get(key);
     if (!buf) return null;
     const bytes = range ? buf.subarray(range.start, (range.end ?? buf.byteLength - 1) + 1) : buf;
@@ -97,7 +100,10 @@ async function makeRuntime(blobStore: BlobStore): Promise<EmbeddedRuntime> {
     [STORAGE_TABLE]: STORAGE_TABLE_NUMBER,
   });
   const appModules: Record<string, RegisteredFunction> = {
-    "app:genUpload": mutation(async (ctx: any, args: { contentType?: string }) => ctx.storage.generateUploadUrl(args)),
+    "app:genUpload": mutation(
+      async (ctx: any, args: { contentType?: string; visibility?: "private" | "public" }) =>
+        ctx.storage.generateUploadUrl(args),
+    ),
   };
   return EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
@@ -133,9 +139,14 @@ function findRoute(routes: StorageRoute[], method: string, path: string): Storag
   return route;
 }
 
-async function mintPendingId(runtime: EmbeddedRuntime, contentType?: string): Promise<string> {
+async function mintPendingId(
+  runtime: EmbeddedRuntime,
+  contentType?: string,
+  visibility?: "private" | "public",
+): Promise<string> {
   const { value } = await runtime.run<{ storageId: string }>("app:genUpload", {
     ...(contentType !== undefined ? { contentType } : {}),
+    ...(visibility !== undefined ? { visibility } : {}),
   });
   return value.storageId;
 }
@@ -273,8 +284,9 @@ describe("GET /api/storage/:id — serve", () => {
     routes: StorageRoute[],
     bytes: Uint8Array,
     contentType?: string,
+    visibility?: "private" | "public",
   ): Promise<string> {
-    const id = await mintPendingId(runtime, contentType);
+    const id = await mintPendingId(runtime, contentType, visibility);
     const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id)}`, {
       method: "POST",
       // Re-wrapped (rather than passing `bytes` directly): a bare `Uint8Array`-typed parameter
@@ -293,7 +305,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789");
-    const id = await uploadReadyFile(runtime, routes, bytes, "text/plain");
+    const id = await uploadReadyFile(runtime, routes, bytes, "text/plain", "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`),
@@ -308,7 +320,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789");
-    const id = await uploadReadyFile(runtime, routes, bytes);
+    const id = await uploadReadyFile(runtime, routes, bytes, undefined, "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=2-5" } }),
@@ -324,7 +336,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789");
-    const id = await uploadReadyFile(runtime, routes, bytes);
+    const id = await uploadReadyFile(runtime, routes, bytes, undefined, "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=5-" } }),
@@ -339,7 +351,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789"); // 10 bytes
-    const id = await uploadReadyFile(runtime, routes, bytes);
+    const id = await uploadReadyFile(runtime, routes, bytes, undefined, "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=0-999999" } }),
@@ -355,7 +367,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789"); // 10 bytes
-    const id = await uploadReadyFile(runtime, routes, bytes);
+    const id = await uploadReadyFile(runtime, routes, bytes, undefined, "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=20-30" } }),
@@ -369,7 +381,7 @@ describe("GET /api/storage/:id — serve", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const bytes = new TextEncoder().encode("0123456789");
-    const id = await uploadReadyFile(runtime, routes, bytes, "text/plain");
+    const id = await uploadReadyFile(runtime, routes, bytes, "text/plain", "public");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
       new Request(`http://localhost/api/storage/${id}`),
@@ -452,5 +464,278 @@ describe("GET /api/storage/:id — serve", () => {
       new Request(`http://localhost/api/storage/${id}`),
     );
     expect(response.status).toBe(404);
+  });
+});
+
+describe("GET /api/storage/:id — access control (Task 8)", () => {
+  /** A `FakeBlobStore` whose `signGetUrl`/`publicUrl` are overridable per-test (default: both `null`,
+   * same as the base fake — i.e. "no redirect backend, stream bytes"). */
+  class RedirectableBlobStore extends FakeBlobStore {
+    signedUrl: string | null = null;
+    publicUrlValue: string | null = null;
+    override async signGetUrl(): Promise<string | null> {
+      return this.signedUrl;
+    }
+    override publicUrl(): string | null {
+      return this.publicUrlValue;
+    }
+  }
+
+  async function uploadReady(
+    runtime: EmbeddedRuntime,
+    routes: StorageRoute[],
+    blobStore: FakeBlobStore,
+    bytes: Uint8Array,
+    visibility: "private" | "public",
+  ): Promise<string> {
+    const id = await mintPendingId(runtime, undefined, visibility);
+    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id)}`, {
+      method: "POST",
+      body: new Uint8Array(bytes),
+    });
+    const response = await findRoute(routes, "POST", "/api/storage/upload").handler(request);
+    expect(response.status).toBe(200);
+    return id;
+  }
+
+  function routeDepsWithCheckRead(
+    runtime: EmbeddedRuntime,
+    checkRead: (identity: string | null, id: string) => Promise<boolean>,
+  ): StorageRouteDeps {
+    return { ...routeDeps(runtime), checkRead };
+  }
+
+  it("private + checkRead() -> false: 403, and the blob's bytes are never read", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+    blobStore.readCalls = 0; // reset after the upload's own internal writes/reads, if any
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => false),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(403);
+    expect(blobStore.readCalls).toBe(0);
+  });
+
+  it("private + checkRead() -> true, no redirect backend: 200 with bytes", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => true),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("private + checkRead() -> true, with a Range header: still 206 with correct partial bytes", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("0123456789");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => true),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=2-5" } }),
+    );
+
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe(`bytes 2-5/${bytes.byteLength}`);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes.subarray(2, 6));
+  });
+
+  it("private + checkRead() -> true, signGetUrl backend returns a url: 302 to the signed url (never streams)", async () => {
+    const blobStore = new RedirectableBlobStore();
+    blobStore.signedUrl = "https://cdn.example.com/signed?sig=abc";
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+    blobStore.readCalls = 0;
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => true),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(blobStore.signedUrl);
+    expect(blobStore.readCalls).toBe(0);
+  });
+
+  it("private + checkRead never sees a redirect skip the check: checkRead(false) still 403s even when signGetUrl has a url", async () => {
+    const blobStore = new RedirectableBlobStore();
+    blobStore.signedUrl = "https://cdn.example.com/signed?sig=abc";
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => false),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(403);
+  });
+
+  it("public file + publicUrl backend returns a url: 302 to it, WITHOUT consulting checkRead", async () => {
+    const blobStore = new RedirectableBlobStore();
+    blobStore.publicUrlValue = "https://cdn.example.com/public/blob";
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("public bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "public");
+
+    let checkReadCalls = 0;
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => {
+        checkReadCalls++;
+        return false; // would 403 if it were (wrongly) consulted for a public file
+      }),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(blobStore.publicUrlValue);
+    expect(checkReadCalls).toBe(0);
+  });
+
+  it("public file + publicUrl backend returns null: 200 streamed, no checkRead consulted", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("public bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "public");
+
+    let checkReadCalls = 0;
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => {
+        checkReadCalls++;
+        return false;
+      }),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    expect(checkReadCalls).toBe(0);
+  });
+
+  it("private + no checkRead dep (authz not composed) + a valid capability token: served (200, no redirect backend)", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}?token=${tokenFor(id)}`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("private + no checkRead dep + a valid token + signGetUrl backend returns a url: 302", async () => {
+    const blobStore = new RedirectableBlobStore();
+    blobStore.signedUrl = "https://cdn.example.com/signed?sig=xyz";
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}?token=${tokenFor(id)}`),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(blobStore.signedUrl);
+  });
+
+  it("private + no checkRead dep + an ABSENT token: 403 (fails closed, not open)", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
+    blobStore.readCalls = 0;
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(403);
+    expect(blobStore.readCalls).toBe(0);
+  });
+
+  it("private + no checkRead dep + an INVALID token: 403", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}?token=not-a-real-token`),
+    );
+
+    expect(response.status).toBe(403);
+  });
+
+  it("checkRead receives the raw Bearer token as identity, and null when the header is absent", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+
+    const seen: Array<string | null> = [];
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async (identity) => {
+        seen.push(identity);
+        return true;
+      }),
+    );
+
+    await findRoute(routes, "GET", `/api/storage/${id}`).handler(new Request(`http://localhost/api/storage/${id}`));
+    await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`, { headers: { authorization: "Bearer user-abc-token" } }),
+    );
+
+    expect(seen).toEqual([null, "user-abc-token"]);
   });
 });

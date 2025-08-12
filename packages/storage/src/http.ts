@@ -1,8 +1,9 @@
 /**
  * The reserved storage HTTP endpoints — Task 7's mechanics for the proxied-upload / direct-confirm
  * / serve surface `ctx.storage.generateUploadUrl` points at (see `./context.ts`'s doc comment and
- * `storageEndpointPath`). Access control (private vs public, the signed-redirect/`publicUrl`
- * branch for a presigned store) is Task 8 — here every `"ready"` row is served unconditionally.
+ * `storageEndpointPath`), plus Task 8's access control on the serve endpoint: private-by-default,
+ * gated by an optional `deps.checkRead` authz seam (falling back to a capability-token check when
+ * authz isn't composed), with public-file/signed-redirect preferred over streaming bytes directly.
  *
  * These are NOT app-authored `httpAction`s routed through `@stackbase/executor`'s
  * `http-router.ts` (that indirection resolves a project's own `http.ts` handler VALUES to a
@@ -26,6 +27,19 @@ export interface StorageRouteDeps {
   runQuery(path: string, args: unknown): Promise<unknown>;
   /** Secret to verify capability tokens minted by `./context.ts`'s `generateUploadUrl`. */
   signingKey: string;
+  /**
+   * Optional authz seam for the serve endpoint's `"private"` branch: resolves whether `identity`
+   * (the raw `Authorization: Bearer <token>` value off the request, or `null` if absent — same
+   * convention as `httpAction`, no resolution performed here) may read the `_storage` doc `id`.
+   * Deliberately NOT wired to `components/authz` from this package — see `./http.ts`'s module
+   * doc comment: this stays a plain dependency so `packages/storage` never imports authz, and a
+   * later task supplies the real effective-permissions check at server-wiring time.
+   *
+   * When undefined (authz not composed into the deployment), `handleServe` falls back to
+   * requiring a valid `?token=` capability token (verified via `verifyStorageToken`) instead of
+   * failing open — see `handleServe`'s doc comment.
+   */
+  checkRead?(identity: string | null, id: string): Promise<boolean>;
 }
 
 export interface StorageRoute {
@@ -40,6 +54,19 @@ const SERVE_PATH_PREFIX = "/api/storage/";
 
 function textResponse(status: number, body: string): Response {
   return new Response(body, { status });
+}
+
+/**
+ * Extract the raw `Authorization: Bearer <token>` value off a request, passed straight through as
+ * `identity` with no resolution performed — same convention `httpAction` uses (see
+ * `packages/executor`'s http-router notes). `null` when the header is absent or not a `Bearer`
+ * scheme.
+ */
+function parseBearerIdentity(request: Request): string | null {
+  const header = request.headers.get("authorization");
+  if (header === null) return null;
+  const m = /^Bearer\s+(.+)$/.exec(header);
+  return m ? (m[1] ?? null) : null;
 }
 
 /**
@@ -116,6 +143,33 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
       return textResponse(500, "internal error");
     }
     if (doc === null || doc.status !== "ready") return textResponse(404, "not found");
+
+    // Access control: private-by-default. A `"public"` doc skips the check entirely (its bytes
+    // are meant to be world-readable); a `"private"` doc requires either the authz seam or, when
+    // authz isn't composed, a valid capability token — this must short-circuit BEFORE any
+    // `blobStore.read`/`signGetUrl` call, so a failed check never touches the backing bytes.
+    if (doc.visibility === "private") {
+      if (deps.checkRead !== undefined) {
+        const identity = parseBearerIdentity(request);
+        const ok = await deps.checkRead(identity, id);
+        if (!ok) return textResponse(403, "forbidden");
+      } else {
+        const token = url.searchParams.get("token");
+        if (token === null || !verifyStorageToken(deps.signingKey, id, token, Date.now())) {
+          return textResponse(403, "forbidden");
+        }
+      }
+    }
+
+    // Prefer a redirect over streaming bytes through this process: a public doc's CDN url, or a
+    // private doc's short-lived presigned GET (only reachable once the check above has passed).
+    // `Date.now()` is wall-clock, non-deterministic — fine here since this handler is the
+    // non-deterministic HTTP layer, not a mutation/query.
+    const redirectUrl =
+      doc.visibility === "public"
+        ? blobStore.publicUrl(doc.key)
+        : await blobStore.signGetUrl(doc.key, { expiresInMs: 60_000, now: Date.now() });
+    if (redirectUrl !== null) return new Response(null, { status: 302, headers: { location: redirectUrl } });
 
     const size = doc.size ?? 0;
     const headers = new Headers();
