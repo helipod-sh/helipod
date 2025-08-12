@@ -27,12 +27,12 @@
  * so it is stable given stable inputs. (Verified later by the Task 7/8 endpoints via the exported
  * `verifyUploadToken` below.)
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
 import type { ComponentContext, ActionApi, ContextProvider } from "@stackbase/executor";
 import { GuestDatabaseWriter } from "@stackbase/executor";
 import type { BlobStore, UploadTarget, BlobMetadata } from "@stackbase/blobstore";
 import { STORAGE_TABLE } from "./system-table";
 import type { StorageDoc } from "./modules";
+import { createStorageToken, verifyStorageToken } from "./token";
 
 /** Default upload-URL validity: 1h — a generous window for a client to finish an upload. */
 const DEFAULT_UPLOAD_TTL_MS = 3_600_000;
@@ -80,17 +80,19 @@ export function storageEndpointPath(id: string): string {
 }
 
 /**
- * The capability token minted for a `proxied` upload URL — an HMAC over `${id}.${exp}` with the
- * deployment signing key. Pure/deterministic (no wall-clock, no randomness), so it is safe to
- * compute inside a mutation and reproducible on replay.
+ * The capability token minted for a `proxied` upload URL — see `./token.ts` for the HMAC
+ * implementation shared with the Task 7 endpoints' verify side. Pure/deterministic (no
+ * wall-clock, no randomness), so it is safe to compute inside a mutation and reproducible on
+ * replay.
  */
 export function signUploadToken(signingKey: string, payload: { id: string; exp: number }): string {
-  return createHmac("sha256", signingKey).update(`${payload.id}.${payload.exp}`).digest("hex");
+  return createStorageToken(signingKey, payload.id, payload.exp);
 }
 
 /**
- * Verify a proxied-upload capability token (used by the Task 7 upload endpoint): recompute the
- * HMAC and constant-time compare, and reject if `now` is past `exp`. `now` here IS wall-clock —
+ * Verify a proxied-upload capability token — thin wrapper over `./token.ts`'s
+ * `verifyStorageToken` (the same function the Task 7 upload/confirm endpoints call), kept here so
+ * existing callers of this exported name don't need to change. `now` here IS wall-clock —
  * verification happens at the HTTP endpoint (an action-like boundary), never inside a mutation.
  */
 export function verifyUploadToken(
@@ -99,11 +101,7 @@ export function verifyUploadToken(
   token: string,
   now: number,
 ): boolean {
-  if (now > payload.exp) return false;
-  const expected = signUploadToken(signingKey, payload);
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(token, "utf8");
-  return a.length === b.length && timingSafeEqual(a, b);
+  return verifyStorageToken(signingKey, payload.id, token, now);
 }
 
 /** Append the capability token (+ its `exp`) to a proxied upload URL's querystring. */
