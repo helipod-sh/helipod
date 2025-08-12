@@ -1,6 +1,19 @@
 export type UploadTarget =
   | { kind: "proxied"; url: string; method: "POST"; headers?: Record<string, string> }
-  | { kind: "presigned"; url: string; method: "PUT"; headers?: Record<string, string> };
+  | {
+      kind: "presigned";
+      url: string;
+      method: "PUT";
+      headers?: Record<string, string>;
+      /**
+       * The engine confirm endpoint the client must `POST` after a successful direct-to-bucket PUT
+       * (`POST /api/storage/confirm?id=&exp=&token=`), which flips the `_storage` row to `ready`.
+       * The `BlobStore` itself never sets this (it doesn't know the engine's confirm endpoint/token
+       * scheme) — the `ctx.storage` context provider fills it in on the returned target. Absent for
+       * proxied uploads, whose single upload endpoint both stores the bytes and finalizes the row.
+       */
+      confirmUrl?: string;
+    };
 
 export interface StoredBlob {
   size: number;

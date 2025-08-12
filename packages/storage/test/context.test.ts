@@ -203,15 +203,30 @@ describe("ctx.storage — mutation/query facade (build)", () => {
     expect(missing).toBeNull();
   });
 
-  it("delete tombstones the row transactionally (blob left for the reaper)", async () => {
+  it("delete tombstones the row (immediately-expired pending, key kept) so the reaper reclaims the blob", async () => {
+    const NOW = 1_700_000_000_000;
     const blobStore = new FakeBlobStore();
-    const runtime = await makeRuntime(blobStore, appModules);
+    const runtime = await makeRuntime(blobStore, appModules, () => NOW);
 
+    // Upload + finalize a ready file so a physical blob (key === id) actually exists.
     const { value } = await runtime.run<{ storageId: string }>("app:genUpload", {});
-    expect((await runtime.runSystem("_storage:_get", { id: value.storageId })).value).not.toBeNull();
+    const id = value.storageId;
+    await blobStore.store(id, new TextEncoder().encode("bytes"));
+    await runtime.runSystem("_storage:_finalize", { id, size: 5, sha256: "x" });
+    expect(blobStore.blobs.has(id)).toBe(true);
 
-    await runtime.run("app:del", { id: value.storageId });
-    expect((await runtime.runSystem("_storage:_get", { id: value.storageId })).value).toBeNull();
+    // Delete does NOT hard-remove the row (that would drop the key and leak the blob). It flips the
+    // row to an immediately-expired `pending` tombstone, keeping its key.
+    await runtime.run("app:del", { id });
+    const tomb = (await runtime.runSystem<Record<string, unknown> | null>("_storage:_get", { id })).value;
+    expect(tomb).toMatchObject({ status: "pending", key: id, expiresAt: NOW });
+
+    // One reaper sweep reclaims the tombstoned row AND (via the returned key) its physical blob.
+    const { keys } = (await runtime.runSystem<{ keys: string[] }>("_storage:_reapExpired", { now: NOW })).value;
+    expect(keys).toContain(id);
+    for (const k of keys) await blobStore.delete(k);
+    expect((await runtime.runSystem("_storage:_get", { id })).value).toBeNull();
+    expect(blobStore.blobs.has(id)).toBe(false);
   });
 
   it("signUploadToken is a pure/deterministic function of (key, id, exp)", () => {

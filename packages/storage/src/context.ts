@@ -97,11 +97,32 @@ export function signUploadToken(signingKey: string, payload: { id: string; exp: 
   return createStorageToken(signingKey, payload.id, payload.exp);
 }
 
-/** Append the capability token (+ its `exp`) to a proxied upload URL's querystring. */
+/**
+ * Append the upload-endpoint's capability params to a proxied upload URL's querystring: the `id`
+ * (which `_storage` doc this uploads into), its `exp`, and the HMAC `token` over `(id, exp)`. The
+ * `BlobStore.createUploadTarget` for a proxied backend returns only the bare endpoint path (`/api/
+ * storage/upload`) — the store is engine-agnostic and doesn't know our endpoint's `id`/token
+ * contract, so the context provider (which owns that contract and knows the id) supplies all three.
+ * `authorize` in `./http.ts` reads `id`+`token` back off exactly these params.
+ */
 function withUploadToken(url: string, id: string, exp: number, signingKey: string): string {
   const token = signUploadToken(signingKey, { id, exp });
   const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}exp=${exp}&token=${token}`;
+  return `${url}${sep}id=${encodeURIComponent(id)}&exp=${exp}&token=${token}`;
+}
+
+/**
+ * The confirm-endpoint URL for a PRESIGNED direct-to-bucket upload: `POST /api/storage/confirm`
+ * with the same `id`/`exp`/`token` capability params the upload endpoint uses. A presigned target's
+ * `url` is the bucket's own presigned PUT (carrying the store's auth, not ours), so — unlike the
+ * proxied path, where the same endpoint both receives bytes and finalizes — the client needs a
+ * SEPARATE, engine-authenticated call to flip the row to `ready` after the direct PUT. The client
+ * can't mint this token itself (it never sees the signing key), so the provider surfaces the whole
+ * URL on the target. See `handleConfirm` in `./http.ts`.
+ */
+function confirmUrl(id: string, exp: number, signingKey: string): string {
+  const token = signUploadToken(signingKey, { id, exp });
+  return `/api/storage/confirm?id=${encodeURIComponent(id)}&exp=${exp}&token=${token}`;
 }
 
 /**
@@ -118,6 +139,18 @@ function privateGetUrl(id: string, exp: number, signingKey: string): string {
 function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
   if (doc === null) return null;
   return { size: doc.size, contentType: doc.contentType, sha256: doc.sha256 };
+}
+
+/**
+ * A row that no longer names a usable file: a `pending` row whose `expiresAt` has passed — i.e. an
+ * abandoned/never-confirmed upload OR a `delete()` tombstone (which flips the row to an
+ * immediately-expired `pending` state). Either way the reaper will remove it, and its bytes are not
+ * servable, so `getUrl`/`getMetadata` treat it as absent (return `null`) rather than handing back a
+ * url that would only 404 or metadata for a file that's on its way out. A pending upload with a
+ * FUTURE expiry (in flight, not yet confirmed) is left visible, unchanged.
+ */
+function isReclaimable(doc: StorageDoc, now: number): boolean {
+  return doc.status === "pending" && doc.expiresAt !== null && doc.expiresAt <= now;
 }
 
 /**
@@ -173,31 +206,42 @@ export function storageContextProvider(blobStore: BlobStore, opts: StorageProvid
           expiresInMs: uploadTtlMs,
           now: cctx.now,
         });
-        // A proxied upload is served by our own endpoint, so gate it with a capability token; a
-        // presigned target already carries the store's own auth in its URL — leave it untouched.
+        // A proxied upload is served by our own endpoint, so gate it with the id + capability
+        // token. A presigned target's URL already carries the bucket's own auth (leave it
+        // untouched), but the client still needs an engine-authenticated way to finalize the row
+        // after the direct PUT — surface a `confirmUrl` carrying the same capability params.
         const finalTarget: UploadTarget =
-          target.kind === "proxied" ? { ...target, url: withUploadToken(target.url, id, exp, signingKey) } : target;
+          target.kind === "proxied"
+            ? { ...target, url: withUploadToken(target.url, id, exp, signingKey) }
+            : { ...target, confirmUrl: confirmUrl(id, exp, signingKey) };
         return { storageId: id, target: finalTarget };
       },
 
       async getUrl(id) {
         const doc = await readDoc(id);
-        if (doc === null) return null;
+        if (doc === null || isReclaimable(doc, cctx.now)) return null;
         if (doc.visibility === "public") return blobStore.publicUrl(doc.key) ?? storageEndpointPath(id);
         // Deterministic: `cctx.now` (the txn timestamp), not wall-clock — keeps `getUrl` query-safe.
         return privateGetUrl(id, cctx.now + DEFAULT_GET_URL_TTL_MS, signingKey);
       },
 
       async getMetadata(id) {
-        return toMetadata(await readDoc(id));
+        const doc = await readDoc(id);
+        return doc === null || isReclaimable(doc, cctx.now) ? null : toMetadata(doc);
       },
 
       async delete(id) {
-        // Transactional tombstone only — the physical blob is reclaimed by the reaper (Task 9);
-        // byte I/O (`blobStore.delete`) can't run inside the transactor.
+        // Transactional tombstone — NOT a hard row delete. Byte I/O (`blobStore.delete`) can't run
+        // inside the transactor, so the physical blob is reclaimed asynchronously by the reaper
+        // (`storageReaper` → `_storage:_reapExpired`). That sweep finds reclaimable blobs by
+        // scanning `_storage` rows, so the row must SURVIVE the delete carrying its `key`: flip it
+        // to an immediately-expired `pending` state (`expiresAt = cctx.now`), which the very next
+        // reaper pass reaps (row + blob) — the delete's own commit touches `_storage`, waking the
+        // reaper's `onCommit`. A hard `db.delete(id)` here would drop the key before any blob I/O
+        // could run and leak the blob forever (the reaper would have nothing left to find).
         const doc = await db.get(id);
         if (doc === null) return;
-        await db.delete(id);
+        await db.replace(id, { ...doc, status: "pending", expiresAt: cctx.now } as never);
       },
     };
   };
@@ -235,14 +279,16 @@ export function storageContextProvider(blobStore: BlobStore, opts: StorageProvid
 
       async getUrl(id) {
         const doc = await getDoc(id);
-        if (doc === null) return null;
+        // Action mode is non-deterministic, so wall-clock `Date.now()` is fine as the "now" for
+        // both the reclaimable check and the token expiry.
+        if (doc === null || isReclaimable(doc, Date.now())) return null;
         if (doc.visibility === "public") return blobStore.publicUrl(doc.key) ?? storageEndpointPath(id);
-        // Action mode is non-deterministic, so wall-clock `Date.now()` for the token expiry is fine.
         return privateGetUrl(id, Date.now() + DEFAULT_GET_URL_TTL_MS, signingKey);
       },
 
       async getMetadata(id) {
-        return toMetadata(await getDoc(id));
+        const doc = await getDoc(id);
+        return doc === null || isReclaimable(doc, Date.now()) ? null : toMetadata(doc);
       },
     };
   };

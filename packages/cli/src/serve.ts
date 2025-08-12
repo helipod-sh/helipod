@@ -28,6 +28,10 @@ export interface ServeOptions {
   /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
   storageBucket?: string;
   storageEndpoint?: string;
+  /** Test-only: shorten the pending-upload TTL / orphan-reaper sweep so a reap is observable in a
+   * test's timescale. Unset → the storage defaults (1h TTL, 60s sweep). Not surfaced as CLI flags. */
+  storageUploadTtlMs?: number;
+  storageReaperSweepMs?: number;
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
@@ -80,6 +84,8 @@ export async function startServe(
     adminKey: opts.adminKey,
     databaseUrl: opts.databaseUrl,
     storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
+    ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
+    ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;

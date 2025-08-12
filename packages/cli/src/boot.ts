@@ -121,6 +121,17 @@ export async function bootLoaded(opts: {
   databaseUrl?: string;
   /** File-storage backend overrides (CLI flags win over env, resolved via `resolveStorageConfig`). */
   storage?: StorageConfig;
+  /**
+   * Override the pending-upload TTL (ms) the `ctx.storage` provider stamps on `expiresAt`. Unset →
+   * the provider default (1h). Exists so tests can force a short reap deadline; production leaves
+   * it at the default.
+   */
+  storageUploadTtlMs?: number;
+  /**
+   * Override the orphan-reaper's sweep interval (ms). Unset → the reaper default (60s). Same
+   * test-only motivation as `storageUploadTtlMs`.
+   */
+  storageReaperSweepMs?: number;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
@@ -149,10 +160,19 @@ export async function bootLoaded(opts: {
     verifyAdmin: (key: string) => verifyAdminKey(opts.adminKey, key),
     componentNames: project.componentNames,
     // Prepend the `ctx.storage` provider and the orphan-reaper driver to whatever components composed.
-    contextProviders: [storageContextProvider(blobStore, { signingKey: opts.adminKey }), ...project.contextProviders],
+    contextProviders: [
+      storageContextProvider(blobStore, {
+        signingKey: opts.adminKey,
+        ...(opts.storageUploadTtlMs !== undefined ? { uploadTtlMs: opts.storageUploadTtlMs } : {}),
+      }),
+      ...project.contextProviders,
+    ],
     tableNumbers: project.tableNumbers,
     bootSteps: project.bootSteps,
-    drivers: [storageReaper(blobStore), ...project.drivers],
+    drivers: [
+      storageReaper(blobStore, opts.storageReaperSweepMs !== undefined ? { sweepMs: opts.storageReaperSweepMs } : undefined),
+      ...project.drivers,
+    ],
   });
 
   const storageRouteDeps: StorageRouteDeps = {
@@ -204,6 +224,8 @@ export async function bootProject(opts: {
   adminKey: string;
   databaseUrl?: string;
   storage?: StorageConfig;
+  storageUploadTtlMs?: number;
+  storageReaperSweepMs?: number;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -214,6 +236,8 @@ export async function bootProject(opts: {
     adminKey: opts.adminKey,
     databaseUrl: opts.databaseUrl,
     storage: opts.storage,
+    ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
+    ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
   });
 }
 

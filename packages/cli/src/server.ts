@@ -295,12 +295,19 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
     url: `http://${options.ip}:${port}`,
     port,
     setRoutes: (r) => { currentRoutes = r; },
-    close: () =>
-      new Promise<void>((res) => {
+    close: async () => {
+      // Stop component drivers (scheduler event loop, storage orphan-reaper, …) BEFORE tearing the
+      // store down, so a driver's wall-clock timer can't fire a sweep against an already-closed
+      // store (which surfaces as a "statement has been finalized" error out of the reaper). Reload
+      // (dev watch / `deploy`) never calls close() — it uses setModules/setRoutes — so this only
+      // runs on a genuine shutdown.
+      await runtime.stopDrivers();
+      await new Promise<void>((res) => {
         for (const c of wss.clients) c.terminate();
         wss.close();
         server.close(() => res());
-      }),
+      });
+    },
   };
 }
 
@@ -411,9 +418,10 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
     url: `http://${options.ip}:${handle.port}`,
     port: handle.port,
     setRoutes: (r) => { currentRoutes = r; },
-    close: () => {
+    close: async () => {
+      // See the Node backend's close(): stop drivers before the store goes away.
+      await runtime.stopDrivers();
       handle.stop(true);
-      return Promise.resolve();
     },
   };
 }
