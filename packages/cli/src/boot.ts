@@ -78,6 +78,24 @@ export function withStorageModules(map: Record<string, RegisteredFunction>): Rec
 }
 
 /**
+ * Warn (never fail) when S3-shaped settings (`STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL`, or
+ * their `--storage-endpoint`/etc. flag equivalents) are present but no bucket was configured —
+ * `isS3Config`/`makeBlobStore` silently fall back to local FS storage in that case, which is the
+ * right default behavior but a silent one: an operator who set the endpoint/region and forgot the
+ * bucket would otherwise get FS storage with no indication anything was ignored.
+ */
+export function warnIfS3ConfigIgnored(storage: StorageConfig | undefined): void {
+  if (isS3Config(storage)) return;
+  const ignored = storage?.endpoint !== undefined || storage?.region !== undefined || storage?.publicBaseUrl !== undefined;
+  if (!ignored) return;
+  process.stderr.write(
+    "⚠ S3 storage settings (STACKBASE_STORAGE_ENDPOINT/REGION/PUBLIC_URL or --storage-endpoint/etc.) are set, " +
+      "but no bucket was provided — S3 config is being IGNORED and storage is falling back to local FS. " +
+      "Set STACKBASE_STORAGE_BUCKET (or --storage-bucket) to actually use S3.\n",
+  );
+}
+
+/**
  * Fail fast if the FS file-storage dir can't be created/written — an operator misconfiguration
  * (read-only mount, wrong owner) must surface as a clear boot error, never a silent-later failure
  * on the first upload. Skipped for the S3 backend (no local dir).
@@ -113,6 +131,7 @@ export async function bootLoaded(opts: {
   // itself was injected into the composed schema/catalog/tableNumbers in `loadProject`.
   const dataDir = dirname(resolve(opts.dataPath));
   const storageConfig = resolveStorageConfig(process.env, opts.storage);
+  warnIfS3ConfigIgnored(storageConfig);
   const blobStore = makeBlobStore({ dataPath: dataDir, storage: storageConfig });
   if (!isS3Config(storageConfig)) ensureStorageDirWritable(join(dataDir, "storage"));
 

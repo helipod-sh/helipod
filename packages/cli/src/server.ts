@@ -152,7 +152,15 @@ function resolveStatic(webDir: string, urlPath: string): { contentType: string; 
 /* Node backend (node:http + ws)                                              */
 /* -------------------------------------------------------------------------- */
 
-function readBody(req: IncomingMessage): Promise<string> {
+/**
+ * Read the raw request body as bytes (a `Buffer`), with no text decoding. This is the ONLY
+ * body-reading path that is safe for the engine-owned `/api/storage/*` uploads: an upload body may
+ * be arbitrary binary (PNG, PDF, ...), and `handleUpload` reconstructs the exact bytes via
+ * `new Uint8Array(await request.arrayBuffer())`. Round-tripping through a decoded/re-encoded utf8
+ * string (as {@link readBody} does) would mangle any non-UTF8 byte sequence — see the Task 10
+ * fixes report.
+ */
+function readBodyBytes(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -165,9 +173,18 @@ function readBody(req: IncomingMessage): Promise<string> {
       }
       chunks.push(c);
     });
-    req.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolvePromise(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+/**
+ * Text variant of {@link readBodyBytes} for routes that treat the body as utf8 text/JSON (`/api/run`,
+ * the admin doc-edit `PATCH`, `httpAction`s, ...). Do NOT use this for the storage upload routes —
+ * decoding-then-re-encoding a binary body as utf8 is lossy for non-UTF8 byte sequences.
+ */
+function readBody(req: IncomingMessage): Promise<string> {
+  return readBodyBytes(req).then((b) => b.toString("utf8"));
 }
 
 async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
@@ -176,10 +193,15 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
-        const body = hasBody(req.method) ? await readBody(req) : undefined;
         const rawUrl = req.url ?? "/";
         const url = new URL(rawUrl, "http://x");
         const path = url.pathname;
+        const needsBody = hasBody(req.method);
+        // Storage routes get the raw bytes (binary-safe); every other route keeps the existing
+        // utf8-decoded string body. The two are mutually exclusive reads of the same stream.
+        const isStorageRequest = path.startsWith(STORAGE_PREFIX);
+        const bodyBytes = needsBody && isStorageRequest ? await readBodyBytes(req) : undefined;
+        const body = needsBody && !isStorageRequest ? await readBody(req) : undefined;
         const query: Record<string, string> = {};
         url.searchParams.forEach((val, key) => { query[key] = val; });
         const authorization = req.headers.authorization ?? undefined;
@@ -203,7 +225,10 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           const request = new Request(`http://${storageHeaders.get("host") ?? "localhost"}${rawUrl}`, {
             method: req.method ?? "GET",
             headers: storageHeaders,
-            ...(hasBody(req.method) && body !== undefined ? { body } : {}),
+            // Raw bytes, NOT the utf8-decoded `body` string — see `readBodyBytes`'s doc comment.
+            // (Copied into a plain `Uint8Array<ArrayBuffer>` — `Buffer`'s `.buffer` is typed
+            // `ArrayBufferLike`, which doesn't structurally satisfy DOM lib's `BodyInit`.)
+            ...(needsBody && bodyBytes !== undefined ? { body: new Uint8Array(bodyBytes) } : {}),
           });
           const response = await storageRoute.handler(request);
           const outHeaders: Record<string, string> = {};
