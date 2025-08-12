@@ -289,4 +289,81 @@ describe("storageReaper — orphan sweep driver", () => {
     // k2's blob is still there: nothing swept it after stop().
     expect(await blobStore.read(key2)).not.toBeNull();
   });
+
+  it("stop() while a tick is in flight does not resurrect the driver once that tick settles", async () => {
+    // Regression test for the driver-resurrection race: `wake()`'s `.finally(() => armTimer())`
+    // used to run unconditionally when an in-flight tick settled, with no "stopped" guard — so if
+    // `stop()` raced in while a sweep's `runFunction` was still awaiting (e.g. a `stackbase dev`
+    // hot-reload teardown racing a sweep), the settling tick would arm a brand-new timer and the
+    // driver would keep running forever after `stop()` returned.
+    const runtime = await makeRuntime();
+    const blobStore = new FakeBlobStore();
+    const { ctx: baseCtx, hasLiveTimer, setNow, fireDueTimers, fireCommit } = makeFakeDriverContext(runtime);
+
+    let runFunctionCalls = 0;
+    let blockNextCall = false;
+    // Boxed in an object (rather than a bare `let`) so TS doesn't narrow the closed-over binding
+    // to `null` across the nested-closure assignment below — a plain `let releaseBlock: (() =>
+    // void) | null = null` mutated only inside a nested arrow gets mis-narrowed to `never` at the
+    // `releaseBlock?.()` call site.
+    const block: { release: (() => void) | null } = { release: null };
+
+    // Wraps the base fake context's `runFunction` so a specific call can be told to block on a
+    // manually-resolved promise — simulating a sweep pass (`_storage:_reapExpired`, or the
+    // subsequent `blobStore.delete`) that's still mid-flight when `stop()` races in.
+    const ctx: DriverContext = {
+      ...baseCtx,
+      runFunction: async (path, args) => {
+        runFunctionCalls++;
+        if (blockNextCall) {
+          blockNextCall = false;
+          await new Promise<void>((resolve) => {
+            block.release = resolve;
+          });
+        }
+        return baseCtx.runFunction(path, args);
+      },
+    };
+
+    const driver = storageReaper(blobStore, { sweepMs: 1_000 });
+
+    // Let the initial start-up tick (against an empty table) settle before proceeding, so the
+    // blocking below applies only to the sweep we trigger next.
+    driver.start(ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(hasLiveTimer()).toBe(true);
+    const callsAfterStartup = runFunctionCalls;
+
+    // Trigger a fresh sweep via the onCommit path (mirrors a real write racing a hot-reload
+    // teardown) and let it reach + block inside `runFunction`, so the tick is genuinely
+    // "in flight" when `stop()` is called below.
+    blockNextCall = true;
+    fireCommit([STORAGE_TABLE]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runFunctionCalls).toBe(callsAfterStartup + 1);
+
+    // Race: stop() while that tick is still awaiting `runFunction`.
+    driver.stop?.();
+    expect(hasLiveTimer()).toBe(false); // stop() clears the timer that was live at that moment
+
+    // Now let the blocked tick actually settle.
+    block.release?.();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The settling tick's `wake()` `.finally` must NOT have armed a new timer.
+    expect(hasLiveTimer()).toBe(false);
+
+    // Prove it strictly: advance the clock well past `sweepMs` and try to fire due timers. If the
+    // driver had resurrected itself (the bug), a re-armed timer would be due now and firing it
+    // would trigger another `runFunction` call.
+    setNow(100_000);
+    await fireDueTimers();
+    expect(runFunctionCalls).toBe(callsAfterStartup + 1);
+
+    // And the onCommit subscription stays torn down too — no new sweep from a write either.
+    fireCommit([STORAGE_TABLE]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runFunctionCalls).toBe(callsAfterStartup + 1);
+  });
 });

@@ -42,8 +42,16 @@ export function storageReaper(blobStore: BlobStore, opts?: { sweepMs?: number })
   let ctx: DriverContext;
   let timer: number | null = null;
   let unsubscribeCommit: (() => void) | null = null;
+  // Set by `stop()` BEFORE it tears down the timer/subscription. Guards against the driver
+  // resurrecting itself: `wake()`'s `.finally(() => armTimer())` runs unconditionally when an
+  // in-flight tick settles, even if `stop()` raced in while `runFunction`/`blobStore.delete` was
+  // still awaiting — without this flag, that `.finally` would arm a brand-new timer after
+  // `stop()` already returned. Checked at every re-entry point (`wake`, `tick`, `armTimer`) so a
+  // timer/commit callback that fires concurrently with `stop()` can't start a fresh sweep either.
+  let stopped = false;
 
   async function tick(): Promise<void> {
+    if (stopped) return;
     const { keys } = (await ctx.runFunction("_storage:_reapExpired", { now: ctx.now() })) as { keys: string[] };
     for (const key of keys) {
       try {
@@ -58,6 +66,7 @@ export function storageReaper(blobStore: BlobStore, opts?: { sweepMs?: number })
   }
 
   function armTimer(): void {
+    if (stopped) return;
     if (timer !== null) {
       ctx.clearTimer(timer);
       timer = null;
@@ -70,6 +79,7 @@ export function storageReaper(blobStore: BlobStore, opts?: { sweepMs?: number })
   // rejection (mirroring scheduler's `wake()`/`sweepOnce()`). Always re-arms the timer afterward,
   // success or failure, so one bad pass doesn't silently kill the whole reaper.
   function wake(): void {
+    if (stopped) return;
     tick()
       .catch((e: unknown) => {
         console.error("[storage] reaper: sweep pass failed:", e);
@@ -89,6 +99,10 @@ export function storageReaper(blobStore: BlobStore, opts?: { sweepMs?: number })
       wake();
     },
     stop() {
+      // Set BEFORE tearing anything down: an in-flight tick's `runFunction`/`blobStore.delete`
+      // may still be awaiting past this point, and when it settles, `wake()`'s `.finally` must
+      // see `stopped` already true so `armTimer()` no-ops instead of resurrecting the driver.
+      stopped = true;
       unsubscribeCommit?.();
       unsubscribeCommit = null;
       if (timer !== null) {
