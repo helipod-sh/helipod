@@ -1,8 +1,9 @@
 /**
  * The shared HMAC capability-token helper for `@stackbase/storage`'s upload/download surface.
- * `./context.ts`'s `signUploadToken`/`verifyUploadToken` (the create side, called inside a
- * mutation via `generateUploadUrl`) and `./http.ts`'s upload/confirm endpoints (the verify side,
- * called at the HTTP boundary) both build on this ONE module, so the two sides can never drift.
+ * `./context.ts`'s `signUploadToken` (the create side, called inside a mutation via
+ * `generateUploadUrl`) and `./http.ts`'s upload/confirm endpoints' `authorize` (the verify side,
+ * called at the HTTP boundary, via `verifyStorageToken` directly) both build on this ONE module,
+ * so the two sides can never drift.
  *
  * The token is self-contained: it embeds its own `exp` (`${exp}.${hmac}`), so verification needs
  * only `(signingKey, id, token, now)` — no separate expiry field to keep in sync out-of-band (the

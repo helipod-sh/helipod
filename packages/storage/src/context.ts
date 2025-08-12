@@ -24,15 +24,16 @@
  *   - `blobStore.createUploadTarget(key, { now: cctx.now, ... })` is handed `cctx.now`, so a
  *     presigner that signs over a timestamp signs over the deterministic one, not wall-clock.
  * The capability token is an HMAC over `${id}.${exp}` with a fixed signing key — a pure function,
- * so it is stable given stable inputs. (Verified later by the Task 7/8 endpoints via the exported
- * `verifyUploadToken` below.)
+ * so it is stable given stable inputs. (Verified later by the Task 7/8 endpoints via
+ * `./token.ts`'s `verifyStorageToken` — the same function `./http.ts`'s `authorize` calls
+ * directly; there is no separate `verifyUploadToken` wrapper here, it had zero callers.)
  */
 import type { ComponentContext, ActionApi, ContextProvider } from "@stackbase/executor";
 import { GuestDatabaseWriter } from "@stackbase/executor";
 import type { BlobStore, UploadTarget, BlobMetadata } from "@stackbase/blobstore";
 import { STORAGE_TABLE } from "./system-table";
 import type { StorageDoc } from "./modules";
-import { createStorageToken, verifyStorageToken } from "./token";
+import { createStorageToken } from "./token";
 
 /** Default upload-URL validity: 1h — a generous window for a client to finish an upload. */
 const DEFAULT_UPLOAD_TTL_MS = 3_600_000;
@@ -89,21 +90,6 @@ export function signUploadToken(signingKey: string, payload: { id: string; exp: 
   return createStorageToken(signingKey, payload.id, payload.exp);
 }
 
-/**
- * Verify a proxied-upload capability token — thin wrapper over `./token.ts`'s
- * `verifyStorageToken` (the same function the Task 7 upload/confirm endpoints call), kept here so
- * existing callers of this exported name don't need to change. `now` here IS wall-clock —
- * verification happens at the HTTP endpoint (an action-like boundary), never inside a mutation.
- */
-export function verifyUploadToken(
-  signingKey: string,
-  payload: { id: string; exp: number },
-  token: string,
-  now: number,
-): boolean {
-  return verifyStorageToken(signingKey, payload.id, token, now);
-}
-
 /** Append the capability token (+ its `exp`) to a proxied upload URL's querystring. */
 function withUploadToken(url: string, id: string, exp: number, signingKey: string): string {
   const token = signUploadToken(signingKey, { id, exp });
@@ -120,8 +106,8 @@ function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
  * `storageContextProvider(blobStore, opts)` — the `ctx.storage` context provider.
  *
  * `opts.signingKey` is REQUIRED (no default — see `StorageProviderOpts.signingKey`'s doc comment):
- * the caller must thread the same deployment/admin signing key in here AND into `verifyUploadToken`
- * on the endpoint side (Task 7/8), or issued tokens won't verify.
+ * the caller must thread the same deployment/admin signing key in here AND into `./http.ts`'s
+ * `StorageRouteDeps.signingKey` on the endpoint side (Task 7/8), or issued tokens won't verify.
  *
  * `write: true` is load-bearing: without it `cctx.db` is a read-only reader and every write in
  * `build` throws (see `ContextProvider.write` in `@stackbase/executor`). With it, and only during a

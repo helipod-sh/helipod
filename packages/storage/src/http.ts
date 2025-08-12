@@ -16,8 +16,10 @@
  * trusted entrypoint `@stackbase/admin`'s `_system:*` built-ins use.
  */
 import type { BlobStore, ByteRange } from "@stackbase/blobstore";
+import { isValidDocumentId } from "@stackbase/id-codec";
 import { verifyStorageToken } from "./token";
 import type { StorageDoc } from "./modules";
+import { STORAGE_TABLE_NUMBER } from "./system-table";
 
 export interface StorageRouteDeps {
   runMutation(path: string, args: unknown): Promise<unknown>;
@@ -102,31 +104,46 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
     if (id === "") return textResponse(404, "not found");
 
     // `id` is an untrusted URL path segment (unlike upload/confirm's token-gated query `id`), so
-    // a malformed value must 404 cleanly rather than propagate the id-codec's decode error as an
-    // unhandled 500.
+    // validate its shape up front — a malformed value 404s cleanly here, BEFORE `runQuery` is ever
+    // called, so a genuine backend failure from `runQuery` (a real id, a real error) is never
+    // masked as "not found" below.
+    if (!isValidDocumentId(id, STORAGE_TABLE_NUMBER)) return textResponse(404, "not found");
+
     let doc: StorageDoc | null;
     try {
       doc = (await deps.runQuery("_storage:_get", { id })) as StorageDoc | null;
     } catch {
-      return textResponse(404, "not found");
+      return textResponse(500, "internal error");
     }
     if (doc === null || doc.status !== "ready") return textResponse(404, "not found");
 
-    const range = parseRange(request.headers.get("range"));
-    const stream = await blobStore.read(doc.key, range);
-    if (stream === null) return textResponse(404, "not found");
-
+    const size = doc.size ?? 0;
     const headers = new Headers();
     if (doc.contentType !== null) headers.set("content-type", doc.contentType);
 
+    const range = parseRange(request.headers.get("range"));
     if (range !== undefined) {
-      const size = doc.size ?? 0;
-      const end = range.end ?? size - 1;
-      headers.set("content-range", `bytes ${range.start}-${end}/${size}`);
+      // A last-byte-pos past EOF is invalid per RFC 7233 — clamp it so the header and the bytes
+      // actually read always agree. A start at/past EOF (or negative/non-finite) can't be
+      // satisfied at all: 416, no read attempted.
+      if (!Number.isFinite(range.start) || range.start < 0 || range.start >= size) {
+        const rejectHeaders = new Headers({ "content-range": `bytes */${size}` });
+        return new Response(null, { status: 416, headers: rejectHeaders });
+      }
+      const clampedEnd = Math.min(range.end ?? size - 1, size - 1);
+
+      const stream = await blobStore.read(doc.key, { start: range.start, end: clampedEnd });
+      if (stream === null) return textResponse(404, "not found");
+
+      headers.set("content-range", `bytes ${range.start}-${clampedEnd}/${size}`);
       headers.set("accept-ranges", "bytes");
+      headers.set("content-length", String(clampedEnd - range.start + 1));
       return new Response(stream, { status: 206, headers });
     }
 
+    const stream = await blobStore.read(doc.key);
+    if (stream === null) return textResponse(404, "not found");
+    headers.set("content-length", String(size));
     return new Response(stream, { status: 200, headers });
   }
 

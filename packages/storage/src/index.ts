@@ -9,7 +9,6 @@ export {
   storageContextProvider,
   storageEndpointPath,
   signUploadToken,
-  verifyUploadToken,
 } from "./context";
 export type {
   StorageProviderOpts,

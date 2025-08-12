@@ -334,6 +334,50 @@ describe("GET /api/storage/:id — serve", () => {
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes.subarray(5));
   });
 
+  it("a Range past EOF (bytes=0-999999 on a 10-byte file) clamps Content-Range to EOF and returns the full body", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const bytes = new TextEncoder().encode("0123456789"); // 10 bytes
+    const id = await uploadReadyFile(runtime, routes, bytes);
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=0-999999" } }),
+    );
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe(`bytes 0-9/${bytes.byteLength}`);
+    expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("a Range starting past EOF (bytes=20-30 on a 10-byte file) returns 416 with Content-Range: bytes */10", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const bytes = new TextEncoder().encode("0123456789"); // 10 bytes
+    const id = await uploadReadyFile(runtime, routes, bytes);
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`, { headers: { range: "bytes=20-30" } }),
+    );
+    expect(response.status).toBe(416);
+    expect(response.headers.get("content-range")).toBe(`bytes */${bytes.byteLength}`);
+  });
+
+  it("a full (non-range) 200 response sets Content-Length to the file's size", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const bytes = new TextEncoder().encode("0123456789");
+    const id = await uploadReadyFile(runtime, routes, bytes, "text/plain");
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+  });
+
   it("a pending (not-yet-finalized) id returns 404", async () => {
     const blobStore = new FakeBlobStore();
     const runtime = await makeRuntime(blobStore);
@@ -369,6 +413,43 @@ describe("GET /api/storage/:id — serve", () => {
 
     const response = await findRoute(routes, "GET", "/api/storage/does-not-exist").handler(
       new Request("http://localhost/api/storage/does-not-exist"),
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("a well-formed id whose backend query THROWS a generic (non-decode) error returns 500, not 404", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    // A syntactically-valid id (so the id-shape gate up front passes) whose `runQuery` then fails
+    // for an unrelated reason (e.g. a DB outage) — must surface as a real 500, not be swallowed
+    // into the same 404 a merely-nonexistent id gets.
+    const id = await mintPendingId(runtime);
+    const throwingDeps: StorageRouteDeps = {
+      signingKey: SIGNING_KEY,
+      async runMutation(path, args) {
+        return (await runtime.runSystem(path, args as never)).value;
+      },
+      async runQuery() {
+        throw new Error("boom: backend unavailable");
+      },
+    };
+    const routes = storageRoutes(blobStore, throwingDeps);
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+    expect(response.status).toBe(500);
+  });
+
+  it("a well-formed id whose backend query returns null (legitimately not found) still returns 404, not 500", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await mintPendingId(runtime);
+    await runtime.runSystem("_storage:_delete", { id });
+
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
     );
     expect(response.status).toBe(404);
   });
