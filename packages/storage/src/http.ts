@@ -151,7 +151,14 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
     if (doc.visibility === "private") {
       if (deps.checkRead !== undefined) {
         const identity = parseBearerIdentity(request);
-        const ok = await deps.checkRead(identity, id);
+        let ok: boolean;
+        try {
+          ok = await deps.checkRead(identity, id);
+        } catch {
+          // A throwing authz check (e.g. the effective-permissions bridge hit a backend error) must
+          // become a clean 500 here, not an unhandled rejection out of the engine-owned route.
+          return textResponse(500, "internal error");
+        }
         if (!ok) return textResponse(403, "forbidden");
       } else {
         const token = url.searchParams.get("token");

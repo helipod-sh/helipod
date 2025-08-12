@@ -10,7 +10,7 @@ import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
-import { bootProject, loadDashboard } from "./boot";
+import { bootProject, loadDashboard, withStorageModules } from "./boot";
 import { startDevServer } from "./server";
 import { createWatchLoop } from "./watch";
 import { serveCommand } from "./serve";
@@ -27,6 +27,8 @@ function parseFlags(args: string[]): DevOptions {
     else if (a === "--data" && args[i + 1]) out.dataPath = args[++i];
     else if (a === "--web" && args[i + 1]) out.webDir = args[++i];
     else if (a === "--database-url" && args[i + 1]) out.databaseUrl = args[++i];
+    else if (a === "--storage-bucket" && args[i + 1]) out.storageBucket = args[++i];
+    else if (a === "--storage-endpoint" && args[i + 1]) out.storageEndpoint = args[++i];
   }
   return out;
 }
@@ -46,11 +48,12 @@ export async function devCommand(args: string[]): Promise<number> {
   const ephemeralKey = !envKey; // a generated per-run key, not the operator's persistent secret
   const loopback = ["127.0.0.1", "::1", "localhost"].includes(opts.ip);
 
-  const { runtime, adminApi, project, generated, store, logSink } = await bootProject({
+  const { runtime, adminApi, project, generated, store, logSink, storageRoutes } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey,
     databaseUrl: opts.databaseUrl,
+    storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
   });
   writeGenerated(generated.files, generatedDir);
 
@@ -60,7 +63,7 @@ export async function devCommand(args: string[]): Promise<number> {
   const dashboard = loadDashboard(ephemeralKey && loopback ? adminKey : undefined);
   const server = await startDevServer(
     runtime,
-    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes },
+    { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes, storageRoutes },
   );
   process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
   if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @stackbase/dashboard build\`)\n`);
@@ -79,7 +82,8 @@ export async function devCommand(args: string[]): Promise<number> {
       try {
         const next = push(await loadConvexDir(opts.convexDir), config.components);
         writeGenerated(next.generated.files, generatedDir);
-        runtime.setModules(next.project.moduleMap);
+        // Re-apply the always-on `_storage:*` built-ins: `setModules` replaces `modules` wholesale.
+        runtime.setModules(withStorageModules(next.project.moduleMap));
         server.setRoutes(next.project.routes);
         process.stdout.write(`↻ pushed (${Object.keys(next.project.moduleMap).length} functions)\n`);
       } catch (e) {

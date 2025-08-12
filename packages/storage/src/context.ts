@@ -38,6 +38,13 @@ import { createStorageToken } from "./token";
 /** Default upload-URL validity: 1h — a generous window for a client to finish an upload. */
 const DEFAULT_UPLOAD_TTL_MS = 3_600_000;
 
+/**
+ * Default GET-url capability-token validity: 1h. A private file's `getUrl` embeds a token so the
+ * serve endpoint's no-authz fallback (`./http.ts`'s `handleServe`) accepts it — long enough for a
+ * client to actually fetch the bytes after reading the url out of a query result.
+ */
+const DEFAULT_GET_URL_TTL_MS = 3_600_000;
+
 export interface StorageProviderOpts {
   /** Upload-URL validity window in ms (default 1h). */
   uploadTtlMs?: number;
@@ -95,6 +102,17 @@ function withUploadToken(url: string, id: string, exp: number, signingKey: strin
   const token = signUploadToken(signingKey, { id, exp });
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}exp=${exp}&token=${token}`;
+}
+
+/**
+ * The download url for a PRIVATE file: the serve endpoint plus a GET-capability token, so the
+ * serve endpoint's no-authz fallback (`./http.ts`'s `handleServe`) accepts the read. `exp` MUST be
+ * a deterministic input (the transaction timestamp `cctx.now + ttl`, never `Date.now()`) when this
+ * is called from inside a query/mutation, so the returned url — and the whole read set — is stable
+ * across an OCC replay; the token itself is a pure HMAC over `(id, exp)`.
+ */
+function privateGetUrl(id: string, exp: number, signingKey: string): string {
+  return `${storageEndpointPath(id)}?token=${createStorageToken(signingKey, id, exp)}`;
 }
 
 function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
@@ -166,7 +184,8 @@ export function storageContextProvider(blobStore: BlobStore, opts: StorageProvid
         const doc = await readDoc(id);
         if (doc === null) return null;
         if (doc.visibility === "public") return blobStore.publicUrl(doc.key) ?? storageEndpointPath(id);
-        return storageEndpointPath(id);
+        // Deterministic: `cctx.now` (the txn timestamp), not wall-clock — keeps `getUrl` query-safe.
+        return privateGetUrl(id, cctx.now + DEFAULT_GET_URL_TTL_MS, signingKey);
       },
 
       async getMetadata(id) {
@@ -218,7 +237,8 @@ export function storageContextProvider(blobStore: BlobStore, opts: StorageProvid
         const doc = await getDoc(id);
         if (doc === null) return null;
         if (doc.visibility === "public") return blobStore.publicUrl(doc.key) ?? storageEndpointPath(id);
-        return storageEndpointPath(id);
+        // Action mode is non-deterministic, so wall-clock `Date.now()` for the token expiry is fine.
+        return privateGetUrl(id, Date.now() + DEFAULT_GET_URL_TTL_MS, signingKey);
       },
 
       async getMetadata(id) {

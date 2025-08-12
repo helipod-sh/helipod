@@ -229,6 +229,9 @@
       },
       "dependencies": {
         "@stackbase/admin": "workspace:*",
+        "@stackbase/blobstore": "workspace:*",
+        "@stackbase/blobstore-fs": "workspace:*",
+        "@stackbase/blobstore-s3": "workspace:*",
         "@stackbase/codegen": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/dashboard": "workspace:*",
@@ -240,6 +243,7 @@
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/query-engine": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/storage": "workspace:*",
         "@stackbase/sync": "workspace:*",
         "@stackbase/values": "workspace:*",
         "esbuild": "^0.27.0",

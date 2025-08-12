@@ -525,6 +525,28 @@ describe("GET /api/storage/:id — access control (Task 8)", () => {
     expect(blobStore.readCalls).toBe(0);
   });
 
+  it("private + checkRead() THROWS: 500 (not an unhandled rejection), and the blob's bytes are never read", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const uploadRoutes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, uploadRoutes, blobStore, bytes, "private");
+    blobStore.readCalls = 0;
+
+    const routes = storageRoutes(
+      blobStore,
+      routeDepsWithCheckRead(runtime, async () => {
+        throw new Error("authz backend exploded");
+      }),
+    );
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}`),
+    );
+
+    expect(response.status).toBe(500);
+    expect(blobStore.readCalls).toBe(0);
+  });
+
   it("private + checkRead() -> true, no redirect backend: 200 with bytes", async () => {
     const blobStore = new RedirectableBlobStore();
     const runtime = await makeRuntime(blobStore);

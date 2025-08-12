@@ -17,6 +17,7 @@ import type {
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/system-table";
 import { storageModules } from "../src/modules";
 import { storageContextProvider, signUploadToken, storageEndpointPath } from "../src/context";
+import { verifyStorageToken } from "../src/token";
 
 /**
  * A minimal in-file `BlobStore` fake (the real `MemoryBlobStore` in `@stackbase/blobstore`'s
@@ -176,14 +177,25 @@ describe("ctx.storage — mutation/query facade (build)", () => {
     });
   });
 
-  it("getUrl returns the stable /api/storage/<id> endpoint for a private file, and null for a missing id", async () => {
+  it("getUrl returns the /api/storage/<id> endpoint with a verifiable, deterministic capability token for a private file, and null for a missing id", async () => {
+    const NOW = 1_700_000_000_000;
     const blobStore = new FakeBlobStore();
-    const runtime = await makeRuntime(blobStore, appModules);
+    const runtime = await makeRuntime(blobStore, appModules, () => NOW);
 
     const { value } = await runtime.run<{ storageId: string }>("app:genUpload", {});
     const url = (await runtime.run<string | null>("app:getUrl", { id: value.storageId })).value;
-    expect(url).toBe(storageEndpointPath(value.storageId));
-    expect(storageEndpointPath(value.storageId)).toBe(`/api/storage/${value.storageId}`);
+
+    // Endpoint + a `?token=` capability token, so the serve endpoint's no-authz fallback accepts it.
+    expect(url).not.toBeNull();
+    expect(url!.startsWith(`${storageEndpointPath(value.storageId)}?token=`)).toBe(true);
+    const token = new URL(url!, "http://x").searchParams.get("token")!;
+    // The token verifies against the same signing key the routes use, at the deterministic `now`.
+    expect(verifyStorageToken("test-signing-key", value.storageId, token, NOW)).toBe(true);
+
+    // Deterministic: the expiry is derived from `cctx.now` (fixed here), so a re-run — an OCC replay
+    // — yields the byte-identical url (a wall-clock `Date.now()` would drift and break query safety).
+    const url2 = (await runtime.run<string | null>("app:getUrl", { id: value.storageId })).value;
+    expect(url2).toBe(url);
 
     // A decodable-but-absent id (delete the row first) reads null, not an error.
     await runtime.run("app:del", { id: value.storageId });

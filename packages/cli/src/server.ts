@@ -11,13 +11,25 @@ import { extname, join, resolve, sep } from "node:path";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
+import type { StorageRoute } from "@stackbase/storage";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
 import type { ResolvedRoute } from "./project";
 import type { DeployResult } from "./deploy-apply";
 import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
+const STORAGE_PREFIX = "/api/storage/";
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Match an engine-owned `/api/storage/*` request (upload/confirm/serve). These are RESERVED paths
+ * spliced into dispatch ahead of user `http.ts` routes and the 404 — the upload/confirm handlers
+ * key off method (POST) so a GET `/api/storage/<id>` falls through to the serve handler.
+ */
+function matchStorageRoute(routes: StorageRoute[] | undefined, method: string, path: string): StorageRoute | undefined {
+  if (!routes || !path.startsWith(STORAGE_PREFIX)) return undefined;
+  return routes.find((r) => r.method === method && path.startsWith(r.pathPrefix));
+}
 
 /** Methods that carry a request body the server must read (PATCH is used by the admin API). */
 export function hasBody(method: string | undefined): boolean {
@@ -57,6 +69,9 @@ export interface DevServerOptions {
   dashboard?: { distDir: string; html: string } | { assets: Record<string, string>; html: string };
   /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
   routes?: ResolvedRoute[];
+  /** Engine-owned `/api/storage/*` handlers (always-on file storage). Reserved — matched before
+   *  user routes; stable across reload/deploy (their deps read the never-swapped systemModules). */
+  storageRoutes?: StorageRoute[];
   /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
 }
@@ -178,6 +193,24 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
             res.end(dash.body);
             return;
           }
+        }
+        // Engine-owned `/api/storage/*` — dispatch to the native Web handler and stream its Response
+        // (bytes, 302 redirects, 206 partials) back through node:http verbatim.
+        const storageRoute = matchStorageRoute(options.storageRoutes, req.method ?? "GET", path);
+        if (storageRoute) {
+          const storageHeaders = new Headers(headers);
+          if (authorization && !storageHeaders.has("authorization")) storageHeaders.set("authorization", authorization);
+          const request = new Request(`http://${storageHeaders.get("host") ?? "localhost"}${rawUrl}`, {
+            method: req.method ?? "GET",
+            headers: storageHeaders,
+            ...(hasBody(req.method) && body !== undefined ? { body } : {}),
+          });
+          const response = await storageRoute.handler(request);
+          const outHeaders: Record<string, string> = {};
+          response.headers.forEach((v, k) => { outHeaders[k] = v; });
+          res.writeHead(response.status, outHeaders);
+          res.end(Buffer.from(await response.arrayBuffer()));
+          return;
         }
         // Derive server info live per request from the runtime — a boot-time snapshot goes stale
         // after the first setModules hot-swap (dev reload / deploy).
@@ -302,6 +335,10 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
           return new Response(body, { headers: { "content-type": dash.contentType } });
         }
       }
+      // Engine-owned `/api/storage/*` — the native `Request` passes straight to the handler, whose
+      // `Response` (streamed bytes / 302 / 206) is returned unchanged by Bun.serve.
+      const storageRoute = matchStorageRoute(options.storageRoutes, req.method, path);
+      if (storageRoute) return await storageRoute.handler(req);
       const body = hasBody(req.method) ? await req.text() : undefined;
       const query: Record<string, string> = {};
       url.searchParams.forEach((val, key) => { query[key] = val; });
