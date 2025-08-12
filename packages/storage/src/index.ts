@@ -21,3 +21,5 @@ export type { StorageDoc } from "./modules";
 export { createStorageToken, verifyStorageToken } from "./token";
 export { storageRoutes } from "./http";
 export type { StorageRouteDeps, StorageRoute } from "./http";
+export { storageReaper } from "./reaper";
+export type { StorageReaperDriver } from "./reaper";
