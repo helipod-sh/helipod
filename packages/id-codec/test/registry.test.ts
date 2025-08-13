@@ -5,6 +5,7 @@ import {
   getFullTableName,
   parseFullTableName,
   USER_TABLE_NUMBER_START,
+  STORAGE_TABLE_NUMBER,
   DEFAULT_SHARD,
   DefaultShardKeyResolver,
   FieldShardKeyResolver,
@@ -63,6 +64,26 @@ describe("MemoryTableRegistry", () => {
     expect(sys.visibility).toBe("system");
     const nextSys = reg.allocate("_other");
     expect(nextSys.tableNumber).toBeGreaterThan(42);
+  });
+});
+
+describe("reserved system tables (_storage)", () => {
+  it("classifies _storage as a system table", () => {
+    expect(isSystemTableName("_storage")).toBe(true);
+  });
+
+  it("has a stable reserved number that preassign pins deterministically", () => {
+    expect(STORAGE_TABLE_NUMBER).toBe(20);
+
+    // Seeding a fresh registry with the reserved number is stable and idempotent regardless of
+    // what else has been allocated — a persisted Id<"_storage"> must always decode to 20.
+    const reg = new MemoryTableRegistry();
+    const storage = reg.preassign("_storage", STORAGE_TABLE_NUMBER);
+    expect(storage.tableNumber).toBe(20);
+    expect(storage.visibility).toBe("system");
+    expect(reg.getByNumber(20)).toBe(storage);
+    expect(reg.preassign("_storage", 999)).toBe(storage); // first-wins
+    expect(storage.tableNumber).toBe(20);
   });
 });
 

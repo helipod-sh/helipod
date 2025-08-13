@@ -8,6 +8,7 @@ import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
 import type { AnalyzedFunction, AnalyzedFunctionManifest } from "@stackbase/codegen";
 import { composeComponents, type ComponentDefinition, type BootContext, type Driver } from "@stackbase/component";
 import type { SimpleIndexCatalog } from "@stackbase/executor";
+import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@stackbase/storage";
 
 export const DEFAULT_INDEX = "by_creation";
 
@@ -63,6 +64,18 @@ export function loadProject(
 ): ProjectArtifacts {
   const schemaJson = loaded.schema.export();
 
+  // File storage is an ALWAYS-ON core feature (not read from `stackbase.config.ts`): inject its
+  // reserved app-root `_storage` system table into the composed schema so it flows through the same
+  // path every other table does — a catalog entry + `by_creation` index (so the `_storage:*`
+  // built-ins' `ctx.db` ops resolve) and a stable tableNumber. Seeding the registry with
+  // `{ _storage: STORAGE_TABLE_NUMBER }` (below) `preassign`s that number so `_storage` decodes back
+  // to the same table forever and never collides with an app/component table. Doing this in the
+  // SHARED load path (not just boot) keeps `stackbase deploy`'s additive-schema diff consistent:
+  // the live schema and every re-pushed schema both carry `_storage`, so a deploy never sees it as
+  // a "dropped table". Codegen already emits `_storage` from `@stackbase/values`' canonical system
+  // defs and filters it out of the app schema, so this injection does not double it there.
+  schemaJson.tables[STORAGE_TABLE] = storageTableDefinition.export();
+
   // Build the app's moduleMap + manifest from loaded.modules (codegen needs the app manifest).
   const appModuleMap: Record<string, RegisteredFunction> = {};
   const manifest: AnalyzedFunctionManifest = [];
@@ -85,7 +98,12 @@ export function loadProject(
   manifest.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   // Compose app + components: allocates table numbers, merges module maps, collects context providers.
-  const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components, existingTableNumbers);
+  // Seed `_storage` at its reserved number BEFORE allocation so `registry.preassign` pins it (an
+  // existing deploy's numbers, if any, still win — they carry the same `_storage: 20`).
+  const composed = composeComponents({ schemaJson, moduleMap: appModuleMap }, components, {
+    [STORAGE_TABLE]: STORAGE_TABLE_NUMBER,
+    ...existingTableNumbers,
+  });
 
   // Extract + resolve the `http.ts` router (if any): its `default` export is an `HttpRouter` whose
   // route handlers are `RegisteredFunction` VALUES — resolve each to its `path:name` function path

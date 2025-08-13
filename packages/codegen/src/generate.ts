@@ -7,6 +7,7 @@
  * These give app code end-to-end types — the Convex-grade DX.
  */
 import type { SchemaDefinitionJSON, TableDefinitionJSON, ValidatorJSON } from "@stackbase/values";
+import { SYSTEM_TABLE_DEFINITIONS } from "@stackbase/values";
 import { validatorToTsType } from "./validator-to-ts";
 
 export type UdfType = "query" | "mutation" | "action" | "httpAction";
@@ -81,8 +82,19 @@ function emitDocumentType(tableName: string, documentType: ValidatorJSON): strin
 }
 
 export function generateDataModel(schema: SchemaDefinitionJSON, options: CodegenOptions = {}): GeneratedFile {
-  const tables = Object.entries(schema.tables) as Array<[string, TableDefinitionJSON]>;
-  const entries = tables.map(([name, table]) => `  ${name}: { document: ${emitDocumentType(name, table.documentType)} };`);
+  // Built-in app-namespace system tables (e.g. `_storage`) are emitted FIRST, from the canonical
+  // definitions in `@stackbase/values`, so `Id<"_storage">`/`Doc<"_storage">`/`v.id("_storage")`
+  // type-check in user schemas. A user table with a reserved system name never shadows one.
+  const systemEntries = Object.entries(SYSTEM_TABLE_DEFINITIONS).map(
+    ([name, documentType]) => `  ${name}: { document: ${emitDocumentType(name, documentType)} };`,
+  );
+  const userTables = (Object.entries(schema.tables) as Array<[string, TableDefinitionJSON]>).filter(
+    ([name]) => !(name in SYSTEM_TABLE_DEFINITIONS),
+  );
+  const userEntries = userTables.map(
+    ([name, table]) => `  ${name}: { document: ${emitDocumentType(name, table.documentType)} };`,
+  );
+  const entries = [...systemEntries, ...userEntries];
   const content = `${options.header ?? DEFAULT_HEADER}import type { GenericId } from "@stackbase/values";
 
 export interface DataModel {

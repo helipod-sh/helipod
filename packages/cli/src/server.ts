@@ -11,13 +11,25 @@ import { extname, join, resolve, sep } from "node:path";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
+import type { StorageRoute } from "@stackbase/storage";
 import { handleHttpRequest, type ServerInfo } from "./http-handler";
 import type { ResolvedRoute } from "./project";
 import type { DeployResult } from "./deploy-apply";
 import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
+const STORAGE_PREFIX = "/api/storage/";
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Match an engine-owned `/api/storage/*` request (upload/confirm/serve). These are RESERVED paths
+ * spliced into dispatch ahead of user `http.ts` routes and the 404 — the upload/confirm handlers
+ * key off method (POST) so a GET `/api/storage/<id>` falls through to the serve handler.
+ */
+function matchStorageRoute(routes: StorageRoute[] | undefined, method: string, path: string): StorageRoute | undefined {
+  if (!routes || !path.startsWith(STORAGE_PREFIX)) return undefined;
+  return routes.find((r) => r.method === method && path.startsWith(r.pathPrefix));
+}
 
 /** Methods that carry a request body the server must read (PATCH is used by the admin API). */
 export function hasBody(method: string | undefined): boolean {
@@ -57,6 +69,9 @@ export interface DevServerOptions {
   dashboard?: { distDir: string; html: string } | { assets: Record<string, string>; html: string };
   /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
   routes?: ResolvedRoute[];
+  /** Engine-owned `/api/storage/*` handlers (always-on file storage). Reserved — matched before
+   *  user routes; stable across reload/deploy (their deps read the never-swapped systemModules). */
+  storageRoutes?: StorageRoute[];
   /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
 }
@@ -137,7 +152,15 @@ function resolveStatic(webDir: string, urlPath: string): { contentType: string; 
 /* Node backend (node:http + ws)                                              */
 /* -------------------------------------------------------------------------- */
 
-function readBody(req: IncomingMessage): Promise<string> {
+/**
+ * Read the raw request body as bytes (a `Buffer`), with no text decoding. This is the ONLY
+ * body-reading path that is safe for the engine-owned `/api/storage/*` uploads: an upload body may
+ * be arbitrary binary (PNG, PDF, ...), and `handleUpload` reconstructs the exact bytes via
+ * `new Uint8Array(await request.arrayBuffer())`. Round-tripping through a decoded/re-encoded utf8
+ * string (as {@link readBody} does) would mangle any non-UTF8 byte sequence — see the Task 10
+ * fixes report.
+ */
+function readBodyBytes(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -150,9 +173,18 @@ function readBody(req: IncomingMessage): Promise<string> {
       }
       chunks.push(c);
     });
-    req.on("end", () => resolvePromise(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolvePromise(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+/**
+ * Text variant of {@link readBodyBytes} for routes that treat the body as utf8 text/JSON (`/api/run`,
+ * the admin doc-edit `PATCH`, `httpAction`s, ...). Do NOT use this for the storage upload routes —
+ * decoding-then-re-encoding a binary body as utf8 is lossy for non-UTF8 byte sequences.
+ */
+function readBody(req: IncomingMessage): Promise<string> {
+  return readBodyBytes(req).then((b) => b.toString("utf8"));
 }
 
 async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
@@ -161,10 +193,15 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       try {
-        const body = hasBody(req.method) ? await readBody(req) : undefined;
         const rawUrl = req.url ?? "/";
         const url = new URL(rawUrl, "http://x");
         const path = url.pathname;
+        const needsBody = hasBody(req.method);
+        // Storage routes get the raw bytes (binary-safe); every other route keeps the existing
+        // utf8-decoded string body. The two are mutually exclusive reads of the same stream.
+        const isStorageRequest = path.startsWith(STORAGE_PREFIX);
+        const bodyBytes = needsBody && isStorageRequest ? await readBodyBytes(req) : undefined;
+        const body = needsBody && !isStorageRequest ? await readBody(req) : undefined;
         const query: Record<string, string> = {};
         url.searchParams.forEach((val, key) => { query[key] = val; });
         const authorization = req.headers.authorization ?? undefined;
@@ -178,6 +215,27 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
             res.end(dash.body);
             return;
           }
+        }
+        // Engine-owned `/api/storage/*` — dispatch to the native Web handler and stream its Response
+        // (bytes, 302 redirects, 206 partials) back through node:http verbatim.
+        const storageRoute = matchStorageRoute(options.storageRoutes, req.method ?? "GET", path);
+        if (storageRoute) {
+          const storageHeaders = new Headers(headers);
+          if (authorization && !storageHeaders.has("authorization")) storageHeaders.set("authorization", authorization);
+          const request = new Request(`http://${storageHeaders.get("host") ?? "localhost"}${rawUrl}`, {
+            method: req.method ?? "GET",
+            headers: storageHeaders,
+            // Raw bytes, NOT the utf8-decoded `body` string — see `readBodyBytes`'s doc comment.
+            // (Copied into a plain `Uint8Array<ArrayBuffer>` — `Buffer`'s `.buffer` is typed
+            // `ArrayBufferLike`, which doesn't structurally satisfy DOM lib's `BodyInit`.)
+            ...(needsBody && bodyBytes !== undefined ? { body: new Uint8Array(bodyBytes) } : {}),
+          });
+          const response = await storageRoute.handler(request);
+          const outHeaders: Record<string, string> = {};
+          response.headers.forEach((v, k) => { outHeaders[k] = v; });
+          res.writeHead(response.status, outHeaders);
+          res.end(Buffer.from(await response.arrayBuffer()));
+          return;
         }
         // Derive server info live per request from the runtime — a boot-time snapshot goes stale
         // after the first setModules hot-swap (dev reload / deploy).
@@ -237,12 +295,19 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
     url: `http://${options.ip}:${port}`,
     port,
     setRoutes: (r) => { currentRoutes = r; },
-    close: () =>
-      new Promise<void>((res) => {
+    close: async () => {
+      // Stop component drivers (scheduler event loop, storage orphan-reaper, …) BEFORE tearing the
+      // store down, so a driver's wall-clock timer can't fire a sweep against an already-closed
+      // store (which surfaces as a "statement has been finalized" error out of the reaper). Reload
+      // (dev watch / `deploy`) never calls close() — it uses setModules/setRoutes — so this only
+      // runs on a genuine shutdown.
+      await runtime.stopDrivers();
+      await new Promise<void>((res) => {
         for (const c of wss.clients) c.terminate();
         wss.close();
         server.close(() => res());
-      }),
+      });
+    },
   };
 }
 
@@ -302,6 +367,10 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
           return new Response(body, { headers: { "content-type": dash.contentType } });
         }
       }
+      // Engine-owned `/api/storage/*` — the native `Request` passes straight to the handler, whose
+      // `Response` (streamed bytes / 302 / 206) is returned unchanged by Bun.serve.
+      const storageRoute = matchStorageRoute(options.storageRoutes, req.method, path);
+      if (storageRoute) return await storageRoute.handler(req);
       const body = hasBody(req.method) ? await req.text() : undefined;
       const query: Record<string, string> = {};
       url.searchParams.forEach((val, key) => { query[key] = val; });
@@ -349,9 +418,10 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
     url: `http://${options.ip}:${handle.port}`,
     port: handle.port,
     setRoutes: (r) => { currentRoutes = r; },
-    close: () => {
+    close: async () => {
+      // See the Node backend's close(): stop drivers before the store goes away.
+      await runtime.stopDrivers();
       handle.stop(true);
-      return Promise.resolve();
     },
   };
 }

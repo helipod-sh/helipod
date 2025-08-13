@@ -12,6 +12,7 @@ import type { AdminApi } from "@stackbase/admin";
 import type { ComponentDefinition } from "@stackbase/component";
 import { loadConvexDir } from "./load-modules";
 import { push } from "./push-pipeline";
+import { withStorageModules } from "./boot";
 import { diffSchema, type DeploySchema } from "./schema-diff";
 import type { ResolvedRoute } from "./project";
 
@@ -61,8 +62,9 @@ export async function applyDeploy(
   });
   if (!diff.ok) return { ok: false, kind: "schema-incompatible", error: diff.reason };
 
-  // Atomic swap — only reached after load + diff succeed.
-  deps.runtime.setModules(project.moduleMap);
+  // Atomic swap — only reached after load + diff succeed. Re-apply the always-on `_storage:*`
+  // built-ins (they're not in the pushed moduleMap) so file storage survives a live deploy.
+  deps.runtime.setModules(withStorageModules(project.moduleMap));
   deps.runtime.setTableNumbers(project.tableNumbers);
   deps.setRoutes(project.routes);
   deps.adminApi.setSchema(project.schemaJson, project.tableNumbers, project.manifest);

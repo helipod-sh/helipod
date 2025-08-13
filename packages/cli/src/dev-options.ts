@@ -13,6 +13,9 @@ export interface DevOptions {
   webDir?: string;
   /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
   databaseUrl?: string;
+  /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
+  storageBucket?: string;
+  storageEndpoint?: string;
 }
 
 export interface ResolvedDevOptions {
@@ -23,6 +26,8 @@ export interface ResolvedDevOptions {
   runtime: RuntimeKind;
   webDir: string | undefined;
   databaseUrl: string | undefined;
+  storageBucket: string | undefined;
+  storageEndpoint: string | undefined;
 }
 
 export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions {
@@ -34,6 +39,8 @@ export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions 
     runtime: options.runtime ?? "auto",
     webDir: options.webDir,
     databaseUrl: options.databaseUrl ?? process.env.STACKBASE_DATABASE_URL,
+    storageBucket: options.storageBucket,
+    storageEndpoint: options.storageEndpoint,
   };
 }
 

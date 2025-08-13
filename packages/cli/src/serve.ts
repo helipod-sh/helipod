@@ -25,6 +25,13 @@ export interface ServeOptions {
   allowDeploy: boolean;
   /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
   databaseUrl?: string;
+  /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
+  storageBucket?: string;
+  storageEndpoint?: string;
+  /** Test-only: shorten the pending-upload TTL / orphan-reaper sweep so a reap is observable in a
+   * test's timescale. Unset → the storage defaults (1h TTL, 60s sweep). Not surfaced as CLI flags. */
+  storageUploadTtlMs?: number;
+  storageReaperSweepMs?: number;
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
@@ -35,6 +42,8 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
   let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
   let databaseUrl = process.env.STACKBASE_DATABASE_URL;
+  let storageBucket: string | undefined;
+  let storageEndpoint: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -44,8 +53,10 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--no-dashboard") dashboard = false;
     else if (a === "--allow-deploy") allowDeploy = true;
     else if (a === "--database-url" && args[i + 1]) databaseUrl = args[++i] as string;
+    else if (a === "--storage-bucket" && args[i + 1]) storageBucket = args[++i] as string;
+    else if (a === "--storage-endpoint" && args[i + 1]) storageEndpoint = args[++i] as string;
   }
-  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl };
+  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl, storageBucket, storageEndpoint };
 }
 
 /**
@@ -67,11 +78,14 @@ function toDeploySchema(schemaJson: SchemaJsonLike): DeploySchema["schemaJson"] 
 export async function startServe(
   opts: ServeOptions & { adminKey: string },
 ): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime }> {
-  const { runtime, adminApi, project, store, components } = await bootProject({
+  const { runtime, adminApi, project, store, components, storageRoutes } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey: opts.adminKey,
     databaseUrl: opts.databaseUrl,
+    storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
+    ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
+    ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -101,7 +115,7 @@ export async function startServe(
     : undefined;
   server = await startDevServer(
     runtime,
-    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, deploy },
+    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy },
   );
   return { server, store, runtime };
 }
