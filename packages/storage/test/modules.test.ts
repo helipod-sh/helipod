@@ -4,6 +4,7 @@ import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema } from "@stackbase/values";
 import { decodeDocumentId } from "@stackbase/id-codec";
+import { DocumentNotFoundError } from "@stackbase/errors";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/system-table";
 import { storageModules } from "../src/modules";
 
@@ -26,7 +27,7 @@ import { storageModules } from "../src/modules";
  * is flagged as a follow-up for a later task in Task 4's report; this harness seeds it directly
  * so this test proves the id round-trips through the RESERVED number, not just "a" number.
  */
-async function makeRuntime(): Promise<EmbeddedRuntime> {
+async function makeRuntime(now?: () => number): Promise<EmbeddedRuntime> {
   const schema = defineSchema({ [STORAGE_TABLE]: storageTableDefinition });
   const c = composeComponents(
     { schemaJson: schema.export(), moduleMap: {} },
@@ -46,6 +47,7 @@ async function makeRuntime(): Promise<EmbeddedRuntime> {
     bootSteps: c.bootSteps,
     drivers: c.drivers,
     tableNumbers: c.tableNumbers,
+    now,
   });
 }
 
@@ -115,6 +117,76 @@ describe("@stackbase/storage internal _storage metadata modules", () => {
 
     const doc = (await runtime.runSystem<Record<string, unknown> | null>("_storage:_get", { id })).value;
     expect(doc).toMatchObject({ status: "ready", size: 42, sha256: "cafebabe" });
+  });
+
+  it("_finalize REFUSES a tombstoned/expired-pending row — no resurrection — and stays pending", async () => {
+    // Regression test for the delete->re-confirm resurrection hole: `ctx.storage.delete()`
+    // tombstones a row to `status:"pending", expiresAt:<now>` (see `../src/context.ts`'s `delete`
+    // doc comment), keeping `key` so the reaper reclaims the blob — but the upload/confirm
+    // capability token stays valid for the full `uploadTtlMs` window, independent of the row's own
+    // `expiresAt`. A client replaying `confirm`/`upload` with that still-valid token must not be
+    // able to flip the tombstone BACK to `"ready"`. Simulate the tombstone directly (a pending row
+    // whose `expiresAt` has already passed at the fixed deterministic `now`) rather than going
+    // through the `ctx.storage` facade, since this test exercises `_finalize` in isolation.
+    const NOW = 1_700_000_000_000;
+    const runtime = await makeRuntime(() => NOW);
+    const id = (
+      await runtime.runSystem<string>("_storage:_createPending", {
+        key: "u/tombstoned",
+        contentType: "text/plain",
+        visibility: "private",
+        expiresAt: NOW - 1, // already expired at `NOW` — same shape as a delete() tombstone
+      })
+    ).value;
+
+    await expect(runtime.runSystem("_storage:_finalize", { id, size: 999, sha256: "resurrected" })).rejects.toThrow(
+      DocumentNotFoundError,
+    );
+
+    // The row was NOT resurrected: still pending, still carrying its pre-tombstone (null) size/hash,
+    // not the replayed finalize's payload.
+    const doc = (await runtime.runSystem<Record<string, unknown> | null>("_storage:_get", { id })).value;
+    expect(doc).toMatchObject({ status: "pending", key: "u/tombstoned", size: null, sha256: null });
+  });
+
+  it("_finalize REFUSES a pending row whose expiresAt is exactly now (boundary — reclaimable, not future)", async () => {
+    const NOW = 1_700_000_000_000;
+    const runtime = await makeRuntime(() => NOW);
+    const id = (
+      await runtime.runSystem<string>("_storage:_createPending", {
+        key: "u/boundary",
+        contentType: null,
+        visibility: "private",
+        expiresAt: NOW, // expiresAt <= now, per `_reapExpired`'s own "due" condition
+      })
+    ).value;
+
+    await expect(runtime.runSystem("_storage:_finalize", { id, size: 1, sha256: "x" })).rejects.toThrow(
+      DocumentNotFoundError,
+    );
+    expect((await runtime.runSystem<Record<string, unknown> | null>("_storage:_get", { id })).value).toMatchObject({
+      status: "pending",
+    });
+  });
+
+  it("_finalize STILL SUCCEEDS for a genuinely in-flight pending row (future expiresAt)", async () => {
+    const NOW = 1_700_000_000_000;
+    const runtime = await makeRuntime(() => NOW);
+    const id = (
+      await runtime.runSystem<string>("_storage:_createPending", {
+        key: "u/in-flight",
+        contentType: null,
+        visibility: "private",
+        expiresAt: NOW + 100_000, // future — not yet expired, a legitimate in-flight upload
+      })
+    ).value;
+
+    await runtime.runSystem("_storage:_finalize", { id, size: 7, sha256: "cafe" });
+    expect((await runtime.runSystem<Record<string, unknown> | null>("_storage:_get", { id })).value).toMatchObject({
+      status: "ready",
+      size: 7,
+      sha256: "cafe",
+    });
   });
 
   it("_finalize is a no-op (idempotent) when the row is already ready", async () => {

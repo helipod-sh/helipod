@@ -327,96 +327,137 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
       process.env.AWS_SECRET_ACCESS_KEY = MINIO_PASS;
       process.env.STACKBASE_STORAGE_REGION = "us-east-1";
 
-      // Short TTL + sweep so an orphaned pending upload actually reaps within the test.
-      const started = await startServe({
-        convexDir,
-        dataPath,
-        ip: "127.0.0.1",
-        port: 0,
-        adminKey: "s3-key",
-        dashboard: false,
-        allowDeploy: false,
-        storageBucket: BUCKET,
-        storageEndpoint: endpoint,
-        storageUploadTtlMs: 600,
-        storageReaperSweepMs: 200,
-      });
-      const { server, store } = started;
-
       try {
-        const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
-
-        /* 1. generateUploadUrl → a PRESIGNED target pointing straight at the bucket. */
-        const { value: up } = await run<CreateUploadResult>(server.url, "files:createUpload", {
-          contentType: "image/png",
-          visibility: "private",
+        // A comfortable upload TTL for the confirmed-file path below: `createUpload →
+        // PUT-to-bucket → confirm` all have to land within the TTL window, and a too-tight window
+        // (600ms, the prior value) is a latent CI flake under container/network latency. The
+        // orphan-reap sub-case (below) needs the OPPOSITE — a short TTL so an abandoned upload
+        // actually expires promptly — so it runs against its own separately-booted server with its
+        // own short TTL, rather than sharing this one. `storageReaperSweepMs` stays short here too:
+        // `delete()`'s tombstone is immediately-expired regardless of `storageUploadTtlMs` (see
+        // `_finalize`'s resurrection guard / `ctx.storage.delete`'s doc comment) — only the sweep
+        // cadence, not this TTL, governs how promptly the post-delete reclaim below is observed.
+        const started = await startServe({
+          convexDir,
+          dataPath,
+          ip: "127.0.0.1",
+          port: 0,
+          adminKey: "s3-key",
+          dashboard: false,
+          allowDeploy: false,
+          storageBucket: BUCKET,
+          storageEndpoint: endpoint,
+          storageUploadTtlMs: 3_000,
+          storageReaperSweepMs: 200,
         });
-        expect(up.target.kind).toBe("presigned");
-        expect(up.target.url).toContain(endpoint);
-        const storageId = up.storageId;
+        const { server, store } = started;
 
-        /* 2. PUT bytes DIRECTLY to the bucket — never through our server. */
-        const putRes = await fetch(up.target.url, {
-          method: up.target.method,
-          headers: up.target.headers ?? {},
-          body: BINARY,
+        try {
+          const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
+
+          /* 1. generateUploadUrl → a PRESIGNED target pointing straight at the bucket. */
+          const { value: up } = await run<CreateUploadResult>(server.url, "files:createUpload", {
+            contentType: "image/png",
+            visibility: "private",
+          });
+          expect(up.target.kind).toBe("presigned");
+          expect(up.target.url).toContain(endpoint);
+          const storageId = up.storageId;
+
+          /* 2. PUT bytes DIRECTLY to the bucket — never through our server. */
+          const putRes = await fetch(up.target.url, {
+            method: up.target.method,
+            headers: up.target.headers ?? {},
+            body: BINARY,
+          });
+          expect(putRes.status).toBe(200);
+          // The object physically exists in the bucket now.
+          expect(await bucketView.read(storageId)).not.toBeNull();
+
+          /* 3. confirm → row flips ready. The confirm url+token is surfaced on the target. */
+          expect(up.target.confirmUrl).toBeTruthy();
+          const confirmRes = await fetch(abs(server.url, up.target.confirmUrl!), { method: "POST" });
+          expect(confirmRes.status).toBe(200);
+          expect((await confirmRes.json()) as { storageId: string }).toEqual({ storageId });
+
+          /* 4. getUrl → GET our serve endpoint → 302 to the signed bucket GET → original bytes. */
+          const { value: getUrl } = await run<{ value: string }>(server.url, "files:getUrl", { id: storageId });
+          expect(getUrl).not.toBeNull();
+          const getRes = await fetch(abs(server.url, getUrl)); // fetch follows the 302 by default
+          expect(getRes.status).toBe(200);
+          const served = new Uint8Array(await getRes.arrayBuffer());
+          expect(Array.from(served)).toEqual(Array.from(BINARY));
+
+          /* 5. Store the Id<"_storage"> in a user row → a pre-opened files:list subscription updates. */
+          const { ws, messages } = await subscribeToFiles(wsUrl);
+          expect(latestMod(messages, 1)!.value).toEqual([]);
+          await run(server.url, "files:save", { name: "s3.png", storageId });
+          await waitFor(() => {
+            const m = latestMod(messages, 1);
+            return m?.type === "QueryUpdated" && Array.isArray(m.value) && (m.value as unknown[]).length > 0;
+          });
+          expect(latestMod(messages, 1)!.value).toEqual([{ name: "s3.png", image: storageId }]);
+          ws.close();
+
+          /* 6. delete a CONFIRMED file → metadata gone; after a reaper tick the bucket object is gone. */
+          await run(server.url, "files:remove", { id: storageId });
+          const metaAfter = await run<{ value: unknown }>(server.url, "files:getMeta", { id: storageId });
+          expect(metaAfter.value).toBeNull();
+          await waitForAsync(async () => (await bucketView.read(storageId)) === null, 20_000);
+          expect(await bucketView.read(storageId)).toBeNull();
+        } finally {
+          await server.close();
+          store.close();
+        }
+
+        /* 7. Orphan reap, on its OWN short-TTL server: a presigned upload PUT to the bucket but
+         * NEVER confirmed. After the (short) TTL expires and a reaper tick fires, the pending row
+         * AND its bucket object are gone. Kept on a separate server/data dir from the
+         * confirmed-file path above so its short TTL never interacts with that path's more
+         * generous one. */
+        const orphanDataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-s3-orphan-db-")), "db.sqlite");
+        const { server: orphanServer, store: orphanStore } = await startServe({
+          convexDir,
+          dataPath: orphanDataPath,
+          ip: "127.0.0.1",
+          port: 0,
+          adminKey: "s3-key-orphan",
+          dashboard: false,
+          allowDeploy: false,
+          storageBucket: BUCKET,
+          storageEndpoint: endpoint,
+          storageUploadTtlMs: 600,
+          storageReaperSweepMs: 200,
         });
-        expect(putRes.status).toBe(200);
-        // The object physically exists in the bucket now.
-        expect(await bucketView.read(storageId)).not.toBeNull();
-
-        /* 3. confirm → row flips ready. The confirm url+token is surfaced on the target. */
-        expect(up.target.confirmUrl).toBeTruthy();
-        const confirmRes = await fetch(abs(server.url, up.target.confirmUrl!), { method: "POST" });
-        expect(confirmRes.status).toBe(200);
-        expect((await confirmRes.json()) as { storageId: string }).toEqual({ storageId });
-
-        /* 4. getUrl → GET our serve endpoint → 302 to the signed bucket GET → original bytes. */
-        const { value: getUrl } = await run<{ value: string }>(server.url, "files:getUrl", { id: storageId });
-        expect(getUrl).not.toBeNull();
-        const getRes = await fetch(abs(server.url, getUrl)); // fetch follows the 302 by default
-        expect(getRes.status).toBe(200);
-        const served = new Uint8Array(await getRes.arrayBuffer());
-        expect(Array.from(served)).toEqual(Array.from(BINARY));
-
-        /* 5. Store the Id<"_storage"> in a user row → a pre-opened files:list subscription updates. */
-        const { ws, messages } = await subscribeToFiles(wsUrl);
-        expect(latestMod(messages, 1)!.value).toEqual([]);
-        await run(server.url, "files:save", { name: "s3.png", storageId });
-        await waitFor(() => {
-          const m = latestMod(messages, 1);
-          return m?.type === "QueryUpdated" && Array.isArray(m.value) && (m.value as unknown[]).length > 0;
-        });
-        expect(latestMod(messages, 1)!.value).toEqual([{ name: "s3.png", image: storageId }]);
-        ws.close();
-
-        /* 6. Orphan reap: a presigned upload PUT to the bucket but NEVER confirmed. After the TTL
-         * expires and a reaper tick fires, the pending row AND its bucket object are gone. */
-        const { value: orphan } = await run<CreateUploadResult>(server.url, "files:createUpload", {
-          contentType: "application/octet-stream",
-          visibility: "private",
-        });
-        await fetch(orphan.target.url, { method: orphan.target.method, headers: orphan.target.headers ?? {}, body: BINARY });
-        expect(await bucketView.read(orphan.storageId)).not.toBeNull();
-        // Wait past the TTL and let the reaper sweep.
-        await waitForAsync(async () => {
-          const { value } = await run<{ value: unknown }>(server.url, "files:getMeta", { id: orphan.storageId });
-          return value === null;
-        }, 20_000);
-        const orphanMeta = await run<{ value: unknown }>(server.url, "files:getMeta", { id: orphan.storageId });
-        expect(orphanMeta.value).toBeNull();
-        expect(await bucketView.read(orphan.storageId)).toBeNull();
-
-        /* 7. delete a CONFIRMED file → metadata gone; after a reaper tick the bucket object is gone. */
-        await run(server.url, "files:remove", { id: storageId });
-        const metaAfter = await run<{ value: unknown }>(server.url, "files:getMeta", { id: storageId });
-        expect(metaAfter.value).toBeNull();
-        await waitForAsync(async () => (await bucketView.read(storageId)) === null, 20_000);
-        expect(await bucketView.read(storageId)).toBeNull();
+        try {
+          const { value: orphan } = await run<CreateUploadResult>(orphanServer.url, "files:createUpload", {
+            contentType: "application/octet-stream",
+            visibility: "private",
+          });
+          await fetch(orphan.target.url, {
+            method: orphan.target.method,
+            headers: orphan.target.headers ?? {},
+            body: BINARY,
+          });
+          expect(await bucketView.read(orphan.storageId)).not.toBeNull();
+          // Wait past the TTL and let the reaper sweep.
+          await waitForAsync(async () => {
+            const { value } = await run<{ value: unknown }>(orphanServer.url, "files:getMeta", {
+              id: orphan.storageId,
+            });
+            return value === null;
+          }, 20_000);
+          const orphanMeta = await run<{ value: unknown }>(orphanServer.url, "files:getMeta", {
+            id: orphan.storageId,
+          });
+          expect(orphanMeta.value).toBeNull();
+          expect(await bucketView.read(orphan.storageId)).toBeNull();
+        } finally {
+          await orphanServer.close();
+          orphanStore.close();
+        }
       } finally {
         process.env = prevEnv;
-        await server.close();
-        store.close();
         stopMinio();
       }
     },

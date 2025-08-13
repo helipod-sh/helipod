@@ -18,6 +18,7 @@
  */
 import type { BlobStore, ByteRange } from "@stackbase/blobstore";
 import { isValidDocumentId } from "@stackbase/id-codec";
+import { DocumentNotFoundError } from "@stackbase/errors";
 import { verifyStorageToken } from "./token";
 import type { StorageDoc } from "./modules";
 import { STORAGE_TABLE_NUMBER } from "./system-table";
@@ -102,6 +103,26 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
     return { id };
   }
 
+  /**
+   * Shared finalize-call wrapper: `_storage:_finalize` throws `DocumentNotFoundError` both for a
+   * truly-missing row AND — since the resurrection-guard fix — for a `pending` row that is
+   * tombstoned/expired (a `ctx.storage.delete()`'d file, or an abandoned upload the reaper hasn't
+   * swept yet). Either way, the upload this capability token pointed at is gone; surface that as a
+   * clean 404 rather than letting it propagate as an uncaught rejection that a server's outer
+   * catch-all would turn into a generic 500. Any OTHER error (a real backend failure) is rethrown
+   * as-is, so it still surfaces as a 500 upstream — this must not mask a genuine outage as "not
+   * found".
+   */
+  async function callFinalize(id: string, size: number, sha256: string | null): Promise<Response | null> {
+    try {
+      await deps.runMutation("_storage:_finalize", { id, size, sha256 });
+      return null;
+    } catch (e) {
+      if (e instanceof DocumentNotFoundError) return textResponse(404, "upload not found (expired or deleted)");
+      throw e;
+    }
+  }
+
   async function handleUpload(request: Request): Promise<Response> {
     const auth = authorize(new URL(request.url));
     if (auth === null) return textResponse(401, "invalid or expired upload token");
@@ -110,7 +131,8 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
     const bytes = new Uint8Array(await request.arrayBuffer());
     const contentType = request.headers.get("content-type");
     const info = await blobStore.store(id, bytes, contentType !== null ? { contentType } : undefined);
-    await deps.runMutation("_storage:_finalize", { id, size: info.size, sha256: info.sha256 });
+    const notFound = await callFinalize(id, info.size, info.sha256);
+    if (notFound !== null) return notFound;
     return Response.json({ storageId: id });
   }
 
@@ -121,7 +143,8 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
 
     const info = await blobStore.finalizeUpload(id);
     if (info === null) return textResponse(409, "upload not found");
-    await deps.runMutation("_storage:_finalize", { id, size: info.size, sha256: info.sha256 });
+    const notFound = await callFinalize(id, info.size, info.sha256);
+    if (notFound !== null) return notFound;
     return Response.json({ storageId: id });
   }
 

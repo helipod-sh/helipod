@@ -100,12 +100,34 @@ export const _insertReady = mutation(
  * so a caller never needs a follow-up `_get` to learn the outcome. Throws if the row doesn't
  * exist at all — unlike a race between two finalizes of the SAME upload, a missing id is a
  * caller bug (the id came from `_createPending`, which the caller must not have discarded).
+ *
+ * ── Resurrection guard (load-bearing) ───────────────────────────────────────────────────────
+ * A `pending` row with an `expiresAt` at/before "now" is NOT a legitimate in-flight upload — it
+ * is either an abandoned upload the reaper hasn't swept yet, or a `ctx.storage.delete()`
+ * tombstone (`./context.ts`'s `delete` flips a row to `pending`/`expiresAt: cctx.now`, keeping
+ * `key` only so the reaper can reclaim the blob). The proxied-upload/confirm capability token
+ * stays valid for the full `uploadTtlMs` window (default 1h — see `./context.ts`'s
+ * `DEFAULT_UPLOAD_TTL_MS`), independent of the row's own `expiresAt`, so a client that captured
+ * the token before a delete can otherwise replay `POST /api/storage/upload`/`confirm` afterward
+ * and — since this mutation used to only guard against an already-`"ready"` row — silently flip
+ * the tombstone BACK to `"ready"`, permanently reverting the delete. Treat such a row exactly
+ * like a missing document (`DocumentNotFoundError`, the same shape `./http.ts`'s endpoints
+ * already map to a 404-family response for a missing/gone upload) rather than resurrecting it.
+ * A genuinely in-flight pending upload has a FUTURE `expiresAt` (or `null`, unexpiring), so it is
+ * unaffected. `ctx.now()` is the mutation's deterministic transaction timestamp — the same clock
+ * `components/scheduler/src/modules.ts` reads via `ctx.now()` — never wall-clock `Date.now()`,
+ * so this stays replay-safe on an OCC conflict.
  */
 export const _finalize = mutation(
   async (ctx: MutationCtx, args: { id: string; size: number; sha256: string }): Promise<StorageDoc> => {
     const existing = await ctx.db.get(args.id);
     if (existing === null) throw new DocumentNotFoundError(`_storage:_finalize: no such document ${args.id}`);
     if (existing["status"] === "ready") return existing as unknown as StorageDoc; // idempotent no-op
+    const expiresAt = existing["expiresAt"] as number | null;
+    if (expiresAt !== null && expiresAt <= ctx.now()) {
+      // Tombstoned (deleted) or already expired — refuse rather than resurrect.
+      throw new DocumentNotFoundError(`_storage:_finalize: no such document ${args.id}`);
+    }
     const updated = { ...existing, status: "ready" as const, size: args.size, sha256: args.sha256 };
     await ctx.db.replace(args.id, updated);
     return updated as unknown as StorageDoc;

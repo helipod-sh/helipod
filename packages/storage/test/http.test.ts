@@ -104,6 +104,10 @@ async function makeRuntime(blobStore: BlobStore): Promise<EmbeddedRuntime> {
       async (ctx: any, args: { contentType?: string; visibility?: "private" | "public" }) =>
         ctx.storage.generateUploadUrl(args),
     ),
+    "app:del": mutation(async (ctx: any, { id }: { id: string }) => {
+      await ctx.storage.delete(id);
+      return null;
+    }),
   };
   return EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
@@ -274,6 +278,80 @@ describe("POST /api/storage/confirm", () => {
     const request = new Request(`http://localhost/api/storage/confirm?id=${id}&token=bogus`, { method: "POST" });
     const response = await findRoute(routes, "POST", "/api/storage/confirm").handler(request);
     expect(response.status).toBe(401);
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "pending" });
+  });
+});
+
+describe("delete->re-confirm resurrection guard", () => {
+  it("a still-valid upload token replayed AFTER ctx.storage.delete() is refused (404), not resurrected to ready", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await mintPendingId(runtime, "text/plain");
+    const token = tokenFor(id); // captured before the delete — mirrors a client holding a stale token
+
+    // Finalize once (a legitimate upload lands).
+    const firstBody = new TextEncoder().encode("original bytes");
+    const firstUpload = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${token}`, {
+        method: "POST",
+        body: new Uint8Array(firstBody),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    expect(firstUpload.status).toBe(200);
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "ready" });
+
+    // The row is deleted — tombstoned to an immediately-expired `pending` row (see
+    // `../src/context.ts`'s `delete` doc comment), NOT hard-removed.
+    await runtime.run("app:del", { id });
+    const tombstoned = await getDoc(runtime, id);
+    expect(tombstoned).toMatchObject({ status: "pending" });
+
+    // The upload capability token is still cryptographically valid (its own `exp` hasn't passed) —
+    // a client that captured it before the delete can replay the upload endpoint.
+    const replayBody = new TextEncoder().encode("attacker-replayed bytes");
+    const replay = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${token}`, {
+        method: "POST",
+        body: new Uint8Array(replayBody),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    expect(replay.status).toBe(404);
+    // The row must NOT be resurrected to ready — it stays exactly as the tombstone left it.
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "pending" });
+  });
+
+  it("a still-valid confirm token replayed AFTER ctx.storage.delete() is refused (404), not resurrected to ready", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await mintPendingId(runtime, "text/plain");
+    const token = tokenFor(id);
+
+    // Finalize once via confirm (simulating a direct-to-store upload landing out-of-band).
+    const firstBytes = new TextEncoder().encode("original bytes");
+    await blobStore.store(id, firstBytes);
+    const firstConfirm = await findRoute(routes, "POST", "/api/storage/confirm").handler(
+      new Request(`http://localhost/api/storage/confirm?id=${id}&token=${token}`, { method: "POST" }),
+    );
+    expect(firstConfirm.status).toBe(200);
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "ready" });
+
+    // Delete tombstones the row.
+    await runtime.run("app:del", { id });
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "pending" });
+
+    // A second (attacker/leftover-client) blob write under the same key, then a replayed confirm
+    // with the still-valid token — must not flip the tombstone back to ready.
+    await blobStore.store(id, new TextEncoder().encode("attacker-replayed bytes"));
+    const replayConfirm = await findRoute(routes, "POST", "/api/storage/confirm").handler(
+      new Request(`http://localhost/api/storage/confirm?id=${id}&token=${token}`, { method: "POST" }),
+    );
+
+    expect(replayConfirm.status).toBe(404);
     expect(await getDoc(runtime, id)).toMatchObject({ status: "pending" });
   });
 });
