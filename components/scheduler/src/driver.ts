@@ -75,8 +75,19 @@ export function schedulerDriver(): SchedulerDriver {
   // `inProgress` forever without this sweep. Kept on its own handle (separate from `timer`, the
   // due-job wake timer) so re-arming one never clobbers the other.
   let sweepTimer: number | null = null;
+  // Set by `stop()` BEFORE it tears down the timers/subscription. Guards against the driver
+  // resurrecting itself: an in-flight pass's end-of-pass `setTimer` (`runPass`), a settling
+  // `sweepOnce`'s `finally → armSweep`, and `iterate`'s `finally → wake` all run unconditionally
+  // when work that was already in flight settles — even if `stop()` raced in while a
+  // `runFunction` was awaiting. Without this flag they re-arm a fresh timer after `stop()`
+  // already returned, and the loop keeps running forever. Checked at every re-entry/re-arm point
+  // (`wake`, `iterate`, `runPass`'s re-arm, `armSweep`) so a timer/commit callback that fires
+  // concurrently with `stop()` can't start or re-schedule work either. (Mirrors the same guard in
+  // `@stackbase/storage`'s reaper driver.)
+  let stopped = false;
 
   function wake(): void {
+    if (stopped) return;
     // Fire-and-forget from a sync callback (onCommit/setTimer); swallow+log rather than let an
     // unexpected internal error (a bug in _peekDue/_claim/_complete, not a job's own throw —
     // those are caught per-job below) surface as an unhandled rejection. If an iteration is
@@ -88,6 +99,7 @@ export function schedulerDriver(): SchedulerDriver {
   }
 
   function iterate(): Promise<void> {
+    if (stopped) return Promise.resolve();
     if (running) {
       // A commit (or another wake) landed while a pass is already in flight — e.g. an app
       // mutation enqueuing a due-now job between the in-flight pass's awaits. That pass may
@@ -156,7 +168,8 @@ export function schedulerDriver(): SchedulerDriver {
       ctx.clearTimer(timer);
       timer = null;
     }
-    if (earliestFutureTs != null) timer = ctx.setTimer(earliestFutureTs, wake);
+    // Guard against re-arming after `stop()` raced in while this pass was awaiting a `runFunction`.
+    if (!stopped && earliestFutureTs != null) timer = ctx.setTimer(earliestFutureTs, wake);
   }
 
   // Runs `scheduler:_reclaim` once, then re-arms itself `SWEEP_MS` out — the recurring safety
@@ -173,6 +186,8 @@ export function schedulerDriver(): SchedulerDriver {
   }
 
   function armSweep(): void {
+    // A settling `sweepOnce()` calls this from its `finally` even if `stop()` raced in mid-sweep.
+    if (stopped) return;
     if (sweepTimer !== null) {
       ctx.clearTimer(sweepTimer);
       sweepTimer = null;
@@ -195,6 +210,10 @@ export function schedulerDriver(): SchedulerDriver {
       armSweep();
     },
     stop() {
+      // Set BEFORE teardown so any in-flight pass/sweep that settles after this returns sees
+      // `stopped` already true and its re-arm (`runPass`'s `setTimer`, `sweepOnce`'s `armSweep`,
+      // `iterate`'s `finally → wake`) no-ops instead of resurrecting the driver.
+      stopped = true;
       unsubscribeCommit?.();
       unsubscribeCommit = null;
       if (timer !== null) {
