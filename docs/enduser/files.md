@@ -14,7 +14,7 @@ the server at one. Your function code is identical either way.
 
 ## How it fits together
 
-- **`_storage`** is a built-in table, like `_scheduled_jobs` — it holds metadata (`status`, `size`,
+- **`_storage`** is a built-in system table — it holds metadata (`status`, `size`,
   `contentType`, `sha256`, `visibility`) for every uploaded file, keyed by its document id.
 - **`Id<"_storage">`** is a first-class id type: put one in a `v.id("_storage")` schema field and it
   behaves like any other document reference, including participating in reactivity — a query that
@@ -141,7 +141,9 @@ export const photoMeta = query({
 });
 ```
 
-`getUrl` returns `null` for an id that doesn't exist, or one that's still a pending/expired upload.
+`getUrl` returns `null` for an id that doesn't exist, or one whose upload was never confirmed and
+has since expired (a deleted file, or an abandoned upload past its TTL). An in-flight upload that
+hasn't expired yet is not treated as absent.
 Otherwise it returns a URL the client can `fetch`/render directly — see [Access control](#access-control-private-by-default)
 below for what that URL actually carries.
 
