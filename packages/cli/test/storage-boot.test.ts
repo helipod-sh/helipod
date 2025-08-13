@@ -105,7 +105,7 @@ describe("storage wiring (boot smoke)", () => {
       // same way `packages/storage/test/http.test.ts`'s fixtures do: mint our own capability
       // token over the same `(signingKey, id)` the upload endpoint verifies against — `exp` need
       // only be in the future, it's independent of whatever `generateUploadUrl` picked.
-      const uploadToken = createStorageToken("boot-key", storageId, Date.now() + 60_000);
+      const uploadToken = createStorageToken("boot-key", "upload", storageId, Date.now() + 60_000);
       const nonUtf8Bytes = new Uint8Array([0xff, 0x00, 0xfe, 0x80, 0x01]);
 
       const uploadRes = await fetch(
@@ -117,7 +117,7 @@ describe("storage wiring (boot smoke)", () => {
 
       // Read it back — private by default, so gate the GET the same way a private `getUrl()`
       // would (a capability token, verified via the same no-authz fallback in `handleServe`).
-      const getToken = createStorageToken("boot-key", storageId, Date.now() + 60_000);
+      const getToken = createStorageToken("boot-key", "get", storageId, Date.now() + 60_000);
       const downloadRes = await fetch(`${server.url}/api/storage/${storageId}?token=${getToken}`);
       expect(downloadRes.status).toBe(200);
       const roundTripped = new Uint8Array(await downloadRes.arrayBuffer());

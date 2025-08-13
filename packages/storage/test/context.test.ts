@@ -190,7 +190,7 @@ describe("ctx.storage — mutation/query facade (build)", () => {
     expect(url!.startsWith(`${storageEndpointPath(value.storageId)}?token=`)).toBe(true);
     const token = new URL(url!, "http://x").searchParams.get("token")!;
     // The token verifies against the same signing key the routes use, at the deterministic `now`.
-    expect(verifyStorageToken("test-signing-key", value.storageId, token, NOW)).toBe(true);
+    expect(verifyStorageToken("test-signing-key", "get", value.storageId, token, NOW)).toBe(true);
 
     // Deterministic: the expiry is derived from `cctx.now` (fixed here), so a re-run — an OCC replay
     // — yields the byte-identical url (a wall-clock `Date.now()` would drift and break query safety).

@@ -19,6 +19,7 @@ export type {
 export { storageModules } from "./modules";
 export type { StorageDoc } from "./modules";
 export { createStorageToken, verifyStorageToken } from "./token";
+export type { TokenScope } from "./token";
 export { storageRoutes } from "./http";
 export type { StorageRouteDeps, StorageRoute } from "./http";
 export { storageReaper } from "./reaper";

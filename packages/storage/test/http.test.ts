@@ -16,7 +16,7 @@ import type {
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/system-table";
 import { storageModules } from "../src/modules";
 import { storageContextProvider } from "../src/context";
-import { createStorageToken } from "../src/token";
+import { createStorageToken, type TokenScope } from "../src/token";
 import { storageRoutes, type StorageRoute, type StorageRouteDeps } from "../src/http";
 
 const SIGNING_KEY = "test-signing-key";
@@ -155,8 +155,8 @@ async function mintPendingId(
   return value.storageId;
 }
 
-function tokenFor(id: string, expiresInMs = 60_000): string {
-  return createStorageToken(SIGNING_KEY, id, Date.now() + expiresInMs);
+function tokenFor(scope: TokenScope, id: string, expiresInMs = 60_000): string {
+  return createStorageToken(SIGNING_KEY, scope, id, Date.now() + expiresInMs);
 }
 
 async function getDoc(runtime: EmbeddedRuntime, id: string): Promise<Record<string, unknown> | null> {
@@ -171,7 +171,7 @@ describe("POST /api/storage/upload", () => {
     const id = await mintPendingId(runtime, "text/plain");
 
     const body = new TextEncoder().encode("hello world");
-    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id)}`, {
+    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor("upload", id)}`, {
       method: "POST",
       body,
       headers: { "content-type": "text/plain" },
@@ -223,12 +223,94 @@ describe("POST /api/storage/upload", () => {
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const id = await mintPendingId(runtime);
 
-    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id, -1000)}`, {
+    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor("upload", id, -1000)}`, {
       method: "POST",
       body: new TextEncoder().encode("x"),
     });
     const response = await findRoute(routes, "POST", "/api/storage/upload").handler(request);
     expect(response.status).toBe(401);
+  });
+
+  it("a GET-scoped token (minted for serving) is rejected against the upload endpoint (scope mismatch), and stored bytes are unchanged", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await mintPendingId(runtime, "text/plain");
+
+    // Legitimately finalize the upload first, so there's a real `ready` blob whose bytes we can
+    // prove stay untouched by the replay below.
+    const original = new TextEncoder().encode("original bytes");
+    const firstUpload = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor("upload", id)}`, {
+        method: "POST",
+        body: new Uint8Array(original),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    expect(firstUpload.status).toBe(200);
+
+    // A `"get"`-scoped token — exactly what `ctx.storage.getUrl()` embeds in a private file's url,
+    // which is meant to be handed to a client/browser and can leak into logs/history/Referer — is
+    // presented as the upload token. Before the scope-tagging fix this recomputed to the SAME HMAC
+    // as an upload token for the same `(id, exp)` and would have authorized the write; now it must
+    // be rejected outright.
+    const getToken = tokenFor("get", id);
+    const replay = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${getToken}`, {
+        method: "POST",
+        body: new TextEncoder().encode("attacker-injected bytes"),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    expect(replay.status).toBe(401);
+    expect(blobStore.blobs.get(id)).toEqual(original);
+    expect(await getDoc(runtime, id)).toMatchObject({ status: "ready", size: original.byteLength });
+  });
+});
+
+describe("re-upload to an already-finalized row is refused (Layer 2 defense-in-depth)", () => {
+  it("a still-valid upload token replayed against an already-`ready` row is rejected, and bytes/size/sha256 stay unchanged", async () => {
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await mintPendingId(runtime, "text/plain");
+    // Captured once and reused — the token itself doesn't expire for the full upload TTL window,
+    // independent of the row's own lifecycle, so a client that held onto it can replay the call
+    // well after the file has already been finalized.
+    const token = tokenFor("upload", id);
+
+    const original = new TextEncoder().encode("original bytes");
+    const first = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${token}`, {
+        method: "POST",
+        body: new Uint8Array(original),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    expect(first.status).toBe(200);
+    const readyDoc = await getDoc(runtime, id);
+    expect(readyDoc).toMatchObject({ status: "ready", size: original.byteLength });
+    const originalSha256 = (readyDoc as { sha256: string | null }).sha256;
+
+    const replay = await findRoute(routes, "POST", "/api/storage/upload").handler(
+      new Request(`http://localhost/api/storage/upload?id=${id}&token=${token}`, {
+        method: "POST",
+        body: new TextEncoder().encode("attacker-replayed bytes"),
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    expect(replay.status).toBeGreaterThanOrEqual(400);
+    expect(replay.status).toBeLessThan(500);
+    // The blob store's bytes and the row's recorded size/hash must be exactly what the FIRST,
+    // legitimate upload produced — the replay must never have reached `blobStore.store`.
+    expect(blobStore.blobs.get(id)).toEqual(original);
+    expect(await getDoc(runtime, id)).toMatchObject({
+      status: "ready",
+      size: original.byteLength,
+      sha256: originalSha256,
+    });
   });
 });
 
@@ -242,7 +324,7 @@ describe("POST /api/storage/confirm", () => {
     const bytes = new TextEncoder().encode("direct bytes");
     await blobStore.store(id, bytes); // simulate the client's direct-to-store upload
 
-    const request = new Request(`http://localhost/api/storage/confirm?id=${id}&token=${tokenFor(id)}`, {
+    const request = new Request(`http://localhost/api/storage/confirm?id=${id}&token=${tokenFor("upload", id)}`, {
       method: "POST",
     });
     const response = await findRoute(routes, "POST", "/api/storage/confirm").handler(request);
@@ -258,7 +340,7 @@ describe("POST /api/storage/confirm", () => {
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const id = await mintPendingId(runtime);
 
-    const request = new Request(`http://localhost/api/storage/confirm?id=${id}&token=${tokenFor(id)}`, {
+    const request = new Request(`http://localhost/api/storage/confirm?id=${id}&token=${tokenFor("upload", id)}`, {
       method: "POST",
     });
     const response = await findRoute(routes, "POST", "/api/storage/confirm").handler(request);
@@ -288,7 +370,7 @@ describe("delete->re-confirm resurrection guard", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const id = await mintPendingId(runtime, "text/plain");
-    const token = tokenFor(id); // captured before the delete — mirrors a client holding a stale token
+    const token = tokenFor("upload", id); // captured before the delete — mirrors a client holding a stale token
 
     // Finalize once (a legitimate upload lands).
     const firstBody = new TextEncoder().encode("original bytes");
@@ -329,7 +411,7 @@ describe("delete->re-confirm resurrection guard", () => {
     const runtime = await makeRuntime(blobStore);
     const routes = storageRoutes(blobStore, routeDeps(runtime));
     const id = await mintPendingId(runtime, "text/plain");
-    const token = tokenFor(id);
+    const token = tokenFor("upload", id);
 
     // Finalize once via confirm (simulating a direct-to-store upload landing out-of-band).
     const firstBytes = new TextEncoder().encode("original bytes");
@@ -365,7 +447,7 @@ describe("GET /api/storage/:id — serve", () => {
     visibility?: "private" | "public",
   ): Promise<string> {
     const id = await mintPendingId(runtime, contentType, visibility);
-    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id)}`, {
+    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor("upload", id)}`, {
       method: "POST",
       // Re-wrapped (rather than passing `bytes` directly): a bare `Uint8Array`-typed parameter
       // widens to `Uint8Array<ArrayBufferLike>` under this repo's TS/@types-node combination,
@@ -567,7 +649,7 @@ describe("GET /api/storage/:id — access control (Task 8)", () => {
     visibility: "private" | "public",
   ): Promise<string> {
     const id = await mintPendingId(runtime, undefined, visibility);
-    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor(id)}`, {
+    const request = new Request(`http://localhost/api/storage/upload?id=${id}&token=${tokenFor("upload", id)}`, {
       method: "POST",
       body: new Uint8Array(bytes),
     });
@@ -762,7 +844,7 @@ describe("GET /api/storage/:id — access control (Task 8)", () => {
     const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
-      new Request(`http://localhost/api/storage/${id}?token=${tokenFor(id)}`),
+      new Request(`http://localhost/api/storage/${id}?token=${tokenFor("get", id)}`),
     );
 
     expect(response.status).toBe(200);
@@ -778,7 +860,7 @@ describe("GET /api/storage/:id — access control (Task 8)", () => {
     const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
 
     const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
-      new Request(`http://localhost/api/storage/${id}?token=${tokenFor(id)}`),
+      new Request(`http://localhost/api/storage/${id}?token=${tokenFor("get", id)}`),
     );
 
     expect(response.status).toBe(302);
@@ -813,6 +895,26 @@ describe("GET /api/storage/:id — access control (Task 8)", () => {
     );
 
     expect(response.status).toBe(403);
+  });
+
+  it("an upload-scoped token used as the GET-capability token is rejected (403, scope mismatch), and bytes are never read", async () => {
+    const blobStore = new RedirectableBlobStore();
+    const runtime = await makeRuntime(blobStore);
+    const bytes = new TextEncoder().encode("secret bytes");
+    const routes = storageRoutes(blobStore, routeDeps(runtime));
+    const id = await uploadReady(runtime, routes, blobStore, bytes, "private");
+    blobStore.readCalls = 0;
+
+    // A fresh `"upload"`-scoped token for this same id — before the scope-tagging fix this
+    // recomputed to the SAME HMAC as a `"get"` token for the same `(id, exp)` and would have been
+    // accepted by the serve endpoint's no-authz fallback; now it must be rejected.
+    const uploadToken = tokenFor("upload", id);
+    const response = await findRoute(routes, "GET", `/api/storage/${id}`).handler(
+      new Request(`http://localhost/api/storage/${id}?token=${uploadToken}`),
+    );
+
+    expect(response.status).toBe(403);
+    expect(blobStore.readCalls).toBe(0);
   });
 
   it("checkRead receives the raw Bearer token as identity, and null when the header is absent", async () => {

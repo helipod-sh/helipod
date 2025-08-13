@@ -89,12 +89,13 @@ export function storageEndpointPath(id: string): string {
 
 /**
  * The capability token minted for a `proxied` upload URL — see `./token.ts` for the HMAC
- * implementation shared with the Task 7 endpoints' verify side. Pure/deterministic (no
- * wall-clock, no randomness), so it is safe to compute inside a mutation and reproducible on
- * replay.
+ * implementation shared with the Task 7 endpoints' verify side. Scoped `"upload"` (see
+ * `./token.ts`'s scope-tagging note) so it can never be replayed against the serve endpoint's
+ * GET-capability check. Pure/deterministic (no wall-clock, no randomness), so it is safe to
+ * compute inside a mutation and reproducible on replay.
  */
 export function signUploadToken(signingKey: string, payload: { id: string; exp: number }): string {
-  return createStorageToken(signingKey, payload.id, payload.exp);
+  return createStorageToken(signingKey, "upload", payload.id, payload.exp);
 }
 
 /**
@@ -130,10 +131,13 @@ function confirmUrl(id: string, exp: number, signingKey: string): string {
  * serve endpoint's no-authz fallback (`./http.ts`'s `handleServe`) accepts the read. `exp` MUST be
  * a deterministic input (the transaction timestamp `cctx.now + ttl`, never `Date.now()`) when this
  * is called from inside a query/mutation, so the returned url — and the whole read set — is stable
- * across an OCC replay; the token itself is a pure HMAC over `(id, exp)`.
+ * across an OCC replay; the token itself is a pure HMAC over `(scope, id, exp)`, scoped `"get"` (see
+ * `./token.ts`'s scope-tagging note) so it can never be replayed against the upload/confirm
+ * endpoints to overwrite this file's bytes — a private `getUrl()` is meant to be embedded in pages
+ * and can leak into logs/history/Referer, so it must not double as an upload capability.
  */
 function privateGetUrl(id: string, exp: number, signingKey: string): string {
-  return `${storageEndpointPath(id)}?token=${createStorageToken(signingKey, id, exp)}`;
+  return `${storageEndpointPath(id)}?token=${createStorageToken(signingKey, "get", id, exp)}`;
 }
 
 function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
@@ -148,8 +152,13 @@ function toMetadata(doc: StorageDoc | null): BlobMetadata | null {
  * servable, so `getUrl`/`getMetadata` treat it as absent (return `null`) rather than handing back a
  * url that would only 404 or metadata for a file that's on its way out. A pending upload with a
  * FUTURE expiry (in flight, not yet confirmed) is left visible, unchanged.
+ *
+ * Exported so `./http.ts`'s `handleUpload`/`handleConfirm` can reuse the exact same "is this row
+ * still a live pending upload" test as a defense-in-depth pre-check before ever touching blob
+ * bytes — a valid, unexpired capability token alone must not be enough to overwrite an
+ * already-finalized (`ready`) or deleted/expired row.
  */
-function isReclaimable(doc: StorageDoc, now: number): boolean {
+export function isReclaimable(doc: StorageDoc, now: number): boolean {
   return doc.status === "pending" && doc.expiresAt !== null && doc.expiresAt <= now;
 }
 

@@ -19,7 +19,8 @@
 import type { BlobStore, ByteRange } from "@stackbase/blobstore";
 import { isValidDocumentId } from "@stackbase/id-codec";
 import { DocumentNotFoundError } from "@stackbase/errors";
-import { verifyStorageToken } from "./token";
+import { verifyStorageToken, type TokenScope } from "./token";
+import { isReclaimable } from "./context";
 import type { StorageDoc } from "./modules";
 import { STORAGE_TABLE_NUMBER } from "./system-table";
 
@@ -93,13 +94,16 @@ function parseRange(header: string | null): ByteRange | undefined {
  */
 export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): StorageRoute[] {
   /** Shared token-gate for the upload/confirm endpoints: `id`+`token` from the query, verified
-   * against `deps.signingKey` at wall-clock `now` (the non-deterministic HTTP layer, so
-   * `Date.now()` IS allowed here — unlike inside a mutation). */
-  function authorize(url: URL): { id: string } | null {
+   * against `deps.signingKey` — for the given `scope` (`"upload"` for both endpoints; the serve
+   * endpoint's fallback below verifies its own `"get"`-scoped token separately) — at wall-clock
+   * `now` (the non-deterministic HTTP layer, so `Date.now()` IS allowed here — unlike inside a
+   * mutation). A `"get"`-scoped token (e.g. one lifted off a leaked `getUrl()`) recomputes to a
+   * different HMAC under `"upload"` and is rejected here — see `./token.ts`'s scope-tagging note. */
+  function authorize(url: URL, scope: TokenScope): { id: string } | null {
     const id = url.searchParams.get("id");
     const token = url.searchParams.get("token");
     if (id === null || token === null) return null;
-    if (!verifyStorageToken(deps.signingKey, id, token, Date.now())) return null;
+    if (!verifyStorageToken(deps.signingKey, scope, id, token, Date.now())) return null;
     return { id };
   }
 
@@ -123,10 +127,39 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
     }
   }
 
+  /**
+   * Layer-2 defense-in-depth (see `./token.ts`'s scope-tagging note, the primary fix): load the
+   * `_storage` row and refuse to proceed unless it is CURRENTLY a live pending upload, even though
+   * the caller already presented a validly-scoped, unexpired capability token. Without this, a
+   * still-unexpired `"upload"`-scoped token could be replayed against an already-`ready` row (or a
+   * deleted/expired one) to overwrite its bytes — `_storage:_finalize`'s own resurrection guard
+   * catches the deleted/expired case AFTER the bytes are already written, which is too late to
+   * protect the blob store's content; checking here, before any `blobStore.store`/`finalizeUpload`
+   * call, means a rejected request never touches the backing bytes at all.
+   *
+   * Returns `null` when the row is safe to proceed against (a live pending upload); otherwise the
+   * `Response` to return as-is.
+   */
+  async function checkLivePending(id: string): Promise<Response | null> {
+    let doc: StorageDoc | null;
+    try {
+      doc = (await deps.runQuery("_storage:_get", { id })) as StorageDoc | null;
+    } catch {
+      return textResponse(500, "internal error");
+    }
+    if (doc === null) return textResponse(404, "upload not found");
+    if (doc.status === "ready") return textResponse(409, "already finalized");
+    if (isReclaimable(doc, Date.now())) return textResponse(404, "upload not found (expired or deleted)");
+    return null;
+  }
+
   async function handleUpload(request: Request): Promise<Response> {
-    const auth = authorize(new URL(request.url));
+    const auth = authorize(new URL(request.url), "upload");
     if (auth === null) return textResponse(401, "invalid or expired upload token");
     const { id } = auth;
+
+    const notLivePending = await checkLivePending(id);
+    if (notLivePending !== null) return notLivePending;
 
     const bytes = new Uint8Array(await request.arrayBuffer());
     const contentType = request.headers.get("content-type");
@@ -137,9 +170,15 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
   }
 
   async function handleConfirm(request: Request): Promise<Response> {
-    const auth = authorize(new URL(request.url));
+    const auth = authorize(new URL(request.url), "upload");
     if (auth === null) return textResponse(401, "invalid or expired upload token");
     const { id } = auth;
+
+    // Symmetric with `handleUpload`'s pre-check — `_storage:_finalize` (called below via
+    // `callFinalize`) already rejects a `ready`/tombstoned row, but checking here too means a
+    // replayed confirm never even calls `blobStore.finalizeUpload` against an already-settled row.
+    const notLivePending = await checkLivePending(id);
+    if (notLivePending !== null) return notLivePending;
 
     const info = await blobStore.finalizeUpload(id);
     if (info === null) return textResponse(409, "upload not found");
@@ -185,7 +224,10 @@ export function storageRoutes(blobStore: BlobStore, deps: StorageRouteDeps): Sto
         if (!ok) return textResponse(403, "forbidden");
       } else {
         const token = url.searchParams.get("token");
-        if (token === null || !verifyStorageToken(deps.signingKey, id, token, Date.now())) {
+        // Scoped `"get"` — see `./token.ts`'s scope-tagging note: an `"upload"`-scoped token
+        // (e.g. one lifted off a proxied-upload URL) recomputes to a different HMAC under `"get"`
+        // and must not authorize a read here.
+        if (token === null || !verifyStorageToken(deps.signingKey, "get", id, token, Date.now())) {
           return textResponse(403, "forbidden");
         }
       }
