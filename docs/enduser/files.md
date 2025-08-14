@@ -238,9 +238,15 @@ STACKBASE_STORAGE_BUCKET=my-app-uploads stackbase serve
 | — | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials — used for MinIO/R2 too. |
 
 Flags win over environment variables if both are set (same convention as `--database-url` /
-`STACKBASE_DATABASE_URL`). If you set `STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` but forget
-`STACKBASE_STORAGE_BUCKET`, the server logs a warning and silently falls back to the filesystem
-backend rather than failing — the bucket is the single switch between the two backends.
+`STACKBASE_DATABASE_URL`). The bucket is the single switch between the two backends: if you set
+`STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` (or their flag equivalents) but forget
+`STACKBASE_STORAGE_BUCKET`, the server **refuses to boot** with an actionable error rather than
+silently falling back to filesystem storage — those settings only make sense for S3, so their
+presence without a bucket is an unambiguous misconfiguration, and silently storing uploads on
+local disk (lost on the next container recreate) would be a data-durability footgun. Set the
+bucket to use S3, or unset the other storage settings to use local FS. (The standard AWS
+credential vars `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are *not* treated as S3 intent — they
+commonly appear on filesystem-backend deployments for unrelated reasons.)
 
 On the filesystem backend, `serve`/`dev` fail fast at boot if the storage directory can't be
 created or written to (a read-only mount, wrong ownership) — this surfaces immediately as a clear

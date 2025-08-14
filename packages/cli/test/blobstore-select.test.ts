@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { isS3Config, makeBlobStore } from "../src/blobstore-select";
-import { warnIfS3ConfigIgnored } from "../src/boot";
+import { assertStorageConfigCoherent } from "../src/boot";
 import { FsBlobStore } from "@stackbase/blobstore-fs";
 import { S3BlobStore } from "@stackbase/blobstore-s3";
 
@@ -19,51 +19,35 @@ describe("makeBlobStore selection", () => {
   });
 });
 
-// Fix 2 regression: S3-shaped settings (endpoint/region/publicBaseUrl) with no bucket used to
-// silently fall back to FS storage with zero indication anything was ignored.
-describe("warnIfS3ConfigIgnored", () => {
-  it("stays silent when nothing S3-shaped is configured", () => {
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      warnIfS3ConfigIgnored(undefined);
-      warnIfS3ConfigIgnored({});
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
+// Fix 2 (escalated to fail-fast): S3-shaped settings (endpoint/region/publicBaseUrl) with no bucket
+// used to silently fall back to FS storage. That's a data-durability footgun (uploads land on
+// ephemeral local disk instead of the object store the operator configured), so it now refuses to
+// boot rather than warn-and-continue.
+describe("assertStorageConfigCoherent", () => {
+  it("accepts config with nothing S3-shaped set (plain FS)", () => {
+    expect(() => assertStorageConfigCoherent(undefined)).not.toThrow();
+    expect(() => assertStorageConfigCoherent({})).not.toThrow();
   });
 
-  it("stays silent when a bucket IS set (real S3 config, not a misconfiguration)", () => {
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      warnIfS3ConfigIgnored({ bucket: "b", endpoint: "http://localhost:9000", region: "us-east-1" });
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
+  it("accepts a real S3 config (bucket set)", () => {
+    expect(() =>
+      assertStorageConfigCoherent({ bucket: "b", endpoint: "http://localhost:9000", region: "us-east-1" }),
+    ).not.toThrow();
   });
 
-  it("warns once when endpoint/region/publicBaseUrl are set but no bucket is provided", () => {
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      warnIfS3ConfigIgnored({ endpoint: "http://localhost:9000" });
-      expect(spy).toHaveBeenCalledTimes(1);
-      const [message] = spy.mock.calls[0]!;
-      expect(message).toContain("STACKBASE_STORAGE_BUCKET");
-      expect(message).toContain("IGNORED");
-    } finally {
-      spy.mockRestore();
-    }
+  it("does NOT treat bare AWS credentials as S3 intent (they're common on FS deployments)", () => {
+    expect(() =>
+      assertStorageConfigCoherent({ accessKeyId: "AKIA...", secretAccessKey: "secret" }),
+    ).not.toThrow();
   });
 
-  it("also warns when only region or only publicBaseUrl is set without a bucket", () => {
-    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      warnIfS3ConfigIgnored({ region: "us-east-1" });
-      warnIfS3ConfigIgnored({ publicBaseUrl: "https://cdn.example.com" });
-      expect(spy).toHaveBeenCalledTimes(2);
-    } finally {
-      spy.mockRestore();
+  it("throws when endpoint/region/publicBaseUrl is set but no bucket is provided", () => {
+    for (const bad of [
+      { endpoint: "http://localhost:9000" },
+      { region: "us-east-1" },
+      { publicBaseUrl: "https://cdn.example.com" },
+    ]) {
+      expect(() => assertStorageConfigCoherent(bad)).toThrow(/STACKBASE_STORAGE_BUCKET/);
     }
   });
 });
