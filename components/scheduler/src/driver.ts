@@ -76,14 +76,20 @@ export function schedulerDriver(): SchedulerDriver {
   // due-job wake timer) so re-arming one never clobbers the other.
   let sweepTimer: number | null = null;
   // Set by `stop()` BEFORE it tears down the timers/subscription. Guards against the driver
-  // resurrecting itself: an in-flight pass's end-of-pass `setTimer` (`runPass`), a settling
+  // resurrecting ITSELF: an in-flight pass's end-of-pass `setTimer` (`runPass`), a settling
   // `sweepOnce`'s `finally → armSweep`, and `iterate`'s `finally → wake` all run unconditionally
   // when work that was already in flight settles — even if `stop()` raced in while a
   // `runFunction` was awaiting. Without this flag they re-arm a fresh timer after `stop()`
-  // already returned, and the loop keeps running forever. Checked at every re-entry/re-arm point
-  // (`wake`, `iterate`, `runPass`'s re-arm, `armSweep`) so a timer/commit callback that fires
-  // concurrently with `stop()` can't start or re-schedule work either. (Mirrors the same guard in
-  // `@stackbase/storage`'s reaper driver.)
+  // already returned, and the loop keeps running forever. Checked at every AUTOMATIC re-entry/
+  // re-arm point — `wake` (the onCommit/timer callback), `runPass`'s end-of-pass re-arm, and
+  // `armSweep` — so a timer/commit callback that fires concurrently with `stop()` can't start or
+  // re-schedule work either. (Mirrors the same guard in `@stackbase/storage`'s reaper driver.)
+  //
+  // `iterate()` itself is deliberately NOT guarded: the ONLY caller that reaches it while
+  // `stopped` is the `__tick()` test seam (an explicit, synchronous manual drive), which tests
+  // use precisely to step a stopped driver one pass at a time after `driver.stop()` unsubscribes
+  // the reactive `onCommit` cascade. Guarding `iterate` would break that pattern (a no-op tick
+  // dispatches nothing); the automatic wake paths are already covered by `wake()`'s guard.
   let stopped = false;
 
   function wake(): void {
@@ -99,7 +105,6 @@ export function schedulerDriver(): SchedulerDriver {
   }
 
   function iterate(): Promise<void> {
-    if (stopped) return Promise.resolve();
     if (running) {
       // A commit (or another wake) landed while a pass is already in flight — e.g. an app
       // mutation enqueuing a due-now job between the in-flight pass's awaits. That pass may
