@@ -263,21 +263,34 @@ export function storageContextProvider(blobStore: BlobStore, opts: StorageProvid
       async store(bytes, o) {
         const contentType = o?.contentType ?? null;
         const visibility = o?.visibility ?? "private";
-        // The full blob is already in hand, so there's no in-flight "pending" phase to model:
-        // pick a fresh key, write+hash the bytes, then insert a `ready` row in one mutation via
-        // `_insertReady` (designed for exactly this path — see its doc in ./modules.ts). Actions
-        // are non-deterministic, so `crypto.randomUUID()` for the key is fine here; the key lives
-        // only in the row's `key` column and every read goes through it, so it need not equal the
-        // returned storage id (unlike the deterministic mutation-upload path, which uses key === id).
+        // Crash-safety: register a reapable `pending` row BEFORE writing any bytes, then flip it to
+        // `ready` only after the write succeeds — the two-phase upload lifecycle, applied to the
+        // action's own byte I/O. If the process dies (or `_finalize` fails) between the byte write
+        // and the metadata commit, the durable `pending` row (with its `expiresAt`) lets the reaper
+        // reclaim BOTH the row and the blob by key. The old insert-a-ready-row-AFTER-the-write path
+        // had no such marker, so a crash in that window orphaned the blob forever (no `_storage`
+        // row referenced its key, so the reaper never saw it). Actions are non-deterministic, so
+        // wall-clock `Date.now()` for the key and the pending expiry is fine here. The key lives
+        // only in the row's `key` column (every read goes through it), so it need not equal the id.
         const key = crypto.randomUUID();
-        const info = await blobStore.store(key, bytes, contentType !== null ? { contentType } : undefined);
-        return api.runMutation<string>("_storage:_insertReady", {
+        const id = await api.runMutation<string>("_storage:_createPending", {
           key,
-          size: info.size,
-          sha256: info.sha256,
           contentType,
           visibility,
+          expiresAt: Date.now() + uploadTtlMs,
         });
+        try {
+          const info = await blobStore.store(key, bytes, contentType !== null ? { contentType } : undefined);
+          await api.runMutation("_storage:_finalize", { id, size: info.size, sha256: info.sha256 });
+          return id;
+        } catch (e) {
+          // The pending row's expiry already guarantees the reaper reclaims the blob+row eventually;
+          // this is just prompt cleanup of the bytes we may have written (e.g. `_finalize` refused a
+          // row that expired mid-write, or the store threw). Best-effort — the reaper is the durable
+          // backstop, so a failed delete here is swallowed rather than masking the original error.
+          await blobStore.delete(key).catch(() => {});
+          throw e;
+        }
       },
 
       async get(id) {

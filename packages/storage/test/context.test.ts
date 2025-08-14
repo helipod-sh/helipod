@@ -97,6 +97,9 @@ async function makeRuntime(
   blobStore: BlobStore,
   appModules: Record<string, RegisteredFunction>,
   now?: () => number,
+  // Spread AFTER `storageModules` so a test can override a privileged `_storage:*` module — e.g.
+  // force `_storage:_finalize` to throw to simulate a process crash mid-`store()`.
+  moduleOverrides?: Record<string, RegisteredFunction>,
 ): Promise<EmbeddedRuntime> {
   const schema = defineSchema({ [STORAGE_TABLE]: storageTableDefinition });
   const c = composeComponents({ schemaJson: schema.export(), moduleMap: {} }, [], {
@@ -105,7 +108,7 @@ async function makeRuntime(
   return EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
     catalog: c.catalog,
-    modules: { ...appModules, ...storageModules },
+    modules: { ...appModules, ...storageModules, ...moduleOverrides },
     systemModules: storageModules,
     componentNames: c.componentNames,
     contextProviders: [...c.contextProviders, storageContextProvider(blobStore, { signingKey: "test-signing-key" })],
@@ -279,5 +282,64 @@ describe("ctx.storage — action facade (buildAction)", () => {
     const id = (await runtime.runAction<string>("app:store", { text: "x" })).value;
     await runtime.runSystem("_storage:_delete", { id });
     expect((await runtime.runAction<string | null>("app:getBytes", { id })).value).toBeNull();
+  });
+
+  // Crash-safety regression: store() writes bytes then commits the metadata row. The old path
+  // inserted the row AFTER the write, so a crash in between orphaned the blob (no `_storage` row
+  // referenced its key → the reaper never saw it). store() now registers a reapable `pending` row
+  // BEFORE writing, and finalizes only after — so an interrupted store is always reclaimable.
+  it("store() registers a reapable pending row BEFORE writing bytes, and cleans up the blob if finalize fails (no orphan)", async () => {
+    const NOW = 1_700_000_000_000;
+    const blobStore = new FakeBlobStore();
+    // Force the finalize step to fail — simulates a crash/error after the bytes are written but
+    // before the row is flipped to `ready`. store()'s catch should clean up the just-written blob.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const throwingFinalize = mutation(async () => {
+      throw new Error("simulated crash before finalize commit");
+    });
+    const runtime = await makeRuntime(blobStore, appModules, () => NOW, { "_storage:_finalize": throwingFinalize });
+
+    await expect(runtime.runAction<string>("app:store", { text: "boom" })).rejects.toThrow(/crash before finalize/);
+
+    // The catch reclaimed the just-written blob (prompt cleanup) — no orphaned bytes left behind.
+    expect(blobStore.blobs.size).toBe(0);
+    // A `pending` row still exists (createPending committed before the write), with an expiry — the
+    // durable reaper backstop. Proves the row was registered BEFORE the byte write, not after.
+    // store() stamps `expiresAt` from wall-clock `Date.now()` (it's an action), not the injected
+    // NOW, so reap with a wall-clock-based cutoff safely past `Date.now() + UPLOAD_TTL_MS`.
+    const reaped = (
+      await runtime.runSystem<{ keys: string[] }>("_storage:_reapExpired", { now: Date.now() + UPLOAD_TTL_MS + 60_000 })
+    ).value;
+    expect(reaped.keys).toHaveLength(1);
+  });
+
+  it("an interrupted store (bytes written, process dies before finalize AND before cleanup) leaves a reapable pending row — the reaper reclaims the blob", async () => {
+    const NOW = 1_700_000_000_000;
+    const blobStore = new FakeBlobStore();
+    const runtime = await makeRuntime(blobStore, appModules, () => NOW);
+
+    // Replicate exactly the state store() leaves if the process is KILLED after the byte write but
+    // before `_finalize` (so store()'s own catch never runs either): a committed `pending` row plus
+    // a written blob under its key.
+    const key = "crash-key";
+    const id = (
+      await runtime.runSystem<string>("_storage:_createPending", {
+        key,
+        contentType: null,
+        visibility: "private",
+        expiresAt: NOW + UPLOAD_TTL_MS,
+      })
+    ).value;
+    await blobStore.store(key, new TextEncoder().encode("would-be-orphan"));
+    expect(typeof id).toBe("string");
+    expect(blobStore.blobs.has(key)).toBe(true);
+
+    // After expiry, the reaper sweep returns the pending row's key so its blob can be reclaimed.
+    const reaped = (await runtime.runSystem<{ keys: string[] }>("_storage:_reapExpired", { now: NOW + UPLOAD_TTL_MS + 1 }))
+      .value;
+    expect(reaped.keys).toContain(key);
+    // The reaper driver then deletes each returned key's blob — do that here and confirm reclaimed.
+    for (const k of reaped.keys) await blobStore.delete(k);
+    expect(blobStore.blobs.has(key)).toBe(false); // reclaimed, not orphaned
   });
 });

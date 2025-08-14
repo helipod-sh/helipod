@@ -55,11 +55,14 @@ export const _createPending = mutation(
 
 /**
  * `_storage:_insertReady` — a MUTATION: inserts a `status:"ready"` row directly, with a known
- * size/sha256 up front. Used by the action-mode `store()` path (Task 6), where the full blob is
- * already written and hashed by the time the metadata row is created — there's no in-flight
- * "pending" phase to model, unlike `_createPending`'s streamed-upload use case. `expiresAt` is
- * always `null` here: a directly-stored blob is never provisional/reapable the way a
+ * size/sha256 up front, in a single transaction with no in-flight "pending" phase. `expiresAt` is
+ * always `null`: a directly-inserted ready row is never provisional/reapable the way a
  * not-yet-finalized pending upload is.
+ *
+ * NOTE: the action-mode `store()` path deliberately does NOT use this — it goes `_createPending`
+ * → write bytes → `_finalize` so a crash between the byte write and the metadata commit leaves a
+ * reapable `pending` row (see `./context.ts`'s `store`), never an orphaned blob. This primitive
+ * remains for direct ready-row insertion (and as a seeding convenience in tests).
  *
  * `sha256` is `string | null` (not just `string`) because `BlobStore.store`'s `StoredBlob.sha256`
  * can itself be `null` (a store that doesn't hash on write) — this mirrors that so a blob store
@@ -119,7 +122,7 @@ export const _insertReady = mutation(
  * so this stays replay-safe on an OCC conflict.
  */
 export const _finalize = mutation(
-  async (ctx: MutationCtx, args: { id: string; size: number; sha256: string }): Promise<StorageDoc> => {
+  async (ctx: MutationCtx, args: { id: string; size: number; sha256: string | null }): Promise<StorageDoc> => {
     const existing = await ctx.db.get(args.id);
     if (existing === null) throw new DocumentNotFoundError(`_storage:_finalize: no such document ${args.id}`);
     if (existing["status"] === "ready") return existing as unknown as StorageDoc; // idempotent no-op

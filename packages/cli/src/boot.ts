@@ -78,20 +78,26 @@ export function withStorageModules(map: Record<string, RegisteredFunction>): Rec
 }
 
 /**
- * Warn (never fail) when S3-shaped settings (`STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL`, or
- * their `--storage-endpoint`/etc. flag equivalents) are present but no bucket was configured —
- * `isS3Config`/`makeBlobStore` silently fall back to local FS storage in that case, which is the
- * right default behavior but a silent one: an operator who set the endpoint/region and forgot the
- * bucket would otherwise get FS storage with no indication anything was ignored.
+ * Fail fast when S3-shaped settings (`STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL`, or their
+ * `--storage-endpoint`/etc. flag equivalents) are present but no bucket was configured. Those
+ * settings only make sense for the S3 backend, which is selected SOLELY by `STACKBASE_STORAGE_BUCKET`
+ * (`isS3Config`) — so their presence without a bucket is an unambiguous misconfiguration by an
+ * operator who intended S3 but forgot the bucket. Silently falling back to local FS in that case is
+ * a data-durability footgun: uploads land on ephemeral local disk (gone on the next container
+ * recreate) instead of the object store the operator configured. Refuse to boot with an actionable
+ * error rather than start in a silently-wrong state. The AWS credential vars (`AWS_ACCESS_KEY_ID`/
+ * `AWS_SECRET_ACCESS_KEY`) are intentionally NOT treated as S3 intent — they're commonly present for
+ * unrelated reasons, so keying off them would false-positive on plain FS deployments.
  */
-export function warnIfS3ConfigIgnored(storage: StorageConfig | undefined): void {
+export function assertStorageConfigCoherent(storage: StorageConfig | undefined): void {
   if (isS3Config(storage)) return;
-  const ignored = storage?.endpoint !== undefined || storage?.region !== undefined || storage?.publicBaseUrl !== undefined;
-  if (!ignored) return;
-  process.stderr.write(
-    "⚠ S3 storage settings (STACKBASE_STORAGE_ENDPOINT/REGION/PUBLIC_URL or --storage-endpoint/etc.) are set, " +
-      "but no bucket was provided — S3 config is being IGNORED and storage is falling back to local FS. " +
-      "Set STACKBASE_STORAGE_BUCKET (or --storage-bucket) to actually use S3.\n",
+  const s3Shaped = storage?.endpoint !== undefined || storage?.region !== undefined || storage?.publicBaseUrl !== undefined;
+  if (!s3Shaped) return;
+  throw new Error(
+    "stackbase: S3 storage settings (STACKBASE_STORAGE_ENDPOINT/REGION/PUBLIC_URL or --storage-endpoint/etc.) " +
+      "are set, but no bucket was provided — the S3 backend is selected only by STACKBASE_STORAGE_BUCKET " +
+      "(or --storage-bucket). Set the bucket to use S3, or unset the other storage settings to use local FS. " +
+      "Refusing to boot rather than silently store uploads on local disk.",
   );
 }
 
@@ -142,7 +148,7 @@ export async function bootLoaded(opts: {
   // itself was injected into the composed schema/catalog/tableNumbers in `loadProject`.
   const dataDir = dirname(resolve(opts.dataPath));
   const storageConfig = resolveStorageConfig(process.env, opts.storage);
-  warnIfS3ConfigIgnored(storageConfig);
+  assertStorageConfigCoherent(storageConfig);
   const blobStore = makeBlobStore({ dataPath: dataDir, storage: storageConfig });
   if (!isS3Config(storageConfig)) ensureStorageDirWritable(join(dataDir, "storage"));
 
