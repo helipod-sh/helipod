@@ -2,7 +2,7 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema, type SchemaDefinition, type SchemaDefinitionJSON } from "@stackbase/values";
-import type { RegisteredFunction } from "@stackbase/executor";
+import { mutation, type RegisteredFunction } from "@stackbase/executor";
 import { flattenModules } from "./flatten";
 
 export interface CreateTestOptions {
@@ -17,6 +17,10 @@ export interface BuiltRuntime {
   tableNumbers: Record<string, number>;
   schemaJson: SchemaDefinitionJSON;
   cleanup: () => Promise<void>;
+  /** Sets the callback `_test:_run`'s handler invokes with a full db-writer `ctx`. */
+  setRunFn: (fn: ((ctx: unknown) => Promise<unknown>) | null) => void;
+  /** Reads back (and clears) the value the last `setRunFn` callback returned. */
+  takeRunResult: () => unknown;
 }
 
 export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntime> {
@@ -32,10 +36,24 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
 
   const composed = composeComponents({ schemaJson, moduleMap: flat.moduleMap }, opts.components ?? []);
 
+  // `_test:_run` — the mechanism behind `t.run(fn)`: a system mutation whose handler invokes
+  // whatever callback `t.run` most recently parked in `currentRunFn`, giving test code a full
+  // db-writer `ctx` inside a real transaction without having to define an app function for it.
+  let currentRunFn: ((ctx: unknown) => Promise<unknown>) | null = null;
+  let runResult: unknown = undefined;
+  const systemModules = {
+    "_test:_run": mutation(async (ctx: unknown) => {
+      if (!currentRunFn) throw new Error("_test:_run invoked with no callback set");
+      runResult = await currentRunFn(ctx);
+      return null;
+    }),
+  };
+
   const runtime = await EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
     catalog: composed.catalog,
     modules: composed.moduleMap,
+    systemModules,
     componentNames: composed.componentNames,
     contextProviders: composed.contextProviders,
     policyRegistry: composed.policyRegistry,
@@ -48,5 +66,12 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   });
 
   const cleanup = async () => { await runtime.stopDrivers(); };
-  return { runtime, tableNumbers: composed.tableNumbers, schemaJson, cleanup };
+  return {
+    runtime,
+    tableNumbers: composed.tableNumbers,
+    schemaJson,
+    cleanup,
+    setRunFn: (fn) => { currentRunFn = fn; },
+    takeRunResult: () => { const r = runResult; runResult = undefined; return r; },
+  };
 }
