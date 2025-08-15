@@ -498,6 +498,19 @@
         "vitest": "catalog:",
       },
     },
+    "packages/test": {
+      "name": "@stackbase/test",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/executor": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/transactor": {
       "name": "@stackbase/transactor",
       "version": "0.0.0",
@@ -819,6 +832,8 @@
     "@stackbase/storage": ["@stackbase/storage@workspace:packages/storage"],
 
     "@stackbase/sync": ["@stackbase/sync@workspace:packages/sync"],
+
+    "@stackbase/test": ["@stackbase/test@workspace:packages/test"],
 
     "@stackbase/transactor": ["@stackbase/transactor@workspace:packages/transactor"],
 
