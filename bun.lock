@@ -502,7 +502,16 @@
       "name": "@stackbase/test",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/blobstore-fs": "workspace:*",
+        "@stackbase/client": "workspace:*",
+        "@stackbase/component": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/storage": "workspace:*",
+        "@stackbase/sync": "workspace:*",
+        "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
