@@ -11,9 +11,17 @@ export interface TestStackbase {
   /**
    * Runs `fn` with a full db-writer `ctx` (the engine's `MutationCtx`, typed `any` here to avoid
    * leaking internal types) inside one real transaction — for test setup/assertions without
-   * having to define an app function. Backed by the `_test:_run` system mutation.
+   * having to define an app function. Backed by the `_test:_run` system mutation. Always
+   * privileged (no ambient identity), regardless of which view it's called on.
    */
   run<T>(fn: (ctx: any) => Promise<T>): Promise<T>;
+  /**
+   * Returns a view of the SAME backend whose `query`/`mutation`/`action` calls carry `identity` as
+   * the ambient session token (reaching user code only through a context provider's
+   * `build({ identity })`, e.g. `components/auth`'s `ctx.auth` — there is no bare `ctx.identity`).
+   * `run`/`close` remain shared with the backend, not per-view.
+   */
+  withIdentity(identity: string): TestStackbase;
   close(): Promise<void>;
 }
 
@@ -21,27 +29,34 @@ export async function createTestStackbase(opts: CreateTestOptions): Promise<Test
   const built: BuiltRuntime = await buildRuntime(opts);
   const { runtime } = built;
 
-  return {
-    async query(ref, args = {}) {
-      return (await runtime.run(getFunctionPath(ref), args as never)).value as never;
-    },
-    async mutation(ref, args = {}) {
-      return (await runtime.run(getFunctionPath(ref), args as never)).value as never;
-    },
-    async action(ref, args = {}) {
-      return (await runtime.runAction(getFunctionPath(ref), args as never)).value as never;
-    },
-    async run(fn) {
-      built.setRunFn(fn as (ctx: unknown) => Promise<unknown>);
-      try {
-        await runtime.runSystem("_test:_run", {});
-        return built.takeRunResult() as never;
-      } finally {
-        built.setRunFn(null);
-      }
-    },
-    async close() {
-      await built.cleanup();
-    },
-  };
+  function makeView(identity: string | null): TestStackbase {
+    return {
+      async query(ref, args = {}) {
+        return (await runtime.run(getFunctionPath(ref), args as never, { identity })).value as never;
+      },
+      async mutation(ref, args = {}) {
+        return (await runtime.run(getFunctionPath(ref), args as never, { identity })).value as never;
+      },
+      async action(ref, args = {}) {
+        return (await runtime.runAction(getFunctionPath(ref), args as never, { identity })).value as never;
+      },
+      async run(fn) {
+        built.setRunFn(fn as (ctx: unknown) => Promise<unknown>);
+        try {
+          await runtime.runSystem("_test:_run", {});
+          return built.takeRunResult() as never;
+        } finally {
+          built.setRunFn(null);
+        }
+      },
+      withIdentity(id) {
+        return makeView(id);
+      },
+      async close() {
+        await built.cleanup();
+      },
+    };
+  }
+
+  return makeView(null);
 }
