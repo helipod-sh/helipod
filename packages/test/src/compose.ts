@@ -74,27 +74,36 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     }),
   };
 
-  const runtime = await EmbeddedRuntime.create({
-    store: new SqliteDocStore(new NodeSqliteAdapter()),
-    catalog: composed.catalog,
-    // `_storage:*` built-ins go in `modules` — the action-mode `ctx.storage` reaches them through
-    // the trusted `invoke`, and the reaper driver through `runFunction`, both of which resolve
-    // `modules` (not `systemModules`).
-    modules: { ...composed.moduleMap, ...storageModules },
-    systemModules,
-    componentNames: composed.componentNames,
-    contextProviders: [
-      storageContextProvider(blobStore, { signingKey: "stackbase-test-signing-key" }),
-      ...composed.contextProviders,
-    ],
-    policyRegistry: composed.policyRegistry,
-    policyProviders: composed.policyProviders,
-    relationRegistry: composed.relationRegistry,
-    bootSteps: composed.bootSteps,
-    drivers: [storageReaper(blobStore), ...composed.drivers],
-    tableNumbers: composed.tableNumbers,
-    now: opts.now,
-  });
+  // `create` can throw before `cleanup` is returned (a driver's `start()`, a boot step, or schema
+  // setup failing) — in that case nothing would ever remove the temp dir. Remove it on failure so a
+  // failed `createTestStackbase` never orphans a `sb-test-*` dir in the OS temp dir, then rethrow.
+  let runtime: EmbeddedRuntime;
+  try {
+    runtime = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()),
+      catalog: composed.catalog,
+      // `_storage:*` built-ins go in `modules` — the action-mode `ctx.storage` reaches them through
+      // the trusted `invoke`, and the reaper driver through `runFunction`, both of which resolve
+      // `modules` (not `systemModules`).
+      modules: { ...composed.moduleMap, ...storageModules },
+      systemModules,
+      componentNames: composed.componentNames,
+      contextProviders: [
+        storageContextProvider(blobStore, { signingKey: "stackbase-test-signing-key" }),
+        ...composed.contextProviders,
+      ],
+      policyRegistry: composed.policyRegistry,
+      policyProviders: composed.policyProviders,
+      relationRegistry: composed.relationRegistry,
+      bootSteps: composed.bootSteps,
+      drivers: [storageReaper(blobStore), ...composed.drivers],
+      tableNumbers: composed.tableNumbers,
+      now: opts.now,
+    });
+  } catch (err) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw err;
+  }
 
   const cleanup = async () => {
     await runtime.stopDrivers();
