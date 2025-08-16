@@ -1,8 +1,20 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema, type SchemaDefinition, type SchemaDefinitionJSON } from "@stackbase/values";
 import { mutation, type RegisteredFunction } from "@stackbase/executor";
+import {
+  STORAGE_TABLE,
+  STORAGE_TABLE_NUMBER,
+  storageTableDefinition,
+  storageModules,
+  storageContextProvider,
+  storageReaper,
+} from "@stackbase/storage";
+import { FsBlobStore } from "@stackbase/blobstore-fs";
 import { flattenModules } from "./flatten";
 
 export interface CreateTestOptions {
@@ -34,7 +46,20 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
       : (flat.schemaModule as SchemaDefinition | null) ?? defineSchema({});
   const schemaJson = schemaDef.export();
 
-  const composed = composeComponents({ schemaJson, moduleMap: flat.moduleMap }, opts.components ?? []);
+  // File storage is an ALWAYS-ON core feature (not opt-in) — inject its reserved `_storage` system
+  // table into the schema BEFORE composing, mirroring `packages/cli`'s `loadProject` (see
+  // `packages/cli/src/project.ts`), so the catalog/tableNumbers include it and `v.id("_storage")`
+  // validates. Its table number is pinned via `existingTableNumbers` below so ids encode/decode
+  // consistently.
+  schemaJson.tables[STORAGE_TABLE] = storageTableDefinition.export();
+
+  const composed = composeComponents({ schemaJson, moduleMap: flat.moduleMap }, opts.components ?? [], {
+    [STORAGE_TABLE]: STORAGE_TABLE_NUMBER,
+  });
+
+  // Per-instance temp dir for the FS blob backend — removed in `cleanup`.
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sb-test-"));
+  const blobStore = new FsBlobStore({ root: tempDir });
 
   // `_test:_run` — the mechanism behind `t.run(fn)`: a system mutation whose handler invokes
   // whatever callback `t.run` most recently parked in `currentRunFn`, giving test code a full
@@ -52,20 +77,29 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   const runtime = await EmbeddedRuntime.create({
     store: new SqliteDocStore(new NodeSqliteAdapter()),
     catalog: composed.catalog,
-    modules: composed.moduleMap,
+    // `_storage:*` built-ins go in `modules` — the action-mode `ctx.storage` reaches them through
+    // the trusted `invoke`, and the reaper driver through `runFunction`, both of which resolve
+    // `modules` (not `systemModules`).
+    modules: { ...composed.moduleMap, ...storageModules },
     systemModules,
     componentNames: composed.componentNames,
-    contextProviders: composed.contextProviders,
+    contextProviders: [
+      storageContextProvider(blobStore, { signingKey: "stackbase-test-signing-key" }),
+      ...composed.contextProviders,
+    ],
     policyRegistry: composed.policyRegistry,
     policyProviders: composed.policyProviders,
     relationRegistry: composed.relationRegistry,
     bootSteps: composed.bootSteps,
-    drivers: composed.drivers,
+    drivers: [storageReaper(blobStore), ...composed.drivers],
     tableNumbers: composed.tableNumbers,
     now: opts.now,
   });
 
-  const cleanup = async () => { await runtime.stopDrivers(); };
+  const cleanup = async () => {
+    await runtime.stopDrivers();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  };
   return {
     runtime,
     tableNumbers: composed.tableNumbers,
