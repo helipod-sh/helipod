@@ -28,6 +28,7 @@
     "@stackbase/executor": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
+    "@stackbase/scheduler": "workspace:*",
     "@stackbase/storage": "workspace:*",
     "@stackbase/sync": "workspace:*",
     "@stackbase/values": "workspace:*"

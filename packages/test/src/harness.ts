@@ -2,6 +2,7 @@ import type { Value } from "@stackbase/values";
 import { getFunctionPath, type FunctionReference } from "@stackbase/client";
 import { buildRuntime, type CreateTestOptions, type BuiltRuntime } from "./compose";
 import type { TestSubscription } from "./reactivity";
+import { finishScheduledFunctions, advanceTimers } from "./scheduler";
 
 type Args = Record<string, Value>;
 
@@ -42,6 +43,20 @@ export interface TestStackbase {
    * `run`/`close` remain shared with the backend, not per-view.
    */
   withIdentity(identity: string): TestStackbase;
+  /**
+   * Deterministically drives every currently- and eventually-due `ctx.scheduler.runAfter`/`runAt`
+   * job (including cascades) to completion by advancing the harness's virtual clock — no real
+   * timers/sleeps. A clean no-op if no `@stackbase/scheduler` component was composed (via
+   * `opts.components`). Throws if `opts.now` was supplied to `createTestStackbase` (the harness
+   * then doesn't own the clock). See `./scheduler.ts`.
+   */
+  finishScheduledFunctions(): Promise<void>;
+  /**
+   * Advances the harness's virtual clock by `ms` and drives one scheduler-driver pass (a no-op
+   * pass if no scheduler is composed) — the one-shot counterpart to `finishScheduledFunctions`.
+   * Throws if `opts.now` was supplied to `createTestStackbase`. See `./scheduler.ts`.
+   */
+  advanceTimers(ms: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -77,6 +92,12 @@ export async function createTestStackbase(opts: CreateTestOptions): Promise<Test
       },
       withIdentity(id) {
         return makeView(id);
+      },
+      async finishScheduledFunctions() {
+        await finishScheduledFunctions(built);
+      },
+      async advanceTimers(ms) {
+        await advanceTimers(built, ms);
       },
       async close() {
         await built.cleanup();

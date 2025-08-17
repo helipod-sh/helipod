@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import type { SchedulerDriver } from "@stackbase/scheduler";
 import { defineSchema, type SchemaDefinition, type SchemaDefinitionJSON } from "@stackbase/values";
 import { mutation, matchRoute, type RegisteredFunction, type RouteEntry } from "@stackbase/executor";
 import {
@@ -62,6 +63,25 @@ export interface BuiltRuntime {
    * runtime it's connected to.
    */
   reactivity: Reactivity;
+  /**
+   * True when this harness owns the virtual clock — i.e. `opts.now` was NOT supplied, so `now()`
+   * is backed by the mutable `clockMs` this module owns. When `opts.now` WAS supplied, the caller
+   * owns time and `advanceClock` throws (mutating `clockMs` would have no effect on `now()`,
+   * which reads the caller's own function instead).
+   */
+  ownsClock: boolean;
+  /**
+   * Advances the harness-owned virtual clock by `ms` (relative to its current value). Backs
+   * `t.advanceTimers`/`t.finishScheduledFunctions` (see `./scheduler.ts`). Throws if `ownsClock`
+   * is false.
+   */
+  advanceClock: (ms: number) => void;
+  /**
+   * Finds `@stackbase/scheduler`'s driver among the composed drivers (by `name === "scheduler"`),
+   * if `defineScheduler()` was included in `opts.components` — `undefined` otherwise. Used by
+   * `./scheduler.ts` to drive `__tick()`.
+   */
+  getSchedulerDriver: () => SchedulerDriver | undefined;
 }
 
 export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntime> {
@@ -115,6 +135,14 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sb-test-"));
   const blobStore = new FsBlobStore({ root: tempDir });
 
+  // The harness-owned virtual clock — only used when `opts.now` isn't supplied. `advanceClock`
+  // (below) mutates `clockMs`; `now` reads it fresh on every call, so `EmbeddedRuntime` (and
+  // everything downstream — the scheduler's `_peekDue`/`_claim`/`_complete`, `ctx.now()` in app
+  // code, etc.) always sees the harness's current virtual time with no real timers involved.
+  const ownsClock = opts.now === undefined;
+  let clockMs = 1_700_000_000_000;
+  const now = opts.now ?? (() => clockMs);
+
   // `_test:_run` — the mechanism behind `t.run(fn)`: a system mutation whose handler invokes
   // whatever callback `t.run` most recently parked in `currentRunFn`, giving test code a full
   // db-writer `ctx` inside a real transaction without having to define an app function for it.
@@ -152,7 +180,7 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
       bootSteps: composed.bootSteps,
       drivers: [storageReaper(blobStore), ...composed.drivers],
       tableNumbers: composed.tableNumbers,
-      now: opts.now,
+      now,
     });
   } catch (err) {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -183,6 +211,9 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     const headerIdentity = auth && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
     return runtime.runHttpAction(match.handlerPath, request, { identity: identity ?? headerIdentity });
   };
+  // Mirrors `components/scheduler/test/helpers.ts`'s lookup — the scheduler's own driver, if
+  // `defineScheduler()` was passed in `opts.components`.
+  const schedulerDriver = composed.drivers.find((d) => d.name === "scheduler") as SchedulerDriver | undefined;
   return {
     runtime,
     tableNumbers: composed.tableNumbers,
@@ -192,5 +223,17 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     takeRunResult: () => { const r = runResult; runResult = undefined; return r; },
     dispatchHttp,
     reactivity,
+    ownsClock,
+    advanceClock: (ms) => {
+      if (!ownsClock) {
+        throw new Error(
+          "advanceClock/advanceTimers/finishScheduledFunctions require the harness-owned virtual clock — " +
+            "createTestStackbase() was given a custom `now`, so the harness has no clock to advance. " +
+            "Omit `opts.now` to use scheduler time control.",
+        );
+      }
+      clockMs += ms;
+    },
+    getSchedulerDriver: () => schedulerDriver,
   };
 }
