@@ -16,6 +16,7 @@ import {
 } from "@stackbase/storage";
 import { FsBlobStore } from "@stackbase/blobstore-fs";
 import { flattenModules } from "./flatten";
+import { createReactivity, type Reactivity } from "./reactivity";
 
 export interface CreateTestOptions {
   modules: Record<string, unknown>;
@@ -54,6 +55,13 @@ export interface BuiltRuntime {
    * is no session concept at the raw-HTTP layer).
    */
   dispatchHttp: (request: Request, identity: string | null) => Promise<Response>;
+  /**
+   * The harness-shared reactive-subscription surface (`t.subscribe`), built lazily on first use
+   * over a real loopback connection to `runtime` — see `./reactivity.ts`. Its `StackbaseClient`
+   * is closed in `cleanup` BEFORE `runtime.stopDrivers()`, so no loopback session outlives the
+   * runtime it's connected to.
+   */
+  reactivity: Reactivity;
 }
 
 export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntime> {
@@ -151,7 +159,11 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     throw err;
   }
 
+  const reactivity = createReactivity(runtime);
   const cleanup = async () => {
+    // Close the shared loopback client BEFORE stopping drivers, so its connection tears down
+    // against a still-live runtime rather than racing driver shutdown.
+    await reactivity.close();
     await runtime.stopDrivers();
     fs.rmSync(tempDir, { recursive: true, force: true });
   };
@@ -179,5 +191,6 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     setRunFn: (fn) => { currentRunFn = fn; },
     takeRunResult: () => { const r = runResult; runResult = undefined; return r; },
     dispatchHttp,
+    reactivity,
   };
 }

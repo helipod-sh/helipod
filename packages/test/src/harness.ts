@@ -1,6 +1,7 @@
 import type { Value } from "@stackbase/values";
 import { getFunctionPath, type FunctionReference } from "@stackbase/client";
 import { buildRuntime, type CreateTestOptions, type BuiltRuntime } from "./compose";
+import type { TestSubscription } from "./reactivity";
 
 type Args = Record<string, Value>;
 
@@ -23,6 +24,17 @@ export interface TestStackbase {
    * precedence over the request's own `Authorization` header if both are present.
    */
   fetch(request: Request): Promise<Response>;
+  /**
+   * Subscribes to a reactive query over the REAL client -> sync protocol -> SubscriptionManager ->
+   * engine path (a loopback `StackbaseClient`, shared across every `subscribe` call on this
+   * backend and every view of it — built lazily on first use, closed in `close()`). A committed
+   * write re-runs and re-pushes only when its write set intersects this query's recorded read
+   * set (surgical, range-based invalidation) — no polling.
+   *
+   * v1 limitation: always uses the base (no-identity) client, regardless of which view (see
+   * `withIdentity`) `subscribe` is called on — there is no per-identity subscription yet.
+   */
+  subscribe<T = any>(ref: FunctionReference | string, args?: Args): TestSubscription<T>;
   /**
    * Returns a view of the SAME backend whose `query`/`mutation`/`action` calls carry `identity` as
    * the ambient session token (reaching user code only through a context provider's
@@ -59,6 +71,9 @@ export async function createTestStackbase(opts: CreateTestOptions): Promise<Test
       },
       async fetch(request) {
         return built.dispatchHttp(request, identity);
+      },
+      subscribe(ref, args = {}) {
+        return built.reactivity.subscribe(ref, args);
       },
       withIdentity(id) {
         return makeView(id);
