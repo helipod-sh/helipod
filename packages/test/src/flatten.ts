@@ -30,7 +30,12 @@ export async function flattenModules(
     const mod = (await resolveModule(rawVal)) as Record<string, unknown>;
     const def = mod && typeof mod === "object" ? (mod as { default?: unknown }).default : undefined;
     if (modPath === "schema") { schemaModule = def ?? mod; continue; }
-    if (modPath === "http") { httpModule = def ?? mod; continue; }
+    // http.ts's default export is the `HttpRouter` itself (captured as `httpModule` for route
+    // resolution), but its NAMED exports are the httpAction `RegisteredFunction`s the router's
+    // routes point to — those still need to land in `moduleMap` as `http:<name>` so `dispatchHttp`
+    // can resolve a route's handler VALUE back to a dispatchable path (no `continue` here, unlike
+    // `schema` above: the loop below must still run for http.ts).
+    if (modPath === "http") { httpModule = def ?? mod; }
     for (const [exportName, exportVal] of Object.entries(mod ?? {})) {
       if (isRegisteredFunction(exportVal)) moduleMap[`${modPath}:${exportName}`] = exportVal;
     }

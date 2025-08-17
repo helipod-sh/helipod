@@ -5,7 +5,7 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema, type SchemaDefinition, type SchemaDefinitionJSON } from "@stackbase/values";
-import { mutation, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, matchRoute, type RegisteredFunction, type RouteEntry } from "@stackbase/executor";
 import {
   STORAGE_TABLE,
   STORAGE_TABLE_NUMBER,
@@ -24,6 +24,16 @@ export interface CreateTestOptions {
   now?: () => number;
 }
 
+/** A single `http.ts` route, with its handler resolved from a `RegisteredFunction` value to the
+ * `path:name` function path `runtime.runHttpAction` looks up — mirrors `packages/cli/src/project.ts`'s
+ * `ResolvedRoute`. */
+export interface ResolvedRoute {
+  method: string;
+  path?: string;
+  pathPrefix?: string;
+  handlerPath: string;
+}
+
 export interface BuiltRuntime {
   runtime: EmbeddedRuntime;
   tableNumbers: Record<string, number>;
@@ -33,6 +43,16 @@ export interface BuiltRuntime {
   setRunFn: (fn: ((ctx: unknown) => Promise<unknown>) | null) => void;
   /** Reads back (and clears) the value the last `setRunFn` callback returned. */
   takeRunResult: () => unknown;
+  /**
+   * Routes a raw `Request` through the app's `http.ts` router (if any), the same way the real
+   * `stackbase dev`/`serve` HTTP handler dispatches to an `httpAction` — see
+   * `packages/cli/src/http-handler.ts`. Returns a plain `Response("Not Found", { status: 404 })`
+   * for an unmatched method+path, never throws for that case. `identity` (if non-null) wins over
+   * the request's own `Authorization` header, which is used as a fallback — mirroring the real
+   * engine's httpAction identity passthrough (there, identity is ALWAYS derived from the header,
+   * since there is no session concept at the raw-HTTP layer).
+   */
+  dispatchHttp: (request: Request, identity: string | null) => Promise<Response>;
 }
 
 export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntime> {
@@ -56,6 +76,31 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   const composed = composeComponents({ schemaJson, moduleMap: flat.moduleMap }, opts.components ?? [], {
     [STORAGE_TABLE]: STORAGE_TABLE_NUMBER,
   });
+
+  // Extract + resolve the `http.ts` router (if any): its default export is an `HttpRouter` whose
+  // route handlers are `RegisteredFunction` VALUES — resolve each to its `path:name` function path
+  // by identity over `composed.moduleMap` (the same objects the router references), for
+  // `runtime.runHttpAction` to look up — mirrors `packages/cli/src/project.ts`'s route resolution.
+  const resolvedRoutes: ResolvedRoute[] = [];
+  const router = flat.httpModule as { routes?: RouteEntry[] } | null;
+  if (router?.routes) {
+    const pathByFn = new Map<RegisteredFunction, string>();
+    for (const [path, fn] of Object.entries(composed.moduleMap)) pathByFn.set(fn, path);
+    for (const r of router.routes) {
+      const handlerPath = pathByFn.get(r.handler);
+      if (!handlerPath) {
+        const where = r.path ?? r.pathPrefix ?? "?";
+        throw new Error(
+          `http.route handler for "${where}" must be an exported httpAction (declare it as a named export of an app module)`,
+        );
+      }
+      resolvedRoutes.push({
+        method: r.method,
+        ...(r.path !== undefined ? { path: r.path } : { pathPrefix: r.pathPrefix }),
+        handlerPath,
+      });
+    }
+  }
 
   // Per-instance temp dir for the FS blob backend — removed in `cleanup`.
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sb-test-"));
@@ -109,6 +154,16 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     await runtime.stopDrivers();
     fs.rmSync(tempDir, { recursive: true, force: true });
   };
+  // See `packages/cli/src/http-handler.ts`'s "User httpAction routes" block — this is the same
+  // match-then-dispatch, minus the wire (de)serialization a real HTTP server needs since `t.fetch`
+  // already deals in `Request`/`Response` objects directly.
+  const dispatchHttp = async (request: Request, identity: string | null): Promise<Response> => {
+    const url = new URL(request.url);
+    const match = matchRoute(resolvedRoutes, request.method, url.pathname);
+    if (!match) return new Response("Not Found", { status: 404 });
+    const headerIdentity = request.headers.get("authorization");
+    return runtime.runHttpAction(match.handlerPath, request, { identity: identity ?? headerIdentity ?? null });
+  };
   return {
     runtime,
     tableNumbers: composed.tableNumbers,
@@ -116,5 +171,6 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     cleanup,
     setRunFn: (fn) => { currentRunFn = fn; },
     takeRunResult: () => { const r = runResult; runResult = undefined; return r; },
+    dispatchHttp,
   };
 }

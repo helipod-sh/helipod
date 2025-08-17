@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mutation, query } from "@stackbase/executor";
+import { mutation, query, httpAction } from "@stackbase/executor";
 import { flattenModules } from "../../src/flatten";
 
 describe("flattenModules", () => {
@@ -22,5 +22,15 @@ describe("flattenModules", () => {
   it("awaits import.meta.glob-style async loaders", async () => {
     const out = await flattenModules({ "a.ts": async () => ({ f: query(async () => 1) }) });
     expect(Object.keys(out.moduleMap)).toEqual(["a:f"]);
+  });
+
+  it("still registers http.ts's named httpAction exports into moduleMap (not just the default router)", async () => {
+    const ping = httpAction(async () => new Response("ok"));
+    const http = { default: { __isRouter: true, routes: [] }, ping };
+    const out = await flattenModules({ "http.ts": http });
+    expect(out.httpModule).toBe(http.default);
+    expect(out.moduleMap["http:ping"]).toBe(ping);
+    // the router's own `default` export itself must NOT leak into moduleMap as `http:default`.
+    expect(out.moduleMap["http:default"]).toBeUndefined();
   });
 });

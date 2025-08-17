@@ -16,6 +16,14 @@ export interface TestStackbase {
    */
   run<T>(fn: (ctx: any) => Promise<T>): Promise<T>;
   /**
+   * Routes `request` through the app's `http.ts` router, exactly as the real `stackbase dev`/`serve`
+   * HTTP handler dispatches to an `httpAction` (see `packages/cli/src/http-handler.ts`). Returns a
+   * plain 404 `Response` for an unmatched method+path — it never throws for that case. This view's
+   * identity (set via `withIdentity`) is passed through as the httpAction's `ctx` identity, taking
+   * precedence over the request's own `Authorization` header if both are present.
+   */
+  fetch(request: Request): Promise<Response>;
+  /**
    * Returns a view of the SAME backend whose `query`/`mutation`/`action` calls carry `identity` as
    * the ambient session token (reaching user code only through a context provider's
    * `build({ identity })`, e.g. `components/auth`'s `ctx.auth` — there is no bare `ctx.identity`).
@@ -48,6 +56,9 @@ export async function createTestStackbase(opts: CreateTestOptions): Promise<Test
         } finally {
           built.setRunFn(null);
         }
+      },
+      async fetch(request) {
+        return built.dispatchHttp(request, identity);
       },
       withIdentity(id) {
         return makeView(id);
