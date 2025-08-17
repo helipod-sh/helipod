@@ -21,16 +21,23 @@ it("t.fetch threads a view's withIdentity through to the httpAction's ctx identi
   }
 });
 
-it("t.fetch falls back to the request's raw Authorization header when the view has no identity", async () => {
+it("t.fetch falls back to the request's Authorization header (Bearer-stripped, engine parity) when the view has no identity", async () => {
   const t = await createTestStackbase({
     modules: { "http.ts": http, "schema.ts": { default: defineSchema({}) } },
     components: [identityProbe],
   });
   try {
+    // Mirrors `packages/cli/src/http-handler.ts`: `Bearer abc123` -> `abc123` (prefix stripped).
     const res = await t.fetch(
-      new Request("http://localhost/whoami", { headers: { authorization: "Bearer raw-token" } }),
+      new Request("http://localhost/whoami", { headers: { authorization: "Bearer abc123" } }),
     );
-    expect(await res.json()).toEqual({ identity: "Bearer raw-token" });
+    expect(await res.json()).toEqual({ identity: "abc123" });
+
+    // A non-Bearer Authorization header is NOT treated as identity (also engine parity) -> null.
+    const other = await t.fetch(
+      new Request("http://localhost/whoami", { headers: { authorization: "Basic Zm9vOmJhcg==" } }),
+    );
+    expect(await other.json()).toEqual({ identity: null });
   } finally {
     await t.close();
   }

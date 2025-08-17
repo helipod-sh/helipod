@@ -48,9 +48,10 @@ export interface BuiltRuntime {
    * `stackbase dev`/`serve` HTTP handler dispatches to an `httpAction` — see
    * `packages/cli/src/http-handler.ts`. Returns a plain `Response("Not Found", { status: 404 })`
    * for an unmatched method+path, never throws for that case. `identity` (if non-null) wins over
-   * the request's own `Authorization` header, which is used as a fallback — mirroring the real
-   * engine's httpAction identity passthrough (there, identity is ALWAYS derived from the header,
-   * since there is no session concept at the raw-HTTP layer).
+   * the request's own `Authorization` header, which is used as a fallback and Bearer-stripped
+   * (`Bearer abc123` -> `abc123`, non-Bearer -> null) — exact parity with the real engine's
+   * httpAction identity passthrough (there, identity is ALWAYS derived from the header, since there
+   * is no session concept at the raw-HTTP layer).
    */
   dispatchHttp: (request: Request, identity: string | null) => Promise<Response>;
 }
@@ -161,8 +162,14 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     const url = new URL(request.url);
     const match = matchRoute(resolvedRoutes, request.method, url.pathname);
     if (!match) return new Response("Not Found", { status: 404 });
-    const headerIdentity = request.headers.get("authorization");
-    return runtime.runHttpAction(match.handlerPath, request, { identity: identity ?? headerIdentity ?? null });
+    // Header-fallback identity mirrors the real engine EXACTLY (see
+    // `packages/cli/src/http-handler.ts`): the raw `Authorization` header is Bearer-stripped —
+    // `Bearer abc123` -> `abc123`, anything else -> null — so a bare `t.fetch(req)`'s httpAction
+    // sees the same `ctx.identity` it would in production. The view's `withIdentity` token (already
+    // a bare string) still wins when present.
+    const auth = request.headers.get("authorization");
+    const headerIdentity = auth && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null;
+    return runtime.runHttpAction(match.handlerPath, request, { identity: identity ?? headerIdentity });
   };
   return {
     runtime,
