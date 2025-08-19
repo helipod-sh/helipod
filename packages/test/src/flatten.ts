@@ -2,11 +2,19 @@ import type { RegisteredFunction } from "@stackbase/executor";
 
 function isRegisteredFunction(v: unknown): v is RegisteredFunction {
   return typeof v === "object" && v !== null && typeof (v as { type?: unknown }).type === "string"
-    && "handler" in (v as object);
+    && typeof (v as { handler?: unknown }).handler === "function";
 }
 
-function stripExt(key: string): string {
-  return key.replace(/\.(ts|tsx|js|jsx|mts|cts)$/, "");
+// `import.meta.glob("./convex/**/*.ts")` keys come back prefixed with the glob's own leading
+// path segments (`./convex/messages.ts`, `../convex/messages.ts`, etc.) — not just an extension to
+// strip. Normalize to the same function-path root the codegen `api`/string refs use (relative to
+// the `convex/` functions root), so a glob-sourced module registers under the exact same path an
+// explicit `{ "messages.ts": messages }` map would.
+function normalizeModulePath(key: string): string {
+  return key
+    .replace(/^(\.\.?\/)+/, "")                 // strip leading ./  ../  ../../
+    .replace(/^convex\//, "")                   // strip the conventional convex/ functions root
+    .replace(/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/, ""); // strip extension
 }
 
 async function resolveModule(v: unknown): Promise<unknown> {
@@ -26,7 +34,7 @@ export async function flattenModules(
   let schemaModule: unknown | null = null;
   let httpModule: unknown | null = null;
   for (const [rawKey, rawVal] of Object.entries(modules)) {
-    const modPath = stripExt(rawKey);
+    const modPath = normalizeModulePath(rawKey);
     const mod = (await resolveModule(rawVal)) as Record<string, unknown>;
     const def = mod && typeof mod === "object" ? (mod as { default?: unknown }).default : undefined;
     if (modPath === "schema") { schemaModule = def ?? mod; continue; }

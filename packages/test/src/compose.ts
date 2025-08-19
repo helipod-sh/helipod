@@ -159,10 +159,14 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   // `create` can throw before `cleanup` is returned (a driver's `start()`, a boot step, or schema
   // setup failing) — in that case nothing would ever remove the temp dir. Remove it on failure so a
   // failed `createTestStackbase` never orphans a `sb-test-*` dir in the OS temp dir, then rethrow.
+  // The store is captured (not constructed inline) so both the success path's `cleanup` and this
+  // catch block can close its underlying SQLite handle — otherwise an in-memory db handle (and, on
+  // `create`-throws, the process-visible file descriptor it holds) leaks for the life of the process.
+  const store = new SqliteDocStore(new NodeSqliteAdapter());
   let runtime: EmbeddedRuntime;
   try {
     runtime = await EmbeddedRuntime.create({
-      store: new SqliteDocStore(new NodeSqliteAdapter()),
+      store,
       catalog: composed.catalog,
       // `_storage:*` built-ins go in `modules` — the action-mode `ctx.storage` reaches them through
       // the trusted `invoke`, and the reaper driver through `runFunction`, both of which resolve
@@ -183,6 +187,7 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
       now,
     });
   } catch (err) {
+    store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
     throw err;
   }
@@ -190,9 +195,12 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   const reactivity = createReactivity(runtime);
   const cleanup = async () => {
     // Close the shared loopback client BEFORE stopping drivers, so its connection tears down
-    // against a still-live runtime rather than racing driver shutdown.
+    // against a still-live runtime rather than racing driver shutdown. The docstore itself is
+    // closed AFTER drivers stop (so nothing still-running can touch it mid-close) and before the
+    // temp dir backing file storage is removed.
     await reactivity.close();
     await runtime.stopDrivers();
+    store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   };
   // See `packages/cli/src/http-handler.ts`'s "User httpAction routes" block — this is the same

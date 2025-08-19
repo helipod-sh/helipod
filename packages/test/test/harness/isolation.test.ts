@@ -28,10 +28,10 @@ describe("harness — isolation", () => {
   });
 
   it("close() leaves no leak: creating + closing 20 instances completes cleanly", async () => {
-    // If `cleanup` failed to stop drivers / close the loopback client / remove the temp dir, this
-    // loop would accumulate open handles across iterations and either hang the process or blow up
-    // resource limits (too many open fds/temp dirs) well before reaching 20. Completing at all,
-    // within the test's own timeout, is the proof.
+    // If `cleanup` failed to stop drivers / close the loopback client / close the underlying
+    // SQLite docstore / remove the temp dir, this loop would accumulate open handles across
+    // iterations and either hang the process or blow up resource limits (too many open fds/temp
+    // dirs) well before reaching 20. Completing at all, within the test's own timeout, is the proof.
     for (let i = 0; i < 20; i++) {
       const t = await createTestStackbase({
         modules: { "messages.ts": messages, "schema.ts": { default: schema } },

@@ -136,7 +136,8 @@ exact same function.
 - **`t.fetch(request)`** — routes a `Request` through your app's `http.ts` router exactly as the
   real server's HTTP handler would, returning a `Response` (a plain 404 for no match). The calling
   view's identity (via `withIdentity`) takes precedence over the request's own `Authorization`
-  header if both are present.
+  header if both are present. This override is a harness convenience only — in production an
+  httpAction's identity comes solely from the request's own `Authorization` header.
 - **`t.subscribe(ref, args)`** — see below.
 - **`t.finishScheduledFunctions()` / `t.advanceTimers(ms)`** — deterministic time control for
   `@stackbase/scheduler` jobs and crons, driven by the harness's own virtual clock (no real

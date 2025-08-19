@@ -33,4 +33,26 @@ describe("flattenModules", () => {
     // the router's own `default` export itself must NOT leak into moduleMap as `http:default`.
     expect(out.moduleMap["http:default"]).toBeUndefined();
   });
+
+  it("normalizes import.meta.glob-style keys (./convex/ prefix) to the same function-path root as explicit keys", async () => {
+    const send = mutation(async () => "ok");
+    const ping = httpAction(async () => new Response("ok"));
+    const schema = { __isSchema: true };
+    const router = { __isRouter: true, routes: [] };
+    const out = await flattenModules({
+      "./convex/messages.ts": { send },
+      "./convex/schema.ts": { default: schema },
+      "./convex/http.ts": { default: router, ping },
+    });
+    expect(out.moduleMap["messages:send"]).toBe(send);
+    expect(out.schemaModule).toBe(schema);
+    expect(out.httpModule).toBe(router);
+    expect(out.moduleMap["http:ping"]).toBe(ping);
+  });
+
+  it("normalizes a glob key with no convex/ dir (./messages.ts) too", async () => {
+    const send = mutation(async () => "ok");
+    const out = await flattenModules({ "./messages.ts": { send } });
+    expect(out.moduleMap["messages:send"]).toBe(send);
+  });
 });
