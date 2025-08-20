@@ -4,7 +4,7 @@
  * that touch the transaction, query engine, and index maintenance. Because the boundary is
  * pure JSON strings, the exact same handlers work when the guest is a real V8 isolate.
  */
-import { DocumentNotFoundError, ForbiddenOperationError, FunctionNotFoundError } from "@stackbase/errors";
+import { DocumentNotFoundError, DocumentValidationError, ForbiddenOperationError, FunctionNotFoundError } from "@stackbase/errors";
 import {
   decodeDocumentId,
   encodeInternalDocumentId,
@@ -23,11 +23,11 @@ import {
   type Query,
   type RangeExpression,
 } from "@stackbase/query-engine";
-import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
+import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import type { DocumentValue } from "@stackbase/docstore";
 import type { TransactionContext } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
-import type { IndexCatalog } from "./catalog";
+import type { IndexCatalog, TableMeta } from "./catalog";
 import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
 import type { PolicyRegistry, RuleContext, RelationRegistry } from "./policy";
@@ -99,6 +99,17 @@ function requireTable(ctx: KernelContext, name: string): { tableNumber: number; 
   return { tableNumber: meta.tableNumber, fullName };
 }
 
+/** Validate a user-provided document value against the table's schema validator (if any). */
+function validateDocumentForWrite(meta: TableMeta | undefined, tableName: string, value: DocumentValue): void {
+  const validator = meta?.documentValidator;
+  if (!validator) return;
+  const failures = validate(validator, value as Value);
+  if (failures.length > 0) {
+    const detail = failures.slice(0, 3).map((f) => `${f.path}: ${f.message}`).join("; ");
+    throw new DocumentValidationError(`document in "${tableName}" does not match schema: ${detail}`);
+  }
+}
+
 /** Reject access to a document whose table is outside the running component's namespace. */
 function requireOwnTable(ctx: KernelContext, fullName: string): void {
   if (ctx.privileged) return;
@@ -151,10 +162,12 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   if (!ctx.profile.capabilities.dbWrite) throw new ForbiddenOperationError("writes are not allowed here");
   const { table, value } = JSON.parse(argJson) as { table: string; value: JSONValue };
   const { tableNumber, fullName } = requireTable(ctx, table);
+  const converted = jsonToConvex(value) as DocumentValue;
+  validateDocumentForWrite(ctx.catalog.getTable(fullName), fullName, converted);
   const id = newDocumentId(tableNumber);
   const docId = encodeInternalDocumentId(id);
   const doc: DocumentValue = {
-    ...(jsonToConvex(value) as DocumentValue),
+    ...converted,
     _id: docId,
     _creationTime: Number(ctx.snapshotTs),
   };
@@ -174,8 +187,11 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
   await enforceWrite(ctx, meta.name, oldDoc);
+  const converted = jsonToConvex(value) as DocumentValue;
+  const { _id: _omitId, _creationTime: _omitCt, ...userFields } = converted;
+  validateDocumentForWrite(meta, meta.name, userFields as DocumentValue);
   const newDoc: DocumentValue = {
-    ...(jsonToConvex(value) as DocumentValue),
+    ...converted,
     _id: id,
     _creationTime: (oldDoc["_creationTime"] as number) ?? Number(ctx.snapshotTs),
   };
