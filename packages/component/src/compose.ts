@@ -40,7 +40,7 @@ function addSchema(
     seen.add(fullName);
     const info = registry.allocate(fullName, { shardKey: tableDef.shardKey });
     tableNumbers[fullName] = info.tableNumber;
-    catalog.addTable(fullName, info.tableNumber);
+    catalog.addTable(fullName, info.tableNumber, tableDef.documentType, schemaJson.schemaValidation);
     catalog.addIndex({
       table: fullName,
       tableNumber: info.tableNumber,

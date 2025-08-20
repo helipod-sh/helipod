@@ -4,10 +4,16 @@
  * generated schema. The kernel uses it for query planning and index maintenance.
  */
 import type { IndexSpec } from "@stackbase/query-engine";
+import { validatorFromJson, type AnyValidator, type ValidatorJSON } from "@stackbase/values";
 
 export interface TableMeta {
   name: string;
   tableNumber: number;
+  /** The table's document validator, built from schema.ts. Null when schemaValidation is off or
+   *  the table has no object documentType. The kernel runs this on every insert/replace. */
+  documentValidator?: AnyValidator | null;
+  /** Whether the owning schema had schemaValidation enabled (default true). */
+  schemaValidation?: boolean;
 }
 
 export interface IndexCatalog {
@@ -23,8 +29,16 @@ export class SimpleIndexCatalog implements IndexCatalog {
   private readonly indexes = new Map<string, IndexSpec>();
   private readonly indexesByTable = new Map<string, IndexSpec[]>();
 
-  addTable(name: string, tableNumber: number): this {
-    const meta: TableMeta = { name, tableNumber };
+  addTable(
+    name: string,
+    tableNumber: number,
+    documentType?: ValidatorJSON,
+    schemaValidation?: boolean,
+  ): this {
+    const enabled = schemaValidation !== false;
+    const documentValidator =
+      enabled && documentType && documentType.type === "object" ? validatorFromJson(documentType) : null;
+    const meta: TableMeta = { name, tableNumber, documentValidator, schemaValidation: enabled };
     this.tables.set(name, meta);
     this.tablesByNumber.set(tableNumber, meta);
     if (!this.indexesByTable.has(name)) this.indexesByTable.set(name, []);
