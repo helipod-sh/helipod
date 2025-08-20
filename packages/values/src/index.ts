@@ -28,6 +28,8 @@ export type {
   ObjectType,
 } from "./validator";
 
+export { validatorFromJson } from "./validator-from-json";
+
 export {
   defineTable,
   defineSchema,
