@@ -2,7 +2,7 @@ import { mutation, query } from "@stackbase/executor";
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export const schema = defineSchema({
-  docs: defineTable({ owner: v.string(), n: v.number(), tag: v.string() }).index("by_owner_n", ["owner", "n"]),
+  docs: defineTable({ owner: v.string(), n: v.number(), tag: v.string(), note: v.optional(v.string()) }).index("by_owner_n", ["owner", "n"]),
 });
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

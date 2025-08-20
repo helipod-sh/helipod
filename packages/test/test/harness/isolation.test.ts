@@ -79,23 +79,19 @@ describe("harness — isolation", () => {
       }
     });
 
-    it("does NOT reject a wrong-typed write at runtime — Stackbase has no runtime validator on the write path", async () => {
-      // See `test/conformance/validators.test.ts` for the full divergence writeup: `Validator.check`
-      // exists as machinery but nothing on the insert/replace path ever calls it, so a value that
-      // doesn't match its schema type still round-trips successfully. Don't assert rejection here —
-      // that behavior doesn't exist.
-      const { mutation, query } = await import("@stackbase/executor");
+    it("rejects a wrong-typed write at runtime — schema validation is enforced", async () => {
+      // See `test/conformance/validators.test.ts` for the full enforcement writeup: `Validator.check`
+      // is now called on every insert/replace, so a value that doesn't match its schema type is
+      // rejected with `DocumentValidationError` rather than round-tripping silently.
+      const { mutation } = await import("@stackbase/executor");
       const { defineSchema, defineTable, v } = await import("@stackbase/values");
       const badSchema = defineSchema({ nums: defineTable({ n: v.number() }) });
       const mod = {
         insert: mutation(async (ctx: any, a: any) => ctx.db.insert("nums", a)),
-        get: query(async (ctx: any, a: { id: string }) => ctx.db.get(a.id)),
       };
       const t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: badSchema } } });
       try {
-        const id = await t.mutation<string>("mod:insert", { n: "not-a-number" });
-        const doc = (await t.query("mod:get", { id })) as Record<string, unknown>;
-        expect(doc["n"]).toBe("not-a-number"); // accepted verbatim, not rejected
+        await expect(t.mutation("mod:insert", { n: "not-a-number" })).rejects.toThrow(/does not match schema/);
       } finally {
         await t.close();
       }

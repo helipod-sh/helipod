@@ -32,13 +32,19 @@ describe("conformance — db CRUD", () => {
     expect(await t.query("mod:get", { id })).toMatchObject({ owner: "a", n: 2, tag: "x" });
   });
 
-  it("replace overwrites the whole document (dropped fields are gone)", async () => {
-    const id = await t.mutation<string>("mod:insert", { owner: "a", n: 1, tag: "x" });
-    // replace with a doc that omits `tag` entirely
-    await t.mutation("mod:replace", { id, doc: { owner: "a", n: 9 } });
+  it("replace overwrites the whole document (dropped optional field is gone)", async () => {
+    const id = await t.mutation<string>("mod:insert", { owner: "a", n: 1, tag: "x", note: "keep" });
+    // replace with a doc that omits the optional `note` field entirely — all required fields present
+    await t.mutation("mod:replace", { id, doc: { owner: "a", n: 9, tag: "y" } });
     const doc = (await t.query("mod:get", { id })) as Record<string, unknown>;
-    expect(doc).toMatchObject({ owner: "a", n: 9 });
-    expect(doc.tag).toBeUndefined();
+    expect(doc).toMatchObject({ owner: "a", n: 9, tag: "y" });
+    expect(doc.note).toBeUndefined(); // proves full overwrite, not a merge — the optional field was dropped
+  });
+
+  it("replace must keep the doc schema-valid — dropping a required field rejects", async () => {
+    const id = await t.mutation<string>("mod:insert", { owner: "a", n: 1, tag: "x" });
+    // `tag` is required by schema; omitting it on replace must be rejected, not silently accepted
+    await expect(t.mutation("mod:replace", { id, doc: { owner: "a", n: 9 } })).rejects.toThrow(/does not match schema/);
   });
 
   it("delete makes a subsequent get return null", async () => {

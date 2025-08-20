@@ -202,11 +202,12 @@ diverges:
   `hasMore` is `!isDone`; `nextCursor` is `continueCursor`.
 - **There is no `ctx.db.patch`.** A partial update is a read, a merge, and a `ctx.db.replace(id,
   merged)`.
-- **Schema validators are compile-time and structural, not runtime-enforced.** Stackbase's
-  `v.*` validators give you TypeScript types and describe your schema's shape, but nothing on the
-  write path currently rejects a value that doesn't match — an insert with a wrong-typed field
-  succeeds and the value round-trips as written. Don't write a test asserting that a bad write is
-  rejected; it isn't, today.
+- **Schema document validation is runtime-enforced.** Stackbase's `v.*` validators give you
+  TypeScript types AND are checked on every write — an insert or `replace` whose document is
+  wrong-typed, has an extra field, or is missing a required field is rejected with a
+  `DocumentValidationError` ("document in \"<table>\" does not match schema: ..."). Disable it for
+  an entire schema with `defineSchema(tables, { schemaValidation: false })`, or loosen a single
+  field with `v.any()`.
 
 ## CI
 
