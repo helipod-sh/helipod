@@ -10,6 +10,13 @@ import { getFunctionPath, type FunctionReference } from "./api";
 import type { ClientTransport } from "./transport";
 
 export type QueryListener = (value: Value) => void;
+/** Fires when a subscribed query throws server-side (its handler errored). */
+export type QueryErrorListener = (error: string) => void;
+
+interface Listener {
+  onUpdate: QueryListener;
+  onError?: QueryErrorListener;
+}
 
 interface Subscription {
   queryId: number;
@@ -17,7 +24,7 @@ interface Subscription {
   args: JSONValue;
   hash: string;
   value: Value | undefined;
-  listeners: Set<QueryListener>;
+  listeners: Set<Listener>;
 }
 
 export class StackbaseClient {
@@ -40,8 +47,17 @@ export class StackbaseClient {
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
   }
 
-  /** Subscribe to a reactive query. `onUpdate` fires with the latest value (immediately if cached). */
-  subscribe(ref: FunctionReference | string, args: Record<string, Value> = {}, onUpdate: QueryListener): () => void {
+  /**
+   * Subscribe to a reactive query. `onUpdate` fires with the latest value (immediately if cached).
+   * `onError` (optional) fires if the query's handler throws server-side — otherwise a failing
+   * query is logged and leaves the last known value in place.
+   */
+  subscribe(
+    ref: FunctionReference | string,
+    args: Record<string, Value> = {},
+    onUpdate: QueryListener,
+    onError?: QueryErrorListener,
+  ): () => void {
     const path = getFunctionPath(ref);
     const argsJson = convexToJson(args as Value);
     const hash = `${path}:${JSON.stringify(argsJson)}`;
@@ -54,13 +70,14 @@ export class StackbaseClient {
       this.subsById.set(queryId, sub);
       this.transport.send({ type: "ModifyQuerySet", add: [{ queryId, udfPath: path, args: argsJson }], remove: [] });
     }
-    sub.listeners.add(onUpdate);
+    const listener: Listener = { onUpdate, onError };
+    sub.listeners.add(listener);
     if (sub.value !== undefined) onUpdate(sub.value);
 
     return () => {
       const s = this.subsByHash.get(hash);
       if (!s) return;
-      s.listeners.delete(onUpdate);
+      s.listeners.delete(listener);
       if (s.listeners.size === 0) {
         this.transport.send({ type: "ModifyQuerySet", add: [], remove: [s.queryId] });
         this.subsByHash.delete(hash);
@@ -69,13 +86,21 @@ export class StackbaseClient {
     };
   }
 
-  /** One-shot read: subscribe, resolve with the first value, unsubscribe. */
+  /** One-shot read: subscribe, resolve with the first value (or reject if the query throws), unsubscribe. */
   query(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
-    return new Promise((resolve) => {
-      const unsubscribe = this.subscribe(ref, args, (value) => {
-        resolve(value);
-        queueMicrotask(unsubscribe);
-      });
+    return new Promise((resolve, reject) => {
+      const unsubscribe = this.subscribe(
+        ref,
+        args,
+        (value) => {
+          resolve(value);
+          queueMicrotask(unsubscribe);
+        },
+        (error) => {
+          reject(new Error(error));
+          queueMicrotask(unsubscribe);
+        },
+      );
     });
   }
 
@@ -175,10 +200,19 @@ export class StackbaseClient {
         const sub = this.subsById.get(mod.queryId);
         if (sub) {
           sub.value = jsonToConvex(mod.value);
-          for (const listener of sub.listeners) listener(sub.value);
+          for (const l of sub.listeners) l.onUpdate(sub.value);
+        }
+      } else if (mod.type === "QueryFailed") {
+        // A subscribed query's handler threw server-side. Surface it to any `onError` listeners
+        // (and always log) so a failing subscription isn't silently swallowed — leaving the last
+        // known value in place for consumers that don't handle errors.
+        const sub = this.subsById.get(mod.queryId);
+        if (sub) {
+          console.error(`[stackbase] query "${sub.path}" failed: ${mod.error}`);
+          for (const l of sub.listeners) l.onError?.(mod.error);
         }
       }
-      // QueryRemoved / QueryFailed: keep the last known value; a real UI would surface the error.
+      // QueryRemoved: keep the last known value.
     }
   }
 

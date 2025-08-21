@@ -8,5 +8,5 @@ export { anyApi, getFunctionPath } from "./api";
 export type { ClientTransport, LoopbackLike } from "./transport";
 export { loopbackTransport, webSocketTransport } from "./transport";
 
-export type { QueryListener } from "./client";
+export type { QueryListener, QueryErrorListener } from "./client";
 export { StackbaseClient } from "./client";

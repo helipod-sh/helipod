@@ -27,6 +27,11 @@ const modules: Record<string, RegisteredFunction> = {
   "messages:echo": action<{ body: string }, string>({
     handler: async (_ctx, { body }) => `echo:${body}`,
   }),
+  "messages:boom": query<Record<string, never>, unknown>({
+    handler: () => {
+      throw new Error("kaboom");
+    },
+  }),
 };
 
 // Typed view of the runtime api proxy for the test.
@@ -182,5 +187,27 @@ describe("StackbaseClient — protocol safety", () => {
     const pending = client.action(api.messages.echo, { body: "x" });
     t.close();
     await expect(pending).rejects.toThrow(/connection closed/);
+  });
+});
+
+describe("StackbaseClient — query failure surfacing (no silent QueryFailed drop)", () => {
+  it("fires onError (and never onUpdate) when a subscribed query throws server-side", async () => {
+    const client = newClient("sErr");
+    const updates: unknown[] = [];
+    const errors: string[] = [];
+    client.subscribe(
+      "messages:boom",
+      {},
+      (v) => updates.push(v),
+      (e) => errors.push(e),
+    );
+    await waitFor(() => errors.length > 0);
+    expect(errors[0]).toContain("kaboom");
+    expect(updates).toEqual([]); // a failed query never delivers a value
+  });
+
+  it("query() rejects when the one-shot query throws, instead of hanging forever", async () => {
+    const client = newClient("sErr2");
+    await expect(client.query("messages:boom", {})).rejects.toThrow(/kaboom/);
   });
 });
