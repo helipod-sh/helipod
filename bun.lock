@@ -80,6 +80,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@stackbase/component": "workspace:*",
+        "@stackbase/errors": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/values": "workspace:*",
         "cron-parser": "^4.9.0",
