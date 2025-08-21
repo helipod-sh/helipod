@@ -1,5 +1,6 @@
 import type { Driver, DriverContext } from "@stackbase/component";
 import type { JSONValue } from "@stackbase/values";
+import { isStackbaseError } from "@stackbase/errors";
 import type { ClaimResult, JobResult, PeekDueResult } from "./modules";
 import { SWEEP_MS } from "./modules";
 
@@ -155,9 +156,15 @@ export function schedulerDriver(): SchedulerDriver {
         let result: JobResult;
         try {
           const value = await ctx.runFunction(claimed.fnPath, claimed.args);
-          result = { kind: "success", value };
+          // A function with no explicit `return` yields `undefined`, which the wire codec
+          // (`jsonToConvex`) rejects — coerce to `null` (Convex parity) so `_complete` never crashes.
+          result = { kind: "success", value: value === undefined ? null : value };
         } catch (e) {
-          result = { kind: "failed", error: String(e) };
+          // Preserve the error's retryability so `_complete` can fail fast on a deterministic,
+          // non-retryable failure (e.g. a `DocumentValidationError` from a schema-violating write)
+          // instead of burning every retry. A plain (non-Stackbase) error defaults to retryable, so
+          // the scheduler's existing "retry unknown failures up to maxFailures" behavior is unchanged.
+          result = { kind: "failed", error: String(e), retryable: isStackbaseError(e) ? e.retryable : true };
         }
         // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
         // `JSONValue` — it's already been through the same JSON syscall round-trip as any other

@@ -134,7 +134,9 @@ export const _claim = mutation(async (ctx: MutationCtx, args: { jobId: string })
   };
 });
 
-export type JobResult = { kind: "success"; value: unknown } | { kind: "failed"; error: string };
+export type JobResult =
+  | { kind: "success"; value: unknown }
+  | { kind: "failed"; error: string; retryable?: boolean };
 
 /**
  * `scheduler:_complete` — a MUTATION: finalizes a claimed job.
@@ -189,8 +191,12 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   const attempts = (job.attempts as number) + 1;
   const maxFailures = job.maxFailures as number;
   const lastError = args.result.error;
+  // A non-retryable failure (a deterministic error like `DocumentValidationError`) is dead-lettered
+  // immediately — retrying it would just reproduce the same error and burn every attempt. An older
+  // result without the flag (or a genuinely transient failure) keeps the existing retry behavior.
+  const retryable = args.result.retryable ?? true;
 
-  if (attempts >= maxFailures) {
+  if (attempts >= maxFailures || !retryable) {
     await ctx.db.replace(
       args.jobId,
       compact({
