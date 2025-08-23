@@ -1,40 +1,71 @@
 /**
  * Function definitions — the Convex-compatible authoring surface. `query`/`mutation`/`action`
- * tag a handler with its UDF type; the executor sets up the right context and profile.
+ * tag a handler with its UDF type; the executor sets up the right context and profile. An
+ * optional `args` validator (a `PropertyValidators` record of `v.*`) is stored on the returned
+ * function so the executor can validate incoming call args and codegen can type the client api.
  */
 import type { UdfType } from "./profile";
 import type { MutationCtx, QueryCtx } from "./guest";
+import { v, type PropertyValidators, type AnyValidator, type ValidatorJSON, type ObjectType } from "@stackbase/values";
 
 export interface RegisteredFunction {
   type: UdfType;
   handler: (ctx: unknown, args: unknown) => unknown | Promise<unknown>;
+  /** Live validator for the call args (`v.object(args)`), when the function declares `args`. */
+  argsValidator?: AnyValidator;
+  /** `argsValidator.toJSON()`, for codegen to emit the typed `FunctionReference`. */
+  argsJson?: ValidatorJSON;
+}
+
+/** Build a `RegisteredFunction`, attaching an args validator when the def declares `args`. */
+function build(type: UdfType, def: unknown): RegisteredFunction {
+  const handler = (typeof def === "function" ? def : (def as { handler: unknown }).handler) as RegisteredFunction["handler"];
+  const rf: RegisteredFunction = { type, handler };
+  if (typeof def === "object" && def !== null && "args" in def) {
+    const args = (def as { args?: PropertyValidators }).args;
+    if (args) {
+      const argsValidator = v.object(args);
+      rf.argsValidator = argsValidator;
+      rf.argsJson = argsValidator.toJSON();
+    }
+  }
+  return rf;
 }
 
 type QueryDef<Args, Output> =
   | { handler: (ctx: QueryCtx, args: Args) => Output | Promise<Output> }
   | ((ctx: QueryCtx, args: Args) => Output | Promise<Output>);
 
-export function query<Args = unknown, Output = unknown>(def: QueryDef<Args, Output>): RegisteredFunction {
-  const handler = typeof def === "function" ? def : def.handler;
-  return { type: "query", handler: handler as RegisteredFunction["handler"] };
+export function query<A extends PropertyValidators, Output = unknown>(
+  def: { args: A; handler: (ctx: QueryCtx, args: ObjectType<A>) => Output | Promise<Output> },
+): RegisteredFunction;
+export function query<Args = unknown, Output = unknown>(def: QueryDef<Args, Output>): RegisteredFunction;
+export function query(def: unknown): RegisteredFunction {
+  return build("query", def);
 }
 
 type MutationDef<Args, Output> =
   | { handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output> }
   | ((ctx: MutationCtx, args: Args) => Output | Promise<Output>);
 
-export function mutation<Args = unknown, Output = unknown>(def: MutationDef<Args, Output>): RegisteredFunction {
-  const handler = typeof def === "function" ? def : def.handler;
-  return { type: "mutation", handler: handler as RegisteredFunction["handler"] };
+export function mutation<A extends PropertyValidators, Output = unknown>(
+  def: { args: A; handler: (ctx: MutationCtx, args: ObjectType<A>) => Output | Promise<Output> },
+): RegisteredFunction;
+export function mutation<Args = unknown, Output = unknown>(def: MutationDef<Args, Output>): RegisteredFunction;
+export function mutation(def: unknown): RegisteredFunction {
+  return build("mutation", def);
 }
 
 type ActionDef<Args, Output> =
   | { handler: (ctx: unknown, args: Args) => Output | Promise<Output> }
   | ((ctx: unknown, args: Args) => Output | Promise<Output>);
 
-export function action<Args = unknown, Output = unknown>(def: ActionDef<Args, Output>): RegisteredFunction {
-  const handler = typeof def === "function" ? def : def.handler;
-  return { type: "action", handler: handler as RegisteredFunction["handler"] };
+export function action<A extends PropertyValidators, Output = unknown>(
+  def: { args: A; handler: (ctx: unknown, args: ObjectType<A>) => Output | Promise<Output> },
+): RegisteredFunction;
+export function action<Args = unknown, Output = unknown>(def: ActionDef<Args, Output>): RegisteredFunction;
+export function action(def: unknown): RegisteredFunction {
+  return build("action", def);
 }
 
 type HttpActionDef =
