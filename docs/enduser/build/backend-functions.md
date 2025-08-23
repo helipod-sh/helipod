@@ -71,6 +71,33 @@ export const sendReminder = action({
 
 ---
 
+## Validating function arguments
+
+Declare an `args` validator to check a function's arguments at runtime and get a
+fully-typed handler and client API. Arguments are validated before your handler runs;
+a mismatch is rejected with an `ARGUMENT_VALIDATION` error (HTTP 400) and the handler
+never executes.
+
+```ts
+import { mutation } from "./_generated/server";
+import { v } from "@stackbase/values";
+
+export const send = mutation({
+  args: { conversationId: v.id("conversations"), body: v.string() },
+  handler: async (ctx, args) => {
+    // args.conversationId and args.body are typed from the validator.
+    return ctx.db.insert("messages", { conversationId: args.conversationId, body: args.body });
+  },
+});
+```
+
+Validation is **opt-in**: a function with no `args` accepts any arguments (unchanged
+behavior). The validator is strict — extra, missing-required, or wrong-typed arguments
+are all rejected. Use `v.optional(...)` for arguments that may be omitted. `httpAction`
+takes a raw `Request` and has no `args` validator.
+
+---
+
 ## Stackbase-specific notes
 
 ### Determinism enforcement
