@@ -19,7 +19,7 @@ beforeEach(async () => {
     transactor,
     queryRuntime: new QueryRuntime(store),
     catalog,
-    invoke: async () => ({ value: null, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null }) as Promise<UdfResult>,
+    invoke: async () => ({ value: null, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null }) as unknown as UdfResult,
   });
 });
 
