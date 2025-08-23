@@ -10,7 +10,8 @@
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
 import type { KeyRange } from "@stackbase/index-key-codec";
-import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
+import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
+import { ArgumentValidationError } from "@stackbase/errors";
 import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
@@ -156,6 +157,15 @@ export class InlineUdfExecutor {
   constructor(private readonly deps: ExecutorDeps) {}
 
   async run<T = unknown>(fn: RegisteredFunction, args: unknown, options: RunOptions = {}): Promise<UdfResult<T>> {
+    if (fn.type !== "httpAction" && fn.argsValidator) {
+      const failures = validate(fn.argsValidator, args as Value);
+      if (failures.length > 0) {
+        const detail = failures.slice(0, 3).map((f) => `${f.path}: ${f.message}`).join("; ");
+        throw new ArgumentValidationError(
+          `arguments to "${options.path ?? "<anonymous>"}" do not match validator: ${detail}`,
+        );
+      }
+    }
     if (fn.type === "httpAction") return this.runActionFn<T>(fn, args, options, "httpAction");
     if (fn.type === "action") return this.runActionFn<T>(fn, args, options);
     const profile = profileFor(fn.type);
