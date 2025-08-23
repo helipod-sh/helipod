@@ -6,6 +6,7 @@
 import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
 import type { AnalyzedFunction, AnalyzedFunctionManifest } from "@stackbase/codegen";
+import { validatorToTsType } from "@stackbase/codegen";
 import { composeComponents, type ComponentDefinition, type BootContext, type Driver } from "@stackbase/component";
 import type { SimpleIndexCatalog } from "@stackbase/executor";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@stackbase/storage";
@@ -85,7 +86,12 @@ export function loadProject(
       if (!isRegisteredFunction(value)) continue;
       appModuleMap[`${path}:${name}`] = value;
       if (value.type === "query" || value.type === "mutation" || value.type === "action" || value.type === "httpAction") {
-        functions.push({ name, type: value.type, visibility: "public" });
+        functions.push({
+          name,
+          type: value.type,
+          visibility: "public",
+          argsType: value.argsJson ? validatorToTsType(value.argsJson) : undefined,
+        });
       }
     }
     if (functions.length > 0) {
