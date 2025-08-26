@@ -117,15 +117,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
 ```tsx
 // src/main.tsx
-import { ConvexProvider, ConvexReactClient } from "convex/react";
+import { StackbaseProvider } from "@stackbase/client/react";
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
 
-const convexUrl = window.electronAPI?.stackbaseUrl ?? "http://localhost:3000";
-const convex = new ConvexReactClient(convexUrl);
+const stackbaseUrl = window.electronAPI?.stackbaseUrl ?? "http://localhost:3000";
+const wsUrl = stackbaseUrl.replace(/^http/, "ws") + "/api/sync";
+const client = new StackbaseClient(webSocketTransport(wsUrl));
 
-// Use <ConvexProvider client={convex}> as normal
+// Use <StackbaseProvider client={client}> as normal
 ```
 
-The renderer uses the same `convex/react` client as any Convex or Stackbase app. No special APIs needed.
+The renderer uses the same `@stackbase/client/react` bindings as any Stackbase app — the same shape as Convex's `ConvexProvider`/`ConvexReactClient`, so an app brought over with `stackbase migrate` needs only this import swapped. No special APIs needed.
 
 ## TypeScript module loading
 

@@ -5,11 +5,11 @@ description: Convex-compatible runtime for Docker, Bun, Node.js, and Cloudflare 
 
 # Stackbase Documentation
 
-> **Stackbase** is a Convex-compatible runtime you can self-host anywhere. Write your backend functions exactly like Convex (queries, mutations, actions in a `convex/` folder, `import { v } from "convex/values"`), then run them on **Docker**, **Bun**, **Node.js**, or **Cloudflare Workers** — no managed-cloud lock-in.
+> **Stackbase** is a Convex-compatible runtime you can self-host anywhere. Write your backend functions like Convex (queries, mutations, actions in a `convex/` folder), using Stackbase's native `@stackbase/*` imports (`import { v } from "@stackbase/values"`), then run them on **Docker**, **Bun**, **Node.js**, or **Cloudflare Workers** — no managed-cloud lock-in.
 
-Stackbase is **100% API compatible with Convex**. Existing Convex apps run unchanged; you keep the DX (reactive queries, transactional mutations, typed generated client) and own the infrastructure.
+Stackbase's API is **Convex-compatible in shape** — reactive queries, transactional mutations, typed generated client — but its canonical imports are native `@stackbase/*`, not `convex/*`. Bring an existing Convex app across with **`stackbase migrate`**, which rewrites its imports for you; you keep the DX and own the infrastructure.
 
-> These docs are derived from the original concave.dev documentation and rebranded for Stackbase. The Convex compatibility surface (the `convex/` directory, `convex/server`, `convex/values`, `_generated`, and links to the official Convex docs) is intentionally preserved — that compatibility is the whole point.
+> These docs are derived from the original concave.dev documentation and rebranded for Stackbase. The `convex/` directory layout and `_generated` output are intentionally preserved (and pages still link to the official Convex docs for API-shape reference), but the import surface is native — Stackbase code imports from `@stackbase/*`, not `convex/server`/`convex/values`. Migrating an existing Convex app is a `stackbase migrate` run, not a drop-in import swap — that on-ramp is the compatibility story.
 
 ## ⚠️ Implementation status (read this first)
 

@@ -32,7 +32,7 @@ For complete function documentation, see:
 ```ts
 // convex/tasks.ts
 import { query, mutation, action } from "./_generated/server";
-import { v } from "convex/values";
+import { v } from "@stackbase/values";
 
 export const list = query({
   args: { status: v.optional(v.string()) },

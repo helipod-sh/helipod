@@ -109,12 +109,12 @@ All supported features work consistently across runtimes:
 
 ## Migration from Convex Cloud
 
-Stackbase is designed as a drop-in replacement for most Convex applications:
+Stackbase is designed as a drop-in replacement for most Convex applications — brought across with the **`stackbase migrate`** CLI command, which rewrites your Convex imports to Stackbase's native `@stackbase/*` surface (it does not run your app unchanged against `convex/*` imports):
 
-1. **No code changes required** for queries, mutations, and actions
-2. **Same client libraries** - use `convex/react`, `convex/browser`, etc.
-3. **Same schema format** - `convex/schema.ts` works unchanged
-4. **Same function definitions** - `query`, `mutation`, `action` from `convex/server`
+1. **No handler logic changes** for queries, mutations, and actions — `query`/`mutation`/`action` keep coming from `./_generated/server`, same as always.
+2. **Equivalent client libraries** - `stackbase migrate` rewrites `convex/react` → `@stackbase/client/react` and `convex/browser` → `@stackbase/client`; use `StackbaseProvider`/`StackbaseClient` in place of `ConvexProvider`/`ConvexReactClient`.
+3. **Same schema format** - `convex/schema.ts` keeps its shape; `stackbase migrate` rewrites its `defineSchema`/`defineTable`/`v` import from `convex/server`/`convex/values` to `@stackbase/values`.
+4. **Same function definitions** - `query`, `mutation`, `action` still come from `./_generated/server`; only the validator/schema import (`v`, `defineSchema`, `defineTable`) moves to `@stackbase/values`.
 
 ### What to check before migrating
 

@@ -6,14 +6,13 @@ title: Schema & Data Models
 
 > Schema works the same as Convex - define tables in convex/schema.ts.
 
-Stackbase uses the same schema system as Convex. Define your tables in `convex/schema.ts` using `defineSchema` and `defineTable`.
+Stackbase uses the same schema system as Convex, exposed through native `@stackbase/*` imports. Define your tables in `convex/schema.ts` using `defineSchema` and `defineTable`.
 
 ## Quick example
 
 ```ts
 // convex/schema.ts
-import { defineSchema, defineTable } from "convex/server";
-import { v } from "convex/values";
+import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
   tasks: defineTable({

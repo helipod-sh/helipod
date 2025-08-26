@@ -67,11 +67,11 @@ For integration tests against a real Stackbase server:
 // tests/e2e.test.ts
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createStackbase, SqliteDocStore } from "@stackbase/runtime-bun";
-import { ConvexHttpClient } from "convex/browser";
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
 import { api } from "../convex/_generated/api";
 
 let server: ReturnType<typeof createStackbase>;
-let client: ConvexHttpClient;
+let client: StackbaseClient;
 
 beforeAll(async () => {
   server = createStackbase({
@@ -80,10 +80,11 @@ beforeAll(async () => {
     schema: "skip",
   });
   await server.listen({ port: 3999, hostname: "127.0.0.1" });
-  client = new ConvexHttpClient("http://localhost:3999");
+  client = new StackbaseClient(webSocketTransport("ws://localhost:3999/api/sync"));
 });
 
 afterAll(async () => {
+  client.close();
   await server.close();
 });
 
@@ -120,7 +121,7 @@ To ensure your app works across all runtimes, run E2E tests against each:
 ```ts
 // tests/cross-runtime.test.ts
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { ConvexHttpClient } from "convex/browser";
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
 import { api } from "../convex/_generated/api";
 
 const runtimes = [
@@ -131,7 +132,7 @@ const runtimes = [
 for (const runtime of runtimes) {
   describe(`E2E: ${runtime.name}`, () => {
     let server: any;
-    let client: ConvexHttpClient;
+    let client: StackbaseClient;
     const port = 3900 + runtimes.indexOf(runtime);
 
     beforeAll(async () => {
@@ -142,10 +143,11 @@ for (const runtime of runtimes) {
         schema: "skip",
       });
       await server.listen({ port, hostname: "127.0.0.1" });
-      client = new ConvexHttpClient(`http://localhost:${port}`);
+      client = new StackbaseClient(webSocketTransport(`ws://localhost:${port}/api/sync`));
     });
 
     afterAll(async () => {
+      client.close();
       await server.close();
     });
 

@@ -11,7 +11,7 @@ This is the fastest path to a working Stackbase backend: install the CLI, initia
 ## Prerequisites
 
 - **Bun** (recommended) or **Node.js 22.5+** (with `--experimental-sqlite` flag)
-- The `convex` npm package (for validator helpers and generated types): `npm i convex`
+- The `@stackbase/values` npm package (for validator helpers): `npm i @stackbase/values` (generated types come from `stackbase dev`/`stackbase codegen`, no extra install needed)
 
 ## 1) Install the CLI
 
@@ -35,7 +35,7 @@ Edit `convex/messages.ts` (created by `stackbase init`) or add your own file:
 
 ```ts
 import { query, mutation } from "./_generated/server";
-import { v } from "convex/values";
+import { v } from "@stackbase/values";
 
 export const list = query({
   args: { limit: v.optional(v.number()) },

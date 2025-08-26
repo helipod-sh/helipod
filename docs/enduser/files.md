@@ -37,7 +37,7 @@ the server at one. Your function code is identical either way.
 ```ts
 // convex/files.ts
 import { mutation, query } from "./_generated/server";
-import { v } from "convex/values";
+import { v } from "@stackbase/values";
 
 export const createUpload = mutation({
   args: { contentType: v.optional(v.string()) },
@@ -103,7 +103,7 @@ Both branches end with the same result: a `ready` `_storage` row you can now ref
 
 ```ts
 // convex/schema.ts
-import { v, defineSchema, defineTable } from "convex/values";
+import { v, defineSchema, defineTable } from "@stackbase/values";
 
 export default defineSchema({
   photos: defineTable({

@@ -71,7 +71,7 @@ pub fn run() {
 
 ```tsx
 import Database from "@tauri-apps/plugin-sql";
-import { ConvexReactClient } from "convex/react";
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
 import { SqliteDocStore } from "@stackbase/docstore-tauri-sql";
 import { createStackbase } from "@stackbase/runtime-embedded";
 
@@ -89,12 +89,10 @@ const runtime = createStackbase({
 await runtime.start();
 const transport = runtime.createTransport();
 
-const client = new ConvexReactClient(transport.clientUrl, {
-  webSocketConstructor: transport.webSocketConstructor,
-});
+const client = new StackbaseClient(webSocketTransport(transport.clientUrl));
 ```
 
-Use the `client` exactly as you would in a normal Convex app.
+Use the `client` exactly as you would in a normal Stackbase app — pair it with `<StackbaseProvider client={client}>` and the `@stackbase/client/react` hooks (`useQuery`/`useMutation`/`useAction`).
 
 ## Optional: run runtime in a Worker
 
@@ -103,7 +101,7 @@ If you want isolation from your UI global scope, host the runtime in a Worker an
 - Worker side: `attachEmbeddedRuntimeWorkerServer(runtime, self)`
 - UI side: `createWorkerTransport(worker)`
 
-This keeps global patching and UDF execution away from the UI thread while preserving the Convex client API.
+This keeps global patching and UDF execution away from the UI thread while preserving the `@stackbase/client` API (the same shape Convex's client API uses).
 
 ## Optional: sidecar mode
 
