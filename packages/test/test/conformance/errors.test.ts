@@ -29,6 +29,13 @@ const mod = {
   writeFromQuery: query(async (ctx: A, args: A) =>
     ctx.db.channel.call("db.insert", JSON.stringify({ table: "docs", value: args }))
   ),
+  // The LOAD-BEARING guarantee that real app code relies on: a query's `ctx.db` has no write
+  // methods at all (unlike the kernel guard above, this is what actually stops ordinary code).
+  queryDbShape: query(async (ctx: A) => ({
+    insert: typeof ctx.db.insert,
+    replace: typeof ctx.db.replace,
+    delete: typeof ctx.db.delete,
+  })),
   // Replace on a well-formed but never-existed / already-deleted id — distinct from `get`,
   // which returns null for the same shape of id.
   replaceMissing: mutation(async (ctx: A, args: { id: string }) =>
@@ -78,6 +85,16 @@ describe("conformance — errors", () => {
       name: "ForbiddenOperationError",
       code: "FORBIDDEN",
       message: expect.stringMatching(/writes are not allowed here/),
+    });
+  });
+
+  it("a query's ctx.db exposes no write methods at all (load-bearing guarantee; the guard above is defense-in-depth)", async () => {
+    // This is the assertion that catches the real regression — if `insert` were ever added to the
+    // query-side reader, the bypass test above would still pass but this one would fail.
+    await expect(t.query("mod:queryDbShape", {})).resolves.toEqual({
+      insert: "undefined",
+      replace: "undefined",
+      delete: "undefined",
     });
   });
 

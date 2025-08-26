@@ -500,9 +500,13 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
         // Jump WAY past several missed 10s periods in one advance — simulates downtime.
         await t.advanceTimers(10_000 * 5 + 500);
 
-        // "skip" discards the entire backlog — fires nothing for the downtime, just re-anchors.
-        const count = await t.query<number>("mod:count", {});
-        expect(count).toBe(0);
+        // "skip" discards the entire backlog — fires nothing for the ~5 missed periods, just re-anchors.
+        expect(await t.query<number>("mod:count", {})).toBe(0);
+
+        // ...but the cron is still ALIVE — one more real period fires it exactly once. Without this,
+        // a count of 0 above is indistinguishable from a cron that died entirely after the gap.
+        await t.advanceTimers(10_000);
+        expect(await t.query<number>("mod:count", {})).toBeGreaterThanOrEqual(1);
       } finally {
         await t.close();
       }
