@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createTestStackbase, type TestStackbase } from "../../src";
 import { schema, mod } from "../fixtures/conformance-app";
+import { mutation, query } from "@stackbase/executor";
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type A = any;
 
 // D1: Stackbase has no `.withIndex(cb)` — range predicates chain directly on the
 // QueryBuilder returned by `ctx.db.query(table, index)`:
@@ -60,5 +65,67 @@ describe("conformance — index reads", () => {
     expect(aRows.every((r) => r.owner === "a")).toBe(true);
     expect(bRows).toHaveLength(2);
     expect(bRows.every((r) => r.owner === "b")).toBe(true);
+  });
+
+  it("an empty range (lo past hi, or gte(x)+lt(x)) returns zero rows without erroring", async () => {
+    await seed();
+    // lo > hi: the interval's start key sorts after its end key.
+    const crossed = await t.query<Array<{ n: number }>>("mod:ownerRange", { owner: "a", lo: 3, hi: 1 });
+    expect(crossed).toEqual([]);
+    // gte(x).lt(x): the half-open interval degenerates to nothing.
+    const degenerate = await t.query<Array<{ n: number }>>("mod:ownerRange", { owner: "a", lo: 2, hi: 2 });
+    expect(degenerate).toEqual([]);
+  });
+});
+
+// A second, INLINE `createTestStackbase` over a single-field index (`by_n`, not the shared
+// fixture's compound `by_owner_n`) — exercises operators/behaviors the shared `mod.ts` doesn't
+// expose: `.gt`/`.lte` (opposite-boundary inclusivity from the `.gte`/`.lt` test above),
+// `.order("desc")` on a non-`by_creation` index, and `.take(n)` (the `limit`/`consumedRange`-trim
+// path in `query-runtime.ts`'s `collect`).
+const idxSchema = defineSchema({
+  items: defineTable({ n: v.number() }).index("by_n", ["n"]),
+});
+
+const idxMod = {
+  insert: mutation(async (ctx: A, a: A) => ctx.db.insert("items", a)),
+  gtLte: query(async (ctx: A, a: { lo: number; hi: number }) =>
+    ctx.db.query("items", "by_n").gt("n", a.lo).lte("n", a.hi).collect()),
+  descRange: query(async (ctx: A, a: { lo: number; hi: number }) =>
+    ctx.db.query("items", "by_n").gte("n", a.lo).lte("n", a.hi).order("desc").collect()),
+  takeRange: query(async (ctx: A, a: { lo: number; hi: number; limit: number }) =>
+    ctx.db.query("items", "by_n").gte("n", a.lo).lt("n", a.hi).take(a.limit).collect()),
+};
+
+describe("conformance — index reads (inline single-field index, gt/lte/desc/take)", () => {
+  let t2: TestStackbase;
+
+  beforeEach(async () => {
+    t2 = await createTestStackbase({ modules: { "mod.ts": idxMod, "schema.ts": { default: idxSchema } } });
+    await t2.run(async (ctx) => {
+      for (const n of [1, 2, 3, 4, 5]) await ctx.db.insert("items", { n });
+    });
+  });
+
+  afterEach(async () => {
+    await t2.close();
+  });
+
+  it("gt(lo) EXCLUDES lo and lte(hi) INCLUDES hi — the opposite boundary behavior from gte/lt", async () => {
+    // seeded n=1..5; gt(1).lte(4) should get n in {2,3,4}: 1 excluded, 4 included.
+    const rows = await t2.query<Array<{ n: number }>>("mod:gtLte", { lo: 1, hi: 4 });
+    expect(rows.map((r) => r.n)).toEqual([2, 3, 4]);
+  });
+
+  it(".order(\"desc\") on a range read over a non-by_creation index returns descending index order", async () => {
+    // seeded n=1..5; gte(2).lte(4) + desc should get n in {2,3,4} ordered [4,3,2].
+    const rows = await t2.query<Array<{ n: number }>>("mod:descRange", { lo: 2, hi: 4 });
+    expect(rows.map((r) => r.n)).toEqual([4, 3, 2]);
+  });
+
+  it(".take(n) on a range read returns only the first n rows of the range", async () => {
+    // seeded n=1..5; gte(1).lt(5) spans {1,2,3,4}; take(2) should return only the first 2: [1,2].
+    const rows = await t2.query<Array<{ n: number }>>("mod:takeRange", { lo: 1, hi: 5, limit: 2 });
+    expect(rows.map((r) => r.n)).toEqual([1, 2]);
   });
 });

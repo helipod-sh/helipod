@@ -27,12 +27,57 @@ export const webhook = httpAction(async (ctx: A, req: Request) => {
   return new Response("ok", { status: 200 });
 });
 
+// Exercises `ctx.runQuery` from an httpAction — only `runMutation` was covered before.
+export const readHandler = httpAction(async (ctx: A) => {
+  const rows = await ctx.runQuery("mod:read", {});
+  return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+});
+
+// Proves the `Request` is fully decoded: a JSON body handler...
+export const echoBody = httpAction(async (_ctx: A, req: Request) => {
+  const body = (await req.json()) as { n: number };
+  return new Response(JSON.stringify({ doubled: body.n * 2 }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+});
+
+// ...and a query-string handler.
+export const echoQuery = httpAction(async (_ctx: A, req: Request) => {
+  const url = new URL(req.url);
+  return new Response(url.searchParams.get("name") ?? "", { status: 200 });
+});
+
+// Surfaces whether `ctx.db` is present on an httpAction's ctx — actions run outside the
+// transaction and must have no `ctx.db` (see `packages/executor/src/executor.ts`'s
+// `runActionFn`, which builds `actionCtx` from `{ runQuery, runMutation, runAction }` plus
+// context-provider facades only — `db` is never one of those keys).
+export const dbCheckHandler = httpAction(async (ctx: A) => {
+  return new Response(JSON.stringify({ hasDb: "db" in ctx, dbType: typeof ctx.db }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+});
+
 const router = httpRouter();
 router.route({ pathPrefix: "/x", method: "GET", handler: prefixHandler });
 router.route({ path: "/x/exact", method: "GET", handler: exactHandler });
 router.route({ path: "/hook", method: "POST", handler: webhook });
+router.route({ path: "/read", method: "GET", handler: readHandler });
+router.route({ path: "/echo-body", method: "POST", handler: echoBody });
+router.route({ path: "/echo-query", method: "GET", handler: echoQuery });
+router.route({ path: "/db-check", method: "GET", handler: dbCheckHandler });
 
-const httpModule = { default: router, prefixHandler, exactHandler, webhook };
+const httpModule = {
+  default: router,
+  prefixHandler,
+  exactHandler,
+  webhook,
+  readHandler,
+  echoBody,
+  echoQuery,
+  dbCheckHandler,
+};
 
 describe("conformance — http router", () => {
   let t: TestStackbase;
@@ -78,5 +123,67 @@ describe("conformance — http router", () => {
   it("a reserved path (/api/*) is rejected at route() registration time", () => {
     const r = httpRouter();
     expect(() => r.route({ path: "/api/x", method: "GET", handler: exactHandler })).toThrow();
+  });
+
+  it("a reserved path (/_*) is also rejected at route() registration time", () => {
+    const r = httpRouter();
+    expect(() => r.route({ path: "/_internal", method: "GET", handler: exactHandler })).toThrow();
+    // Sanity: the reservation is on the first path segment, not merely a leading underscore
+    // anywhere — a pathPrefix form is caught the same way.
+    expect(() => r.route({ pathPrefix: "/_admin", method: "GET", handler: exactHandler })).toThrow();
+  });
+
+  it("a path with no registered route at all 404s (distinct from a wrong-method 404 on a known path)", async () => {
+    const res = await t.fetch(new Request("http://t/totally/unknown/path", { method: "GET" }));
+    expect(res.status).toBe(404);
+  });
+
+  it("an httpAction can read data via ctx.runQuery, not just ctx.runMutation", async () => {
+    await t.mutation("mod:save", { label: "seen-by-query" });
+    const res = await t.fetch(new Request("http://t/read", { method: "GET" }));
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toMatchObject([{ label: "seen-by-query" }]);
+  });
+
+  it("an httpAction handler can read a decoded JSON request body", async () => {
+    const res = await t.fetch(
+      new Request("http://t/echo-body", {
+        method: "POST",
+        body: JSON.stringify({ n: 21 }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ doubled: 42 });
+  });
+
+  it("an httpAction handler can read the request's query string", async () => {
+    const res = await t.fetch(new Request("http://t/echo-query?name=stackbase", { method: "GET" }));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("stackbase");
+  });
+
+  it("an httpAction's ctx has no ctx.db — actions run outside the transaction", async () => {
+    const res = await t.fetch(new Request("http://t/db-check", { method: "GET" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ hasDb: false, dbType: "undefined" });
+  });
+
+  it("route() with an inline (non-exported) handler is rejected at resolution time", async () => {
+    // Same schema/mod modules, but a fresh router whose handler is a plain inline httpAction
+    // never re-exported by the module map — the resolver in `packages/test/src/compose.ts`
+    // finds a route's dispatch path by scanning the module map for the handler VALUE's
+    // identity, so a handler that isn't itself a named export can never be found.
+    const inlineHandler = httpAction(async () => new Response("inline", { status: 200 }));
+    const badRouter = httpRouter();
+    badRouter.route({ path: "/inline", method: "GET", handler: inlineHandler });
+    const badHttpModule = { default: badRouter };
+
+    await expect(
+      createTestStackbase({
+        modules: { "http.ts": badHttpModule, "mod.ts": mod, "schema.ts": { default: schema } },
+      }),
+    ).rejects.toThrow(/must be an exported httpAction/);
   });
 });

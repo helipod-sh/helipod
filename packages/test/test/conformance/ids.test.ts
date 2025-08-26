@@ -15,6 +15,8 @@ const mod = {
   insertA: mutation(async (ctx: A, args: A) => ctx.db.insert("a", args)),
   insertB: mutation(async (ctx: A, args: A) => ctx.db.insert("b", args)),
   get: query(async (ctx: A, args: { id: string }) => ctx.db.get(args.id)),
+  replace: mutation(async (ctx: A, args: { id: string; value: A }) => ctx.db.replace(args.id, args.value)),
+  del: mutation(async (ctx: A, args: { id: string }) => ctx.db.delete(args.id)),
 };
 
 describe("conformance — ids", () => {
@@ -65,5 +67,84 @@ describe("conformance — ids", () => {
     // rejected, and never silently reinterpreted as an "a" row. Confirm with the actual b id:
     const bBack = (await t.query("mod:get", { id: idB })) as Record<string, unknown>;
     expect(bBack).toMatchObject({ label: "from-b", ref: idA });
+  });
+
+  it("ctx.db.replace of a syntactically-malformed id string rejects (id-codec throws)", async () => {
+    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    await expect(t.mutation("mod:replace", { id: "garbage!!", value: { label: "x" } })).rejects.toThrow();
+  });
+
+  it("ctx.db.delete of a syntactically-malformed id string rejects (id-codec throws)", async () => {
+    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    await expect(t.mutation("mod:del", { id: "garbage!!" })).rejects.toThrow();
+  });
+
+  it("replace ignores a caller-supplied _id/_creationTime in the payload: real id + original creation time are kept", async () => {
+    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    const id = await t.mutation<string>("mod:insertA", { label: "original" });
+    const before = (await t.query("mod:get", { id })) as Record<string, unknown>;
+    const originalCreationTime = before["_creationTime"];
+    expect(typeof originalCreationTime).toBe("number");
+
+    // Mint a second, well-formed but DIFFERENT id (for a different row) to use as the bogus
+    // caller-supplied _id in the replacement payload — this proves the engine doesn't honor it.
+    const otherId = await t.mutation<string>("mod:insertA", { label: "other" });
+    expect(otherId).not.toBe(id);
+
+    await t.mutation("mod:replace", {
+      id,
+      value: { label: "replaced", _id: otherId, _creationTime: 123456789 },
+    });
+
+    const after = (await t.query("mod:get", { id })) as Record<string, unknown>;
+    expect(after).toMatchObject({ label: "replaced", _id: id, _creationTime: originalCreationTime });
+    expect(after["_id"]).not.toBe(otherId);
+    expect(after["_creationTime"]).not.toBe(123456789);
+
+    // The other row is untouched by the bogus _id in the replacement payload.
+    const otherDoc = (await t.query("mod:get", { id: otherId })) as Record<string, unknown>;
+    expect(otherDoc).toMatchObject({ label: "other", _id: otherId });
+  });
+
+  it("two inserts with byte-for-byte identical field values produce two distinct ids", async () => {
+    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    const id1 = await t.mutation<string>("mod:insertA", { label: "twin" });
+    const id2 = await t.mutation<string>("mod:insertA", { label: "twin" });
+    expect(id1).not.toBe(id2);
+
+    const doc1 = (await t.query("mod:get", { id: id1 })) as Record<string, unknown>;
+    const doc2 = (await t.query("mod:get", { id: id2 })) as Record<string, unknown>;
+    expect(doc1).toMatchObject({ label: "twin", _id: id1 });
+    expect(doc2).toMatchObject({ label: "twin", _id: id2 });
+  });
+
+  it("an id nested inside object/array-typed fields survives insert -> get (convexToJson/jsonToConvex boundary) and still resolves via get", async () => {
+    const nestedSchema = defineSchema({
+      a: defineTable({ label: v.string() }),
+      c: defineTable({
+        info: v.object({ ref: v.id("a"), tags: v.array(v.string()) }),
+        refs: v.array(v.id("a")),
+      }),
+    });
+    const nestedMod = {
+      insertA: mutation(async (ctx: A, args: A) => ctx.db.insert("a", args)),
+      insertC: mutation(async (ctx: A, args: A) => ctx.db.insert("c", args)),
+      get: query(async (ctx: A, args: { id: string }) => ctx.db.get(args.id)),
+    };
+    t = await createTestStackbase({ modules: { "mod.ts": nestedMod, "schema.ts": { default: nestedSchema } } });
+
+    const idA = await t.mutation<string>("mod:insertA", { label: "nested-target" });
+    const idC = await t.mutation<string>("mod:insertC", {
+      info: { ref: idA, tags: ["x", "y"] },
+      refs: [idA],
+    });
+
+    const docC = (await t.query("mod:get", { id: idC })) as A;
+    expect(docC.info.ref).toBe(idA);
+    expect(docC.refs).toEqual([idA]);
+
+    // The nested id string still resolves to the real row via get().
+    const resolved = (await t.query("mod:get", { id: docC.info.ref })) as Record<string, unknown>;
+    expect(resolved).toMatchObject({ label: "nested-target", _id: idA });
   });
 });
