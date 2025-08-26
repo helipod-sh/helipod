@@ -31,10 +31,11 @@ describe("rewriteImports", () => {
     expect(r.output).toContain(`from "./_generated/server"`);
   });
 
-  it("convex/server: mixed/unknown symbols are NOT rewritten and are flagged action-needed", () => {
+  it("convex/server: mixed/unknown symbols are NOT rewritten and are flagged action-needed exactly once", () => {
     const src = `import { defineSchema, cronJobs } from "convex/server";`;
     const r = rewriteImports(src, "x.ts");
     expect(r.output).toBe(src); // unchanged
+    expect(r.entries).toHaveLength(1); // was double-counted by the step-2 flag + step-3 residual re-scan
     expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "x.ts" });
   });
 
@@ -43,5 +44,31 @@ describe("rewriteImports", () => {
     const r = rewriteImports(src, "m.ts");
     expect(r.output).toBe(src);
     expect(r.entries).toHaveLength(0);
+  });
+
+  it("reports correct line numbers when same-mapping rewrites stack before a different-mapping import", () => {
+    const stackedLines = Array.from({ length: 8 }, () => `import { v } from "convex/values";`).join("\n");
+    const src = `${stackedLines}\nimport { X } from "convex/react";\n`;
+    const r = rewriteImports(src, "a.ts");
+    expect(r.entries).toHaveLength(9);
+    const reactEntry = r.entries.find((e) => e.what.includes("convex/react"));
+    expect(reactEntry).toBeDefined();
+    expect(reactEntry?.line).toBe(9); // was misreported as 10 (lineOf indexed original source with a mutated-output offset)
+  });
+
+  it("convex/server: require() form is not brace-parsed and is flagged action-needed", () => {
+    const src = `const x = require("convex/server");`;
+    const r = rewriteImports(src, "x.ts");
+    expect(r.output).toBe(src);
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "x.ts" });
+  });
+
+  it("convex/server: export-from brace clause is not matched by the import-anchored regex and is flagged action-needed", () => {
+    const src = `export { defineSchema } from "convex/server";`;
+    const r = rewriteImports(src, "x.ts");
+    expect(r.output).toBe(src);
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "x.ts" });
   });
 });

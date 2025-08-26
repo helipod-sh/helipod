@@ -28,16 +28,19 @@ export function rewriteImports(source: string, file: string): { output: string; 
   // 1. Unambiguous specifiers — replace every quoted occurrence.
   for (const [from, to] of Object.entries(SIMPLE)) {
     const re = new RegExp(`(["'])${from.replace("/", "\\/")}\\1`, "g");
+    const input = output; // the string this pass's match offsets index into
     output = output.replace(re, (_m, q, offset: number) => {
-      entries.push({ severity: "auto-fixed", file, line: lineOf(source, offset), what: `import "${from}"`, fix: `rewritten to "${to}"` });
+      entries.push({ severity: "auto-fixed", file, line: lineOf(input, offset), what: `import "${from}"`, fix: `rewritten to "${to}"` });
       return `${q}${to}${q}`;
     });
   }
 
-  // 2. convex/server — symbol-aware (single-line brace clause only).
+  // 2. convex/server — symbol-aware (brace clause; multi-line brace clauses are handled since
+  // `[^}]*` matches across newlines).
   const serverRe = /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*(["'])convex\/server\2/g;
+  const serverInput = output; // the string this pass's match offsets index into
   output = output.replace(serverRe, (full, names: string, q: string, offset: number) => {
-    const line = lineOf(source, offset);
+    const line = lineOf(serverInput, offset);
     const syms = names.split(",").map((s) => s.trim().split(/\s+as\s+/)[0]!.trim()).filter(Boolean);
     const allSchema = syms.length > 0 && syms.every((s) => SCHEMA_SYMBOLS.has(s));
     const allServer = syms.length > 0 && syms.every((s) => SERVER_SYMBOLS.has(s));
@@ -53,10 +56,21 @@ export function rewriteImports(source: string, file: string): { output: string; 
     return full; // leave unchanged
   });
 
-  // 3. Any convex/server occurrence NOT matched above (default import, multiline, require, dynamic).
+  // 3. Any convex/server occurrence NOT matched above (default import, export-from, require,
+  // dynamic import). Re-derive step 2's brace-clause match ranges against the FINAL output (not
+  // the offsets recorded during step 2, which may no longer line up after earlier rewrites shift
+  // string length) so occurrences step 2 already flagged — or rewrote — aren't re-flagged here.
+  const handledRanges: Array<[number, number]> = [];
+  serverRe.lastIndex = 0;
+  let hm: RegExpExecArray | null;
+  while ((hm = serverRe.exec(output)) !== null) {
+    handledRanges.push([hm.index, hm.index + hm[0].length]);
+  }
+
   const residualRe = /(["'])convex\/server\1/g;
   let m: RegExpExecArray | null;
   while ((m = residualRe.exec(output)) !== null) {
+    if (handledRanges.some(([start, end]) => m!.index >= start && m!.index < end)) continue;
     entries.push({ severity: "action-needed", file, line: lineOf(output, m.index), what: `import "convex/server"`, fix: `map manually: defineSchema/defineTable → "@stackbase/values"; httpRouter/httpAction → "./_generated/server"` });
   }
 
