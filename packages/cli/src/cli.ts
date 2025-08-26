@@ -16,6 +16,7 @@ import { createWatchLoop } from "./watch";
 import { serveCommand } from "./serve";
 import { deployCommand } from "./deploy";
 import { buildCommand } from "./build";
+import { migrateCommand } from "./migrate";
 
 function parseFlags(args: string[]): DevOptions {
   const out: DevOptions = {};
@@ -120,6 +121,7 @@ function printHelp(): void {
       "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
       "  deploy     Push convex/ to a running `serve --allow-deploy` and hot-swap it live",
       "  build      Compile the app to a self-contained executable (bun build --compile)",
+      "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  codegen    Regenerate convex/_generated types",
       "  help       Show this help",
       "",
@@ -140,6 +142,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return deployCommand(rest);
     case "build":
       return buildCommand(rest);
+    case "migrate":
+      return migrateCommand(rest);
     case "codegen":
       return codegenCommand(rest);
     case "help":
