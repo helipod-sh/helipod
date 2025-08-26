@@ -9,6 +9,7 @@ const SIMPLE: Record<string, string> = {
 
 const SCHEMA_SYMBOLS = new Set(["defineSchema", "defineTable"]);
 const SERVER_SYMBOLS = new Set(["httpRouter", "httpAction"]);
+const CRON_SYMBOLS = new Set(["cronJobs"]);
 
 function lineOf(source: string, index: number): number {
   let line = 1;
@@ -52,7 +53,17 @@ export function rewriteImports(source: string, file: string): { output: string; 
       entries.push({ severity: "auto-fixed", file, line, what: `import "convex/server" (http)`, fix: `rewritten to "./_generated/server"` });
       return full.replace(/["']convex\/server["']/, `${q}./_generated/server${q}`);
     }
-    entries.push({ severity: "action-needed", file, line, what: `import { ${syms.join(", ")} } from "convex/server"`, fix: `map each symbol manually: defineSchema/defineTable → "@stackbase/values"; httpRouter/httpAction → "./_generated/server"` });
+    const hasCron = syms.some((s) => CRON_SYMBOLS.has(s));
+    const hasOther = syms.some((s) => !CRON_SYMBOLS.has(s));
+    const cronFix = `cronJobs → import from "@stackbase/scheduler" and compose defineScheduler() in stackbase.config.ts`;
+    const genericFix = `defineSchema/defineTable → "@stackbase/values"; httpRouter/httpAction → "./_generated/server"`;
+    const fix =
+      hasCron && hasOther
+        ? `${cronFix}; other symbols: map manually: ${genericFix}`
+        : hasCron
+          ? cronFix
+          : `map each symbol manually: ${genericFix}`;
+    entries.push({ severity: "action-needed", file, line, what: `import { ${syms.join(", ")} } from "convex/server"`, fix });
     return full; // leave unchanged
   });
 

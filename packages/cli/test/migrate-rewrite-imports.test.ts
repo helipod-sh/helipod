@@ -39,6 +39,18 @@ describe("rewriteImports", () => {
     expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "x.ts" });
   });
 
+  it("convex/server: a cronJobs import gets cron-specific fix advice (not the generic defineSchema/httpRouter mapping)", () => {
+    const r = rewriteImports(`import { cronJobs } from "convex/server";`, "crons.ts");
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "crons.ts" });
+    expect(r.entries[0]?.fix).toMatch(/@stackbase\/scheduler|defineScheduler/);
+  });
+
+  it("convex/server: cronJobs mixed with another symbol still surfaces cron-specific advice", () => {
+    const r = rewriteImports(`import { defineSchema, cronJobs } from "convex/server";`, "x.ts");
+    expect(r.entries[0]?.fix).toMatch(/@stackbase\/scheduler|defineScheduler/);
+  });
+
   it("leaves ./_generated/server untouched", () => {
     const src = `import { query, mutation } from "./_generated/server";`;
     const r = rewriteImports(src, "m.ts");

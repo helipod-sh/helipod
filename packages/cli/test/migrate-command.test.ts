@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { cpSync, mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, symlinkSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { migrateCommand } from "../src/migrate";
@@ -55,5 +55,25 @@ describe("migrateCommand", () => {
     expect(readFileSync(join(root, "convex", "schema.ts"), "utf8")).toContain("convex/values"); // unchanged
     expect(existsSync(join(root, "MIGRATION-REPORT.md"))).toBe(true);
     expect(existsSync(join(root, "convex", "_generated"))).toBe(false);
+  });
+
+  it("deletes a pre-existing Convex _generated/ before regenerating, so stale .js files don't survive", async () => {
+    // A real Convex app ships _generated/{server.js,server.d.ts,api.js,api.d.ts,dataModel.d.ts}.
+    // The pre-write guard only checks for server.ts (Stackbase's own extension), so these stale
+    // Convex artifacts previously survived a migrate untouched and could shadow the regenerated
+    // Stackbase files (a JS-first resolver picks the stale server.js, which imports the
+    // now-uninstalled "convex/server").
+    const generatedDir = join(root, "convex", "_generated");
+    mkdirSync(generatedDir, { recursive: true });
+    writeFileSync(join(generatedDir, "server.js"), `export const query = 1;\nimport "convex/server";\n`);
+    writeFileSync(join(generatedDir, "server.d.ts"), `export declare const query: 1;\n`);
+    writeFileSync(join(generatedDir, "api.js"), `export const api = {};\n`);
+
+    const code = await migrateCommand(["--dir", join(root, "convex"), "--force"]);
+    expect(code).toBe(0);
+
+    expect(existsSync(join(generatedDir, "server.js"))).toBe(false);
+    expect(existsSync(join(generatedDir, "api.js"))).toBe(false);
+    expect(existsSync(join(generatedDir, "server.ts"))).toBe(true);
   });
 });

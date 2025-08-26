@@ -3,7 +3,7 @@
  * imports, scaffold config, write a divergence report, and regenerate `_generated/`. v1 supports
  * only `--from convex`; other origin backends register into `SOURCES` the same way.
  */
-import { writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeGenerated, generateServer } from "@stackbase/codegen";
@@ -103,6 +103,16 @@ export async function migrateCommand(args: string[]): Promise<number> {
   // Regenerate _generated/ via the standard pipeline.
   try {
     const generatedDir = join(appDir, "_generated");
+
+    // Delete the app's existing `_generated/` before regenerating (spec §88). A real Convex app
+    // ships `_generated/{server.js, server.d.ts, api.js, api.d.ts, dataModel.d.ts}` — the pre-write
+    // guard below only checks for `server.ts` (Stackbase's own extension), so those stale Convex
+    // artifacts would otherwise survive untouched and can shadow the regenerated Stackbase files
+    // (a JS-first resolver picks the stale `server.js`, which imports the now-uninstalled
+    // "convex/server"). `force: true` makes this a no-op when the dir is absent (the from-scratch
+    // migration case), preserving existing behavior there.
+    rmSync(generatedDir, { recursive: true, force: true });
+
     const config = await loadConfig(projectRoot);
 
     // A project migrated straight from Convex source has NEVER had `_generated/` written — its
