@@ -27,6 +27,7 @@ import type {
   DocStore,
   DocumentLogEntry,
   DocumentValue,
+  IndexOverlayEntry,
   IndexWrite,
   InternalDocumentId,
   TimestampOracle,
@@ -45,6 +46,13 @@ import type {
 
 function docKeyspace(id: InternalDocumentId): string {
   return tableKeyspaceId(encodeStorageTableId(id.tableNumber));
+}
+
+/** Stable string form of index-key bytes, for de-duplicating staged updates by key. */
+function hexKey(b: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += b[i]!.toString(16).padStart(2, "0");
+  return s;
 }
 
 class TransactionContextImpl implements TransactionContext {
@@ -91,6 +99,25 @@ class TransactionContextImpl implements TransactionContext {
 
   stageIndexUpdates(updates: readonly DatabaseIndexUpdate[]): void {
     for (const u of updates) this.indexUpdates.push(u);
+  }
+
+  pendingIndexOverlay(indexId: string): readonly IndexOverlayEntry[] {
+    // Collapse this transaction's staged index-key changes for `indexId` to the net per-key
+    // state (last write wins). A replace whose indexed field changed appears as a Deleted at the
+    // old key plus a NonClustered at the new key; a same-key update appears as a NonClustered
+    // (its value is read from `staged`). The query runtime overlays these onto its committed scan.
+    const byKey = new Map<string, IndexOverlayEntry>();
+    for (const u of this.indexUpdates) {
+      if (u.indexId !== indexId) continue;
+      if (u.value.type === "Deleted") {
+        byKey.set(hexKey(u.key), { key: u.key, value: null });
+      } else {
+        // A NonClustered entry corresponds to a staged put; treat a since-tombstoned doc as a delete.
+        const staged = this.staged.get(u.value.docId);
+        byKey.set(hexKey(u.key), { key: u.key, value: staged ? staged.value : null });
+      }
+    }
+    return [...byKey.values()];
   }
 }
 

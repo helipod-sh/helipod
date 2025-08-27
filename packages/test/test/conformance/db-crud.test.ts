@@ -102,6 +102,11 @@ const extMod = {
     await ctx.db.delete(a.id);
     return { viaGet: await ctx.db.get(a.id), viaQuery: await ctx.db.query("docs", "by_creation").collect() };
   }),
+  // Read-your-own-writes via paginate: insert then paginate within the SAME mutation.
+  insertThenPaginate: mutation(async (ctx: A, a: { owner: string; n: number; tag: string }) => {
+    await ctx.db.insert("docs", a);
+    return ctx.db.query("docs", "by_creation").paginate({ cursor: null, pageSize: 50 });
+  }),
   // Insert, then throw — the whole transaction must roll back, leaving no trace.
   insertThenThrow: mutation(async (ctx: A, a: A) => {
     await ctx.db.insert("docs", a);
@@ -175,18 +180,11 @@ describe("conformance — db CRUD (extended)", () => {
     expect(res.viaGet).toBeNull();
   });
 
-  // FINDING: ctx.db.query(...).collect() does NOT see the mutation's own uncommitted writes —
-  // it diverges from ctx.db.get(), which does (see the two passing tests above). QueryRuntime.collect
-  // (packages/query-engine/src/query-runtime.ts) scans the DocStore directly at the transaction's
-  // `snapshotTs` via `docStore.index_scan(...)` and never consults the transaction's staged-write
-  // buffer (`TransactionContextImpl.staged`, packages/transactor/src/single-writer-transactor.ts) the
-  // way `ctx.db.get`'s `ctx.txn.get()` does. Concretely: inserting a row and then immediately running
-  // an INDEX query in the same mutation handler does NOT return that row; deleting a row and then
-  // immediately running an index query in the same mutation still returns the now-deleted row. This is
-  // a real divergence from Convex, where `ctx.db.query()` inside a mutation reflects all of that
-  // mutation's own prior writes. Kept skipped (not faked green) — a fix would need QueryRuntime.collect
-  // (and .paginate) to merge `ctx.staged` over the DocStore scan before evaluating range/filters.
-  it.skip("read-your-own-writes via ctx.db.query: a query run inside the same mutation sees a just-inserted row", async () => {
+  // Read-your-own-writes for ctx.db.query — now consistent with ctx.db.get (was a FINDING; fixed).
+  // QueryRuntime.collect/paginate overlay the transaction's pending index writes
+  // (TransactionContext.pendingIndexOverlay) onto the committed DocStore scan, so an insert made
+  // earlier in the same mutation is visible to a later index query, and an earlier delete is not.
+  it("read-your-own-writes via ctx.db.query: a query run inside the same mutation sees a just-inserted row", async () => {
     const res = await t.mutation<{ id: string; viaQuery: Array<{ owner: string }> }>(
       "mod:insertThenQuery",
       { owner: "fresh", n: 1, tag: "x" },
@@ -194,10 +192,18 @@ describe("conformance — db CRUD (extended)", () => {
     expect(res.viaQuery.some((r) => r.owner === "fresh")).toBe(true);
   });
 
-  it.skip("read-your-own-writes via ctx.db.query: a query run inside the same mutation does not see a just-deleted row", async () => {
+  it("read-your-own-writes via ctx.db.query: a query run inside the same mutation does not see a just-deleted row", async () => {
     const id = await t.mutation<string>("mod:insert", { owner: "a", n: 1, tag: "x" });
     const res = await t.mutation<{ viaQuery: Array<{ _id: string }> }>("mod:deleteThenQuery", { id });
     expect(res.viaQuery.some((r) => r._id === id)).toBe(false);
+  });
+
+  it("read-your-own-writes via ctx.db.query.paginate: a paginate run inside the same mutation sees a just-inserted row", async () => {
+    const res = await t.mutation<{ page: Array<{ owner: string }> }>(
+      "mod:insertThenPaginate",
+      { owner: "fresh", n: 1, tag: "x" },
+    );
+    expect(res.page.some((r) => r.owner === "fresh")).toBe(true);
   });
 
   it("mutation rollback: a mutation that inserts then throws leaves no row behind", async () => {

@@ -65,6 +65,16 @@ export interface IndexWrite {
   update: DatabaseIndexUpdate;
 }
 
+/**
+ * A single index-key change staged by the current transaction, projected for read-your-own-writes
+ * overlay onto a query scan. `value === null` means the key is deleted (tombstoned) in the pending
+ * write set; a non-null `value` is the pending document at that key (insert or update).
+ */
+export interface IndexOverlayEntry {
+  key: Uint8Array;
+  value: DocumentValue | null;
+}
+
 export interface PrevRevQuery {
   id: InternalDocumentId;
   ts: bigint;

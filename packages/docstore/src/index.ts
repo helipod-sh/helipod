@@ -16,6 +16,7 @@ export type {
   DatabaseIndexValue,
   DatabaseIndexUpdate,
   IndexWrite,
+  IndexOverlayEntry,
   PrevRevQuery,
   SchemaSetupOptions,
   DocStore,

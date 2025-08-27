@@ -5,7 +5,12 @@
  */
 import type { ShardId } from "@stackbase/id-codec";
 import type { KeyRange, RangeSet, SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { DatabaseIndexUpdate, DocumentValue, InternalDocumentId } from "@stackbase/docstore";
+import type {
+  DatabaseIndexUpdate,
+  DocumentValue,
+  IndexOverlayEntry,
+  InternalDocumentId,
+} from "@stackbase/docstore";
 import type { HeadroomLimits } from "./headroom";
 
 /** A committed write's invalidation payload — serializable, so it crosses processes (Tier 2). */
@@ -49,6 +54,12 @@ export interface TransactionContext {
   recordWrite(range: KeyRange): void;
   /** Stage index entry updates to be applied atomically at commit. */
   stageIndexUpdates(updates: readonly DatabaseIndexUpdate[]): void;
+  /**
+   * The net pending index-key changes for `indexId` (last write per key wins), so a query scan
+   * can overlay this transaction's own uncommitted writes — read-your-own-writes for `.query()`,
+   * matching what `get()` already does. Empty when nothing pending touches this index.
+   */
+  pendingIndexOverlay(indexId: string): readonly IndexOverlayEntry[];
 }
 
 export interface RunInTransactionOptions {

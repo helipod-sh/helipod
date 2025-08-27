@@ -249,7 +249,8 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
     if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
   }
 
-  const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs);
+  const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
+  const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs, overlay);
   for (const range of readSet.toArray()) ctx.txn.recordRead(range);
   return JSON.stringify({ docs: documents.map((d) => convexToJson(d as Value)) });
 };
@@ -272,11 +273,12 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
   }
 
+  const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
   const { page, nextCursor, hasMore, scanCapped, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
     cursor: spec.cursor,
     pageSize: spec.pageSize,
     maxScan: spec.maxScan,
-  });
+  }, overlay);
   for (const range of readSet.toArray()) ctx.txn.recordRead(range);
   return JSON.stringify({ page: page.map((d) => convexToJson(d as Value)), nextCursor, hasMore, scanCapped });
 };
