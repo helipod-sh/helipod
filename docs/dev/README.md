@@ -5,6 +5,7 @@ Internal engineering docs for **building** Stackbase. (End-user product docs liv
 ## Start here
 
 - **[Architecture: System Design (North Star)](./architecture/system-design.md)** — the synthesized Stackbase architecture: the reactive-transaction core primitive, the storage seam, and the tiered (lightweight → scalable) model that reconciles all four design goals.
+- **[Business Model & Licensing (locked decision)](./business-model-and-licensing.md)** — free now / gate scale later: everything free to win adoption, then a paid license key unlocks scaling up (deploy anywhere, BYO cloud — the n8n/GitLab-EE model, no mandatory cloud). FSL from day one; paid `ee/` under a separate license; set the license now, add the paywall later.
 
 ## Scaling & deployment
 
