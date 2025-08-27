@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { DocStore } from "@stackbase/docstore";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
@@ -24,6 +25,13 @@ export interface CreateTestOptions {
   components?: ComponentDefinition[];
   schema?: SchemaDefinition | "auto" | false;
   now?: () => number;
+  /**
+   * The document store to run against. Defaults to an in-memory SQLite store. Pass an alternative
+   * (e.g. a `PostgresDocStore`) to exercise the real engine against a different backend — its
+   * `setupSchema()` is called by the runtime and `close()` by the harness cleanup. The store must
+   * start empty; the harness owns its lifecycle from here.
+   */
+  store?: DocStore;
 }
 
 /** A single `http.ts` route, with its handler resolved from a `RegisteredFunction` value to the
@@ -162,7 +170,7 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
   // The store is captured (not constructed inline) so both the success path's `cleanup` and this
   // catch block can close its underlying SQLite handle — otherwise an in-memory db handle (and, on
   // `create`-throws, the process-visible file descriptor it holds) leaks for the life of the process.
-  const store = new SqliteDocStore(new NodeSqliteAdapter());
+  const store = opts.store ?? new SqliteDocStore(new NodeSqliteAdapter());
   let runtime: EmbeddedRuntime;
   try {
     runtime = await EmbeddedRuntime.create({
@@ -187,7 +195,7 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
       now,
     });
   } catch (err) {
-    store.close();
+    await store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
     throw err;
   }
@@ -200,7 +208,7 @@ export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntim
     // temp dir backing file storage is removed.
     await reactivity.close();
     await runtime.stopDrivers();
-    store.close();
+    await store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   };
   // See `packages/cli/src/http-handler.ts`'s "User httpAction routes" block — this is the same

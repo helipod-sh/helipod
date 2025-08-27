@@ -28,6 +28,8 @@
     "@stackbase/index-key-codec": "workspace:*"
   },
   "devDependencies": {
+    "@stackbase/test": "workspace:*",
+    "@stackbase/executor": "workspace:*",
     "@electric-sql/pglite": "^0.2.17",
     "@types/pg": "^8.11.10",
     "@types/node": "catalog:",

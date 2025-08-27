@@ -24,6 +24,7 @@
     "@stackbase/blobstore-fs": "workspace:*",
     "@stackbase/client": "workspace:*",
     "@stackbase/component": "workspace:*",
+    "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/id-codec": "workspace:*",

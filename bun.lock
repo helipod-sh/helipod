@@ -350,6 +350,8 @@
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/test": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
         "tsup": "catalog:",
@@ -506,6 +508,7 @@
         "@stackbase/blobstore-fs": "workspace:*",
         "@stackbase/client": "workspace:*",
         "@stackbase/component": "workspace:*",
+        "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
