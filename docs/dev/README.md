@@ -9,6 +9,7 @@ Internal engineering docs for **building** Stackbase. (End-user product docs liv
 
 ## Scaling & deployment
 
+- **[Tier 2 Topology — Research & Second Thought (proposed)](./architecture/tier2-topology-research.md)** — the two-pass design research for actually building the scale tier: the first "n8n-style role-flagged fleet" proposal, the 2024–2026 web sweep (WarpStream/SlateDB/Turso/Zero/Electric/Neon/Rivet/Calvin) that exposed its two flaws, and the proposed **symmetric log-fed fleet** (every node the same binary; the store is its own coordinator via leases; every node tails the log into a local embedded replica). Slice 1 = 2 nodes + 1 Postgres with live failover.
 - [Deployment Topologies & the TypeScript-vs-Rust Question](./architecture/deployment-and-language.md) — the deployment matrix (single binary · npm without Docker · Docker · a DigitalOcean droplet · Railway/Fly · edge), the whole-system language decision ("could we have used Rust? could users still use it like a package?"), how the single binary scales, and an honest snapshot of what ships vs. what's designed.
 - [Scalability Spectrum](./architecture/scalability-spectrum.md) — Tier 0 → Tier 2, per-conversation write sharding, the connection-sharded sync fleet, and the seams the Foundation must reserve.
 - [Scaling Reality](./architecture/scaling-reality.md) — the numbers-grounded answer to "won't a JS/Bun engine fall over at WhatsApp-class connection counts?" (the connection-tier half of the language question).
@@ -24,6 +25,7 @@ How the systems we draw from actually work, and the one transferable idea from e
 - [Supabase](./research/supabase.md) — schema-as-source-of-truth + RLS; and the operational weight to avoid.
 - [PocketBase](./research/pocketbase.md) — single binary + embedded SQLite; the lightweight tier.
 - [Lunora](./research/lunora.md) — the closest *shipped* prior art (Convex-style backend on Cloudflare DOs, alpha); client-sync playbook (watermarks, bookmark resume, offline), poke/membership-diff protocol, advisory guardrails. Authz-specific deep-dive lives in [`components/authz/docs/research.md`](../../components/authz/docs/research.md).
+- [iii](./research/iii.md) — function orchestration mesh (not a competitor; short brief). Borrows: server-side `onChange` triggers (cheap, high-demand backlog item), polyglot *action* workers over the serializable syscall ABI (later), Apache-licensed client SDK; NOT their single-hub scaling topology.
 
 ## The design goals (user brief)
 
