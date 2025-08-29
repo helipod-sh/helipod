@@ -26,6 +26,7 @@ How the systems we draw from actually work, and the one transferable idea from e
 - [PocketBase](./research/pocketbase.md) — single binary + embedded SQLite; the lightweight tier.
 - [Lunora](./research/lunora.md) — the closest *shipped* prior art (Convex-style backend on Cloudflare DOs, alpha); client-sync playbook (watermarks, bookmark resume, offline), poke/membership-diff protocol, advisory guardrails. Authz-specific deep-dive lives in [`components/authz/docs/research.md`](../../components/authz/docs/research.md).
 - [iii](./research/iii.md) — function orchestration mesh (not a competitor; short brief). Borrows: server-side `onChange` triggers (cheap, high-demand backlog item), polyglot *action* workers over the serializable syscall ABI (later), Apache-licensed client SDK; NOT their single-hub scaling topology.
+- [dbx](./research/dbx.md) — lightweight cross-platform database *client* (Rust/Tauri, not a competitor; short brief). No reusable code (opposite side of the boundary — it consumes DBs, we are one). One transferable idea: a Stackbase-native **`@stackbase/mcp`** server giving AI agents access to *logical* tables (through our reactivity/validation/authz), unlike a generic SQL-over-MCP client — backlog, no spec yet.
 
 ## The design goals (user brief)
 
