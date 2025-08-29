@@ -1,0 +1,38 @@
+{
+  "name": "@stackbase/fleet",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "@stackbase/docstore-postgres": "workspace:*",
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/runtime-embedded": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@types/pg": "^8.11.10",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

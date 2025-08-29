@@ -15,7 +15,8 @@
       "packages/*",
       "components/*",
       "examples/*",
-      "apps/*"
+      "apps/*",
+      "ee/packages/*"
     ],
     "catalog": {
       "typescript": "^5.7.2",
