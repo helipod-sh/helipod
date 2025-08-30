@@ -43,10 +43,12 @@ function normalizeRows(rows: Record<string, unknown>[]): PgRow[] {
 
 export class NodePgClient implements PgClient {
   private readonly client: pg.Client;
+  private readonly connectionString: string;
   private connected = false;
   private connectPromise?: Promise<void>;
 
   constructor(opts: { connectionString: string }) {
+    this.connectionString = opts.connectionString;
     this.client = new Client({
       connectionString: opts.connectionString,
       // Per-client type map: int8 (OID 20) → bigint; every other OID keeps pg's default parser.
@@ -95,6 +97,38 @@ export class NodePgClient implements PgClient {
     if (rows[0]?.ok !== true) {
       throw new Error("another Stackbase engine is already connected to this database (advisory lock held)");
     }
+  }
+
+  async tryAcquireWriterLock(): Promise<boolean> {
+    await this.ensure();
+    // Non-blocking: resolve true/false instead of throwing — callers (fleet failover) poll this.
+    const rows = await this.query(`SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY]);
+    return rows[0]?.ok === true;
+  }
+
+  /**
+   * LISTEN on a dedicated connection — `pg.Client` delivers `notification` events only on the
+   * connection that issued LISTEN, and the main connection is busy with query/transaction
+   * traffic, so a second connection is created lazily (only if `listen` is ever called) reusing
+   * the same connection string. The returned closer ends that connection; safe to call once.
+   */
+  async listen(channel: string, onNotify: (payload: string) => void): Promise<() => Promise<void>> {
+    const listener = new Client({ connectionString: this.connectionString });
+    await listener.connect();
+    listener.on("notification", (msg) => {
+      if (msg.channel === channel && msg.payload !== undefined) onNotify(msg.payload);
+    });
+    await listener.query(`LISTEN "${channel.replace(/"/g, '""')}"`);
+    let closed = false;
+    return async () => {
+      if (closed) return;
+      closed = true;
+      await listener.end();
+    };
+  }
+
+  async notify(channel: string, payload: string): Promise<void> {
+    await this.query(`SELECT pg_notify($1, $2)`, [channel, payload]);
   }
 
   async close(): Promise<void> {

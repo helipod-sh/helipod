@@ -2,4 +2,5 @@
 export type { PgClient, PgQuerier, PgRow, PgValue } from "./pg-client";
 export { ADVISORY_LOCK_KEY } from "./pg-client";
 export { NodePgClient } from "./node-pg-client";
-export { PostgresDocStore } from "./postgres-docstore";
+export { PostgresDocStore, ReadOnlyStoreError } from "./postgres-docstore";
+export type { PostgresDocStoreOptions } from "./postgres-docstore";
