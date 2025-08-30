@@ -50,6 +50,20 @@ function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record
   for (const [name, num] of Object.entries(tableNumbers)) map.set(num, name);
 }
 
+/**
+ * Fleet write-routing seam (Tier 2): lets a non-writer node forward mutations/actions to
+ * whichever node currently holds the write lease, instead of executing them locally. Queries
+ * are NEVER routed — a non-writer still serves reads from its own (replicated) storage.
+ * `isLocalWriter` is checked on EVERY call (not cached at construction), so a role flip on
+ * promotion/demotion takes effect immediately without recreating the runtime.
+ */
+export interface WriteRouter {
+  /** true → execute writes locally (this node is the writer). Checked per call. */
+  isLocalWriter(): boolean;
+  /** Forward a write to the writer node; resolves with the function's JSON result or throws. */
+  forward(kind: "mutation" | "action", path: string, args: JSONValue, identity: string | null): Promise<JSONValue>;
+}
+
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
   catalog: IndexCatalog;
@@ -89,6 +103,19 @@ export interface EmbeddedRuntimeOptions {
    * whose drivers don't inspect `inv.tables`) can omit it and driver callbacks just see raw ids.
    */
   tableNumbers?: Record<string, number>;
+  /**
+   * Route mutations/actions to another node instead of executing them locally, when
+   * `writeRouter.isLocalWriter()` is false. Applies to EVERY mutation/action entry point (the
+   * WS `syncExecutor.runMutation`/`runAction` and the public `run`/`runAction` methods) —
+   * queries are never routed. See `WriteRouter`.
+   */
+  writeRouter?: WriteRouter;
+  /**
+   * Skip starting component drivers at `create()` time; call the returned instance's
+   * `startDrivers()` later instead. For a fleet node that boots as a non-writer and only
+   * wants drivers running once/if it becomes the writer.
+   */
+  deferDrivers?: boolean;
 }
 
 export class EmbeddedRuntime {
@@ -116,6 +143,15 @@ export class EmbeddedRuntime {
      * reassigning the field) keeps that closure correct without any circular-reference dance.
      */
     private tableNumberToName: Map<number, string>,
+    /** The transactor's timestamp oracle; `observeTimestamp` delegates straight to it. */
+    private readonly oracle: MonotonicTimestampOracle,
+    /** Threaded from `create()` so `startDrivers()` can start deferred drivers later. */
+    private readonly driverCtx: DriverContext,
+    /** Mutable: false when `deferDrivers` was set and `startDrivers()` hasn't run yet. */
+    private driversStarted: boolean,
+    /** When set and `isLocalWriter()` is false, every mutation/action entry point forwards
+     *  through it instead of executing locally. Queries never consult this. */
+    private readonly writeRouter: WriteRouter | undefined,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -127,7 +163,8 @@ export class EmbeddedRuntime {
     // Recover the timestamp high-water mark from persisted data, so snapshot reads after a
     // restart see existing documents (a fresh oracle at 0 would read `ts <= 0` and find nothing).
     const startTs = await options.store.maxTimestamp();
-    const transactor = new SingleWriterTransactor(options.store, new MonotonicTimestampOracle(startTs), { fanout });
+    const oracle = new MonotonicTimestampOracle(startTs);
+    const transactor = new SingleWriterTransactor(options.store, oracle, { fanout });
     const queryRuntime = new QueryRuntime(options.store);
 
     // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:
@@ -195,7 +232,18 @@ export class EmbeddedRuntime {
         };
       },
       async runMutation(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const fn = resolve(path);
+        // Write-routing seam: a non-writer fleet node forwards to the writer instead of
+        // executing locally. `isLocalWriter()` is checked fresh on every call (never cached),
+        // so a role flip on promotion takes effect on the very next mutation. The forwarded
+        // write's own commit fans out through the writer's fan-out (a cross-process adapter,
+        // not this in-memory one) — there is no local `tables`/`writeRanges`/`commitTs` to
+        // report here, so those come back empty/zero.
+        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
+          const value = await options.writeRouter.forward("mutation", path, args, identity ?? null);
+          return { value: jsonToConvex(value) as Value, tables: [], writeRanges: [], commitTs: 0 };
+        }
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -216,6 +264,13 @@ export class EmbeddedRuntime {
         // the instance `runAction` (Task 1)'s public gate.
         const fn = resolve(path);
         if (fn.type !== "action") throw new Error(`${path} is not an action`);
+        // Write-routing seam (see `runMutation` above): forward instead of executing locally
+        // when this node isn't the writer. An action has no read/write set of its own to fan
+        // out either way, so nothing extra to reconcile here.
+        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
+          const value = await options.writeRouter.forward("action", path, args, identity ?? null);
+          return { value: jsonToConvex(value) as Value };
+        }
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
         return { value: r.value as Value };
       },
@@ -332,9 +387,20 @@ export class EmbeddedRuntime {
     }
 
     const drivers = options.drivers ?? [];
-    for (const d of drivers) await d.start(driverCtx);
+    // `deferDrivers` skips this: the caller starts them later via the instance's
+    // `startDrivers()` (e.g. a fleet node that boots as a non-writer and only wants drivers
+    // running once/if it becomes the writer).
+    let driversStarted = false;
+    if (!options.deferDrivers) {
+      for (const d of drivers) await d.start(driverCtx);
+      driversStarted = true;
+    }
 
-    return new EmbeddedRuntime(options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames, contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName);
+    return new EmbeddedRuntime(
+      options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
+      contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
+      oracle, driverCtx, driversStarted, options.writeRouter,
+    );
   }
 
   /**
@@ -380,11 +446,29 @@ export class EmbeddedRuntime {
     return createLoopbackConnection(this.handler, sessionId ?? `session-${++this.sessionCounter}`);
   }
 
-  /** Directly invoke a function (for HTTP routes / the CLI `run` command). */
+  /**
+   * Synthesizes a `UdfResult` for a write forwarded to the writer node: `forward` only returns
+   * the function's JSON result, not read ranges / an oplog, so those come back empty/zero here.
+   * Shared by `run()` and `runAction()` — both route through the same `WriteRouter`.
+   */
+  private forwardedResult<T>(value: JSONValue): UdfResult<T> {
+    return { value: jsonToConvex(value) as T, logs: [], committed: true, commitTs: 0n, readRanges: [], oplog: null };
+  }
+
+  /** Directly invoke a function (for HTTP routes / the CLI `run` command). Routes mutations
+   *  and actions through `writeRouter` when set and this node isn't the writer; queries always
+   *  run locally. */
   async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
+    if (
+      this.writeRouter && !this.writeRouter.isLocalWriter() &&
+      (fn.type === "mutation" || fn.type === "action")
+    ) {
+      const value = await this.writeRouter.forward(fn.type, path, args, opts?.identity ?? null);
+      return this.forwardedResult<T>(value);
+    }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
       namespace: namespaceForPath(path, this.componentNames),
@@ -397,12 +481,17 @@ export class EmbeddedRuntime {
     });
   }
 
-  /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks `_`-prefixed paths. */
+  /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks
+   *  `_`-prefixed paths. Routes through `writeRouter` when set and this node isn't the writer. */
   async runAction<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     if (fn.type !== "action") throw new Error(`${path} is not an action`);
+    if (this.writeRouter && !this.writeRouter.isLocalWriter()) {
+      const value = await this.writeRouter.forward("action", path, args, opts?.identity ?? null);
+      return this.forwardedResult<T>(value);
+    }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
       namespace: namespaceForPath(path, this.componentNames),
@@ -454,6 +543,28 @@ export class EmbeddedRuntime {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     for (const d of this.drivers) await d.stop?.();
+  }
+
+  /**
+   * Start component drivers deferred via `EmbeddedRuntimeOptions.deferDrivers`. Idempotent —
+   * a second (or later) call is a no-op once drivers are running, so callers don't need to
+   * track whether they've already called it (e.g. a fleet node calling this on every
+   * promotion attempt).
+   */
+  async startDrivers(): Promise<void> {
+    if (this.driversStarted) return;
+    this.driversStarted = true;
+    for (const d of this.drivers) await d.start(this.driverCtx);
+  }
+
+  /**
+   * Lets a non-writer fleet node advance its local timestamp oracle past timestamps it learns
+   * from the writer's change stream, so its own next allocated timestamp (if/when it becomes
+   * the writer) never collides with or precedes one it already observed. Delegates straight to
+   * `MonotonicTimestampOracle.observeTimestamp`.
+   */
+  observeTimestamp(ts: bigint): void {
+    this.oracle.observeTimestamp(ts);
   }
 }
 
