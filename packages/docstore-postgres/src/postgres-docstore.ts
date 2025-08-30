@@ -43,8 +43,45 @@ function asBigIntOrNull(v: PgValue | undefined): bigint | null {
   return v === null || v === undefined ? null : asBigInt(v);
 }
 
+/** Thrown by `write()` while the store is in read-only mode (see `PostgresDocStore`'s
+ * `readOnly` option and `setWritable()`). Fleet followers construct the store read-only so a
+ * stray write can't happen before the node actually holds the writer lease. */
+export class ReadOnlyStoreError extends Error {
+  constructor() {
+    super("PostgresDocStore is read-only — call setWritable() after acquiring the writer lock");
+    this.name = "ReadOnlyStoreError";
+  }
+}
+
+export interface PostgresDocStoreOptions {
+  /** Start the store in read-only mode: `setupSchema()` still runs DDL but skips taking the
+   * writer advisory lock, and `write()` throws `ReadOnlyStoreError` until `setWritable()` is
+   * called (by the caller, after it has separately acquired the lock — e.g. via
+   * `PgClient.tryAcquireWriterLock()` on promotion in a fleet). Default: false. */
+  readOnly?: boolean;
+}
+
 export class PostgresDocStore implements DocStore {
-  constructor(private readonly db: PgClient) {}
+  private readOnly: boolean;
+
+  constructor(
+    private readonly db: PgClient,
+    options?: PostgresDocStoreOptions,
+  ) {
+    this.readOnly = options?.readOnly ?? false;
+  }
+
+  /** The underlying `PgClient` — exposed so fleet code (leader election, LISTEN/NOTIFY signaling)
+   * reuses the same connection this store writes through, rather than opening a second one. */
+  pgClient(): PgClient {
+    return this.db;
+  }
+
+  /** Promote a read-only store to writable. Caller must already hold the single-writer advisory
+   * lock (e.g. via `pgClient().tryAcquireWriterLock()`) — this method does not itself take it. */
+  setWritable(): void {
+    this.readOnly = false;
+  }
 
   private serializeValue(value: DocumentValue): string {
     return JSON.stringify(convexToJson(value as Value));
@@ -59,7 +96,9 @@ export class PostgresDocStore implements DocStore {
     for (const stmt of SCHEMA_STATEMENTS) await this.db.query(stmt);
     // Single-writer invariant — fail fast if another engine already holds the advisory lock.
     // No-op under PGlite (single in-process connection); real guard under NodePgClient.
-    await this.db.acquireWriterLock();
+    // Skipped entirely in read-only mode: a follower runs DDL (schema must exist) but must NOT
+    // contend for the writer lock — the leader (or its own later promotion) owns that.
+    if (!this.readOnly) await this.db.acquireWriterLock();
   }
 
   async write(
@@ -68,6 +107,7 @@ export class PostgresDocStore implements DocStore {
     conflictStrategy: ConflictStrategy,
     _shardId?: ShardId,
   ): Promise<void> {
+    if (this.readOnly) throw new ReadOnlyStoreError();
     // Dedup last-wins to mirror SQLite INSERT OR REPLACE and avoid ON CONFLICT double-affect.
     // Note: under the "Error" conflict strategy, SQLite's per-row INSERT would throw on a
     // duplicate (table_id, internal_id, ts) within one batch, but this dedup silently keeps

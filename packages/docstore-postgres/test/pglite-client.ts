@@ -40,6 +40,23 @@ export class PgliteClient implements PgClient {
     void ADVISORY_LOCK_KEY;
   }
 
+  async tryAcquireWriterLock(): Promise<boolean> {
+    // Same rationale as acquireWriterLock: single in-process connection, contention unobservable.
+    void ADVISORY_LOCK_KEY;
+    return true;
+  }
+
+  /** Not implemented: PGlite is a single in-process WASM instance with no cross-connection
+   * notification channel to speak of; the real LISTEN/NOTIFY path is proven by the fleet E2E
+   * against real Postgres, not this test client. */
+  async listen(_channel: string, _onNotify: (payload: string) => void): Promise<() => Promise<void>> {
+    throw new Error("listen/notify not supported on PGlite test client");
+  }
+
+  async notify(_channel: string, _payload: string): Promise<void> {
+    throw new Error("listen/notify not supported on PGlite test client");
+  }
+
   async close(): Promise<void> {
     await this.pg.close();
   }
