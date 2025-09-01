@@ -74,4 +74,35 @@ describe("LeaseManager", () => {
       vi.useRealTimers();
     }
   });
+
+  it("acquireLoop() survives a transient tryAcquire() rejection and keeps retrying", async () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000", retryMs: 10 });
+      await mgr.setup();
+
+      const original = mgr.tryAcquire.bind(mgr);
+      let calls = 0;
+      vi.spyOn(mgr, "tryAcquire").mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("transient connection error");
+        return original();
+      });
+
+      const onAcquired = vi.fn();
+      mgr.acquireLoop(onAcquired);
+
+      // First attempt rejects; loop must not die — it should reschedule and succeed on retry.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(onAcquired).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(onAcquired).toHaveBeenCalledTimes(1);
+      expect(onAcquired).toHaveBeenCalledWith({ epoch: 1n, writerUrl: "http://node-a:4000" });
+
+      mgr.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

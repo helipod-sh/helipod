@@ -73,14 +73,20 @@ export class LeaseManager {
 
     const attempt = () => {
       if (this.stopped) return;
-      void this.tryAcquire().then((state) => {
-        if (this.stopped) return;
-        if (state) {
-          onAcquired(state);
-          return;
-        }
-        this.timer = setTimeout(attempt, this.retryMs);
-      });
+      void this.tryAcquire()
+        .then((state) => {
+          if (this.stopped) return;
+          if (state) {
+            onAcquired(state);
+            return;
+          }
+          this.timer = setTimeout(attempt, this.retryMs);
+        })
+        .catch(() => {
+          // Transient error (e.g. a dropped connection) — keep retrying rather than dying silently.
+          if (this.stopped) return;
+          this.timer = setTimeout(attempt, this.retryMs);
+        });
     };
 
     this.timer = setTimeout(attempt, this.retryMs);
