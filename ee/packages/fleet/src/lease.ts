@@ -39,7 +39,7 @@ export class LeaseManager {
   async setup(): Promise<void> {
     await this.client.query(`
       CREATE TABLE IF NOT EXISTS fleet_lease (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY CHECK (id = 1),
         epoch BIGINT NOT NULL,
         writer_url TEXT NOT NULL,
         acquired_at TIMESTAMPTZ NOT NULL

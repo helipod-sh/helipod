@@ -105,4 +105,16 @@ describe("LeaseManager", () => {
       vi.useRealTimers();
     }
   });
+
+  it("CHECK (id = 1) constraint is enforced on the fleet_lease table", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+
+    // Attempt to insert a row with id=2 should violate the CHECK constraint and fail.
+    await expect(
+      client.query(
+        "INSERT INTO fleet_lease (id, epoch, writer_url, acquired_at) VALUES (2, 1, 'http://test:4000', now())",
+      ),
+    ).rejects.toThrow();
+  });
 });
