@@ -135,3 +135,40 @@ Other things checked and found fine:
 - `/Volumes/Projects/concave-dev/.claude/worktrees/agent-a4717ae5aea9bb202/ee/packages/fleet/src/index.ts` (append-only edit)
 - `/Volumes/Projects/concave-dev/.claude/worktrees/agent-a4717ae5aea9bb202/ee/packages/fleet/test/lease.test.ts` (new)
 - `/Volumes/Projects/concave-dev/.claude/worktrees/agent-a4717ae5aea9bb202/ee/packages/fleet/test/pglite-client.ts` (new)
+
+## Spec compliance fix: CHECK (id = 1) constraint
+
+**Commit:** `305b402`
+
+The design spec (`docs/superpowers/specs/2025-08-28-fleet-slice1-design.md` §2) requires:
+```sql
+CREATE TABLE IF NOT EXISTS fleet_lease (
+  id         int PRIMARY KEY CHECK (id = 1),
+  epoch      bigint NOT NULL,
+  writer_url text   NOT NULL,
+  acquired_at timestamptz NOT NULL
+);
+```
+
+The initial implementation at `src/lease.ts` line 42 had the PRIMARY KEY but was missing the `CHECK (id = 1)` constraint. This allows `fleet_lease` to remain a true singleton row (enforced at the database level) rather than relying solely on application logic.
+
+**Fix applied:**
+1. Updated `lease.ts` line 42: `id INTEGER PRIMARY KEY` → `id INTEGER PRIMARY KEY CHECK (id = 1)`
+2. Added test to `lease.test.ts`: `"CHECK (id = 1) constraint is enforced on the fleet_lease table"` — verifies that a raw `INSERT INTO fleet_lease (id, epoch, writer_url, acquired_at) VALUES (2, 1, 'http://test:4000', now())` rejects with a constraint violation.
+
+**Test results:**
+```
+cd ee/packages/fleet && ../../../node_modules/.bin/vitest run test/lease.test.ts
+✓ test/lease.test.ts (6 tests) 1666ms
+   ✓ LeaseManager > setup() creates the fleet_lease table
+   ✓ LeaseManager > tryAcquire() returns epoch 1 on first call, epoch 2 on second
+   ✓ LeaseManager > read() returns the latest lease row
+   ✓ LeaseManager > acquireLoop() fires onAcquired once then stop() halts further retries
+   ✓ LeaseManager > acquireLoop() survives a transient tryAcquire() rejection and keeps retrying
+   ✓ LeaseManager > CHECK (id = 1) constraint is enforced on the fleet_lease table
+
+Test Files  1 passed (1)
+     Tests  6 passed (6)
+```
+
+**Typecheck:** `bun run --filter @stackbase/fleet typecheck` — Exited with code 0.
