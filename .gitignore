@@ -34,3 +34,6 @@ apps/*/dist/
 .remember/
 .claude/
 stackbase-chat-working.png
+
+# SDD scratch (progress ledger, briefs, reports)
+.superpowers/

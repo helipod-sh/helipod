@@ -1,16 +1,16 @@
+/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import { PGlite } from "@electric-sql/pglite";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
 import { ADVISORY_LOCK_KEY } from "@stackbase/docstore-postgres";
 
 /**
- * Test-only PgClient over PGlite (real Postgres in WASM, in-process, single connection),
- * local to @stackbase/fleet (packages/docstore-postgres/test/pglite-client.ts is not exported
- * from that package, so this is a minimal local mirror for fleet's own tests).
- *
- * Same int8 (OID 20) parser rationale as the docstore-postgres original: PGlite's default int8
- * decoding is inconsistent (small values -> number, values beyond Number.MAX_SAFE_INTEGER ->
- * bigint), so the typed-parsers option is registered at construction time to force `bigint`
- * unconditionally, matching the PgClient normalization contract (`query` returns int8 as bigint).
+ * Test-only `PgClient` over PGlite (real Postgres in WASM, in-process, single connection) —
+ * mirrors `packages/docstore-postgres/test/pglite-client.ts` (see there for the OID 20 bigint
+ * parser rationale). `listen`/`notify` are stubbed to throw: PGlite is a single in-process WASM
+ * instance with no cross-connection notification channel, so `CommitTailer.start()` must
+ * tolerate a `listen()` rejection and fall back to its poll loop — which is exactly the path
+ * these fixtures exercise (see `commit-notifier.test.ts`). The real LISTEN/NOTIFY path is
+ * latency-only and proven against real Postgres in the fleet E2E, not here.
  */
 export class PgliteClient implements PgClient {
   private readonly pg = new PGlite({ parsers: { 20: (v: string) => BigInt(v) } });
@@ -33,14 +33,20 @@ export class PgliteClient implements PgClient {
   }
 
   async acquireWriterLock(): Promise<void> {
-    // Single in-process connection: contention is unobservable. No-op.
     void ADVISORY_LOCK_KEY;
   }
 
   async tryAcquireWriterLock(): Promise<boolean> {
-    // Same rationale as acquireWriterLock: single in-process connection, contention unobservable.
     void ADVISORY_LOCK_KEY;
     return true;
+  }
+
+  async listen(_channel: string, _onNotify: (payload: string) => void): Promise<() => Promise<void>> {
+    throw new Error("listen/notify not supported on PGlite test client");
+  }
+
+  async notify(_channel: string, _payload: string): Promise<void> {
+    throw new Error("listen/notify not supported on PGlite test client");
   }
 
   async close(): Promise<void> {
