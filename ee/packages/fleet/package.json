@@ -26,6 +26,7 @@
     "@stackbase/docstore": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
     "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {

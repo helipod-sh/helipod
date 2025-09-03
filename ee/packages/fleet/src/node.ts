@@ -5,9 +5,12 @@
  *
  *  - `prepareFleetNode` — constructs the Postgres client + read-only store, sets up the lease
  *    table, and makes ONE `tryAcquire()` attempt. Its result decides the whole boot: acquired →
- *    a WRITER (writable store, notifying fan-out, drivers on, forwarder pre-promoted); not
- *    acquired → a SYNC replica (read-only store, drivers deferred, writes forwarded). It returns
- *    the exact `createEmbeddedRuntime` option deltas the caller threads through `bootProject`.
+ *    a WRITER (writable store, drivers on, forwarder pre-promoted); not acquired → a SYNC replica
+ *    (read-only store, drivers deferred, writes forwarded). BOTH roles get the pg_notify-wrapping
+ *    `NotifyingFanoutAdapter` — a sync node's is inert until (if) it's later promoted, at which
+ *    point its commits immediately wake the remaining followers instead of degrading them to the
+ *    poll fallback for good. It returns the exact `createEmbeddedRuntime` option deltas the caller
+ *    threads through `bootProject`.
  *
  *  - `startFleetNode` — called AFTER the runtime is built. For a sync node it starts the commit
  *    tailer (cross-process reactive fan-out) and the lease acquire loop, and on promotion runs the
@@ -24,7 +27,8 @@ import {
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
-import { keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import { keySuccessor, serializeKeyRange, indexKeyspaceId, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import { decodeStorageIndexId, encodeStorageTableId } from "@stackbase/id-codec";
 import { LeaseManager } from "./lease";
 import { CommitTailer, NotifyingFanoutAdapter, type DerivedInvalidation } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
@@ -33,11 +37,20 @@ import { WriteForwarder } from "./forwarder";
  * Convert a single written `(indexId, key)` pair into the sync handler's point range
  * `[key, keySuccessor(key))` — the exact same half-open encoding `RangeSet.addKey` uses for a
  * point read/write, so a follower's derived write range overlaps a subscription's recorded read
- * range under `rangesOverlap`. `indexId` (the `indexes.index_id` column) IS the keyspace id
- * (`table:<id>` / `index:<id>:<name>`), so it maps straight onto `SerializedKeyRange.keyspace`.
+ * range under `rangesOverlap`.
+ *
+ * `indexId` here is the Postgres `indexes.index_id` column — the STORAGE index id produced by
+ * `encodeStorageIndexId`, format `"<tableNumber>/<indexName>"` (e.g. `"10001/by_creation"`). That
+ * is NOT the same string as the engine's keyspace id (`indexKeyspaceId`'s `"index:<table>:<name>"`
+ * / `tableKeyspaceId`'s `"table:<table>"`, see `packages/index-key-codec/src/keyspace.ts`), which is
+ * what `SerializedKeyRange.keyspace` — and `rangesOverlap` — actually compare on. So the storage id
+ * must be decoded back into its parts and the keyspace REBUILT with the engine's own helper; feeding
+ * the raw storage id straight through silently produces ranges that can never overlap anything.
  */
 export function keyToPointRange(indexId: string, key: Uint8Array): SerializedKeyRange {
-  return serializeKeyRange({ keyspace: indexId, start: key, end: keySuccessor(key) });
+  const { tableNumber, indexName } = decodeStorageIndexId(indexId);
+  const keyspace = indexKeyspaceId(encodeStorageTableId(tableNumber), indexName);
+  return serializeKeyRange({ keyspace, start: key, end: keySuccessor(key) });
 }
 
 export interface FleetHandles {
@@ -84,12 +97,19 @@ export async function prepareFleetNode(deps: {
   const lease = new LeaseManager(client, { advertiseUrl: deps.advertiseUrl });
   const forwarder = new WriteForwarder(lease, { adminKey: deps.adminKey, selfUrl: deps.advertiseUrl });
 
+  // EVERY fleet node — writer or sync — gets the pg_notify-wrapping fan-out adapter, not just the
+  // node that wins the lease at boot. A sync node never commits (`InMemoryWriteFanoutAdapter.publish`
+  // is only ever invoked by a LOCAL commit), so wrapping it here is inert until this node is
+  // eventually promoted (see the promotion order in `startFleetNode`) — at which point its commits
+  // immediately NOTIFY the remaining followers instead of leaving them degraded to the `pollMs`
+  // fallback in `CommitTailer` for the rest of the process lifetime.
+  const fanoutAdapter = new NotifyingFanoutAdapter(new InMemoryWriteFanoutAdapter(), client);
+
   await lease.setup();
   const acquired = await lease.tryAcquire();
 
   if (acquired) {
-    // Writer boot: make the store writable, promote the forwarder so writes execute locally, and
-    // wrap the in-memory fan-out with pg_notify so followers wake promptly.
+    // Writer boot: make the store writable and promote the forwarder so writes execute locally.
     store.setWritable();
     forwarder.promote();
     return {
@@ -102,7 +122,7 @@ export async function prepareFleetNode(deps: {
         store,
         writeRouter: forwarder,
         deferDrivers: false,
-        fanoutAdapter: new NotifyingFanoutAdapter(new InMemoryWriteFanoutAdapter(), client),
+        fanoutAdapter,
       },
     };
   }
@@ -114,7 +134,7 @@ export async function prepareFleetNode(deps: {
     lease,
     forwarder,
     role: "sync",
-    runtimeOptions: { store, writeRouter: forwarder, deferDrivers: true },
+    runtimeOptions: { store, writeRouter: forwarder, deferDrivers: true, fanoutAdapter },
   };
 }
 
