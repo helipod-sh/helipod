@@ -122,6 +122,7 @@
         "@stackbase/docstore-postgres": "workspace:*",
         "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/values": "workspace:*",
         "pg": "^8.13.1",
       },
       "devDependencies": {

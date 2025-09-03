@@ -25,7 +25,8 @@
     "@stackbase/docstore-postgres": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*"
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.17",

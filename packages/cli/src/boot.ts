@@ -10,7 +10,12 @@ import { dirname, join, resolve } from "node:path";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DocStore } from "@stackbase/docstore";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+  type WriteRouter,
+  type EmbeddedWriteFanoutAdapter,
+} from "@stackbase/runtime-embedded";
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
 import type { GeneratedBundle } from "@stackbase/codegen";
@@ -138,10 +143,23 @@ export async function bootLoaded(opts: {
    * test-only motivation as `storageUploadTtlMs`.
    */
   storageReaperSweepMs?: number;
+  /**
+   * Tier 2 fleet wiring (from `@stackbase/fleet`'s `prepareFleetNode`). When set, `store` is the
+   * pre-constructed (read-only-until-promoted) Postgres store — used INSTEAD of `makeStore` — and
+   * the runtime is built as a fleet node: writes route through `writeRouter` when this node isn't
+   * the writer, drivers are deferred until promotion (`deferDrivers`), and a promoted writer's
+   * commits fan out via `fanoutAdapter` (pg_notify). Absent for dev / non-fleet serve.
+   */
+  fleet?: {
+    store: DocStore;
+    writeRouter?: WriteRouter;
+    deferDrivers?: boolean;
+    fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+  };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
-  const store = makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
+  const store = opts.fleet?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
   // File storage is always on. Blobs sit beside the SQLite file (`<dataDir>/storage`); the signing
   // key is the deployment admin key (already fail-fasted-if-unset by `serve`). The `_storage` table
@@ -179,6 +197,11 @@ export async function bootLoaded(opts: {
       storageReaper(blobStore, opts.storageReaperSweepMs !== undefined ? { sweepMs: opts.storageReaperSweepMs } : undefined),
       ...project.drivers,
     ],
+    // Fleet (Tier 2): route writes to the lease-holder when not the writer, defer drivers until
+    // promotion, and (writer boot) fan out commits cross-process via pg_notify.
+    ...(opts.fleet?.writeRouter ? { writeRouter: opts.fleet.writeRouter } : {}),
+    ...(opts.fleet?.deferDrivers ? { deferDrivers: true } : {}),
+    ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
   });
 
   const storageRouteDeps: StorageRouteDeps = {
@@ -232,6 +255,13 @@ export async function bootProject(opts: {
   storage?: StorageConfig;
   storageUploadTtlMs?: number;
   storageReaperSweepMs?: number;
+  /** Tier 2 fleet wiring (see `bootLoaded`'s `fleet`). Absent for dev / non-fleet serve. */
+  fleet?: {
+    store: DocStore;
+    writeRouter?: WriteRouter;
+    deferDrivers?: boolean;
+    fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+  };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -244,6 +274,7 @@ export async function bootProject(opts: {
     storage: opts.storage,
     ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
     ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
+    ...(opts.fleet ? { fleet: opts.fleet } : {}),
   });
 }
 

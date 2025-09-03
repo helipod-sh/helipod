@@ -20,6 +20,19 @@ export interface HttpRequest {
   headers?: Record<string, string>;
 }
 
+/**
+ * The fleet node handle the HTTP layer consumes (structural mirror of `@stackbase/fleet`'s
+ * `FleetHandles` — declared here so core cli has no static dependency on the enterprise package).
+ * `role()` decides whether a sync node proxies public httpActions to the writer; `writerUrl()` is
+ * that proxy target. Present only when `serve --fleet` is active.
+ */
+export interface FleetHandles {
+  role(): "sync" | "writer";
+  writerUrl(): Promise<string>;
+  onPromoted(cb: () => void): void;
+  stop(): Promise<void>;
+}
+
 export interface HttpResponse {
   status: number;
   headers: Record<string, string>;
@@ -69,7 +82,33 @@ export async function handleHttpRequest(
   admin?: { api: AdminApi; key: string },
   routes?: ResolvedRoute[],
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> },
+  fleet?: FleetHandles,
 ): Promise<HttpResponse> {
+  // Fleet write-forwarding target: a sync node's `WriteForwarder` POSTs mutations/actions here.
+  // Enabled only in fleet mode (harmless on the writer — `runtime.run` executes locally there).
+  // Admin-key gated (same bearer as `/_admin/*`): it can run any function under an arbitrary
+  // identity, so it must never be reachable without the deployment admin key.
+  if (fleet && req.method === "POST" && req.path === "/_fleet/run") {
+    if (!admin || !verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { error: "unauthorized" });
+    try {
+      const p = JSON.parse(req.body ?? "{}") as {
+        path?: string;
+        args?: JSONValue;
+        identity?: string | null;
+        kind?: string;
+      };
+      if (!p.path) return json(400, { error: "missing function path" });
+      const identity = p.identity ?? null;
+      const result =
+        p.kind === "action"
+          ? await runtime.runAction(p.path, p.args ?? {}, { identity })
+          : await runtime.run(p.path, p.args ?? {}, { identity });
+      return json(200, { value: convexToJson(result.value as Value) });
+    } catch (e) {
+      const err = toStackbaseError(e);
+      return json(500, { error: err.message, code: err.code });
+    }
+  }
   if (admin && deploy && req.method === "POST" && req.path === "/_admin/deploy") {
     if (!verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { ok: false, error: "unauthorized" });
     let files: Array<{ path: string; code: string }>;
@@ -111,6 +150,30 @@ export async function handleHttpRequest(
   // User httpAction routes — matched AFTER the built-ins, only for non-reserved paths.
   const match = routes && routes.length > 0 ? matchRoute(routes, req.method, req.path) : undefined;
   if (match) {
+    // Fleet sync node: an httpAction runs like an action (it may `ctx.runMutation`), so the WHOLE
+    // request is proxied to the writer and executed there — never run locally on a replica. The
+    // writer's Response (status/headers/body) is streamed back verbatim.
+    if (fleet && fleet.role() === "sync") {
+      try {
+        const writerUrl = await fleet.writerUrl();
+        if (!writerUrl) return json(503, { error: "fleet: no writer available" });
+        const qs = req.query && Object.keys(req.query).length ? "?" + new URLSearchParams(req.query).toString() : "";
+        const target = `${writerUrl.replace(/\/$/, "")}${req.path}${qs}`;
+        const headers = new Headers(req.headers ?? {});
+        if (req.authorization && !headers.has("authorization")) headers.set("authorization", req.authorization);
+        // `fetch` recomputes these from the URL/body; a stale copied value would mismatch the
+        // re-encoded body (or point at this node, not the writer).
+        headers.delete("host");
+        headers.delete("content-length");
+        const hasBody = req.method !== "GET" && req.method !== "HEAD" && req.body !== undefined;
+        const resp = await fetch(target, { method: req.method, headers, ...(hasBody ? { body: req.body } : {}) });
+        const outHeaders: Record<string, string> = {};
+        resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+        return { status: resp.status, headers: outHeaders, body: await resp.text() };
+      } catch (e) {
+        return json(502, { error: `fleet: httpAction proxy to writer failed: ${e instanceof Error ? e.message : String(e)}` });
+      }
+    }
     try {
       const headers = new Headers(req.headers ?? {});
       if (req.authorization && !headers.has("authorization")) headers.set("authorization", req.authorization);
