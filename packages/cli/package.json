@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@stackbase/client": "workspace:*",
+    "@stackbase/fleet": "workspace:*",
     "@stackbase/scheduler": "workspace:*",
     "@stackbase/workflow": "workspace:*",
     "@types/node": "catalog:",

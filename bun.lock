@@ -128,11 +128,14 @@
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
+        "@stackbase/executor": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
+        "@types/ws": "^8.5.13",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
+        "ws": "^8.18.0",
       },
     },
     "examples/auth-demo": {
@@ -273,6 +276,7 @@
       },
       "devDependencies": {
         "@stackbase/client": "workspace:*",
+        "@stackbase/fleet": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
         "@stackbase/workflow": "workspace:*",
         "@types/node": "catalog:",
