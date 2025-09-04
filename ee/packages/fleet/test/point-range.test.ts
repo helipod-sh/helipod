@@ -25,7 +25,7 @@ import {
   tableKeyspaceId,
 } from "@stackbase/index-key-codec";
 import { encodeStorageIndexId, encodeStorageTableId } from "@stackbase/id-codec";
-import { keyToPointRange } from "../src/node";
+import { keyToPointRange, docKeyToPointRange } from "../src/node";
 
 describe("keyToPointRange", () => {
   it("rebuilds the engine's index keyspace id from a real storage index_id, not the raw storage id", () => {
@@ -97,5 +97,84 @@ describe("keyToPointRange", () => {
     const key = encodeIndexKey(["a"]);
     const writeRange = deserializeKeyRange(keyToPointRange(storageIndexId, key));
     expect(writeRange.keyspace).not.toBe(tableKeyspaceId(encodeStorageTableId(10001)));
+  });
+});
+
+/**
+ * `docKeyToPointRange` is the DOCUMENT-keyspace counterpart to `keyToPointRange` above: it
+ * converts a `(table_id, internal_id)` pair read straight from the Postgres `documents` table
+ * (`DerivedInvalidation.writtenDocs`) into the point range a bare `ctx.db.get(id)` read records.
+ *
+ * The ground truth for that read range is `packages/transactor/src/single-writer-transactor.ts`:
+ * `docKeyspace(id)` is `tableKeyspaceId(encodeStorageTableId(id.tableNumber))`, and
+ * `TransactionContextImpl.get()` records it via `this.reads.addKey(docKeyspace(id), id.internalId)`.
+ * Every assertion below reproduces that exact composition with the engine's own exported helpers
+ * (`tableKeyspaceId`, `encodeStorageTableId`, `RangeSet.addKey`) — never a hand-rolled string —
+ * so a passing test proves the fleet bridge's derived range is byte-for-byte what the local
+ * commit path would have produced for the same document write.
+ */
+describe("docKeyToPointRange", () => {
+  it("produces the document-keyspace point range for a written doc, matching the transactor's own docKeyspace() composition", () => {
+    const tableNumber = 10001;
+    const tableId = encodeStorageTableId(tableNumber); // what documents.table_id actually stores
+    const internalId = new Uint8Array([1, 2, 3, 4]);
+
+    const r = docKeyToPointRange(tableId, internalId);
+    const back = deserializeKeyRange(r);
+
+    // Ground truth: single-writer-transactor.ts's docKeyspace(id) = tableKeyspaceId(encodeStorageTableId(id.tableNumber)).
+    expect(back.keyspace).toBe(tableKeyspaceId(encodeStorageTableId(tableNumber)));
+    expect([...back.start]).toEqual([...internalId]);
+    expect(back.end).not.toBeNull();
+    expect([...(back.end as Uint8Array)]).toEqual([...keySuccessor(internalId)]);
+  });
+
+  it("matches the engine's own point-write encoding end to end: a written doc's derived range overlaps a ctx.db.get-style recorded read range", () => {
+    const tableNumber = 10001;
+    const tableId = encodeStorageTableId(tableNumber);
+    const internalId = new Uint8Array([9, 9, 9]);
+
+    // Engine side: a bare `ctx.db.get(id)` records its read exactly this way — see
+    // `TransactionContextImpl.get()`'s `this.reads.addKey(docKeyspace(id), id.internalId)`.
+    const readSet = new RangeSet();
+    readSet.addKey(tableKeyspaceId(encodeStorageTableId(tableNumber)), internalId);
+    const [readRange] = readSet.toArray();
+
+    // Fleet side: the tailer derived the same written (table_id, internal_id) pair straight from
+    // the `documents` table and converts it via the bridge under test.
+    const writeRange = deserializeKeyRange(docKeyToPointRange(tableId, internalId));
+
+    expect(rangesOverlap(writeRange, readRange!)).toBe(true);
+  });
+
+  it("does NOT overlap a different document id in the same table", () => {
+    const tableNumber = 10001;
+    const readSet = new RangeSet();
+    readSet.addKey(tableKeyspaceId(encodeStorageTableId(tableNumber)), new Uint8Array([1]));
+    const [readRange] = readSet.toArray();
+
+    const writeRange = deserializeKeyRange(docKeyToPointRange(encodeStorageTableId(tableNumber), new Uint8Array([2])));
+    expect(rangesOverlap(writeRange, readRange!)).toBe(false);
+  });
+
+  it("does NOT overlap the same internal id in a DIFFERENT table (table isolation)", () => {
+    const internalId = new Uint8Array([5]);
+    const readSet = new RangeSet();
+    readSet.addKey(tableKeyspaceId(encodeStorageTableId(10001)), internalId);
+    const [readRange] = readSet.toArray();
+
+    const writeRange = deserializeKeyRange(docKeyToPointRange(encodeStorageTableId(10002), internalId));
+    expect(rangesOverlap(writeRange, readRange!)).toBe(false);
+  });
+
+  it("does NOT overlap an index-keyspace read on the same table/key (keyspace isolation from indexes)", () => {
+    const tableNumber = 10001;
+    const key = new Uint8Array([7]);
+    const readSet = new RangeSet();
+    readSet.addKey(indexKeyspaceId(encodeStorageTableId(tableNumber), "by_creation"), key);
+    const [readRange] = readSet.toArray();
+
+    const writeRange = deserializeKeyRange(docKeyToPointRange(encodeStorageTableId(tableNumber), key));
+    expect(rangesOverlap(writeRange, readRange!)).toBe(false);
   });
 });

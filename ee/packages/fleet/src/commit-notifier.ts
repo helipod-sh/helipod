@@ -12,6 +12,17 @@
  * conversion into the sync handler's `WriteInvalidation.writtenRanges` shape happens where the
  * handler's range/key-codec types are already in scope (the caller wiring this to
  * `onInvalidation`), not here.
+ *
+ * `DerivedInvalidation.writtenDocs` carries the DOCUMENT-keyspace half of the same picture:
+ * `indexes` rows only cover a write transitively (via whichever indexes happen to exist on the
+ * table, and NOT AT ALL for a pure delete — see `postgres-docstore.ts`'s `write()`, a "Deleted"
+ * index entry carries no `table_id`/`internal_id`), so a subscription that reads via a bare
+ * `ctx.db.get(id)` — which records its read range in the document keyspace, not any index
+ * keyspace, see `single-writer-transactor.ts`'s `docKeyspace()`/`TransactionContextImpl.get()` —
+ * would never be invalidated by deriving from `indexes` alone. The `documents` table is written
+ * unconditionally for every put AND delete (`DocumentLogEntry`, `postgres-docstore.ts`'s
+ * `write()`), so querying it directly is the one source that provably reproduces the local
+ * commit path's document-keyspace write ranges 1:1, independent of what indexes exist.
  */
 import type { PgQuerier } from "@stackbase/docstore-postgres";
 import type { PostgresDocStore } from "@stackbase/docstore-postgres";
@@ -63,6 +74,11 @@ export interface DerivedInvalidation {
   writtenTables: string[];
   /** Raw written index keys — point invalidation input, NOT yet point ranges. */
   writtenKeys: Array<{ indexId: string; key: Uint8Array }>;
+  /** DISTINCT `(table_id, internal_id)` pairs written since the watermark, read straight from the
+   *  `documents` log (deduped in SQL via `SELECT DISTINCT` — one entry per doc regardless of how
+   *  many index rows accompanied its write). Point invalidation input for the DOCUMENT keyspace,
+   *  NOT yet point ranges — same split as `writtenKeys` above. */
+  writtenDocs: Array<{ tableId: string; internalId: Uint8Array }>;
 }
 
 export interface CommitTailerOptions {
@@ -138,7 +154,14 @@ export class CommitTailer {
         `SELECT index_id, key, table_id, ts FROM indexes WHERE ts > $1 AND ts <= $2 ORDER BY ts ASC`,
         [this.watermark, newMaxTs],
       );
-      if (rows.length === 0) return; // no index rows in range — no-op; watermark stays put
+      // Document-keyspace source (see the module doc comment for why `indexes` alone is
+      // insufficient): every put/delete lands here unconditionally, `SELECT DISTINCT` dedupes
+      // multiple revisions of the same doc within this range to one row.
+      const docRows = await this.client.query(
+        `SELECT DISTINCT table_id, internal_id FROM documents WHERE ts > $1 AND ts <= $2`,
+        [this.watermark, newMaxTs],
+      );
+      if (rows.length === 0 && docRows.length === 0) return; // nothing in range — watermark stays put
 
       // `table_id` is NULL on a "Deleted" index entry (see postgres-docstore.ts's `write()`) — skip
       // nulls so a pure-tombstone commit doesn't leak a bogus "null" string into writtenTables.
@@ -146,7 +169,11 @@ export class CommitTailer {
       for (const r of rows) if (r.table_id !== null) tableIds.add(String(r.table_id));
       const writtenTables = [...tableIds];
       const writtenKeys = rows.map((r) => ({ indexId: String(r.index_id), key: r.key as Uint8Array }));
-      await this.onInvalidation({ newMaxTs, writtenTables, writtenKeys });
+      const writtenDocs = docRows.map((r) => ({
+        tableId: String(r.table_id),
+        internalId: r.internal_id as Uint8Array,
+      }));
+      await this.onInvalidation({ newMaxTs, writtenTables, writtenKeys, writtenDocs });
       // Advance ONLY after onInvalidation resolves — a throwing/slow handler must not cause this
       // range to be silently skipped on the next tick.
       this.watermark = newMaxTs;

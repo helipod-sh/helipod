@@ -82,6 +82,7 @@ describe("CommitTailer (poll path)", () => {
     expect(inv.writtenKeys).toHaveLength(1);
     expect(inv.writtenKeys[0]!.indexId).toBe(INDEX_ID);
     expect(inv.writtenKeys[0]!.key).toEqual(kc);
+    expect(inv.writtenDocs).toEqual([{ tableId: TABLE, internalId: c.internalId }]);
 
     await tailer.stop();
     const countAfterStop = invalidations.length;
@@ -115,6 +116,43 @@ describe("CommitTailer (poll path)", () => {
     expect(invalidations).toHaveLength(1);
     expect(invalidations[0]!.writtenTables).toEqual([]); // no NonClustered entry in this commit
     expect(invalidations[0]!.writtenKeys).toEqual([{ indexId: INDEX_ID, key: ka }]);
+    // The gap this fix closes: a subscription reading via bare `ctx.db.get(id)` reads the
+    // DOCUMENT keyspace, not any index keyspace — so it must still be invalidated here even
+    // though the index-derived `writtenTables`/`writtenKeys` carry nothing usable for it. The
+    // `documents` table records the tombstone write unconditionally, independent of `indexes`.
+    expect(invalidations[0]!.writtenDocs).toEqual([{ tableId: TABLE, internalId: a.internalId }]);
+  });
+
+  it("a doc write with multiple indexed fields yields exactly ONE writtenDocs entry (dedup — a doc with 3 indexes is still 1 doc range)", async () => {
+    const a = docId(1);
+    const k1 = encodeIndexKey(["a"]);
+    const k2 = encodeIndexKey(["b"]);
+    const k3 = encodeIndexKey(["c"]);
+
+    const invalidations: DerivedInvalidation[] = [];
+    tailer = new CommitTailer(client as unknown as never, store, {
+      pollMs: 20,
+      onInvalidation: async (inv) => {
+        invalidations.push(inv);
+      },
+    });
+    await tailer.start();
+
+    // One document write, three index entries maintained alongside it (three declared indexes).
+    await store.write(
+      [rev(a, 1n, null, "A")],
+      [
+        { ts: 1n, update: { indexId: "10001:by_a", key: k1, value: { type: "NonClustered", docId: a } } },
+        { ts: 1n, update: { indexId: "10001:by_b", key: k2, value: { type: "NonClustered", docId: a } } },
+        { ts: 1n, update: { indexId: "10001:by_c", key: k3, value: { type: "NonClustered", docId: a } } },
+      ],
+      "Error",
+    );
+
+    await waitFor(() => invalidations.length > 0);
+    expect(invalidations).toHaveLength(1);
+    expect(invalidations[0]!.writtenKeys).toHaveLength(3); // one index-keyspace range per index row
+    expect(invalidations[0]!.writtenDocs).toEqual([{ tableId: TABLE, internalId: a.internalId }]); // deduped to ONE doc-keyspace range
   });
 });
 

@@ -27,7 +27,13 @@ import {
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
-import { keySuccessor, serializeKeyRange, indexKeyspaceId, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import {
+  keySuccessor,
+  serializeKeyRange,
+  indexKeyspaceId,
+  tableKeyspaceId,
+  type SerializedKeyRange,
+} from "@stackbase/index-key-codec";
 import { decodeStorageIndexId, encodeStorageTableId } from "@stackbase/id-codec";
 import { LeaseManager } from "./lease";
 import { CommitTailer, NotifyingFanoutAdapter, type DerivedInvalidation } from "./commit-notifier";
@@ -51,6 +57,24 @@ export function keyToPointRange(indexId: string, key: Uint8Array): SerializedKey
   const { tableNumber, indexName } = decodeStorageIndexId(indexId);
   const keyspace = indexKeyspaceId(encodeStorageTableId(tableNumber), indexName);
   return serializeKeyRange({ keyspace, start: key, end: keySuccessor(key) });
+}
+
+/**
+ * Convert a single written `(table_id, internal_id)` pair — from `documents`, i.e.
+ * `DerivedInvalidation.writtenDocs` — into the DOCUMENT-keyspace point range a bare
+ * `ctx.db.get(id)` read records: `[internalId, keySuccessor(internalId))` under
+ * `tableKeyspaceId(table)`. Unlike `keyToPointRange` above, no decode/recompose round trip is
+ * needed here — the Postgres `documents.table_id` column is already written as
+ * `encodeStorageTableId(tableNumber)` (see `postgres-docstore.ts`'s `write()`), which is exactly
+ * the string `tableKeyspaceId` expects; it is NOT a storage *index* id, so there is no separate
+ * "storage id" vs "engine keyspace id" split to bridge for the table half. This must match
+ * `single-writer-transactor.ts`'s `docKeyspace()` (`tableKeyspaceId(encodeStorageTableId(...))`)
+ * plus its `RangeSet.addKey(docKeyspace(id), id.internalId)` byte-for-byte, or a follower never
+ * invalidates a subscription whose only read was a point `get`.
+ */
+export function docKeyToPointRange(tableId: string, internalId: Uint8Array): SerializedKeyRange {
+  const keyspace = tableKeyspaceId(tableId);
+  return serializeKeyRange({ keyspace, start: internalId, end: keySuccessor(internalId) });
 }
 
 export interface FleetHandles {
@@ -184,7 +208,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // this and would leave one otherwise); reactivity is best-effort — reads stay correct.
       try {
         runtime.observeTimestamp(inv.newMaxTs);
-        const ranges = inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key));
+        const ranges = [
+          ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
+          ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
+        ];
         await runtime.handler.notifyWrites({
           tables: inv.writtenTables,
           ranges,
