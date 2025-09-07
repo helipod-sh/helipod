@@ -46,6 +46,10 @@ const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
 
 const CONTAINER_NAME = `sb-fleet-e2e-${process.pid}`;
 
+/** Module-level tracker for all spawned fleet serve processes — used by afterAll fallback to ensure
+ *  cleanup even if a test hangs or errors out. Each process is pushed immediately on spawn. */
+const allSpawnedProcesses: ServeProcess[] = [];
+
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -105,15 +109,32 @@ interface ReadyLine {
 type ReadyOrExit = { ready?: ReadyLine; exitCode?: number | null; stdout: string; stderr: string };
 
 /** Wait for the `serve` ready JSON line on stdout (the first complete line that parses to an object
- *  with a `url`), or the process exiting first. Robust to any non-JSON log lines emitted before it. */
+ *  with a `url`), or the process exiting first. Robust to any non-JSON log lines emitted before it.
+ *  Times out after 60s with a clear message including captured stdout/stderr, preventing infinite hangs. */
 function waitForReadyOrExit(proc: ServeProcess): Promise<ReadyOrExit> {
-  return new Promise((resolvePromise) => {
+  return new Promise((resolvePromise, rejectPromise) => {
     let stdoutBuf = "";
     let stderrBuf = "";
     let settled = false;
+    const timeoutMs = 60_000;
+    const deadline = Date.now() + timeoutMs;
+    const timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.stdout.off("data", onStdout);
+      proc.stderr.off("data", onStderr);
+      proc.off("exit", onExit);
+      rejectPromise(
+        new Error(
+          `waitForReadyOrExit timed out after ${timeoutMs}ms waiting for ready line. ` +
+          `Last stdout: ${JSON.stringify(stdoutBuf)}, stderr: ${JSON.stringify(stderrBuf)}`,
+        ),
+      );
+    }, timeoutMs);
     const finish = (result: ReadyOrExit) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeoutHandle);
       proc.stdout.off("data", onStdout);
       proc.stderr.off("data", onStderr);
       proc.off("exit", onExit);
@@ -166,7 +187,7 @@ function freePort(): Promise<number> {
 
 function spawnFleetServe(databaseUrl: string, port: number): ServeProcess {
   const advertiseUrl = `http://127.0.0.1:${port}`;
-  return spawn(
+  const proc = spawn(
     "bun",
     [
       CLI_BIN, "serve",
@@ -180,6 +201,8 @@ function spawnFleetServe(databaseUrl: string, port: number): ServeProcess {
     ],
     { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY }, stdio: ["ignore", "pipe", "pipe"] },
   );
+  allSpawnedProcesses.push(proc);
+  return proc;
 }
 
 async function stopServe(proc: ServeProcess | undefined): Promise<void> {
@@ -295,6 +318,17 @@ async function waitForLease(
 
 maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, real processes, failover)", () => {
   afterAll(() => {
+    // Belt-and-braces: kill any still-alive spawned processes BEFORE stopping the container.
+    // This ensures cleanup even if the test hangs or errors out, bypassing the try/finally.
+    for (const proc of allSpawnedProcesses) {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Ignore errors if process is already gone.
+        }
+      }
+    }
     stopPostgresContainer();
   });
 
