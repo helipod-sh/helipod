@@ -12,7 +12,7 @@ import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
 import type { StorageRoute } from "@stackbase/storage";
-import { handleHttpRequest, type ServerInfo } from "./http-handler";
+import { handleHttpRequest, type ServerInfo, type FleetHandles } from "./http-handler";
 import type { ResolvedRoute } from "./project";
 import type { DeployResult } from "./deploy-apply";
 import { detectRuntime } from "./dev-options";
@@ -74,6 +74,9 @@ export interface DevServerOptions {
   storageRoutes?: StorageRoute[];
   /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
+  /** Fleet node handle — present only under `serve --fleet`. Enables `/_fleet/run` and the sync-role
+   *  httpAction proxy. Absent → byte-for-byte the non-fleet behavior. */
+  fleet?: FleetHandles;
 }
 
 /** Content-type for an embedded dashboard asset, derived from its extension. */
@@ -247,6 +250,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           options.admin,
           currentRoutes,
           options.deploy,
+          options.fleet,
         );
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
           const file = resolveStatic(options.webDir, path);
@@ -387,6 +391,7 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
         options.admin,
         currentRoutes,
         options.deploy,
+        options.fleet,
       );
       if (response.status === 404 && req.method === "GET" && options.webDir) {
         const file = resolveStatic(options.webDir, path);

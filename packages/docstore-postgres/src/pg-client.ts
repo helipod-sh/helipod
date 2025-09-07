@@ -18,6 +18,8 @@ export interface PgClient extends PgQuerier {
   transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T>;
   /** Take the process-lifetime single-writer advisory lock; throw if already held elsewhere. */
   acquireWriterLock(): Promise<void>;
+  /** Non-blocking attempt at the same advisory lock; resolves `true`/`false` instead of throwing. */
+  tryAcquireWriterLock(): Promise<boolean>;
   close(): Promise<void>;
 }
 

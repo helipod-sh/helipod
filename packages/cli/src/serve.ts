@@ -7,12 +7,51 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
-import { bootProject, loadDashboard } from "./boot";
+import { bootProject, isPostgresUrl, loadDashboard } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
 import type { DocStore } from "@stackbase/docstore";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import type { EmbeddedRuntime, WriteRouter, EmbeddedWriteFanoutAdapter } from "@stackbase/runtime-embedded";
+import type { FleetHandles } from "./http-handler";
+
+/**
+ * Structural mirrors of `@stackbase/fleet`'s public surface. Declared locally (not imported) so
+ * core `packages/cli` keeps ZERO static dependency on the enterprise `@stackbase/fleet` package —
+ * it's loaded only via dynamic `import()` in fleet mode. Keep these in sync with `ee/packages/fleet`.
+ * The engine seam types (`WriteRouter`/`EmbeddedWriteFanoutAdapter`) ARE core, so they're imported;
+ * `FleetHandles` lives in `./http-handler` (where the proxy consumes it).
+ */
+/** The `createEmbeddedRuntime` option deltas `prepareFleetNode` computes (threaded via `bootProject`). */
+export interface FleetRuntimeOptions {
+  store: DocStore;
+  writeRouter: WriteRouter;
+  deferDrivers: boolean;
+  fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+}
+
+/** `prepareFleetNode`'s result. `client`/`lease`/`forwarder` are opaque here — only handed back
+ *  into `startFleetNode`; the store + runtime option deltas are what `bootProject` consumes. */
+export interface FleetPrep {
+  client: unknown;
+  store: DocStore;
+  lease: unknown;
+  forwarder: unknown;
+  role: "sync" | "writer";
+  runtimeOptions: FleetRuntimeOptions;
+}
+
+/** The slice of `@stackbase/fleet` serve consumes (via dynamic import). */
+export interface FleetModule {
+  prepareFleetNode(deps: { databaseUrl: string; advertiseUrl: string; adminKey: string }): Promise<FleetPrep>;
+  startFleetNode(deps: {
+    client: unknown;
+    store: DocStore;
+    runtime: EmbeddedRuntime;
+    lease: unknown;
+    forwarder: unknown;
+  }): Promise<FleetHandles>;
+}
 
 export interface ServeOptions {
   convexDir: string;
@@ -32,6 +71,36 @@ export interface ServeOptions {
    * test's timescale. Unset → the storage defaults (1h TTL, 60s sweep). Not surfaced as CLI flags. */
   storageUploadTtlMs?: number;
   storageReaperSweepMs?: number;
+  /** Tier 2: run this node as part of a symmetric fleet (writer-or-sync, decided at boot by the
+   *  Postgres write lease). Requires a Postgres `databaseUrl` and an `advertiseUrl`. Optional so
+   *  existing (non-fleet) `ServeOptions` literals need no change; `resolveServeOptions` always sets it. */
+  fleet?: boolean;
+  /** The URL other fleet nodes reach THIS node at (recorded on the lease when it's the writer, and
+   *  the target sync nodes forward writes / proxy httpActions to). Flag wins over env. */
+  advertiseUrl?: string;
+}
+
+/** Fail-fast messages for `--fleet` misconfiguration (asserted verbatim by `fleet-flags.test.ts`). */
+export const FLEET_ERR_NO_DB =
+  "fleet mode requires --database-url (Postgres) — set --database-url postgres://… or STACKBASE_DATABASE_URL.";
+export const FLEET_ERR_NO_ADVERTISE =
+  "fleet mode requires --advertise-url (or STACKBASE_ADVERTISE_URL) — the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000";
+export const FLEET_ERR_NO_PACKAGE =
+  "fleet mode requires @stackbase/fleet — install it (bun add @stackbase/fleet).";
+
+/**
+ * Validate `--fleet` prerequisites. Pure — no I/O; the dynamic-import check (FLEET_ERR_NO_PACKAGE)
+ * happens later in `serveCommand`. Only call this when `fleet` is set.
+ */
+export function validateFleetOptions(opts: {
+  fleet?: boolean;
+  databaseUrl?: string;
+  advertiseUrl?: string;
+}): { ok: true; databaseUrl: string; advertiseUrl: string } | { ok: false; error: string } {
+  if (!isPostgresUrl(opts.databaseUrl)) return { ok: false, error: FLEET_ERR_NO_DB };
+  const advertiseUrl = opts.advertiseUrl?.trim();
+  if (!advertiseUrl) return { ok: false, error: FLEET_ERR_NO_ADVERTISE };
+  return { ok: true, databaseUrl: opts.databaseUrl!, advertiseUrl };
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
@@ -44,6 +113,8 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let databaseUrl = process.env.STACKBASE_DATABASE_URL;
   let storageBucket: string | undefined;
   let storageEndpoint: string | undefined;
+  let fleet = process.env.STACKBASE_FLEET === "1" || process.env.STACKBASE_FLEET?.trim().toLowerCase() === "true";
+  let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -55,8 +126,10 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--database-url" && args[i + 1]) databaseUrl = args[++i] as string;
     else if (a === "--storage-bucket" && args[i + 1]) storageBucket = args[++i] as string;
     else if (a === "--storage-endpoint" && args[i + 1]) storageEndpoint = args[++i] as string;
+    else if (a === "--fleet") fleet = true;
+    else if (a === "--advertise-url" && args[i + 1]) advertiseUrl = args[++i] as string;
   }
-  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl, storageBucket, storageEndpoint };
+  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl, storageBucket, storageEndpoint, fleet, advertiseUrl };
 }
 
 /**
@@ -74,10 +147,23 @@ function toDeploySchema(schemaJson: SchemaJsonLike): DeploySchema["schemaJson"] 
   return { tables };
 }
 
-/** Testable core: boot + start the server. No signals, no exit, does not block. */
+/** Testable core: boot + start the server. No signals, no exit, does not block. In fleet mode the
+ *  caller injects the dynamically-imported `@stackbase/fleet` module + resolved config so this core
+ *  stays free of the enterprise dependency. */
 export async function startServe(
-  opts: ServeOptions & { adminKey: string },
-): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime }> {
+  opts: ServeOptions & {
+    adminKey: string;
+    fleetModule?: FleetModule;
+    fleetConfig?: { databaseUrl: string; advertiseUrl: string };
+  },
+): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime; fleet?: FleetHandles; role?: "sync" | "writer" }> {
+  // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
+  // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
+  const prep =
+    opts.fleet && opts.fleetModule && opts.fleetConfig
+      ? await opts.fleetModule.prepareFleetNode({ ...opts.fleetConfig, adminKey: opts.adminKey })
+      : undefined;
+
   const { runtime, adminApi, project, store, components, storageRoutes } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
@@ -86,9 +172,24 @@ export async function startServe(
     storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
     ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
     ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
+    ...(prep ? { fleet: prep.runtimeOptions } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
+
+  // Start the fleet node (sync: commit tailer + acquire loop; writer: already live) BEFORE the HTTP
+  // server, so its handles exist to pass in. The http layer reads `role()` live per request, so
+  // there's no ordering hazard with promotion.
+  const fleet =
+    prep && opts.fleetModule
+      ? await opts.fleetModule.startFleetNode({
+          client: prep.client,
+          store: prep.store,
+          runtime,
+          lease: prep.lease,
+          forwarder: prep.forwarder,
+        })
+      : undefined;
 
   // `server` is assigned below by `startDevServer`; `setRoutes` only runs on a LATER deploy
   // request, by which time it is set. `current` reads AdminApi's live schema — no serve-side
@@ -115,9 +216,9 @@ export async function startServe(
     : undefined;
   server = await startDevServer(
     runtime,
-    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy },
+    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy, fleet },
   );
-  return { server, store, runtime };
+  return { server, store, runtime, fleet, role: prep?.role };
 }
 
 /** CLI wrapper: flags → fail-fast → startServe → signal handlers → run forever. */
@@ -134,7 +235,31 @@ export async function serveCommand(args: string[]): Promise<number> {
     );
     return 1;
   }
-  const { server, store } = await startServe({ ...opts, adminKey });
+
+  // Fleet mode: validate prerequisites and load the enterprise package (dynamic import only —
+  // never a static dependency of core cli), failing fast with actionable messages.
+  let fleetModule: FleetModule | undefined;
+  let fleetConfig: { databaseUrl: string; advertiseUrl: string } | undefined;
+  if (opts.fleet) {
+    const v = validateFleetOptions(opts);
+    if (!v.ok) {
+      process.stderr.write(`✗ ${v.error}\n`);
+      return 1;
+    }
+    try {
+      // Indirect specifier (typed `string`, not a literal) so tsc does NOT statically resolve
+      // `@stackbase/fleet` — core cli has no static/type dependency on the enterprise package; it's
+      // resolved at runtime via the workspace link. See package.json (fleet is deliberately absent).
+      const fleetSpecifier: string = "@stackbase/fleet";
+      fleetModule = (await import(fleetSpecifier)) as unknown as FleetModule;
+    } catch {
+      process.stderr.write(`✗ ${FLEET_ERR_NO_PACKAGE}\n`);
+      return 1;
+    }
+    fleetConfig = { databaseUrl: v.databaseUrl, advertiseUrl: v.advertiseUrl };
+  }
+
+  const { server, store, role, fleet } = await startServe({ ...opts, adminKey, fleetModule, fleetConfig });
   process.stdout.write(
     JSON.stringify({
       level: "info",
@@ -144,6 +269,8 @@ export async function serveCommand(args: string[]): Promise<number> {
       data: opts.dataPath,
       dashboard: opts.dashboard,
       allowDeploy: opts.allowDeploy,
+      // Additive: present only in fleet mode. Task 7's 2-process E2E asserts each node's role here.
+      ...(role ? { fleet: true, role } : {}),
     }) + "\n",
   );
 
@@ -152,6 +279,8 @@ export async function serveCommand(args: string[]): Promise<number> {
     if (closing) return;
     closing = true;
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
+    // Stop the fleet node (lease acquire loop / commit tailer) before the store closes.
+    if (fleet) await fleet.stop();
     await server.close();
     await store.close();
     process.exit(0);

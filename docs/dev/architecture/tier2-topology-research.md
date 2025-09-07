@@ -1,6 +1,6 @@
 ---
 title: Tier 2 Topology — Research, Second Thought, and the Proposed Unique Design
-status: proposed (research complete, pre-spec — slice 1 to be spec'd from this)
+status: slice 1 SHIPPED (symmetric fleet, lease-based writer, live failover — see docs/enduser/deploy/fleet.md); slice 2 (embedded local replicas) and beyond remain research/pre-spec
 decided: —
 date: 2025-08-28
 audience: engineering (internal)

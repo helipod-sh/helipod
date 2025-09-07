@@ -178,6 +178,18 @@ underneath you.
 Neither of these is a clustering/HA limitation — they're consequences of the single-node,
 single-writer durability story already described above, not new constraints on top of it.
 
+## Scaling out (fleet)
+
+Everything above is **single-node**: one `stackbase serve` process, one database. When you need
+more than one node — for redundancy, or because one process's write throughput isn't enough —
+Stackbase has a first multi-node story built on top of the same Postgres backend described above:
+**`stackbase serve --fleet`**. N identical nodes share one Postgres database; the first to grab a
+lease becomes the writer, the rest serve reads and forward writes to it, and killing the writer
+promotes another node live, with no coordinator service and no per-node role configuration.
+
+See [Fleet (Multi-Node)](/deploy/fleet) for requirements, a 2-node Docker Compose example,
+failover behavior, and current limits (single writer, no autoscaler, `ee/`-licensed).
+
 ## Reverse proxy / TLS
 
 Stackbase serves plain HTTP — `serve` has no TLS support built in. For a public deployment, put a
@@ -217,5 +229,7 @@ If step 5 shows the data you wrote in step 4, the persistent-volume story works 
   deployment, live, no restart. Opt-in per deployment via `--allow-deploy`.
 - [Using Postgres](#using-postgres) above — opt-in Postgres storage backend, single-writer guard, no
   migrations needed.
-- TLS termination and multi-node are not part of this slice — see the repo `CLAUDE.md` for what's
-  shipped vs. deferred.
+- [Fleet (Multi-Node)](/deploy/fleet) — `stackbase serve --fleet`, multiple nodes over shared
+  Postgres, live failover. See [Scaling out (fleet)](#scaling-out-fleet) above.
+- TLS termination is not part of this slice — see the repo `CLAUDE.md` for what's shipped vs.
+  deferred.

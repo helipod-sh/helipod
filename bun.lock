@@ -114,6 +114,30 @@
         "vitest": "catalog:",
       },
     },
+    "ee/packages/fleet": {
+      "name": "@stackbase/fleet",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-postgres": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/values": "workspace:*",
+        "pg": "^8.13.1",
+      },
+      "devDependencies": {
+        "@electric-sql/pglite": "^0.2.17",
+        "@stackbase/executor": "workspace:*",
+        "@types/node": "catalog:",
+        "@types/pg": "^8.11.10",
+        "@types/ws": "^8.5.13",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+        "ws": "^8.18.0",
+      },
+    },
     "examples/auth-demo": {
       "name": "@stackbase/example-auth-demo",
       "version": "0.0.0",
@@ -252,6 +276,7 @@
       },
       "devDependencies": {
         "@stackbase/client": "workspace:*",
+        "@stackbase/fleet": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
         "@stackbase/workflow": "workspace:*",
         "@types/node": "catalog:",
@@ -832,6 +857,8 @@
     "@stackbase/example-auth-demo": ["@stackbase/example-auth-demo@workspace:examples/auth-demo"],
 
     "@stackbase/executor": ["@stackbase/executor@workspace:packages/executor"],
+
+    "@stackbase/fleet": ["@stackbase/fleet@workspace:ee/packages/fleet"],
 
     "@stackbase/id-codec": ["@stackbase/id-codec@workspace:packages/id-codec"],
 
