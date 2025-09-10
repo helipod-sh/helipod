@@ -12,3 +12,4 @@ export {
   type FleetRuntimeOptions,
   type StartFleetNodeDeps,
 } from "./node";
+export { SwitchableDocStore } from "./switchable-store";
