@@ -24,7 +24,6 @@ import type {
 } from "@stackbase/docstore";
 import { PgliteClient } from "./pglite-client";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
-import { CommitTailer, type DerivedInvalidation } from "../src/commit-notifier";
 
 const T1 = 10001;
 const T2 = 10002;
@@ -110,7 +109,6 @@ describe("ReplicaTailer", () => {
   let replica: SqliteDocStore;
   let tailer: ReplicaTailer | undefined;
   let tailer2: ReplicaTailer | undefined;
-  let commitTailer: CommitTailer | undefined;
 
   beforeEach(async () => {
     client = new PgliteClient();
@@ -123,10 +121,8 @@ describe("ReplicaTailer", () => {
   afterEach(async () => {
     if (tailer) await tailer.stop();
     if (tailer2) await tailer2.stop();
-    if (commitTailer) await commitTailer.stop();
     tailer = undefined;
     tailer2 = undefined;
-    commitTailer = undefined;
     await primary.close();
     await replica.close();
   });
@@ -221,16 +217,9 @@ describe("ReplicaTailer", () => {
     expect(await replica.maxTimestamp()).toBe(3n); // final state unchanged
   });
 
-  it("(c) invalidation parity vs slice 1's CommitTailer for identical writes (regression bridge)", async () => {
-    const commitInvs: DerivedInvalidation[] = [];
-    commitTailer = new CommitTailer(client, primary, {
-      pollMs: 20,
-      onInvalidation: async (inv) => {
-        commitInvs.push(inv);
-      },
-    });
-    await commitTailer.start();
-
+  it("(c) invalidation values match the ones computed directly from the engine helpers (parity regression)", async () => {
+    // Snapshotted expectation, computed via the engine's OWN id/key codecs for the same write —
+    // NOT by importing the (now-deleted) slice-1 CommitTailer and cross-checking against it.
     const replicaInvs: AppliedInvalidation[] = [];
     tailer = new ReplicaTailer(client, primary, replica, {
       pollMs: 20,
@@ -244,16 +233,16 @@ describe("ReplicaTailer", () => {
     const ka = encodeIndexKey(["a"]);
     await primary.write([rev(a, 1n, null, "A1")], [idxPut(INDEX_ID_T1, a, ka, 1n)], "Error");
 
-    await waitUntil(() => commitInvs.length > 0 && replicaInvs.length > 0);
-    expect(commitInvs).toHaveLength(1);
+    await waitUntil(() => replicaInvs.length > 0);
     expect(replicaInvs).toHaveLength(1);
 
-    const c = commitInvs[0]!;
     const r = replicaInvs[0]!;
-    expect(r.newMaxTs).toBe(c.newMaxTs);
-    expect(r.writtenTables).toEqual(c.writtenTables);
-    expect(r.writtenKeys).toEqual(c.writtenKeys);
-    expect(r.writtenDocs).toEqual(c.writtenDocs);
+    expect(r.newMaxTs).toBe(1n);
+    // A NonClustered index put carries the storage table id; the doc-keyspace half comes from the
+    // applied DocumentLogEntry. Both are reproduced with the engine's own encoders.
+    expect(r.writtenTables).toEqual([encodeStorageTableId(T1)]);
+    expect(r.writtenKeys).toEqual([{ indexId: INDEX_ID_T1, key: ka }]);
+    expect(r.writtenDocs).toEqual([{ tableId: encodeStorageTableId(T1), internalId: a.internalId }]);
   });
 
   it("(d) tombstone-only batch: doc-keyspace ranges + tombstone applied even with no NonClustered index row", async () => {

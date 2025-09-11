@@ -7,9 +7,9 @@ import { ADVISORY_LOCK_KEY } from "@stackbase/docstore-postgres";
  * Test-only `PgClient` over PGlite (real Postgres in WASM, in-process, single connection) —
  * mirrors `packages/docstore-postgres/test/pglite-client.ts` (see there for the OID 20 bigint
  * parser rationale). `listen`/`notify` are stubbed to throw: PGlite is a single in-process WASM
- * instance with no cross-connection notification channel, so `CommitTailer.start()` must
+ * instance with no cross-connection notification channel, so `ReplicaTailer.start()` must
  * tolerate a `listen()` rejection and fall back to its poll loop — which is exactly the path
- * these fixtures exercise (see `commit-notifier.test.ts`). The real LISTEN/NOTIFY path is
+ * these fixtures exercise (see `replica-tailer.test.ts`). The real LISTEN/NOTIFY path is
  * latency-only and proven against real Postgres in the fleet E2E, not here.
  */
 export class PgliteClient implements PgClient {

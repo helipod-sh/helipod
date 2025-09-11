@@ -20,10 +20,9 @@
  *      replica has caught up to the primary's `maxTimestamp()` AT CALL TIME (the ready gate),
  *      batching the catch-up in `batchSize`-sized ticks instead of one unbounded pull.
  *
- * `CommitTailer` stays alive, untouched, until Task 4 deletes it (`node.ts` still uses it for
- * cross-process wake-up). This class deliberately does NOT import `commit-notifier.ts`'s
- * `DerivedInvalidation` type — `AppliedInvalidation` below is a parallel type with the identical
- * member shapes, so it has no lifetime tie to a class that is going away this slice.
+ * `CommitTailer` was the slice-1 derive-only precursor; slice 2 (Task 4) deleted it once this class
+ * subsumed its wake/derive posture with verbatim replica apply. `AppliedInvalidation` below carries
+ * the invalidation shape (identical members to what `CommitTailer.DerivedInvalidation` had).
  *
  * Per-tick pipeline (see the class body for the full step-by-step):
  *   1. `newMax = await primary.maxTimestamp()`; no-op if `<= watermark`.

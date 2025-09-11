@@ -23,7 +23,9 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
@@ -185,13 +187,22 @@ function freePort(): Promise<number> {
   });
 }
 
+/** Per-node data dirs — since slice 2 each SYNC node keeps its OWN local file-backed replica
+ *  (`<dataDir>/fleet-replica.db`); nodes must not share a data dir (they'd stomp each other's
+ *  replica), and a fresh dir per run prevents a stale replica from a prior run leaking rows into a
+ *  new (empty) primary's subscriptions. Cleaned in afterAll. */
+const spawnedDataDirs: string[] = [];
+
 function spawnFleetServe(databaseUrl: string, port: number): ServeProcess {
   const advertiseUrl = `http://127.0.0.1:${port}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "sb-fleet-node-"));
+  spawnedDataDirs.push(dataDir);
   const proc = spawn(
     "bun",
     [
       CLI_BIN, "serve",
       "--dir", fixtureConvexDir(),
+      "--data", join(dataDir, "db.sqlite"),
       "--port", String(port),
       "--ip", "127.0.0.1",
       "--no-dashboard",
@@ -330,6 +341,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       }
     }
     stopPostgresContainer();
+    for (const dir of spawnedDataDirs) rmSync(dir, { recursive: true, force: true });
   });
 
   it(
