@@ -12,3 +12,5 @@ export {
   type FleetRuntimeOptions,
   type StartFleetNodeDeps,
 } from "./node";
+export { docKeyToPointRange } from "./ranges";
+export { ReplicaTailer, type AppliedInvalidation, type ReplicaTailerOptions } from "./replica-tailer";
