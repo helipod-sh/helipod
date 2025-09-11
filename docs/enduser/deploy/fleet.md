@@ -13,20 +13,30 @@ coordinator service and no "primary"/"replica" flag to set — every node runs t
 command, and the fleet decides its own roles at boot (and again on failover) using a lease
 that lives in the database itself.
 
+**Slice 2** adds an embedded local replica to every sync node, so reads no longer touch the
+shared database at all: each sync node tails the shared write log into a local, file-backed
+SQLite replica and serves every query and subscription from it. The primary's per-sync-node
+load drops to a single tail cursor. Mutations/actions still forward to the writer and commit
+through Postgres exactly as in slice 1 — this is a read-path change only.
+
 ## What it is
 
 - **Symmetric nodes.** Every node runs `stackbase serve --fleet ...` with the same flags. The
   first node to acquire the shared **write lease** (a Postgres advisory lock, discoverable via a
   `fleet_lease` row) becomes the **writer**; every other node is a **sync node**.
 - **Connect to any node.** A client can open its WebSocket / HTTP connection to *any* node in the
-  fleet. Queries and subscriptions are always served locally by whichever node the client is
-  connected to. Mutations, actions, and `httpAction` requests are transparently **forwarded** to
-  the current writer if they land on a sync node — the client never needs to know or care which
-  node is the writer.
+  fleet. Queries and subscriptions are always served **locally** by whichever node the client is
+  connected to — on a sync node this means its own embedded local replica (see [Reads served from
+  a local replica](#reads-served-from-a-local-replica) below), never a round-trip to Postgres.
+  Mutations, actions, and `httpAction` requests are transparently **forwarded** to the current
+  writer if they land on a sync node — the client never needs to know or care which node is the
+  writer.
 - **Reactive updates cross the process boundary.** When the writer commits, it `NOTIFY`s the
-  shared Postgres database; every sync node is `LISTEN`ing and re-runs/pushes affected
-  subscriptions, with a 1-second poll fallback if a `NOTIFY` is ever missed (the write log itself
-  is always the source of truth, so a missed notification costs latency, never a missed update).
+  shared Postgres database; every sync node's replica tailer is `LISTEN`ing (with a 1-second poll
+  fallback if a `NOTIFY` is ever missed) and applies the newly-committed batch to its local
+  replica, derives the invalidation, and re-runs/pushes affected subscriptions — the write log
+  itself is always the source of truth, so a missed notification costs latency, never a missed
+  update.
 - **Live failover.** If the writer process dies (crash, `SIGKILL`, a bad deploy), its Postgres
   session — and with it the advisory lock — is released automatically. A sync node's retry loop
   picks up the lease, typically within a couple of seconds, and promotes itself to writer. No
@@ -55,6 +65,14 @@ forwarding.
 - **The same `STACKBASE_ADMIN_KEY` on every node.** Nodes authenticate to each other's internal
   forwarding endpoint with this key (a plain bearer token), so it must be identical across the
   fleet — same as it already needs to be a single strong secret per deployment.
+- **A unique data directory per node.** A sync node now keeps its own local replica file
+  alongside its SQLite data path — at `<dir>/fleet-replica.db`, where `<dir>` is the directory
+  containing whatever `--data`/`STACKBASE_DATA_DIR` you gave it (see [Reads served from a local
+  replica](#reads-served-from-a-local-replica) below). Every node in the fleet must point at its
+  own directory — this is not currently validated, so two nodes sharing a data directory will
+  silently stomp each other's replica file (and each other's SQLite file, if not on Postgres)
+  rather than fail fast. Give each node's `--data`/`STACKBASE_DATA_DIR` its own path, the same way
+  you'd already isolate two ordinary `stackbase serve` processes.
 
 ## Starting a fleet node
 
@@ -190,13 +208,78 @@ STACKBASE_ADMIN_KEY=secret STACKBASE_DATABASE_URL=postgres://... \
 
 ## Behavior in detail
 
+### Reads served from a local replica
+
+Every sync node runs a small **replica tailer** that follows the shared Postgres write log and
+applies each committed batch, verbatim, onto a local file-backed replica at
+`<dir>/fleet-replica.db` — where `<dir>` is the directory holding whatever `--data`/
+`STACKBASE_DATA_DIR` path you gave the node (the same directory a non-fleet `serve` would put its
+SQLite file in). It's a plain embedded SQLite store, the same storage engine single-node
+self-hosting uses, just fed by the tail instead of by local writes. All queries and subscriptions
+on that node are served entirely from this local file; the node's connection to Postgres is used
+**only** to pull the next batch of committed writes, never to answer a read. This is what removes
+the slice-1 concern about primary read load growing with fleet size — a sync node's load on the
+shared database is one tail cursor, not a live connection serving arbitrary reads.
+
+- **New nodes catch up before reporting ready.** A brand-new node (or one whose replica file was
+  deleted) starts its replica from scratch and replays the write log before its startup line
+  prints `"ready":true` — first boot against a large existing log takes longer than a warm
+  restart. There's no partial-ready state: a sync node either serves the full, caught-up dataset
+  or hasn't reported ready yet.
+- **Restarts resume, they don't replay.** A sync node restarted against the *same* data directory
+  reopens its existing replica file and resumes tailing from its own last-applied position — this
+  is fast, not a full re-bootstrap.
+- **The replica file is safe to delete.** It's a rebuildable mirror, never a source of truth.
+  Delete `<dir>/fleet-replica.db` (and its `-wal`/`-shm` sidecars, if present) and restart the
+  node — it re-bootstraps cleanly from the primary's log, the same as a first boot. A corrupted
+  replica file (e.g. from a hard crash mid-write) is handled the same way automatically: the node
+  detects the failure to open it, deletes it, and rebuilds once before giving up.
+
+### Read-your-own-writes
+
+A mutation's success response, from **any** node, carries a guarantee: an immediate follow-up read
+against **that same node** sees the write. Concretely — send a mutation to sync node B (which
+forwards it to the writer and gets back a committed result), then immediately query B, and you're
+guaranteed to see the write, even though B answers that query from its own local replica rather
+than from Postgres. Internally this works by having the node wait for its local replica to catch
+up to the mutation's commit before returning the mutation's result to the caller, bounded at 5
+seconds — if the replica hasn't caught up within that window, the mutation still returns rather
+than hanging, and in that rare case an immediately-following read could be stale.
+
+**This guarantee covers mutations, not `action` calls that write via inner mutations.** An
+action's own top-level response has no single commit to wait on — even though its inner
+`ctx.runMutation` calls commit normally and fan out reactively like any other write — so an
+action's response can precede its own inner writes becoming visible on the node you called it on.
+This is a known limitation: if you need read-your-own-writes for an action's side effects,
+structure the client code to await the mutation directly (or subscribe/poll) rather than treating
+the action's return value as a guarantee that its writes are visible yet.
+
+### Reads keep working through a Postgres outage; writes don't
+
+If the shared Postgres database becomes unreachable (network partition, restart, maintenance),
+sync nodes keep answering queries and live subscriptions keep pushing updates — they're reading
+from their own local replica file, which needs nothing from Postgres to serve a read it has
+already tailed. This is proven end-to-end by pausing (`docker pause`) the underlying Postgres
+container mid-test: a sync node's reads and an already-open subscription both keep working
+throughout the outage.
+
+Writes do not share this tolerance. A mutation forwarded to the writer during the outage fails
+visibly (the writer's own commit hangs against the unreachable database, so the caller sees a
+bounded failure, not a silent success or an indefinite hang) rather than being queued or served
+stale. Once Postgres comes back, the writer resumes committing and the fleet reconverges
+automatically — no manual restart needed.
+
+Be precise about what this means: it's read availability, not general high availability.
+Fleet mode's outage tolerance is reads-survive/writes-fail — don't describe it as HA beyond that.
+
 ### Writes forwarded transparently
 
 A sync node forwards any mutation, action, or `httpAction` request it receives to the current
 writer over an internal, admin-key-authenticated endpoint, waits for the result, and relays it
 back to the caller exactly as if it had executed locally. Queries and subscriptions are **never**
-forwarded — every node always serves those from its own connection to the shared Postgres
-database.
+forwarded — every node always serves those locally, from its own embedded replica on a sync node
+or directly on the writer (see [Reads served from a local
+replica](#reads-served-from-a-local-replica) above).
 
 ### Failover timing and in-flight requests
 
@@ -210,7 +293,7 @@ database.
   Treat these the same way you'd treat any other transient network failure: **retry from the
   client/app**, the same way you'd already handle a dropped connection.
 - Subscriptions on the *surviving* nodes are never affected by a writer failing over — they keep
-  streaming from their own local connection to Postgres throughout.
+  streaming from their own local embedded replica throughout.
 - There is no demotion path: a writer that loses its Postgres session must exit (a process
   supervisor/Docker restarts it), after which it rejoins the fleet as a sync node. A running
   writer never voluntarily hands off the lease.
@@ -222,11 +305,14 @@ Be realistic about what this slice is and isn't:
 - **Single writer.** Exactly one node executes mutations/actions at a time — write throughput is
   the throughput of one node, same as single-node Postgres self-hosting. Multi-writer/sharded
   writes are a later slice, not this one.
-- **Sync nodes read the shared Postgres directly.** Every sync node holds its own connection to
-  the same Postgres database and reads from it live — there's no embedded local replica yet. This
-  is fine at a handful of nodes; an embedded log-tailed replica (removing primary read load at
-  10+ nodes) is the next slice, a drop-in swap behind the same storage seam with no protocol
-  changes.
+- **A sync node's data-directory uniqueness isn't validated.** Nothing stops you from accidentally
+  pointing two nodes at the same `--data`/`STACKBASE_DATA_DIR` directory — see
+  [Requirements](#requirements) above. Get this wrong and both nodes' replica state corrupts
+  silently rather than failing fast at boot.
+- **Read availability, not full HA.** Sync nodes keep serving reads/subscriptions through a
+  Postgres outage, but writes still fail during one — see [Reads keep working through a Postgres
+  outage; writes don't](#reads-keep-working-through-a-postgres-outage-writes-dont) above. There's
+  still exactly one writer and no write-side failover faster than the lease timing described above.
 - **No autoscaler.** You start and stop nodes yourself; there's no controller that adds/removes
   fleet nodes based on load.
 - **No load balancer included.** Point clients directly at any node, or put your own load

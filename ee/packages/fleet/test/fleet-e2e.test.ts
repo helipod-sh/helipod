@@ -10,7 +10,7 @@
  *   1. Symmetric boot elects one writer: node A (booted first) → `role: "writer"`, node B →
  *      `role: "sync"`; `fleet_lease` reads `epoch=1, writer_url=A`.
  *   2. Write forwarding + cross-process fan-out: a mutation POSTed to the SYNC node B forwards to A,
- *      commits, and A's NOTIFY wakes B's CommitTailer, which re-runs a subscription opened on B —
+ *      commits, and A's NOTIFY wakes B's ReplicaTailer, which re-runs a subscription opened on B —
  *      the reactive update crosses the process boundary.
  *   3. Live failover: SIGKILL A; B's lease acquire loop promotes it (`epoch=2, writer_url=B`); a
  *      mutation to B now commits LOCALLY and its own subscription fans out via the local writer path.

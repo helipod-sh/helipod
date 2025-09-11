@@ -192,7 +192,7 @@ export async function startServe(
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
 
-  // Start the fleet node (sync: commit tailer + acquire loop; writer: already live) BEFORE the HTTP
+  // Start the fleet node (sync: replica tailer + acquire loop; writer: already live) BEFORE the HTTP
   // server, so its handles exist to pass in. The http layer reads `role()` live per request, so
   // there's no ordering hazard with promotion.
   const fleet =
@@ -296,7 +296,7 @@ export async function serveCommand(args: string[]): Promise<number> {
     if (closing) return;
     closing = true;
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
-    // Stop the fleet node (lease acquire loop / commit tailer) before the store closes.
+    // Stop the fleet node (lease acquire loop / replica tailer) before the store closes.
     if (fleet) await fleet.stop();
     await server.close();
     await store.close();

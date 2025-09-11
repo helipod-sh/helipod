@@ -1,6 +1,6 @@
 ---
 title: Tier 2 Topology — Research, Second Thought, and the Proposed Unique Design
-status: slice 1 SHIPPED (symmetric fleet, lease-based writer, live failover — see docs/enduser/deploy/fleet.md); slice 2 (embedded local replicas) and beyond remain research/pre-spec
+status: slice 1 SHIPPED (symmetric fleet, lease-based writer, live failover) + slice 2 SHIPPED (embedded local replicas — every sync node serves reads off a file-backed replica tailing the shared log, read-your-own-writes, Postgres-outage read tolerance — see docs/enduser/deploy/fleet.md); beyond slice 2 remains research/pre-spec
 decided: —
 date: 2025-08-28
 audience: engineering (internal)
