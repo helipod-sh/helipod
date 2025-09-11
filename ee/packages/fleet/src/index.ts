@@ -2,7 +2,7 @@
 export const FLEET_VERSION = "0.0.0";
 export { LeaseManager, type LeaseState } from "./lease";
 export { NotifyingFanoutAdapter, CommitTailer, type DerivedInvalidation } from "./commit-notifier";
-export { WriteForwarder, type WriteForwarderOptions } from "./forwarder";
+export { WriteForwarder, type WriteForwarderOptions, type ReplicaWaiter } from "./forwarder";
 export {
   prepareFleetNode,
   startFleetNode,
