@@ -13,3 +13,5 @@ export {
   type StartFleetNodeDeps,
 } from "./node";
 export { SwitchableDocStore } from "./switchable-store";
+export { docKeyToPointRange } from "./ranges";
+export { ReplicaTailer, type AppliedInvalidation, type ReplicaTailerOptions } from "./replica-tailer";
