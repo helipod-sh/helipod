@@ -33,12 +33,19 @@ half, a Foundation obligation per scalability-spectrum.md §5.6, so it is core, 
   slow-client timeout (default 30s of sustained backpressure). Dropping is safe by design: a
   `Transition` gap makes the client full-resync (built in Foundation for exactly this). Drops
   are counted and logged (per-session counters, one warn per episode — not per frame).
-- `SessionHeartbeatController`: server-side ping/liveness — a session with no socket activity
-  for the idle timeout (default 60s; ping at half) is reaped (socket closed, session removed).
+- `SessionHeartbeatController`: server-side liveness via **transport-level ping/pong** — NOT
+  inbound-message activity (an idle subscribed client legitimately sends nothing for minutes;
+  reaping on inbound silence would kill healthy sessions). Verified: there is no ping/pong at
+  the `SyncWebSocket` seam today and the client has no keepalive, so the seam gains an
+  OPTIONAL capability: `ping?(cb: () => void): void` (transport fires `cb` on pong). The
+  `ws`/`Bun.serve` adapters in `packages/cli/src/server.ts` implement it with real WebSocket
+  ping/pong (both runtimes support it); the loopback does NOT implement it. Controller
+  behavior: sessions whose socket implements `ping` are pinged every 30s and reaped after 2
+  missed pongs (~60s); sockets without `ping` (loopback) are **exempt from reaping** —
+  heartbeat is explicitly off for loopback, by design, not "sees constant activity".
 - Both wired into `SyncProtocolHandler`'s session lifecycle for **every** transport; on the
-  Tier 0 loopback they are effectively no-ops (bufferedAmount is always 0; heartbeat sees
-  constant activity or is configured off for loopback — decide in plan against how the
-  loopback socket behaves). The existing full suite passing unchanged IS the no-op proof.
+  Tier 0 loopback both are true no-ops (bufferedAmount is always 0; no `ping` capability).
+  The existing full suite passing unchanged IS the no-op proof.
 - Config surfaces as optional handler options with the defaults above; no env vars this slice.
 
 **C2. Read-your-own-writes for actions** (`packages/executor` + delete a documented limitation):
@@ -46,8 +53,10 @@ half, a Foundation obligation per scalability-spectrum.md §5.6, so it is core, 
   inner `ctx.runMutation` commit timestamps. Fix: the action's `UdfResult` carries
   `commitTs = max(inner mutation commitTs)` observed during the action (0n when it wrote
   nothing). Thread it through the trusted `invoke` path's results.
-- Downstream already works unchanged: `/_fleet/run` returns `commitTs`, the forwarder waits
-  when non-zero. Mutations' behavior untouched.
+- Downstream needs ONE edit (verified): `/_fleet/run`'s response builder reads
+  `result.oplog?.commitTs` (packages/cli/src/http-handler.ts:108) and an action's `oplog` is
+  `null` — it MUST fall back to the new field: `result.oplog?.commitTs ?? result.commitTs ?? 0n`.
+  The forwarder already waits on any non-zero commitTs (no change). Mutations untouched.
 - `docs/enduser/deploy/fleet.md`'s "does not extend to actions" paragraph is REPLACED by the
   guarantee (and the E2E asserts it — see Testing).
 - Non-fleet impact: additive field on action results; nothing else consumes it today. Audit
@@ -57,19 +66,27 @@ half, a Foundation obligation per scalability-spectrum.md §5.6, so it is core, 
 **C3. httpAction proxy header fidelity** (`packages/cli/src/http-handler.ts`): the sync-node
 proxy currently copies response headers verbatim after undici auto-decompressed the body —
 a writer httpAction setting `Content-Encoding: gzip` would corrupt. Fix: strip
-`content-encoding` and `content-length` from the relayed response headers (undici hands us
-decoded bytes; length is recomputed by the server). One unit test with a gzip-claiming stub.
+`content-encoding`, `content-length`, `transfer-encoding`, and `connection` from the relayed
+response headers (undici hands us decoded bytes; length is recomputed by the server;
+TE/connection are hop-by-hop). One unit test with a gzip-claiming stub.
 
 ### ee/fleet
 
-**C4. Writer self-exit on lease loss** (`ee/packages/fleet`): the writer holds its lease on a
-Postgres session; today, if that session dies (network partition, PG restart), the writer
-just errors on every operation while the doc claims it "must exit". Make it real: the fleet
-node monitors lease-session liveness (the dedicated lease connection's `error`/`end` events,
-plus a periodic cheap probe ~5s as belt-and-braces) and on loss **logs + `process.exit(1)`**
-— the supervisor/Docker restarts it and it rejoins as a sync node (slice-1 behavior, now
-actually reachable). Exit is the policy: a writer that cannot verify its lease must not keep
-accepting writes (they'd all fail anyway) and must not silently linger.
+**C4. Writer self-exit on lease loss** (`ee/packages/fleet` + one small docstore-postgres seam):
+the advisory lock is held on `NodePgClient`'s **single shared pinned connection** (verified —
+there is no dedicated lease connection, and `NodePgClient` has no reconnect: a dead pinned
+connection stays dead), so today a writer whose session dies just errors on every operation
+while the doc claims it "must exit". Make it real, two signals:
+- `NodePgClient` gains an `onConnectionLost(cb)` seam (wired to the pinned connection's
+  `error`/`end` events) — connection-closed is **definitive** loss → log + `process.exit(1)`.
+- Belt-and-braces probe every ~5s: a plain `SELECT 1` on the same client (NOT
+  `pg_try_advisory_lock` — it is re-entrant on the holding session and would leak a lock
+  count). Transient query failure tolerates up to 3 consecutive misses (~15s); the 4th, or
+  any connection-closed event, exits. Since the client cannot reconnect, sustained probe
+  failure is provably-lost, not a blip.
+The supervisor/Docker restarts the process and it rejoins as a sync node (slice-1 behavior,
+now actually reachable). Exit is the policy: a writer that cannot verify its lease must not
+keep accepting writes (they'd all fail anyway) and must not silently linger.
 
 **C5. Promotion error policy** (`ee/packages/fleet/src/node.ts`): the promotion sequence runs
 in a detached async block with no catch — a mid-promotion throw is an unhandled rejection
@@ -87,9 +104,12 @@ interleaving). Unit test with a deliberate mid-bootstrap stop.
 DIFFERENT primary is currently served as-is (foreign rows below the watermark). Fix: the
 primary carries a persistent **deployment id** — a `persistence_globals` row (`fleet:deploymentId`,
 a UUID minted once by the first writer via `writeGlobalIfAbsent`). The replica mirrors it
-(same key, its own store). At sync boot: read both; mismatch (or replica has data but no
-stamp) → warn + delete the replica file + re-bootstrap; fresh replica → adopt the primary's
-id. Uses only existing `getGlobal`/`writeGlobalIfAbsent` — no schema change.
+under the same key in its own store — written LOCALLY by fleet code (the tailer replicates
+only documents+indexes, never `persistence_globals`, so the stamp cannot arrive via the
+tail). Check point: the `prepareFleetNode` sync branch, after the replica opens and BEFORE
+`tailer.start()`: read both stamps; mismatch (or replica has data but no stamp) → warn +
+delete the replica file + re-bootstrap; fresh replica → adopt the primary's id. Uses only
+existing `getGlobal`/`writeGlobalIfAbsent` — no schema change.
 
 **C8. Small leaks/guards** (`packages/docstore-postgres` + `ee/packages/fleet`):
 - `NodePgClient.listen`: if the `LISTEN` query fails after `connect()` succeeded, end the
@@ -116,11 +136,17 @@ a bound; no swallowed errors without a counter or log.
   1. **RYOW-for-actions:** an action that writes via `ctx.runMutation`, called via sync node
      B → immediate query on B sees the write (the previously-documented limitation, now an
      assertion).
-  2. **Writer self-exit:** sever the writer's Postgres sessions (restart the PG container —
-     `docker restart`, unlike the offload test's `pause`) → the writer process EXITS within a
-     bounded window → when PG is back, a surviving sync node takes the lease (epoch bump) and
-     writes resume. (Assert the old writer's process exit code/liveness, the epoch bump, and a
-     committed post-recovery mutation + push.)
+  2. **Writer self-exit:** sever ONLY the writer's Postgres session with
+     `SELECT pg_terminate_backend(pid)` against the writer's backend (NOT `docker restart` —
+     that severs every node's connection and `NodePgClient` has no reconnect, so the
+     survivors could never take the lease; terminate-backend keeps PG up and the sync nodes'
+     connections intact, which is exactly the failure C4 models) → the writer process EXITS
+     within a bounded window → a surviving sync node takes the lease (epoch bump) and writes
+     resume. (Assert the old writer's exit, the epoch bump, and a committed post-recovery
+     mutation + push. Identify the writer's backend pids via `pg_stat_activity` filtered on
+     `application_name`/address — pick the discriminator in the plan.) Full-PG-restart
+     recovery (reconnect in `NodePgClient` + supervisor restarts) is explicitly OUT of scope
+     — a named follow-up, not this slice.
 - Full monorepo gate green throughout. The unchanged non-fleet suite passing is the proof that
   C1's controllers are no-ops on loopback and C2 is additive.
 
