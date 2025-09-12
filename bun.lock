@@ -120,6 +120,7 @@
       "dependencies": {
         "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-postgres": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",

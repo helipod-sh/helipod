@@ -103,7 +103,9 @@ export async function handleHttpRequest(
         p.kind === "action"
           ? await runtime.runAction(p.path, p.args ?? {}, { identity })
           : await runtime.run(p.path, p.args ?? {}, { identity });
-      return json(200, { value: convexToJson(result.value as Value) });
+      // Stringified: a replica's `WriteForwarder` waits on this via `ReplicaTailer.waitFor` for
+      // read-your-own-writes, and bigints don't survive JSON.stringify.
+      return json(200, { value: convexToJson(result.value as Value), commitTs: String(result.oplog?.commitTs ?? 0n) });
     } catch (e) {
       const err = toStackbaseError(e);
       return json(500, { error: err.message, code: err.code });

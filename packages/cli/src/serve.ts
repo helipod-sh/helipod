@@ -4,7 +4,7 @@
  * and shuts down gracefully on SIGTERM/SIGINT. Shares the boot core with dev via bootProject().
  */
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
 import { bootProject, isPostgresUrl, loadDashboard } from "./boot";
@@ -30,11 +30,14 @@ export interface FleetRuntimeOptions {
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
 }
 
-/** `prepareFleetNode`'s result. `client`/`lease`/`forwarder` are opaque here — only handed back
- *  into `startFleetNode`; the store + runtime option deltas are what `bootProject` consumes. */
+/** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here
+ *  — only handed back into `startFleetNode`; the runtime option deltas are what `bootProject`
+ *  consumes. `pgStore` is the Postgres store (writer runtime store, or a sync node's tail source). */
 export interface FleetPrep {
   client: unknown;
-  store: DocStore;
+  pgStore: DocStore;
+  replica?: unknown;
+  switchable?: unknown;
   lease: unknown;
   forwarder: unknown;
   role: "sync" | "writer";
@@ -43,13 +46,20 @@ export interface FleetPrep {
 
 /** The slice of `@stackbase/fleet` serve consumes (via dynamic import). */
 export interface FleetModule {
-  prepareFleetNode(deps: { databaseUrl: string; advertiseUrl: string; adminKey: string }): Promise<FleetPrep>;
+  prepareFleetNode(deps: {
+    databaseUrl: string;
+    advertiseUrl: string;
+    adminKey: string;
+    dataDir: string;
+  }): Promise<FleetPrep>;
   startFleetNode(deps: {
     client: unknown;
-    store: DocStore;
+    pgStore: DocStore;
     runtime: EmbeddedRuntime;
     lease: unknown;
     forwarder: unknown;
+    replica?: unknown;
+    switchable?: unknown;
   }): Promise<FleetHandles>;
 }
 
@@ -161,7 +171,12 @@ export async function startServe(
   // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
   const prep =
     opts.fleet && opts.fleetModule && opts.fleetConfig
-      ? await opts.fleetModule.prepareFleetNode({ ...opts.fleetConfig, adminKey: opts.adminKey })
+      ? await opts.fleetModule.prepareFleetNode({
+          ...opts.fleetConfig,
+          adminKey: opts.adminKey,
+          // A sync node's local replica lives beside the data file (same dir the SQLite store uses).
+          dataDir: dirname(resolve(opts.dataPath)),
+        })
       : undefined;
 
   const { runtime, adminApi, project, store, components, storageRoutes } = await bootProject({
@@ -177,17 +192,19 @@ export async function startServe(
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
 
-  // Start the fleet node (sync: commit tailer + acquire loop; writer: already live) BEFORE the HTTP
+  // Start the fleet node (sync: replica tailer + acquire loop; writer: already live) BEFORE the HTTP
   // server, so its handles exist to pass in. The http layer reads `role()` live per request, so
   // there's no ordering hazard with promotion.
   const fleet =
     prep && opts.fleetModule
       ? await opts.fleetModule.startFleetNode({
           client: prep.client,
-          store: prep.store,
+          pgStore: prep.pgStore,
           runtime,
           lease: prep.lease,
           forwarder: prep.forwarder,
+          replica: prep.replica,
+          switchable: prep.switchable,
         })
       : undefined;
 
@@ -279,7 +296,7 @@ export async function serveCommand(args: string[]): Promise<number> {
     if (closing) return;
     closing = true;
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
-    // Stop the fleet node (lease acquire loop / commit tailer) before the store closes.
+    // Stop the fleet node (lease acquire loop / replica tailer) before the store closes.
     if (fleet) await fleet.stop();
     await server.close();
     await store.close();

@@ -10,7 +10,7 @@
  *   1. Symmetric boot elects one writer: node A (booted first) → `role: "writer"`, node B →
  *      `role: "sync"`; `fleet_lease` reads `epoch=1, writer_url=A`.
  *   2. Write forwarding + cross-process fan-out: a mutation POSTed to the SYNC node B forwards to A,
- *      commits, and A's NOTIFY wakes B's CommitTailer, which re-runs a subscription opened on B —
+ *      commits, and A's NOTIFY wakes B's ReplicaTailer, which re-runs a subscription opened on B —
  *      the reactive update crosses the process boundary.
  *   3. Live failover: SIGKILL A; B's lease acquire loop promotes it (`epoch=2, writer_url=B`); a
  *      mutation to B now commits LOCALLY and its own subscription fans out via the local writer path.
@@ -23,7 +23,9 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
@@ -185,13 +187,32 @@ function freePort(): Promise<number> {
   });
 }
 
-function spawnFleetServe(databaseUrl: string, port: number): ServeProcess {
+/** Per-node data dirs — since slice 2 each SYNC node keeps its OWN local file-backed replica
+ *  (`<dataDir>/fleet-replica.db`); nodes must not share a data dir (they'd stomp each other's
+ *  replica), and a fresh dir per run prevents a stale replica from a prior run leaking rows into a
+ *  new (empty) primary's subscriptions. Cleaned in afterAll. */
+const spawnedDataDirs: string[] = [];
+
+/** Filename of a sync node's local file-backed replica under its `--data-dir` (mirrors the fleet
+ *  node's `REPLICA_DB_FILENAME`). Hardcoded rather than imported to keep this test black-box. */
+const REPLICA_DB_FILENAME = "fleet-replica.db";
+
+/** Spawn a `serve --fleet` child. A `dataDir` may be supplied to reuse an EXISTING data dir (the
+ *  replica-persistence scenario restarts a node against the same dir so its on-disk replica resumes
+ *  instead of replaying); when omitted, a fresh per-node dir is minted (nodes must not share one).
+ *  Caller-provided dirs are the caller's to track/clean; freshly-minted ones are tracked here. */
+function spawnFleetServe(databaseUrl: string, port: number, dataDir?: string): ServeProcess {
   const advertiseUrl = `http://127.0.0.1:${port}`;
+  if (dataDir === undefined) {
+    dataDir = mkdtempSync(join(tmpdir(), "sb-fleet-node-"));
+    spawnedDataDirs.push(dataDir);
+  }
   const proc = spawn(
     "bun",
     [
       CLI_BIN, "serve",
       "--dir", fixtureConvexDir(),
+      "--data", join(dataDir, "db.sqlite"),
       "--port", String(port),
       "--ip", "127.0.0.1",
       "--no-dashboard",
@@ -225,6 +246,51 @@ async function apiRun(url: string, path: string, args: Record<string, unknown>):
   });
   const body = (await res.json()) as RunResult["body"];
   return { status: res.status, body };
+}
+
+/** A `/api/run` call bounded by an `AbortController` timeout. The offload proof needs this: with the
+ *  primary paused, a mutation forwarded from a SYNC node reaches the writer, whose commit then hangs
+ *  on the frozen Postgres TCP connection (the commit itself is unbounded — only the forwarder's
+ *  lease-refresh/retry and the RYOW wait are bounded), so the sync node's `/api/run` never responds.
+ *  We treat that timeout as a VISIBLE failure. Distinguishes: an HTTP response, a client-side abort
+ *  (timeout), or a transport error. */
+type BoundedRunOutcome =
+  | { kind: "http"; status: number; body: RunResult["body"] }
+  | { kind: "timeout" }
+  | { kind: "error"; message: string };
+
+async function apiRunBounded(
+  url: string,
+  path: string,
+  args: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<BoundedRunOutcome> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${url}/api/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path, args }),
+      signal: ac.signal,
+    });
+    let body: RunResult["body"] = {};
+    try {
+      body = (await res.json()) as RunResult["body"];
+    } catch {
+      // Empty/non-JSON body — leave as {} (a mutation that failed to commit is still a visible fail).
+    }
+    return { kind: "http", status: res.status, body };
+  } catch (e) {
+    if (ac.signal.aborted) return { kind: "timeout" };
+    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function openWs(url: string): Promise<WebSocket> {
@@ -330,6 +396,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       }
     }
     stopPostgresContainer();
+    for (const dir of spawnedDataDirs) rmSync(dir, { recursive: true, force: true });
   });
 
   it(
@@ -488,6 +555,177 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeC);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "serves read-your-own-writes, offloads reads while the primary is paused, and resumes the on-disk replica across a restart",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+
+      // B's data dir is created by the test (not spawnFleetServe) so the restart step below can
+      // re-open the SAME on-disk replica — proving resume-not-replay.
+      const dataDirB = mkdtempSync(join(tmpdir(), "sb-fleet-nodeB-"));
+      spawnedDataDirs.push(dataDirB);
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let nodeBRestart: ServeProcess | undefined;
+      let wsB: WebSocket | undefined;
+      let paused = false;
+      try {
+        /* ---------------------------------------------------------------- */
+        /* Boot writer A (first) + sync B. Unlike the failover flow above, B  */
+        /* stays SYNC for the whole test: its reads/subscriptions are served  */
+        /* off its LOCAL replica, never Postgres — the offload proof needs a  */
+        /* read path that survives the primary being frozen.                  */
+        /* ---------------------------------------------------------------- */
+        nodeA = spawnFleetServe(databaseUrl, portA);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        nodeB = spawnFleetServe(databaseUrl, portB, dataDirB);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+        const urlB = bootB.ready.url;
+
+        const lease1 = await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+        expect(lease1.epoch).toBe(1);
+
+        // Live subscription on the sync node — its updates throughout the test implicitly prove the
+        // replica tailer's tail -> verbatim-apply -> derive-invalidation -> fan-out pipeline.
+        const sub = await subscribe(`${urlB.replace("http", "ws")}/api/sync`, 1, "notes:list", {});
+        wsB = sub.ws;
+        expect(latestMod(sub.messages, 1)!.value).toEqual([]);
+
+        /* ---------------------------------------------------------------- */
+        /* RYOW: mutate via B, then IMMEDIATELY (no sleep) query via B. The    */
+        /* forwarder's post-commit wait for the replica watermark to reach     */
+        /* this write's commitTs is what makes the immediate read see it.      */
+        /* ---------------------------------------------------------------- */
+        const ryowAdd = await apiRun(urlB, "notes:add", { box: "ryow", text: "ryow-1" });
+        expect(ryowAdd.status).toBe(200);
+        expect(ryowAdd.body.committed).toBe(true);
+
+        const ryowRead = await apiRun(urlB, "notes:list", {}); // no sleep — RYOW must hold synchronously
+        expect(ryowRead.status).toBe(200);
+        expect(ryowRead.body.value).toEqual([{ box: "ryow", text: "ryow-1" }]);
+
+        /* ---------------------------------------------------------------- */
+        /* Offload proof: freeze the primary. B's reads + subscription must    */
+        /* keep working off the replica (NO Postgres round-trip on the read     */
+        /* path), while a WRITE fails visibly (the writer's commit hangs on the  */
+        /* frozen connection) — not a silent success, not an unbounded hang.    */
+        /* ---------------------------------------------------------------- */
+        expect(runDocker(["pause", CONTAINER_NAME]).status).toBe(0);
+        paused = true;
+
+        // Read still answers 200 with correct data — served entirely from the local replica.
+        const readDuringPause = await apiRunBounded(urlB, "notes:list", {}, 15_000);
+        expect(readDuringPause.kind).toBe("http");
+        if (readDuringPause.kind === "http") {
+          expect(readDuringPause.status).toBe(200);
+          expect(readDuringPause.body.value).toEqual([{ box: "ryow", text: "ryow-1" }]);
+        }
+
+        // The live subscription socket stays healthy (a paused primary must not tear it down).
+        expect(wsB.readyState).toBe(WebSocket.OPEN);
+
+        // A mutation fails visibly within a bounded window. The forwarded commit hangs on the frozen
+        // primary, so B's `/api/run` never resolves and our AbortController trips — a timeout IS the
+        // visible failure. Assert only that it did NOT silently commit; record the exact shape.
+        const writeDuringPause = await apiRunBounded(urlB, "notes:add", { box: "paused", text: "during-pause" }, 8_000);
+        const committedDuringPause =
+          writeDuringPause.kind === "http" &&
+          writeDuringPause.status === 200 &&
+          writeDuringPause.body.committed === true;
+        expect(committedDuringPause).toBe(false);
+
+        // Unpause and reconverge: a fresh mutation commits and the subscription receives it.
+        expect(runDocker(["unpause", CONTAINER_NAME]).status).toBe(0);
+        paused = false;
+
+        const reconverge = await (async () => {
+          const deadline = Date.now() + 30_000;
+          for (;;) {
+            const r = await apiRun(urlB, "notes:add", { box: "rc", text: "reconverge" }).catch(
+              () => ({ status: 0, body: {} }) as RunResult,
+            );
+            if (r.status === 200 && r.body.committed === true) return r;
+            if (Date.now() > deadline) throw new Error(`post-unpause mutation never committed: ${JSON.stringify(r.body)}`);
+            await sleep(300);
+          }
+        })();
+        expect(reconverge.body.committed).toBe(true);
+
+        await waitFor(() => {
+          const m = latestMod(sub.messages, 1);
+          const v = m?.value as Array<{ box: string; text: string }> | undefined;
+          return m?.type === "QueryUpdated" && Array.isArray(v) && v.some((n) => n.text === "reconverge");
+        }, 20_000);
+
+        /* ---------------------------------------------------------------- */
+        /* Replica persistence: the on-disk replica exists; restart B against  */
+        /* the SAME data dir; it comes ready quickly (resume, not replay) and   */
+        /* serves current data.                                                */
+        /* ---------------------------------------------------------------- */
+        const replicaPath = join(dataDirB, REPLICA_DB_FILENAME);
+        expect(existsSync(replicaPath)).toBe(true);
+
+        // Graceful stop (not the writer) so the replica file is closed cleanly, then restart it.
+        await stopServe(nodeB);
+        nodeB = undefined;
+
+        const restartStart = Date.now();
+        nodeBRestart = spawnFleetServe(databaseUrl, portB, dataDirB);
+        const bootB2 = await waitForReadyOrExit(nodeBRestart);
+        if (!bootB2.ready) throw new Error(`node B restart failed to boot: exit=${bootB2.exitCode} stderr=${bootB2.stderr}`);
+        expect(bootB2.ready.role).toBe("sync");
+        const restartMs = Date.now() - restartStart;
+        // Resume seeds the tailer watermark from the replica's own maxTimestamp, so the ready gate
+        // (catch-up to the primary) is near-instant — far under a cold from-scratch replay budget.
+        expect(restartMs).toBeLessThan(30_000);
+        const urlB2 = bootB2.ready.url;
+
+        const afterRestart = await (async () => {
+          const deadline = Date.now() + 15_000;
+          for (;;) {
+            const r = await apiRun(urlB2, "notes:list", {});
+            const v = r.body.value as Array<{ box: string; text: string }> | undefined;
+            if (
+              r.status === 200 &&
+              Array.isArray(v) &&
+              v.some((n) => n.text === "ryow-1") &&
+              v.some((n) => n.text === "reconverge")
+            ) {
+              return v;
+            }
+            if (Date.now() > deadline) throw new Error(`restarted B did not serve current data: ${JSON.stringify(r.body.value)}`);
+            await sleep(300);
+          }
+        })();
+        expect(afterRestart.some((n) => n.text === "ryow-1")).toBe(true);
+        expect(afterRestart.some((n) => n.text === "reconverge")).toBe(true);
+      } finally {
+        wsB?.close();
+        await pg.end().catch(() => {});
+        if (paused) runDocker(["unpause", CONTAINER_NAME]); // never leave a paused container behind
+        await stopServe(nodeA);
+        await stopServe(nodeB);
+        await stopServe(nodeBRestart);
         stopPostgresContainer();
       }
     },
