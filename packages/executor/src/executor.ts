@@ -280,10 +280,16 @@ export class InlineUdfExecutor {
     const startedAt = clock();
     const invoke = this.deps.invoke;
     if (!invoke) throw new Error("action execution requires an `invoke` runner (runtime wiring missing)");
-    const run = (_kind: "query" | "mutation" | "action") =>
+    // RYOW for actions: track the max commitTs observed across this action's inner
+    // runMutation/runAction invokes (queries never commit, so they're excluded). An inner
+    // action's own commitTs already reflects ITS max (recursively, by this same tracking) —
+    // so propagation through action → action → mutation chains falls out for free.
+    let maxCommitTs = 0n;
+    const run = (kind: "query" | "mutation" | "action") =>
       async <T = unknown>(ref: FunctionReference | string, a: Record<string, unknown> = {}): Promise<T> => {
         const path = resolveRef(ref);
         const res = await invoke(path, convexToJson(jsonToConvex(a as unknown as JSONValue) as Value) as JSONValue, { identity: options.identity ?? null });
+        if (kind !== "query" && res.commitTs > maxCommitTs) maxCommitTs = res.commitTs;
         return res.value as T;
       };
     const runQuery = run("query");
@@ -304,7 +310,7 @@ export class InlineUdfExecutor {
     try {
       const value = await fn.handler(actionCtx, args);
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
-      return { value: value as T, logs: [], committed: false, commitTs: 0n, readRanges: [], oplog: null };
+      return { value: value as T, logs: [], committed: false, commitTs: maxCommitTs, readRanges: [], oplog: null };
     } catch (e) {
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;
