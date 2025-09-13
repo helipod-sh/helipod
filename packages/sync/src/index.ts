@@ -31,5 +31,8 @@ export type {
 } from "./handler";
 export { SyncProtocolHandler } from "./handler";
 
+export type { BackpressureOptions, HeartbeatOptions } from "./session-controllers";
+export { SessionBackpressureController, SessionHeartbeatController } from "./session-controllers";
+
 export type { SyncClientState, MutationOutcome } from "./client-reducer";
 export { createClientState, applyServerMessage } from "./client-reducer";

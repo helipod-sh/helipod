@@ -18,12 +18,27 @@ import {
   type StateVersion,
 } from "./protocol";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
+import {
+  SessionBackpressureController,
+  SessionHeartbeatController,
+  type BackpressureOptions,
+  type HeartbeatOptions,
+} from "./session-controllers";
+
+/** How often the handler sweeps every session's send queue for a drain/abandon opportunity. */
+const FLUSH_SWEEP_MS = 1000;
 
 /** The minimal socket the handler needs (abstract — WS, Durable Object, or loopback). */
 export interface SyncWebSocket {
   send(data: string): void;
   readonly bufferedAmount: number;
   close(): void;
+  /**
+   * Send a transport-level ping; invoke `onPong` when the matching pong arrives. OPTIONAL — a
+   * socket that omits it (the in-process loopback, which has no peer to die) is exempt from
+   * heartbeat reaping. Real WebSocket transports implement it.
+   */
+  ping?(onPong: () => void): void;
 }
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
@@ -54,6 +69,10 @@ export interface SyncProtocolHandlerOptions {
   autoNotifyOnMutation?: boolean;
   /** Validate an admin key presented via `SetAdminAuth`. Defaults to `() => false` (no admin). */
   verifyAdmin?: (key: string) => boolean;
+  /** Per-session outbound flow control (queue caps, slow-client drops). Defaults apply if omitted. */
+  backpressure?: BackpressureOptions;
+  /** Per-session ping/pong liveness reaping. Defaults apply if omitted. */
+  heartbeat?: HeartbeatOptions;
 }
 
 interface Session {
@@ -62,6 +81,10 @@ interface Session {
   version: StateVersion;
   identity: string | null;
   privileged: boolean;
+  /** The single outbound chokepoint — every server→client frame for this session goes through it. */
+  bp: SessionBackpressureController;
+  /** Transport-level liveness; reaps half-open connections. No-op for ping-less sockets (loopback). */
+  hb: SessionHeartbeatController;
 }
 
 function errMessage(e: unknown): string {
@@ -73,30 +96,57 @@ export class SyncProtocolHandler {
   private readonly subscriptions = new SubscriptionManager();
   private notifyTail: Promise<void> = Promise.resolve();
   private readonly verifyAdmin: (key: string) => boolean;
+  /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly executor: SyncUdfExecutor,
     private readonly options: SyncProtocolHandlerOptions = {},
   ) {
     this.verifyAdmin = options.verifyAdmin ?? (() => false);
+    this.sweepTimer = setInterval(() => {
+      for (const session of this.sessions.values()) session.bp.flush();
+    }, FLUSH_SWEEP_MS);
+    // Don't keep the process alive for the sweep (Node); loopback-only usage exits cleanly.
+    (this.sweepTimer as { unref?: () => void }).unref?.();
   }
 
   connect(sessionId: string, socket: SyncWebSocket): void {
-    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false });
+    const bp = new SessionBackpressureController(socket, this.options.backpressure);
+    const hb = new SessionHeartbeatController(socket, () => this.reap(sessionId), this.options.heartbeat);
+    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false, bp, hb });
+    hb.start();
   }
 
   disconnect(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    session?.hb.stop();
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
   }
 
+  /** Reap a session whose heartbeat went dead: close the socket, then tear down like a disconnect. */
+  private reap(sessionId: string): void {
+    this.sessions.get(sessionId)?.socket.close();
+    this.disconnect(sessionId);
+  }
+
+  /** Stop the background sweep. Call on shutdown; sessions must already be disconnected. */
+  dispose(): void {
+    if (this.sweepTimer !== null) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
   private send(session: Session, msg: ServerMessage): void {
-    session.socket.send(encodeServerMessage(msg));
+    session.bp.send(encodeServerMessage(msg));
   }
 
   async handleMessage(sessionId: string, raw: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`unknown session: ${sessionId}`);
+    session.hb.noteActivity(); // any inbound frame is liveness credit
     const msg: ClientMessage = parseClientMessage(raw);
     switch (msg.type) {
       case "Connect":
