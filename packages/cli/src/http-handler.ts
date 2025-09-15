@@ -174,6 +174,13 @@ export async function handleHttpRequest(
         const resp = await fetch(target, { method: req.method, headers, ...(hasBody ? { body: req.body } : {}) });
         const outHeaders: Record<string, string> = {};
         resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+        // Hop-by-hop / body-framing headers: `undici` already decompressed the body (so a copied
+        // content-encoding/content-length would mismatch what we actually relay), and
+        // transfer-encoding/connection are connection-scoped, never meaningful to forward verbatim.
+        delete outHeaders["content-encoding"];
+        delete outHeaders["content-length"];
+        delete outHeaders["transfer-encoding"];
+        delete outHeaders["connection"];
         return { status: resp.status, headers: outHeaders, body: await resp.text() };
       } catch (e) {
         return json(502, { error: `fleet: httpAction proxy to writer failed: ${e instanceof Error ? e.message : String(e)}` });

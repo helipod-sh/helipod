@@ -129,6 +129,10 @@ export class ReplicaTailer {
     while (!this.stopped && this.wm < target) {
       await this.tick();
     }
+    // `stop()` can land while the bootstrap loop above is awaiting a `tick()` — it already cleared
+    // (then-undefined) `timer`/`unlisten` and is done, so falling through to arm either here would
+    // leak a listener/timer `stop()` never gets a chance to tear down. Re-check before arming.
+    if (this.stopped) return;
 
     try {
       this.unlisten = await this.client.listen(COMMIT_CHANNEL, () => {
@@ -138,6 +142,15 @@ export class ReplicaTailer {
       // LISTEN unsupported (e.g. a test double, or a transient connection issue) — the poll
       // loop below is the correctness path regardless, so this is not fatal to start().
       this.unlisten = undefined;
+    }
+    if (this.stopped) {
+      // stop() landed while the (possibly slow) listen() call above was in flight.
+      if (this.unlisten !== undefined) {
+        const unlisten = this.unlisten;
+        this.unlisten = undefined;
+        await unlisten();
+      }
+      return;
     }
 
     this.timer = setInterval(() => void this.tick(), this.pollMs);
