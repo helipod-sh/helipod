@@ -38,6 +38,7 @@ import {
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
 import { LeaseManager } from "./lease";
+import { LeaseMonitor } from "./lease-monitor";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
 import { SwitchableDocStore } from "./switchable-store";
@@ -204,6 +205,47 @@ export interface StartFleetNodeDeps {
    *  through (swapped to the Postgres store on promotion). Absent/ignored for a writer boot. */
   replica?: SqliteDocStore;
   switchable?: SwitchableDocStore;
+  /** Process-exit indirection (C4/C5). Injected so tests observe exits instead of killing the runner;
+   *  defaults to `console.error` + `process.exit(1)`. Fires on writer lease loss (the lease monitor)
+   *  and on a failed promotion step. */
+  onExit?: (reason: string) => void;
+}
+
+/** Production exit policy: log and terminate so the node restarts and rejoins the fleet as a fresh
+ *  sync node. Overridable via `StartFleetNodeDeps.onExit` (tests inject a spy). */
+function defaultFleetExit(reason: string): void {
+  console.error(`fleet: ${reason} — exiting so this node restarts and rejoins as a sync replica`);
+  process.exit(1);
+}
+
+/** The seam the C5 promotion wrap touches — narrow structural spies over the promotion sequence,
+ *  monitor start, promoted-callback fan-out, and the exit indirection. */
+export interface PromotionRunDeps {
+  /** The CRITICAL PROMOTION ORDER (`promoteFleetNode`), as a thunk. */
+  promote: () => Promise<void>;
+  /** Start the writer lease monitor — this node is now the writer and must self-exit on lease loss. */
+  startMonitor: () => void;
+  /** Notify the http layer to drop its writer proxy. */
+  firePromoted: () => void;
+  /** Exit indirection — any promotion-step failure routes here (a half-promoted node must not linger). */
+  onExit: (reason: string) => void;
+}
+
+/**
+ * C5 promotion error policy: wrap the promotion sequence so ANY step failure is caught, logged, and
+ * turned into an exit rather than left as a silent unhandled rejection with the node stuck
+ * half-promoted (writable pg store, un-swapped runtime, no drivers). On success the lease monitor is
+ * started (writer self-exit is now armed) and the http layer is told to drop its proxy. Fires exit at
+ * most once by construction — it's invoked once per node (guarded by the caller's `promoting` flag).
+ */
+export async function runPromotion(deps: PromotionRunDeps): Promise<void> {
+  try {
+    await deps.promote();
+    deps.startMonitor(); // this node is the writer now — arm self-exit-on-lease-loss
+    deps.firePromoted();
+  } catch (e) {
+    deps.onExit(`promotion failed (${e instanceof Error ? e.message : String(e)})`);
+  }
 }
 
 /** The minimal seams the CRITICAL PROMOTION ORDER touches — narrow structural interfaces (not the
@@ -252,6 +294,7 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  */
 export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHandles> {
   const { client, pgStore, runtime, lease, forwarder, replica, switchable } = deps;
+  const onExit = deps.onExit ?? defaultFleetExit;
   const promotedCbs: Array<() => void> = [];
   const firePromoted = (): void => {
     for (const cb of promotedCbs) {
@@ -263,13 +306,37 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     }
   };
 
-  // Writer boot: nothing to start (store already writable, forwarder promoted, drivers running).
+  // The writer lease monitor (C4). Runs ONLY while this node is the writer: constructed lazily at
+  // writer boot OR on promotion (never on a sync node). A sync node's connection loss is survivable —
+  // its reads keep working off the local replica (slice 2) — so `monitor` stays null and the
+  // connection-lost callback below is a no-op until (if) this node becomes the writer.
+  let monitor: LeaseMonitor | null = null;
+  const startWriterMonitor = (): void => {
+    monitor = new LeaseMonitor({
+      // Plain liveness round-trip — NEVER pg_try_advisory_lock (re-entrant on the holding session).
+      probe: async () => {
+        await client.query("SELECT 1");
+      },
+      onExit: (reason) => onExit(`writer lease lost: ${reason}`),
+    });
+    monitor.start();
+  };
+
+  // Register the connection-lost hook ONCE, here — routed to the monitor only when this node is the
+  // writer (monitor non-null). A dropped pinned connection is definitive lease loss (the advisory
+  // lock is released the instant that backend goes away), so it exits immediately.
+  client.onConnectionLost?.(() => monitor?.connectionLost());
+
+  // Writer boot: nothing to start (store already writable, forwarder promoted, drivers running) —
+  // except the lease monitor, since this node is the writer from the first tick.
   if (forwarder.isLocalWriter()) {
+    startWriterMonitor();
     return {
       role: () => "writer",
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
       onPromoted: (cb) => promotedCbs.push(cb),
       stop: async () => {
+        monitor?.stop();
         lease.stop();
       },
     };
@@ -315,14 +382,19 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
 
   let promoting = false;
   lease.acquireLoop((state) => {
-    void (async () => {
-      if (promoting) return;
-      promoting = true;
+    if (promoting) return;
+    promoting = true;
+    void state; // (writerUrl now points at us via the lease tryAcquire() just upserted)
+    // C5: the promotion sequence is wrapped — any step failure exits(1) instead of leaving this node
+    // stuck half-promoted with an unhandled rejection. On success the lease monitor is armed (this
+    // node is now the writer) and the http layer drops its proxy.
+    void runPromotion({
       // The lease row is already upserted by the tryAcquire() inside acquireLoop before this fires.
-      await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
-      void state; // (writerUrl now points at us via the lease it just upserted)
-      firePromoted(); // http layer drops the proxy
-    })();
+      promote: () => promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica }),
+      startMonitor: startWriterMonitor,
+      firePromoted,
+      onExit,
+    });
   });
 
   return {
@@ -330,6 +402,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     writerUrl: async () => (await lease.read())?.writerUrl ?? "",
     onPromoted: (cb) => promotedCbs.push(cb),
     stop: async () => {
+      monitor?.stop(); // disarm writer self-exit BEFORE the connection is closed (if promoted)
       lease.stop();
       await tailer.stop();
       // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a sync

@@ -20,6 +20,13 @@ export interface PgClient extends PgQuerier {
   acquireWriterLock(): Promise<void>;
   /** Non-blocking attempt at the same advisory lock; resolves `true`/`false` instead of throwing. */
   tryAcquireWriterLock(): Promise<boolean>;
+  /**
+   * Register a callback fired once when the underlying connection is lost. Optional — only drivers
+   * with a single pinned connection whose loss is definitive (see `NodePgClient`) implement it; the
+   * fleet writer lease monitor uses it to treat a dropped connection as definitive lease loss.
+   * Absent (undefined) on drivers that don't need it (e.g. the in-process PGlite test client).
+   */
+  onConnectionLost?(cb: () => void): void;
   close(): Promise<void>;
 }
 
