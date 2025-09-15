@@ -131,6 +131,76 @@ describe("LeaseMonitor (C4: writer self-exit on lease loss)", () => {
     await vi.advanceTimersByTimeAsync(100); // 2nd miss > maxMisses(1) → exit
     expect(onExit).toHaveBeenCalledTimes(1);
   });
+
+  it("a never-resolving probe (silently-wedged connection) still accrues misses via the per-probe timeout, exiting on the 4th", async () => {
+    const onExit = vi.fn();
+    // Simulates a half-open TCP connection: the query promise never settles at all.
+    const probe = vi.fn(() => new Promise<void>(() => {}));
+    // probeTimeoutMs (2500) deliberately half of probeMs (5000, the default) so each tick's own
+    // timeout lands cleanly between ticks with no same-instant ambiguity: tick@5000/timeout@7500,
+    // tick@10000/timeout@12500, etc.
+    const m = new LeaseMonitor({ probe, onExit, probeTimeoutMs: 2500 }); // probeMs 5000 default, maxMisses 3
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(5000); // tick 1 starts
+    await vi.advanceTimersByTimeAsync(2500); // tick 1's timeout fires → miss 1
+    await vi.advanceTimersByTimeAsync(2500); // tick 2 starts
+    await vi.advanceTimersByTimeAsync(2500); // miss 2
+    await vi.advanceTimersByTimeAsync(2500); // tick 3 starts
+    await vi.advanceTimersByTimeAsync(2500); // miss 3
+    expect(onExit).not.toHaveBeenCalled(); // 3 timeouts tolerated
+    expect(probe).toHaveBeenCalledTimes(3); // each tick got its own fresh attempt — inFlight cleared
+
+    await vi.advanceTimersByTimeAsync(2500); // tick 4 starts
+    await vi.advanceTimersByTimeAsync(2500); // 4th timeout → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("lease");
+    expect(String(onExit.mock.calls[0]![0])).toContain("timed out");
+  });
+
+  it("a probe that resolves AFTER its timeout already fired is ignored — no reset, no double-count", async () => {
+    const onExit = vi.fn();
+    // A fresh deferred per probe() call — each tick's probe is independently controllable.
+    function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+      let resolve!: () => void;
+      const promise = new Promise<void>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+    let current = createDeferred();
+    const probe = vi.fn(() => {
+      current = createDeferred();
+      return current.promise;
+    });
+    const m = new LeaseMonitor({ probe, onExit, probeMs: 100, probeTimeoutMs: 50, maxMisses: 3 });
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(100); // tick 1 starts (t=100), probe() called
+    const tick1 = current;
+    await vi.advanceTimersByTimeAsync(50); // t=150: tick 1's timeout fires → miss 1 (probe still unsettled)
+    expect(onExit).not.toHaveBeenCalled();
+
+    // Tick 1's probe (still pending) now resolves late — well after its own timeout already counted
+    // as a miss. This must NOT reset the miss counter back to 0.
+    tick1.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Drive 3 more ticks to timeout-misses (2, 3, 4) — miss 4 exceeds maxMisses(3) and exits. If the
+    // late resolution above had incorrectly reset the counter to 0, this would NOT exit here.
+    await vi.advanceTimersByTimeAsync(50); // t=200: tick 2 starts
+    await vi.advanceTimersByTimeAsync(50); // t=250: miss 2
+    expect(onExit).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(50); // t=300: tick 3 starts
+    await vi.advanceTimersByTimeAsync(50); // t=350: miss 3
+    expect(onExit).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(50); // t=400: tick 4 starts
+    await vi.advanceTimersByTimeAsync(50); // t=450: miss 4 > maxMisses(3) → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("runPromotion (C5: promotion error policy)", () => {
