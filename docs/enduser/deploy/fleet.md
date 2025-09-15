@@ -246,13 +246,15 @@ up to the mutation's commit before returning the mutation's result to the caller
 seconds — if the replica hasn't caught up within that window, the mutation still returns rather
 than hanging, and in that rare case an immediately-following read could be stale.
 
-**This guarantee covers mutations, not `action` calls that write via inner mutations.** An
-action's own top-level response has no single commit to wait on — even though its inner
-`ctx.runMutation` calls commit normally and fan out reactively like any other write — so an
-action's response can precede its own inner writes becoming visible on the node you called it on.
-This is a known limitation: if you need read-your-own-writes for an action's side effects,
-structure the client code to await the mutation directly (or subscribe/poll) rather than treating
-the action's return value as a guarantee that its writes are visible yet.
+**This guarantee covers `action` calls too, including their inner writes.** An action's own
+top-level response has no single commit of its own — but the engine tracks the highest commit
+timestamp across everything the action wrote via its inner `ctx.runMutation`/`ctx.runAction` calls
+(recursively — an action calling another action picks up that inner action's own writes too) and
+carries it on the action's response. The forwarding node waits on that same timestamp before
+returning, exactly as it does for a plain mutation — same 5-second bound, same same-node guarantee.
+An action that performs no writes at all (a pure read, or one that only calls other actions/queries
+that don't write) simply has nothing to wait on, and its response returns as soon as the handler
+completes.
 
 ### Reads keep working through a Postgres outage; writes don't
 
