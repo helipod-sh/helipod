@@ -46,6 +46,8 @@ export class NodePgClient implements PgClient {
   private readonly connectionString: string;
   private connected = false;
   private connectPromise?: Promise<void>;
+  private readonly connectionLostCbs: Array<() => void> = [];
+  private connectionLostFired = false;
 
   constructor(opts: { connectionString: string }) {
     this.connectionString = opts.connectionString;
@@ -66,9 +68,39 @@ export class NodePgClient implements PgClient {
     // Promise.all([store.get(a), store.get(b)]) before any awaited setup) all
     // await the SAME connect() rather than each racing check-then-await-then-set
     // and calling this.client.connect() twice (pg rejects the second call).
-    return (this.connectPromise ??= this.client.connect().then(() => {
-      this.connected = true;
-    }));
+    return (this.connectPromise ??= (() => {
+      // Attach connection-loss listeners on the single pinned connection the moment we connect it.
+      // A closed/errored pinned connection is DEFINITIVE — `ensure()` memoizes and never reconnects,
+      // and the session-level advisory lock is released by Postgres when the backend goes away — so
+      // fire the registered callbacks exactly once (guarding the error-then-end double-fire).
+      this.client.on("error", () => this.fireConnectionLost());
+      this.client.on("end", () => this.fireConnectionLost());
+      return this.client.connect().then(() => {
+        this.connected = true;
+      });
+    })());
+  }
+
+  /**
+   * Register a callback fired once when the pinned connection is lost (error/end). Used by the fleet
+   * writer lease monitor to treat a dropped connection as definitive lease loss. Multiple callbacks
+   * allowed; all fire (a throwing one can't mask the loss for the others). Absent on drivers that
+   * don't need it (the seam member is optional).
+   */
+  onConnectionLost(cb: () => void): void {
+    this.connectionLostCbs.push(cb);
+  }
+
+  private fireConnectionLost(): void {
+    if (this.connectionLostFired) return;
+    this.connectionLostFired = true;
+    for (const cb of this.connectionLostCbs) {
+      try {
+        cb();
+      } catch {
+        // A misbehaving callback must not mask the connection loss for the others.
+      }
+    }
   }
 
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
@@ -140,6 +172,9 @@ export class NodePgClient implements PgClient {
 
   async close(): Promise<void> {
     if (this.connected) {
+      // A deliberate close is not a lost connection: suppress the `end`-event fire so a graceful
+      // shutdown never trips the writer lease monitor into a spurious process.exit(1).
+      this.connectionLostFired = true;
       await this.client.end();
       this.connected = false;
       this.connectPromise = undefined;
