@@ -118,7 +118,14 @@ export class NodePgClient implements PgClient {
     listener.on("notification", (msg) => {
       if (msg.channel === channel && msg.payload !== undefined) onNotify(msg.payload);
     });
-    await listener.query(`LISTEN "${channel.replace(/"/g, '""')}"`);
+    try {
+      await listener.query(`LISTEN "${channel.replace(/"/g, '""')}"`);
+    } catch (e) {
+      // The dedicated connection connected fine but LISTEN itself failed — end it before
+      // rethrowing so a failed listen() doesn't leak a live Postgres connection.
+      await listener.end();
+      throw e;
+    }
     let closed = false;
     return async () => {
       if (closed) return;
