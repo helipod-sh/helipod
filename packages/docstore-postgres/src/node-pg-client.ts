@@ -44,15 +44,23 @@ function normalizeRows(rows: Record<string, unknown>[]): PgRow[] {
 export class NodePgClient implements PgClient {
   private readonly client: pg.Client;
   private readonly connectionString: string;
+  private readonly applicationName?: string;
   private connected = false;
   private connectPromise?: Promise<void>;
   private readonly connectionLostCbs: Array<() => void> = [];
   private connectionLostFired = false;
 
-  constructor(opts: { connectionString: string }) {
+  constructor(opts: { connectionString: string; applicationName?: string }) {
     this.connectionString = opts.connectionString;
+    this.applicationName = opts.applicationName;
     this.client = new Client({
       connectionString: opts.connectionString,
+      // Tag this connection's backend in pg_stat_activity when a name is supplied (fleet nodes pass a
+      // per-node `stackbase-fleet-<port>` so an operator — or the fleet self-exit E2E — can identify
+      // and target one node's backends). Passed as an explicit config field, not appended to the
+      // connection string: pg merges the parsed connection string OVER explicit fields, so this only
+      // survives because our connection strings never set `application_name` themselves.
+      application_name: opts.applicationName,
       // Per-client type map: int8 (OID 20) → bigint; every other OID keeps pg's default parser.
       types: {
         getTypeParser: (oid: number, format?: string) =>
@@ -145,7 +153,7 @@ export class NodePgClient implements PgClient {
    * the same connection string. The returned closer ends that connection; safe to call once.
    */
   async listen(channel: string, onNotify: (payload: string) => void): Promise<() => Promise<void>> {
-    const listener = new Client({ connectionString: this.connectionString });
+    const listener = new Client({ connectionString: this.connectionString, application_name: this.applicationName });
     await listener.connect();
     listener.on("notification", (msg) => {
       if (msg.channel === channel && msg.payload !== undefined) onNotify(msg.payload);

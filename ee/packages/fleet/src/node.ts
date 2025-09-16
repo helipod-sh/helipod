@@ -54,6 +54,24 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 /** The filename of a sync node's local embedded replica, under the serve data dir. */
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
 
+/**
+ * The `application_name` a fleet node stamps on its Postgres backends, derived from its advertise
+ * URL so every node on a host is distinguishable in `pg_stat_activity`. Uses the URL's port (unique
+ * per node on a host); if the URL is unparseable or portless, falls back to the raw string so the
+ * name is always deterministic and non-empty. Exported so failover tooling/tests can reconstruct a
+ * specific node's discriminator without guessing.
+ */
+export function fleetApplicationName(advertiseUrl: string): string {
+  let discriminator = advertiseUrl;
+  try {
+    const port = new URL(advertiseUrl).port;
+    if (port) discriminator = port;
+  } catch {
+    // Unparseable advertise URL — keep the raw string as the discriminator.
+  }
+  return `stackbase-fleet-${discriminator}`;
+}
+
 /** Pick the SQLite adapter for the active runtime — Bun is primary (`bun:sqlite`), Node is
  *  supported (`node:sqlite`). Same runtime split `packages/cli`'s `makeStore` uses; hardcoding
  *  `NodeSqliteAdapter` would crash a Bun-hosted `stackbase serve --fleet` with "no such built-in
@@ -139,7 +157,12 @@ export async function prepareFleetNode(deps: {
   /** The serve data dir — the sync node's local replica is created at `<dataDir>/fleet-replica.db`. */
   dataDir: string;
 }): Promise<FleetPrep> {
-  const client = new NodePgClient({ connectionString: deps.databaseUrl });
+  // Tag this node's Postgres backends so they're identifiable in `pg_stat_activity` — an operator can
+  // see which fleet node owns a connection, and the writer self-exit E2E targets exactly one node's
+  // backends via `pg_terminate_backend(... WHERE application_name = ...)`. Derived from the advertise
+  // URL's port (unique per node on a host); falls back to the whole advertise URL if it has no port.
+  const applicationName = fleetApplicationName(deps.advertiseUrl);
+  const client = new NodePgClient({ connectionString: deps.databaseUrl, applicationName });
   // Read-only until (and unless) this node wins the lease. A follower still runs the idempotent
   // DDL in setupSchema but does NOT contend for the writer advisory lock (see PostgresDocStore).
   const pgStore = new PostgresDocStore(client, { readOnly: true });

@@ -8,6 +8,8 @@ export {
   prepareFleetNode,
   startFleetNode,
   runPromotion,
+  fleetApplicationName,
+  REPLICA_DB_FILENAME,
   keyToPointRange,
   type FleetHandles,
   type FleetPrep,
