@@ -15,6 +15,7 @@ export type FunctionReference<
 export type Api = {
   "notes": {
     add: FunctionReference<"mutation", "public", any, any>;
+    addViaAction: FunctionReference<"action", "public", any, any>;
     get: FunctionReference<"query", "public", any, any>;
     list: FunctionReference<"query", "public", any, any>;
     update: FunctionReference<"mutation", "public", any, any>;

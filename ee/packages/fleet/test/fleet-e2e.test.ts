@@ -30,6 +30,11 @@ import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
 import { Client } from "pg";
+// Pure helper — reconstructs a node's `application_name` from its advertise URL, the exact
+// discriminator `prepareFleetNode` stamps on that node's Postgres backends. Imported from `src`
+// (not `dist`) only to compute the string in-test; the spawned `serve` children run the BUILT fleet
+// code (via `packages/cli/dist/bin.js`), so both sides must agree — rebuild before running.
+import { fleetApplicationName } from "../src/node";
 
 /* -------------------------------------------------------------------------- */
 /* Docker availability + Postgres container lifecycle                          */
@@ -726,6 +731,150 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeBRestart);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "forwards an action with read-your-own-writes, then self-exits the writer when its Postgres backends are severed and promotes the survivor",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+      const advB = `http://127.0.0.1:${portB}`;
+      // The exact `application_name` node A stamps on its Postgres backends — the failover trigger
+      // targets ONLY this discriminator, so node B's backends are untouched.
+      const writerAppName = fleetApplicationName(advA);
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let wsB: WebSocket | undefined;
+      try {
+        /* ---------------------------------------------------------------- */
+        /* Boot writer A (first) + sync B; A stays writer until we sever it. */
+        /* ---------------------------------------------------------------- */
+        nodeA = spawnFleetServe(databaseUrl, portA);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        nodeB = spawnFleetServe(databaseUrl, portB);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+        const urlB = bootB.ready.url;
+
+        const lease1 = await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+        expect(lease1.epoch).toBe(1);
+
+        // Live subscription on the sync node — must survive the writer's self-exit + B's promotion and
+        // still fan out the post-recovery write.
+        const sub = await subscribe(`${urlB.replace("http", "ws")}/api/sync`, 1, "notes:list", {});
+        wsB = sub.ws;
+        expect(latestMod(sub.messages, 1)!.value).toEqual([]);
+
+        /* ---------------------------------------------------------------- */
+        /* Scenario 1 — RYOW for ACTIONS: an action POSTed to the SYNC node B */
+        /* forwards to the writer, runs a nested ctx.runMutation, and the      */
+        /* writer surfaces that mutation's commitTs. The forwarder's replica   */
+        /* catch-up wait covers actions too, so an IMMEDIATE read on B (no     */
+        /* sleep) sees the row the action wrote.                               */
+        /* ---------------------------------------------------------------- */
+        const actAdd = await apiRun(urlB, "notes:addViaAction", { box: "act", text: "act-1" });
+        expect(actAdd.status).toBe(200);
+        expect(typeof actAdd.body.value).toBe("string"); // the action returns the inserted note id
+
+        const actRead = await apiRun(urlB, "notes:list", {}); // no sleep — action RYOW must hold synchronously
+        expect(actRead.status).toBe(200);
+        expect(actRead.body.value).toEqual([{ box: "act", text: "act-1" }]);
+
+        // The write also fans out cross-process to B's live subscription.
+        await waitFor(() => {
+          const m = latestMod(sub.messages, 1);
+          const v = m?.value as Array<{ box: string; text: string }> | undefined;
+          return m?.type === "QueryUpdated" && Array.isArray(v) && v.some((n) => n.text === "act-1");
+        });
+
+        /* ---------------------------------------------------------------- */
+        /* Scenario 2 — writer self-exit: sever ONLY node A's Postgres backends */
+        /* via pg_terminate_backend (its app_name discriminator). This kills   */
+        /* A's pinned lease/lock connection, so its LeaseMonitor sees the       */
+        /* connection-lost event and A self-exits(1) — fast (event path, not    */
+        /* the 5s probe path). B's acquire loop then promotes it.              */
+        /* ---------------------------------------------------------------- */
+        // Sanity: A's backend(s) are present and identifiable before we sever them.
+        const before = await pg.query(
+          "SELECT pid FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()",
+          [writerAppName],
+        );
+        expect(before.rows.length).toBeGreaterThan(0);
+
+        // Arm the exit observation BEFORE severing — assert via the child-process handle, not lease state.
+        const exitInfo = new Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number }>(
+          (resolvePromise) => {
+            const start = Date.now();
+            nodeA!.once("exit", (code, signal) => resolvePromise({ code, signal, elapsedMs: Date.now() - start }));
+          },
+        );
+
+        await pg.query(
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()",
+          [writerAppName],
+        );
+
+        // The writer must EXIT (self-terminate), and fast: the connection-lost event fires immediately,
+        // well under the LeaseMonitor's 5s probe interval — proving the event path, not the probe backstop.
+        const exit = await Promise.race([
+          exitInfo,
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("writer did not self-exit within 15s")), 15_000)),
+        ]);
+        nodeA = undefined; // it's gone — don't SIGTERM a dead pid in finally
+        expect(exit.code).toBe(1); // process.exit(1), not a signal — a genuine self-exit
+        expect(exit.signal).toBeNull();
+        expect(exit.elapsedMs).toBeLessThan(4000); // < probe interval ⇒ the connectionLost event path fired
+
+        /* ---------------------------------------------------------------- */
+        /* B's acquire loop promotes it: epoch bumps to 2, writer_url = B.     */
+        /* ---------------------------------------------------------------- */
+        const lease2 = await waitForLease(pg, (l) => l.epoch >= 2 && l.writerUrl === advB, 15_000);
+        expect(lease2.epoch).toBe(2);
+        expect(lease2.writerUrl).toBe(advB);
+
+        /* ---------------------------------------------------------------- */
+        /* Post-recovery: a mutation via the survivor B commits LOCALLY and    */
+        /* fans out to the pre-existing subscription.                          */
+        /* ---------------------------------------------------------------- */
+        const recover = await (async () => {
+          const deadline = Date.now() + 15_000;
+          for (;;) {
+            const r = await apiRun(urlB, "notes:add", { box: "post", text: "post-recovery" }).catch(
+              () => ({ status: 0, body: {} }) as RunResult,
+            );
+            if (r.status === 200 && r.body.committed === true) return r;
+            if (Date.now() > deadline) throw new Error(`post-recovery mutation never committed: ${JSON.stringify(r.body)}`);
+            await sleep(300);
+          }
+        })();
+        expect(recover.body.committed).toBe(true);
+
+        await waitFor(() => {
+          const m = latestMod(sub.messages, 1);
+          const v = m?.value as Array<{ box: string; text: string }> | undefined;
+          return m?.type === "QueryUpdated" && Array.isArray(v) && v.some((n) => n.text === "post-recovery");
+        }, 15_000);
+      } finally {
+        wsB?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        await stopServe(nodeB);
         stopPostgresContainer();
       }
     },
