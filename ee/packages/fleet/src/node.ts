@@ -128,6 +128,10 @@ export interface FleetPrep {
    *  the runtime store points at. Absent for a writer boot. */
   replica?: SqliteDocStore;
   switchable?: SwitchableDocStore;
+  /** Sync only: the on-disk path of `replica`, threaded through to `startFleetNode` so its C7
+   *  `reconcileReplicaIdentity` call (deferred there — see that function's doc comment) can rebuild
+   *  the file in place if needed. Absent for a writer boot. */
+  replicaPath?: string;
   lease: LeaseManager;
   forwarder: WriteForwarder;
   role: "sync" | "writer";
@@ -135,20 +139,22 @@ export interface FleetPrep {
 }
 
 /**
- * Open the sync node's local file-backed replica (`SqliteDocStore`) and wrap it in a
- * `SwitchableDocStore`. A corrupted replica file (open or `setupSchema` throws — e.g. a torn write
- * from a hard crash) is not fatal: the file is a rebuildable mirror of the primary, so delete it and
- * retry ONCE (a fresh replica re-tails from scratch); a second failure is a real environment problem
- * and propagates. Also clears the SQLite `-wal`/`-shm` sidecars so a stale journal can't re-corrupt
- * the fresh file.
+ * Open (or recover) the on-disk SQLite replica file itself — no `SwitchableDocStore` wrapper. A
+ * corrupted replica file (open or `setupSchema` throws — e.g. a torn write from a hard crash) is not
+ * fatal: the file is a rebuildable mirror of the primary, so delete it and retry ONCE (a fresh
+ * replica re-tails from scratch); a second failure is a real environment problem and propagates.
+ * Also clears the SQLite `-wal`/`-shm` sidecars so a stale journal can't re-corrupt the fresh file.
+ *
+ * Shared by `openSyncReplica` (first boot, wraps the result in a NEW switchable) and
+ * `reconcileReplicaIdentity`'s foreign-replica rebuild path, which instead repoints an EXISTING
+ * switchable via `swapTo()` — see that function's doc comment for why minting a new switchable there
+ * would be wrong.
  */
-export async function openSyncReplica(
-  replicaPath: string,
-): Promise<{ replica: SqliteDocStore; switchable: SwitchableDocStore }> {
+async function openReplicaFile(replicaPath: string): Promise<SqliteDocStore> {
   try {
     const replica = new SqliteDocStore(replicaAdapter(replicaPath));
     await replica.setupSchema();
-    return { replica, switchable: new SwitchableDocStore(replica) };
+    return replica;
   } catch (e) {
     console.warn(
       `fleet: local replica at ${replicaPath} failed to open (${e instanceof Error ? e.message : String(e)}) — ` +
@@ -158,17 +164,34 @@ export async function openSyncReplica(
     // Retry ONCE — a second failure here is not a corrupt-file problem and must surface.
     const replica = new SqliteDocStore(replicaAdapter(replicaPath));
     await replica.setupSchema();
-    return { replica, switchable: new SwitchableDocStore(replica) };
+    return replica;
   }
 }
 
 /**
+ * Open the sync node's local file-backed replica (`SqliteDocStore`) and wrap it in a fresh
+ * `SwitchableDocStore`. See `openReplicaFile` for the corrupted-file recovery behavior.
+ */
+export async function openSyncReplica(
+  replicaPath: string,
+): Promise<{ replica: SqliteDocStore; switchable: SwitchableDocStore }> {
+  const replica = await openReplicaFile(replicaPath);
+  return { replica, switchable: new SwitchableDocStore(replica) };
+}
+
+/**
  * C7: reconcile the sync node's local replica identity against the primary's `fleet:deploymentId`
- * stamp — called by `prepareFleetNode` right after `openSyncReplica` opens the replica, and always
- * BEFORE the tailer is started (`startFleetNode`). A replica file is only ever safe to tail onto
- * when it's either brand new or already stamped for THIS primary; otherwise it may carry rows from
- * a different deployment (e.g. a data dir reused/copied across environments) and must be rebuilt
- * before a single row is served off it.
+ * stamp — called by `startFleetNode`'s sync path, immediately BEFORE the tailer is started. (An
+ * earlier version of this code called it from `prepareFleetNode`, right after `openSyncReplica`
+ * opened the replica — but that runs BEFORE `bootProject`, and `persistence_globals` (which
+ * `pgStore.getGlobal` below reads) is only created by `store.setupSchema()` inside `bootProject`'s
+ * `createEmbeddedRuntime`. On a fresh multi-node CONCURRENT first boot, a sync node could hit this
+ * before ANY node's schema DDL had run and crash with "relation persistence_globals does not exist".
+ * Moving the call into `startFleetNode` — which runs after THIS node's own `bootProject` — closes
+ * that window; see `startFleetNode` for how it's threaded.) A replica file is only ever safe to tail
+ * onto when it's either brand new or already stamped for THIS primary; otherwise it may carry rows
+ * from a different deployment (e.g. a data dir reused/copied across environments) and must be
+ * rebuilt before a single row is served off it.
  *
  * Cases:
  *  - primary has no stamp yet (this sync node won the boot race against the writer): mint-adopt via
@@ -177,7 +200,11 @@ export async function openSyncReplica(
  *  - fresh replica (no data, no stamp): adopt the primary's id locally, no warning, no rebuild.
  *  - stamps match: proceed as-is.
  *  - mismatch, or data present without a stamp (a pre-C7 replica): warn, delete the replica file
- *    (+ `-wal`/`-shm`), reopen a fresh one, and adopt the primary's id onto it.
+ *    (+ `-wal`/`-shm`), reopen a fresh one, and adopt the primary's id onto it. The rebuild repoints
+ *    the CALLER's existing `switchable` via `swapTo()` rather than minting a new `SwitchableDocStore`
+ *    — by the time this runs (inside `startFleetNode`), that switchable is already the runtime's live
+ *    store (threaded from `prepareFleetNode` through `bootProject`), so replacing the object instead
+ *    of repointing it would orphan the runtime on the stale (deleted) replica file.
  */
 export async function reconcileReplicaIdentity(deps: {
   pgStore: PostgresDocStore;
@@ -215,9 +242,12 @@ export async function reconcileReplicaIdentity(deps: {
   );
   await deps.replica.close();
   deleteReplicaFile(replicaPath);
-  const rebuilt = await openSyncReplica(replicaPath);
-  await rebuilt.replica.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, primaryId as JSONValue);
-  return rebuilt;
+  const freshReplica = await openReplicaFile(replicaPath);
+  await freshReplica.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, primaryId as JSONValue);
+  // Repoint the EXISTING switchable — do NOT mint a new one (see the doc comment above): whatever
+  // holds a reference to `deps.switchable` (the runtime store, for a sync node) must keep working.
+  deps.switchable.swapTo(freshReplica);
+  return { replica: freshReplica, switchable: deps.switchable };
 }
 
 /**
@@ -283,21 +313,21 @@ export async function prepareFleetNode(deps: {
   // Sync boot: the runtime store is a local file-backed replica behind a SwitchableDocStore. The
   // read-only Postgres store is the tail source + promotion swap target only. Drivers deferred until
   // (if) promoted; writes forwarded to the current writer.
+  //
+  // C7: the replica's deployment-id stamp is reconciled against the primary's in `startFleetNode`,
+  // right before the tailer starts — NOT here. `persistence_globals` (which the reconcile reads via
+  // `pgStore.getGlobal`) is only created by `store.setupSchema()` inside `bootProject`'s
+  // `createEmbeddedRuntime`, which runs AFTER this function returns; reading it here would crash on a
+  // concurrent multi-node first boot, before ANY node's schema DDL has run. See
+  // `reconcileReplicaIdentity`'s doc comment for the full rationale.
   const replicaPath = join(deps.dataDir, REPLICA_DB_FILENAME);
-  const opened = await openSyncReplica(replicaPath);
-  // C7: reconcile the replica's deployment-id stamp against the primary's BEFORE the tailer (see
-  // `startFleetNode`) ever starts applying onto it — a foreign or pre-C7 replica is rebuilt here.
-  const { replica, switchable } = await reconcileReplicaIdentity({
-    pgStore,
-    replica: opened.replica,
-    switchable: opened.switchable,
-    replicaPath,
-  });
+  const { replica, switchable } = await openSyncReplica(replicaPath);
   return {
     client,
     pgStore,
     replica,
     switchable,
+    replicaPath,
     lease,
     forwarder,
     role: "sync",
@@ -317,6 +347,9 @@ export interface StartFleetNodeDeps {
    *  through (swapped to the Postgres store on promotion). Absent/ignored for a writer boot. */
   replica?: SqliteDocStore;
   switchable?: SwitchableDocStore;
+  /** Sync only: `replica`'s on-disk path — needed here (not just in `prepareFleetNode`) because the
+   *  C7 `reconcileReplicaIdentity` check now runs in THIS function, right before `tailer.start()`. */
+  replicaPath?: string;
   /** Process-exit indirection (C4/C5). Injected so tests observe exits instead of killing the runner;
    *  defaults to `console.error` + `process.exit(1)`. Fires on writer lease loss (the lease monitor)
    *  and on a failed promotion step. */
@@ -405,7 +438,8 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  * via `promoteFleetNode`.
  */
 export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHandles> {
-  const { client, pgStore, runtime, lease, forwarder, replica, switchable } = deps;
+  const { client, pgStore, runtime, lease, forwarder, switchable, replicaPath } = deps;
+  let replica = deps.replica;
   const onExit = deps.onExit ?? defaultFleetExit;
   const promotedCbs: Array<() => void> = [];
   const firePromoted = (): void => {
@@ -460,12 +494,22 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     };
   }
 
-  // Sync boot invariant: prepareFleetNode's sync branch always provides both.
-  if (!replica || !switchable) {
+  // Sync boot invariant: prepareFleetNode's sync branch always provides all three.
+  if (!replica || !switchable || !replicaPath) {
     throw new Error(
-      "fleet: sync node start requires a replica + switchable store (bug: prepareFleetNode sync boot must provide them)",
+      "fleet: sync node start requires a replica + switchable store + replicaPath (bug: prepareFleetNode sync boot must provide them)",
     );
   }
+
+  // C7: reconcile the replica's deployment-id stamp against the primary's — post-DDL-guaranteed now
+  // (this node's own bootProject has already run `store.setupSchema()`; a writer's does so directly
+  // on `pgStore`, and a sync node's own read of the shared Postgres tables right below, via the
+  // tailer's `maxTimestamp()`/`load_documents`, carries the identical schema-existence dependency) —
+  // and always BEFORE the tailer starts (a foreign or pre-C7 replica must be rebuilt before a single
+  // row is tailed onto it). Deferred here from `prepareFleetNode` for exactly this reason — see
+  // `reconcileReplicaIdentity`'s doc comment.
+  const reconciled = await reconcileReplicaIdentity({ pgStore, replica, switchable, replicaPath });
+  replica = reconciled.replica; // may be a freshly-rebuilt replica; `switchable` was repointed in place
 
   // Sync boot: verbatim-apply the primary's MVCC log onto the local replica AND drive cross-process
   // reactive fan-out from the SAME applied batch. `start()` gates on bootstrap catch-up, so this
