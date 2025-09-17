@@ -25,13 +25,18 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { newDocumentId, encodeStorageIndexId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 import type { DocStore, DocumentLogEntry, IndexWrite, InternalDocumentId } from "@stackbase/docstore";
+import type { NodePgClient } from "@stackbase/docstore-postgres";
+import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { PgliteClient } from "./pglite-client";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { SwitchableDocStore } from "../src/switchable-store";
+import { LeaseManager } from "../src/lease";
+import { WriteForwarder } from "../src/forwarder";
 import {
   openSyncReplica,
   promoteFleetNode,
   reconcileReplicaIdentity,
+  startFleetNode,
   FLEET_DEPLOYMENT_ID_KEY,
   REPLICA_DB_FILENAME,
 } from "../src/node";
@@ -359,6 +364,57 @@ describe("fleet node lifecycle", () => {
       } finally {
         await replica.close();
         await pgStore.close();
+      }
+    });
+
+    it("REGRESSION (sync self-sufficiency): startFleetNode's sync path succeeds on a database whose setupSchema was NEVER externally run", async () => {
+      // The narrower window left after the call-site move: a sync node's own bootProject runs
+      // setupSchema on its LOCAL replica (its runtime store is the SwitchableDocStore over the
+      // replica), so on a fresh database with the writer's bootProject still mid-flight, NOTHING has
+      // created persistence_globals/documents/indexes on Postgres when startFleetNode's stamp check
+      // and tailer.start() read them. The fix: startFleetNode's sync path runs the idempotent
+      // (read-only, no writer lock) pgStore.setupSchema() itself, first. Exercise the REAL
+      // startFleetNode sync path — not extracted seams — against a PG store nobody migrated.
+      const freshClient = new PgliteClient();
+      const pgStore = new PostgresDocStore(freshClient, { readOnly: true }); // NO setupSchema, anywhere
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path); // = prepareFleetNode's sync prep (local file only)
+      const lease = new LeaseManager(freshClient, {
+        advertiseUrl: "http://127.0.0.1:9999",
+        // PgliteClient.tryAcquireWriterLock always returns true, so a fast retry would spuriously
+        // promote this "sync" node mid-test; the first acquireLoop attempt only fires after retryMs,
+        // and handles.stop() cancels it long before an hour elapses.
+        retryMs: 3_600_000,
+      });
+      const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://127.0.0.1:9999" });
+      expect(forwarder.isLocalWriter()).toBe(false); // sync role — takes startFleetNode's sync path
+      const runtime = {
+        observeTimestamp: () => {},
+        startDrivers: async () => {},
+        handler: { notifyWrites: async () => {} },
+      } as unknown as EmbeddedRuntime;
+
+      const handles = await startFleetNode({
+        client: freshClient as unknown as NodePgClient, // structural: query/listen used; onConnectionLost is optional-chained
+        pgStore,
+        runtime,
+        lease,
+        forwarder,
+        replica: opened.replica,
+        switchable: opened.switchable,
+        replicaPath: path,
+      });
+      try {
+        // startFleetNode resolving at all IS the regression assertion: it ran its own setupSchema,
+        // then the stamp check (mint-adopt: fresh primary had no stamp), then tailer.start() gated
+        // on catch-up against the empty-but-migrated log. Confirm each observable effect:
+        expect(handles.role()).toBe("sync");
+        const minted = await pgStore.getGlobal(FLEET_DEPLOYMENT_ID_KEY); // schema exists + stamp minted
+        expect(minted).not.toBeNull();
+        expect(await opened.replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBe(minted); // replica adopted it
+      } finally {
+        await handles.stop(); // stops lease loop + tailer, closes pgStore (and with it freshClient)
+        await opened.replica.close();
       }
     });
 

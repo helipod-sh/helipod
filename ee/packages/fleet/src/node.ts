@@ -187,8 +187,10 @@ export async function openSyncReplica(
  * `pgStore.getGlobal` below reads) is only created by `store.setupSchema()` inside `bootProject`'s
  * `createEmbeddedRuntime`. On a fresh multi-node CONCURRENT first boot, a sync node could hit this
  * before ANY node's schema DDL had run and crash with "relation persistence_globals does not exist".
- * Moving the call into `startFleetNode` — which runs after THIS node's own `bootProject` — closes
- * that window; see `startFleetNode` for how it's threaded.) A replica file is only ever safe to tail
+ * `startFleetNode`'s sync path now runs `pgStore.setupSchema()` itself — idempotent DDL, no writer
+ * lock in read-only mode — immediately before calling this, so the check is self-sufficient on a
+ * fresh database regardless of the writer's boot progress; see `startFleetNode` for the wiring.) A
+ * replica file is only ever safe to tail
  * onto when it's either brand new or already stamped for THIS primary; otherwise it may carry rows
  * from a different deployment (e.g. a data dir reused/copied across environments) and must be
  * rebuilt before a single row is served off it.
@@ -501,13 +503,23 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     );
   }
 
-  // C7: reconcile the replica's deployment-id stamp against the primary's — post-DDL-guaranteed now
-  // (this node's own bootProject has already run `store.setupSchema()`; a writer's does so directly
-  // on `pgStore`, and a sync node's own read of the shared Postgres tables right below, via the
-  // tailer's `maxTimestamp()`/`load_documents`, carries the identical schema-existence dependency) —
-  // and always BEFORE the tailer starts (a foreign or pre-C7 replica must be rebuilt before a single
-  // row is tailed onto it). Deferred here from `prepareFleetNode` for exactly this reason — see
-  // `reconcileReplicaIdentity`'s doc comment.
+  // C7: make this node SELF-SUFFICIENT on a fresh database — run the idempotent Postgres DDL here,
+  // before anything below reads the shared tables. A sync node's own `bootProject` ran
+  // `setupSchema()` on the LOCAL replica only (slice 2 made its runtime store the
+  // `SwitchableDocStore` over the replica — slice 1, where the runtime store was `pgStore` itself,
+  // had this covered as a side effect, and slice 2 silently lost it); on a fresh multi-node
+  // CONCURRENT first boot the writer's `bootProject` may still be mid-flight, so nothing has
+  // necessarily created `persistence_globals`/`documents`/`indexes` on Postgres yet when the stamp
+  // check below (or the tailer's first `maxTimestamp()`) reads them. Read-only contract: the store
+  // is `readOnly` here, so `setupSchema()` runs the `CREATE ... IF NOT EXISTS` DDL but skips the
+  // writer advisory lock (see `PostgresDocStore.setupSchema`) — safe for any number of followers to
+  // run concurrently with the writer's own DDL.
+  await pgStore.setupSchema();
+
+  // C7: reconcile the replica's deployment-id stamp against the primary's — post-DDL-guaranteed by
+  // the `setupSchema()` call directly above — and always BEFORE the tailer starts (a foreign or
+  // pre-C7 replica must be rebuilt before a single row is tailed onto it). Deferred here from
+  // `prepareFleetNode` for exactly this reason — see `reconcileReplicaIdentity`'s doc comment.
   const reconciled = await reconcileReplicaIdentity({ pgStore, replica, switchable, replicaPath });
   replica = reconciled.replica; // may be a freshly-rebuilt replica; `switchable` was repointed in place
 
