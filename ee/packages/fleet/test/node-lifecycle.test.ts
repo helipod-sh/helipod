@@ -28,7 +28,13 @@ import type { DocStore, DocumentLogEntry, IndexWrite, InternalDocumentId } from 
 import { PgliteClient } from "./pglite-client";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { SwitchableDocStore } from "../src/switchable-store";
-import { openSyncReplica, promoteFleetNode, REPLICA_DB_FILENAME } from "../src/node";
+import {
+  openSyncReplica,
+  promoteFleetNode,
+  reconcileReplicaIdentity,
+  FLEET_DEPLOYMENT_ID_KEY,
+  REPLICA_DB_FILENAME,
+} from "../src/node";
 
 const T1 = 10001;
 const INDEX_ID_T1 = encodeStorageIndexId(T1, "by_key");
@@ -164,5 +170,155 @@ describe("fleet node lifecycle", () => {
     await t2.stop();
     await r2.close();
     await primary.close();
+  });
+
+  describe("(e) reconcileReplicaIdentity — C7 foreign-replica deployment-id stamp", () => {
+    let client: PgliteClient;
+    let primary: PostgresDocStore;
+    const PRIMARY_ID = "id-A";
+
+    beforeEach(async () => {
+      client = new PgliteClient();
+      primary = new PostgresDocStore(client);
+      await primary.setupSchema();
+      // Stamp the primary directly — mirrors the writer boot path's `writeGlobalIfAbsent` mint.
+      expect(await primary.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, PRIMARY_ID)).toBe(true);
+    });
+    afterEach(async () => {
+      await primary.close();
+    });
+
+    it("fresh replica (no data, no stamp) is adopted silently — no warn, no rebuild", async () => {
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { replica } = await reconcileReplicaIdentity({
+          pgStore: primary,
+          replica: opened.replica,
+          switchable: opened.switchable,
+          replicaPath: path,
+        });
+        expect(replica).toBe(opened.replica); // same object — no rebuild
+        expect(await replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBe(PRIMARY_ID); // adopted
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        await opened.replica.close();
+      }
+    });
+
+    it("matching stamp proceeds as-is — no rebuild, data preserved", async () => {
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path);
+      const a = newDocumentId(T1);
+      await opened.replica.write(
+        [rev(a, 1n, null, "A1")],
+        [idxPut(a, encodeIndexKey(["a"]), 1n)],
+        "Error",
+      );
+      await opened.replica.writeGlobal(FLEET_DEPLOYMENT_ID_KEY, PRIMARY_ID); // already stamped for A
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { replica } = await reconcileReplicaIdentity({
+          pgStore: primary,
+          replica: opened.replica,
+          switchable: opened.switchable,
+          replicaPath: path,
+        });
+        expect(replica).toBe(opened.replica); // same object — no rebuild
+        expect(await replica.maxTimestamp()).toBe(1n); // pre-existing data preserved
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        await opened.replica.close();
+      }
+    });
+
+    it("replica stamped for a DIFFERENT primary is warned about, rebuilt, and adopts the primary's id", async () => {
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path);
+      const a = newDocumentId(T1);
+      // Simulate a replica file that previously tailed a DIFFERENT primary (id-B): foreign data +
+      // a foreign stamp.
+      await opened.replica.write(
+        [rev(a, 1n, null, "FOREIGN")],
+        [idxPut(a, encodeIndexKey(["a"]), 1n)],
+        "Error",
+      );
+      await opened.replica.writeGlobal(FLEET_DEPLOYMENT_ID_KEY, "id-B");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { replica } = await reconcileReplicaIdentity({
+          pgStore: primary,
+          replica: opened.replica,
+          switchable: opened.switchable,
+          replicaPath: path,
+        });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0]![0])).toContain("does not match");
+        expect(replica).not.toBe(opened.replica); // rebuilt — a fresh SqliteDocStore instance
+        expect(await replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBe(PRIMARY_ID); // now id-A
+        expect(await replica.maxTimestamp()).toBe(0n); // foreign rows are gone
+        await replica.close();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("data present but no stamp (pre-C7 replica) is rebuilt and adopts the primary's id", async () => {
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path);
+      const a = newDocumentId(T1);
+      // No FLEET_DEPLOYMENT_ID_KEY written at all — mirrors a replica file created before C7.
+      await opened.replica.write(
+        [rev(a, 1n, null, "PRE_C7")],
+        [idxPut(a, encodeIndexKey(["a"]), 1n)],
+        "Error",
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { replica } = await reconcileReplicaIdentity({
+          pgStore: primary,
+          replica: opened.replica,
+          switchable: opened.switchable,
+          replicaPath: path,
+        });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(replica).not.toBe(opened.replica); // rebuilt
+        expect(await replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBe(PRIMARY_ID);
+        expect(await replica.maxTimestamp()).toBe(0n); // old, unstamped rows are gone
+        await replica.close();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("primary has no stamp yet (sync node won the boot race): mint-adopts race-safely, then proceeds", async () => {
+      // A separate primary with NO stamp — the sync node hits reconcileReplicaIdentity before the
+      // writer has minted one.
+      const freshClient = new PgliteClient();
+      const freshPrimary = new PostgresDocStore(freshClient);
+      await freshPrimary.setupSchema();
+      expect(await freshPrimary.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBeNull();
+
+      const path = join(tmp, REPLICA_DB_FILENAME);
+      const opened = await openSyncReplica(path);
+      try {
+        const { replica } = await reconcileReplicaIdentity({
+          pgStore: freshPrimary,
+          replica: opened.replica,
+          switchable: opened.switchable,
+          replicaPath: path,
+        });
+        const mintedId = await freshPrimary.getGlobal(FLEET_DEPLOYMENT_ID_KEY);
+        expect(typeof mintedId).toBe("string");
+        expect(mintedId).not.toBeNull();
+        expect(await replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY)).toBe(mintedId); // adopted the mint
+      } finally {
+        await opened.replica.close();
+        await freshPrimary.close();
+      }
+    });
   });
 });

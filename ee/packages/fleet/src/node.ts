@@ -31,6 +31,7 @@ import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/docstore-sqlite";
 import type { DatabaseAdapter } from "@stackbase/docstore-sqlite";
 import type { DocStore } from "@stackbase/docstore";
+import type { JSONValue } from "@stackbase/values";
 import {
   InMemoryWriteFanoutAdapter,
   type EmbeddedRuntime,
@@ -53,6 +54,23 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 
 /** The filename of a sync node's local embedded replica, under the serve data dir. */
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
+
+/**
+ * `persistence_globals` key a fleet deployment stamps once on the primary (C7) and every sync
+ * node mirrors locally onto its replica. A replica file is a rebuildable mirror of ONE primary —
+ * reused against a DIFFERENT primary (e.g. a data dir copied/reattached to another deployment) it
+ * would otherwise silently serve foreign rows, since the file itself carries no identity. The
+ * tailer never replicates `persistence_globals` (it applies only `documents`/`indexes` rows), so
+ * this stamp can only ever land on the replica via a direct local write — see
+ * `reconcileReplicaIdentity`.
+ */
+export const FLEET_DEPLOYMENT_ID_KEY = "fleet:deploymentId";
+
+/** Delete a SQLite replica file and its `-wal`/`-shm` sidecars — shared by the corrupted-file
+ *  recovery in `openSyncReplica` and the foreign-replica rebuild in `reconcileReplicaIdentity`. */
+function deleteReplicaFile(path: string): void {
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(path + suffix, { force: true });
+}
 
 /**
  * The `application_name` a fleet node stamps on its Postgres backends, derived from its advertise
@@ -136,12 +154,70 @@ export async function openSyncReplica(
       `fleet: local replica at ${replicaPath} failed to open (${e instanceof Error ? e.message : String(e)}) — ` +
         `deleting and rebuilding from the primary`,
     );
-    for (const suffix of ["", "-wal", "-shm"]) rmSync(replicaPath + suffix, { force: true });
+    deleteReplicaFile(replicaPath);
     // Retry ONCE — a second failure here is not a corrupt-file problem and must surface.
     const replica = new SqliteDocStore(replicaAdapter(replicaPath));
     await replica.setupSchema();
     return { replica, switchable: new SwitchableDocStore(replica) };
   }
+}
+
+/**
+ * C7: reconcile the sync node's local replica identity against the primary's `fleet:deploymentId`
+ * stamp — called by `prepareFleetNode` right after `openSyncReplica` opens the replica, and always
+ * BEFORE the tailer is started (`startFleetNode`). A replica file is only ever safe to tail onto
+ * when it's either brand new or already stamped for THIS primary; otherwise it may carry rows from
+ * a different deployment (e.g. a data dir reused/copied across environments) and must be rebuilt
+ * before a single row is served off it.
+ *
+ * Cases:
+ *  - primary has no stamp yet (this sync node won the boot race against the writer): mint-adopt via
+ *    `writeGlobalIfAbsent` on the PG store — race-safe by contract, so every node that hits this
+ *    converges on whichever write landed first.
+ *  - fresh replica (no data, no stamp): adopt the primary's id locally, no warning, no rebuild.
+ *  - stamps match: proceed as-is.
+ *  - mismatch, or data present without a stamp (a pre-C7 replica): warn, delete the replica file
+ *    (+ `-wal`/`-shm`), reopen a fresh one, and adopt the primary's id onto it.
+ */
+export async function reconcileReplicaIdentity(deps: {
+  pgStore: PostgresDocStore;
+  replica: SqliteDocStore;
+  switchable: SwitchableDocStore;
+  replicaPath: string;
+}): Promise<{ replica: SqliteDocStore; switchable: SwitchableDocStore }> {
+  const { pgStore, replicaPath } = deps;
+
+  let primaryId = await pgStore.getGlobal(FLEET_DEPLOYMENT_ID_KEY);
+  if (primaryId === null) {
+    // The writer hasn't booted (or minted) yet — mint-adopt from here instead. Whichever node's
+    // write wins the race is authoritative; re-read to pick up the actual winner (may not be ours).
+    await pgStore.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, crypto.randomUUID());
+    primaryId = await pgStore.getGlobal(FLEET_DEPLOYMENT_ID_KEY);
+  }
+
+  const replicaId = await deps.replica.getGlobal(FLEET_DEPLOYMENT_ID_KEY);
+  if (replicaId === primaryId) {
+    return { replica: deps.replica, switchable: deps.switchable }; // already stamped for this primary
+  }
+
+  const hasData = (await deps.replica.maxTimestamp()) > 0n;
+  if (replicaId === null && !hasData) {
+    // Fresh replica — nothing foreign to worry about, just adopt silently.
+    await deps.replica.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, primaryId as JSONValue);
+    return { replica: deps.replica, switchable: deps.switchable };
+  }
+
+  // Mismatch, or data present without a stamp (predates C7) — this file may carry rows from a
+  // different deployment. Not fatal: rebuild from scratch, same recovery as a corrupted file.
+  console.warn(
+    `fleet: local replica at ${replicaPath} does not match the primary's deployment id ` +
+      `(foreign replica, or predates identity stamping) — deleting and rebuilding from the primary`,
+  );
+  await deps.replica.close();
+  deleteReplicaFile(replicaPath);
+  const rebuilt = await openSyncReplica(replicaPath);
+  await rebuilt.replica.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, primaryId as JSONValue);
+  return rebuilt;
 }
 
 /**
@@ -185,6 +261,10 @@ export async function prepareFleetNode(deps: {
     // locally. The runtime runs directly on the writable Postgres store — no replica, no switchable.
     pgStore.setWritable();
     forwarder.promote();
+    // C7: the deployment-id mint (writeGlobalIfAbsent) needs `persistence_globals` to already
+    // exist, which `bootProject`'s `createEmbeddedRuntime` only creates via `store.setupSchema()`
+    // AFTER this function returns — so the mint itself happens in `startFleetNode`'s writer
+    // branch, not here. See that comment for the full rationale.
     return {
       client,
       pgStore,
@@ -203,7 +283,16 @@ export async function prepareFleetNode(deps: {
   // Sync boot: the runtime store is a local file-backed replica behind a SwitchableDocStore. The
   // read-only Postgres store is the tail source + promotion swap target only. Drivers deferred until
   // (if) promoted; writes forwarded to the current writer.
-  const { replica, switchable } = await openSyncReplica(join(deps.dataDir, REPLICA_DB_FILENAME));
+  const replicaPath = join(deps.dataDir, REPLICA_DB_FILENAME);
+  const opened = await openSyncReplica(replicaPath);
+  // C7: reconcile the replica's deployment-id stamp against the primary's BEFORE the tailer (see
+  // `startFleetNode`) ever starts applying onto it — a foreign or pre-C7 replica is rebuilt here.
+  const { replica, switchable } = await reconcileReplicaIdentity({
+    pgStore,
+    replica: opened.replica,
+    switchable: opened.switchable,
+    replicaPath,
+  });
   return {
     client,
     pgStore,
@@ -354,6 +443,12 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // except the lease monitor, since this node is the writer from the first tick.
   if (forwarder.isLocalWriter()) {
     startWriterMonitor();
+    // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
+    // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
+    // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
+    // first while this node was still booting). Sync nodes read this to detect a foreign-primary
+    // replica file and rebuild rather than serve it.
+    await pgStore.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, crypto.randomUUID());
     return {
       role: () => "writer",
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
