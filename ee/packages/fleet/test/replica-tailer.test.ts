@@ -10,7 +10,7 @@
  * expected string/byte sequence — per the slice-1 lesson: reconstruction must invert the producer's
  * serialization exactly (`postgres-docstore.ts`'s `write()`).
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
@@ -323,5 +323,38 @@ describe("ReplicaTailer", () => {
     const releasedPromise = tailer.waitFor(999_999n, 5000);
     tailer.release();
     await expect(releasedPromise).resolves.toBe("released");
+  });
+
+  it("(g) stop() mid-bootstrap halts the walk without arming LISTEN or the poll timer (C6)", async () => {
+    // 5 pre-existing entries + batchSize 1 forces >= 2 bootstrap ticks before catch-up would
+    // otherwise complete — stop() lands after the FIRST tick's onInvalidation, well before the
+    // bootstrap while-loop's condition would naturally exit.
+    for (let n = 1; n <= 5; n++) {
+      const id = newDocumentId(T1);
+      await primary.write([rev(id, BigInt(n), null, `V${n}`)], [], "Error");
+    }
+    const listenSpy = vi.spyOn(client, "listen");
+
+    const invalidations: AppliedInvalidation[] = [];
+    tailer = new ReplicaTailer(client, primary, replica, {
+      pollMs: 20,
+      batchSize: 1,
+      onInvalidation: async (inv) => {
+        invalidations.push(inv);
+        if (invalidations.length === 1) await tailer!.stop();
+      },
+    });
+    await tailer.start(); // must return early (stopped), NOT run all 5 ticks to completion
+
+    expect(invalidations).toHaveLength(1); // only the first tick ever ran
+    expect(await replica.maxTimestamp()).toBeLessThan(await primary.maxTimestamp()); // catch-up incomplete
+    expect(listenSpy).not.toHaveBeenCalled(); // stop() landed before LISTEN was ever armed
+
+    // If a poll timer HAD leaked, it would eventually pick up a write landing after stop() — give
+    // it several poll intervals' worth of real time and confirm nothing further ever fires.
+    const a = newDocumentId(T1);
+    await primary.write([rev(a, 6n, null, "after-stop")], [], "Error");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(invalidations).toHaveLength(1); // no further tick ran — no timer, no LISTEN wake
   });
 });

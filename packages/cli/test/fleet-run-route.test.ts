@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@stackbase/executor";
+import { InMemoryLogSink, SimpleIndexCatalog, mutation, action } from "@stackbase/executor";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { handleHttpRequest, type FleetHandles } from "../src/http-handler";
 
@@ -30,9 +30,10 @@ async function setup() {
     modules: {
       "notes:add": mutation(async (ctx, a: { title: string }) => ctx.db.insert("notes", a)),
       "notes:noop": mutation(async () => null),
+      "notes:actAdd": action(async (ctx: any, a: { title: string }) => ctx.runMutation("notes:add", { title: a.title })),
     },
   });
-  const info = { functions: ["notes:add", "notes:noop"], tables: ["notes"] };
+  const info = { functions: ["notes:add", "notes:noop", "notes:actAdd"], tables: ["notes"] };
   return { runtime, admin: { api: undefined as never, key: "k" }, info };
 }
 
@@ -58,6 +59,30 @@ describe("/_fleet/run response shape", () => {
     expect(typeof body.commitTs).toBe("string");
     // A committing mutation's commitTs is a positive integer string (never "0", never a bigint
     // literal — bigints don't survive JSON.stringify, which is exactly why this is stringified).
+    expect(BigInt(body.commitTs)).toBeGreaterThan(0n);
+  });
+
+  it("kind=action that commits via ctx.runMutation surfaces a non-\"0\" stringified commitTs (RYOW for actions)", async () => {
+    const { runtime, admin, info } = await setup();
+    const res = await handleHttpRequest(
+      runtime,
+      {
+        method: "POST",
+        path: "/_fleet/run",
+        body: JSON.stringify({ path: "notes:actAdd", args: { title: "hi" }, identity: null, kind: "action" }),
+        authorization: "Bearer k",
+      },
+      info,
+      admin,
+      undefined,
+      undefined,
+      fleetHandles,
+    );
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body) as { value: unknown; commitTs: string };
+    // An action's `oplog` is always null (see http-handler.ts's fallback) — this proves the
+    // `result.commitTs` fallback (the executor's max-inner-commitTs tracking) is what surfaces here.
+    expect(body.commitTs).not.toBe("0");
     expect(BigInt(body.commitTs)).toBeGreaterThan(0n);
   });
 

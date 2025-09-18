@@ -284,6 +284,10 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           return ws.bufferedAmount;
         },
         close: () => ws.close(),
+        ping: (onPong) => {
+          ws.once("pong", onPong);
+          ws.ping();
+        },
       };
       runtime.handler.connect(sessionId, syncSocket);
       ws.on("message", (data: Buffer) => void runtime.handler.handleMessage(sessionId, data.toString("utf8")));
@@ -323,6 +327,7 @@ interface BunWebSocket {
   send(data: string): number;
   close(): void;
   getBufferedAmount(): number;
+  ping(): void;
   readonly data: { sessionId: string };
 }
 interface BunUpgradeServer {
@@ -341,11 +346,19 @@ interface BunServeOptions {
     open(ws: BunWebSocket): void;
     message(ws: BunWebSocket, message: string | Uint8Array): void;
     close(ws: BunWebSocket): void;
+    pong(ws: BunWebSocket): void;
   };
 }
 interface BunRuntime {
   serve(options: BunServeOptions): BunServeHandle;
 }
+
+/**
+ * Per-session pong callbacks for the Bun transport. Bun delivers pongs to ONE config-level
+ * `websocket.pong(ws)` handler (not a per-socket listener like node-ws), so the heartbeat
+ * controller's `onPong` is stashed here keyed by session id and invoked when the pong lands.
+ */
+const bunPongCallbacks = new Map<string, () => void>();
 
 async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
   const bun = (globalThis as { Bun?: BunRuntime }).Bun;
@@ -407,6 +420,10 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
             return ws.getBufferedAmount();
           },
           close: () => ws.close(),
+          ping: (onPong) => {
+            bunPongCallbacks.set(ws.data.sessionId, onPong);
+            ws.ping();
+          },
         };
         runtime.handler.connect(ws.data.sessionId, syncSocket);
       },
@@ -414,7 +431,14 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
         void runtime.handler.handleMessage(ws.data.sessionId, typeof message === "string" ? message : new TextDecoder().decode(message));
       },
       close(ws) {
+        bunPongCallbacks.delete(ws.data.sessionId);
         runtime.handler.disconnect(ws.data.sessionId);
+      },
+      pong(ws) {
+        // Bun fires the config-level pong handler; route it to the session's stashed onPong.
+        const cb = bunPongCallbacks.get(ws.data.sessionId);
+        bunPongCallbacks.delete(ws.data.sessionId);
+        cb?.();
       },
     },
   });

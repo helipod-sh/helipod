@@ -234,6 +234,14 @@ shared database is one tail cursor, not a live connection serving arbitrary read
   node — it re-bootstraps cleanly from the primary's log, the same as a first boot. A corrupted
   replica file (e.g. from a hard crash mid-write) is handled the same way automatically: the node
   detects the failure to open it, deletes it, and rebuilds once before giving up.
+- **A replica file from a different deployment is detected and rebuilt automatically.** Every
+  deployment stamps a one-time identity marker on the primary the first time it boots a writer,
+  and every sync node mirrors that stamp onto its own replica file (this can't happen via the
+  tail — it's a direct local write). If a replica file ever gets reused against a *different*
+  primary — a data directory copied between environments, or reattached to a different database —
+  the mismatch (or an old replica that predates this check) is caught the moment the node boots:
+  it's deleted and rebuilt from the current primary before serving a single read, the same
+  automatic recovery as a corrupted file. There's nothing to configure or clean up by hand.
 
 ### Read-your-own-writes
 
@@ -246,13 +254,15 @@ up to the mutation's commit before returning the mutation's result to the caller
 seconds — if the replica hasn't caught up within that window, the mutation still returns rather
 than hanging, and in that rare case an immediately-following read could be stale.
 
-**This guarantee covers mutations, not `action` calls that write via inner mutations.** An
-action's own top-level response has no single commit to wait on — even though its inner
-`ctx.runMutation` calls commit normally and fan out reactively like any other write — so an
-action's response can precede its own inner writes becoming visible on the node you called it on.
-This is a known limitation: if you need read-your-own-writes for an action's side effects,
-structure the client code to await the mutation directly (or subscribe/poll) rather than treating
-the action's return value as a guarantee that its writes are visible yet.
+**This guarantee covers `action` calls too, including their inner writes.** An action's own
+top-level response has no single commit of its own — but the engine tracks the highest commit
+timestamp across everything the action wrote via its inner `ctx.runMutation`/`ctx.runAction` calls
+(recursively — an action calling another action picks up that inner action's own writes too) and
+carries it on the action's response. The forwarding node waits on that same timestamp before
+returning, exactly as it does for a plain mutation — same 5-second bound, same same-node guarantee.
+An action that performs no writes at all (a pure read, or one that only calls other actions/queries
+that don't write) simply has nothing to wait on, and its response returns as soon as the handler
+completes.
 
 ### Reads keep working through a Postgres outage; writes don't
 
@@ -281,6 +291,18 @@ forwarded — every node always serves those locally, from its own embedded repl
 or directly on the writer (see [Reads served from a local
 replica](#reads-served-from-a-local-replica) above).
 
+### Slow clients
+
+This isn't fleet-specific — it applies to every node's WebSocket connections — but matters more
+in a fleet where a node may be fanning updates out to more connections. A client whose connection
+can't keep up with pushed updates (a slow network, a backgrounded tab) doesn't grow the server's
+memory without bound: its outbound updates queue up to a cap, and past that cap the server starts
+dropping the newest update rather than queuing indefinitely. A dropped update isn't lost data —
+the client SDK detects the resulting gap and automatically resyncs (re-subscribes its live queries
+from scratch) the next time it hears from the server, with no app code involved. A connection that
+stops responding entirely (not just slow, actually gone) is detected and closed by a periodic
+heartbeat, freeing its resources. None of this requires manual intervention.
+
 ### Failover timing and in-flight requests
 
 - A dead writer's Postgres session — and its advisory lock — is released as soon as Postgres
@@ -294,9 +316,16 @@ replica](#reads-served-from-a-local-replica) above).
   client/app**, the same way you'd already handle a dropped connection.
 - Subscriptions on the *surviving* nodes are never affected by a writer failing over — they keep
   streaming from their own local embedded replica throughout.
-- There is no demotion path: a writer that loses its Postgres session must exit (a process
-  supervisor/Docker restarts it), after which it rejoins the fleet as a sync node. A running
-  writer never voluntarily hands off the lease.
+- **Writer self-exit is real, not aspirational.** There is no demotion path — a running writer
+  never voluntarily hands off the lease, so the only way it stops being the writer is by exiting.
+  A dropped Postgres connection is detected immediately (the advisory lock lives on that
+  connection and is released by Postgres the instant it goes away); a connection that goes
+  silently wedged instead of erroring is caught by a backstop liveness probe within a few seconds.
+  Either way the process exits within seconds of losing the lease — a process supervisor (Docker's
+  `restart: unless-stopped`, systemd, Kubernetes, etc.) restarts it, and it rejoins the fleet as a
+  fresh sync node. A promotion that fails partway through (a Postgres error while it's catching
+  its write oracle up, for example) exits the same way, rather than leaving the node stuck
+  half-promoted.
 
 ## Current limits
 

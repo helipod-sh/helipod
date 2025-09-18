@@ -543,6 +543,8 @@ export class EmbeddedRuntime {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     for (const d of this.drivers) await d.stop?.();
+    // Stop the sync handler's background flush sweep (per-session backpressure drain) on shutdown.
+    this.handler.dispose();
   }
 
   /**

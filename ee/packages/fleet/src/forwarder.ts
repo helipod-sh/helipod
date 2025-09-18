@@ -49,9 +49,11 @@ export type ReplicaWaiter = Pick<ReplicaTailer, "waitFor" | "release">;
 export class WriteForwarder implements WriteRouter {
   private role: "sync" | "writer" = "sync";
   private tailer: ReplicaWaiter | undefined;
-  /** Guards the "missing commitTs" warning to once per process — a malformed/old-writer response
-   *  shape shouldn't spam the log on every subsequent forwarded write. */
+  /** Guard each distinct malformed-response warning to once per process (independently — an absent
+   *  commitTs and an unparseable one are different failure modes and each deserves its own log
+   *  line) so a bad/old writer response doesn't spam the log on every subsequent forwarded write. */
   private warnedMissingCommitTs = false;
+  private warnedUnparseableCommitTs = false;
 
   constructor(
     private readonly lease: LeaseManager,
@@ -148,8 +150,8 @@ export class WriteForwarder implements WriteRouter {
     try {
       commitTs = BigInt(commitTsStr);
     } catch {
-      if (!this.warnedMissingCommitTs) {
-        this.warnedMissingCommitTs = true;
+      if (!this.warnedUnparseableCommitTs) {
+        this.warnedUnparseableCommitTs = true;
         console.warn(
           `fleet: writer's /_fleet/run response for ${path} had an unparseable commitTs ${JSON.stringify(commitTsStr)} — skipping read-your-own-writes wait`,
         );

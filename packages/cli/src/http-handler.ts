@@ -104,8 +104,11 @@ export async function handleHttpRequest(
           ? await runtime.runAction(p.path, p.args ?? {}, { identity })
           : await runtime.run(p.path, p.args ?? {}, { identity });
       // Stringified: a replica's `WriteForwarder` waits on this via `ReplicaTailer.waitFor` for
-      // read-your-own-writes, and bigints don't survive JSON.stringify.
-      return json(200, { value: convexToJson(result.value as Value), commitTs: String(result.oplog?.commitTs ?? 0n) });
+      // read-your-own-writes, and bigints don't survive JSON.stringify. `result.oplog` is null for
+      // actions (they never commit directly) — fall back to `result.commitTs`, which the executor
+      // now surfaces as the MAX commitTs across the action's inner runMutation/runAction invokes
+      // (0n if it committed nothing), so fleet RYOW covers actions too.
+      return json(200, { value: convexToJson(result.value as Value), commitTs: String(result.oplog?.commitTs ?? result.commitTs ?? 0n) });
     } catch (e) {
       const err = toStackbaseError(e);
       return json(500, { error: err.message, code: err.code });
@@ -171,6 +174,13 @@ export async function handleHttpRequest(
         const resp = await fetch(target, { method: req.method, headers, ...(hasBody ? { body: req.body } : {}) });
         const outHeaders: Record<string, string> = {};
         resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+        // Hop-by-hop / body-framing headers: `undici` already decompressed the body (so a copied
+        // content-encoding/content-length would mismatch what we actually relay), and
+        // transfer-encoding/connection are connection-scoped, never meaningful to forward verbatim.
+        delete outHeaders["content-encoding"];
+        delete outHeaders["content-length"];
+        delete outHeaders["transfer-encoding"];
+        delete outHeaders["connection"];
         return { status: resp.status, headers: outHeaders, body: await resp.text() };
       } catch (e) {
         return json(502, { error: `fleet: httpAction proxy to writer failed: ${e instanceof Error ? e.message : String(e)}` });

@@ -38,6 +38,10 @@ export interface FleetPrep {
   pgStore: DocStore;
   replica?: unknown;
   switchable?: unknown;
+  /** Sync only: `replica`'s on-disk path — threaded through to `startFleetNode`, which now runs the
+   *  C7 deployment-id reconcile (deferred there from `prepareFleetNode` so it reads Postgres only
+   *  after THIS node's own boot has run — see `@stackbase/fleet`'s `node.ts`). */
+  replicaPath?: string;
   lease: unknown;
   forwarder: unknown;
   role: "sync" | "writer";
@@ -60,6 +64,7 @@ export interface FleetModule {
     forwarder: unknown;
     replica?: unknown;
     switchable?: unknown;
+    replicaPath?: string;
   }): Promise<FleetHandles>;
 }
 
@@ -205,6 +210,7 @@ export async function startServe(
           forwarder: prep.forwarder,
           replica: prep.replica,
           switchable: prep.switchable,
+          replicaPath: prep.replicaPath,
         })
       : undefined;
 

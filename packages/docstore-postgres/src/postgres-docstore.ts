@@ -93,7 +93,23 @@ export class PostgresDocStore implements DocStore {
   async setupSchema(_options?: SchemaSetupOptions): Promise<void> {
     // One idempotent statement per query() — portable across single-statement (PGlite) and
     // multi-statement (pg) drivers. Engine-authored text, no interpolation.
-    for (const stmt of SCHEMA_STATEMENTS) await this.db.query(stmt);
+    //
+    // `CREATE ... IF NOT EXISTS` is NOT fully race-proof in Postgres: two sessions racing to
+    // create the same object on a fresh database can both pass the "does it exist" check before
+    // either commits, and the loser gets a duplicate-object error instead of a clean no-op
+    // (a documented Postgres quirk, not a bug in this code). Fleet self-sufficiency (C7) means
+    // every node now runs this DDL concurrently on first boot, widening exposure from one runner
+    // to N — so swallow only the duplicate-object race codes here; the statement's objective
+    // (the object exists) is already achieved when one of these fires, so continuing is correct.
+    // Anything else (e.g. a syntax error) is a real problem and must still propagate.
+    for (const stmt of SCHEMA_STATEMENTS) {
+      try {
+        await this.db.query(stmt);
+      } catch (e) {
+        const code = (e as { code?: unknown } | null)?.code;
+        if (code !== "23505" /* unique_violation */ && code !== "42P07" /* duplicate_table */) throw e;
+      }
+    }
     // Single-writer invariant — fail fast if another engine already holds the advisory lock.
     // No-op under PGlite (single in-process connection); real guard under NodePgClient.
     // Skipped entirely in read-only mode: a follower runs DDL (schema must exist) but must NOT

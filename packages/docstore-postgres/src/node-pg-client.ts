@@ -44,13 +44,23 @@ function normalizeRows(rows: Record<string, unknown>[]): PgRow[] {
 export class NodePgClient implements PgClient {
   private readonly client: pg.Client;
   private readonly connectionString: string;
+  private readonly applicationName?: string;
   private connected = false;
   private connectPromise?: Promise<void>;
+  private readonly connectionLostCbs: Array<() => void> = [];
+  private connectionLostFired = false;
 
-  constructor(opts: { connectionString: string }) {
+  constructor(opts: { connectionString: string; applicationName?: string }) {
     this.connectionString = opts.connectionString;
+    this.applicationName = opts.applicationName;
     this.client = new Client({
       connectionString: opts.connectionString,
+      // Tag this connection's backend in pg_stat_activity when a name is supplied (fleet nodes pass a
+      // per-node `stackbase-fleet-<port>` so an operator — or the fleet self-exit E2E — can identify
+      // and target one node's backends). Passed as an explicit config field, not appended to the
+      // connection string: pg merges the parsed connection string OVER explicit fields, so this only
+      // survives because our connection strings never set `application_name` themselves.
+      application_name: opts.applicationName,
       // Per-client type map: int8 (OID 20) → bigint; every other OID keeps pg's default parser.
       types: {
         getTypeParser: (oid: number, format?: string) =>
@@ -66,9 +76,39 @@ export class NodePgClient implements PgClient {
     // Promise.all([store.get(a), store.get(b)]) before any awaited setup) all
     // await the SAME connect() rather than each racing check-then-await-then-set
     // and calling this.client.connect() twice (pg rejects the second call).
-    return (this.connectPromise ??= this.client.connect().then(() => {
-      this.connected = true;
-    }));
+    return (this.connectPromise ??= (() => {
+      // Attach connection-loss listeners on the single pinned connection the moment we connect it.
+      // A closed/errored pinned connection is DEFINITIVE — `ensure()` memoizes and never reconnects,
+      // and the session-level advisory lock is released by Postgres when the backend goes away — so
+      // fire the registered callbacks exactly once (guarding the error-then-end double-fire).
+      this.client.on("error", () => this.fireConnectionLost());
+      this.client.on("end", () => this.fireConnectionLost());
+      return this.client.connect().then(() => {
+        this.connected = true;
+      });
+    })());
+  }
+
+  /**
+   * Register a callback fired once when the pinned connection is lost (error/end). Used by the fleet
+   * writer lease monitor to treat a dropped connection as definitive lease loss. Multiple callbacks
+   * allowed; all fire (a throwing one can't mask the loss for the others). Absent on drivers that
+   * don't need it (the seam member is optional).
+   */
+  onConnectionLost(cb: () => void): void {
+    this.connectionLostCbs.push(cb);
+  }
+
+  private fireConnectionLost(): void {
+    if (this.connectionLostFired) return;
+    this.connectionLostFired = true;
+    for (const cb of this.connectionLostCbs) {
+      try {
+        cb();
+      } catch {
+        // A misbehaving callback must not mask the connection loss for the others.
+      }
+    }
   }
 
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
@@ -113,12 +153,19 @@ export class NodePgClient implements PgClient {
    * the same connection string. The returned closer ends that connection; safe to call once.
    */
   async listen(channel: string, onNotify: (payload: string) => void): Promise<() => Promise<void>> {
-    const listener = new Client({ connectionString: this.connectionString });
+    const listener = new Client({ connectionString: this.connectionString, application_name: this.applicationName });
     await listener.connect();
     listener.on("notification", (msg) => {
       if (msg.channel === channel && msg.payload !== undefined) onNotify(msg.payload);
     });
-    await listener.query(`LISTEN "${channel.replace(/"/g, '""')}"`);
+    try {
+      await listener.query(`LISTEN "${channel.replace(/"/g, '""')}"`);
+    } catch (e) {
+      // The dedicated connection connected fine but LISTEN itself failed — end it before
+      // rethrowing so a failed listen() doesn't leak a live Postgres connection.
+      await listener.end();
+      throw e;
+    }
     let closed = false;
     return async () => {
       if (closed) return;
@@ -133,6 +180,9 @@ export class NodePgClient implements PgClient {
 
   async close(): Promise<void> {
     if (this.connected) {
+      // A deliberate close is not a lost connection: suppress the `end`-event fire so a graceful
+      // shutdown never trips the writer lease monitor into a spurious process.exit(1).
+      this.connectionLostFired = true;
       await this.client.end();
       this.connected = false;
       this.connectPromise = undefined;

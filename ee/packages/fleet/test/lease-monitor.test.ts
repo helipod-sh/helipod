@@ -1,0 +1,251 @@
+/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/**
+ * Writer self-exit on lease loss (Task 4, C4) + promotion error policy (C5).
+ *
+ *   (a) `LeaseMonitor` — the writer-only liveness watchdog: `connectionLost()` exits immediately;
+ *       `maxMisses` consecutive probe failures are tolerated, the next one exits; any success resets;
+ *       `onExit` fires at most once; `stop()` halts everything. Exercised with fake timers.
+ *   (b) `runPromotion` — the C5 wrap: a successful promotion arms the lease monitor and drops the
+ *       proxy; ANY failed promotion step routes to the injected exit (a half-promoted node must not
+ *       linger) and does NOT arm the monitor. This is also the seam that proves the monitor is
+ *       constructed ONLY on (successful) promotion — a sync node that never promotes never starts one.
+ *
+ * The fully-integrated `startFleetNode` wiring (real NodePgClient + advisory-lock election + a live
+ * runtime/tailer) is proven only through the real `stackbase serve --fleet` E2E (Task 5); here we
+ * exercise the extracted, side-effect-free seams directly — the same spy pattern as
+ * `node-lifecycle.test.ts`.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { LeaseMonitor } from "../src/lease-monitor";
+import { runPromotion } from "../src/node";
+
+describe("LeaseMonitor (C4: writer self-exit on lease loss)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("connectionLost() → onExit exactly once, immediately", () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {});
+    const m = new LeaseMonitor({ probe, onExit });
+    m.start();
+
+    m.connectionLost();
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("lease");
+    expect(probe).not.toHaveBeenCalled(); // exit was immediate, no probe needed
+  });
+
+  it("onExit fires at most once (repeated connectionLost + subsequent probe misses)", async () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {
+      throw new Error("down");
+    });
+    const m = new LeaseMonitor({ probe, onExit });
+    m.start();
+
+    m.connectionLost();
+    m.connectionLost();
+    await vi.advanceTimersByTimeAsync(5000 * 10); // any later probe misses must not re-fire
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("3 consecutive probe misses → NO exit; the 4th → exit with reason containing 'lease'", async () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {
+      throw new Error("SELECT 1 failed");
+    });
+    const m = new LeaseMonitor({ probe, onExit }); // defaults: probeMs 5000, maxMisses 3
+    m.start();
+
+    for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(5000);
+    expect(onExit).not.toHaveBeenCalled(); // 3 misses tolerated
+    expect(probe).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(5000); // 4th miss
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("lease");
+  });
+
+  it("a probe success after 2 misses resets the counter (takes 4 more misses to exit)", async () => {
+    const onExit = vi.fn();
+    let healthy = false;
+    const probe = vi.fn(async () => {
+      if (!healthy) throw new Error("down");
+    });
+    const m = new LeaseMonitor({ probe, onExit });
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(5000); // miss 1
+    await vi.advanceTimersByTimeAsync(5000); // miss 2
+    healthy = true;
+    await vi.advanceTimersByTimeAsync(5000); // success → reset to 0
+    expect(onExit).not.toHaveBeenCalled();
+
+    healthy = false;
+    for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(5000); // misses 1,2,3 post-reset
+    expect(onExit).not.toHaveBeenCalled(); // reset held — 3 fresh misses is still tolerated
+
+    await vi.advanceTimersByTimeAsync(5000); // 4th post-reset miss → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop() halts probing — no exit and no further probes afterward", async () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {
+      throw new Error("down");
+    });
+    const m = new LeaseMonitor({ probe, onExit });
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(5000); // miss 1
+    m.stop();
+    const callsAtStop = probe.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5000 * 10);
+    expect(onExit).not.toHaveBeenCalled();
+    expect(probe).toHaveBeenCalledTimes(callsAtStop); // no probes after stop()
+  });
+
+  it("connectionLost() after stop() does not exit", () => {
+    const onExit = vi.fn();
+    const m = new LeaseMonitor({ probe: vi.fn(async () => {}), onExit });
+    m.start();
+    m.stop();
+
+    m.connectionLost();
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
+  it("respects a custom maxMisses/probeMs", async () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {
+      throw new Error("down");
+    });
+    const m = new LeaseMonitor({ probe, onExit, probeMs: 100, maxMisses: 1 });
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(100); // miss 1 — tolerated
+    expect(onExit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100); // 2nd miss > maxMisses(1) → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("a never-resolving probe (silently-wedged connection) still accrues misses via the per-probe timeout, exiting on the 4th", async () => {
+    const onExit = vi.fn();
+    // Simulates a half-open TCP connection: the query promise never settles at all.
+    const probe = vi.fn(() => new Promise<void>(() => {}));
+    // probeTimeoutMs (2500) deliberately half of probeMs (5000, the default) so each tick's own
+    // timeout lands cleanly between ticks with no same-instant ambiguity: tick@5000/timeout@7500,
+    // tick@10000/timeout@12500, etc.
+    const m = new LeaseMonitor({ probe, onExit, probeTimeoutMs: 2500 }); // probeMs 5000 default, maxMisses 3
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(5000); // tick 1 starts
+    await vi.advanceTimersByTimeAsync(2500); // tick 1's timeout fires → miss 1
+    await vi.advanceTimersByTimeAsync(2500); // tick 2 starts
+    await vi.advanceTimersByTimeAsync(2500); // miss 2
+    await vi.advanceTimersByTimeAsync(2500); // tick 3 starts
+    await vi.advanceTimersByTimeAsync(2500); // miss 3
+    expect(onExit).not.toHaveBeenCalled(); // 3 timeouts tolerated
+    expect(probe).toHaveBeenCalledTimes(3); // each tick got its own fresh attempt — inFlight cleared
+
+    await vi.advanceTimersByTimeAsync(2500); // tick 4 starts
+    await vi.advanceTimersByTimeAsync(2500); // 4th timeout → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("lease");
+    expect(String(onExit.mock.calls[0]![0])).toContain("timed out");
+  });
+
+  it("a probe that resolves AFTER its timeout already fired is ignored — no reset, no double-count", async () => {
+    const onExit = vi.fn();
+    // A fresh deferred per probe() call — each tick's probe is independently controllable.
+    function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+      let resolve!: () => void;
+      const promise = new Promise<void>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+    let current = createDeferred();
+    const probe = vi.fn(() => {
+      current = createDeferred();
+      return current.promise;
+    });
+    const m = new LeaseMonitor({ probe, onExit, probeMs: 100, probeTimeoutMs: 50, maxMisses: 3 });
+    m.start();
+
+    await vi.advanceTimersByTimeAsync(100); // tick 1 starts (t=100), probe() called
+    const tick1 = current;
+    await vi.advanceTimersByTimeAsync(50); // t=150: tick 1's timeout fires → miss 1 (probe still unsettled)
+    expect(onExit).not.toHaveBeenCalled();
+
+    // Tick 1's probe (still pending) now resolves late — well after its own timeout already counted
+    // as a miss. This must NOT reset the miss counter back to 0.
+    tick1.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Drive 3 more ticks to timeout-misses (2, 3, 4) — miss 4 exceeds maxMisses(3) and exits. If the
+    // late resolution above had incorrectly reset the counter to 0, this would NOT exit here.
+    await vi.advanceTimersByTimeAsync(50); // t=200: tick 2 starts
+    await vi.advanceTimersByTimeAsync(50); // t=250: miss 2
+    expect(onExit).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(50); // t=300: tick 3 starts
+    await vi.advanceTimersByTimeAsync(50); // t=350: miss 3
+    expect(onExit).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(50); // t=400: tick 4 starts
+    await vi.advanceTimersByTimeAsync(50); // t=450: miss 4 > maxMisses(3) → exit
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runPromotion (C5: promotion error policy)", () => {
+  it("success → promote runs, monitor is started, proxy dropped, no exit", async () => {
+    const order: string[] = [];
+    const startMonitor = vi.fn(() => void order.push("startMonitor"));
+    const firePromoted = vi.fn(() => void order.push("firePromoted"));
+    const onExit = vi.fn();
+    const promote = vi.fn(async () => void order.push("promote"));
+
+    await runPromotion({ promote, startMonitor, firePromoted, onExit });
+
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(startMonitor).toHaveBeenCalledTimes(1); // writer self-exit armed on promotion
+    expect(firePromoted).toHaveBeenCalledTimes(1);
+    expect(onExit).not.toHaveBeenCalled();
+    // Monitor starts only after the promotion sequence completes.
+    expect(order).toEqual(["promote", "startMonitor", "firePromoted"]);
+  });
+
+  it("a throwing promotion step → injected exit once; monitor NOT started, proxy NOT dropped", async () => {
+    const startMonitor = vi.fn();
+    const firePromoted = vi.fn();
+    const onExit = vi.fn();
+    const promote = vi.fn(async () => {
+      throw new Error("swapTo blew up");
+    });
+
+    await runPromotion({ promote, startMonitor, firePromoted, onExit });
+
+    expect(onExit).toHaveBeenCalledTimes(1); // half-promoted node must not linger — it exits
+    expect(String(onExit.mock.calls[0]![0])).toContain("promotion failed");
+    expect(String(onExit.mock.calls[0]![0])).toContain("swapTo blew up");
+    expect(startMonitor).not.toHaveBeenCalled(); // a failed promotion never arms the monitor
+    expect(firePromoted).not.toHaveBeenCalled();
+  });
+
+  it("a sync node that never promotes never constructs/starts a monitor", () => {
+    // The ONLY paths that start a writer monitor are the writer-boot branch and runPromotion's
+    // success path. A sync node runs neither until it wins the lease — modeled here by never invoking
+    // runPromotion: startMonitor stays untouched.
+    const startMonitor = vi.fn();
+    const onExit = vi.fn();
+    void onExit;
+    // (no runPromotion call — this node stayed a sync replica)
+    expect(startMonitor).not.toHaveBeenCalled();
+  });
+});

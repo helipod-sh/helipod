@@ -201,6 +201,31 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     warnSpy.mockRestore();
   });
 
+  it("warns once for a missing commitTs AND once for an unparseable one — two DISTINCT warns, not a shared guard (C8b)", async () => {
+    const responses = [
+      jsonResponse({ value: "ok", committed: true }), // commitTs absent
+      jsonResponse({ value: "ok", committed: true, commitTs: "not-a-bigint" }), // commitTs unparseable
+      // Repeat both kinds — a shared/single guard would suppress these; a per-kind guard still
+      // warns exactly once per kind total, never a second time for the SAME kind.
+      jsonResponse({ value: "ok", committed: true }),
+      jsonResponse({ value: "ok", committed: true, commitTs: "still-not-a-bigint" }),
+    ];
+    globalThis.fetch = vi.fn(async () => responses.shift()!);
+    const forwarder = makeForwarder();
+    const tailer = new StubTailer();
+    forwarder.attachTailer(tailer);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    for (let i = 0; i < 4; i++) await forwarder.forward("mutation", "notes:add", {}, null);
+
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    const messages = warnSpy.mock.calls.map(([m]) => String(m));
+    expect(messages.some((m) => m.includes("had no commitTs"))).toBe(true);
+    expect(messages.some((m) => m.includes("unparseable commitTs"))).toBe(true);
+
+    warnSpy.mockRestore();
+  });
+
   it("skips the wait entirely when no tailer is attached (writer role)", async () => {
     globalThis.fetch = vi.fn(async () => jsonResponse({ value: "ok", committed: true, commitTs: "7" }));
     const forwarder = makeForwarder();
