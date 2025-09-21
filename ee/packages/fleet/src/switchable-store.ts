@@ -66,6 +66,15 @@ export class SwitchableDocStore implements DocStore {
     return d.write(documents, indexUpdates, conflictStrategy, shardId);
   }
 
+  async commitWrite(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    shardId?: ShardId,
+  ): Promise<bigint> {
+    const d = this.delegate;
+    return d.commitWrite(documents, indexUpdates, shardId);
+  }
+
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {
     const d = this.delegate;
     return d.get(id, readTimestamp);

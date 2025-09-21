@@ -194,5 +194,68 @@ export function runDocStoreConformance(
         expect(live.map((d) => d.value.value.body)).toEqual(["b"]);
       });
     });
+
+    // The store-allocated commit-timestamp contract (Fenced Frontier B1, D1). Entries arrive with
+    // placeholder ts (0n); the store stamps every document + index row with a freshly-allocated ts
+    // inside its own atomicity domain and returns it. Raw shard_id column assertions (case (e)) need
+    // storage-specific SQL that the suite's vocabulary can't reach, so they live in each store's own
+    // test file (docstore-sqlite/test/commit-write.test.ts, docstore-postgres/test/commit-guard.test.ts).
+    describe("commitWrite (store-allocated timestamps)", () => {
+      function indexUpdate(indexId: string, key: Uint8Array, docId: InternalDocumentId): IndexWrite {
+        return { ts: 0n, update: { indexId, key, value: { type: "NonClustered", docId } } };
+      }
+
+      // (a) strictly increasing across calls, and greater than any prior write()'s ts.
+      it("allocates strictly increasing timestamps greater than any prior write()", async () => {
+        const w = newDocumentId(TABLE);
+        await store.write([rev(w, 5n, null, "prior")], [], "Error"); // prior write() at ts 5
+
+        const a = newDocumentId(TABLE);
+        const t1 = await store.commitWrite([rev(a, 0n, null, "c1")], []);
+        expect(t1).toBeGreaterThan(5n);
+
+        const b = newDocumentId(TABLE);
+        const t2 = await store.commitWrite([rev(b, 0n, null, "c2")], []);
+        expect(t2).toBeGreaterThan(t1);
+      });
+
+      // (b) every row of one commit shares the returned ts (verified via get AND index_scan).
+      it("stamps every document and index row of a commit with the returned ts", async () => {
+        const id = newDocumentId(TABLE);
+        const indexId = encodeStorageIndexId(TABLE, "by_body");
+        const key = encodeIndexKey(["apple"]);
+        const commitTs = await store.commitWrite([rev(id, 0n, null, "apple")], [indexUpdate(indexId, key, id)]);
+
+        expect((await store.get(id))!.ts).toBe(commitTs);
+        const scanned = await collect(
+          store.index_scan(indexId, TABLE_ID, commitTs, { start: encodeIndexKey([]), end: null }, "asc"),
+        );
+        expect(scanned).toHaveLength(1);
+        expect(scanned[0]![1].ts).toBe(commitTs);
+      });
+
+      // (c) the 0n placeholder is never persisted.
+      it("never persists the 0n placeholder timestamp", async () => {
+        const id = newDocumentId(TABLE);
+        await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect(await store.get(id, 0n)).toBeNull(); // nothing visible at ts 0
+        const atZero = await collect(store.load_documents({ minInclusive: 0n, maxExclusive: 1n }, "asc"));
+        expect(atZero).toHaveLength(0); // no log entry at ts 0
+      });
+
+      // (d) maxTimestamp() reflects the returned ts immediately after commit.
+      it("makes the committed ts the new maxTimestamp()", async () => {
+        const id = newDocumentId(TABLE);
+        const commitTs = await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect(await store.maxTimestamp()).toBe(commitTs);
+      });
+
+      // Seeding: a fresh store allocates from 1 (or greater, per the store's seeding policy).
+      it("allocates 1n or greater on a fresh store", async () => {
+        const id = newDocumentId(TABLE);
+        const commitTs = await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect(commitTs).toBeGreaterThanOrEqual(1n);
+      });
+    });
   });
 }

@@ -98,6 +98,25 @@ export interface DocStore {
     shardId?: ShardId,
   ): Promise<void>;
 
+  /**
+   * Commit a transaction's staged rows, allocating the commit timestamp inside the store's OWN
+   * atomicity domain, then return it. The `ts` fields on `documents`/`indexUpdates` arrive as `0n`
+   * placeholders and are overwritten by the store — every document and index row of the commit is
+   * stamped with the single allocated ts.
+   *
+   * This closes the allocated-but-unlanded window that a caller-side oracle opens (allocate in
+   * memory → then write): here allocation and landing are one atomic step. Postgres:
+   * `nextval('stackbase_ts')` inside the commit transaction, so the ts is visible atomically with
+   * its rows. SQLite: `MAX(ts) + 1` inside its transaction (race-free under the single writer).
+   * The `write()` path is deliberately left untouched — the replica-apply path depends on its
+   * caller-supplied timestamps.
+   */
+  commitWrite(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    shardId?: ShardId,
+  ): Promise<bigint>;
+
   /** The newest visible revision of a document at `readTimestamp` (or latest), or null. */
   get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null>;
 
