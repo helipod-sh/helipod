@@ -7,8 +7,11 @@
  *
  *   1. VALIDATE — has any commit since our snapshot written something we read? (read-set ∩
  *      write-set). If so → `OccConflictError`, and the caller replays the deterministic fn.
- *   2. ALLOCATE — take one monotonic commit timestamp for the whole transaction.
- *   3. APPLY    — append all staged revisions to the store, then publish an `OplogDelta`.
+ *   2+3. APPLY+ALLOCATE — hand all staged revisions to `DocStore.commitWrite` with `ts: 0n`
+ *      placeholders; the store allocates the commit timestamp *inside its own atomicity domain*
+ *      and stamps + lands every row atomically, closing the allocated-but-unlanded window a
+ *      caller-side oracle allocation would open. The returned ts is then published as the new
+ *      last-committed clock and used to build the `OplogDelta`.
  *
  * Single-writer per *shard* gives serializability cheaply (no cross-writer coordination) and
  * scales out by adding shards — see scalability-spectrum §2.1.
@@ -202,10 +205,10 @@ export class SingleWriterTransactor implements Transactor {
       }
     }
 
-    // Phase 2 — allocate one commit timestamp for the whole transaction.
-    const commitTs = this.oracle.allocateTimestamp();
-
-    // Phase 3 — apply: append staged revisions, chaining prev_ts to the snapshot revision.
+    // Phase 2+3 — apply: append staged revisions (chaining prev_ts to the snapshot revision) and
+    // allocate the commit timestamp inside the store's own atomicity domain. Entries carry a `0n`
+    // placeholder ts; the store stamps + returns the real one, closing the allocated-but-unlanded
+    // window a caller-side oracle allocation would otherwise open.
     const entries: DocumentLogEntry[] = [];
     for (const w of ctx.staged.entries()) {
       // Chain prev_ts from the *latest committed* revision (we hold the single-writer lock,
@@ -213,14 +216,14 @@ export class SingleWriterTransactor implements Transactor {
       // two transactions blind-write the same document.
       const prev = await this.docStore.get(w.id);
       entries.push({
-        ts: commitTs,
+        ts: 0n,
         id: w.id,
         prev_ts: prev ? prev.ts : null,
         value: w.value === null ? null : { id: w.id, value: w.value },
       });
     }
-    const indexWrites: IndexWrite[] = ctx.indexUpdates.map((update) => ({ ts: commitTs, update }));
-    await this.docStore.write(entries, indexWrites, "Error", shardId);
+    const indexWrites: IndexWrite[] = ctx.indexUpdates.map((update) => ({ ts: 0n, update }));
+    const commitTs = await this.docStore.commitWrite(entries, indexWrites, shardId);
 
     this.recentCommits.push({ ts: commitTs, writes: ctx.writeRanges });
     // Advance the committed clock only now that writes are applied + recorded (still under
