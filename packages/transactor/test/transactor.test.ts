@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { newDocumentId, encodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
@@ -147,6 +147,94 @@ describe("OCC", () => {
         { maxRetries: 0 },
       ),
     ).rejects.toMatchObject({ name: "OccConflictError" });
+  });
+});
+
+describe("store-allocated commit timestamps (Task 2)", () => {
+  it("routes commit through DocStore.commitWrite with ts:0n placeholders, prev_ts chained from the pre-commit head revision", async () => {
+    const { store, transactor } = await makeTransactor();
+    const id = newDocumentId(TABLE);
+
+    const spy = vi.spyOn(store, "commitWrite");
+
+    const first = await transactor.runInTransaction(async (ctx) => ctx.put(id, { n: 1n }));
+    expect(spy).toHaveBeenCalledTimes(1);
+    // First write: no prior revision, so prev_ts is null; ts arrives as the 0n placeholder.
+    const [firstEntries, firstIndexWrites] = spy.mock.calls[0]!;
+    expect(firstEntries).toHaveLength(1);
+    expect(firstEntries[0]!.ts).toBe(0n);
+    expect(firstEntries[0]!.prev_ts).toBeNull();
+    for (const iw of firstIndexWrites) expect(iw.ts).toBe(0n);
+
+    const headBeforeSecondCommit = await store.get(id);
+    expect(headBeforeSecondCommit!.ts).toBe(first.commitTs);
+
+    await transactor.runInTransaction(async (ctx) => ctx.put(id, { n: 2n }));
+    expect(spy).toHaveBeenCalledTimes(2);
+    const [secondEntries, secondIndexWrites] = spy.mock.calls[1]!;
+    expect(secondEntries).toHaveLength(1);
+    // prev_ts chaining is untouched: it must match the head revision observed *before* this commit,
+    // not some derivative of the (no-longer-allocated) oracle timestamp.
+    expect(secondEntries[0]!.ts).toBe(0n);
+    expect(secondEntries[0]!.prev_ts).toBe(headBeforeSecondCommit!.ts);
+    for (const iw of secondIndexWrites) expect(iw.ts).toBe(0n);
+  });
+
+  it("never calls the oracle's allocateTimestamp; the commit timestamp comes from the store", async () => {
+    const { store, oracle, transactor } = await makeTransactor();
+    const id = newDocumentId(TABLE);
+    const allocateSpy = vi.spyOn(oracle, "allocateTimestamp");
+    const publishSpy = vi.spyOn(oracle, "publishCommitted");
+
+    const result = await transactor.runInTransaction(async (ctx) => ctx.put(id, { n: 1n }));
+
+    expect(allocateSpy).not.toHaveBeenCalled();
+    expect(publishSpy).toHaveBeenCalledWith(result.commitTs);
+    expect(result.commitTs).toBe(await store.maxTimestamp());
+    expect(oracle.getLastCommittedTimestamp()).toBe(await store.maxTimestamp());
+  });
+
+  it("the transactor's recent-commit ring records the store-returned commit ts, matching store.maxTimestamp()", async () => {
+    const { store, transactor } = await makeTransactor();
+    const idA = newDocumentId(TABLE);
+    const idB = newDocumentId(TABLE);
+
+    await transactor.runInTransaction(async (ctx) => ctx.put(idA, { v: 1n }));
+    const second = await transactor.runInTransaction(async (ctx) => ctx.put(idB, { v: 2n }));
+
+    // Private field access is deliberate: this is the one place we can directly observe that the
+    // ring entry pushed on commit carries the store-allocated ts, not a caller-allocated one.
+    const recentCommits = (transactor as unknown as { recentCommits: { ts: bigint }[] })
+      .recentCommits;
+    expect(recentCommits.length).toBeGreaterThan(0);
+    const newest = recentCommits[recentCommits.length - 1]!.ts;
+    expect(newest).toBe(second.commitTs);
+    expect(newest).toBe(await store.maxTimestamp());
+  });
+
+  it("OCC conflict/replay behavior is unaffected by store-allocated timestamps (existing coverage, capture-checked)", async () => {
+    const { store, transactor } = await makeTransactor();
+    const id = newDocumentId(TABLE);
+    await transactor.runInTransaction(async (ctx) => ctx.put(id, { count: 0n }));
+
+    const spy = vi.spyOn(store, "commitWrite");
+
+    const increment = () =>
+      transactor.runInTransaction(async (ctx) => {
+        const doc = await ctx.get(id);
+        const count = (doc as { count: bigint } | null)?.count ?? 0n;
+        ctx.put(id, { count: count + 1n });
+      });
+    await Promise.all([increment(), increment(), increment()]);
+
+    const final = await transactor.runInTransaction(async (ctx) => ctx.get(id));
+    expect((final.value as { count: bigint }).count).toBe(3n);
+    // Every successful commit (including replays) still hands 0n placeholders to the store.
+    for (const call of spy.mock.calls) {
+      for (const entry of call[0]) expect(entry.ts).toBe(0n);
+    }
+    expect(final.value).toEqual({ count: 3n });
+    expect(await store.maxTimestamp()).toBeGreaterThan(0n);
   });
 });
 

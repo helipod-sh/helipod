@@ -159,6 +159,13 @@ export interface TimestampOracle {
   getCurrentTimestamp(): bigint;
   /** The latest *fully-applied* commit timestamp — the safe snapshot for new transactions. */
   getLastCommittedTimestamp(): bigint;
+  /**
+   * Legacy: allocates a timestamp from the caller-side oracle, independent of `DocStore`.
+   * `SingleWriterTransactor.commit` no longer calls this — it hands `DocStore.commitWrite` `ts: 0n`
+   * placeholders and lets the store allocate inside its own atomicity domain instead, closing the
+   * allocated-but-unlanded window this method opens. Kept on the interface for compat (e.g. tests
+   * or callers that still want a standalone monotonic counter).
+   */
   allocateTimestamp(): bigint;
   /** Mark a commit as fully applied (advances the last-committed clock). */
   publishCommitted(ts: bigint): void;
