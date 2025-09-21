@@ -1,7 +1,8 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 export const FLEET_VERSION = "0.0.0";
-export { LeaseManager, type LeaseState } from "./lease";
+export { LeaseManager, type LeaseState, type LeaseRow, type LeaseManagerOptions } from "./lease";
 export { LeaseMonitor, type LeaseMonitorDeps } from "./lease-monitor";
+export { FencedError } from "./fenced-error";
 export { NotifyingFanoutAdapter, type CommitChannelClient } from "./commit-notifier";
 export { WriteForwarder, type WriteForwarderOptions, type ReplicaWaiter } from "./forwarder";
 export {

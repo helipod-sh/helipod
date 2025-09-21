@@ -40,6 +40,7 @@ import {
 } from "@stackbase/runtime-embedded";
 import { LeaseManager } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
+import { FencedError } from "./fenced-error";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
 import { SwitchableDocStore } from "./switchable-store";
@@ -274,7 +275,9 @@ export async function prepareFleetNode(deps: {
   // Read-only until (and unless) this node wins the lease. A follower still runs the idempotent
   // DDL in setupSchema but does NOT contend for the writer advisory lock (see PostgresDocStore).
   const pgStore = new PostgresDocStore(client, { readOnly: true });
-  const lease = new LeaseManager(client, { advertiseUrl: deps.advertiseUrl });
+  // `applicationName` is recorded on the lease row (writer_app_name) so a future D4 eviction
+  // fencer can `pg_terminate_backend` the exact wedged holder's connection by name.
+  const lease = new LeaseManager(client, { advertiseUrl: deps.advertiseUrl, applicationName });
   const forwarder = new WriteForwarder(lease, { adminKey: deps.adminKey, selfUrl: deps.advertiseUrl });
 
   // EVERY fleet node — writer or sync — gets the pg_notify-wrapping fan-out adapter, not just the
@@ -434,6 +437,44 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
 }
 
 /**
+ * Install the epoch-fenced commit guard (Fenced Frontier B1, D3) on `pgStore`. Runs inside every
+ * `commitWrite` transaction, after the row inserts, before COMMIT — the SAME row as the lease
+ * (`shard_leases`) advances the durable-commit frontier chain (`prev_ts := frontier_ts, frontier_ts
+ * := commitTs`) predicated on THIS node's epoch still being current, so frontier publication,
+ * fencing, and the lease are one row with zero extra round-trips. `lease.currentEpoch()` is read
+ * LIVE on every commit (not a snapshot taken at install time) so a later re-promotion's epoch bump
+ * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`,
+ * which aborts the whole transaction — AND fires `fireFenced()` (routes to the writer lease
+ * monitor's `fenced()`, mirroring `connectionLost()`) before throwing, so the node exits
+ * immediately rather than leaving the caller's mutation to fail silently with no self-demotion.
+ * Called at writer boot AND on promotion success — see the two call sites below.
+ */
+export function installCommitGuard(
+  pgStore: PostgresDocStore,
+  lease: LeaseManager,
+  fireFenced: (reason: string) => void,
+): void {
+  pgStore.setCommitGuard(async (q, commitTs) => {
+    const epoch = lease.currentEpoch();
+    if (epoch === null) {
+      // Structurally shouldn't happen — the guard is only ever installed after a successful
+      // tryAcquire() (writer boot) or promotion (which itself re-acquires). Treat defensively as
+      // fenced rather than let an inconsistent guard silently allow an unfenced commit through.
+      fireFenced("commit guard invoked with no acquired epoch");
+      throw new FencedError("commit fenced: this node has not acquired a shard_leases epoch");
+    }
+    const rows = await q.query(
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
+      [commitTs, "default", epoch],
+    );
+    if (rows.length === 0) {
+      fireFenced("commit guard found 0 rows for this node's epoch — superseded by another writer");
+      throw new FencedError("commit fenced: epoch no longer current");
+    }
+  });
+}
+
+/**
  * Wire the running fleet node. A writer node is already fully live (promoted in `prepareFleetNode`,
  * drivers started at `create()`) — it just gets handles. A sync node starts the replica tailer (its
  * `start()` catch-up is the node's ready gate) and the lease acquire loop, and promotes on acquire
@@ -461,9 +502,22 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   let monitor: LeaseMonitor | null = null;
   const startWriterMonitor = (): void => {
     monitor = new LeaseMonitor({
-      // Plain liveness round-trip — NEVER pg_try_advisory_lock (re-entrant on the holding session).
+      // Heartbeat-as-probe (Fenced Frontier B1, D2): one round-trip serves liveness-probe + TTL
+      // maintenance + fence verification — NEVER pg_try_advisory_lock (re-entrant on the holding
+      // session). `lease.currentEpoch()` is read live so a re-promotion's epoch bump is honored.
+      // A 0-row heartbeat means this node's epoch has been superseded (fenced) even though its
+      // connection is still alive — DEFINITIVE loss, so it routes straight to `monitor.fenced()`
+      // (bypassing the miss-tolerance below, which exists only for transient/ambiguous blips) and
+      // then throws so `LeaseMonitor.tick()`'s catch path sees an already-exited monitor and skips
+      // `recordMiss` (no double-count, no delay past this single probe).
       probe: async () => {
-        await client.query("SELECT 1");
+        const epoch = lease.currentEpoch();
+        if (epoch === null) throw new Error("fleet: heartbeat probe with no acquired epoch (bug)");
+        const rowsUpdated = await lease.heartbeat(epoch);
+        if (rowsUpdated === 0) {
+          monitor?.fenced("heartbeat found 0 rows for this node's epoch");
+          throw new FencedError("writer lease fenced: heartbeat found 0 rows for this node's epoch");
+        }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
     });
@@ -479,6 +533,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // except the lease monitor, since this node is the writer from the first tick.
   if (forwarder.isLocalWriter()) {
     startWriterMonitor();
+    // D3: install the epoch-fenced commit guard now — this node is the writer from the first tick,
+    // so every commit from here on must be fenced against its acquired epoch. `monitor` is already
+    // non-null (startWriterMonitor() just ran), so a fenced commit routes straight to its fenced().
+    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -564,7 +622,15 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // node is now the writer) and the http layer drops its proxy.
     void runPromotion({
       // The lease row is already upserted by the tryAcquire() inside acquireLoop before this fires.
-      promote: () => promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica }),
+      promote: async () => {
+        await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
+        // D3: install the epoch-fenced commit guard now that promotion has succeeded — this node
+        // is the writer from here on. `startMonitor` (below) hasn't run yet, but `installCommitGuard`
+        // closes over the `monitor` variable by reference, not value, so a commit that fences AFTER
+        // `startMonitor` runs (the only time commits are even possible — drivers/writes start post-
+        // promotion) still reaches the now-non-null monitor correctly.
+        installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+      },
       startMonitor: startWriterMonitor,
       firePromoted,
       onExit,

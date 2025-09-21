@@ -8,7 +8,7 @@
  *
  * Proves, end to end:
  *   1. Symmetric boot elects one writer: node A (booted first) → `role: "writer"`, node B →
- *      `role: "sync"`; `fleet_lease` reads `epoch=1, writer_url=A`.
+ *      `role: "sync"`; `shard_leases` reads `epoch=1, writer_url=A`.
  *   2. Write forwarding + cross-process fan-out: a mutation POSTed to the SYNC node B forwards to A,
  *      commits, and A's NOTIFY wakes B's ReplicaTailer, which re-runs a subscription opened on B —
  *      the reactive update crosses the process boundary.
@@ -364,7 +364,7 @@ async function subscribe(
 /* -------------------------------------------------------------------------- */
 
 async function readLease(pg: Client): Promise<{ epoch: number; writerUrl: string } | null> {
-  const r = await pg.query("SELECT epoch, writer_url FROM fleet_lease WHERE id = 1");
+  const r = await pg.query("SELECT epoch, writer_url FROM shard_leases WHERE shard_id = 'default'");
   const row = r.rows[0] as { epoch: string; writer_url: string } | undefined;
   return row ? { epoch: Number(row.epoch), writerUrl: row.writer_url } : null;
 }
