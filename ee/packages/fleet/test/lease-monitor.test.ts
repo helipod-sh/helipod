@@ -36,6 +36,53 @@ describe("LeaseMonitor (C4: writer self-exit on lease loss)", () => {
     expect(probe).not.toHaveBeenCalled(); // exit was immediate, no probe needed
   });
 
+  it("fenced() → onExit exactly once, immediately, mirroring connectionLost()", () => {
+    const onExit = vi.fn();
+    const probe = vi.fn(async () => {});
+    const m = new LeaseMonitor({ probe, onExit });
+    m.start();
+
+    m.fenced("heartbeat found 0 rows");
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("fenced");
+    expect(String(onExit.mock.calls[0]![0])).toContain("heartbeat found 0 rows");
+    expect(probe).not.toHaveBeenCalled(); // exit was immediate, no probe needed
+  });
+
+  it("fenced() with no reason still exits with a generic reason", () => {
+    const onExit = vi.fn();
+    const m = new LeaseMonitor({ probe: vi.fn(async () => {}), onExit });
+    m.start();
+
+    m.fenced();
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("fenced");
+  });
+
+  it("fenced() and connectionLost() race safely — only the first fires onExit", () => {
+    const onExit = vi.fn();
+    const m = new LeaseMonitor({ probe: vi.fn(async () => {}), onExit });
+    m.start();
+
+    m.fenced("epoch superseded");
+    m.connectionLost(); // must be a no-op — fireExit is guarded by `exited`
+
+    expect(onExit).toHaveBeenCalledTimes(1);
+    expect(String(onExit.mock.calls[0]![0])).toContain("fenced");
+  });
+
+  it("fenced() after stop() does not exit", () => {
+    const onExit = vi.fn();
+    const m = new LeaseMonitor({ probe: vi.fn(async () => {}), onExit });
+    m.start();
+    m.stop();
+
+    m.fenced();
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
   it("onExit fires at most once (repeated connectionLost + subsequent probe misses)", async () => {
     const onExit = vi.fn();
     const probe = vi.fn(async () => {

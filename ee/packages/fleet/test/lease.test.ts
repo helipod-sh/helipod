@@ -18,11 +18,11 @@ describe("LeaseManager", () => {
     await client.close();
   });
 
-  it("setup() creates the fleet_lease table", async () => {
+  it("setup() creates the shard_leases table", async () => {
     const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
     await mgr.setup();
     const rows = await client.query(
-      "SELECT table_name FROM information_schema.tables WHERE table_name = 'fleet_lease'",
+      "SELECT table_name FROM information_schema.tables WHERE table_name = 'shard_leases'",
     );
     expect(rows.length).toBe(1);
   });
@@ -38,17 +38,32 @@ describe("LeaseManager", () => {
     expect(second).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000" });
   });
 
-  it("read() returns the latest lease row", async () => {
-    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+  it("read() returns the latest lease row, including the fencing/frontier columns", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000", applicationName: "node-a-app" });
     await mgr.setup();
 
     expect(await mgr.read()).toBeNull();
 
     await mgr.tryAcquire();
-    expect(await mgr.read()).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000" });
+    expect(await mgr.read()).toMatchObject({
+      epoch: 1n,
+      writerUrl: "http://node-a:4000",
+      writerAppName: "node-a-app",
+      frontierTs: 0n,
+      prevTs: 0n,
+    });
+    expect((await mgr.read())?.expiresAt).toBeTruthy();
 
     await mgr.tryAcquire();
-    expect(await mgr.read()).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000" });
+    // Re-acquisition (epoch 2) bumps the epoch but must NOT reset frontier_ts/prev_ts — the
+    // durable-commit chain survives across epochs (D3 depends on this).
+    expect(await mgr.read()).toMatchObject({
+      epoch: 2n,
+      writerUrl: "http://node-a:4000",
+      writerAppName: "node-a-app",
+      frontierTs: 0n,
+      prevTs: 0n,
+    });
   });
 
   it("acquireLoop() fires onAcquired once then stop() halts further retries", async () => {
@@ -106,15 +121,68 @@ describe("LeaseManager", () => {
     }
   });
 
-  it("CHECK (id = 1) constraint is enforced on the fleet_lease table", async () => {
+  it("shard_id PRIMARY KEY enforces single-row-per-shard discipline on shard_leases", async () => {
     const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
     await mgr.setup();
 
-    // Attempt to insert a row with id=2 should violate the CHECK constraint and fail.
+    // First bare INSERT for 'default' succeeds (table is empty). A second bare INSERT for the SAME
+    // shard_id must violate the PRIMARY KEY — the upsert discipline (ON CONFLICT DO UPDATE) is how
+    // tryAcquire() legitimately re-acquires; a plain duplicate INSERT (bypassing the upsert) must fail.
+    await client.query(
+      "INSERT INTO shard_leases (shard_id, epoch, writer_url, expires_at) VALUES ('default', 1, 'http://test:4000', now())",
+    );
     await expect(
       client.query(
-        "INSERT INTO fleet_lease (id, epoch, writer_url, acquired_at) VALUES (2, 1, 'http://test:4000', now())",
+        "INSERT INTO shard_leases (shard_id, epoch, writer_url, expires_at) VALUES ('default', 2, 'http://test2:4000', now())",
       ),
     ).rejects.toThrow();
+  });
+
+  it("tryAcquire() records writer_app_name from LeaseManagerOptions.applicationName", async () => {
+    const mgr = new LeaseManager(client, {
+      advertiseUrl: "http://node-a:4000",
+      applicationName: "stackbase-fleet-4000",
+    });
+    await mgr.setup();
+    await mgr.tryAcquire();
+
+    const rows = await client.query("SELECT writer_app_name FROM shard_leases WHERE shard_id = 'default'");
+    expect(rows[0]!.writer_app_name).toBe("stackbase-fleet-4000");
+  });
+
+  it("heartbeat(epoch) extends expires_at and returns 1 row updated for the current epoch", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    const acquired = await mgr.tryAcquire();
+
+    const before = (await client.query("SELECT expires_at FROM shard_leases WHERE shard_id = 'default'"))[0]!
+      .expires_at;
+    const n = await mgr.heartbeat(acquired!.epoch);
+    expect(n).toBe(1);
+    const after = (await client.query("SELECT expires_at FROM shard_leases WHERE shard_id = 'default'"))[0]!
+      .expires_at;
+    expect(after).not.toBe(before);
+  });
+
+  it("heartbeat(epoch) with a stale (superseded) epoch returns 0 rows updated", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    const first = await mgr.tryAcquire(); // epoch 1
+    await mgr.tryAcquire(); // epoch 2 — supersedes epoch 1
+
+    const n = await mgr.heartbeat(first!.epoch);
+    expect(n).toBe(0);
+  });
+
+  it("currentEpoch() tracks the most recently acquired epoch, live across re-acquisitions", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    expect(mgr.currentEpoch()).toBeNull();
+
+    await mgr.tryAcquire();
+    expect(mgr.currentEpoch()).toBe(1n);
+
+    await mgr.tryAcquire();
+    expect(mgr.currentEpoch()).toBe(2n);
   });
 });

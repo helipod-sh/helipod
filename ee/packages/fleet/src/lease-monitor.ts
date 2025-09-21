@@ -5,12 +5,19 @@
  * as a fresh sync node (exit-and-rejoin) — rather than lingering as a zombie writer that believes it
  * still owns the lock while some other node has taken over.
  *
- * Two independent loss signals feed it:
+ * Three independent loss signals feed it:
  *
  *  - `connectionLost()` — DEFINITIVE. The advisory lock lives on `NodePgClient`'s single pinned
  *    connection, which never reconnects (see `NodePgClient.ensure()`); if that connection closes or
  *    errors, the session-level `pg_advisory_lock` is released by Postgres the instant the backend
  *    goes away. So a closed pinned connection == lease definitely lost → exit immediately.
+ *
+ *  - `fenced()` — DEFINITIVE (Fenced Frontier B1, D2/D3). The connection is still alive, but this
+ *    node's epoch has been superseded — either the heartbeat probe found 0 rows for `(shard_id,
+ *    epoch)`, or an epoch-fenced commit guard's UPDATE matched 0 rows. Both mean some OTHER node
+ *    now holds the lease, so — exactly like `connectionLost()` — this bypasses the probe-miss
+ *    tolerance below (which exists only for transient/ambiguous blips; a fenced epoch never is)
+ *    and exits immediately.
  *
  *  - `probe()` misses — a BACKSTOP for a silently-wedged connection that isn't emitting error/end
  *    events (e.g. a half-open TCP connection). The probe is a caller-supplied liveness round-trip
@@ -121,6 +128,14 @@ export class LeaseMonitor {
   connectionLost(): void {
     if (this.stopped || this.exited) return;
     this.fireExit("writer lease lost: database connection closed");
+  }
+
+  /** DEFINITIVE lease loss (epoch superseded — heartbeat or commit guard found 0 rows for this
+   *  node's epoch) → exit immediately, mirroring `connectionLost()`. Idempotent/at-most-once via
+   *  the same `fireExit` guard — safe to call from both the heartbeat probe and a commit guard. */
+  fenced(reason?: string): void {
+    if (this.stopped || this.exited) return;
+    this.fireExit(`writer lease fenced: ${reason ?? "epoch superseded by another node"}`);
   }
 
   private fireExit(reason: string): void {
