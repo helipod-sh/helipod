@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
+import { encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type WriteRouter } from "../src/index";
@@ -117,12 +117,45 @@ describe("deferred driver start", () => {
 });
 
 describe("observeTimestamp", () => {
-  it("advances the oracle so a subsequent local mutation commits past the observed timestamp", async () => {
+  it("a local commit lands strictly above all existing log history (incl. replica-applied rows); observeTimestamp still advances the snapshot clock", async () => {
+    // SUPERSESSION NOTE: ts allocation moved into the store (`DocStore.commitWrite` computes the
+    // commit ts inside its own atomicity domain — SQLite MAX(ts)+1, Postgres
+    // GREATEST(nextval, MAX(ts)+1)); `observeTimestamp` remains for snapshot bookkeeping; the
+    // allocate-above-history guarantee this test previously pinned to the in-memory oracle bump
+    // is now STRUCTURAL — see the fenced-frontier-b1 spec, D1. This test asserts the purpose
+    // (a commit always lands above everything already in the log, however it got there), not the
+    // old mechanism (oracle bump → allocation jumps).
+    //
+    // Why the API stays: `observeTimestamp` advances the oracle's `lastCommitted` clock
+    // (packages/docstore/src/timestamp-oracle.ts:34-37), which `runInTransaction` uses as the
+    // snapshot ts for every new transaction — a promoted/tailing fleet node calls it so local
+    // reads immediately see all replica-applied history. That snapshot role is load-bearing and
+    // untouched; only the allocation role moved into the store.
     const { runtime, store } = await makeRuntime();
 
+    // Seed a high-ts row via the verbatim write() path — exactly what a replica tailer applying
+    // a foreign primary's log would have done (caller-supplied timestamps, no allocation).
+    const foreignId = newDocumentId(MESSAGES);
+    await store.write(
+      [
+        {
+          ts: 100n,
+          id: foreignId,
+          prev_ts: null,
+          value: { id: foreignId, value: { conversationId: "c0", body: "replica-applied" } },
+        },
+      ],
+      [],
+      "Error",
+    );
+
+    // Promotion still calls this (ee/packages/fleet/src/node.ts promoteFleetNode step 1) — it
+    // must not throw, and it advances the snapshot clock past the applied history.
     runtime.observeTimestamp(100n);
+
     await runtime.run("messages:send", { conversationId: "c1", body: "after-observe" });
 
+    // The purpose: the local commit's landed ts is STRICTLY above the seeded foreign row's ts.
     const max = await store.maxTimestamp();
     expect(max).toBeGreaterThan(100n);
   });
