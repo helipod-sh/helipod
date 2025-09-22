@@ -5,10 +5,12 @@ import type { PgClient, PgRow, PgValue } from "@stackbase/docstore-postgres";
  *  pinned to `'default'`; multi-shard routing is B2. */
 const SHARD_ID = "default";
 
-/** TTL a fresh acquisition/heartbeat extends `expires_at` by. Matches the LeaseMonitor's 5s probe
- *  cadence with headroom for several missed round-trips before a fencer would consider this node
- *  wedged (D4 — not implemented by this class; a future eviction path reads this column). */
-const LEASE_TTL_SECONDS = 15;
+/** Default TTL a fresh acquisition/heartbeat extends `expires_at` by, in ms. The LeaseMonitor's
+ *  probe cadence is derived proportionally (ttl/3 → the historical 5s at this default), leaving
+ *  headroom for several missed round-trips before a fencer considers this node wedged (D4). A
+ *  deployment can shorten it via `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning) — see
+ *  `prepareFleetNode` in `node.ts` for the threading. */
+const DEFAULT_LEASE_TTL_MS = 15_000;
 
 /** The current fleet writer lease: which epoch is live and which node holds it. */
 export interface LeaseState {
@@ -38,6 +40,12 @@ export interface LeaseManagerOptions {
   applicationName?: string;
   /** Interval between tryAcquire() attempts inside acquireLoop(). Default 2000ms. */
   retryMs?: number;
+  /** How long a fresh acquisition/heartbeat extends `expires_at` by, in ms. Default 15000ms. The
+   *  whole failover clock scales with this: a wedged writer's lease expires this long after its last
+   *  heartbeat, so a follower's eviction can't fire before then. Shortened by
+   *  `STACKBASE_FLEET_LEASE_TTL_MS` for the wedged-writer E2E (and available to operators as tuning);
+   *  the LeaseMonitor's probe cadence is derived from it so a live writer always renews in time. */
+  ttlMs?: number;
 }
 
 const DEFAULT_RETRY_MS = 2000;
@@ -95,6 +103,13 @@ export class LeaseManager {
   private readonly advertiseUrl: string;
   private readonly applicationName: string | null;
   private readonly retryMs: number;
+  /** The lease TTL in ms this manager stamps onto `expires_at`. Public so the LeaseMonitor can
+   *  derive its probe cadence from the SAME knob (see `startFleetNode`) — a live writer must renew
+   *  well within the TTL. */
+  readonly ttlMs: number;
+  /** `ttlMs` as a whole-ms integer, ready to interpolate into the `interval '<n> milliseconds'` SQL
+   *  below. Integer-coerced (never a fraction/NaN) so the interpolation can't produce invalid SQL. */
+  private readonly ttlMsSql: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   /** The epoch this node most recently acquired, updated on every successful `tryAcquire()` —
@@ -108,6 +123,11 @@ export class LeaseManager {
     this.advertiseUrl = opts.advertiseUrl;
     this.applicationName = opts.applicationName ?? null;
     this.retryMs = opts.retryMs ?? DEFAULT_RETRY_MS;
+    this.ttlMs = opts.ttlMs ?? DEFAULT_LEASE_TTL_MS;
+    // Guard the SQL-interpolated value: a whole positive integer of ms. A non-positive/NaN TTL would
+    // produce a lease that's born already-expired (or invalid SQL), so clamp to the default instead.
+    const rounded = Math.round(this.ttlMs);
+    this.ttlMsSql = Number.isFinite(rounded) && rounded > 0 ? rounded : DEFAULT_LEASE_TTL_MS;
   }
 
   /** Idempotent DDL: creates shard_leases if it doesn't already exist. */
@@ -149,12 +169,12 @@ export class LeaseManager {
 
     const rows = await this.client.query(
       `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
-       VALUES ($1, 1, $2, $3, now() + interval '${LEASE_TTL_SECONDS} seconds', 0, 0)
+       VALUES ($1, 1, $2, $3, now() + interval '${this.ttlMsSql} milliseconds', 0, 0)
        ON CONFLICT (shard_id) DO UPDATE SET
          epoch = shard_leases.epoch + 1,
          writer_url = $2,
          writer_app_name = $3,
-         expires_at = now() + interval '${LEASE_TTL_SECONDS} seconds'
+         expires_at = now() + interval '${this.ttlMsSql} milliseconds'
        RETURNING epoch, writer_url`,
       [SHARD_ID, this.advertiseUrl, this.applicationName],
     );
@@ -174,7 +194,7 @@ export class LeaseManager {
    */
   async heartbeat(epoch: bigint): Promise<number> {
     const rows = await this.client.query(
-      `UPDATE shard_leases SET expires_at = now() + interval '${LEASE_TTL_SECONDS} seconds'
+      `UPDATE shard_leases SET expires_at = now() + interval '${this.ttlMsSql} milliseconds'
        WHERE shard_id = $1 AND epoch = $2
        RETURNING epoch`,
       [SHARD_ID, epoch],

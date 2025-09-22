@@ -56,6 +56,28 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 /** The filename of a sync node's local embedded replica, under the serve data dir. */
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
 
+/** Default lease TTL (ms) when `STACKBASE_FLEET_LEASE_TTL_MS` is unset — mirrors `lease.ts`'s own
+ *  default so the two never drift. */
+export const DEFAULT_LEASE_TTL_MS = 15_000;
+
+/**
+ * Derive the failover cadences from a single knob, the lease TTL. Every timing that must stay in a
+ * fixed ratio to the TTL is computed here so one env var (`STACKBASE_FLEET_LEASE_TTL_MS`) scales the
+ * whole clock coherently — a live writer must renew (probe) several times per TTL, and a follower
+ * must retry-acquire several times per TTL, or a shortened TTL would either expire a healthy writer's
+ * lease or notice a wedged one too slowly. The ratios are chosen so the DEFAULT TTL (15000ms)
+ * reproduces the historical hard-coded constants EXACTLY — `probeMs = ttl/3 = 5000` (the old
+ * `LeaseMonitor` default) and `retryMs = ttl*2/15 = 2000` (the old `LeaseManager` default) — so the
+ * production default is byte-for-byte behavior-identical; only a shortened TTL (the wedged-writer
+ * E2E's 4000ms, or an operator's tuning) changes anything.
+ */
+export function fleetProbeMs(ttlMs: number): number {
+  return Math.max(1, Math.round(ttlMs / 3));
+}
+export function fleetAcquireRetryMs(ttlMs: number): number {
+  return Math.max(1, Math.round((ttlMs * 2) / 15));
+}
+
 /**
  * Bounded-writer-session timeouts (Fenced Frontier B1, D4) applied to every fleet node's pinned
  * Postgres connection — the single `NodePgClient` `prepareFleetNode` builds is the writer-capable one
@@ -276,7 +298,13 @@ export async function prepareFleetNode(deps: {
   adminKey: string;
   /** The serve data dir — the sync node's local replica is created at `<dataDir>/fleet-replica.db`. */
   dataDir: string;
+  /** Lease TTL in ms — the single knob the whole failover clock scales from (see `fleetProbeMs`/
+   *  `fleetAcquireRetryMs`). Threaded from serve's fleet config, which reads
+   *  `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning; the wedged-writer E2E uses 4000). Default 15000
+   *  reproduces the historical constants exactly. */
+  leaseTtlMs?: number;
 }): Promise<FleetPrep> {
+  const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   // Tag this node's Postgres backends so they're identifiable in `pg_stat_activity` — an operator can
   // see which fleet node owns a connection, and the writer self-exit E2E targets exactly one node's
   // backends via `pg_terminate_backend(... WHERE application_name = ...)`. Derived from the advertise
@@ -294,7 +322,12 @@ export async function prepareFleetNode(deps: {
   const pgStore = new PostgresDocStore(client, { readOnly: true });
   // `applicationName` is recorded on the lease row (writer_app_name) so a future D4 eviction
   // fencer can `pg_terminate_backend` the exact wedged holder's connection by name.
-  const lease = new LeaseManager(client, { advertiseUrl: deps.advertiseUrl, applicationName });
+  const lease = new LeaseManager(client, {
+    advertiseUrl: deps.advertiseUrl,
+    applicationName,
+    ttlMs: leaseTtlMs,
+    retryMs: fleetAcquireRetryMs(leaseTtlMs),
+  });
   const forwarder = new WriteForwarder(lease, { adminKey: deps.adminKey, selfUrl: deps.advertiseUrl });
 
   // EVERY fleet node — writer or sync — gets the pg_notify-wrapping fan-out adapter, not just the
@@ -537,6 +570,11 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
+      // Probe cadence scales with the lease TTL (same knob the LeaseManager stamps expires_at from),
+      // so a live writer always renews several times per TTL — a shortened TTL (e.g. the wedged-writer
+      // E2E's 4000ms) must not let a HEALTHY writer's own lease expire between probes. At the default
+      // 15000ms TTL this is exactly the historical 5000ms probe.
+      probeMs: fleetProbeMs(lease.ttlMs),
     });
     monitor.start();
   };

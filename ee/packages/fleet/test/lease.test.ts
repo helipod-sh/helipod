@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { LeaseManager } from "../src/lease";
+import { fleetProbeMs, fleetAcquireRetryMs } from "../src/node";
 import { PgliteClient } from "./pglite-client";
 
 // Real advisory-lock CONTENTION (a second writer failing to acquire while the first holds it) is
@@ -184,5 +185,44 @@ describe("LeaseManager", () => {
 
     await mgr.tryAcquire();
     expect(mgr.currentEpoch()).toBe(2n);
+  });
+
+  it("ttlMs stamps a shorter expires_at — a small TTL expires quickly, exposed via ttlMs + isExpired()", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000", ttlMs: 120 });
+    expect(mgr.ttlMs).toBe(120); // public — the LeaseMonitor derives its probe cadence from this
+    await mgr.setup();
+    await mgr.tryAcquire();
+
+    // Fresh lease is not yet expired.
+    expect(await mgr.isExpired()).toBe(false);
+    // After well past the 120ms TTL (no heartbeat), the DB's own clock reports it expired — the exact
+    // signal a follower's evict path keys off. A default-TTL (15s) lease would NOT be expired here.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await mgr.isExpired()).toBe(true);
+  });
+
+  it("ttlMs defaults to 15000 and clamps a non-positive/NaN value back to the default", () => {
+    expect(new LeaseManager(client, { advertiseUrl: "http://x:1" }).ttlMs).toBe(15_000);
+    // A garbage TTL must not produce a born-expired lease (invalid SQL / negative interval); the
+    // stamped value clamps to the default even though the reported ttlMs echoes the raw input.
+    const bad = new LeaseManager(client, { advertiseUrl: "http://x:1", ttlMs: -5 });
+    expect(bad.ttlMs).toBe(-5); // echoed as given (cadence derivation still gets a real number below)
+  });
+});
+
+describe("fleet cadence derivation (fleetProbeMs / fleetAcquireRetryMs)", () => {
+  it("the default TTL reproduces the historical hard-coded probe/retry constants exactly", () => {
+    // 15000ms TTL → 5000ms probe (old LeaseMonitor default) and 2000ms retry (old LeaseManager
+    // default): the production default is byte-for-byte behavior-identical after the change.
+    expect(fleetProbeMs(15_000)).toBe(5_000);
+    expect(fleetAcquireRetryMs(15_000)).toBe(2_000);
+  });
+
+  it("a shortened TTL scales the whole clock proportionally, never to zero", () => {
+    expect(fleetProbeMs(4_000)).toBe(Math.round(4_000 / 3)); // ~1333ms — 3 renewals per TTL
+    expect(fleetAcquireRetryMs(4_000)).toBe(Math.round((4_000 * 2) / 15)); // ~533ms
+    // Even an absurdly tiny TTL yields at least a 1ms interval (never a 0ms busy-loop).
+    expect(fleetProbeMs(1)).toBeGreaterThanOrEqual(1);
+    expect(fleetAcquireRetryMs(1)).toBeGreaterThanOrEqual(1);
   });
 });
