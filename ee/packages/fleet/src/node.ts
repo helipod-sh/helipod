@@ -592,6 +592,23 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // so every commit from here on must be fenced against its acquired epoch. `monitor` is already
     // non-null (startWriterMonitor() just ran), so a fenced commit routes straight to its fenced().
     installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+    // F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): seed frontier_ts up to this store's
+    // current max document ts — HERE, not inside tryAcquire() (`prepareFleetNode` runs BEFORE
+    // `bootProject`/`setupSchema`, so `documents` may not exist yet there), and BEFORE this node is
+    // reported ready (`startFleetNode`'s return is what unblocks serve's ready line). Closes the
+    // "pre-loaded database" hole: a single-node Postgres `serve` that accumulated real data before
+    // `--fleet` was ever enabled has no `shard_leases` row, so the first `tryAcquire()` after
+    // enabling it seeds `frontier_ts=0` even though history exists — without this seed, a fresh sync
+    // node's ready gate (wm=0 < target=0) is a silent no-op and it reports ready EMPTY. GREATEST
+    // inside `seedFrontier` makes this a no-op on an already-live fleet; promotion deliberately does
+    // NOT re-seed (see `promoteFleetNode` — frontier is already live by then via the commit guard).
+    const epoch = lease.currentEpoch();
+    if (epoch === null) {
+      throw new Error(
+        "fleet: writer boot has no acquired epoch (bug: forwarder.isLocalWriter() implies tryAcquire() already ran)",
+      );
+    }
+    await lease.seedFrontier(epoch, await pgStore.maxTimestamp());
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -640,6 +657,17 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // reactive fan-out from the SAME applied batch. `start()` gates on bootstrap catch-up, so this
   // node isn't reported ready (serve prints its ready line only after `startFleetNode` returns)
   // until the replica has caught up to the FENCED FRONTIER F (Fenced Frontier B1, D5 — the tailer
+  //
+  // F1 note: a sync node never seeds `frontier_ts` itself — it doesn't hold the epoch, so it
+  // structurally can't (see `LeaseManager.seedFrontier`'s epoch fencing). If THIS node wins the boot
+  // race and starts tailing before any writer has ever seeded the frontier (e.g. against a database
+  // that was populated single-node, pre-`--fleet`), its ready gate targets whatever F is on the row
+  // at that moment — 0, if no writer has booted yet — and it reports ready with an empty replica
+  // exactly like the bug this fix addresses. That's an accepted, BOUNDED window: it heals the moment
+  // ANY fleet writer boots (the writer-boot seed above), not on the far looser "first post-upgrade
+  // commit" the old code silently relied on. Widening the sync node's own ready gate to wait for
+  // frontier >= the primary's live max is deliberately NOT done — it would either dead-lock forever
+  // on a fleet with no writer yet, or duplicate the writer's own seed logic on the read-only side.
   // reads `shard_leases.frontier_ts` itself, via the SAME `client` passed below, rather than
   // `pgStore.maxTimestamp()`; nothing extra to wire here) — a fresh follower never serves a read
   // that's arbitrarily behind, and never pulls a commit that raced past the last fence check. On

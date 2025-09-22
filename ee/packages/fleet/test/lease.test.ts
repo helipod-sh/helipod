@@ -210,6 +210,54 @@ describe("LeaseManager", () => {
   });
 });
 
+describe("LeaseManager.seedFrontier (F1 fix: pre-loaded-database bootstrap hole)", () => {
+  let client: PgliteClient;
+
+  beforeEach(() => {
+    client = new PgliteClient();
+  });
+
+  afterEach(async () => {
+    await client.close();
+  });
+
+  it("seeds frontier_ts up from 0 to the given maxTs, epoch-fenced to the current epoch", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    const acquired = await mgr.tryAcquire(); // epoch 1, frontier_ts seeded to 0 (first-row creation)
+    expect((await mgr.read())?.frontierTs).toBe(0n);
+
+    await mgr.seedFrontier(acquired!.epoch, 1000n);
+
+    expect((await mgr.read())?.frontierTs).toBe(1000n);
+    // prev_ts is deliberately untouched by a seed (not a commit) — stays at its prior value.
+    expect((await mgr.read())?.prevTs).toBe(0n);
+  });
+
+  it("is a no-op (GREATEST) when frontier_ts is already >= maxTs — an already-live fleet is unaffected", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    const acquired = await mgr.tryAcquire();
+    await mgr.seedFrontier(acquired!.epoch, 5000n);
+    expect((await mgr.read())?.frontierTs).toBe(5000n);
+
+    // A second seed with a LOWER maxTs (e.g. a restart re-running the seed step) must never regress.
+    await mgr.seedFrontier(acquired!.epoch, 10n);
+    expect((await mgr.read())?.frontierTs).toBe(5000n);
+  });
+
+  it("no-ops (affects 0 rows) against a stale/superseded epoch — never clobbers a newer writer's row", async () => {
+    const mgr = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await mgr.setup();
+    const first = await mgr.tryAcquire(); // epoch 1
+    await mgr.tryAcquire(); // epoch 2 — supersedes epoch 1, frontier_ts still 0
+
+    // Seeding against the STALE epoch 1 must not touch the row at all (epoch-fenced WHERE clause).
+    await mgr.seedFrontier(first!.epoch, 9999n);
+    expect((await mgr.read())?.frontierTs).toBe(0n);
+  });
+});
+
 describe("fleet cadence derivation (fleetProbeMs / fleetAcquireRetryMs)", () => {
   it("the default TTL reproduces the historical hard-coded probe/retry constants exactly", () => {
     // 15000ms TTL → 5000ms probe (old LeaseMonitor default) and 2000ms retry (old LeaseManager

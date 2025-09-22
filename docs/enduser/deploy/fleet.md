@@ -365,7 +365,9 @@ internal bookkeeping the lease lives in was reworked as part of adding wedged-wr
 (above); an old node and a new node would disagree about where to look for it. Nothing about your
 data is affected — the lease itself is short-lived coordination state, not application data, so
 there's nothing to migrate or back up before upgrading. The old bookkeeping is simply left behind
-unused.
+unused. The same goes for turning `--fleet` on for the first time against a Postgres database that
+already has data in it from single-node use: existing data is served by sync nodes as soon as the
+first fleet writer boots — no write required to "reveal" it.
 
 ## Current limits
 

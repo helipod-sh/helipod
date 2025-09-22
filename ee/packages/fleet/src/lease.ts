@@ -349,6 +349,37 @@ export class LeaseManager {
     }
   }
 
+  /**
+   * F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): seed `frontier_ts` up to at least
+   * `maxTs` — the writer-BOOT step that closes the "pre-loaded database" hole. `tryAcquire()` only
+   * seeds `frontier_ts` to 0 on the row's FIRST creation (see above); a single-node Postgres `serve`
+   * that accumulates real data BEFORE `--fleet` is ever turned on has no `shard_leases` row at all,
+   * so the first `tryAcquire()` after enabling `--fleet` creates one at `frontier_ts=0` even though
+   * the store already holds history. Because the tailer targets `F=frontier_ts` (not
+   * `primary.maxTimestamp()`, see `replica-tailer.ts`'s D5), a fresh sync node's ready gate
+   * (`wm=0 < target=0`) is then a silent no-op — it reports ready with an EMPTY replica while the
+   * primary holds everything. Callers must invoke this at WRITER BOOT, after this node's own
+   * `setupSchema()` has definitely run (the `documents` table this reads may not exist before
+   * that — see `prepareFleetNode`/`startFleetNode`'s boot ordering) and BEFORE the node is reported
+   * ready; a later promotion does NOT need to call this — by then `frontier_ts` is already live,
+   * tracking every commit via the guard installed by `installCommitGuard`.
+   *
+   * `GREATEST` makes this a no-op on an already-live fleet (frontier already tracks every commit)
+   * and on re-acquisition — never regresses `frontier_ts`. Epoch-fenced like every other
+   * `shard_leases` write: a stale `epoch` here (this node lost the writer race to someone else
+   * between its `tryAcquire()` and this call) affects 0 rows rather than clobbering the new
+   * writer's state — that writer's own commit guard is the source of truth for `frontier_ts` going
+   * forward regardless. Deliberately does NOT touch `prev_ts`: this is a seed of the high-water
+   * mark, not a commit, so there is no new "previous commit" to record — the next REAL commit's
+   * guard sets `prev_ts := frontier_ts` (now the seeded value) exactly as it always does.
+   */
+  async seedFrontier(epoch: bigint, maxTs: bigint): Promise<void> {
+    await this.client.query(
+      `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2 AND epoch = $3`,
+      [maxTs, SHARD_ID, epoch],
+    );
+  }
+
   /** Reads the current lease row (discovery for forwarding, plus the full fencing/frontier state);
    *  null if none exists yet. */
   async read(): Promise<LeaseRow | null> {
