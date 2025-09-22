@@ -39,8 +39,11 @@ through Postgres exactly as in slice 1 — this is a read-path change only.
   update.
 - **Live failover.** If the writer process dies (crash, `SIGKILL`, a bad deploy), its Postgres
   session — and with it the advisory lock — is released automatically. A sync node's retry loop
-  picks up the lease, typically within a couple of seconds, and promotes itself to writer. No
-  restart of the other nodes is needed.
+  picks up the lease, typically within a couple of seconds, and promotes itself to writer. A
+  writer that's still *running* but stuck — a GC pause, a frozen process, a hung transaction — is
+  covered too, on a different mechanism with its own timing; see [Failover timing and in-flight
+  requests](#failover-timing-and-in-flight-requests) below for both cases. No restart of the other
+  nodes is needed either way.
 
 This is built on the same Postgres storage adapter as [single-node self-hosting with
 Postgres](/self-hosting#using-postgres) — a fleet is that same adapter, plus a small `ee/`
@@ -310,6 +313,34 @@ heartbeat, freeing its resources. None of this requires manual intervention.
   so failover typically completes within a couple of seconds and up to roughly 10 seconds in the
   worst case, not longer. This has been proven end-to-end by killing a live writer with `SIGKILL`
   mid-test and observing a sync node promote and start serving writes.
+- **A writer that's alive but stuck — not crashed, just wedged (a GC pause, a frozen process, a
+  hung transaction) — no longer holds the fleet hostage.** This is a different failure than the
+  dead-writer case above: the process never exits and never releases anything on its own, so
+  another node has to notice and take over instead. Every writer's lease carries a time limit
+  (15 seconds by default) that it has to keep renewing to stay the writer; once a writer stops
+  renewing, another node waits out that time limit and then takes the lease away from it —
+  *fencing* it, meaning any commit the stuck writer had in flight at that exact moment is aborted
+  rather than allowed to land, so a write is never left half-applied or silently lost. The new
+  writer also terminates the stuck writer's database sessions, so it can't wake up later and keep
+  writing as an unnoticed second writer. Measured end-to-end with the time limit shortened to 4
+  seconds for testing: takeover completed about 4.5 seconds after the writer wedged. If the
+  frozen writer later revives (e.g. the paused process resumes), it discovers its lease is gone
+  and exits on its own rather than resuming as a writer; a process supervisor restarts it and it
+  rejoins the fleet as an ordinary sync node.
+- **Tuning the lease time limit: `STACKBASE_FLEET_LEASE_TTL_MS`.** This sets how long a writer's
+  lease survives without a renewal before another node is allowed to take it over — the default
+  is `15000` (15 seconds), which is also what the crash-failover timing above already assumes.
+  Lowering it makes a wedged-writer takeover faster, at the cost of a healthy writer needing to
+  renew more often — a transient hiccup (a slow GC pause, a brief network blip) that outlasts the
+  limit could trigger a failover that wasn't really necessary. Raising it does the opposite: fewer
+  false alarms, slower recovery from a genuine wedge. Set the same value on every node in the
+  fleet; a mismatch doesn't corrupt anything, but nodes would disagree about when a peer's lease
+  has actually run out.
+- **The writer's database connection also has its own fixed limits, independent of the lease
+  above:** a single SQL statement is capped at 10 seconds, and a transaction left open and idle
+  is capped at 5 seconds. Either limit being hit fails the offending write visibly instead of
+  letting it hang indefinitely — a second line of defense, on the writer's own connection, that
+  applies whether or not a takeover is also in progress.
 - **Any mutation/action in flight against the dying writer at the moment it dies fails visibly**
   to its caller (a connection error, not a silent hang) — there is no in-flight request migration.
   Treat these the same way you'd treat any other transient network failure: **retry from the
@@ -326,6 +357,15 @@ heartbeat, freeing its resources. None of this requires manual intervention.
   fresh sync node. A promotion that fails partway through (a Postgres error while it's catching
   its write oracle up, for example) exits the same way, rather than leaving the node stuck
   half-promoted.
+
+## Upgrading
+
+Upgrade all fleet nodes together for this release rather than rolling nodes one at a time. The
+internal bookkeeping the lease lives in was reworked as part of adding wedged-writer failover
+(above); an old node and a new node would disagree about where to look for it. Nothing about your
+data is affected — the lease itself is short-lived coordination state, not application data, so
+there's nothing to migrate or back up before upgrading. The old bookkeeping is simply left behind
+unused.
 
 ## Current limits
 

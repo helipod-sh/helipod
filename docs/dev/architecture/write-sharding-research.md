@@ -1,6 +1,6 @@
 ---
 title: Write Sharding — Multi-Agent Research & the Fenced Frontier Verdict
-status: proposed (research complete, pre-spec — slice B1 to be brainstormed/spec'd from this)
+status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps — see docs/enduser/deploy/fleet.md); slices beyond B1 remain research/pre-spec
 date: 2025-08-28
 audience: engineering (internal)
 ---
