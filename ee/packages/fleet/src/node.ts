@@ -57,6 +57,17 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
 
 /**
+ * Bounded-writer-session timeouts (Fenced Frontier B1, D4) applied to every fleet node's pinned
+ * Postgres connection — the single `NodePgClient` `prepareFleetNode` builds is the writer-capable one
+ * (a sync node's same connection becomes the writer's on promotion via `pgStore.setWritable()`), so
+ * it is bounded from boot. `idle_in_transaction=5s` kills a transaction a wedged writer leaves open
+ * mid-commit (releasing the row lock a fencer's `evictExpired` needs); `statement=10s` caps any single
+ * runaway statement. A NON-fleet single-node `serve`/`dev` (`makeStore` in `packages/cli`) constructs
+ * `NodePgClient` WITHOUT this option and stays unbounded — see that call site.
+ */
+export const FLEET_WRITER_SESSION_TIMEOUTS = { idleInTransactionMs: 5_000, statementMs: 10_000 };
+
+/**
  * `persistence_globals` key a fleet deployment stamps once on the primary (C7) and every sync
  * node mirrors locally onto its replica. A replica file is a rebuildable mirror of ONE primary —
  * reused against a DIFFERENT primary (e.g. a data dir copied/reattached to another deployment) it
@@ -271,7 +282,13 @@ export async function prepareFleetNode(deps: {
   // backends via `pg_terminate_backend(... WHERE application_name = ...)`. Derived from the advertise
   // URL's port (unique per node on a host); falls back to the whole advertise URL if it has no port.
   const applicationName = fleetApplicationName(deps.advertiseUrl);
-  const client = new NodePgClient({ connectionString: deps.databaseUrl, applicationName });
+  // Writer-capable connection: bound its session (D4) — see FLEET_WRITER_SESSION_TIMEOUTS. Non-fleet
+  // constructions (packages/cli's makeStore) pass no sessionTimeouts and stay unbounded.
+  const client = new NodePgClient({
+    connectionString: deps.databaseUrl,
+    applicationName,
+    sessionTimeouts: FLEET_WRITER_SESSION_TIMEOUTS,
+  });
   // Read-only until (and unless) this node wins the lease. A follower still runs the idempotent
   // DDL in setupSchema but does NOT contend for the writer advisory lock (see PostgresDocStore).
   const pgStore = new PostgresDocStore(client, { readOnly: true });

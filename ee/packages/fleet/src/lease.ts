@@ -47,6 +47,22 @@ function toBigIntOrZero(v: PgValue | undefined): bigint {
   return typeof v === "bigint" ? v : BigInt(v as number | string);
 }
 
+/**
+ * True if `e` is a Postgres lock-acquisition timeout (`lock_timeout` fired). `evictExpired`'s
+ * `SELECT ... FOR UPDATE` runs under `SET LOCAL lock_timeout='2s'`, so if a wedged writer is mid-
+ * commit and still holds the row lock, the fencer waits at most 2s and then this fires — treated as
+ * "couldn't fence this tick, retry next tick" rather than an error surfaced to the acquire loop.
+ * SQLSTATE `55P03` is `lock_not_available`; the message match is a belt-and-braces fallback.
+ */
+function isLockTimeoutError(e: unknown): boolean {
+  if (e && typeof e === "object") {
+    if ((e as { code?: unknown }).code === "55P03") return true;
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string" && /lock[_ ]?timeout|lock_not_available/i.test(msg)) return true;
+  }
+  return false;
+}
+
 function rowToLeaseRow(row: PgRow): LeaseRow {
   return {
     epoch: row.epoch as bigint,
@@ -166,26 +182,139 @@ export class LeaseManager {
     return rows.length;
   }
 
-  /** Loop tryAcquire() every retryMs until it succeeds, then invoke onAcquired once. stop() cancels. */
+  /**
+   * Read-only expiry check: does the lease row exist AND is `expires_at` in the past, per the DB's
+   * OWN clock? Used as the acquire loop's per-tick pre-gate before the heavier `evictExpired`
+   * transaction — a healthy (live) lease must NOT make every follower take the row lock every tick and
+   * contend with the writer's commit guard, so the common case stays a single cheap SELECT. The
+   * comparison is `now()` in SQL (not `read().expiresAt` in JS) so it's authoritative against clock
+   * skew between a follower's host and Postgres.
+   */
+  async isExpired(): Promise<boolean> {
+    const rows = await this.client.query(
+      `SELECT 1 FROM shard_leases WHERE shard_id = $1 AND expires_at < now()`,
+      [SHARD_ID],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Fencing-first eviction of an EXPIRED lease (Fenced Frontier B1, D4). Bumps `epoch` (fencing the
+   * wedged holder — its next commit guard / heartbeat now matches 0 rows), clears `writer_url`/
+   * `writer_app_name`, and advances `frontier_ts`, all predicated on the lease actually being
+   * expired. Returns `{ fenced: true, oldAppName }` capturing the evicted holder's `writer_app_name`
+   * (so the acquire loop can `pg_terminate_backend` its lingering connection); `{ fenced: false }`
+   * when the row is live (no-op) OR the row lock couldn't be taken within `lock_timeout` (retry next
+   * tick — never throws that to the loop).
+   *
+   * Why a `SELECT ... FOR UPDATE` then a separate `UPDATE`, NOT a single `UPDATE ... RETURNING (SELECT
+   * writer_app_name FROM cte)`: on Postgres, RETURNING — and the inlined CTE subquery it evaluates —
+   * sees the NEW (already-nulled) row, so a single statement reads back NULL for the old app name
+   * (verified on PGlite; a `MATERIALIZED` CTE with its own `FOR UPDATE` instead collides with the
+   * same-statement UPDATE's row lock and yields zero rows). The two-statement form captures the old
+   * value cleanly, and the `FOR UPDATE` takes the very row lock a concurrent commit-guard UPDATE
+   * contends on — serializing eviction against an in-flight commit. That contention is single-
+   * connection-untestable and covered E2E only (see the test header).
+   */
+  async evictExpired(): Promise<{ fenced: boolean; oldAppName: string | null }> {
+    try {
+      return await this.client.transaction(async (tx) => {
+        // `lock_timeout` scoped to THIS transaction (auto-reset at COMMIT/ROLLBACK): if the wedged
+        // holder is mid-commit and still holds the row lock, wait at most 2s, then the FOR UPDATE
+        // below fires a lock_timeout error → caught outside → {fenced:false}, retry next tick.
+        await tx.query(`SET LOCAL lock_timeout = '2s'`);
+        const sel = await tx.query(
+          `SELECT writer_app_name FROM shard_leases WHERE shard_id = $1 AND expires_at < now() FOR UPDATE`,
+          [SHARD_ID],
+        );
+        if (sel.length === 0) return { fenced: false, oldAppName: null }; // live (or gone) — no-op
+        const oldAppName = (sel[0]!.writer_app_name as string | null | undefined) ?? null;
+        // BINDING HANDOFF (Task 1 review): `frontier_ts` MUST stay inside the GREATEST —
+        // `frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))`, NEVER `nextval`
+        // alone. `frontier_ts` is the true high-water mark (the commit guard maintains it >= every
+        // committed ts), while the `stackbase_ts` sequence can LAG reality in a mixed
+        // write()/commitWrite store. Architectural invariant: the production primary is pure-
+        // commitWrite, so the sequence never lags maxTimestamp there; `frontier_ts` in this GREATEST
+        // is what makes eviction safe even if that ever changes. The row is already locked by the
+        // SELECT FOR UPDATE above, so the bare shard_id WHERE targets exactly that expired row.
+        await tx.query(
+          `UPDATE shard_leases SET
+             epoch = epoch + 1,
+             writer_url = NULL,
+             writer_app_name = NULL,
+             frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))
+           WHERE shard_id = $1`,
+          [SHARD_ID],
+        );
+        return { fenced: true, oldAppName };
+      });
+    } catch (e) {
+      // A lock_timeout (couldn't take the row lock in 2s) is expected under contention — surface it as
+      // a no-op-this-tick, not an error. The transaction() wrapper has already ROLLBACK'd.
+      if (isLockTimeoutError(e)) return { fenced: false, oldAppName: null };
+      throw e;
+    }
+  }
+
+  /**
+   * Kill the evicted holder's lingering Postgres backend(s) by `application_name` so its session-level
+   * advisory writer lock is released and the NEXT acquire tick can win. Matches the fleet E2E's query
+   * shape exactly, including the `pid <> pg_backend_pid()` self-exclusion (the fencer never terminates
+   * its own connection — its app name differs anyway, so this is belt-and-braces). Best-effort: if the
+   * backend is already gone, the query simply affects zero rows.
+   */
+  async terminateBackend(appName: string): Promise<void> {
+    await this.client.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()`,
+      [appName],
+    );
+  }
+
+  /**
+   * A tick observed the advisory-lock try FAIL — another backend still holds the writer lock. If the
+   * lease has ALSO expired, that holder is wedged (its heartbeat stopped) while its connection lingers
+   * (a hung/paused process still owns the advisory lock, so no other node can acquire). Fence it
+   * (`evictExpired` bumps the epoch) then terminate its backend to release the lock; the next tick's
+   * advisory try then succeeds → normal acquisition → promotion. No-op when the lease is still live.
+   */
+  private async maybeEvictWedged(): Promise<void> {
+    if (!(await this.isExpired())) return;
+    const { fenced, oldAppName } = await this.evictExpired();
+    // Skip termination when there's no recorded app name — nothing to target (and a null-name lease
+    // predates app-name stamping / was hand-written). The epoch bump alone already fenced the holder.
+    if (fenced && oldAppName !== null) await this.terminateBackend(oldAppName);
+  }
+
+  /** Loop tryAcquire() every retryMs until it succeeds, then invoke onAcquired once. stop() cancels.
+   *  On a tick where the advisory try fails AND the lease has expired, the wedged holder is fenced +
+   *  its backend terminated (`maybeEvictWedged`) so a later tick can take over. */
   acquireLoop(onAcquired: (s: LeaseState) => void): void {
     this.stopped = false;
 
-    const attempt = () => {
+    const schedule = () => {
       if (this.stopped) return;
-      void this.tryAcquire()
-        .then((state) => {
+      this.timer = setTimeout(attempt, this.retryMs);
+    };
+
+    const attempt = (): void => {
+      if (this.stopped) return;
+      void (async () => {
+        try {
+          const state = await this.tryAcquire();
           if (this.stopped) return;
           if (state) {
             onAcquired(state);
-            return;
+            return; // acquired — the loop is done (no reschedule)
           }
-          this.timer = setTimeout(attempt, this.retryMs);
-        })
-        .catch(() => {
-          // Transient error (e.g. a dropped connection) — keep retrying rather than dying silently.
-          if (this.stopped) return;
-          this.timer = setTimeout(attempt, this.retryMs);
-        });
+          // Advisory try failed this tick: if the lease has expired, fence + evict the wedged holder
+          // so the next tick can win. Any error here falls through to the catch → reschedule.
+          await this.maybeEvictWedged();
+        } catch {
+          // Transient error (dropped connection, eviction/terminate race) — never let the loop die;
+          // just retry next tick.
+        }
+        schedule();
+      })();
     };
 
     this.timer = setTimeout(attempt, this.retryMs);

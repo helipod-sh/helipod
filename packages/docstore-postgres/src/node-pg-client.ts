@@ -23,6 +23,33 @@ const { Client, types } = pg;
 // int8 (OID 20) → bigint (pg defaults to string). Set on a per-client type map, not globally.
 const INT8_OID = 20;
 
+/** Bounded-writer-session timeouts (Fenced Frontier B1, D4). Applied ONLY to fleet writer-capable
+ *  connections (see `prepareFleetNode`) — a non-fleet single-node `NodePgClient` passes no
+ *  `sessionTimeouts` and runs unbounded, exactly as before. */
+export interface PgSessionTimeouts {
+  /** `idle_in_transaction_session_timeout` — kills a transaction left open (a wedged writer stuck
+   *  mid-commit holding the row lock a fencer needs). Milliseconds. */
+  idleInTransactionMs: number;
+  /** `statement_timeout` — caps any single runaway statement. Milliseconds. */
+  statementMs: number;
+}
+
+/**
+ * The `SET` statements that install {@link PgSessionTimeouts} on a connection — a pure builder so the
+ * exact SQL is unit-testable without a live Postgres. Issued post-connect on the pinned connection
+ * (see `ensure()`), NOT via the `options`/`-c` connection-string param: pg merges a parsed connection
+ * string OVER explicit config fields (the same footgun the `application_name` wiring below documents),
+ * so an app-supplied `options=` in the URL would silently shadow a config-field `options`; a plain
+ * post-connect `SET` on the already-pinned single connection has no such merge ambiguity. Both GUCs
+ * read a bare integer as MILLISECONDS.
+ */
+export function pgSessionTimeoutStatements(t: PgSessionTimeouts): string[] {
+  return [
+    `SET idle_in_transaction_session_timeout = ${Math.trunc(t.idleInTransactionMs)}`,
+    `SET statement_timeout = ${Math.trunc(t.statementMs)}`,
+  ];
+}
+
 function toDriverParams(params?: readonly PgValue[]): unknown[] | undefined {
   if (!params) return undefined;
   // pg wants a Buffer for bytea; convert Uint8Array → Buffer. bigint is serialized fine by pg as text.
@@ -49,10 +76,15 @@ export class NodePgClient implements PgClient {
   private connectPromise?: Promise<void>;
   private readonly connectionLostCbs: Array<() => void> = [];
   private connectionLostFired = false;
+  /** Bounded-writer-session timeouts, applied post-connect in `ensure()`. Undefined (the default,
+   *  and every non-fleet construction) → no `SET`, unbounded session. Public+readonly so a fleet
+   *  boot can be introspected in tests without a live connection. */
+  readonly sessionTimeouts?: PgSessionTimeouts;
 
-  constructor(opts: { connectionString: string; applicationName?: string }) {
+  constructor(opts: { connectionString: string; applicationName?: string; sessionTimeouts?: PgSessionTimeouts }) {
     this.connectionString = opts.connectionString;
     this.applicationName = opts.applicationName;
+    this.sessionTimeouts = opts.sessionTimeouts;
     this.client = new Client({
       connectionString: opts.connectionString,
       // Tag this connection's backend in pg_stat_activity when a name is supplied (fleet nodes pass a
@@ -83,7 +115,16 @@ export class NodePgClient implements PgClient {
       // fire the registered callbacks exactly once (guarding the error-then-end double-fire).
       this.client.on("error", () => this.fireConnectionLost());
       this.client.on("end", () => this.fireConnectionLost());
-      return this.client.connect().then(() => {
+      return this.client.connect().then(async () => {
+        // Install the bounded-session timeouts (fleet writer-capable connections only) BEFORE marking
+        // connected, so they're in force for the very first query/transaction — no window where an
+        // unbounded statement could run pre-SET. Chained into the memoized connect promise, so every
+        // `ensure()` awaiter observes them applied.
+        if (this.sessionTimeouts) {
+          for (const stmt of pgSessionTimeoutStatements(this.sessionTimeouts)) {
+            await this.client.query(stmt);
+          }
+        }
         this.connected = true;
       });
     })());
