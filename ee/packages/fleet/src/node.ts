@@ -601,9 +601,12 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // Sync boot: verbatim-apply the primary's MVCC log onto the local replica AND drive cross-process
   // reactive fan-out from the SAME applied batch. `start()` gates on bootstrap catch-up, so this
   // node isn't reported ready (serve prints its ready line only after `startFleetNode` returns)
-  // until the replica has caught up to the primary — a fresh follower never serves a read that's
-  // arbitrarily behind. On each applied batch: advance the oracle, translate written keys/docs into
-  // point ranges, and push the transition into the sync handler.
+  // until the replica has caught up to the FENCED FRONTIER F (Fenced Frontier B1, D5 — the tailer
+  // reads `shard_leases.frontier_ts` itself, via the SAME `client` passed below, rather than
+  // `pgStore.maxTimestamp()`; nothing extra to wire here) — a fresh follower never serves a read
+  // that's arbitrarily behind, and never pulls a commit that raced past the last fence check. On
+  // each applied batch: advance the oracle, translate written keys/docs into point ranges, and
+  // push the transition into the sync handler.
   const tailer = new ReplicaTailer(client, pgStore, replica, {
     onInvalidation: async (inv: AppliedInvalidation) => {
       // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits

@@ -140,12 +140,23 @@ describe("fleet node lifecycle", () => {
     const client = new PgliteClient();
     const primary = new PostgresDocStore(client);
     await primary.setupSchema();
+    // Fenced Frontier B1 (D5): the tailer's pull target is `shard_leases.frontier_ts`, not
+    // `primary.maxTimestamp()` — a real lease row is required, and since this test drives the
+    // primary via raw `write()` (exact ts control, matching `replica-tailer.test.ts`'s pattern)
+    // rather than the guarded `commitWrite`, the frontier is advanced by hand below.
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-lifecycle-restart-test:0" });
+    await lease.setup();
+    await lease.tryAcquire();
     const path = join(tmp, REPLICA_DB_FILENAME);
 
     const a = newDocumentId(T1);
     const b = newDocumentId(T1);
     await primary.write([rev(a, 1n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 1n)], "Error");
     await primary.write([rev(b, 2n, null, "B1")], [idxPut(b, encodeIndexKey(["b"]), 2n)], "Error");
+    await client.query(
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = 'default'`,
+      [2n],
+    );
 
     // First run: tail the two entries onto a file-backed replica, then dispose.
     const r1 = new SqliteDocStore(new NodeSqliteAdapter({ path }));
@@ -386,6 +397,12 @@ describe("fleet node lifecycle", () => {
         // and handles.stop() cancels it long before an hour elapses.
         retryMs: 3_600_000,
       });
+      // Fenced Frontier B1 (D5): the tailer now reads `shard_leases.frontier_ts` as its pull
+      // target, so the table must exist — in production this is ALWAYS true by the time
+      // `startFleetNode` runs (`prepareFleetNode` calls `lease.setup()` before deciding
+      // sync-vs-writer); this test bypasses `prepareFleetNode` and drives `startFleetNode`
+      // directly, so it must do that setup step itself.
+      await lease.setup();
       const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://127.0.0.1:9999" });
       expect(forwarder.isLocalWriter()).toBe(false); // sync role — takes startFleetNode's sync path
       const runtime = {

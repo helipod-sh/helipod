@@ -36,6 +36,7 @@ describe("NotifyingFanoutAdapter", () => {
       tables: ["10001"],
       ranges: [],
       originId: "origin-a",
+      shardId: "default",
     };
     adapter.publish(payload);
 

@@ -21,4 +21,10 @@ export {
 } from "./node";
 export { SwitchableDocStore } from "./switchable-store";
 export { docKeyToPointRange } from "./ranges";
-export { ReplicaTailer, type AppliedInvalidation, type ReplicaTailerOptions } from "./replica-tailer";
+export {
+  ReplicaTailer,
+  DensityViolationError,
+  type AppliedInvalidation,
+  type ReplicaTailerOptions,
+} from "./replica-tailer";
+export { stablePrefixFromFrontier, type StablePrefixTs } from "./stable-prefix";
