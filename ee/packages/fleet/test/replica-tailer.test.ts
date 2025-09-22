@@ -23,7 +23,7 @@ import type {
   InternalDocumentId,
 } from "@stackbase/docstore";
 import { PgliteClient } from "./pglite-client";
-import { ReplicaTailer, DensityViolationError, type AppliedInvalidation } from "../src/replica-tailer";
+import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { stablePrefixFromFrontier, type StablePrefixTs } from "../src/stable-prefix";
 import { LeaseManager } from "../src/lease";
 import { installCommitGuard } from "../src/node";
@@ -478,12 +478,12 @@ describe("Fenced Frontier B1 (Task 5): tailer targets F, density assertions, Sta
     expect(await replica.get(c)).not.toBeNull();
   });
 
-  it("density violation: hand-tampering the replica's head between ticks throws DensityViolationError naming the doc", async () => {
+  it("density violation: hand-tampering the replica's head HALTS the tailer, logging the doc + remedy once", async () => {
     const a = newDocumentId(T);
     const commit1 = await primary.commitWrite([guardedDoc(a, null, "A1")], []);
 
-    // A large pollMs keeps the background setInterval from also racing this same violation and
-    // producing an unhandled rejection alongside the deliberately-forced tick below.
+    // A large pollMs keeps the background setInterval from also racing this same violation while we
+    // drive the tick deterministically below.
     tailer = new ReplicaTailer(client, primary, replica, { pollMs: 20_000, onInvalidation: async () => {} });
     await tailer.start(); // bootstrap applies commit1 cleanly
     expect((await replica.get(a))?.ts).toBe(commit1);
@@ -507,21 +507,31 @@ describe("Fenced Frontier B1 (Task 5): tailer targets F, density assertions, Sta
     const commit2 = await primary.commitWrite([guardedDoc(a, commit1, "A2")], []);
     expect(commit2).not.toBe(tamperedTs);
 
-    await expect(forceTick(tailer)).rejects.toThrow(DensityViolationError);
+    // The tick now catches the DensityViolationError, HALTS the tailer, and logs the message ONCE
+    // (rather than rejecting and letting the fire-and-forget caller re-hit it forever). forceTick
+    // therefore RESOLVES — the violation is handled terminally, not propagated.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await forceTick(tailer);
-      expect.unreachable("forceTick must keep throwing until the divergence is resolved");
-    } catch (e) {
-      expect(e).toBeInstanceOf(DensityViolationError);
-      const message = (e as Error).message;
+      await forceTick(tailer); // resolves — no throw
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const message = String(errorSpy.mock.calls[0]?.[0]);
       expect(message).toContain(encodeStorageTableId(T)); // names the doc (table half)
       expect(message).toContain(String(tamperedTs)); // names the actual (wrong) head ts
       expect(message).toContain(String(commit1)); // names the expected prev_ts
       expect(message).toContain("delete <replica path>/fleet-replica.db to re-bootstrap"); // the remedy
+
+      // HALTED: the tailer is stopped, so a further tick is a no-op — the watermark never advances
+      // and nothing is re-logged (the error loop the fix eliminates would re-fire here).
+      expect(tailer.watermark()).toBe(commit1); // frozen at the last clean apply, never commit2
+      await forceTick(tailer);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(tailer.watermark()).toBe(commit1);
+    } finally {
+      errorSpy.mockRestore();
     }
   });
 
-  it("density violation (insert case): an entry with prev_ts=null but a live replica head throws", async () => {
+  it("density violation (insert case): an entry with prev_ts=null but a live replica head halts the tailer", async () => {
     const a = newDocumentId(T);
     const commit1 = await primary.commitWrite([guardedDoc(a, null, "A1")], []);
 
@@ -536,7 +546,50 @@ describe("Fenced Frontier B1 (Task 5): tailer targets F, density assertions, Sta
     await bumpFrontier(client, bogusTs);
     await primary.write([{ ts: bogusTs, id: a, prev_ts: null, value: { id: a, value: { body: "BOGUS" } } }], [], "Error");
 
-    await expect(forceTick(tailer)).rejects.toThrow(DensityViolationError);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await forceTick(tailer); // resolves — the insert-case violation is caught + halts the tailer
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(String(errorSpy.mock.calls[0]?.[0])).toContain("re-bootstrap");
+      expect(tailer.watermark()).toBe(commit1); // never advanced past the bogus insert
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("density violation HALTS the fire-and-forget poll loop — the error is logged once, not every pollMs", async () => {
+    const a = newDocumentId(T);
+    const commit1 = await primary.commitWrite([guardedDoc(a, null, "A1")], []);
+
+    // Small pollMs: the natural setInterval (not forceTick) must be the one that hits the violation,
+    // proving the real fire-and-forget path halts rather than looping.
+    tailer = new ReplicaTailer(client, primary, replica, { pollMs: 20, onInvalidation: async () => {} });
+    await tailer.start(); // bootstrap applies commit1 cleanly
+    expect((await replica.get(a))?.ts).toBe(commit1);
+
+    // Diverge the replica, then land a real chained update on the primary the poll loop will pull.
+    const tamperedTs = commit1 + 1000n;
+    await replica.write(
+      [{ ts: tamperedTs, id: a, prev_ts: commit1, value: { id: a, value: { body: "TAMPERED" } } }],
+      [],
+      "Overwrite",
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await primary.commitWrite([guardedDoc(a, commit1, "A2")], []);
+
+      // The background poll tick hits the violation and halts. Wait for the first (and only) log.
+      await waitUntil(() => errorSpy.mock.calls.length >= 1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+
+      // Wait out MANY more poll intervals — a non-halting tailer would re-log ~dozens of times; a
+      // halted one (interval cleared) stays at exactly one. The watermark stays frozen at commit1.
+      await new Promise((r) => setTimeout(r, 500)); // ~25 pollMs periods
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(tailer.watermark()).toBe(commit1);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("F-regression: a lease row whose frontier goes backward throws — F must never regress", async () => {

@@ -319,70 +319,91 @@ export class ReplicaTailer {
     if (this.stopped || this.draining) return;
     this.draining = true;
     try {
-      const F = await this.readFrontier();
-      if (F <= this.wm) return; // spurious wake — nothing new since last apply (or no lease yet)
-
-      const { docs, cappedAt } = await this.pullDocs(this.wm, F);
-      const appliedMax = stablePrefixFromFrontier(cappedAt ?? F);
-
-      const indexRows = await this.client.query(
-        `SELECT index_id, key, ts, table_id, internal_id, deleted FROM indexes WHERE ts > $1 AND ts <= $2 ORDER BY ts ASC`,
-        [this.wm, appliedMax],
-      );
-
-      if (docs.length === 0 && indexRows.length === 0) return; // nothing in range — watermark stays put
-
-      // Invert postgres-docstore.ts's write() serialization exactly: `deleted` -> the Deleted
-      // variant (table_id/internal_id are NULL on those rows and must not be read), else
-      // NonClustered carrying the decoded docId.
-      const indexWrites: IndexWrite[] = indexRows.map((r) => {
-        const deleted = r.deleted as boolean;
-        const value: DatabaseIndexValue = deleted
-          ? { type: "Deleted" }
-          : {
-              type: "NonClustered",
-              docId: {
-                tableNumber: decodeStorageTableId(r.table_id as string),
-                internalId: r.internal_id as Uint8Array,
-              },
-            };
-        return {
-          ts: r.ts as bigint,
-          update: { indexId: r.index_id as string, key: r.key as Uint8Array, value },
-        };
-      });
-
-      // Density assertions (D5, defense-in-depth) — MUST run against the replica's PRE-apply
-      // state, so before the write() below (which would otherwise make every check trivially
-      // pass, since the entry itself would already be its own head by the time it's checked).
-      await this.assertDensity(docs);
-
-      // Verbatim apply — exactly what load_documents yielded, plus the reconstructed index
-      // writes, under "Overwrite" so a second application of the same range is a safe no-op.
-      await this.replica.write(docs, indexWrites, "Overwrite");
-
-      const tableIds = new Set<string>();
-      for (const r of indexRows) if (r.table_id !== null) tableIds.add(String(r.table_id));
-      const writtenTables = [...tableIds];
-      const writtenKeys = indexRows.map((r) => ({ indexId: String(r.index_id), key: r.key as Uint8Array }));
-
-      const seenDocs = new Set<string>();
-      const writtenDocs: Array<{ tableId: string; internalId: Uint8Array }> = [];
-      for (const d of docs) {
-        const dedupeKey = docDedupeKey(d.id);
-        if (seenDocs.has(dedupeKey)) continue;
-        seenDocs.add(dedupeKey);
-        writtenDocs.push({ tableId: encodeStorageTableId(d.id.tableNumber), internalId: d.id.internalId });
+      await this.drainOnce();
+    } catch (e) {
+      if (e instanceof DensityViolationError) {
+        // A density violation means a commit was skipped between the primary and this replica — the
+        // replica is corrupt and can only serve silently-wrong reads from here on. HALT PERMANENTLY:
+        // the fire-and-forget `void this.tick()` callers (the LISTEN wake + the pollMs setInterval)
+        // would otherwise re-hit the exact same violation every tick forever (watermark frozen, an
+        // endless error loop), since the divergence is on disk and never self-heals. `stop()` clears
+        // the interval + closes LISTEN so no further ticks run; the logged message already carries the
+        // operator remedy (delete the replica file and re-bootstrap from the primary). Not rethrown:
+        // this is the terminal handling, not a transient error to propagate.
+        console.error(e.message);
+        await this.stop();
+        return;
       }
-
-      await this.onInvalidation({ newMaxTs: appliedMax, writtenTables, writtenKeys, writtenDocs });
-      // Advance ONLY after onInvalidation resolves — a throwing/slow handler must not cause this
-      // range to be silently skipped on the next tick.
-      this.wm = appliedMax;
-      this.wakeSatisfiedWaiters();
+      throw e;
     } finally {
       this.draining = false;
     }
+  }
+
+  /** One pull-apply-invalidate walk. Split out from `tick()` so `tick()` can wrap it with the
+   *  DensityViolationError halt handling without that catch swallowing the `draining` bookkeeping. */
+  private async drainOnce(): Promise<void> {
+    const F = await this.readFrontier();
+    if (F <= this.wm) return; // spurious wake — nothing new since last apply (or no lease yet)
+
+    const { docs, cappedAt } = await this.pullDocs(this.wm, F);
+    const appliedMax = stablePrefixFromFrontier(cappedAt ?? F);
+
+    const indexRows = await this.client.query(
+      `SELECT index_id, key, ts, table_id, internal_id, deleted FROM indexes WHERE ts > $1 AND ts <= $2 ORDER BY ts ASC`,
+      [this.wm, appliedMax],
+    );
+
+    if (docs.length === 0 && indexRows.length === 0) return; // nothing in range — watermark stays put
+
+    // Invert postgres-docstore.ts's write() serialization exactly: `deleted` -> the Deleted
+    // variant (table_id/internal_id are NULL on those rows and must not be read), else
+    // NonClustered carrying the decoded docId.
+    const indexWrites: IndexWrite[] = indexRows.map((r) => {
+      const deleted = r.deleted as boolean;
+      const value: DatabaseIndexValue = deleted
+        ? { type: "Deleted" }
+        : {
+            type: "NonClustered",
+            docId: {
+              tableNumber: decodeStorageTableId(r.table_id as string),
+              internalId: r.internal_id as Uint8Array,
+            },
+          };
+      return {
+        ts: r.ts as bigint,
+        update: { indexId: r.index_id as string, key: r.key as Uint8Array, value },
+      };
+    });
+
+    // Density assertions (D5, defense-in-depth) — MUST run against the replica's PRE-apply
+    // state, so before the write() below (which would otherwise make every check trivially
+    // pass, since the entry itself would already be its own head by the time it's checked).
+    await this.assertDensity(docs);
+
+    // Verbatim apply — exactly what load_documents yielded, plus the reconstructed index
+    // writes, under "Overwrite" so a second application of the same range is a safe no-op.
+    await this.replica.write(docs, indexWrites, "Overwrite");
+
+    const tableIds = new Set<string>();
+    for (const r of indexRows) if (r.table_id !== null) tableIds.add(String(r.table_id));
+    const writtenTables = [...tableIds];
+    const writtenKeys = indexRows.map((r) => ({ indexId: String(r.index_id), key: r.key as Uint8Array }));
+
+    const seenDocs = new Set<string>();
+    const writtenDocs: Array<{ tableId: string; internalId: Uint8Array }> = [];
+    for (const d of docs) {
+      const dedupeKey = docDedupeKey(d.id);
+      if (seenDocs.has(dedupeKey)) continue;
+      seenDocs.add(dedupeKey);
+      writtenDocs.push({ tableId: encodeStorageTableId(d.id.tableNumber), internalId: d.id.internalId });
+    }
+
+    await this.onInvalidation({ newMaxTs: appliedMax, writtenTables, writtenKeys, writtenDocs });
+    // Advance ONLY after onInvalidation resolves — a throwing/slow handler must not cause this
+    // range to be silently skipped on the next tick.
+    this.wm = appliedMax;
+    this.wakeSatisfiedWaiters();
   }
 
   /**
