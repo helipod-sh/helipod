@@ -205,8 +205,16 @@ const REPLICA_DB_FILENAME = "fleet-replica.db";
 /** Spawn a `serve --fleet` child. A `dataDir` may be supplied to reuse an EXISTING data dir (the
  *  replica-persistence scenario restarts a node against the same dir so its on-disk replica resumes
  *  instead of replaying); when omitted, a fresh per-node dir is minted (nodes must not share one).
- *  Caller-provided dirs are the caller's to track/clean; freshly-minted ones are tracked here. */
-function spawnFleetServe(databaseUrl: string, port: number, dataDir?: string): ServeProcess {
+ *  Caller-provided dirs are the caller's to track/clean; freshly-minted ones are tracked here.
+ *  `extraEnv` layers additional environment onto the child — the wedged-writer scenario passes
+ *  `STACKBASE_FLEET_LEASE_TTL_MS` to shrink the failover clock; unset (the existing scenarios) is
+ *  byte-for-byte the old behavior. */
+function spawnFleetServe(
+  databaseUrl: string,
+  port: number,
+  dataDir?: string,
+  extraEnv?: Record<string, string>,
+): ServeProcess {
   const advertiseUrl = `http://127.0.0.1:${port}`;
   if (dataDir === undefined) {
     dataDir = mkdtempSync(join(tmpdir(), "sb-fleet-node-"));
@@ -225,7 +233,7 @@ function spawnFleetServe(databaseUrl: string, port: number, dataDir?: string): S
       "--fleet",
       "--advertise-url", advertiseUrl,
     ],
-    { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY }, stdio: ["ignore", "pipe", "pipe"] },
+    { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] },
   );
   allSpawnedProcesses.push(proc);
   return proc;
@@ -381,6 +389,35 @@ async function waitForLease(
     if (Date.now() - start > timeoutMs) throw new Error(`lease predicate not met within ${timeoutMs}ms (last=${JSON.stringify(l)})`);
     await new Promise<void>((r) => setTimeout(r, 250));
   }
+}
+
+/**
+ * The no-skipped-ts / density proof, straight off the primary's `documents` MVCC log via direct SQL:
+ * for EVERY document (`table_id`, `internal_id`), ordering its revisions by `ts`, each revision's
+ * `prev_ts` must equal its immediate predecessor's `ts` (and the first revision's `prev_ts` must be
+ * NULL). A single window-function pass with `LAG(ts)` computes each row's predecessor ts;
+ * `prev_ts IS DISTINCT FROM pred_ts` flags any break in the chain (NULL-safe, so an insert's
+ * NULL/NULL is not a violation). Zero violations ⇒ not a single commit was skipped or reordered
+ * across the whole run — the exact invariant the store-allocated ts (D1) + epoch-fenced commits (D3)
+ * exist to guarantee, re-proven here end-to-end across the A-writer→fence→B-writer takeover. Also
+ * returns how many documents carry >1 revision so the caller can assert the proof isn't vacuous. */
+async function assertDenseChain(pg: Client): Promise<{ violations: number; multiRevDocs: number }> {
+  const violations = await pg.query(`
+    SELECT count(*)::int AS n FROM (
+      SELECT prev_ts, LAG(ts) OVER (PARTITION BY table_id, internal_id ORDER BY ts) AS pred_ts
+      FROM documents
+    ) t
+    WHERE prev_ts IS DISTINCT FROM pred_ts
+  `);
+  const multi = await pg.query(`
+    SELECT count(*)::int AS n FROM (
+      SELECT table_id, internal_id FROM documents GROUP BY table_id, internal_id HAVING count(*) > 1
+    ) d
+  `);
+  return {
+    violations: (violations.rows[0] as { n: number }).n,
+    multiRevDocs: (multi.rows[0] as { n: number }).n,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -875,6 +912,235 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "fences and takes over from a WEDGED (SIGSTOP'd) writer, the straggler self-exits on SIGCONT, and the MVCC log stays skip-free",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const portC = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+      const advB = `http://127.0.0.1:${portB}`;
+
+      // Shrink the whole failover clock so a wedged-writer fence + takeover completes in a test's
+      // timescale: lease TTL 4s (⇒ probe ~1.33s, acquire-retry ~0.53s inside @stackbase/fleet). A
+      // frozen writer's lease then expires ~3-4s after the freeze — comfortably before its own 5s
+      // idle-in-transaction / 10s statement server timeouts, so the FOLLOWER's eviction is what fires,
+      // never the writer self-releasing its advisory lock (which would take over with only ONE epoch
+      // bump instead of the eviction-fence + acquisition pair this scenario proves).
+      const FLEET_TTL = { STACKBASE_FLEET_LEASE_TTL_MS: "4000" };
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let nodeC: ServeProcess | undefined;
+      let wsB: WebSocket | undefined;
+      let loopRunning = true;
+      let loopDone: Promise<void> | undefined;
+      let contSent = false;
+      try {
+        /* ---------------------------------------------------------------- */
+        /* Boot writer A (first) + sync B, both on the shortened TTL.        */
+        /* ---------------------------------------------------------------- */
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, FLEET_TTL);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        nodeB = spawnFleetServe(databaseUrl, portB, undefined, FLEET_TTL);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+        const urlB = bootB.ready.url;
+
+        const lease1 = await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+        expect(lease1.epoch).toBe(1);
+        const startEpoch = lease1.epoch;
+
+        /* ---------------------------------------------------------------- */
+        /* A live subscription on the sync node — it must SURVIVE the writer  */
+        /* freeze, the fence/takeover, and the straggler's exit, and still    */
+        /* fan out a post-takeover write.                                     */
+        /* ---------------------------------------------------------------- */
+        const sub = await subscribe(`${urlB.replace("http", "ws")}/api/sync`, 1, "notes:list", {});
+        wsB = sub.ws;
+        expect(latestMod(sub.messages, 1)!.value).toEqual([]);
+
+        // Seed a note (forwarded B→A, committed on A) whose id the background loop then UPDATES over
+        // and over — building a multi-revision prev_ts chain, the substrate for the density proof.
+        const seed = await apiRun(urlB, "notes:add", { box: "seed", text: "rev-0" });
+        expect(seed.body.committed).toBe(true);
+        const seedId = seed.body.value as string;
+        expect(typeof seedId).toBe("string");
+
+        /* ---------------------------------------------------------------- */
+        /* Background mutation loop via B (every 300ms): updates the seed     */
+        /* note (chain growth) with tolerated per-tick failures — writes      */
+        /* forwarded to A will fail once A is frozen; they resume once B is    */
+        /* the local writer.                                                  */
+        /* ---------------------------------------------------------------- */
+        let loopCounter = 0;
+        let loopSuccesses = 0;
+        loopDone = (async () => {
+          while (loopRunning) {
+            loopCounter += 1;
+            const r = await apiRunBounded(urlB, "notes:update", { id: seedId, text: `rev-${loopCounter}` }, 2_000).catch(
+              () => ({ kind: "error", message: "threw" }) as BoundedRunOutcome,
+            );
+            if (r.kind === "http" && r.status === 200) loopSuccesses += 1;
+            await sleep(300);
+          }
+        })();
+
+        // Let a few forwarded updates land cleanly on A before we wedge it.
+        await waitFor(() => loopSuccesses >= 2, 15_000);
+
+        /* ---------------------------------------------------------------- */
+        /* WEDGE the writer: SIGSTOP freezes A's process — its TCP            */
+        /* connections stay open (frozen), so this is NOT a connection-lost   */
+        /* signal; the lease's expires_at lapsing is what drives the fence.   */
+        /* ---------------------------------------------------------------- */
+        const freezeAt = Date.now();
+        nodeA.kill("SIGSTOP");
+
+        /* ---------------------------------------------------------------- */
+        /* Fence + takeover + promotion. B's acquire loop must run EVICTION   */
+        /* (advisory-try fails against A's still-held lock, lease expired ⇒    */
+        /* evictExpired bumps the epoch AND pg_terminate_backend frees A's     */
+        /* backend) THEN acquisition — so the epoch climbs by >= 2 and the     */
+        /* writer_url flips to B.                                              */
+        /* ---------------------------------------------------------------- */
+        const lease2 = await waitForLease(
+          pg,
+          (l) => l.epoch >= startEpoch + 2 && l.writerUrl === advB,
+          30_000,
+        );
+        const takeoverMs = Date.now() - freezeAt;
+        expect(lease2.writerUrl).toBe(advB);
+        expect(lease2.epoch).toBeGreaterThanOrEqual(startEpoch + 2); // eviction-fence + acquisition
+
+        /* ---------------------------------------------------------------- */
+        /* Writes via B commit again (now the LOCAL writer) and fan out to    */
+        /* the PRE-EXISTING subscription opened before the failover.          */
+        /* ---------------------------------------------------------------- */
+        const postTakeover = await (async () => {
+          const deadline = Date.now() + 20_000;
+          for (;;) {
+            const r = await apiRun(urlB, "notes:add", { box: "after", text: "after-takeover" }).catch(
+              () => ({ status: 0, body: {} }) as RunResult,
+            );
+            if (r.status === 200 && r.body.committed === true) return r;
+            if (Date.now() > deadline) throw new Error(`post-takeover mutation never committed: ${JSON.stringify(r.body)}`);
+            await sleep(300);
+          }
+        })();
+        expect(postTakeover.body.committed).toBe(true);
+
+        await waitFor(() => {
+          const m = latestMod(sub.messages, 1);
+          const v = m?.value as Array<{ box: string; text: string }> | undefined;
+          return m?.type === "QueryUpdated" && Array.isArray(v) && v.some((n) => n.text === "after-takeover");
+        }, 20_000);
+        expect(wsB.readyState).toBe(WebSocket.OPEN); // the socket survived the whole failover
+
+        /* ---------------------------------------------------------------- */
+        /* SIGCONT the straggler: A thaws, discovers its backend was          */
+        /* terminated (connection-lost) / its epoch superseded (heartbeat     */
+        /* finds 0 rows ⇒ fenced), and self-exits(1) — it must NOT resume as  */
+        /* a zombie writer. Assert via the child handle, not lease state.     */
+        /* ---------------------------------------------------------------- */
+        const exitInfo = new Promise<{ code: number | null; signal: NodeJS.Signals | null; elapsedMs: number }>(
+          (resolvePromise) => {
+            const start = Date.now();
+            nodeA!.once("exit", (code, signal) => resolvePromise({ code, signal, elapsedMs: Date.now() - start }));
+          },
+        );
+        contSent = true;
+        nodeA.kill("SIGCONT");
+        const exit = await Promise.race([
+          exitInfo,
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("straggler did not self-exit within 20s of SIGCONT")), 20_000)),
+        ]);
+        expect(exit.code).toBe(1); // process.exit(1) — a genuine self-demotion, not a signal kill
+        expect(exit.signal).toBeNull();
+        nodeA = undefined; // it's gone — don't signal a dead pid in finally
+
+        /* ---------------------------------------------------------------- */
+        /* Stop the background loop and quiesce, then the NO-SKIPPED-TS proof: */
+        /* the whole run's MVCC log is a dense prev_ts chain per document —    */
+        /* nothing was skipped or reordered across the A→B takeover.           */
+        /* ---------------------------------------------------------------- */
+        loopRunning = false;
+        await loopDone;
+        loopDone = undefined;
+
+        const chain = await assertDenseChain(pg);
+        expect(chain.violations).toBe(0); // every revision's prev_ts == its predecessor's ts
+        expect(chain.multiRevDocs).toBeGreaterThan(0); // the seed's update chain makes the proof non-vacuous
+
+        /* ---------------------------------------------------------------- */
+        /* Full-log density RE-PROOF: a FRESH sync node C (no replica file)    */
+        /* bootstraps against writer B by re-tailing the ENTIRE log from ts 0  */
+        /* — the tailer's own per-entry density assertions run over every      */
+        /* revision written across the whole run. It comes ready (⇒ no         */
+        /* DensityViolationError halted the catch-up) and serves current data. */
+        /* (A fresh sync node with an empty replica is exactly the             */
+        /* delete-the-replica-file-and-re-bootstrap path; B itself is the      */
+        /* writer post-takeover and a writer never tails, so the tailer        */
+        /* re-proof must run on a sync node.)                                  */
+        /* ---------------------------------------------------------------- */
+        nodeC = spawnFleetServe(databaseUrl, portC, undefined, FLEET_TTL);
+        const bootC = await waitForReadyOrExit(nodeC);
+        if (!bootC.ready) throw new Error(`node C failed to bootstrap-tail the full log: exit=${bootC.exitCode} stderr=${bootC.stderr}`);
+        expect(bootC.ready.role).toBe("sync"); // B still holds the lease — C joins as sync
+        const urlC = bootC.ready.url;
+
+        const listViaC = await (async () => {
+          const deadline = Date.now() + 20_000;
+          for (;;) {
+            const r = await apiRun(urlC, "notes:list", {});
+            const v = r.body.value as Array<{ box: string; text: string }> | undefined;
+            if (r.status === 200 && Array.isArray(v) && v.some((n) => n.text === "after-takeover") && v.some((n) => n.box === "seed")) {
+              return v;
+            }
+            if (Date.now() > deadline) throw new Error(`fresh sync node C did not serve current data: ${JSON.stringify(r.body.value)}`);
+            await sleep(300);
+          }
+        })();
+        expect(listViaC.some((n) => n.text === "after-takeover")).toBe(true);
+        expect(listViaC.some((n) => n.box === "seed")).toBe(true);
+
+        // Surface the observed failover timing in the test log (the report records it too).
+        // eslint-disable-next-line no-console
+        console.log(`[wedged-writer] takeover ${takeoverMs}ms after SIGSTOP; straggler exit ${exit.elapsedMs}ms after SIGCONT; final epoch ${lease2.epoch}`);
+      } finally {
+        loopRunning = false;
+        if (loopDone) await loopDone.catch(() => {});
+        // If we SIGSTOP'd A but never got to SIGCONT it (a mid-scenario failure), thaw it so the
+        // stopServe below can deliver a graceful SIGTERM — a stopped process defers non-KILL signals
+        // until it's continued, so a frozen A would otherwise sit ignoring SIGTERM in cleanup.
+        if (nodeA && !contSent) {
+          try {
+            nodeA.kill("SIGCONT");
+          } catch {
+            // already gone
+          }
+        }
+        wsB?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        await stopServe(nodeB);
+        await stopServe(nodeC);
         stopPostgresContainer();
       }
     },
