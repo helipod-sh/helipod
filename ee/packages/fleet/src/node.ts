@@ -40,6 +40,7 @@ import {
 } from "@stackbase/runtime-embedded";
 import { LeaseManager } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
+import { FencedError } from "./fenced-error";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
 import { SwitchableDocStore } from "./switchable-store";
@@ -54,6 +55,39 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 
 /** The filename of a sync node's local embedded replica, under the serve data dir. */
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
+
+/** Default lease TTL (ms) when `STACKBASE_FLEET_LEASE_TTL_MS` is unset — mirrors `lease.ts`'s own
+ *  default so the two never drift. */
+export const DEFAULT_LEASE_TTL_MS = 15_000;
+
+/**
+ * Derive the failover cadences from a single knob, the lease TTL. Every timing that must stay in a
+ * fixed ratio to the TTL is computed here so one env var (`STACKBASE_FLEET_LEASE_TTL_MS`) scales the
+ * whole clock coherently — a live writer must renew (probe) several times per TTL, and a follower
+ * must retry-acquire several times per TTL, or a shortened TTL would either expire a healthy writer's
+ * lease or notice a wedged one too slowly. The ratios are chosen so the DEFAULT TTL (15000ms)
+ * reproduces the historical hard-coded constants EXACTLY — `probeMs = ttl/3 = 5000` (the old
+ * `LeaseMonitor` default) and `retryMs = ttl*2/15 = 2000` (the old `LeaseManager` default) — so the
+ * production default is byte-for-byte behavior-identical; only a shortened TTL (the wedged-writer
+ * E2E's 4000ms, or an operator's tuning) changes anything.
+ */
+export function fleetProbeMs(ttlMs: number): number {
+  return Math.max(1, Math.round(ttlMs / 3));
+}
+export function fleetAcquireRetryMs(ttlMs: number): number {
+  return Math.max(1, Math.round((ttlMs * 2) / 15));
+}
+
+/**
+ * Bounded-writer-session timeouts (Fenced Frontier B1, D4) applied to every fleet node's pinned
+ * Postgres connection — the single `NodePgClient` `prepareFleetNode` builds is the writer-capable one
+ * (a sync node's same connection becomes the writer's on promotion via `pgStore.setWritable()`), so
+ * it is bounded from boot. `idle_in_transaction=5s` kills a transaction a wedged writer leaves open
+ * mid-commit (releasing the row lock a fencer's `evictExpired` needs); `statement=10s` caps any single
+ * runaway statement. A NON-fleet single-node `serve`/`dev` (`makeStore` in `packages/cli`) constructs
+ * `NodePgClient` WITHOUT this option and stays unbounded — see that call site.
+ */
+export const FLEET_WRITER_SESSION_TIMEOUTS = { idleInTransactionMs: 5_000, statementMs: 10_000 };
 
 /**
  * `persistence_globals` key a fleet deployment stamps once on the primary (C7) and every sync
@@ -264,17 +298,36 @@ export async function prepareFleetNode(deps: {
   adminKey: string;
   /** The serve data dir — the sync node's local replica is created at `<dataDir>/fleet-replica.db`. */
   dataDir: string;
+  /** Lease TTL in ms — the single knob the whole failover clock scales from (see `fleetProbeMs`/
+   *  `fleetAcquireRetryMs`). Threaded from serve's fleet config, which reads
+   *  `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning; the wedged-writer E2E uses 4000). Default 15000
+   *  reproduces the historical constants exactly. */
+  leaseTtlMs?: number;
 }): Promise<FleetPrep> {
+  const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   // Tag this node's Postgres backends so they're identifiable in `pg_stat_activity` — an operator can
   // see which fleet node owns a connection, and the writer self-exit E2E targets exactly one node's
   // backends via `pg_terminate_backend(... WHERE application_name = ...)`. Derived from the advertise
   // URL's port (unique per node on a host); falls back to the whole advertise URL if it has no port.
   const applicationName = fleetApplicationName(deps.advertiseUrl);
-  const client = new NodePgClient({ connectionString: deps.databaseUrl, applicationName });
+  // Writer-capable connection: bound its session (D4) — see FLEET_WRITER_SESSION_TIMEOUTS. Non-fleet
+  // constructions (packages/cli's makeStore) pass no sessionTimeouts and stay unbounded.
+  const client = new NodePgClient({
+    connectionString: deps.databaseUrl,
+    applicationName,
+    sessionTimeouts: FLEET_WRITER_SESSION_TIMEOUTS,
+  });
   // Read-only until (and unless) this node wins the lease. A follower still runs the idempotent
   // DDL in setupSchema but does NOT contend for the writer advisory lock (see PostgresDocStore).
   const pgStore = new PostgresDocStore(client, { readOnly: true });
-  const lease = new LeaseManager(client, { advertiseUrl: deps.advertiseUrl });
+  // `applicationName` is recorded on the lease row (writer_app_name) so a future D4 eviction
+  // fencer can `pg_terminate_backend` the exact wedged holder's connection by name.
+  const lease = new LeaseManager(client, {
+    advertiseUrl: deps.advertiseUrl,
+    applicationName,
+    ttlMs: leaseTtlMs,
+    retryMs: fleetAcquireRetryMs(leaseTtlMs),
+  });
   const forwarder = new WriteForwarder(lease, { adminKey: deps.adminKey, selfUrl: deps.advertiseUrl });
 
   // EVERY fleet node — writer or sync — gets the pg_notify-wrapping fan-out adapter, not just the
@@ -434,6 +487,44 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
 }
 
 /**
+ * Install the epoch-fenced commit guard (Fenced Frontier B1, D3) on `pgStore`. Runs inside every
+ * `commitWrite` transaction, after the row inserts, before COMMIT — the SAME row as the lease
+ * (`shard_leases`) advances the durable-commit frontier chain (`prev_ts := frontier_ts, frontier_ts
+ * := commitTs`) predicated on THIS node's epoch still being current, so frontier publication,
+ * fencing, and the lease are one row with zero extra round-trips. `lease.currentEpoch()` is read
+ * LIVE on every commit (not a snapshot taken at install time) so a later re-promotion's epoch bump
+ * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`,
+ * which aborts the whole transaction — AND fires `fireFenced()` (routes to the writer lease
+ * monitor's `fenced()`, mirroring `connectionLost()`) before throwing, so the node exits
+ * immediately rather than leaving the caller's mutation to fail silently with no self-demotion.
+ * Called at writer boot AND on promotion success — see the two call sites below.
+ */
+export function installCommitGuard(
+  pgStore: PostgresDocStore,
+  lease: LeaseManager,
+  fireFenced: (reason: string) => void,
+): void {
+  pgStore.setCommitGuard(async (q, commitTs) => {
+    const epoch = lease.currentEpoch();
+    if (epoch === null) {
+      // Structurally shouldn't happen — the guard is only ever installed after a successful
+      // tryAcquire() (writer boot) or promotion (which itself re-acquires). Treat defensively as
+      // fenced rather than let an inconsistent guard silently allow an unfenced commit through.
+      fireFenced("commit guard invoked with no acquired epoch");
+      throw new FencedError("commit fenced: this node has not acquired a shard_leases epoch");
+    }
+    const rows = await q.query(
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
+      [commitTs, "default", epoch],
+    );
+    if (rows.length === 0) {
+      fireFenced("commit guard found 0 rows for this node's epoch — superseded by another writer");
+      throw new FencedError("commit fenced: epoch no longer current");
+    }
+  });
+}
+
+/**
  * Wire the running fleet node. A writer node is already fully live (promoted in `prepareFleetNode`,
  * drivers started at `create()`) — it just gets handles. A sync node starts the replica tailer (its
  * `start()` catch-up is the node's ready gate) and the lease acquire loop, and promotes on acquire
@@ -461,11 +552,29 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   let monitor: LeaseMonitor | null = null;
   const startWriterMonitor = (): void => {
     monitor = new LeaseMonitor({
-      // Plain liveness round-trip — NEVER pg_try_advisory_lock (re-entrant on the holding session).
+      // Heartbeat-as-probe (Fenced Frontier B1, D2): one round-trip serves liveness-probe + TTL
+      // maintenance + fence verification — NEVER pg_try_advisory_lock (re-entrant on the holding
+      // session). `lease.currentEpoch()` is read live so a re-promotion's epoch bump is honored.
+      // A 0-row heartbeat means this node's epoch has been superseded (fenced) even though its
+      // connection is still alive — DEFINITIVE loss, so it routes straight to `monitor.fenced()`
+      // (bypassing the miss-tolerance below, which exists only for transient/ambiguous blips) and
+      // then throws so `LeaseMonitor.tick()`'s catch path sees an already-exited monitor and skips
+      // `recordMiss` (no double-count, no delay past this single probe).
       probe: async () => {
-        await client.query("SELECT 1");
+        const epoch = lease.currentEpoch();
+        if (epoch === null) throw new Error("fleet: heartbeat probe with no acquired epoch (bug)");
+        const rowsUpdated = await lease.heartbeat(epoch);
+        if (rowsUpdated === 0) {
+          monitor?.fenced("heartbeat found 0 rows for this node's epoch");
+          throw new FencedError("writer lease fenced: heartbeat found 0 rows for this node's epoch");
+        }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
+      // Probe cadence scales with the lease TTL (same knob the LeaseManager stamps expires_at from),
+      // so a live writer always renews several times per TTL — a shortened TTL (e.g. the wedged-writer
+      // E2E's 4000ms) must not let a HEALTHY writer's own lease expire between probes. At the default
+      // 15000ms TTL this is exactly the historical 5000ms probe.
+      probeMs: fleetProbeMs(lease.ttlMs),
     });
     monitor.start();
   };
@@ -479,6 +588,27 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // except the lease monitor, since this node is the writer from the first tick.
   if (forwarder.isLocalWriter()) {
     startWriterMonitor();
+    // D3: install the epoch-fenced commit guard now — this node is the writer from the first tick,
+    // so every commit from here on must be fenced against its acquired epoch. `monitor` is already
+    // non-null (startWriterMonitor() just ran), so a fenced commit routes straight to its fenced().
+    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+    // F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): seed frontier_ts up to this store's
+    // current max document ts — HERE, not inside tryAcquire() (`prepareFleetNode` runs BEFORE
+    // `bootProject`/`setupSchema`, so `documents` may not exist yet there), and BEFORE this node is
+    // reported ready (`startFleetNode`'s return is what unblocks serve's ready line). Closes the
+    // "pre-loaded database" hole: a single-node Postgres `serve` that accumulated real data before
+    // `--fleet` was ever enabled has no `shard_leases` row, so the first `tryAcquire()` after
+    // enabling it seeds `frontier_ts=0` even though history exists — without this seed, a fresh sync
+    // node's ready gate (wm=0 < target=0) is a silent no-op and it reports ready EMPTY. GREATEST
+    // inside `seedFrontier` makes this a no-op on an already-live fleet; promotion deliberately does
+    // NOT re-seed (see `promoteFleetNode` — frontier is already live by then via the commit guard).
+    const epoch = lease.currentEpoch();
+    if (epoch === null) {
+      throw new Error(
+        "fleet: writer boot has no acquired epoch (bug: forwarder.isLocalWriter() implies tryAcquire() already ran)",
+      );
+    }
+    await lease.seedFrontier(epoch, await pgStore.maxTimestamp());
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -526,9 +656,23 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // Sync boot: verbatim-apply the primary's MVCC log onto the local replica AND drive cross-process
   // reactive fan-out from the SAME applied batch. `start()` gates on bootstrap catch-up, so this
   // node isn't reported ready (serve prints its ready line only after `startFleetNode` returns)
-  // until the replica has caught up to the primary — a fresh follower never serves a read that's
-  // arbitrarily behind. On each applied batch: advance the oracle, translate written keys/docs into
-  // point ranges, and push the transition into the sync handler.
+  // until the replica has caught up to the FENCED FRONTIER F (Fenced Frontier B1, D5 — the tailer
+  //
+  // F1 note: a sync node never seeds `frontier_ts` itself — it doesn't hold the epoch, so it
+  // structurally can't (see `LeaseManager.seedFrontier`'s epoch fencing). If THIS node wins the boot
+  // race and starts tailing before any writer has ever seeded the frontier (e.g. against a database
+  // that was populated single-node, pre-`--fleet`), its ready gate targets whatever F is on the row
+  // at that moment — 0, if no writer has booted yet — and it reports ready with an empty replica
+  // exactly like the bug this fix addresses. That's an accepted, BOUNDED window: it heals the moment
+  // ANY fleet writer boots (the writer-boot seed above), not on the far looser "first post-upgrade
+  // commit" the old code silently relied on. Widening the sync node's own ready gate to wait for
+  // frontier >= the primary's live max is deliberately NOT done — it would either dead-lock forever
+  // on a fleet with no writer yet, or duplicate the writer's own seed logic on the read-only side.
+  // reads `shard_leases.frontier_ts` itself, via the SAME `client` passed below, rather than
+  // `pgStore.maxTimestamp()`; nothing extra to wire here) — a fresh follower never serves a read
+  // that's arbitrarily behind, and never pulls a commit that raced past the last fence check. On
+  // each applied batch: advance the oracle, translate written keys/docs into point ranges, and
+  // push the transition into the sync handler.
   const tailer = new ReplicaTailer(client, pgStore, replica, {
     onInvalidation: async (inv: AppliedInvalidation) => {
       // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits
@@ -564,7 +708,15 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // node is now the writer) and the http layer drops its proxy.
     void runPromotion({
       // The lease row is already upserted by the tryAcquire() inside acquireLoop before this fires.
-      promote: () => promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica }),
+      promote: async () => {
+        await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
+        // D3: install the epoch-fenced commit guard now that promotion has succeeded — this node
+        // is the writer from here on. `startMonitor` (below) hasn't run yet, but `installCommitGuard`
+        // closes over the `monitor` variable by reference, not value, so a commit that fences AFTER
+        // `startMonitor` runs (the only time commits are even possible — drivers/writes start post-
+        // promotion) still reaches the now-non-null monitor correctly.
+        installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+      },
       startMonitor: startWriterMonitor,
       firePromoted,
       onExit,

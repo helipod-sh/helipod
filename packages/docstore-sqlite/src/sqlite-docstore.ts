@@ -26,7 +26,7 @@ import type {
   InternalDocumentId,
 } from "@stackbase/docstore";
 import { getPrevRevQueryKey } from "@stackbase/docstore";
-import { encodeStorageTableId, decodeStorageTableId } from "@stackbase/id-codec";
+import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DatabaseAdapter, PreparedStatement, SqlRow, SqlValue } from "./adapter";
 
@@ -87,43 +87,86 @@ export class SqliteDocStore implements DocStore {
 
   async setupSchema(_options?: SchemaSetupOptions): Promise<void> {
     this.db.exec(SCHEMA_SQL);
+    // Additive `shard_id` column (Fenced Frontier B1, D6). `node:sqlite` has no
+    // `ADD COLUMN IF NOT EXISTS`, so guard with a `pragma table_info` existence check — a
+    // pre-B1 database upgrades in place and its old rows read as 'default' via the DEFAULT.
+    for (const table of ["documents", "indexes"] as const) {
+      // `table` is a fixed literal from this list — never user input, so interpolation is safe
+      // (PRAGMA does not accept bound parameters for its argument).
+      const cols = this.prep(`PRAGMA table_info(${table})`).all();
+      if (!cols.some((c) => c.name === "shard_id")) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN shard_id TEXT NOT NULL DEFAULT 'default'`);
+      }
+    }
+  }
+
+  /** Insert already-stamped document + index rows in the current transaction. Shared by `write()`
+   * (caller-supplied timestamps) and `commitWrite()` (store-allocated), so the row-building /
+   * column list lives in exactly one place. Must be called inside `this.db.transaction`. */
+  private insertRows(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    conflictStrategy: ConflictStrategy,
+    shardId: ShardId,
+  ): void {
+    const docVerb = conflictStrategy === "Overwrite" ? "INSERT OR REPLACE" : "INSERT";
+    const docStmt = this.prep(
+      `${docVerb} INTO documents (table_id, internal_id, ts, prev_ts, value, shard_id) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    const idxStmt = this.prep(
+      `INSERT OR REPLACE INTO indexes (index_id, key, ts, table_id, internal_id, deleted, shard_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const entry of documents) {
+      docStmt.run(
+        encodeStorageTableId(entry.id.tableNumber),
+        entry.id.internalId,
+        entry.ts,
+        entry.prev_ts,
+        entry.value === null ? null : this.serializeValue(entry.value.value),
+        shardId,
+      );
+    }
+    for (const { ts, update } of indexUpdates) {
+      const v = update.value;
+      idxStmt.run(
+        update.indexId,
+        update.key,
+        ts,
+        v.type === "NonClustered" ? encodeStorageTableId(v.docId.tableNumber) : null,
+        v.type === "NonClustered" ? v.docId.internalId : null,
+        v.type === "NonClustered" ? 0 : 1,
+        shardId,
+      );
+    }
   }
 
   async write(
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     conflictStrategy: ConflictStrategy,
-    _shardId?: ShardId,
+    shardId?: ShardId,
   ): Promise<void> {
-    const docVerb = conflictStrategy === "Overwrite" ? "INSERT OR REPLACE" : "INSERT";
-    const docStmt = this.prep(
-      `${docVerb} INTO documents (table_id, internal_id, ts, prev_ts, value) VALUES (?, ?, ?, ?, ?)`,
-    );
-    const idxStmt = this.prep(
-      `INSERT OR REPLACE INTO indexes (index_id, key, ts, table_id, internal_id, deleted) VALUES (?, ?, ?, ?, ?, ?)`,
-    );
-
     this.db.transaction(() => {
-      for (const entry of documents) {
-        docStmt.run(
-          encodeStorageTableId(entry.id.tableNumber),
-          entry.id.internalId,
-          entry.ts,
-          entry.prev_ts,
-          entry.value === null ? null : this.serializeValue(entry.value.value),
-        );
-      }
-      for (const { ts, update } of indexUpdates) {
-        const v = update.value;
-        idxStmt.run(
-          update.indexId,
-          update.key,
-          ts,
-          v.type === "NonClustered" ? encodeStorageTableId(v.docId.tableNumber) : null,
-          v.type === "NonClustered" ? v.docId.internalId : null,
-          v.type === "NonClustered" ? 0 : 1,
-        );
-      }
+      this.insertRows(documents, indexUpdates, conflictStrategy, shardId ?? DEFAULT_SHARD);
+    });
+  }
+
+  async commitWrite(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    shardId?: ShardId,
+  ): Promise<bigint> {
+    // Allocate + stamp + write in ONE synchronous transaction. Under the single-writer invariant,
+    // `MAX(ts) + 1` computed inside the transaction is race-free: no other writer can interleave a
+    // higher ts between the read and the insert.
+    return this.db.transaction(() => {
+      const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
+      const m = row?.m;
+      const commitTs = (m === null || m === undefined ? 0n : asBigInt(m)) + 1n;
+      const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
+      const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
+      this.insertRows(stampedDocs, stampedIdx, "Error", shardId ?? DEFAULT_SHARD);
+      return commitTs;
     });
   }
 

@@ -30,7 +30,7 @@ import type {
   InternalDocumentId,
 } from "@stackbase/docstore";
 import { getPrevRevQueryKey } from "@stackbase/docstore";
-import { encodeStorageTableId, decodeStorageTableId } from "@stackbase/id-codec";
+import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "./pg-client";
 import { ADVISORY_LOCK_KEY } from "./pg-client";
@@ -63,12 +63,21 @@ export interface PostgresDocStoreOptions {
 
 export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
+  /** Fleet-installed epoch fence (D3). Runs inside every `commitWrite` transaction, after the row
+   * inserts and before COMMIT; throwing aborts the whole commit. Never set at Tier 0. */
+  private commitGuard: ((q: PgQuerier, commitTs: bigint) => Promise<void>) | null = null;
 
   constructor(
     private readonly db: PgClient,
     options?: PostgresDocStoreOptions,
   ) {
     this.readOnly = options?.readOnly ?? false;
+  }
+
+  /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
+   * (the epoch fence); at Tier 0 no guard is ever set and `commitWrite` never calls one. */
+  setCommitGuard(guard: ((q: PgQuerier, commitTs: bigint) => Promise<void>) | null): void {
+    this.commitGuard = guard;
   }
 
   /** The underlying `PgClient` — exposed so fleet code (leader election, LISTEN/NOTIFY signaling)
@@ -114,22 +123,43 @@ export class PostgresDocStore implements DocStore {
     // No-op under PGlite (single in-process connection); real guard under NodePgClient.
     // Skipped entirely in read-only mode: a follower runs DDL (schema must exist) but must NOT
     // contend for the writer lock — the leader (or its own later promotion) owns that.
-    if (!this.readOnly) await this.db.acquireWriterLock();
+    if (!this.readOnly) {
+      await this.db.acquireWriterLock();
+      // Seed the commit-ts sequence exactly once per database, under the writer lock. The sentinel
+      // global makes this one-shot and race-safe: concurrent booters all attempt the insert, but
+      // ON CONFLICT DO NOTHING means only one gets `true` back and runs the setval; the rest skip.
+      //   - fresh DB   (MAX(ts)=0): setval(1, is_called=false) → first nextval returns 1
+      //   - existing DB(MAX(ts)=N): setval(N, is_called=true)  → next  nextval returns N+1
+      // so an upgraded deployment continues its ts line seamlessly without a gap.
+      if (await this.writeGlobalIfAbsent("core:tsSeqSeeded", "1")) {
+        await this.db.query(
+          `SELECT setval(
+             'stackbase_ts',
+             GREATEST((SELECT COALESCE(MAX(ts), 0) FROM documents), 1),
+             (SELECT COALESCE(MAX(ts), 0) FROM documents) > 0
+           )`,
+        );
+      }
+    }
   }
 
-  async write(
+  /** Build + run the document and index INSERTs for one commit, against `tx`. Entries arrive with
+   * their `ts` already final (caller-supplied for `write()`, store-allocated for `commitWrite`);
+   * this is the single home for the INSERT SQL and its column list (incl. `shard_id`), so the two
+   * write paths can never drift. Dedup is last-wins to mirror SQLite `INSERT OR REPLACE` and avoid
+   * an ON CONFLICT double-affect within one batch. */
+  private async writeRows(
+    tx: PgQuerier,
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     conflictStrategy: ConflictStrategy,
-    _shardId?: ShardId,
+    shardId: ShardId,
   ): Promise<void> {
-    if (this.readOnly) throw new ReadOnlyStoreError();
-    // Dedup last-wins to mirror SQLite INSERT OR REPLACE and avoid ON CONFLICT double-affect.
     // Note: under the "Error" conflict strategy, SQLite's per-row INSERT would throw on a
     // duplicate (table_id, internal_id, ts) within one batch, but this dedup silently keeps
-    // the last write instead. That divergence is intentional and safe here: the transactor
-    // allocates exactly one commit `ts` per transaction and stages at most one revision per
-    // document, so a genuine duplicate key never reaches write() within a single batch.
+    // the last write instead. That divergence is intentional and safe here: exactly one commit
+    // `ts` is stamped per transaction and at most one revision per document is staged, so a
+    // genuine duplicate key never reaches this method within a single batch.
     const docByKey = new Map<string, DocumentLogEntry>();
     for (const e of documents) {
       docByKey.set(`${encodeStorageTableId(e.id.tableNumber)}|${Buffer.from(e.id.internalId).toString("hex")}|${e.ts}`, e);
@@ -139,60 +169,104 @@ export class PostgresDocStore implements DocStore {
       idxByKey.set(`${w.update.indexId}|${Buffer.from(w.update.key).toString("hex")}|${w.ts}`, w);
     }
 
-    await this.db.transaction(async (tx) => {
-      const docs = [...docByKey.values()];
-      if (docs.length > 0) {
-        const cols = 5;
-        const rowsSql = docs
-          .map((_, i) => `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5})`)
-          .join(",");
-        const params: PgValue[] = [];
-        for (const e of docs) {
-          params.push(
-            encodeStorageTableId(e.id.tableNumber),
-            e.id.internalId,
-            e.ts,
-            e.prev_ts,
-            e.value === null ? null : this.serializeValue(e.value.value),
-          );
-        }
-        const conflict =
-          conflictStrategy === "Overwrite"
-            ? ` ON CONFLICT (table_id, internal_id, ts) DO UPDATE SET prev_ts = EXCLUDED.prev_ts, value = EXCLUDED.value`
-            : ``; // "Error": plain INSERT — a PK collision raises, matching the strategy.
-        await tx.query(
-          `INSERT INTO documents (table_id, internal_id, ts, prev_ts, value) VALUES ${rowsSql}${conflict}`,
-          params,
+    const docs = [...docByKey.values()];
+    if (docs.length > 0) {
+      const cols = 6;
+      const rowsSql = docs
+        .map(
+          (_, i) =>
+            `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5},$${i * cols + 6})`,
+        )
+        .join(",");
+      const params: PgValue[] = [];
+      for (const e of docs) {
+        params.push(
+          encodeStorageTableId(e.id.tableNumber),
+          e.id.internalId,
+          e.ts,
+          e.prev_ts,
+          e.value === null ? null : this.serializeValue(e.value.value),
+          shardId,
         );
       }
+      const conflict =
+        conflictStrategy === "Overwrite"
+          ? ` ON CONFLICT (table_id, internal_id, ts) DO UPDATE SET prev_ts = EXCLUDED.prev_ts, value = EXCLUDED.value, shard_id = EXCLUDED.shard_id`
+          : ``; // "Error": plain INSERT — a PK collision raises, matching the strategy.
+      await tx.query(
+        `INSERT INTO documents (table_id, internal_id, ts, prev_ts, value, shard_id) VALUES ${rowsSql}${conflict}`,
+        params,
+      );
+    }
 
-      const idxs = [...idxByKey.values()];
-      if (idxs.length > 0) {
-        const cols = 6;
-        const rowsSql = idxs
-          .map(
-            (_, i) =>
-              `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5},$${i * cols + 6})`,
-          )
-          .join(",");
-        const params: PgValue[] = [];
-        for (const { ts, update } of idxs) {
-          const v = update.value;
-          params.push(
-            update.indexId,
-            update.key,
-            ts,
-            v.type === "NonClustered" ? encodeStorageTableId(v.docId.tableNumber) : null,
-            v.type === "NonClustered" ? v.docId.internalId : null,
-            v.type !== "NonClustered", // deleted = true for a "Deleted" entry
-          );
-        }
-        await tx.query(
-          `INSERT INTO indexes (index_id, key, ts, table_id, internal_id, deleted) VALUES ${rowsSql}` +
-            ` ON CONFLICT (index_id, key, ts) DO UPDATE SET table_id = EXCLUDED.table_id, internal_id = EXCLUDED.internal_id, deleted = EXCLUDED.deleted`,
-          params,
+    const idxs = [...idxByKey.values()];
+    if (idxs.length > 0) {
+      const cols = 7;
+      const rowsSql = idxs
+        .map(
+          (_, i) =>
+            `($${i * cols + 1},$${i * cols + 2},$${i * cols + 3},$${i * cols + 4},$${i * cols + 5},$${i * cols + 6},$${i * cols + 7})`,
+        )
+        .join(",");
+      const params: PgValue[] = [];
+      for (const { ts, update } of idxs) {
+        const v = update.value;
+        params.push(
+          update.indexId,
+          update.key,
+          ts,
+          v.type === "NonClustered" ? encodeStorageTableId(v.docId.tableNumber) : null,
+          v.type === "NonClustered" ? v.docId.internalId : null,
+          v.type !== "NonClustered", // deleted = true for a "Deleted" entry
+          shardId,
         );
       }
+      await tx.query(
+        `INSERT INTO indexes (index_id, key, ts, table_id, internal_id, deleted, shard_id) VALUES ${rowsSql}` +
+          ` ON CONFLICT (index_id, key, ts) DO UPDATE SET table_id = EXCLUDED.table_id, internal_id = EXCLUDED.internal_id, deleted = EXCLUDED.deleted, shard_id = EXCLUDED.shard_id`,
+        params,
+      );
+    }
+  }
+
+  async write(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    conflictStrategy: ConflictStrategy,
+    shardId?: ShardId,
+  ): Promise<void> {
+    if (this.readOnly) throw new ReadOnlyStoreError();
+    await this.db.transaction(async (tx) => {
+      await this.writeRows(tx, documents, indexUpdates, conflictStrategy, shardId ?? DEFAULT_SHARD);
+    });
+  }
+
+  async commitWrite(
+    documents: readonly DocumentLogEntry[],
+    indexUpdates: readonly IndexWrite[],
+    shardId?: ShardId,
+  ): Promise<bigint> {
+    if (this.readOnly) throw new ReadOnlyStoreError();
+    // One transaction: allocate the commit ts from the sequence, stamp every staged row with it,
+    // insert, run the epoch fence (if installed), COMMIT. `nextval` inside the transaction makes
+    // the ts visible atomically with its rows — no allocated-but-unlanded window (D1). A throwing
+    // guard (D3) rolls the whole thing back; the advanced sequence value is not reclaimed on
+    // rollback (Postgres sequences are non-transactional), which is harmless — ts gaps are legal.
+    return this.db.transaction(async (tx) => {
+      // `nextval` is the primary allocator (and the shared clock the D4 eviction fencer bumps).
+      // `GREATEST(nextval, MAX(ts)+1)` also covers out-of-band `write()` rows whose ts did not come
+      // from this sequence (e.g. a pre-B1 upgrade before the setup-time setval lands, or a replica
+      // that also applies via `write()`), keeping commitWrite strictly above every existing ts —
+      // byte-identical to SQLite's `MAX(ts)+1` semantics. Race-free under the single writer.
+      const rows = await tx.query(
+        `SELECT GREATEST(nextval('stackbase_ts'), (SELECT COALESCE(MAX(ts), 0) FROM documents) + 1) AS ts`,
+      );
+      const commitTs = asBigInt(rows[0]!.ts);
+      const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
+      const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
+      await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shardId ?? DEFAULT_SHARD);
+      if (this.commitGuard) await this.commitGuard(tx, commitTs);
+      return commitTs;
     });
   }
 

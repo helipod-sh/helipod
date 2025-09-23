@@ -140,12 +140,23 @@ describe("fleet node lifecycle", () => {
     const client = new PgliteClient();
     const primary = new PostgresDocStore(client);
     await primary.setupSchema();
+    // Fenced Frontier B1 (D5): the tailer's pull target is `shard_leases.frontier_ts`, not
+    // `primary.maxTimestamp()` — a real lease row is required, and since this test drives the
+    // primary via raw `write()` (exact ts control, matching `replica-tailer.test.ts`'s pattern)
+    // rather than the guarded `commitWrite`, the frontier is advanced by hand below.
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-lifecycle-restart-test:0" });
+    await lease.setup();
+    await lease.tryAcquire();
     const path = join(tmp, REPLICA_DB_FILENAME);
 
     const a = newDocumentId(T1);
     const b = newDocumentId(T1);
     await primary.write([rev(a, 1n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 1n)], "Error");
     await primary.write([rev(b, 2n, null, "B1")], [idxPut(b, encodeIndexKey(["b"]), 2n)], "Error");
+    await client.query(
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = 'default'`,
+      [2n],
+    );
 
     // First run: tail the two entries onto a file-backed replica, then dispose.
     const r1 = new SqliteDocStore(new NodeSqliteAdapter({ path }));
@@ -386,6 +397,12 @@ describe("fleet node lifecycle", () => {
         // and handles.stop() cancels it long before an hour elapses.
         retryMs: 3_600_000,
       });
+      // Fenced Frontier B1 (D5): the tailer now reads `shard_leases.frontier_ts` as its pull
+      // target, so the table must exist — in production this is ALWAYS true by the time
+      // `startFleetNode` runs (`prepareFleetNode` calls `lease.setup()` before deciding
+      // sync-vs-writer); this test bypasses `prepareFleetNode` and drives `startFleetNode`
+      // directly, so it must do that setup step itself.
+      await lease.setup();
       const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://127.0.0.1:9999" });
       expect(forwarder.isLocalWriter()).toBe(false); // sync role — takes startFleetNode's sync path
       const runtime = {
@@ -444,5 +461,87 @@ describe("fleet node lifecycle", () => {
         await freshPrimary.close();
       }
     });
+  });
+});
+
+describe("F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): writer-boot frontier seed closes the pre-loaded-database bootstrap hole", () => {
+  // Reproduces the bug end to end: a single-node Postgres store accumulates real documents via the
+  // RAW write() path with NO lease/fleet machinery involved at all (no `shard_leases` row exists) —
+  // exactly what a pre-fleet `stackbase serve` looks like. The operator then enables `--fleet` for
+  // the first time. Before the fix, the first `tryAcquire()` seeds `frontier_ts=0` even though the
+  // store already holds history, so a fresh sync node's ready gate (`wm=0 < target=0`) is a silent
+  // no-op and it reports ready with an EMPTY replica. Drives the REAL `startFleetNode` writer path
+  // (not just the extracted `seedFrontier` seam) so the fix is proven where it actually runs: after
+  // `pgStore.setupSchema()`, before this node is reported ready.
+  it("a pre-loaded store gets frontier_ts seeded at writer boot, and a fresh sync tailer then catches up on the FULL history", async () => {
+    const client = new PgliteClient();
+    const primary = new PostgresDocStore(client);
+    await primary.setupSchema();
+
+    const a = newDocumentId(T1);
+    const b = newDocumentId(T1);
+    await primary.write([rev(a, 1n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 1n)], "Error");
+    await primary.write([rev(b, 2n, null, "B1")], [idxPut(b, encodeIndexKey(["b"]), 2n)], "Error");
+    expect(await primary.maxTimestamp()).toBe(2n);
+
+    // Operator enables --fleet: prepareFleetNode's writer decision (PgliteClient's single connection
+    // always wins tryAcquireWriterLock()). Lease row is freshly created at frontier_ts=0 — the bug's
+    // starting condition, unchanged by this fix (tryAcquire() itself is untouched).
+    const lease = new LeaseManager(client, { advertiseUrl: "http://writer:9001" });
+    await lease.setup();
+    const acquired = await lease.tryAcquire();
+    expect(acquired).toEqual({ epoch: 1n, writerUrl: "http://writer:9001" });
+    expect((await lease.read())?.frontierTs).toBe(0n);
+
+    primary.setWritable();
+    const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://writer:9001" });
+    forwarder.promote();
+    expect(forwarder.isLocalWriter()).toBe(true); // takes startFleetNode's WRITER branch
+
+    const runtime = {
+      observeTimestamp: () => {},
+      startDrivers: async () => {},
+      handler: { notifyWrites: async () => {} },
+    } as unknown as EmbeddedRuntime;
+    const onExit = vi.fn();
+
+    const handles = await startFleetNode({
+      client: client as unknown as NodePgClient, // structural: query/listen used; onConnectionLost optional
+      pgStore: primary,
+      runtime,
+      lease,
+      forwarder,
+      onExit,
+    });
+    try {
+      expect(handles.role()).toBe("writer");
+      expect(onExit).not.toHaveBeenCalled();
+      // THE FIX: frontier_ts is now seeded up to the pre-existing max ts instead of staying at 0.
+      expect((await lease.read())?.frontierTs).toBe(2n);
+
+      // The actual observable failure mode, closed end to end: a fresh sync node joining NOW must
+      // catch up on the FULL pre-loaded history, not bootstrap empty.
+      const replica = new SqliteDocStore(new NodeSqliteAdapter());
+      await replica.setupSchema();
+      const invalidations: AppliedInvalidation[] = [];
+      const tailer = new ReplicaTailer(client, primary, replica, {
+        pollMs: 20,
+        onInvalidation: async (inv) => {
+          invalidations.push(inv);
+        },
+      });
+      try {
+        await tailer.start(); // must catch up to ts=2, not resolve immediately empty
+        expect(await replica.maxTimestamp()).toBe(2n);
+        expect(await replica.get(a)).not.toBeNull();
+        expect(await replica.get(b)).not.toBeNull();
+        expect(invalidations.length).toBeGreaterThan(0);
+      } finally {
+        await tailer.stop();
+        await replica.close();
+      }
+    } finally {
+      await handles.stop();
+    }
   });
 });

@@ -13,6 +13,11 @@ export interface EmbeddedWriteFanoutPayload {
   tables: string[];
   ranges: SerializedKeyRange[];
   originId: string;
+  /** The shard this commit landed on (Fenced Frontier B1, D6) — sourced verbatim from
+   *  `OplogDelta.shardId`. Additive: single-shard (Tier 0/B1) deployments always see `"default"`
+   *  (`DEFAULT_SHARD`); a multi-shard fan-out consumer (B2+) can use it to route/filter, but every
+   *  existing consumer today ignores it. */
+  shardId: string;
 }
 
 export type FanoutListener = (payload: EmbeddedWriteFanoutPayload) => void;
@@ -51,6 +56,7 @@ export class EmbeddedWriteFanout implements WriteFanout {
       tables: delta.writtenTables,
       ranges: delta.writtenRanges,
       originId: this.originId,
+      shardId: delta.shardId,
     });
   }
 

@@ -55,6 +55,9 @@ export interface FleetModule {
     advertiseUrl: string;
     adminKey: string;
     dataDir: string;
+    /** Lease TTL in ms — the failover-clock knob (see `@stackbase/fleet`'s `node.ts`). Threaded from
+     *  `STACKBASE_FLEET_LEASE_TTL_MS`; undefined → the fleet default (15000). Ops/test tuning. */
+    leaseTtlMs?: number;
   }): Promise<FleetPrep>;
   startFleetNode(deps: {
     client: unknown;
@@ -118,6 +121,15 @@ export function validateFleetOptions(opts: {
   return { ok: true, databaseUrl: opts.databaseUrl!, advertiseUrl };
 }
 
+/** Parse `STACKBASE_FLEET_LEASE_TTL_MS` — a positive finite integer of ms, else undefined (the fleet
+ *  default applies). Kept here (not in `@stackbase/fleet`) so the env read stays at serve's config
+ *  boundary, alongside the other fleet flags; the fleet package receives a validated number. */
+function parseLeaseTtlMs(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 export function resolveServeOptions(args: string[]): ServeOptions {
   let convexDir = "convex";
   let dataPath = process.env.STACKBASE_DATA_DIR ? join(process.env.STACKBASE_DATA_DIR, "db.sqlite") : "./data/db.sqlite";
@@ -169,7 +181,7 @@ export async function startServe(
   opts: ServeOptions & {
     adminKey: string;
     fleetModule?: FleetModule;
-    fleetConfig?: { databaseUrl: string; advertiseUrl: string };
+    fleetConfig?: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number };
   },
 ): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime; fleet?: FleetHandles; role?: "sync" | "writer" }> {
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
@@ -262,7 +274,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   // Fleet mode: validate prerequisites and load the enterprise package (dynamic import only —
   // never a static dependency of core cli), failing fast with actionable messages.
   let fleetModule: FleetModule | undefined;
-  let fleetConfig: { databaseUrl: string; advertiseUrl: string } | undefined;
+  let fleetConfig: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number } | undefined;
   if (opts.fleet) {
     const v = validateFleetOptions(opts);
     if (!v.ok) {
@@ -279,7 +291,12 @@ export async function serveCommand(args: string[]): Promise<number> {
       process.stderr.write(`✗ ${FLEET_ERR_NO_PACKAGE}\n`);
       return 1;
     }
-    fleetConfig = { databaseUrl: v.databaseUrl, advertiseUrl: v.advertiseUrl };
+    // `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning): the lease TTL in ms, the single knob the
+    // whole failover clock scales from inside `@stackbase/fleet` (heartbeat + acquire cadences are
+    // derived from it). Unset → the fleet default (15000ms, behavior-identical to the historical
+    // constants). Only a positive finite number is honored; anything else falls through to the
+    // default. The wedged-writer E2E sets this to 4000 so failover completes in a test's timescale.
+    fleetConfig = { databaseUrl: v.databaseUrl, advertiseUrl: v.advertiseUrl, leaseTtlMs: parseLeaseTtlMs(process.env.STACKBASE_FLEET_LEASE_TTL_MS) };
   }
 
   const { server, store, role, fleet } = await startServe({ ...opts, adminKey, fleetModule, fleetConfig });
