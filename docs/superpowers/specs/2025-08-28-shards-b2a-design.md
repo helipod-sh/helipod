@@ -51,9 +51,21 @@ routes to that shard's state (the option **already exists** on
 deps as today plus a lazily-seeded per-shard oracle start (each shard's oracle seeds from
 `store.maxTimestamp()` at first use — safe: commitWrite's `GREATEST(nextval, MAX+1)` is the
 structural guarantee; the oracle is snapshot bookkeeping only, per B1).
-- **Cross-shard parallelism falls out:** different shards' mutexes are independent, so two
-  mutations on different shards run `commitWrite` concurrently (two Postgres transactions in
-  flight — safe: different `shard_leases` rows, per-shard guards).
+- **Cross-shard parallelism requires a commit-connection pool (spec-review finding — the
+  single pinned `NodePgClient` connection CANNOT run two transactions concurrently: pg queues
+  per session; two interleaved `transaction()` calls would produce a no-op second BEGIN and a
+  first COMMIT that commits BOTH shards' half-staged writes — atomicity corruption).**
+  Fix, required: `NodePgClient` gains a small **per-shard commit connection pool** (N
+  dedicated connections, lazily opened, used ONLY for `commitWrite` transactions; the pinned
+  connection keeps lease heartbeats/eviction/setup/queries; LISTEN keeps its own connection).
+  Hazard requirements that come with it: (a) `sessionTimeouts` (5s idle-in-txn/10s statement)
+  applied to EVERY commit connection, not just the pinned one — else the wedged-writer fence
+  bound breaks per shard; (b) a dead per-shard commit connection maps to THAT shard's
+  definitive lease loss (per-shard `onConnectionLost` routing); (c) each slot's advisory lock
+  is taken ON its shard's commit connection (session-scoped locks — its death releases exactly
+  that shard). `evictExpired`'s FOR UPDATE serialization is row-lock-based — unaffected.
+  With the pool, different shards' mutexes + connections are independent → genuinely
+  concurrent Postgres transactions.
 - `SingleWriterTransactor` remains (Tier-0-single-shard construction can keep using it, or
   `ShardedTransactor` with one shard — plan decides which the runtime constructs; behavior
   must be byte-identical either way, proven by the existing suites).
@@ -84,15 +96,28 @@ Using the catalog's `.shardKey` metadata (already threaded to `TableInfo`):
   mutation whose shardBy resolves to the same value)"`. Also: inserting into a sharded table
   from an undeclared (`"default"`) mutation errors the same way. Shard-key fields are
   **immutable after insert** (replace with a changed shard-key value errors).
-- **Read guard:** reads (get/query/paginate) of a **different sharded table row/range whose
-  shard ≠ the transaction's shard** are rejected with an instructive error — EXCEPT on the
-  default shard (no `shardBy`), where reads of sharded tables are... also rejected in B2a
-  when they would cross shards? **Decision:** in B2a, a `"default"`-shard mutation may READ
-  sharded tables freely (single-node: all data is local and stable at `lastCommitted` — the
-  serializable-globals escape hatch pattern depends on it), and a **sharded** mutation may
-  read: its home shard (serializable) + unsharded tables (split snapshot, D4) — but NOT other
-  sharded tables' foreign shards (error). Queries/subscriptions (read-only, no shard) are
-  untouched — they read everything as today.
+- **Read guard — the full decision matrix (B2a):**
+  - A `"default"`-shard mutation (no `shardBy`) may READ everything, sharded tables included
+    (single-node: all data local and stable at `lastCommitted` — the serializable-globals
+    escape hatch depends on it).
+  - A **sharded** mutation may read: unsharded tables (split snapshot, D4, not OCC-validated);
+    its home shard's rows of its sharded tables. `db.get` on a sharded table is necessarily
+    **read-then-reject** (the shard is known only after reading the doc's key field —
+    acceptable DX, matches the existing read-policy shape in the kernel).
+  - A sharded mutation reading a **different sharded table's** foreign-shard row → error.
+  - **Same-table cross-shard scans (spec-review finding — previously unspecified):** a
+    sharded mutation may scan its OWN sharded table **only via an index whose first field is
+    the shard key, with an `eq()` pinning it to the mutation's own shard-key value**
+    (checkable at query-build time in the kernel: index definition + range prefix). Any other
+    scan of a sharded table from a sharded mutation → instructive error naming the pinned-
+    index rule. This keeps every row a sharded mutation can see provably home-shard, without
+    per-row filtering costs.
+  - Queries/subscriptions (read-only, no shard) are untouched — they read everything as
+    today.
+  - **Catalog threading (spec-review finding):** the kernel's `TableMeta` does NOT carry
+    `shardKey` today (compose.ts drops it before `catalog.addTable`) — thread it through
+    (`addTable` signature + `TableMeta` field), the same shape the D5 validation additions
+    used in B1's lineage.
 - Guards live in the kernel/executor → identical behavior at Tier-0 SQLite, `stackbase dev`
   (8 virtual shards), and fleet.
 
@@ -104,16 +129,32 @@ stable snapshot NOT OCC-validated** — B2a single-node reads them at the same s
 read-set recording for invalidation precision but their ranges are **excluded from OCC
 conflict checks** (the documented write-skew class; the auth example named in docs verbatim
 per the verdict: a revoked permission stays effective on sharded mutations for the staleness
-window). Deterministic replay stays sound: both halves are stable snapshots. The escape hatch
-(full serialization incl. globals) = omit `shardBy` (default shard, today's semantics).
+window). **Mechanism (spec-review edit): the transaction context splits into TWO read sets** —
+`reads` (OCC-validated, home-shard ranges) and `recordedReads` (invalidation-only, global-
+table ranges) — classified at record time by the catalog's shardKey metadata; the conflict
+predicate (`c.ts > snapshotTs && reads.intersects(c.writes)`) consults only the first; the
+union feeds invalidation/read-set reporting. Deterministic replay stays sound: both halves
+are stable snapshots. The escape hatch (full serialization incl. globals) = omit `shardBy`
+(default shard, today's semantics — one read set, everything validated, unchanged).
 
 ### D5. Fleet single-node integration (B1 machinery × N)
 
 - `setupSchema`/fleet boot creates **all N `shard_leases` rows**; the (single) fleet node's
-  acquisition loop acquires ALL of them (per-shard advisory locks keyed by slot; the B1
-  fencing upsert per row). The commit guard becomes **per-shard**: the guard closure reads
-  the transaction's shardId (threaded through commitWrite → guard param) and fences against
-  THAT row's epoch. `LeaseMonitor` heartbeats all held leases (one batched UPDATE per beat).
+  acquisition loop acquires ALL of them. **Per-slot advisory locks are a seam change
+  (spec-review finding): today's `tryAcquireWriterLock` takes no key (one fixed
+  `ADVISORY_LOCK_KEY`) — it gains a slot parameter using the two-int
+  `pg_try_advisory_lock(classId, slot)` form, each slot's lock taken ON that shard's commit
+  connection (D1 hazard (c)).** The commit guard becomes **per-shard**: the guard signature
+  gains the shard (`(q, commitTs, shardId)` — commitWrite already carries it) and fences
+  against THAT row's epoch (per-shard epoch map replacing the single `currentEpoch`).
+  `LeaseMonitor` heartbeats all held leases (one batched UPDATE per beat).
+- **Frontier seeding covers ALL N rows (spec-review finding — the B1-F1 hole recurs ×7
+  otherwise: rows created at frontier 0 pin min-F to 0 → empty-but-ready sync nodes on any
+  pre-loaded database):** writer boot seeds EVERY row it holds —
+  `frontier_ts = GREATEST(frontier_ts, maxTimestamp())`, epoch-fenced per row, batched —
+  BEFORE the node reports ready (valid for all shards at once: any future commit takes a
+  later nextval). Belt-and-braces on the reader side: the tailer treats **fewer than
+  NUM_SHARDS rows existing** as not-ready (a half-created table must not fake a min).
 - **Node-batched idle-shard frontier closing** (needed the moment N>1 — an idle shard pins
   F): one transaction per beat — `nextval` once, then
   `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $N) WHERE (shard_id, epoch) IN
@@ -136,11 +177,12 @@ byte-identically to today (everything on `"default"` — the existing suites pro
 
 ### D7. Codegen cross-check
 
-Where a mutation's `shardBy` names an arg and the mutation's module statically writes a
-sharded table (best-effort static association — the same depth the existing codegen
-analysis reaches): validate the arg exists, is required, and its validator type matches the
-`.shardKey` field's type; emit a codegen-time error naming both sides. Dynamic cases fall
-through to the kernel guards (which are the always-on truth).
+Scoped down (spec-review edit — codegen reads validators, not handler bodies; static
+write-association is beyond it): where a mutation declares `shardBy` as an arg NAME, codegen
+validates the arg **exists in the mutation's validators and is required**, and — when exactly
+one table in the schema is sharded by a same-named field — that the validator type matches
+that `.shardKey` field's type. Everything deeper falls through to the kernel guards (the
+always-on truth at every tier).
 
 ## Error handling summary
 
@@ -157,7 +199,13 @@ through to the kernel guards (which are the always-on truth).
 
 - **Unit:** ShardedTransactor (per-shard isolation: concurrent commits on two shards
   interleave; OCC conflicts detected per shard, NOT across shards for home ranges; ring/
-  snapshot per shard), jump-hash routing (stability + distribution + slot-0→default),
+  snapshot per shard), **the pool-parallelism proof: a two-shard concurrent-commit test
+  constructed to FAIL on a single shared connection** (e.g. hold shard A's transaction open
+  across an await while shard B's commit completes — impossible without independent
+  connections; this is the regression test for the spec-review's atomicity-corruption
+  finding), **the F1×N regression: pre-loaded database + N shard rows → sync-node bootstrap
+  serves full history (min-F seeded before ready)**, jump-hash routing (stability +
+  distribution + slot-0→default),
   executor resolution (shardBy arg/resolver/missing→default), kernel guards (all error cases
   in D3, at Tier-0 SQLite — proving every-tier), split-snapshot OCC exclusion (a global-table
   read doesn't abort on concurrent global write; home-shard read does), codegen cross-check
