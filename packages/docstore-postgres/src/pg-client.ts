@@ -13,6 +13,13 @@ export interface PgQuerier {
   query(text: string, params?: readonly PgValue[]): Promise<PgRow[]>;
 }
 
+/** A querier that can also open its own BEGIN/COMMIT on a specific pinned connection — what a
+ *  per-shard commit connection hands back so `commitWrite` runs entirely on that shard's session. */
+export interface PgTransactionalQuerier extends PgQuerier {
+  /** Run `fn` in one BEGIN/COMMIT (ROLLBACK on throw) on this querier's own pinned connection. */
+  transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T>;
+}
+
 export interface PgClient extends PgQuerier {
   /** Run `fn` in one BEGIN/COMMIT (ROLLBACK on throw); `tx` is pinned to a single connection. */
   transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T>;
@@ -27,8 +34,39 @@ export interface PgClient extends PgQuerier {
    * Absent (undefined) on drivers that don't need it (e.g. the in-process PGlite test client).
    */
   onConnectionLost?(cb: () => void): void;
+  /**
+   * Pool mode only (Fenced Frontier B2a, D1): return a querier bound to `shardId`'s DEDICATED commit
+   * connection, lazily opening it on first use. `commitWrite` runs its whole transaction on this so
+   * two shards commit on two independent Postgres sessions concurrently — the single pinned connection
+   * physically CANNOT (pg queues per session: two interleaved `transaction()` calls yield a no-op second
+   * BEGIN and a first COMMIT that commits BOTH shards' half-staged rows — atomicity corruption). Absent
+   * (undefined) on non-pool drivers (single-node `NodePgClient`, the PGlite test client): `commitWrite`
+   * then keeps its byte-identical pinned-connection path. */
+  commitQuerierFor?(shardId: string): Promise<PgTransactionalQuerier>;
+  /**
+   * Pool mode only (D1 hazard (b)): register a callback fired once, per commit connection, when THAT
+   * shard's commit connection is lost (error/end) — mapping a dropped connection to that shard's
+   * definitive lease loss. The fleet lease monitor uses it to relinquish exactly the affected shard(s).
+   * Multiple callbacks allowed; all fire (a throwing one can't mask the loss for the others). */
+  onShardConnectionLost?(cb: (shardId: string) => void): void;
+  /**
+   * Pool mode only (D1 hazard (c) / D5 per-slot locks): take slot `slot`'s advisory lock via the
+   * two-int `pg_try_advisory_lock({@link SHARD_ADVISORY_LOCK_CLASS}, slot)` form, executed ON that
+   * shard's commit connection so the lock is SESSION-scoped to it — that connection's death releases
+   * exactly that shard's lock, nothing else. `slot` indexes the ordered commit-pool shard list.
+   * Non-blocking: resolves `true`/`false`. */
+  tryAcquireShardLock?(slot: number): Promise<boolean>;
   close(): Promise<void>;
 }
 
-/** Fixed application key for pg_advisory_lock (single-writer guard). */
+/** Fixed application key for the single-writer guard — the one-int `pg_try_advisory_lock(int8)` form. */
 export const ADVISORY_LOCK_KEY = 0x5354424153454e31n;
+
+/**
+ * Class id for the per-slot commit locks — the two-int `pg_try_advisory_lock(classId, slot)` form.
+ * Postgres keeps the one-int (int8) and two-int (int4,int4) advisory-lock spaces DISJOINT, so a slot
+ * lock can never collide with the {@link ADVISORY_LOCK_KEY} single-writer lock even numerically; this
+ * distinct constant also namespaces the slot locks so slot `n` means the same thing across nodes.
+ * `int4`-range (< 2^31): "STBS".
+ */
+export const SHARD_ADVISORY_LOCK_CLASS = 0x53544253;
