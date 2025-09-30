@@ -202,6 +202,35 @@ describe("ShardedTransactor — per-shard isolation", () => {
     expect(s1Result.committed).toBe(true);
     spy.mockRestore();
   });
+
+  it("a failed shard creation (transient docStore.maxTimestamp() throw) does not permanently poison the shard — the next attempt recreates it", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+    const originalMaxTimestamp = store.maxTimestamp.bind(store);
+    let calls = 0;
+    const spy = vi.spyOn(store, "maxTimestamp").mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw new Error("transient store failure");
+      return originalMaxTimestamp();
+    });
+
+    // First attempt: createShard's maxTimestamp() call throws, so the whole transaction rejects.
+    await expect(
+      transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { a: 1n }), {
+        shardId: "s1",
+      }),
+    ).rejects.toThrow("transient store failure");
+
+    // Second attempt on the SAME shard must retry creation (not replay the cached rejection).
+    const result = await transactor.runInTransaction(
+      async (ctx) => ctx.put(newDocumentId(TABLE), { a: 1n }),
+      { shardId: "s1" },
+    );
+    expect(result.committed).toBe(true);
+    expect(calls).toBe(2);
+
+    spy.mockRestore();
+  });
 });
 
 describe("ShardedTransactor — observeTimestamp fan-out", () => {
@@ -245,6 +274,37 @@ describe("ShardedTransactor — observeTimestamp fan-out", () => {
       shardId: "s3",
     });
     expect(result.committed).toBe(true);
+  });
+
+  it("observeTimestamp BEFORE a shard's first use floors its oracle seed, even when the store's own maxTimestamp is lower (fleet-follower ahead-of-local-log case)", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+
+    // No shard has ever been touched, and the fresh store's own log max is far below 1000n —
+    // yet the oracle must still seed at-or-past the observed frontier, not the local store max.
+    transactor.observeTimestamp(1000n);
+
+    let snapshotTs: bigint | undefined;
+    const result = await transactor.runInTransaction(
+      async (ctx) => {
+        snapshotTs = ctx.snapshotTs;
+        ctx.put(newDocumentId(TABLE), { x: 1n });
+      },
+      { shardId: "s3" },
+    );
+
+    expect(result.committed).toBe(true);
+    // The store's own commit-ts allocation (`GREATEST(nextval, MAX+1)`) is independent
+    // bookkeeping from the oracle (see the module doc) — what this test asserts is that the
+    // shard's ORACLE seeded at-or-past the observed frontier, i.e. the snapshot it read at.
+    expect(snapshotTs).toBeGreaterThanOrEqual(1000n);
+
+    const shards = (
+      transactor as unknown as {
+        shards: Map<ShardId, { oracle: { getCurrentTimestamp(): bigint } }>;
+      }
+    ).shards;
+    expect(shards.get("s3")!.oracle.getCurrentTimestamp()).toBeGreaterThanOrEqual(1000n);
   });
 });
 

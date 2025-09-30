@@ -16,14 +16,19 @@
  * mutex, same commit sequence — because both ultimately construct one `ShardWriter` the same
  * way (see `sharded-transactor.test.ts`'s byte-identity test).
  *
- * Each shard's oracle seeds LAZILY, on that shard's first use, from `docStore.maxTimestamp()`
- * — the GLOBAL max across ALL shards' committed log entries (there is no per-shard max: the
- * log is one table). This is correct, not merely convenient: `DocStore.commitWrite`'s
- * `GREATEST(nextval, MAX+1)` allocation is the structural monotonicity guarantee regardless of
- * which shard commits — the oracle is snapshot bookkeeping only. A freshly-created shard's
- * `recentCommits` ring starts empty, so seeding its oracle from the global max cannot
- * manufacture a spurious OCC conflict: there is nothing in that shard's ring yet to conflict
- * with, and the ring only ever holds THIS shard's own past commits (D1).
+ * Each shard's oracle seeds LAZILY, on that shard's first use, from
+ * `max(docStore.maxTimestamp(), observedHighWater)` — the GLOBAL max across ALL shards'
+ * committed log entries (there is no per-shard max: the log is one table), floored by the
+ * highest timestamp this transactor has ever learned via `observeTimestamp` (D1/T4 fleet
+ * seam). This is correct, not merely convenient: `DocStore.commitWrite`'s `GREATEST(nextval,
+ * MAX+1)` allocation is the structural monotonicity guarantee regardless of which shard
+ * commits — the oracle is snapshot bookkeeping only. A freshly-created shard's `recentCommits`
+ * ring starts empty, so seeding its oracle from the global max cannot manufacture a spurious
+ * OCC conflict: there is nothing in that shard's ring yet to conflict with, and the ring only
+ * ever holds THIS shard's own past commits (D1). The `observedHighWater` floor matters on a
+ * fleet follower: `observeTimestamp` can carry a ts learned from the change stream that is
+ * AHEAD of what this node's own `docStore.maxTimestamp()` would report (the local read replica
+ * hasn't caught up yet) — a shard created after that observation must not seed behind it.
  */
 import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
@@ -50,6 +55,10 @@ export class ShardedTransactor implements Transactor {
    *  `docStore.maxTimestamp()` and construct two independent writers for the same shard,
    *  splitting its single-writer invariant in two). */
   private readonly creating = new Map<ShardId, Promise<ShardWriter>>();
+  /** Highest timestamp ever observed via `observeTimestamp`, across ALL shards (existing or
+   *  not-yet-created) — the floor a newly-created shard's oracle must seed at-or-past (see the
+   *  module doc above). */
+  private observedHighWater = 0n;
 
   constructor(
     private readonly docStore: DocStore,
@@ -68,11 +77,15 @@ export class ShardedTransactor implements Transactor {
   }
 
   /**
-   * Fans a learned timestamp ("the log reached ts") to every shard oracle CREATED so far. A
-   * shard not yet touched needs no fan-out: it will seed at-or-past `ts` anyway when it first
-   * calls `docStore.maxTimestamp()` (the store's log is already past `ts` by then).
+   * Fans a learned timestamp ("the log reached ts") to every shard oracle CREATED so far, and
+   * records it as the transactor-wide `observedHighWater` floor. A shard not yet touched still
+   * needs this recorded: on a fleet follower, `ts` can be AHEAD of what this node's own
+   * `docStore.maxTimestamp()` would report (the local read replica hasn't caught up yet), so
+   * `createShard` seeds every new writer's oracle from `max(docStore.maxTimestamp(),
+   * observedHighWater)` rather than trusting the local store max alone.
    */
   observeTimestamp(ts: bigint): void {
+    if (ts > this.observedHighWater) this.observedHighWater = ts;
     for (const writer of this.shards.values()) writer.oracle.observeTimestamp(ts);
   }
 
@@ -82,13 +95,20 @@ export class ShardedTransactor implements Transactor {
     let pending = this.creating.get(shardId);
     if (!pending) {
       pending = this.createShard(shardId);
+      // On rejection (e.g. a transient `docStore.maxTimestamp()` throw), clear the cached
+      // promise so the shard isn't permanently poisoned — the next caller retries creation.
+      // In-flight callers already awaiting `pending` still observe the original rejection.
+      pending.catch(() => {
+        if (this.creating.get(shardId) === pending) this.creating.delete(shardId);
+      });
       this.creating.set(shardId, pending);
     }
     return pending;
   }
 
   private async createShard(shardId: ShardId): Promise<ShardWriter> {
-    const seedTs = this.options.seedTs ?? (await this.docStore.maxTimestamp());
+    const storeSeed = this.options.seedTs ?? (await this.docStore.maxTimestamp());
+    const seedTs = storeSeed > this.observedHighWater ? storeSeed : this.observedHighWater;
     const oracle = new MonotonicTimestampOracle(seedTs);
     const writer = new ShardWriter(
       this.docStore,
