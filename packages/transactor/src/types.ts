@@ -40,7 +40,13 @@ export interface WriteFanout {
 export interface TransactionContext {
   readonly snapshotTs: bigint;
   readonly shardId: ShardId;
-  /** The accumulated read set (ranges) — for OCC validation and reactivity. */
+  /**
+   * The accumulated read set (ranges) — for reactivity/invalidation reporting. As of the
+   * two-read-set split (shards B2a, D4) this is the UNION of every `recordRead`/`get()` call
+   * (OCC-validated) and every `recordReadUnvalidated` call (invalidation-only); the commit's
+   * OCC conflict predicate consults only the validated subset internally. A caller that never
+   * calls `recordReadUnvalidated` sees `reads` behave exactly as before the split.
+   */
   readonly reads: RangeSet;
   /** Read a document (records the read for OCC; sees the transaction's own pending writes). */
   get(id: InternalDocumentId): Promise<DocumentValue | null>;
@@ -48,8 +54,18 @@ export interface TransactionContext {
   put(id: InternalDocumentId, value: DocumentValue): void;
   /** Stage a delete (tombstone). */
   delete(id: InternalDocumentId): void;
-  /** Merge an externally-computed read range (e.g. an index range from the query engine). */
+  /** Merge an externally-computed read range (e.g. an index range from the query engine) into
+   *  the OCC-validated set (and, transitively, `reads` — see its doc above). */
   recordRead(range: KeyRange): void;
+  /**
+   * Merge an externally-computed read range into `reads` ONLY — it is never checked by the
+   * commit's OCC conflict predicate (shards B2a, D4: the documented write-skew class for
+   * global/unsharded tables read from a sharded mutation's split snapshot). Still feeds
+   * invalidation/reporting via `reads`, so subscriptions over that range still recompute on a
+   * concurrent write to it — only this transaction's own commit is exempted from aborting
+   * over it.
+   */
+  recordReadUnvalidated(range: KeyRange): void;
   /** Merge an externally-computed write range (e.g. index-key ranges from a write). */
   recordWrite(range: KeyRange): void;
   /** Stage index entry updates to be applied atomically at commit. */
