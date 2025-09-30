@@ -37,7 +37,13 @@ interface FakeClientInstance {
   ended: boolean;
 }
 
-const state = vi.hoisted(() => ({ instances: [] as FakeClientInstance[] }));
+const state = vi.hoisted(() => ({
+  instances: [] as FakeClientInstance[],
+  // FIFO of connect() override behaviors, consumed one per connect() CALL (not per instance) — lets
+  // a test make e.g. the first shard-connect attempt reject and the second (on a brand-new client)
+  // succeed, without needing to know the instance index up front. Empty/no entry → default resolve.
+  connectQueue: [] as Array<(() => Promise<void>) | undefined>,
+}));
 
 vi.mock("pg", () => {
   class FakeClient implements FakeClientInstance {
@@ -47,7 +53,10 @@ vi.mock("pg", () => {
     constructor(public opts: { connectionString: string; application_name?: string }) {
       state.instances.push(this);
     }
-    async connect(): Promise<void> {}
+    async connect(): Promise<void> {
+      const behavior = state.connectQueue.shift();
+      if (behavior) return behavior();
+    }
     on(event: string, cb: (...a: unknown[]) => void): void {
       (this.handlers[event] ??= []).push(cb);
     }
@@ -74,6 +83,7 @@ const texts = (inst: FakeClientInstance): string[] => inst.queries.map((q) => q.
 
 afterEach(() => {
   state.instances.length = 0;
+  state.connectQueue.length = 0;
   vi.clearAllMocks();
 });
 
@@ -118,6 +128,31 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
     // Same shard again → reuses the existing connection, opens nothing new.
     await client.commitQuerierFor!("s1");
     expect(state.instances).toHaveLength(3);
+  });
+
+  it("a rejected shard connect is evicted, not memoized — the next attempt opens a fresh connection", async () => {
+    const client = new NodePgClient({
+      connectionString: "postgres://fake",
+      commitPool: { shards: ["s1"] },
+    });
+
+    // First connect() call (the shard's commit connection — the pinned connection is never
+    // touched in this test) rejects. Before the fix, the rejected promise was memoized forever
+    // by `??=`, so every subsequent commitQuerierFor("s1") would replay this SAME rejection
+    // without ever calling connect() again.
+    state.connectQueue.push(() => Promise.reject(new Error("connect boom")));
+
+    await expect(client.commitQuerierFor!("s1")).rejects.toThrow("connect boom");
+    expect(state.instances).toHaveLength(2); // pinned + one failed shard-connect attempt
+
+    // Second attempt: no override queued → the FakeClient's default connect() resolves. If the
+    // cache entry were still memoized (bug), this would replay "connect boom" again and no new
+    // `pg.Client` would be constructed — pg itself would also refuse to reconnect the SAME
+    // client instance a second time, so reuse isn't even an option after a failed connect.
+    const q = await client.commitQuerierFor!("s1");
+    expect(state.instances).toHaveLength(3); // pinned + failed attempt + a FRESH shard client
+    await q.query("SELECT 1");
+    expect(texts(state.instances[2]!)).toContain("SELECT 1");
   });
 
   it("rejects commitQuerierFor / tryAcquireShardLock for an unknown shard or out-of-range slot", async () => {

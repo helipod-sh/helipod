@@ -270,7 +270,7 @@ export class NodePgClient implements PgClient {
     c.connectPromise ??= (() => {
       c.client.on("error", () => this.fireShardConnectionLost(c));
       c.client.on("end", () => this.fireShardConnectionLost(c));
-      return c.client.connect().then(async () => {
+      const promise = c.client.connect().then(async () => {
         if (this.sessionTimeouts) {
           for (const stmt of pgSessionTimeoutStatements(this.sessionTimeouts)) {
             await c.client.query(stmt);
@@ -278,6 +278,20 @@ export class NodePgClient implements PgClient {
         }
         c.connected = true;
       });
+      // A rejected connect poisons `c.client` forever — `pg.Client` refuses a second `connect()`
+      // call on the same instance ("Client has already been connected. You cannot reuse a
+      // client."), even after a failed first attempt. So a memoized-forever `connectPromise`
+      // would replay this same rejection on every future call for this shard's process lifetime.
+      // Evict the WHOLE cache entry (not just `connectPromise`) on rejection, attached here
+      // BEFORE this promise is returned to the caller, so the eviction always runs ahead of the
+      // caller's own `await conn.connectPromise` (promise handlers fire in attachment order) —
+      // the in-flight caller still observes the original rejection via the returned promise
+      // itself, but the NEXT `ensureShardConn(shardId)` call finds no cached entry and builds a
+      // fresh `pg.Client` + connection from scratch.
+      promise.catch(() => {
+        if (this.commitConns.get(shardId) === c) this.commitConns.delete(shardId);
+      });
+      return promise;
     })();
     return c;
   }
