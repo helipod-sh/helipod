@@ -63,9 +63,10 @@ export interface PostgresDocStoreOptions {
 
 export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
-  /** Fleet-installed epoch fence (D3). Runs inside every `commitWrite` transaction, after the row
-   * inserts and before COMMIT; throwing aborts the whole commit. Never set at Tier 0. */
-  private commitGuard: ((q: PgQuerier, commitTs: bigint) => Promise<void>) | null = null;
+  /** Fleet-installed epoch fence (D3/D5). Runs inside every `commitWrite` transaction, after the row
+   * inserts and before COMMIT; throwing aborts the whole commit. Never set at Tier 0. The `shardId` is
+   * passed so a per-shard fleet fence can check THAT shard's epoch row (B2a per-shard guards). */
+  private commitGuard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId) => Promise<void>) | null = null;
 
   constructor(
     private readonly db: PgClient,
@@ -76,7 +77,7 @@ export class PostgresDocStore implements DocStore {
 
   /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
    * (the epoch fence); at Tier 0 no guard is ever set and `commitWrite` never calls one. */
-  setCommitGuard(guard: ((q: PgQuerier, commitTs: bigint) => Promise<void>) | null): void {
+  setCommitGuard(guard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId) => Promise<void>) | null): void {
     this.commitGuard = guard;
   }
 
@@ -247,12 +248,13 @@ export class PostgresDocStore implements DocStore {
     shardId?: ShardId,
   ): Promise<bigint> {
     if (this.readOnly) throw new ReadOnlyStoreError();
+    const shard = shardId ?? DEFAULT_SHARD;
     // One transaction: allocate the commit ts from the sequence, stamp every staged row with it,
     // insert, run the epoch fence (if installed), COMMIT. `nextval` inside the transaction makes
     // the ts visible atomically with its rows — no allocated-but-unlanded window (D1). A throwing
     // guard (D3) rolls the whole thing back; the advanced sequence value is not reclaimed on
     // rollback (Postgres sequences are non-transactional), which is harmless — ts gaps are legal.
-    return this.db.transaction(async (tx) => {
+    const runCommit = async (tx: PgQuerier): Promise<bigint> => {
       // `nextval` is the primary allocator (and the shared clock the D4 eviction fencer bumps).
       // `GREATEST(nextval, MAX(ts)+1)` also covers out-of-band `write()` rows whose ts did not come
       // from this sequence (e.g. a pre-B1 upgrade before the setup-time setval lands, or a replica
@@ -264,10 +266,19 @@ export class PostgresDocStore implements DocStore {
       const commitTs = asBigInt(rows[0]!.ts);
       const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
       const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
-      await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shardId ?? DEFAULT_SHARD);
-      if (this.commitGuard) await this.commitGuard(tx, commitTs);
+      await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shard);
+      if (this.commitGuard) await this.commitGuard(tx, commitTs, shard);
       return commitTs;
-    });
+    };
+    // Pool mode (D1): route the whole commit onto THIS shard's dedicated commit connection, so
+    // concurrent cross-shard commits run on independent Postgres sessions. Without a pool (single-node,
+    // Tier-0 tests, PGlite) the transaction runs on the pinned connection — byte-identical to before,
+    // which the existing conformance suite proves.
+    if (this.db.commitQuerierFor) {
+      const q = await this.db.commitQuerierFor(shard);
+      return q.transaction(runCommit);
+    }
+    return this.db.transaction(runCommit);
   }
 
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {

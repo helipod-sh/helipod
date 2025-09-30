@@ -10,13 +10,21 @@
  * whose `getTypeParser` falls through to the passed object for any oid without a `setTypeParser`
  * override, so this is real per-client wiring, not a global mutation of `pg.types`.
  *
- * Uses a single pinned `pg.Client` connection (not a `Pool`) — the engine is single-writer,
- * so one connection is all a `PostgresDocStore` ever needs, and `transaction` requires pinning
- * to one connection anyway (a `Pool` would risk BEGIN/COMMIT landing on different connections).
+ * Uses a single pinned `pg.Client` connection (not a `Pool`) for queries, `write()`, the writer
+ * lock, lease heartbeats/eviction and setup — the engine is single-writer, so one connection is all
+ * a single-shard `PostgresDocStore` ever needs, and `transaction` requires pinning to one connection
+ * anyway (a `Pool` would risk BEGIN/COMMIT landing on different connections).
+ *
+ * The ONE exception (Fenced Frontier B2a, D1): when constructed with `commitPool`, a dedicated
+ * `pg.Client` is lazily opened PER SHARD for `commitWrite` transactions only. Concurrent cross-shard
+ * commits need independent Postgres sessions — two `transaction()` calls on one session interleave
+ * into a single BEGIN/COMMIT and corrupt atomicity. Each commit connection gets the same session
+ * timeouts (hazard (a)), routes its loss to that shard's lease (hazard (b)), and hosts that slot's
+ * session-scoped advisory lock (hazard (c)). LISTEN keeps its own separate connection, unchanged.
  */
 import pg from "pg";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "./pg-client";
-import { ADVISORY_LOCK_KEY } from "./pg-client";
+import type { PgClient, PgQuerier, PgRow, PgTransactionalQuerier, PgValue } from "./pg-client";
+import { ADVISORY_LOCK_KEY, SHARD_ADVISORY_LOCK_CLASS } from "./pg-client";
 
 const { Client, types } = pg;
 
@@ -68,6 +76,16 @@ function normalizeRows(rows: Record<string, unknown>[]): PgRow[] {
   });
 }
 
+/** One shard's dedicated commit connection (D1). Lazily opened; `connected` gates teardown; `lostFired`
+ *  guards a single per-shard connection-lost fire (error-then-end double-event, and graceful close). */
+interface ShardCommitConn {
+  readonly shardId: string;
+  readonly client: pg.Client;
+  connectPromise?: Promise<void>;
+  connected: boolean;
+  lostFired: boolean;
+}
+
 export class NodePgClient implements PgClient {
   private readonly client: pg.Client;
   private readonly connectionString: string;
@@ -80,19 +98,57 @@ export class NodePgClient implements PgClient {
    *  and every non-fleet construction) → no `SET`, unbounded session. Public+readonly so a fleet
    *  boot can be introspected in tests without a live connection. */
   readonly sessionTimeouts?: PgSessionTimeouts;
+  /** Ordered commit-pool shard list (index = slot), or undefined for a non-pool (single-shard) client.
+   *  Public+readonly so a fleet boot / test can introspect the configured shards without connecting. */
+  readonly commitPoolShards?: readonly string[];
+  /** Lazily-opened per-shard commit connections (pool mode only). */
+  private readonly commitConns = new Map<string, ShardCommitConn>();
+  private readonly shardConnectionLostCbs: Array<(shardId: string) => void> = [];
 
-  constructor(opts: { connectionString: string; applicationName?: string; sessionTimeouts?: PgSessionTimeouts }) {
+  // The three pool capabilities are PRESENT (bound in the constructor) only when a `commitPool` is
+  // configured, and absent otherwise — so `PostgresDocStore.commitWrite`'s `if (db.commitQuerierFor)`
+  // presence check correctly keeps a poolless single-node client on the pinned path. See the bindings
+  // in the constructor; the real bodies are the `*Impl` methods below.
+  readonly commitQuerierFor?: (shardId: string) => Promise<PgTransactionalQuerier>;
+  readonly onShardConnectionLost?: (cb: (shardId: string) => void) => void;
+  readonly tryAcquireShardLock?: (slot: number) => Promise<boolean>;
+
+  constructor(opts: {
+    connectionString: string;
+    applicationName?: string;
+    sessionTimeouts?: PgSessionTimeouts;
+    /** Per-shard commit-connection pool (Fenced Frontier B2a, D1). `shards` is the ordered slot list —
+     *  `shards[slot]` is the shard id `tryAcquireShardLock(slot)` locks. Unset → single pinned connection,
+     *  byte-identical to today (the poolless `commitWrite` path the conformance suite proves). */
+    commitPool?: { shards: readonly string[] };
+  }) {
     this.connectionString = opts.connectionString;
     this.applicationName = opts.applicationName;
     this.sessionTimeouts = opts.sessionTimeouts;
-    this.client = new Client({
-      connectionString: opts.connectionString,
+    this.commitPoolShards = opts.commitPool ? [...opts.commitPool.shards] : undefined;
+    this.client = this.buildClient(opts.applicationName);
+    // Expose the pool capabilities ONLY in pool mode (presence == capability, per the PgClient seam).
+    if (this.commitPoolShards) {
+      this.commitQuerierFor = (shardId) => this.commitQuerierForImpl(shardId);
+      this.onShardConnectionLost = (cb) => {
+        this.shardConnectionLostCbs.push(cb);
+      };
+      this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
+    }
+  }
+
+  /** Build a `pg.Client` on this client's connection string, with the shared int8→bigint type map and
+   *  an optional `application_name`. Used for the pinned connection and every per-shard commit connection
+   *  (so they carry the SAME normalization contract); LISTEN builds its own thinner client separately. */
+  private buildClient(applicationName?: string): pg.Client {
+    return new Client({
+      connectionString: this.connectionString,
       // Tag this connection's backend in pg_stat_activity when a name is supplied (fleet nodes pass a
       // per-node `stackbase-fleet-<port>` so an operator — or the fleet self-exit E2E — can identify
       // and target one node's backends). Passed as an explicit config field, not appended to the
       // connection string: pg merges the parsed connection string OVER explicit fields, so this only
       // survives because our connection strings never set `application_name` themselves.
-      application_name: opts.applicationName,
+      application_name: applicationName,
       // Per-client type map: int8 (OID 20) → bigint; every other OID keeps pg's default parser.
       types: {
         getTypeParser: (oid: number, format?: string) =>
@@ -152,10 +208,16 @@ export class NodePgClient implements PgClient {
     }
   }
 
+  /** Run + normalize a query on a specific connection (the pinned one, or a shard's commit connection).
+   *  Assumes the connection is already established — callers `await` the relevant `ensure`/`connectPromise`. */
+  private async queryOn(client: pg.Client, text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
+    const res = await client.query(text, toDriverParams(params));
+    return normalizeRows(res.rows as Record<string, unknown>[]);
+  }
+
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
     await this.ensure();
-    const res = await this.client.query(text, toDriverParams(params));
-    return normalizeRows(res.rows as Record<string, unknown>[]);
+    return this.queryOn(this.client, text, params);
   }
 
   async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {
@@ -184,6 +246,105 @@ export class NodePgClient implements PgClient {
     await this.ensure();
     // Non-blocking: resolve true/false instead of throwing — callers (fleet failover) poll this.
     const rows = await this.query(`SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY]);
+    return rows[0]?.ok === true;
+  }
+
+  // ---- Per-shard commit pool (Fenced Frontier B2a, D1) -----------------------------------------
+
+  /** Resolve the (lazily-created, lazily-connected) commit connection for `shardId`, returning it
+   *  together with the memoized connect promise every caller awaits. Connecting installs the SAME
+   *  session timeouts as the pinned connection (hazard (a)) and wires error/end → per-shard loss
+   *  (hazard (b)), both BEFORE marking it connected so no unbounded/un-monitored window exists. */
+  private ensureShardConn(shardId: string): ShardCommitConn {
+    if (!this.commitPoolShards) throw new Error("NodePgClient: commit pool not configured (no commitPool option)");
+    if (!this.commitPoolShards.includes(shardId)) {
+      throw new Error(`NodePgClient: '${shardId}' is not a configured commit-pool shard`);
+    }
+    let conn = this.commitConns.get(shardId);
+    if (!conn) {
+      const client = this.buildClient(this.applicationName ? `${this.applicationName}-commit-${shardId}` : undefined);
+      conn = { shardId, client, connected: false, lostFired: false };
+      this.commitConns.set(shardId, conn);
+    }
+    const c = conn;
+    c.connectPromise ??= (() => {
+      c.client.on("error", () => this.fireShardConnectionLost(c));
+      c.client.on("end", () => this.fireShardConnectionLost(c));
+      const promise = c.client.connect().then(async () => {
+        if (this.sessionTimeouts) {
+          for (const stmt of pgSessionTimeoutStatements(this.sessionTimeouts)) {
+            await c.client.query(stmt);
+          }
+        }
+        c.connected = true;
+      });
+      // A rejected connect poisons `c.client` forever — `pg.Client` refuses a second `connect()`
+      // call on the same instance ("Client has already been connected. You cannot reuse a
+      // client."), even after a failed first attempt. So a memoized-forever `connectPromise`
+      // would replay this same rejection on every future call for this shard's process lifetime.
+      // Evict the WHOLE cache entry (not just `connectPromise`) on rejection, attached here
+      // BEFORE this promise is returned to the caller, so the eviction always runs ahead of the
+      // caller's own `await conn.connectPromise` (promise handlers fire in attachment order) —
+      // the in-flight caller still observes the original rejection via the returned promise
+      // itself, but the NEXT `ensureShardConn(shardId)` call finds no cached entry and builds a
+      // fresh `pg.Client` + connection from scratch.
+      promise.catch(() => {
+        if (this.commitConns.get(shardId) === c) this.commitConns.delete(shardId);
+      });
+      return promise;
+    })();
+    return c;
+  }
+
+  private async commitQuerierForImpl(shardId: string): Promise<PgTransactionalQuerier> {
+    const conn = this.ensureShardConn(shardId);
+    await conn.connectPromise;
+    // A querier whose query() and transaction() BOTH run on THIS shard's dedicated connection, so the
+    // whole commitWrite (nextval → inserts → guard → COMMIT) is one atomic session, concurrent with
+    // other shards' commits on their own connections.
+    const querier: PgQuerier = { query: (text, params) => this.queryOn(conn.client, text, params) };
+    return {
+      ...querier,
+      transaction: async <T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> => {
+        await conn.client.query("BEGIN");
+        try {
+          const result = await fn(querier);
+          await conn.client.query("COMMIT");
+          return result;
+        } catch (e) {
+          await conn.client.query("ROLLBACK");
+          throw e;
+        }
+      },
+    };
+  }
+
+  private fireShardConnectionLost(conn: ShardCommitConn): void {
+    if (conn.lostFired) return;
+    conn.lostFired = true;
+    for (const cb of this.shardConnectionLostCbs) {
+      try {
+        cb(conn.shardId);
+      } catch {
+        // A misbehaving callback must not mask the loss for the others (mirrors the pinned path).
+      }
+    }
+  }
+
+  private async tryAcquireShardLockImpl(slot: number): Promise<boolean> {
+    if (!this.commitPoolShards) throw new Error("NodePgClient: commit pool not configured (no commitPool option)");
+    const shardId = this.commitPoolShards[slot];
+    if (shardId === undefined) {
+      throw new Error(`NodePgClient: shard slot ${slot} out of range (pool has ${this.commitPoolShards.length} shards)`);
+    }
+    const conn = this.ensureShardConn(shardId);
+    await conn.connectPromise;
+    // Two-int form ON the shard's commit connection → the lock is bound to that session; the
+    // connection's death releases exactly this slot, nothing else (D1 hazard (c) / D5 per-slot locks).
+    const rows = await this.queryOn(conn.client, `SELECT pg_try_advisory_lock($1, $2) AS ok`, [
+      SHARD_ADVISORY_LOCK_CLASS,
+      slot,
+    ]);
     return rows[0]?.ok === true;
   }
 
@@ -228,5 +389,20 @@ export class NodePgClient implements PgClient {
       this.connected = false;
       this.connectPromise = undefined;
     }
+    // Tear down every commit-pool connection. Set the per-shard fired-guard FIRST so the resulting
+    // `end` event never routes a graceful shutdown into a spurious per-shard lease loss (mirrors the
+    // pinned path above). Only `end()` a connection that actually finished connecting.
+    for (const conn of this.commitConns.values()) {
+      conn.lostFired = true;
+      if (conn.connectPromise) {
+        try {
+          await conn.connectPromise;
+        } catch {
+          continue; // never connected (connect() rejected) → nothing to end
+        }
+        if (conn.connected) await conn.client.end();
+      }
+    }
+    this.commitConns.clear();
   }
 }
