@@ -346,6 +346,106 @@ describe("ShardedTransactor — byte-identity with SingleWriterTransactor", () =
   });
 });
 
+describe("ShardedTransactor — tryRunExclusiveOnShard (idle-frontier-closer mutual exclusion)", () => {
+  it("runs fn and returns true when the shard's commit mutex is free", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+    let ran = false;
+    const ok = await transactor.tryRunExclusiveOnShard("s1", async () => {
+      ran = true;
+    });
+    expect(ok).toBe(true);
+    expect(ran).toBe(true);
+  });
+
+  it("returns false IMMEDIATELY (without running fn) while a commit holds that shard's mutex", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+
+    // Gate shard s1's commitWrite so its mutex stays held while we probe the closer.
+    let releaseCommit: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const originalCommitWrite = store.commitWrite.bind(store);
+    const spy = vi.spyOn(store, "commitWrite").mockImplementation(async (entries, indexWrites, shardId) => {
+      if (shardId === "s1") await commitGate;
+      return originalCommitWrite(entries, indexWrites, shardId);
+    });
+
+    const commitPromise = transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { v: 1n }), {
+      shardId: "s1",
+    });
+    // Let the commit reach (and block inside) commitWrite under the s1 mutex.
+    await new Promise((r) => setTimeout(r, 10));
+
+    let ran = false;
+    const ok = await transactor.tryRunExclusiveOnShard("s1", async () => {
+      ran = true;
+    });
+    expect(ok).toBe(false); // busy → skipped
+    expect(ran).toBe(false); // fn NEVER ran while the commit held the mutex
+
+    releaseCommit!();
+    await commitPromise;
+    spy.mockRestore();
+  });
+
+  it("a commit and the closer on the SAME shard never interleave: the closer runs only in the gap between commits", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+
+    const trace: string[] = [];
+    let releaseCommit: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const originalCommitWrite = store.commitWrite.bind(store);
+    const spy = vi.spyOn(store, "commitWrite").mockImplementation(async (entries, indexWrites, shardId) => {
+      if (shardId === "s1") {
+        trace.push("commit:enter");
+        await commitGate;
+        trace.push("commit:exit");
+      }
+      return originalCommitWrite(entries, indexWrites, shardId);
+    });
+
+    const commitPromise = transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { v: 1n }), {
+      shardId: "s1",
+    });
+    await new Promise((r) => setTimeout(r, 10)); // commit is now inside commitWrite, holding the mutex
+
+    // While the commit holds the mutex, the closer is refused (no interleave).
+    const busy = await transactor.tryRunExclusiveOnShard("s1", async () => {
+      trace.push("closer:ran-BUSY");
+    });
+    expect(busy).toBe(false);
+
+    releaseCommit!();
+    await commitPromise;
+
+    // After the commit releases, the closer acquires cleanly.
+    const free = await transactor.tryRunExclusiveOnShard("s1", async () => {
+      trace.push("closer:ran-FREE");
+    });
+    expect(free).toBe(true);
+
+    // The closer's body NEVER appears between commit:enter and commit:exit.
+    expect(trace).toEqual(["commit:enter", "commit:exit", "closer:ran-FREE"]);
+    spy.mockRestore();
+  });
+
+  it("takes the mutex on a never-before-committed shard (creates its ShardWriter on demand — no create-vs-close race)", async () => {
+    const store = await makeSetupStore();
+    const transactor = new ShardedTransactor(store);
+    // "s7" has never been used — the closer must still take a real (created-on-demand) mutex.
+    const ok = await transactor.tryRunExclusiveOnShard("s7", async () => {});
+    expect(ok).toBe(true);
+    const shards = (transactor as unknown as { shards: Map<ShardId, unknown> }).shards;
+    expect(shards.has("s7")).toBe(true);
+  });
+});
+
 describe("TransactionContext — the two-read-set split (D4)", () => {
   it("recordReadUnvalidated does NOT trigger an OCC conflict, but DOES appear in the reported (union) read ranges", async () => {
     const store = await makeSetupStore();

@@ -42,6 +42,17 @@ export class SingleWriterTransactor implements Transactor {
   }
 
   /**
+   * Non-blocking run of `fn` under this (single) writer's commit mutex — the API-total mirror of
+   * `ShardedTransactor.tryRunExclusiveOnShard`, so a caller (the fleet runtime seam) can invoke it
+   * uniformly regardless of whether the runtime is sharded. `shardId` is ignored: a single-shard
+   * transactor has exactly one writer. Returns `false` (skip) if a commit currently holds the mutex.
+   * In practice unused single-shard (the fleet idle-frontier closer only runs at `numShards > 1`).
+   */
+  tryRunExclusiveOnShard(_shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    return this.writer.mutex.tryRunExclusive(fn);
+  }
+
+  /**
    * Test/back-compat accessor: the existing suite reaches into the recent-commits ring
    * directly (private-field peek) to assert the store-allocated commit ts lands there. Now
    * delegates to the extracted `ShardWriter` (D1) — same array, same semantics, just no

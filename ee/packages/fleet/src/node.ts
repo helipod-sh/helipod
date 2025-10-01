@@ -39,7 +39,7 @@ import {
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
-import { LeaseManager } from "./lease";
+import { LeaseManager, type TryRunExclusiveOnShard } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
 import { FencedError } from "./fenced-error";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
@@ -117,6 +117,9 @@ export class FrontierMonitor {
     private readonly lease: LeaseManager,
     private readonly opts: {
       closeIdle: boolean;
+      /** Per-shard commit-mutex seam the idle-frontier closer runs each bump under (see
+       *  `closeIdleFrontiers`). Required when `closeIdle` is true; ignored otherwise. */
+      runExclusiveOnShard?: TryRunExclusiveOnShard;
       beatMs?: number;
       coalesceMs?: number;
       lagWarnMs?: number;
@@ -152,7 +155,12 @@ export class FrontierMonitor {
     if (this.stopped || this.running) return; // never overlap two beats (one nextval per beat)
     this.running = true;
     try {
-      if (this.opts.closeIdle) await this.lease.closeIdleFrontiers();
+      if (this.opts.closeIdle) {
+        if (!this.opts.runExclusiveOnShard) {
+          throw new Error("fleet: FrontierMonitor closeIdle requires a runExclusiveOnShard seam (bug)");
+        }
+        await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+      }
       const rows = await this.lease.readAllFrontiers();
       if (rows.length === 0) return;
       const min = rows[0]!.frontierTs; // ordered ascending → first row is the pinning shard
@@ -254,6 +262,18 @@ function deleteReplicaFile(path: string): void {
  * name is always deterministic and non-empty. Exported so failover tooling/tests can reconstruct a
  * specific node's discriminator without guessing.
  */
+/**
+ * True if the `documents` MVCC-log table already exists on `client`'s database. Used at writer
+ * election (which runs BEFORE `setupSchema` creates the table) to decide whether a first-created
+ * shard-lease row can safely seed its frontier from `SELECT MAX(ts) FROM documents` — referencing a
+ * non-existent `documents` in that INSERT subquery would fail to plan on a fresh database. `to_regclass`
+ * returns NULL for an absent relation rather than erroring, so this is a safe pre-DDL probe.
+ */
+async function documentsTableExists(client: NodePgClient): Promise<boolean> {
+  const rows = await client.query(`SELECT to_regclass('documents') IS NOT NULL AS present`);
+  return rows[0]?.present === true;
+}
+
 export function fleetApplicationName(advertiseUrl: string): string {
   let discriminator = advertiseUrl;
   try {
@@ -510,7 +530,15 @@ export async function prepareFleetNode(deps: {
   // holds ALL shards (the remaining slots are acquired in `startFleetNode`'s writer/promotion arming);
   // drivers run on the default-shard holder only (D5). `tryAcquire` takes slot 0's per-shard lock in
   // pool mode, else the legacy writer lock (PGlite/no-pool) — same election either way.
-  const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0);
+  //
+  // Seed the DEFAULT shard's first-created frontier from the store max IFF `documents` already exists
+  // (F1×N residual-window fix). This election runs BEFORE `bootProject`'s `setupSchema`, so on a fresh
+  // database `documents` does NOT exist yet — but a fresh store holds no data, so `frontier_ts = 0` is
+  // correct there. On a PRE-LOADED store (single-node `serve` upgraded to `--fleet`), `documents`
+  // already exists and this seeds the default row to the real max at INSERT time, so it is never
+  // momentarily visible at 0 while the other shards are still being acquired in `armWriter`.
+  const seedDefaultFrontier = await documentsTableExists(client);
+  const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0, seedDefaultFrontier);
 
   if (acquired) {
     // Writer boot: make the Postgres store writable and promote the forwarder so writes execute
@@ -697,8 +725,16 @@ export function installCommitGuard(
       fireFenced(`commit guard invoked with no acquired epoch for shard '${shardId}'`);
       throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
+    // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
+    // frontier regression: (1) the idle-shard closer now takes THIS shard's commit mutex before
+    // bumping its frontier (`closeIdleFrontiers`), so nothing can have raised it mid-commit on the
+    // same epoch, and a cross-epoch writer is fenced by the `epoch = $3` predicate; (2) GREATEST makes
+    // the write monotone regardless. The tailer's semantics already tolerate `frontier_ts` exceeding
+    // the last committed doc ts (idle bumps do exactly that, and its empty-range advance handles it),
+    // so keeping the strictly-larger of the two is always safe. `prev_ts := frontier_ts` still records
+    // the pre-write frontier as the chain's previous link.
     const rows = await q.query(
-      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
       [commitTs, shardId, epoch],
     );
     if (rows.length === 0) {
@@ -723,10 +759,15 @@ export async function acquireShardAsWriter(
   shardId: ShardId,
   slot: number,
   retryMs: number,
+  seedFrontierFromDocuments = false,
 ): Promise<void> {
   const deadline = Date.now() + Math.max(1, retryMs) * 75; // ~10 TTLs at the default cadence ratios
   for (;;) {
-    const state = await lease.tryAcquire(shardId, slot);
+    // `seedFrontierFromDocuments`: writer-boot arming passes true (post-`setupSchema`, so `documents`
+    // exists) so a FIRST-created shard row is born seeded to the store max — never momentarily visible
+    // at frontier 0 (the F1×N residual-window fix). A re-acquire (ON CONFLICT) preserves the live
+    // frontier regardless, so this is inert on promotion where the rows already exist.
+    const state = await lease.tryAcquire(shardId, slot, seedFrontierFromDocuments);
     if (state) return;
     // Lock held — if this shard's lease has expired, its holder is wedged: fence + terminate so the
     // next attempt's advisory try can win. No-op when the lease is still live (a real concurrent
@@ -831,7 +872,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
    */
   const armWriter = async (seed: boolean): Promise<void> => {
     for (let slot = 1; slot < numShards; slot++) {
-      await acquireShardAsWriter(lease, shards[slot]!, slot, fleetAcquireRetryMs(lease.ttlMs));
+      // `seed` doubles as "seed a first-created shard row's frontier from the store max" — true on
+      // writer boot (post-`setupSchema`, `documents` exists), inert on promotion (rows already exist,
+      // ON CONFLICT preserves their live frontiers). Closes the F1×N residual window at INSERT time.
+      await acquireShardAsWriter(lease, shards[slot]!, slot, fleetAcquireRetryMs(lease.ttlMs), seed);
     }
     if (seed) await lease.seedFrontierAll(await pgStore.maxTimestamp());
     installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
@@ -840,7 +884,13 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // monitor is read-only — health stats without mutating the frontier — so single-shard behavior is
     // byte-identical to B1.
     const closeIdle = numShards > 1;
-    frontierMonitor = new FrontierMonitor(lease, { closeIdle });
+    // The idle-frontier closer takes each shard's commit mutex before bumping it (the frontier-
+    // inversion fix), via the runtime's per-shard exclusion seam over the same `ShardedTransactor`
+    // that this writer's commits run on. Only consulted when `closeIdle` is true.
+    frontierMonitor = new FrontierMonitor(lease, {
+      closeIdle,
+      runExclusiveOnShard: (shardId, fn) => runtime.tryRunExclusiveOnShard(shardId, fn),
+    });
     frontierMonitor.start();
     // Coalesced idle-close on each LOCAL commit: a commit on one shard schedules a ~10ms beat so idle
     // sibling shards un-pin F promptly instead of waiting out the 100ms periodic beat. `?.` — a stub

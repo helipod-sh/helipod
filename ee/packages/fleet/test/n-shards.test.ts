@@ -19,6 +19,14 @@ import { PgliteClient } from "./pglite-client";
 
 const N = 4; // "default","s1","s2","s3"
 const SHARDS = shardIdList(N);
+
+/** A `TryRunExclusiveOnShard` stub that treats every shard's commit mutex as FREE: always runs `fn`
+ *  and reports success. Stands in for the runtime seam when the test drives `closeIdleFrontiers`
+ *  directly (no real transactor). The busy-skip path is covered by the dedicated test below. */
+const alwaysFree = async (_shardId: string, fn: () => Promise<void>): Promise<boolean> => {
+  await fn();
+  return true;
+};
 const TABLE = 20050;
 const INDEX_ID = encodeStorageIndexId(TABLE, "by_key");
 
@@ -120,12 +128,89 @@ describe("Shards B2a — N shard leases", () => {
     expect(rows[0]!.frontierTs).toBe(0n); // min is an idle shard, still 0
 
     // One idle-closing beat: allocate a nextval, bump every held idle shard up to it → min-F advances.
-    const newTs = await lease.closeIdleFrontiers();
+    const newTs = await lease.closeIdleFrontiers(alwaysFree);
     rows = await lease.readAllFrontiers();
     const min = rows[0]!.frontierTs;
     expect(min).toBeGreaterThan(0n); // no longer pinned at 0
     // Every shard's frontier is now >= the closer's ceiling (the committed one was already above it).
     for (const r of rows) expect(r.frontierTs).toBeGreaterThanOrEqual(newTs > min ? min : newTs);
+    await client.close();
+  });
+
+  it("closeIdleFrontiers SKIPS a busy (mid-commit) shard and GREATEST-bumps the free ones (frontier-inversion fix)", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    installCommitGuard(pgStore, lease, () => {});
+    // Establish a nonzero floor so the closer's ceiling is well above 0 and the assertions are crisp.
+    await pgStore.commitWrite([doc(newDocumentId(TABLE), "x")], [], DEFAULT_SHARD);
+
+    // Stub the per-shard mutex seam: pretend "s2" is mid-commit (mutex busy → false, fn NOT run);
+    // every other shard is free (fn runs, returns true). This is exactly what the runtime seam does
+    // when a real commit holds s2's ShardWriter mutex.
+    const touched: string[] = [];
+    const seam = async (shardId: string, fn: () => Promise<void>): Promise<boolean> => {
+      if (shardId === "s2") return false; // busy — skipped, left for the next beat
+      await fn();
+      touched.push(shardId);
+      return true;
+    };
+
+    const before = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+    const newTs = await lease.closeIdleFrontiers(seam);
+    const after = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+
+    // s2 was busy → its frontier is UNCHANGED (the closer never touched it).
+    expect(after.get("s2")).toBe(before.get("s2"));
+    expect(touched).not.toContain("s2");
+    // The free idle shards (s1, s3) were bumped up to the ceiling; default already sat above it.
+    expect(after.get("s1")).toBe(newTs);
+    expect(after.get("s3")).toBe(newTs);
+    expect(after.get(DEFAULT_SHARD)!).toBeGreaterThanOrEqual(newTs);
+    await client.close();
+  });
+
+  it("the commit guard uses GREATEST(frontier_ts, commitTs) — a manually-raised frontier is never regressed by a later, lower commit ts", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    installCommitGuard(pgStore, lease, () => {});
+
+    // Raise s3's frontier FAR above anything the next commit's ts allocator will hand out (idle bumps
+    // legitimately do this). commitWrite's ts = GREATEST(nextval, MAX(ts)+1) will be far below 10^12.
+    const RAISED = 1_000_000_000_000n;
+    await lease.seedFrontier(lease.currentEpoch("s3")!, RAISED, "s3");
+    expect((await lease.read("s3"))?.frontierTs).toBe(RAISED);
+
+    // Commit on s3: its commitTs is far below RAISED. With the GREATEST guard, frontier_ts holds at
+    // RAISED (never drops to commitTs); prev_ts records the pre-write frontier (RAISED). A bare
+    // `frontier_ts = commitTs` would REGRESS the frontier here — the bug this asserts against.
+    const commitTs = await pgStore.commitWrite([doc(newDocumentId(TABLE), "y")], [], "s3");
+    expect(commitTs).toBeLessThan(RAISED);
+    const s3 = await lease.read("s3");
+    expect(s3?.frontierTs).toBe(RAISED); // NOT regressed to commitTs
+    expect(s3?.prevTs).toBe(RAISED); // prev_ts := pre-write frontier
+    await client.close();
+  });
+
+  it("tryAcquire seeds a FIRST-created shard row's frontier from the store max at INSERT time (F1×N window closed by construction)", async () => {
+    // Pre-loaded store: real data already committed BEFORE this shard's lease row is ever created.
+    const { client, pgStore, lease } = await makeNode();
+    await pgStore.commitWrite([doc(newDocumentId(TABLE), "a")], [], DEFAULT_SHARD);
+    await pgStore.commitWrite([doc(newDocumentId(TABLE), "b")], [], DEFAULT_SHARD);
+    const maxTs = await pgStore.maxTimestamp();
+    expect(maxTs).toBeGreaterThan(0n);
+
+    // Create the lease row for the FIRST time with seedFrontierFromDocuments = true. The frontier is
+    // set to MAX(ts) atomically inside the INSERT, so the row is NEVER momentarily visible at
+    // frontier_ts = 0 — there is no observable (count==N ∧ min-F < maxTs) state during arming, because
+    // each row is born at-or-above maxTs. (A single PGlite connection can't poll concurrently; the
+    // window is closed by construction — the row's very first observable frontier is already >= maxTs.)
+    await lease.tryAcquire(DEFAULT_SHARD, 0, true);
+    expect((await lease.read(DEFAULT_SHARD))?.frontierTs).toBeGreaterThanOrEqual(maxTs);
+
+    // Control: WITHOUT the seed flag, a first-created row is born at 0 (the pre-fix behavior — only
+    // safe on a fresh, dataless store; here it demonstrates the flag is what closes the window).
+    await lease.tryAcquire("s1", 1, false);
+    expect((await lease.read("s1"))?.frontierTs).toBe(0n);
     await client.close();
   });
 
@@ -228,7 +313,7 @@ describe("Shards B2a — N shard leases", () => {
 
     // Close the idle shards up to a fresh nextval (>= commitTs) → min-F reaches/passes commitTs → the
     // tailer's next tick advances its watermark → the RYOW waiter resolves "reached".
-    await lease.closeIdleFrontiers();
+    await lease.closeIdleFrontiers(alwaysFree);
     expect(await waited).toBe("reached");
     expect(tailer.watermark()).toBeGreaterThanOrEqual(commitTs);
     await tailer.stop();

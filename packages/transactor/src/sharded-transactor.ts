@@ -89,6 +89,25 @@ export class ShardedTransactor implements Transactor {
     for (const writer of this.shards.values()) writer.oracle.observeTimestamp(ts);
   }
 
+  /**
+   * Run `fn` under shard `shardId`'s writer mutex IFF that mutex is free right now — the SAME mutex
+   * every commit on that shard holds (`ShardWriter.runInTransaction` → `mutex.runExclusive`). Returns
+   * `true` if `fn` ran (we held exclusion against that shard's commits), `false` if a commit already
+   * holds the mutex, in which case `fn` is NOT run and the caller should retry later.
+   *
+   * The fleet idle-frontier closer (`closeIdleFrontiers`) uses this to bump a held-but-idle shard's
+   * frontier atomically with respect to that shard's own commits: an in-flight commit (drawing ts T)
+   * is skipped (mutex busy) rather than raced, and a commit that starts *after* the closer releases
+   * acquires the mutex afterward and stamps its own (later) ts, so the closer can never publish a
+   * frontier ahead of an in-flight commit's not-yet-landed rows. The shard's `ShardWriter` is created
+   * on demand if it doesn't exist yet, so the mutex the closer takes is the very one a first-ever
+   * commit on that shard would take (no create-vs-close race).
+   */
+  async tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    const writer = await this.getOrCreateShard(shardId);
+    return writer.mutex.tryRunExclusive(fn);
+  }
+
   private async getOrCreateShard(shardId: ShardId): Promise<ShardWriter> {
     const existing = this.shards.get(shardId);
     if (existing) return existing;

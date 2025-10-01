@@ -9,7 +9,7 @@
  */
 import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId } from "@stackbase/id-codec";
+import { decodeStorageTableId, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
@@ -162,6 +162,9 @@ export class EmbeddedRuntime {
     /** The transactor's timestamp observer (the single-shard oracle, or the `ShardedTransactor`
      *  itself); `observeTimestamp` delegates straight to it. */
     private readonly oracle: TimestampObserver,
+    /** The write path — retained so a fleet writer can take a shard's commit mutex non-blockingly
+     *  (`tryRunExclusiveOnShard`) to close idle frontiers without racing that shard's own commits. */
+    private readonly transactor: SingleWriterTransactor | ShardedTransactor,
     /** Threaded from `create()` so `startDrivers()` can start deferred drivers later. */
     private readonly driverCtx: DriverContext,
     /** Mutable: false when `deferDrivers` was set and `startDrivers()` hasn't run yet. */
@@ -430,7 +433,7 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
-      oracle, driverCtx, driversStarted, options.writeRouter,
+      oracle, transactor, driverCtx, driversStarted, options.writeRouter,
     );
   }
 
@@ -598,6 +601,17 @@ export class EmbeddedRuntime {
    */
   observeTimestamp(ts: bigint): void {
     this.oracle.observeTimestamp(ts);
+  }
+
+  /**
+   * Run `fn` under shard `shardId`'s commit mutex IFF it is free right now — the seam a fleet writer's
+   * idle-frontier closer uses to publish a shard's frontier atomically with respect to that shard's
+   * own commits (see `ShardedTransactor.tryRunExclusiveOnShard`). Returns `true` if `fn` ran, `false`
+   * if a commit currently holds the mutex (skip; retry next beat). Total across sharded/single-shard
+   * runtimes — the single-shard transactor ignores `shardId` and uses its one writer.
+   */
+  tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    return this.transactor.tryRunExclusiveOnShard(shardId, fn);
   }
 }
 

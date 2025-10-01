@@ -15,6 +15,18 @@ const SHARD_ID: ShardId = DEFAULT_SHARD;
  *  `prepareFleetNode` in `node.ts` for the threading. */
 const DEFAULT_LEASE_TTL_MS = 15_000;
 
+/**
+ * Non-blocking per-shard commit-mutex seam (see `Transactor.tryRunExclusiveOnShard` /
+ * `EmbeddedRuntime.tryRunExclusiveOnShard`): run `fn` under shard `shardId`'s commit mutex if it is
+ * free right now (returns `true`), else skip without running it (returns `false`). `closeIdleFrontiers`
+ * takes this so each idle shard's frontier bump is mutually exclusive with that shard's own commits —
+ * the fix for the frontier-inversion race (an idle-closer publishing a frontier ahead of an in-flight
+ * commit's not-yet-landed rows). The writer owns both the closer and every shard's commits, so this
+ * single-process mutex is airtight for B2a; cross-node closing of a held shard is impossible by design
+ * (only the lease holder closes its own held shards).
+ */
+export type TryRunExclusiveOnShard = (shardId: ShardId, fn: () => Promise<void>) => Promise<boolean>;
+
 /** The current fleet writer lease: which epoch is live and which node holds it. */
 export interface LeaseState {
   epoch: bigint;
@@ -185,11 +197,25 @@ export class LeaseManager {
    * One non-blocking attempt: takes the advisory lock (fast path); on success, runs the fencing
    * upsert against `shard_leases` (bumping `epoch`, recording this node's URL/app-name, extending
    * `expires_at`) and returns the new state. On failure to take the lock, returns null.
-   * `frontier_ts`/`prev_ts` are seeded to 0 on first creation only — an `ON CONFLICT` re-acquisition
-   * (including promotion) leaves them untouched, so the durable-commit chain survives across
-   * epochs (D3 depends on this: frontier must never reset just because the writer changed).
+   * `prev_ts` is seeded to 0 on first creation only, and `frontier_ts` to either 0 or the store's
+   * current `MAX(ts)` (see `seedFrontierFromDocuments`) — an `ON CONFLICT` re-acquisition (including
+   * promotion) leaves BOTH untouched, so the durable-commit chain survives across epochs (D3 depends
+   * on this: frontier must never reset just because the writer changed).
+   *
+   * `seedFrontierFromDocuments` (the F1×N residual-window fix): when a row is FIRST created, seed its
+   * `frontier_ts` to `MAX(ts)` from the `documents` log inside the same INSERT — atomically, so the
+   * row is NEVER momentarily visible at `frontier_ts = 0` on a pre-loaded store (which would let a
+   * concurrently-booting sync node pass its `count == N ∧ min-F` ready gate with an empty replica).
+   * Pass `true` only when the `documents` table is known to exist (post-`setupSchema`, or a pre-loaded
+   * store) — the caller guards this; `false` (the default, and the only safe value pre-DDL on a fresh
+   * database) creates the row at `frontier_ts = 0`, which is correct precisely because a fresh store
+   * holds no data. `seedFrontierAll` remains the idempotent belt-and-braces second pass.
    */
-  async tryAcquire(shardId: ShardId = SHARD_ID, slot = 0): Promise<LeaseState | null> {
+  async tryAcquire(
+    shardId: ShardId = SHARD_ID,
+    slot = 0,
+    seedFrontierFromDocuments = false,
+  ): Promise<LeaseState | null> {
     // Per-slot advisory lock (B2a, D1 hazard (c)): each slot's lock is taken on THAT shard's
     // dedicated commit connection (`tryAcquireShardLock(slot)`), so the connection's death releases
     // exactly that slot. The two-int lock space is disjoint from the legacy single-int writer lock,
@@ -201,9 +227,13 @@ export class LeaseManager {
       : await this.client.tryAcquireWriterLock();
     if (!acquired) return null;
 
+    // Seed a FIRST-creation frontier from the store's current max (atomic with the INSERT) when the
+    // caller vouches `documents` exists; else 0. The `frontier_ts < $N`-style guards elsewhere and
+    // `GREATEST` on every later write mean this only ever RAISES the seed, never regresses it.
+    const frontierSeed = seedFrontierFromDocuments ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)` : `0`;
     const rows = await this.client.query(
       `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
-       VALUES ($1, 1, $2, $3, now() + interval '${this.ttlMsSql} milliseconds', 0, 0)
+       VALUES ($1, 1, $2, $3, now() + interval '${this.ttlMsSql} milliseconds', ${frontierSeed}, 0)
        ON CONFLICT (shard_id) DO UPDATE SET
          epoch = shard_leases.epoch + 1,
          writer_url = $2,
@@ -464,31 +494,48 @@ export class LeaseManager {
   }
 
   /**
-   * Batched idle-shard frontier closing (B2a, D5 — needed the moment N>1: an idle shard pins the
-   * fleet's `F = min(frontier_ts)`). ONE transaction per beat: allocate a single fresh `nextval`
-   * from the shared `stackbase_ts` sequence, then advance every held shard whose frontier is BELOW
-   * it up to that value — `UPDATE ... SET frontier_ts = GREATEST(frontier_ts, $N) WHERE (shard_id,
-   * epoch) IN (held pairs) AND frontier_ts < $N`. A valid frontier for every idle shard because any
-   * FUTURE commit takes a still-later `nextval`; a shard that just committed above `$N` is left
-   * untouched by the `frontier_ts < $N` guard. Epoch-fenced per pair. Returns the `nextval` used
-   * (the ceiling this beat closed idle shards up to) so the caller can log/observe it. No-op (returns
-   * the allocated ts anyway) when this node holds nothing.
+   * Per-shard idle-shard frontier closing (B2a, D5 — needed the moment N>1: an idle shard pins the
+   * fleet's `F = min(frontier_ts)`). Allocate a single fresh `nextval` `N` from the shared
+   * `stackbase_ts` sequence per beat, then for EACH held shard advance its frontier up to `N` —
+   * `UPDATE ... SET frontier_ts = GREATEST(frontier_ts, $N) WHERE shard_id=$s AND epoch=$e AND
+   * frontier_ts < $N` — but run each shard's UPDATE UNDER THAT SHARD'S COMMIT MUTEX
+   * (`runExclusiveOnShard`), skipping any shard currently mid-commit (mutex busy → left for the next
+   * beat). Returns the `nextval` used (the ceiling this beat closed idle shards up to).
+   *
+   * Why per-shard-mutex, not the old bare batched UPDATE (the frontier-inversion fix): the commit
+   * guard writes `frontier_ts := commitTs` for a commit that drew its ts `T` from the SAME sequence,
+   * *inside* the commit transaction — which runs under the shard's commit mutex. If the closer drew
+   * `N > T` and bare-wrote `frontier_ts = N` while that commit's rows had not yet landed, a tailer
+   * could read `F ≥ N`, pull `(watermark, N]`, and MISS `T`'s rows when they land afterward (silent
+   * replica miss), or the guard's later write of `T` would trip a frontier-regression assert. Taking
+   * the shard's commit mutex makes the closer and that shard's commits mutually exclusive on this
+   * (single, writer-owned) node: a commit that started BEFORE the draw holds the mutex → skipped
+   * this beat; a commit that starts AFTER the closer releases acquires the mutex afterward and its
+   * `T` (drawn later) is `> N`, so `GREATEST` keeps `frontier_ts ≥ N` with no regression and nothing
+   * in-flight ever sits below `N`. Cross-node closing of a held shard is impossible by design (only
+   * the lease holder closes its own held shards; orphan bumping via `evictExpired` targets
+   * writer-less rows, where no commit can be in flight). Epoch-fenced per pair. No-op (returns the
+   * allocated ts anyway) when this node holds nothing.
    */
-  async closeIdleFrontiers(): Promise<bigint> {
+  async closeIdleFrontiers(runExclusiveOnShard: TryRunExclusiveOnShard): Promise<bigint> {
     const pairs = this.heldPairs();
-    return this.client.transaction(async (tx) => {
-      const tsRows = await tx.query(`SELECT nextval('stackbase_ts') AS ts`);
-      const newTs = toBigIntOrZero(tsRows[0]?.ts as PgValue | undefined);
-      if (pairs.length > 0) {
-        const { clause, params } = this.tupleInClause(pairs, 1);
-        await tx.query(
+    // ONE ceiling per beat. Drawn OUTSIDE any shard mutex — a bare `nextval` is monotone and the
+    // `frontier_ts < $N` + `GREATEST` guards below tolerate it lagging or leading a concurrent commit.
+    const tsRows = await this.client.query(`SELECT nextval('stackbase_ts') AS ts`);
+    const newTs = toBigIntOrZero(tsRows[0]?.ts as PgValue | undefined);
+    for (const { shardId, epoch } of pairs) {
+      // Skip-if-busy: an in-flight commit on this shard holds its mutex, so `runExclusiveOnShard`
+      // returns false and we leave the shard for the next beat — that commit will itself set
+      // `frontier_ts` to its own (later) commit ts, which is `≥ N` anyway.
+      await runExclusiveOnShard(shardId, async () => {
+        await this.client.query(
           `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1)
-           WHERE (shard_id, epoch) IN (${clause}) AND frontier_ts < $1`,
-          [newTs, ...params],
+           WHERE shard_id = $2 AND epoch = $3 AND frontier_ts < $1`,
+          [newTs, shardId, epoch],
         );
-      }
-      return newTs;
-    });
+      });
+    }
+    return newTs;
   }
 
   /** Reads the current lease row for `shardId` (discovery for forwarding, plus the full fencing/
