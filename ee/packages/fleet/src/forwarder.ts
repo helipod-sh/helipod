@@ -19,6 +19,7 @@
  */
 import type { WriteRouter } from "@stackbase/runtime-embedded";
 import type { JSONValue } from "@stackbase/values";
+import { isStackbaseError, stackbaseErrorFromJSON, type StackbaseErrorJSON } from "@stackbase/errors";
 import type { LeaseManager } from "./lease";
 import type { ReplicaTailer } from "./replica-tailer";
 
@@ -90,9 +91,13 @@ export class WriteForwarder implements WriteRouter {
     try {
       result = await this.post(first, body);
     } catch (firstErr) {
-      // The writer may have changed (failover) OR the connection blipped — re-read the lease and
-      // retry exactly once against the (possibly new) writer URL. The second attempt's error, if
-      // any, propagates with the writer's own error message.
+      // A StackbaseError here means a LIVE writer answered DEFINITIVELY (a user error — e.g. the shard
+      // guard — an OCC conflict, a validation failure): the mutation reached the writer and it decided.
+      // Re-forwarding would only re-run it against the same writer, so propagate the typed error
+      // UNCHANGED (its status/code/retryable survive to the caller). Only a TRANSPORT failure (fetch
+      // rejected: the writer may have failed over or the connection blipped) is worth a single retry
+      // against the re-read (possibly new) writer URL.
+      if (isStackbaseError(firstErr)) throw firstErr;
       let second: string;
       try {
         second = await this.writerUrl();
@@ -122,14 +127,21 @@ export class WriteForwarder implements WriteRouter {
       body: JSON.stringify(body),
     });
     const text = await res.text();
-    let parsed: { value?: JSONValue; error?: string; commitTs?: string };
+    let parsed: { value?: JSONValue; error?: string; errorJson?: StackbaseErrorJSON; commitTs?: string };
     try {
-      parsed = text ? (JSON.parse(text) as { value?: JSONValue; error?: string; commitTs?: string }) : {};
+      parsed = text ? (JSON.parse(text) as typeof parsed) : {};
     } catch {
       parsed = {};
     }
-    if (!res.ok) throw new Error(parsed.error ?? `fleet: writer /_fleet/run returned HTTP ${res.status}`);
-    if (parsed.error !== undefined) throw new Error(parsed.error);
+    if (!res.ok || parsed.error !== undefined) {
+      // Rehydrate the writer's TYPED error when it serialized one (`errorJson`), so its
+      // status/code/retryable identity survives the hop — the sync node's `/api/run` then maps it to
+      // the same 4xx/5xx the writer would have returned locally. Falls back to a plain Error (an old
+      // writer without `errorJson`, or a non-JSON body) so a mixed-version fleet still surfaces the
+      // message.
+      if (parsed.errorJson) throw stackbaseErrorFromJSON(parsed.errorJson);
+      throw new Error(parsed.error ?? `fleet: writer /_fleet/run returned HTTP ${res.status}`);
+    }
     return { value: parsed.value ?? null, commitTs: parsed.commitTs };
   }
 

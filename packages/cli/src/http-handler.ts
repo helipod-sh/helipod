@@ -121,8 +121,12 @@ export async function handleHttpRequest(
         ...(result.oplog?.shardId !== undefined ? { shardId: result.oplog.shardId } : {}),
       });
     } catch (e) {
+      // Preserve the typed error's identity across the fleet hop: return its REAL http status and the
+      // full serialized error (`errorJson`) so the forwarding SYNC node can rehydrate it and surface
+      // the correct 4xx/5xx + code/retryable, instead of collapsing every forwarded failure to a 500.
+      // `error` (the flat message) is kept for back-compat / human-readable logs.
       const err = toStackbaseError(e);
-      return json(500, { error: err.message, code: err.code });
+      return json(getHttpStatus(err), { error: err.message, code: err.code, errorJson: err.toJSON() });
     }
   }
   if (admin && deploy && req.method === "POST" && req.path === "/_admin/deploy") {
