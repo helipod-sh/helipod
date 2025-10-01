@@ -1,133 +1,19 @@
 /**
- * `SingleWriterTransactor` — the heart of the write path.
+ * `SingleWriterTransactor` — the heart of the write path, restricted to exactly one shard.
  *
- * Execution is optimistic and lock-free: the function reads at a snapshot timestamp,
- * recording a read set, and stages writes into an `UncommittedWrites` buffer (read your
- * own writes). Commit runs the 3-phase pipeline under a single-writer lock:
- *
- *   1. VALIDATE — has any commit since our snapshot written something we read? (read-set ∩
- *      write-set). If so → `OccConflictError`, and the caller replays the deterministic fn.
- *   2+3. APPLY+ALLOCATE — hand all staged revisions to `DocStore.commitWrite` with `ts: 0n`
- *      placeholders; the store allocates the commit timestamp *inside its own atomicity domain*
- *      and stamps + lands every row atomically, closing the allocated-but-unlanded window a
- *      caller-side oracle allocation would open. The returned ts is then published as the new
- *      last-committed clock and used to build the `OplogDelta`.
- *
- * Single-writer per *shard* gives serializability cheaply (no cross-writer coordination) and
- * scales out by adding shards — see scalability-spectrum §2.1.
+ * As of shards B2a (D1) this is a thin `Transactor` wrapper around a single `ShardWriter`
+ * (`./shard-writer.ts`) — the same class `ShardedTransactor` instantiates once per shard. All
+ * commit/OCC/snapshot machinery now lives there; see its header for the 3-phase pipeline and
+ * the two-read-set split. This class exists so single-shard callers (Tier-0 embedded runtime,
+ * most tests) keep a construction shape independent of sharding, and so the existing suite's
+ * behavior is provably unchanged (a default-shard-only `ShardedTransactor` is byte-identical —
+ * see `sharded-transactor.test.ts`).
  */
-import { OccConflictError } from "@stackbase/errors";
-import { DEFAULT_SHARD, encodeStorageTableId, type ShardId } from "@stackbase/id-codec";
-import {
-  RangeSet,
-  serializeKeyRange,
-  tableKeyspaceId,
-  writtenTablesFromRanges,
-} from "@stackbase/index-key-codec";
-import type { KeyRange } from "@stackbase/index-key-codec";
-import type {
-  DatabaseIndexUpdate,
-  DocStore,
-  DocumentLogEntry,
-  DocumentValue,
-  IndexOverlayEntry,
-  IndexWrite,
-  InternalDocumentId,
-  TimestampOracle,
-} from "@stackbase/docstore";
-import { AsyncMutex } from "./async-mutex";
-import { DEFAULT_HEADROOM, HeadroomTracker, type HeadroomLimits } from "./headroom";
-import { UncommittedWrites } from "./uncommitted-writes";
-import type {
-  CommitResult,
-  OplogDelta,
-  RunInTransactionOptions,
-  TransactionContext,
-  Transactor,
-  WriteFanout,
-} from "./types";
-
-function docKeyspace(id: InternalDocumentId): string {
-  return tableKeyspaceId(encodeStorageTableId(id.tableNumber));
-}
-
-/** Stable string form of index-key bytes, for de-duplicating staged updates by key. */
-function hexKey(b: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < b.length; i++) s += b[i]!.toString(16).padStart(2, "0");
-  return s;
-}
-
-class TransactionContextImpl implements TransactionContext {
-  readonly reads = new RangeSet();
-  readonly writeRanges = new RangeSet();
-  readonly staged = new UncommittedWrites();
-  readonly indexUpdates: DatabaseIndexUpdate[] = [];
-
-  constructor(
-    readonly snapshotTs: bigint,
-    readonly shardId: ShardId,
-    private readonly docStore: DocStore,
-    private readonly headroom: HeadroomTracker,
-  ) {}
-
-  async get(id: InternalDocumentId): Promise<DocumentValue | null> {
-    this.headroom.countRead();
-    this.reads.addKey(docKeyspace(id), id.internalId);
-    const local = this.staged.get(id);
-    if (local) return local.value; // read-your-own-writes (value, or null if deleted)
-    const doc = await this.docStore.get(id, this.snapshotTs);
-    return doc ? doc.value.value : null;
-  }
-
-  put(id: InternalDocumentId, value: DocumentValue): void {
-    this.headroom.countWrite();
-    this.writeRanges.addKey(docKeyspace(id), id.internalId);
-    this.staged.set(id, value);
-  }
-
-  delete(id: InternalDocumentId): void {
-    this.headroom.countWrite();
-    this.writeRanges.addKey(docKeyspace(id), id.internalId);
-    this.staged.set(id, null);
-  }
-
-  recordRead(range: KeyRange): void {
-    this.reads.add(range);
-  }
-
-  recordWrite(range: KeyRange): void {
-    this.writeRanges.add(range);
-  }
-
-  stageIndexUpdates(updates: readonly DatabaseIndexUpdate[]): void {
-    for (const u of updates) this.indexUpdates.push(u);
-  }
-
-  pendingIndexOverlay(indexId: string): readonly IndexOverlayEntry[] {
-    // Collapse this transaction's staged index-key changes for `indexId` to the net per-key
-    // state (last write wins). A replace whose indexed field changed appears as a Deleted at the
-    // old key plus a NonClustered at the new key; a same-key update appears as a NonClustered
-    // (its value is read from `staged`). The query runtime overlays these onto its committed scan.
-    const byKey = new Map<string, IndexOverlayEntry>();
-    for (const u of this.indexUpdates) {
-      if (u.indexId !== indexId) continue;
-      if (u.value.type === "Deleted") {
-        byKey.set(hexKey(u.key), { key: u.key, value: null });
-      } else {
-        // A NonClustered entry corresponds to a staged put; treat a since-tombstoned doc as a delete.
-        const staged = this.staged.get(u.value.docId);
-        byKey.set(hexKey(u.key), { key: u.key, value: staged ? staged.value : null });
-      }
-    }
-    return [...byKey.values()];
-  }
-}
-
-interface RecentCommit {
-  ts: bigint;
-  writes: RangeSet;
-}
+import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
+import type { DocStore, TimestampOracle } from "@stackbase/docstore";
+import { DEFAULT_HEADROOM, type HeadroomLimits } from "./headroom";
+import { ShardWriter, type RecentCommit } from "./shard-writer";
+import type { CommitResult, RunInTransactionOptions, TransactionContext, Transactor, WriteFanout } from "./types";
 
 export interface SingleWriterTransactorOptions {
   shardId?: ShardId;
@@ -136,141 +22,32 @@ export interface SingleWriterTransactorOptions {
 }
 
 export class SingleWriterTransactor implements Transactor {
-  private readonly mutex = new AsyncMutex();
-  private recentCommits: RecentCommit[] = [];
-  /** Active transaction snapshots (refcounted) — bounds how far back we must retain commits. */
-  private readonly activeSnapshots = new Map<bigint, number>();
-  private readonly shardId: ShardId;
-  private readonly fanout: WriteFanout | undefined;
-  private readonly defaultHeadroom: HeadroomLimits;
+  private readonly writer: ShardWriter;
 
-  constructor(
-    private readonly docStore: DocStore,
-    private readonly oracle: TimestampOracle,
-    options: SingleWriterTransactorOptions = {},
-  ) {
-    this.shardId = options.shardId ?? DEFAULT_SHARD;
-    this.fanout = options.fanout;
-    this.defaultHeadroom = options.defaultHeadroom ?? DEFAULT_HEADROOM;
+  constructor(docStore: DocStore, oracle: TimestampOracle, options: SingleWriterTransactorOptions = {}) {
+    this.writer = new ShardWriter(
+      docStore,
+      oracle,
+      options.shardId ?? DEFAULT_SHARD,
+      options.fanout,
+      options.defaultHeadroom ?? DEFAULT_HEADROOM,
+    );
   }
 
-  async runInTransaction<T>(
+  runInTransaction<T>(
     fn: (ctx: TransactionContext) => Promise<T>,
     options: RunInTransactionOptions = {},
   ): Promise<CommitResult<T>> {
-    const maxRetries = options.maxRetries ?? 8;
-    const shardId = options.shardId ?? this.shardId;
-    const headroomLimits = { ...this.defaultHeadroom, ...options.headroom };
-
-    for (let attempt = 0; ; attempt++) {
-      // Snapshot from the last *fully-applied* commit, never an in-flight allocated ts —
-      // otherwise a new txn could snapshot at a commit ts whose writes aren't applied yet,
-      // and the strict `c.ts > snapshotTs` conflict check would miss it (lost update).
-      const snapshotTs = this.oracle.getLastCommittedTimestamp();
-      this.retain(snapshotTs);
-      try {
-        const ctx = new TransactionContextImpl(
-          snapshotTs,
-          shardId,
-          this.docStore,
-          new HeadroomTracker(headroomLimits),
-        );
-        const value = await fn(ctx);
-
-        if (ctx.staged.size === 0) {
-          // Pure read: the snapshot is already consistent; nothing to commit.
-          return { value, committed: false, commitTs: snapshotTs, shardId, oplog: null };
-        }
-
-        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value));
-      } catch (e) {
-        if (e instanceof OccConflictError && attempt < maxRetries) continue; // deterministic replay
-        throw e;
-      } finally {
-        this.release(snapshotTs);
-      }
-    }
+    return this.writer.runInTransaction(fn, options);
   }
 
-  private async commit<T>(
-    ctx: TransactionContextImpl,
-    snapshotTs: bigint,
-    shardId: ShardId,
-    value: T,
-  ): Promise<CommitResult<T>> {
-    // Phase 1 — validate: any commit after our snapshot that touched something we read?
-    for (const c of this.recentCommits) {
-      if (c.ts > snapshotTs && ctx.reads.intersects(c.writes)) {
-        throw new OccConflictError("transaction read data that was changed before it committed");
-      }
-    }
-
-    // Phase 2+3 — apply: append staged revisions (chaining prev_ts to the snapshot revision) and
-    // allocate the commit timestamp inside the store's own atomicity domain. Entries carry a `0n`
-    // placeholder ts; the store stamps + returns the real one, closing the allocated-but-unlanded
-    // window a caller-side oracle allocation would otherwise open.
-    const entries: DocumentLogEntry[] = [];
-    for (const w of ctx.staged.entries()) {
-      // Chain prev_ts from the *latest committed* revision (we hold the single-writer lock,
-      // so this is race-free). Using the stale snapshot would fork the revision chain when
-      // two transactions blind-write the same document.
-      const prev = await this.docStore.get(w.id);
-      entries.push({
-        ts: 0n,
-        id: w.id,
-        prev_ts: prev ? prev.ts : null,
-        value: w.value === null ? null : { id: w.id, value: w.value },
-      });
-    }
-    const indexWrites: IndexWrite[] = ctx.indexUpdates.map((update) => ({ ts: 0n, update }));
-    const commitTs = await this.docStore.commitWrite(entries, indexWrites, shardId);
-
-    this.recentCommits.push({ ts: commitTs, writes: ctx.writeRanges });
-    // Advance the committed clock only now that writes are applied + recorded (still under
-    // the mutex), so a concurrent snapshot can never observe this commit before it's safe.
-    this.oracle.publishCommitted(commitTs);
-    this.prune();
-
-    const ranges = ctx.writeRanges.toArray();
-    const oplog: OplogDelta = {
-      commitTs,
-      shardId,
-      writtenRanges: ranges.map(serializeKeyRange),
-      writtenTables: writtenTablesFromRanges(ranges),
-    };
-    // Fire-and-forget so a slow/failing subscriber never stalls or aborts the single writer.
-    if (this.fanout) {
-      try {
-        void this.fanout.publish(oplog);
-      } catch {
-        /* a fan-out failure must not fail the commit */
-      }
-    }
-
-    return { value, committed: true, commitTs, shardId, oplog };
-  }
-
-  private retain(ts: bigint): void {
-    this.activeSnapshots.set(ts, (this.activeSnapshots.get(ts) ?? 0) + 1);
-  }
-
-  private release(ts: bigint): void {
-    const n = (this.activeSnapshots.get(ts) ?? 0) - 1;
-    if (n <= 0) this.activeSnapshots.delete(ts);
-    else this.activeSnapshots.set(ts, n);
-  }
-
-  private minActiveSnapshot(): bigint {
-    let min: bigint | null = null;
-    for (const ts of this.activeSnapshots.keys()) if (min === null || ts < min) min = ts;
-    return min ?? this.oracle.getLastCommittedTimestamp();
-  }
-
-  /** Drop commits that can no longer conflict with any active or future transaction. */
-  private prune(): void {
-    const min = this.minActiveSnapshot();
-    if (this.recentCommits.some((c) => c.ts <= min)) {
-      this.recentCommits = this.recentCommits.filter((c) => c.ts > min);
-    }
+  /**
+   * Test/back-compat accessor: the existing suite reaches into the recent-commits ring
+   * directly (private-field peek) to assert the store-allocated commit ts lands there. Now
+   * delegates to the extracted `ShardWriter` (D1) — same array, same semantics, just no
+   * longer owned directly by this class.
+   */
+  private get recentCommits(): readonly RecentCommit[] {
+    return this.writer.recentCommits;
   }
 }
