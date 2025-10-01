@@ -53,6 +53,77 @@ export function makeStore(opts: { dataPath: string; databaseUrl?: string }): Doc
   return new SqliteDocStore(adapter);
 }
 
+// ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
+// Decided ONCE, at first boot, and immutable after: `STACKBASE_FLEET_SHARDS` (or the fleet
+// default of 8) is persisted via `writeGlobalIfAbsent` the first time the store is writable; every
+// later boot reads the persisted value back and fails fast if an explicitly-set env value now
+// disagrees with it (resharding online isn't supported — that's B5's offline tool).
+
+/** Default shard count when neither `STACKBASE_FLEET_SHARDS` nor a persisted value is present.
+ *  Mirrors `@stackbase/fleet`'s own `DEFAULT_NUM_SHARDS` (kept as an independent literal here —
+ *  core `packages/cli` has zero static dependency on the enterprise `@stackbase/fleet` package). */
+export const DEFAULT_NUM_SHARDS = 8;
+
+/** The `persistence_globals` key the resolved shard count is stamped under (same store contract —
+ *  SQLite/Postgres, fleet/non-fleet — `getGlobal`/`writeGlobalIfAbsent` all implement it). */
+export const NUM_SHARDS_GLOBAL_KEY = "fleet:numShards";
+
+/** Parse `STACKBASE_FLEET_SHARDS` — a positive integer, else undefined (falls through to the
+ *  persisted value, or the default on a fresh deployment). Mirrors `serve.ts`'s
+ *  `parseLeaseTtlMs` shape for the other fleet-adjacent env knob. */
+export function parseNumShards(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+/** Build the fail-fast message for a `STACKBASE_FLEET_SHARDS` value that disagrees with what's
+ *  already persisted — named verbatim so tests can assert on it without re-deriving the string. */
+export function numShardsMismatchError(envValue: number, persisted: number): Error {
+  return new Error(
+    `stackbase: STACKBASE_FLEET_SHARDS=${envValue} conflicts with the shard count already persisted ` +
+      `for this deployment (${persisted}, set at first boot). The shard count is immutable after ` +
+      `first boot — changing it live isn't supported; resharding is a planned offline tool (B5). ` +
+      `Unset STACKBASE_FLEET_SHARDS, or set it to ${persisted} to match the existing deployment.`,
+  );
+}
+
+/**
+ * Resolve NUM_SHARDS against `store`'s persisted `fleet:numShards` global: a persisted value wins
+ * (immutable after first boot) — an explicitly-set `envValue` that disagrees fails fast, naming
+ * both. No persisted value → `envValue ?? DEFAULT_NUM_SHARDS`, persisted now via
+ * `writeGlobalIfAbsent` so every later boot (fleet or not) sees the same count. `store` must
+ * already have run `setupSchema()` (the `persistence_globals` table must exist) — `getGlobal`/
+ * `writeGlobalIfAbsent` are plain KV ops, not gated by a `DocStore`'s writer/read-only mode (a
+ * fleet sync node's read-only Postgres client can call this too; see `serve.ts`'s fleet wiring,
+ * which resolves before any node's writer-vs-sync election).
+ *
+ * Guards a concurrent-first-boot race (two nodes racing `writeGlobalIfAbsent` on a fresh
+ * deployment with disagreeing envs): if this call loses the race (`writeGlobalIfAbsent` returns
+ * false — a peer's row landed first), it re-reads the now-persisted value and re-applies the same
+ * mismatch check against it, so a genuine env disagreement still fails fast instead of silently
+ * running with whichever value happened to land in Postgres.
+ */
+export async function resolveNumShards(
+  store: Pick<DocStore, "getGlobal" | "writeGlobalIfAbsent">,
+  envValue: number | undefined,
+): Promise<number> {
+  const persistedRaw = await store.getGlobal(NUM_SHARDS_GLOBAL_KEY);
+  if (persistedRaw !== null) {
+    const persisted = Number(persistedRaw);
+    if (envValue !== undefined && envValue !== persisted) throw numShardsMismatchError(envValue, persisted);
+    return persisted;
+  }
+  const resolved = envValue ?? DEFAULT_NUM_SHARDS;
+  const wrote = await store.writeGlobalIfAbsent(NUM_SHARDS_GLOBAL_KEY, String(resolved));
+  if (wrote) return resolved;
+  // Lost a concurrent first-boot race — adopt whichever value actually landed, and still enforce
+  // the mismatch check against OUR env (agreeing with our own losing guess no longer matters).
+  const raced = Number(await store.getGlobal(NUM_SHARDS_GLOBAL_KEY));
+  if (envValue !== undefined && envValue !== raced) throw numShardsMismatchError(envValue, raced);
+  return raced;
+}
+
 export interface BootResult {
   runtime: EmbeddedRuntime;
   adminApi: AdminApi;
@@ -163,6 +234,22 @@ export async function bootLoaded(opts: {
   const logSink = new InMemoryLogSink();
   const store = opts.fleet?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
+  // Shards B2a (T5): resolve NUM_SHARDS. A fleet caller (`serve.ts --fleet`) has ALREADY resolved
+  // + persisted its count against the durable Postgres store BEFORE `prepareFleetNode` (which needs
+  // the number up front, to size the per-shard commit-connection pool) and threads it in as
+  // `opts.fleet.numShards` — a sync node's `opts.fleet.store` here is its LOCAL replica, not the
+  // durable store, so resolving/persisting generically against `store` below would be wrong for
+  // that role. Non-fleet (dev, `serve` without `--fleet`, the single binary): resolve right here,
+  // against the one store there is — `setupSchema()` is idempotent (`createEmbeddedRuntime` below
+  // calls it again), so calling it early just to make `persistence_globals` queryable is safe.
+  let numShards: number;
+  if (opts.fleet) {
+    numShards = opts.fleet.numShards ?? 1;
+  } else {
+    await store.setupSchema();
+    numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
+  }
+
   // File storage is always on. Blobs sit beside the SQLite file (`<dataDir>/storage`); the signing
   // key is the deployment admin key (already fail-fasted-if-unset by `serve`). The `_storage` table
   // itself was injected into the composed schema/catalog/tableNumbers in `loadProject`.
@@ -204,8 +291,9 @@ export async function bootLoaded(opts: {
     ...(opts.fleet?.writeRouter ? { writeRouter: opts.fleet.writeRouter } : {}),
     ...(opts.fleet?.deferDrivers ? { deferDrivers: true } : {}),
     ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
-    // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the pooled fleet store.
-    ...(opts.fleet?.numShards !== undefined ? { numShards: opts.fleet.numShards } : {}),
+    // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the store — resolved
+    // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
+    numShards,
   });
 
   const storageRouteDeps: StorageRouteDeps = {

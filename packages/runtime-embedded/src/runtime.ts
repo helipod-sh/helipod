@@ -172,6 +172,12 @@ export class EmbeddedRuntime {
     /** When set and `isLocalWriter()` is false, every mutation/action entry point forwards
      *  through it instead of executing locally. Queries never consult this. */
     private readonly writeRouter: WriteRouter | undefined,
+    /** Shards B2a (T5): the SAME resolved count `create()` used to build the transactor and every
+     *  closure's `RunOptions.numShards` — instance methods (`run`/`runAction`/`runHttpAction`/
+     *  `runSystem`/`runAdmin`) thread it through here so a call made AFTER construction routes
+     *  identically to one made during `create()`. Defaults to 1 (byte-identical to before) when
+     *  `EmbeddedRuntimeOptions.numShards` is unset. */
+    private readonly numShards: number,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -201,6 +207,13 @@ export class EmbeddedRuntime {
     }
     const queryRuntime = new QueryRuntime(options.store);
 
+    // Shards B2a (T5): the SAME resolved count that decided the transactor above must reach every
+    // `executor.run` call site's `RunOptions.numShards` — the executor/kernel shard resolution (T3)
+    // defaults `numShards` to 1 there, which makes every guard short-circuit onto "default" no matter
+    // how many shards the transactor actually runs. Captured once here; every closure below and every
+    // instance method (via the constructor field) passes this same value.
+    const numShards = options.numShards ?? 1;
+
     // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:
     // it resolves ANY registered path, including `_`-prefixed component-internal modules — unlike
     // the public `run`/`runAction` below, which block `_`. The executor is constructed before
@@ -219,6 +232,7 @@ export class EmbeddedRuntime {
         relationRegistry,
         functionKind,
         identity: opts?.identity ?? null,
+        numShards,
       });
     };
     const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
@@ -230,7 +244,7 @@ export class EmbeddedRuntime {
         await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
         return null;
       });
-      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards });
     }
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
@@ -258,7 +272,7 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
@@ -277,7 +291,7 @@ export class EmbeddedRuntime {
           const value = await options.writeRouter.forward("mutation", path, args, identity ?? null);
           return { value: jsonToConvex(value) as Value, tables: [], writeRanges: [], commitTs: 0 };
         }
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -288,7 +302,7 @@ export class EmbeddedRuntime {
       async runAdminQuery(path, args) {
         const fn = adminModules[path];
         if (!fn) throw new Error(`unknown admin function: ${path}`);
-        const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true });
+        const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true, numShards });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
       },
       async runAction(path, args, identity) {
@@ -305,7 +319,7 @@ export class EmbeddedRuntime {
           const value = await options.writeRouter.forward("action", path, args, identity ?? null);
           return { value: jsonToConvex(value) as Value };
         }
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return { value: r.value as Value };
       },
     };
@@ -351,6 +365,7 @@ export class EmbeddedRuntime {
           functionKind,
           identity: null,
           privileged: true,
+          numShards,
         });
         return res.value;
       },
@@ -433,7 +448,7 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
-      oracle, transactor, driverCtx, driversStarted, options.writeRouter,
+      oracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards,
     );
   }
 
@@ -512,6 +527,7 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
   }
 
@@ -535,6 +551,7 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
   }
 
@@ -554,6 +571,7 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
     return result.value;
   }
@@ -562,14 +580,14 @@ export class EmbeddedRuntime {
   async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
   }
 
   /** Run a privileged admin built-in (`_admin:*`) once (e.g. for the HTTP fallback). Trusted callers only. */
   async runAdmin<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.adminModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown admin function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
   }
 
   /** Stop all component drivers and clear all pending driver timers. Call on runtime shutdown. */

@@ -14,7 +14,11 @@
  * `DEFAULT_SHARD`, matching `SingleWriterTransactor`'s longstanding default). A
  * default-shard-only caller is byte-identical to `SingleWriterTransactor` — same ring, same
  * mutex, same commit sequence — because both ultimately construct one `ShardWriter` the same
- * way (see `sharded-transactor.test.ts`'s byte-identity test).
+ * way (see `sharded-transactor.test.ts`'s byte-identity test). Every call also fans its result's
+ * ts to every OTHER shard oracle (`observeTimestamp`, below) — a QUERY is never routed (D2), so
+ * it always reads through `"default"`'s own oracle; without this fan-out that oracle would only
+ * ever learn about `"default"`'s OWN commits, and could sit stale behind every other shard's
+ * writes indefinitely (Shards B2a follow-up, D3's "queries read everything" contract).
  *
  * Each shard's oracle seeds LAZILY, on that shard's first use, from
  * `max(docStore.maxTimestamp(), observedHighWater)` — the GLOBAL max across ALL shards'
@@ -73,7 +77,20 @@ export class ShardedTransactor implements Transactor {
     const writer = await this.getOrCreateShard(shardId);
     // Normalize shardId in the options handed to the writer so its own `options.shardId ??
     // <its configured id>` default can never disagree with which writer we routed to.
-    return writer.runInTransaction(fn, { ...options, shardId });
+    const result = await writer.runInTransaction(fn, { ...options, shardId });
+    // Cross-shard read consistency (Shards B2a follow-up — found by T5's dev-tier proof, the
+    // first place a real NUM_SHARDS>1 + cross-shard write + query readback ran end to end): a
+    // QUERY is NEVER routed (D2) — it always runs on `"default"`, using THAT shard's own oracle
+    // for its snapshot. Without this fan-out, `"default"`'s oracle only ever advances via ITS
+    // OWN commits, so a query could sit forever behind every OTHER shard's writes (e.g. a boot
+    // step that touches `"default"` before any sharded write seeds it at ts 0) — silently
+    // violating D3's "queries read everything, unaffected by sharding" contract. `result.commitTs`
+    // is always populated (a real commit ts, or — for a pure read — that shard's own snapshotTs,
+    // itself always <= the true global max), so fanning it via the SAME `observeTimestamp` the
+    // fleet-follower seam already uses is a safe, monotonic no-op when the observer is already
+    // caught up, and a correctness fix when it isn't.
+    this.observeTimestamp(result.commitTs);
+    return result;
   }
 
   /**
@@ -83,6 +100,10 @@ export class ShardedTransactor implements Transactor {
    * `docStore.maxTimestamp()` would report (the local read replica hasn't caught up yet), so
    * `createShard` seeds every new writer's oracle from `max(docStore.maxTimestamp(),
    * observedHighWater)` rather than trusting the local store max alone.
+   *
+   * Also called automatically after EVERY `runInTransaction` (see above) — not just externally
+   * by the fleet-follower seam — so every shard's oracle stays roughly caught up with the
+   * transactor-wide high-water mark, keeping cross-shard query reads correct at every tier.
    */
   observeTimestamp(ts: bigint): void {
     if (ts > this.observedHighWater) this.observedHighWater = ts;

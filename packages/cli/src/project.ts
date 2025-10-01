@@ -5,8 +5,8 @@
  */
 import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
-import type { AnalyzedFunction, AnalyzedFunctionManifest } from "@stackbase/codegen";
-import { validatorToTsType } from "@stackbase/codegen";
+import type { AnalyzedFunction, AnalyzedFunctionManifest, ShardByDeclaration } from "@stackbase/codegen";
+import { validatorToTsType, assertShardByDeclarations } from "@stackbase/codegen";
 import { composeComponents, type ComponentDefinition, type BootContext, type Driver } from "@stackbase/component";
 import type { SimpleIndexCatalog } from "@stackbase/executor";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@stackbase/storage";
@@ -80,6 +80,11 @@ export function loadProject(
   // Build the app's moduleMap + manifest from loaded.modules (codegen needs the app manifest).
   const appModuleMap: Record<string, RegisteredFunction> = {};
   const manifest: AnalyzedFunctionManifest = [];
+  // Shards B2a (D7): collected alongside the manifest loop below — every mutation whose `shardBy`
+  // is a plain arg-name STRING (a resolver function is opaque to codegen; it falls through to the
+  // kernel guards at runtime, same as always). Cross-checked against `schemaJson` once the loop
+  // finishes (see `assertShardByDeclarations` below).
+  const shardByDeclarations: ShardByDeclaration[] = [];
   for (const [path, exports] of Object.entries(loaded.modules)) {
     const functions: AnalyzedFunction[] = [];
     for (const [name, value] of Object.entries(exports)) {
@@ -93,6 +98,9 @@ export function loadProject(
           argsType: value.argsJson ? validatorToTsType(value.argsJson) : undefined,
         });
       }
+      if (value.type === "mutation" && typeof value.shardBy === "string") {
+        shardByDeclarations.push({ functionPath: `${path}:${name}`, argName: value.shardBy, argsJson: value.argsJson });
+      }
     }
     if (functions.length > 0) {
       // Sort so codegen output is deterministic regardless of module-namespace key order
@@ -102,6 +110,7 @@ export function loadProject(
     }
   }
   manifest.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  assertShardByDeclarations(schemaJson, shardByDeclarations);
 
   // Compose app + components: allocates table numbers, merges module maps, collects context providers.
   // Seed `_storage` at its reserved number BEFORE allocation so `registry.preassign` pins it (an
