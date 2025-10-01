@@ -14,6 +14,9 @@ export interface TableMeta {
   documentValidator?: AnyValidator | null;
   /** Whether the owning schema had schemaValidation enabled (default true). */
   schemaValidation?: boolean;
+  /** The document field this table is sharded by (`schema.ts` `.shardKey(field)`), or null when
+   *  unsharded. Null short-circuits every kernel shard guard → zero overhead for unsharded apps. */
+  shardKey?: string | null;
 }
 
 export interface IndexCatalog {
@@ -34,11 +37,12 @@ export class SimpleIndexCatalog implements IndexCatalog {
     tableNumber: number,
     documentType?: ValidatorJSON,
     schemaValidation?: boolean,
+    shardKey?: string | null,
   ): this {
     const enabled = schemaValidation !== false;
     const documentValidator =
       enabled && documentType && documentType.type === "object" ? validatorFromJson(documentType) : null;
-    const meta: TableMeta = { name, tableNumber, documentValidator, schemaValidation: enabled };
+    const meta: TableMeta = { name, tableNumber, documentValidator, schemaValidation: enabled, shardKey: shardKey ?? null };
     this.tables.set(name, meta);
     this.tablesByNumber.set(tableNumber, meta);
     if (!this.indexesByTable.has(name)) this.indexesByTable.set(name, []);

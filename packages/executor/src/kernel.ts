@@ -12,8 +12,10 @@ import {
   newDocumentId,
   getFullTableName,
   parseFullTableName,
+  shardIdForKeyValue,
+  type ShardId,
 } from "@stackbase/id-codec";
-import { indexKeyspaceId, keySuccessor } from "@stackbase/index-key-codec";
+import { indexKeyspaceId, keySuccessor, encodeIndexKey, indexKeysEqual, type IndexableValue, type KeyRange } from "@stackbase/index-key-codec";
 import {
   computeIndexUpdates,
   extractIndexKey,
@@ -52,6 +54,14 @@ export interface KernelContext {
   readonly getRuleContext: (() => Promise<RuleContext>) | null;
   /** Declared relations (to-many + to-one), for resolving relation predicates in read policies. */
   readonly relationRegistry: RelationRegistry;
+  /** The shard this transaction runs on (a mutation's resolved `shardBy`, else `"default"`). */
+  readonly shardId: ShardId;
+  /** NUM_SHARDS for this deployment; how the guards route a document's shard-key value to a shard. */
+  readonly numShards: number;
+  /** Whether the running mutation DECLARED a `shardBy` (a "sharded mutation"). A no-`shardBy`
+   *  mutation (`"default"` shard) may read everything but may not write sharded tables; a
+   *  sharded mutation is subject to the full read+write ownership matrix (D3). */
+  readonly shardDeclared: boolean;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -118,6 +128,126 @@ function requireOwnTable(ctx: KernelContext, fullName: string): void {
   }
 }
 
+// ── Shard ownership guards (D3) ──────────────────────────────────────────────────────────────
+// Always-on at every tier (Tier-0 SQLite, `stackbase dev`'s 8 virtual shards, fleet). Every guard
+// short-circuits when the target table is unsharded (`meta.shardKey` null) OR the run is privileged
+// (admin/driver) — so an app with no `.shardKey` never evaluates any of this (zero overhead), and
+// the error messages are written as product copy: they name the table, the shard-key field, both
+// shards, and the exact fix.
+
+/** Route a document to its shard by the value of its shard-key field. */
+function shardOfDoc(ctx: KernelContext, shardKey: string, doc: DocumentValue): ShardId {
+  return shardIdForKeyValue((doc as Record<string, unknown>)[shardKey], ctx.numShards);
+}
+
+/**
+ * Write guard: a document written to a sharded table must route to the running mutation's shard.
+ * A no-`shardBy` ("default") mutation may not write a sharded table at all. No-op for unsharded
+ * tables / privileged runs.
+ */
+function enforceShardWrite(ctx: KernelContext, meta: TableMeta, doc: DocumentValue, op: "insert" | "replace" | "delete"): void {
+  const shardKey = meta.shardKey;
+  if (!shardKey || ctx.privileged) return;
+  if (!ctx.shardDeclared) {
+    throw new ForbiddenOperationError(
+      `table '${meta.name}' is sharded by '${shardKey}', but this mutation does not declare a shard, ` +
+        `so it runs on the 'default' shard and may not write sharded tables. ` +
+        `Add shardBy: '${shardKey}' to the mutation so its writes route to a single shard.`,
+    );
+  }
+  const docShard = shardOfDoc(ctx, shardKey, doc);
+  if (docShard !== ctx.shardId) {
+    throw new ForbiddenOperationError(
+      `table '${meta.name}' is sharded by '${shardKey}'; this mutation runs on shard ${ctx.shardId} ` +
+        `but the document (${shardKey}=${JSON.stringify((doc as Record<string, unknown>)[shardKey])}) routes to shard ${docShard}. ` +
+        `Perform this ${op} from a mutation whose shardBy resolves to that '${shardKey}' value ` +
+        `(each mutation writes exactly one shard).`,
+    );
+  }
+}
+
+/** Replace guard: the shard-key field is immutable after insert (changing it would re-route the row). */
+function enforceShardKeyImmutable(ctx: KernelContext, meta: TableMeta, oldDoc: DocumentValue, newDoc: DocumentValue): void {
+  const shardKey = meta.shardKey;
+  if (!shardKey || ctx.privileged) return;
+  const before = encodeIndexKey([(oldDoc as Record<string, unknown>)[shardKey] as IndexableValue]);
+  const after = encodeIndexKey([(newDoc as Record<string, unknown>)[shardKey] as IndexableValue]);
+  if (!indexKeysEqual(before, after)) {
+    throw new ForbiddenOperationError(
+      `cannot change the shard-key field '${shardKey}' of a '${meta.name}' document ` +
+        `(${JSON.stringify((oldDoc as Record<string, unknown>)[shardKey])} → ${JSON.stringify((newDoc as Record<string, unknown>)[shardKey])}): ` +
+        `it is immutable after insert. Delete the document and insert a new one to move it between shards.`,
+    );
+  }
+}
+
+/**
+ * Read-then-reject `db.get` guard: a sharded mutation may only see rows of a sharded table that
+ * belong to its own shard. No-op for unsharded tables, "default"/query readers, and privileged runs.
+ */
+function enforceShardGet(ctx: KernelContext, meta: TableMeta, doc: DocumentValue): void {
+  const shardKey = meta.shardKey;
+  if (!shardKey || ctx.privileged || !ctx.shardDeclared) return;
+  const docShard = shardOfDoc(ctx, shardKey, doc);
+  if (docShard !== ctx.shardId) {
+    throw new ForbiddenOperationError(
+      `table '${meta.name}' is sharded by '${shardKey}'; this mutation runs on shard ${ctx.shardId} ` +
+        `but read a document (${shardKey}=${JSON.stringify((doc as Record<string, unknown>)[shardKey])}) that lives on shard ${docShard}. ` +
+        `A sharded mutation may only read rows of its own shard — read foreign-shard data from a query (queries read every shard).`,
+    );
+  }
+}
+
+/**
+ * Scan guard: a sharded mutation may scan its OWN sharded table only via an index whose FIRST field
+ * is the shard key, pinned by an `eq()` on that field to a value routing to its own shard. Any other
+ * scan of a sharded table from a sharded mutation is rejected with the pinned-index rule. No-op for
+ * unsharded tables, "default"/query readers, and privileged runs.
+ */
+function enforceShardScan(
+  ctx: KernelContext,
+  meta: TableMeta | undefined,
+  indexSpec: { index: string; fields: readonly string[] },
+  range: Array<{ field: string; operator: string; value: JSONValue }> | undefined,
+): void {
+  if (!ctx.shardDeclared || ctx.privileged) return;
+  const shardKey = meta?.shardKey;
+  if (!shardKey) return; // unsharded table — allowed; its ranges are recorded invalidation-only (D4)
+  if (indexSpec.fields[0] !== shardKey) {
+    throw new ForbiddenOperationError(
+      `table '${meta!.name}' is sharded by '${shardKey}'; a sharded mutation may only scan it via an index ` +
+        `whose first field is '${shardKey}' (index '${indexSpec.index}' starts with '${indexSpec.fields[0] ?? "(none)"}'). ` +
+        `Scan foreign-shard data from a query, or define an index on ['${shardKey}', …] and pin it with .eq('${shardKey}', <its value>).`,
+    );
+  }
+  const eq = range?.find((r) => r.field === shardKey && r.operator === "eq");
+  if (!eq) {
+    throw new ForbiddenOperationError(
+      `table '${meta!.name}' is sharded by '${shardKey}'; a sharded mutation must pin its scan to one shard ` +
+        `with .eq('${shardKey}', <value>) as the first range constraint (an open scan would cross shards). ` +
+        `Scan across shards from a query instead.`,
+    );
+  }
+  const eqShard = shardIdForKeyValue(jsonToConvex(eq.value), ctx.numShards);
+  if (eqShard !== ctx.shardId) {
+    throw new ForbiddenOperationError(
+      `table '${meta!.name}' is sharded by '${shardKey}'; this mutation runs on shard ${ctx.shardId} ` +
+        `but the scan is pinned to '${shardKey}'=${JSON.stringify(eq.value)}, which routes to shard ${eqShard}. ` +
+        `A sharded mutation may only scan its own shard — read other shards from a query.`,
+    );
+  }
+}
+
+/** Record a scan's ranges, routing an unsharded-table read from a SHARDED mutation to the
+ *  invalidation-only set (D4 split snapshot): it feeds reactivity but is NOT OCC-validated. */
+function recordScanReads(ctx: KernelContext, meta: TableMeta | undefined, ranges: readonly KeyRange[]): void {
+  const unvalidated = ctx.shardDeclared && !ctx.privileged && !meta?.shardKey;
+  for (const range of ranges) {
+    if (unvalidated) ctx.txn.recordReadUnvalidated(range);
+    else ctx.txn.recordRead(range);
+  }
+}
+
 /** Maintain every index of `table` for a document change, recording write ranges for reactivity. */
 function maintainIndexes(
   ctx: KernelContext,
@@ -148,6 +278,7 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   const value = await ctx.txn.get(internalId);
+  if (value !== null) enforceShardGet(ctx, meta, value as DocumentValue);
   if (value !== null && !ctx.privileged && ctx.getRuleContext) {
     const policy = ctx.policyRegistry.get(meta.name);
     if (policy?.read) {
@@ -162,8 +293,9 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   if (!ctx.profile.capabilities.dbWrite) throw new ForbiddenOperationError("writes are not allowed here");
   const { table, value } = JSON.parse(argJson) as { table: string; value: JSONValue };
   const { tableNumber, fullName } = requireTable(ctx, table);
+  const meta = ctx.catalog.getTable(fullName);
   const converted = jsonToConvex(value) as DocumentValue;
-  validateDocumentForWrite(ctx.catalog.getTable(fullName), fullName, converted);
+  validateDocumentForWrite(meta, fullName, converted);
   const id = newDocumentId(tableNumber);
   const docId = encodeInternalDocumentId(id);
   const doc: DocumentValue = {
@@ -171,6 +303,7 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
     _id: docId,
     _creationTime: Number(ctx.snapshotTs),
   };
+  if (meta) enforceShardWrite(ctx, meta, doc, "insert");
   await enforceWrite(ctx, fullName, doc);
   ctx.txn.put(id, doc);
   maintainIndexes(ctx, fullName, null, doc, id);
@@ -195,6 +328,8 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
     _id: id,
     _creationTime: (oldDoc["_creationTime"] as number) ?? Number(ctx.snapshotTs),
   };
+  enforceShardKeyImmutable(ctx, meta, oldDoc as DocumentValue, newDoc);
+  enforceShardWrite(ctx, meta, newDoc, "replace");
   await enforceWrite(ctx, meta.name, newDoc); // post-image: the result must also satisfy the write policy
   ctx.txn.put(internalId, newDoc);
   maintainIndexes(ctx, meta.name, oldDoc, newDoc, internalId);
@@ -209,7 +344,10 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   const oldDoc = await ctx.txn.get(internalId);
-  if (oldDoc !== null) await enforceWrite(ctx, meta.name, oldDoc);
+  if (oldDoc !== null) {
+    enforceShardWrite(ctx, meta, oldDoc as DocumentValue, "delete");
+    await enforceWrite(ctx, meta.name, oldDoc);
+  }
   ctx.txn.delete(internalId);
   maintainIndexes(ctx, meta.name, oldDoc, null, internalId);
   return "{}";
@@ -229,6 +367,8 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   const tableName = ctx.privileged ? spec.table : getFullTableName(spec.table, ctx.namespace);
   const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
+  const tableMeta = ctx.catalog.getTable(tableName);
+  enforceShardScan(ctx, tableMeta, indexSpec, spec.range);
 
   const query: Query = {
     index: indexSpec,
@@ -251,7 +391,7 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
 
   const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
   const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs, overlay);
-  for (const range of readSet.toArray()) ctx.txn.recordRead(range);
+  recordScanReads(ctx, tableMeta, readSet.toArray());
   return JSON.stringify({ docs: documents.map((d) => convexToJson(d as Value)) });
 };
 
@@ -260,6 +400,8 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
   const tableName = ctx.privileged ? spec.table : getFullTableName(spec.table, ctx.namespace);
   const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
+  const tableMeta = ctx.catalog.getTable(tableName);
+  enforceShardScan(ctx, tableMeta, indexSpec, spec.range);
 
   const query: Query = {
     index: indexSpec,
@@ -279,7 +421,7 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     pageSize: spec.pageSize,
     maxScan: spec.maxScan,
   }, overlay);
-  for (const range of readSet.toArray()) ctx.txn.recordRead(range);
+  recordScanReads(ctx, tableMeta, readSet.toArray());
   return JSON.stringify({ page: page.map((d) => convexToJson(d as Value)), nextCursor, hasMore, scanCapped });
 };
 

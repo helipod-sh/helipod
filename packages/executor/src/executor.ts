@@ -11,6 +11,7 @@ import type { OplogDelta, Transactor } from "@stackbase/transactor";
 import type { QueryRuntime } from "@stackbase/query-engine";
 import type { KeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
+import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
 import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
@@ -118,6 +119,12 @@ export interface RunOptions {
   relationRegistry?: RelationRegistry;
   /** Resolve a target function's registered kind by path; threaded onto every `ComponentContext` built for `build(cctx)`. See `ComponentContext.functionKind`'s doc comment. */
   functionKind?: (path: string) => "query" | "mutation" | "action" | "httpAction" | undefined;
+  /**
+   * Number of shards this deployment routes across (boot-time config; NUM_SHARDS). Defaults to 1
+   * → every `shardBy` resolves to `"default"` and every kernel shard guard short-circuits, so
+   * behavior is byte-identical to a non-sharded engine. T5 threads the real value from boot.
+   */
+  numShards?: number;
 }
 
 export interface UdfResult<T = unknown> {
@@ -169,6 +176,28 @@ export class InlineUdfExecutor {
     if (fn.type === "httpAction") return this.runActionFn<T>(fn, args, options, "httpAction");
     if (fn.type === "action") return this.runActionFn<T>(fn, args, options);
     const profile = profileFor(fn.type);
+    // Resolve which shard this mutation runs on BEFORE opening the transaction. Only mutations
+    // that declare `shardBy` are routed; a query or a no-`shardBy` mutation runs on "default"
+    // (all guards short-circuit). The resolved value is canonicalized + jump-hashed by id-codec.
+    const numShards = options.numShards ?? 1;
+    const shardDeclared = fn.type === "mutation" && fn.shardBy !== undefined;
+    let shardId: ShardId = DEFAULT_SHARD;
+    if (shardDeclared) {
+      let shardKeyValue: unknown;
+      const shardBy = fn.shardBy!;
+      if (typeof shardBy === "string") {
+        shardKeyValue = (args as Record<string, unknown> | null | undefined)?.[shardBy];
+      } else {
+        try {
+          shardKeyValue = shardBy(args);
+        } catch (e) {
+          throw new Error(
+            `shardBy resolver for "${options.path ?? "<anonymous>"}" threw: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+      shardId = shardIdForKeyValue(shardKeyValue, numShards);
+    }
     const seed = options.seed ?? 0;
     const clock = this.deps.now ?? Date.now;
     const startedAt = clock();
@@ -202,6 +231,9 @@ export class InlineUdfExecutor {
           policyRegistry: new Map(),
           getRuleContext: null,
           relationRegistry: { toMany: new Map(), toOne: new Map() },
+          shardId,
+          numShards,
+          shardDeclared,
         };
 
         const reserved = new Set(["db", "random", "now"]);
@@ -241,7 +273,7 @@ export class InlineUdfExecutor {
 
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
-      });
+      }, { shardId });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.
