@@ -42,7 +42,7 @@ export {
 } from "./shard";
 export type { ShardId, ShardKey, ShardKeyResolver, ShardKeyResolverInput, ShardRouter } from "./shard";
 
-export { jumpConsistentHash, shardIdForKeyValue, JumpShardRouter } from "./jump-hash";
+export { jumpConsistentHash, shardIdForKeyValue, shardIdList, JumpShardRouter } from "./jump-hash";
 
 export {
   MemoryTableRegistry,

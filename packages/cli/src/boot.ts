@@ -155,6 +155,8 @@ export async function bootLoaded(opts: {
     writeRouter?: WriteRouter;
     deferDrivers?: boolean;
     fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+    /** Shards B2a: shard count — >1 builds a ShardedTransactor (per-shard parallel commits). */
+    numShards?: number;
   };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
@@ -202,6 +204,8 @@ export async function bootLoaded(opts: {
     ...(opts.fleet?.writeRouter ? { writeRouter: opts.fleet.writeRouter } : {}),
     ...(opts.fleet?.deferDrivers ? { deferDrivers: true } : {}),
     ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
+    // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the pooled fleet store.
+    ...(opts.fleet?.numShards !== undefined ? { numShards: opts.fleet.numShards } : {}),
   });
 
   const storageRouteDeps: StorageRouteDeps = {
@@ -261,6 +265,8 @@ export async function bootProject(opts: {
     writeRouter?: WriteRouter;
     deferDrivers?: boolean;
     fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+    /** Shards B2a: shard count — >1 builds a ShardedTransactor (per-shard parallel commits). */
+    numShards?: number;
   };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);

@@ -28,6 +28,9 @@ export interface FleetRuntimeOptions {
   writeRouter: WriteRouter;
   deferDrivers: boolean;
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+  /** Shards B2a: number of shards this node runs — threaded into `createEmbeddedRuntime` (>1 builds a
+   *  `ShardedTransactor` over the pooled store for per-shard parallel commits). */
+  numShards: number;
 }
 
 /** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here
@@ -45,6 +48,9 @@ export interface FleetPrep {
   lease: unknown;
   forwarder: unknown;
   role: "sync" | "writer";
+  /** Shards B2a: shard count decided at boot — threaded to `startFleetNode` (acquire-all, seed-all,
+   *  per-shard guard, idle closer, tailer count gate). */
+  numShards: number;
   runtimeOptions: FleetRuntimeOptions;
 }
 
@@ -58,6 +64,9 @@ export interface FleetModule {
     /** Lease TTL in ms — the failover-clock knob (see `@stackbase/fleet`'s `node.ts`). Threaded from
      *  `STACKBASE_FLEET_LEASE_TTL_MS`; undefined → the fleet default (15000). Ops/test tuning. */
     leaseTtlMs?: number;
+    /** Shards B2a: shard count (default 8 in the fleet package). T5 owns the persist-once/env story;
+     *  serve threads a plain number (undefined → fleet default). */
+    numShards?: number;
   }): Promise<FleetPrep>;
   startFleetNode(deps: {
     client: unknown;
@@ -68,6 +77,8 @@ export interface FleetModule {
     replica?: unknown;
     switchable?: unknown;
     replicaPath?: string;
+    /** Shards B2a: from `FleetPrep.numShards` — drives the acquire-all/seed-all/idle-closer. */
+    numShards?: number;
   }): Promise<FleetHandles>;
 }
 
@@ -223,6 +234,7 @@ export async function startServe(
           replica: prep.replica,
           switchable: prep.switchable,
           replicaPath: prep.replicaPath,
+          numShards: prep.numShards,
         })
       : undefined;
 

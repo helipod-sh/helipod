@@ -14,7 +14,7 @@ import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } f
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
+import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
 import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
@@ -116,6 +116,22 @@ export interface EmbeddedRuntimeOptions {
    * wants drivers running once/if it becomes the writer.
    */
   deferDrivers?: boolean;
+  /**
+   * Number of shards to run (Shards B2a). When `> 1`, the runtime builds ONE `ShardedTransactor`
+   * (N independent per-shard mutexes + OCC rings + oracles) over the store instead of the
+   * single-shard `SingleWriterTransactor`, so mutations routed to different shards commit in
+   * parallel. Unset / `1` → the single-shard transactor, byte-identical to before (the existing
+   * suites are the proof). The executor resolves each mutation's shard (`shardBy`) and passes it
+   * through `runInTransaction({ shardId })`; a fleet writer pairs this with the per-shard commit
+   * pool so different shards' commits are genuinely concurrent Postgres transactions.
+   */
+  numShards?: number;
+}
+
+/** The minimal timestamp-observer seam `observeTimestamp` delegates to — a `MonotonicTimestampOracle`
+ *  (single-shard) or a `ShardedTransactor` (which fans a learned ts to every shard oracle). */
+interface TimestampObserver {
+  observeTimestamp(ts: bigint): void;
 }
 
 export class EmbeddedRuntime {
@@ -143,8 +159,9 @@ export class EmbeddedRuntime {
      * reassigning the field) keeps that closure correct without any circular-reference dance.
      */
     private tableNumberToName: Map<number, string>,
-    /** The transactor's timestamp oracle; `observeTimestamp` delegates straight to it. */
-    private readonly oracle: MonotonicTimestampOracle,
+    /** The transactor's timestamp observer (the single-shard oracle, or the `ShardedTransactor`
+     *  itself); `observeTimestamp` delegates straight to it. */
+    private readonly oracle: TimestampObserver,
     /** Threaded from `create()` so `startDrivers()` can start deferred drivers later. */
     private readonly driverCtx: DriverContext,
     /** Mutable: false when `deferDrivers` was set and `startDrivers()` hasn't run yet. */
@@ -163,8 +180,22 @@ export class EmbeddedRuntime {
     // Recover the timestamp high-water mark from persisted data, so snapshot reads after a
     // restart see existing documents (a fresh oracle at 0 would read `ts <= 0` and find nothing).
     const startTs = await options.store.maxTimestamp();
-    const oracle = new MonotonicTimestampOracle(startTs);
-    const transactor = new SingleWriterTransactor(options.store, oracle, { fanout });
+    // Shards B2a: with numShards > 1, one `ShardedTransactor` (per-shard mutexes/rings/oracles) so
+    // cross-shard commits run in parallel; else the single-shard transactor, byte-identical to before.
+    // `observeTimestamp` (fleet follower catch-up + promotion) delegates to whichever we build — the
+    // ShardedTransactor fans a learned ts to every shard oracle; the single oracle takes it directly.
+    let transactor: SingleWriterTransactor | ShardedTransactor;
+    let oracle: TimestampObserver;
+    if ((options.numShards ?? 1) > 1) {
+      const sharded = new ShardedTransactor(options.store, { fanout });
+      sharded.observeTimestamp(startTs); // floor every shard oracle at the recovered high-water mark
+      transactor = sharded;
+      oracle = sharded;
+    } else {
+      const singleOracle = new MonotonicTimestampOracle(startTs);
+      transactor = new SingleWriterTransactor(options.store, singleOracle, { fanout });
+      oracle = singleOracle;
+    }
     const queryRuntime = new QueryRuntime(options.store);
 
     // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:

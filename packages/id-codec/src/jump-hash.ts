@@ -63,6 +63,21 @@ export function shardIdForKeyValue(value: unknown, numShards: number): ShardId {
 }
 
 /**
+ * The canonical ordered shard-id list for `numShards` shards: `["default", "s1", …, "s{N-1}"]`.
+ * The array INDEX is the slot number — slot 0 is `"default"`, slot k is `"s"+k` — matching
+ * `shardIdForKeyValue`'s slot→id mapping exactly. This is the ONE source of truth for the
+ * slot↔shardId contract the fleet's per-shard commit pool (`NodePgClient`'s `commitPool.shards`),
+ * per-slot advisory locks (`tryAcquireShardLock(slot)`), and lease acquire-all loop all share, so
+ * nobody hand-rolls (and risks disagreeing on) the numbering. `numShards` must be ≥ 1.
+ */
+export function shardIdList(numShards: number): ShardId[] {
+  if (numShards < 1) throw new RangeError(`numShards must be >= 1, got ${numShards}`);
+  const ids: ShardId[] = [DEFAULT_SHARD];
+  for (let slot = 1; slot < numShards; slot++) ids.push(`s${slot}`);
+  return ids;
+}
+
+/**
  * The B2a `ShardRouter`: jump-consistent-hash routing over `numShards` shards. Single-node, so
  * every client resolves to one local sync node. `getShardForKey`/`getShardForDocument` take the
  * already-extracted shard-key value (a string, per the seam); `shardIdForKeyValue` is the

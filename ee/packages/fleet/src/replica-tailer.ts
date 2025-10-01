@@ -76,9 +76,9 @@ import { stablePrefixFromFrontier, type StablePrefixTs } from "./stable-prefix";
 const COMMIT_CHANNEL = "stackbase_commits";
 const DEFAULT_POLL_MS = 1000;
 const DEFAULT_BATCH_SIZE = 1000;
-/** B1 is single-shard only (see `lease.ts`'s `SHARD_ID`) — every `shard_leases` read below is
- *  pinned to this. */
-const SHARD_ID = "default";
+/** Default shard count (B1 single-shard behavior) when `numShards` is unset — `min(frontier_ts)` over
+ *  the one `default` row, `count(*) >= 1`, byte-identical to B1's `WHERE shard_id = 'default'`. */
+const DEFAULT_NUM_SHARDS = 1;
 
 /** Stable string key for a document identity — used to dedupe/track per-doc state across a
  *  batch (both the density-assertion running-head cache below and `writtenDocs`'s DISTINCT). */
@@ -150,6 +150,11 @@ export interface ReplicaTailerOptions {
   /** Max `DocumentLogEntry` rows pulled per tick (bootstrap catch-up + steady state). Default
    *  1000. A tick may apply slightly more than this to avoid splitting a commit's ts group. */
   batchSize?: number;
+  /** Number of shards the fleet runs (B2a). The tailer's target is `F = min(frontier_ts)` over ALL
+   *  shard rows, and it refuses to treat a partial `shard_leases` (`count(*) < numShards`) as ready —
+   *  a half-created lease table must not fake a min (belt-and-braces against the F1×N hole). Default
+   *  1 → B1's single-shard behavior. */
+  numShards?: number;
   /** Invoked once per non-empty applied batch, in watermark order, AFTER the batch has already
    *  been written to the replica. The watermark only advances after this resolves. */
   onInvalidation: (inv: AppliedInvalidation) => Promise<void>;
@@ -168,6 +173,7 @@ interface Waiter {
 export class ReplicaTailer {
   private readonly pollMs: number;
   private readonly batchSize: number;
+  private readonly numShards: number;
   private readonly onInvalidation: (inv: AppliedInvalidation) => Promise<void>;
   /** The tailer's own applied high-water mark — a `StablePrefixTs` (D6): only ever seeded from the
    *  replica's own persisted `maxTimestamp()` (a prior run's watermark, on restart) or advanced to
@@ -194,6 +200,7 @@ export class ReplicaTailer {
   ) {
     this.pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
     this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.numShards = opts.numShards ?? DEFAULT_NUM_SHARDS;
     this.onInvalidation = opts.onInvalidation;
   }
 
@@ -205,25 +212,36 @@ export class ReplicaTailer {
   }
 
   /**
-   * Reads the fenced frontier `F` (Fenced Frontier B1, D5) — `shard_leases.frontier_ts` for the
-   * single B1 shard — via the same `CommitChannelClient` already threaded in for LISTEN/NOTIFY.
-   * Falls back to `0n` when no lease row exists yet (a fresh fleet, pre-first-acquisition: nothing
-   * has ever been fenced or committed, so there is nothing to pull). Asserts F is monotonically
-   * non-decreasing across reads (D5's other defense-in-depth invariant, alongside the density
-   * check below) — a regression can only mean `shard_leases` itself was corrupted or hand-tampered.
+   * Reads the fenced frontier `F` (Fenced Frontier B1 D5, generalized to N shards in B2a) —
+   * `F = min(frontier_ts)` over ALL `shard_leases` rows — via the same `CommitChannelClient` already
+   * threaded in for LISTEN/NOTIFY. The min is the dense prefix the WHOLE fleet has durably fenced: a
+   * replica may serve reads up to it and never past a commit that hasn't been fenced on every shard.
+   *
+   * Belt-and-braces (B2a — the F1×N hole otherwise recurs ×N): treat `count(*) < numShards` as
+   * F=0-equivalent (NOT ready). A half-created `shard_leases` — some shards claimed+seeded, others not
+   * yet — must not let `min` over the present rows fake a ready frontier; the writer's acquire-all +
+   * seed-all completes (all N rows present, each seeded ≥ max) BEFORE it reports ready, so a real min
+   * only appears once every shard is genuinely fenced. `count(*) = 0` (fresh fleet, pre-acquisition)
+   * is the same F=0.
+   *
+   * Asserts F is monotonically non-decreasing across reads once the count gate is satisfied (D5's
+   * defense-in-depth invariant) — a regression can only mean `shard_leases` was corrupted/hand-
+   * tampered. The assertion is skipped while `count(*) < numShards` (F is a placeholder 0 there, so a
+   * later real min is legitimately larger, not a regression).
    */
   private async readFrontier(): Promise<StablePrefixTs> {
-    const rows = await this.client.query(`SELECT frontier_ts FROM shard_leases WHERE shard_id = $1`, [
-      SHARD_ID,
-    ]);
+    const rows = await this.client.query(
+      `SELECT COALESCE(MIN(frontier_ts), 0) AS min_frontier, COUNT(*) AS n FROM shard_leases`,
+    );
     const row = rows[0];
-    const raw = row === undefined ? 0n : toBigInt(row.frontier_ts);
+    const count = row === undefined ? 0 : Number(toBigInt(row.n));
+    if (count < this.numShards) return stablePrefixFromFrontier(0n); // partial/absent lease table — not ready
+    const raw = row === undefined ? 0n : toBigInt(row.min_frontier);
     const f = stablePrefixFromFrontier(raw);
     if (this.lastF !== null && f < this.lastF) {
       throw new Error(
-        `fleet: frontier regression detected — shard_leases.frontier_ts went from ${this.lastF} to ${f} ` +
-          `for shard '${SHARD_ID}'. F must be monotonically non-decreasing; this indicates the lease row ` +
-          `was corrupted or hand-tampered.`,
+        `fleet: frontier regression detected — min(shard_leases.frontier_ts) went from ${this.lastF} to ${f}. ` +
+          `F must be monotonically non-decreasing; this indicates a lease row was corrupted or hand-tampered.`,
       );
     }
     this.lastF = f;
@@ -354,7 +372,20 @@ export class ReplicaTailer {
       [this.wm, appliedMax],
     );
 
-    if (docs.length === 0 && indexRows.length === 0) return; // nothing in range — watermark stays put
+    if (docs.length === 0 && indexRows.length === 0) {
+      // B2a: F advanced past the watermark but the range `(wm, F]` holds NO rows. This is the
+      // idle-shard-closing case: the writer advances an idle shard's frontier via a bare `nextval`
+      // (D5) with no backing document, so `min(frontier_ts)` can legitimately run AHEAD of the last
+      // committed doc's ts. The replica IS caught up to F (there is provably nothing to apply in the
+      // range — and never will be, since any future commit takes a still-later `nextval`), so ADVANCE
+      // the watermark to F. Without this the bootstrap loop (`while wm < target`) would spin forever
+      // waiting for documents that will never exist in this range, and RYOW `waitFor(F)` would hang.
+      // (Single-shard B1 never reaches here: with the idle-closer off, F only advances alongside a
+      // real commit, so an F>wm range is never empty.)
+      this.wm = appliedMax;
+      this.wakeSatisfiedWaiters();
+      return;
+    }
 
     // Invert postgres-docstore.ts's write() serialization exactly: `deleted` -> the Deleted
     // variant (table_id/internal_id are NULL on those rows and must not be read), else
