@@ -112,9 +112,21 @@ are all rejected:
 >
 > `table 'messages' is sharded by 'conversationId'; this mutation runs on shard s3 but the scan is pinned to 'conversationId'=<value>, which routes to shard s5. A sharded mutation may only scan its own shard — read other shards from a query.`
 
-**6. A sharded mutation can freely read and write its own shard, and freely read unsharded
-(global) tables.** Neither of those needs anything special — the constraints above only kick in
-when a sharded mutation touches a *foreign* shard of a *sharded* table.
+**6. A sharded mutation can freely read and write its own shard, freely read unsharded (global)
+tables, and freely INSERT into them — but it may not modify (replace/delete) an unsharded doc.**
+Reading its own shard and reading globals need nothing special. Writing a global table is
+*insert-only*: an insert is fork-free (a brand-new document with a unique id — there's no existing
+version for two shards to race on), so a sharded mutation may add rows to a global table. But a
+**replace or delete of an existing unsharded document must come from a mutation without `shardBy`
+(the default shard)**, which owns every global doc's read-modify-write. Attempting a global
+replace/delete from a sharded mutation is an instructive error:
+
+> `table 'settings' is not sharded, so its documents are owned by the 'default' shard; a replace of one must run on the default shard, but this mutation runs on shard s3. Run this update from a mutation without shardBy (which runs on the default shard), or restructure so the sharded mutation only INSERTS into 'settings' (inserts are allowed from any shard).`
+
+The reason is the same one-writer-per-document invariant that governs sharded tables: a global doc
+is owned by the default ring, so letting shard `s3` and shard `s5` both read-modify-write the same
+global row would fork its version chain and silently lose one update. Inserts don't have that
+hazard (nothing to fork); replaces and deletes do.
 
 Cross-shard writes and cross-shard reads of a sharded table, from inside one mutation, are
 rejected by design — cross-shard transactions aren't supported. If your mutation genuinely needs
@@ -146,12 +158,25 @@ single-writer ceiling for that mutation.
 
 ## The escape hatch: full serializability
 
-Don't declare `shardBy` on a mutation and it runs on the default shard — the same behavior
-Stackbase has always had, including for tables that happen to be sharded. On the default shard,
-reads of sharded and unsharded tables alike are fully OCC-validated, exactly like today's
-single-writer semantics. Use this for any mutation whose correctness genuinely needs a fully
-serialized view of global state (an admin operation, a rare cross-cutting invariant check) —
-you give up the shard's parallel write throughput for that one mutation, not for the whole app.
+Don't declare `shardBy` on a mutation and it runs on the default shard. This is the *owning ring
+for every unsharded (global) document*: all replaces and deletes of global docs happen here, so
+they are fully serializable **against one another** — every read-modify-write of global state goes
+through this single writer, exactly like Stackbase's original single-writer semantics. Use this for
+any mutation whose correctness needs a serialized view of global state that it also modifies (an
+admin operation, a rare cross-cutting invariant check) — you give up the shards' parallel write
+throughput for that one mutation, not for the whole app.
+
+One honest caveat: a default-shard mutation is serialized against every other *global* write, but
+sharded mutations may still **insert** new rows into global tables from their own rings (inserts are
+fork-free, so they're allowed everywhere — see rule 6). Those cross-ring inserts are *not* part of a
+default mutation's OCC validation: a range scan a default mutation runs over a global table sees a
+stable snapshot and won't abort-and-retry just because a sharded mutation inserted a matching row on
+another ring at the same instant (a phantom-read-class window, the same phantom class queries always
+tolerate). So "fully serialized" holds for the read-modify-write of existing global docs — the thing
+the default shard exists to give you — but not against concurrent *inserts* originating on other
+shards. If a default mutation's correctness hinges on seeing a just-inserted global row from another
+shard within the same transaction, that ordering isn't guaranteed; design for it the way you would
+any eventually-consistent insert.
 
 ## How many shards: `NUM_SHARDS`
 

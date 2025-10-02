@@ -104,6 +104,23 @@ const deleteSharded = mutation<{ channelId: string; id: string }, void>({
   shardBy: "channelId",
   handler: (ctx, { id }) => ctx.db.delete(id),
 });
+// Privileged whole-document replace — models the admin `_system:patchDocument` path (raw table
+// names, privileged, routed onto a ring purely by RunOptions.shardId).
+const replacePriv = mutation<{ id: string; channelId: string; body: string }, void>({
+  handler: (ctx, { id, channelId, body }) => ctx.db.replace(id, { channelId, body }),
+});
+// Unsharded-table RMWs reached from a sharded mutation (blocker 2) + the default-ring control.
+const replaceSettingFromSharded = mutation<{ channelId: string; id: string; key: string }, void>({
+  shardBy: "channelId",
+  handler: (ctx, { id, key }) => ctx.db.replace(id, { key }),
+});
+const deleteSettingFromSharded = mutation<{ channelId: string; id: string }, void>({
+  shardBy: "channelId",
+  handler: (ctx, { id }) => ctx.db.delete(id),
+});
+const replaceSettingDefault = mutation<{ id: string; key: string }, void>({
+  handler: (ctx, { id, key }) => ctx.db.replace(id, { key }),
+});
 const scanPinned = mutation<{ channelId: string }, unknown[]>({
   shardBy: "channelId",
   handler: (ctx, { channelId }) => ctx.db.query("messages", "by_channel").eq("channelId", channelId).collect(),
@@ -193,6 +210,61 @@ describe("write ownership guards", () => {
     await expect(run(deleteSharded, { channelId: "chan-1", id: created.value })).rejects.toThrow(
       /runs on shard s1 but the document \(channelId="chan-5"\) routes to shard s2/,
     );
+  });
+});
+
+describe("privileged write ownership (blocker 1: privileged writes obey shard ownership)", () => {
+  const runPriv = <T = unknown>(fn: RegisteredFunction, args: unknown, shardId?: string) =>
+    exec.run<T>(fn, args, { numShards: N, path: "priv", privileged: true, shardId });
+
+  it("rejects a privileged replace of a sharded doc with NO shard override (would fork from default)", async () => {
+    const created = await run<string>(sendSharded, { channelId: "chan-5", body: "a" }); // lives on s2
+    // No RunOptions.shardId → the privileged run stays on the default ring, but the doc routes to s2.
+    await expect(runPriv(replacePriv, { id: created.value, channelId: "chan-5", body: "b" })).rejects.toThrow(
+      /runs on shard default but the document \(channelId="chan-5"\) routes to shard s2/,
+    );
+  });
+
+  it("succeeds when the privileged replace is routed to the doc's home shard", async () => {
+    const created = await run<string>(sendSharded, { channelId: "chan-5", body: "a" }); // s2
+    const r = await runPriv(replacePriv, { id: created.value, channelId: "chan-5", body: "b" }, "s2");
+    expect(r.committed).toBe(true);
+    const back = await run(getDocQuery, { id: created.value });
+    expect((back.value as { body: string }).body).toBe("b");
+  });
+
+  it("rejects a privileged replace routed to the WRONG shard", async () => {
+    const created = await run<string>(sendSharded, { channelId: "chan-5", body: "a" }); // s2
+    await expect(runPriv(replacePriv, { id: created.value, channelId: "chan-5", body: "b" }, "s1")).rejects.toThrow(
+      /runs on shard s1 but the document \(channelId="chan-5"\) routes to shard s2/,
+    );
+  });
+});
+
+describe("unsharded-table RMW ownership (blocker 2: global docs owned by the default ring)", () => {
+  it("rejects a REPLACE of an unsharded doc from a sharded mutation, naming the fix", async () => {
+    const created = await run<string>(writeSetting, { key: "theme" }); // on default
+    await expect(run(replaceSettingFromSharded, { channelId: "chan-1", id: created.value, key: "dark" })).rejects.toThrow(
+      /table 'settings' is not sharded.*owned by the 'default' shard.*mutation runs on shard s1.*without shardBy/s,
+    );
+  });
+
+  it("rejects a DELETE of an unsharded doc from a sharded mutation", async () => {
+    const created = await run<string>(writeSetting, { key: "theme" });
+    await expect(run(deleteSettingFromSharded, { channelId: "chan-1", id: created.value })).rejects.toThrow(
+      /table 'settings' is not sharded.*owned by the 'default' shard/s,
+    );
+  });
+
+  it("still allows an INSERT into an unsharded table from a sharded mutation (fork-free)", async () => {
+    const r = await run<string>(writeSettingFromSharded, { channelId: "chan-1", key: "k" });
+    expect(r.committed).toBe(true);
+  });
+
+  it("allows a default (no-shardBy) mutation to REPLACE an unsharded doc", async () => {
+    const created = await run<string>(writeSetting, { key: "theme" });
+    const r = await run(replaceSettingDefault, { id: created.value, key: "dark" });
+    expect(r.committed).toBe(true);
   });
 });
 

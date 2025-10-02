@@ -9,7 +9,7 @@
  */
 import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId, type ShardId } from "@stackbase/id-codec";
+import { decodeStorageTableId, decodeDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
@@ -178,6 +178,10 @@ export class EmbeddedRuntime {
      *  identically to one made during `create()`. Defaults to 1 (byte-identical to before) when
      *  `EmbeddedRuntimeOptions.numShards` is unset. */
     private readonly numShards: number,
+    /** The SAME catalog the executor/kernel enforce ownership against — so `runSystem`'s privileged
+     *  doc-mutation routing (`resolveDocMutationShard`) reads a table's `shardKey` from the exact
+     *  source of truth the guards use, and can never disagree with them. */
+    private readonly catalog: IndexCatalog,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -448,7 +452,7 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
-      oracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards,
+      oracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
     );
   }
 
@@ -576,11 +580,60 @@ export class EmbeddedRuntime {
     return result.value;
   }
 
-  /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
-  async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+  /**
+   * The privileged built-in doc mutations whose target is a USER table (and thus may be sharded).
+   * These are the ONLY `runSystem` paths that need shard routing — every other `_system:*`/
+   * `_storage:*`/`_test:*` built-in writes UNSHARDED component-internal tables, which are owned by
+   * the default ring (INSERT from any ring; RMW on default), so they need no override.
+   */
+  private static readonly DOC_MUTATION_PATHS: ReadonlySet<string> = new Set([
+    "_system:patchDocument",
+    "_system:deleteDocument",
+    "_system:insertDocument",
+  ]);
+
+  /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API).
+   *  For a doc mutation on a user table, the target document's OWNING shard is resolved and passed
+   *  through so the privileged write lands on the same ring a user's sharded mutation of that doc
+   *  would — one-doc-one-ring. `opts.shardId` lets a trusted caller override the resolution. */
+  async runSystem<T = unknown>(path: string, args: JSONValue, opts?: { shardId?: ShardId }): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
+    let shardId = opts?.shardId;
+    if (shardId === undefined && this.numShards > 1 && EmbeddedRuntime.DOC_MUTATION_PATHS.has(path)) {
+      shardId = await this.resolveDocMutationShard(path, args);
+    }
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards, shardId });
+  }
+
+  /**
+   * Resolve the owning shard for a privileged admin doc mutation so the write commits on the SAME
+   * ring a user's sharded mutation of that document would use (the one-doc-one-ring invariant).
+   * Without this, a dashboard edit of a sharded doc runs on the default ring and forks the doc's
+   * prev_ts chain against its home-shard writer — a permanent tailer halt + a silently-lost update.
+   *
+   * The shard-key field is IMMUTABLE after insert, so peeking the current doc's key value BEFORE the
+   * transaction is race-free (its shard can't have changed by the time the txn opens). An unsharded
+   * target (component tables, or app tables with no `.shardKey`) resolves to `"default"` — its RMW
+   * ring per the same invariant. Called only for `DOC_MUTATION_PATHS` when `numShards > 1`.
+   */
+  private async resolveDocMutationShard(path: string, args: JSONValue): Promise<ShardId> {
+    const a = args as Record<string, unknown>;
+    if (path === "_system:insertDocument") {
+      // INSERT: route by the shard-key value in the incoming fields (privileged uses the raw table name).
+      const meta = this.catalog.getTable(a.table as string);
+      if (!meta?.shardKey) return DEFAULT_SHARD;
+      const fields = a.fields as Record<string, unknown> | undefined;
+      return shardIdForKeyValue(fields?.[meta.shardKey], this.numShards);
+    }
+    // PATCH / DELETE: route by the EXISTING document's immutable shard-key value.
+    const internalId = decodeDocumentId(a.id as string);
+    const meta = this.catalog.getTableByNumber(internalId.tableNumber);
+    if (!meta?.shardKey) return DEFAULT_SHARD;
+    const latest = await this.store.get(internalId);
+    if (!latest) return DEFAULT_SHARD; // missing → the system fn itself throws DocumentNotFound
+    const doc = latest.value.value as Record<string, unknown>;
+    return shardIdForKeyValue(doc[meta.shardKey], this.numShards);
   }
 
   /** Run a privileged admin built-in (`_admin:*`) once (e.g. for the HTTP fallback). Trusted callers only. */

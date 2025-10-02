@@ -125,6 +125,16 @@ export interface RunOptions {
    * behavior is byte-identical to a non-sharded engine. T5 threads the real value from boot.
    */
   numShards?: number;
+  /**
+   * Explicit shard override for the transaction — honored ONLY when `privileged: true`. A
+   * privileged run (admin `_system:*` doc edits, drivers) skips the shardBy *declaration* path, so
+   * this is its ONLY way onto a non-default ring: the admin/system layer resolves a document's
+   * owning shard from its (immutable) shard-key value and passes it here, so a privileged write of
+   * a sharded doc lands on the doc's home ring instead of forking its prev_ts chain from the default
+   * ring. Ignored for non-privileged callers — their shard comes solely from `shardBy` (one-ring
+   * invariant: user code declares its shard, it never overrides it).
+   */
+  shardId?: ShardId;
 }
 
 export interface UdfResult<T = unknown> {
@@ -180,6 +190,7 @@ export class InlineUdfExecutor {
     // that declare `shardBy` are routed; a query or a no-`shardBy` mutation runs on "default"
     // (all guards short-circuit). The resolved value is canonicalized + jump-hashed by id-codec.
     const numShards = options.numShards ?? 1;
+    const privileged = options.privileged ?? false;
     const shardDeclared = fn.type === "mutation" && fn.shardBy !== undefined;
     let shardId: ShardId = DEFAULT_SHARD;
     if (shardDeclared) {
@@ -197,6 +208,11 @@ export class InlineUdfExecutor {
         }
       }
       shardId = shardIdForKeyValue(shardKeyValue, numShards);
+    } else if (privileged && options.shardId !== undefined) {
+      // Privileged override (admin/system layer): the ONLY way a privileged run reaches a
+      // non-default ring, since it skips shardBy declaration. Non-privileged callers can't set
+      // this — their shard comes solely from shardBy (one-doc-one-ring invariant).
+      shardId = options.shardId;
     }
     const seed = options.seed ?? 0;
     const clock = this.deps.now ?? Date.now;
@@ -225,7 +241,7 @@ export class InlineUdfExecutor {
           random: createSeededRandom(seed),
           logs: [],
           namespace: options.namespace ?? "",
-          privileged: options.privileged ?? false,
+          privileged,
           identity: options.identity ?? null,
           now: startedAt,
           policyRegistry: new Map(),

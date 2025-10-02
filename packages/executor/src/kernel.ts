@@ -13,6 +13,7 @@ import {
   getFullTableName,
   parseFullTableName,
   shardIdForKeyValue,
+  DEFAULT_SHARD,
   type ShardId,
 } from "@stackbase/id-codec";
 import { indexKeyspaceId, keySuccessor, encodeIndexKey, indexKeysEqual, type IndexableValue, type KeyRange } from "@stackbase/index-key-codec";
@@ -129,11 +130,20 @@ function requireOwnTable(ctx: KernelContext, fullName: string): void {
 }
 
 // ── Shard ownership guards (D3) ──────────────────────────────────────────────────────────────
-// Always-on at every tier (Tier-0 SQLite, `stackbase dev`'s 8 virtual shards, fleet). Every guard
-// short-circuits when the target table is unsharded (`meta.shardKey` null) OR the run is privileged
-// (admin/driver) — so an app with no `.shardKey` never evaluates any of this (zero overhead), and
-// the error messages are written as product copy: they name the table, the shard-key field, both
-// shards, and the exact fix.
+// Always-on at every tier (Tier-0 SQLite, `stackbase dev`'s 8 virtual shards, fleet). The one
+// invariant these enforce: EVERY document has exactly ONE owning ring for its whole life — a
+// sharded doc is owned by the shard of its (immutable) shard-key value; an unsharded doc is owned
+// by the `"default"` shard for read-modify-write purposes. An app with no `.shardKey` never
+// evaluates any of the sharded-table branches (zero overhead), and the error messages are written
+// as product copy: they name the table, the shard-key field, both shards, and the exact fix.
+//
+// WRITE ownership is enforced for PRIVILEGED runs too (admin `_system:*` doc edits, drivers): a
+// privileged write forks a doc's prev_ts chain exactly as a user write does, so it must land on the
+// doc's owning ring. Privileged runs skip only the shardBy *declaration* requirement (they route
+// via `RunOptions.shardId`, set by the admin/system layer from the doc's key), never ownership.
+// READ guards keep the privileged bypass: admin reads are cross-shard by nature and — unlike
+// writes — a read can never fork a prev_ts chain, so reading any shard from a privileged run is
+// safe. (For non-privileged runs, `shardDeclared` is false ⇒ read guards already short-circuit.)
 
 /** Route a document to its shard by the value of its shard-key field. */
 function shardOfDoc(ctx: KernelContext, shardKey: string, doc: DocumentValue): ShardId {
@@ -141,14 +151,33 @@ function shardOfDoc(ctx: KernelContext, shardKey: string, doc: DocumentValue): S
 }
 
 /**
- * Write guard: a document written to a sharded table must route to the running mutation's shard.
- * A no-`shardBy` ("default") mutation may not write a sharded table at all. No-op for unsharded
- * tables / privileged runs.
+ * Write guard. For a SHARDED table: the document must route to the running transaction's shard; a
+ * non-privileged no-`shardBy` ("default") mutation may not write it at all. For an UNSHARDED table:
+ * INSERT is fork-free (a fresh unique id, no concurrent-prev race) and allowed from any shard, but
+ * REPLACE/DELETE re-modifies an existing row's chain and so must run on the owning `"default"` ring
+ * — from any other ring it is an instructive error (a cross-ring RMW would lose updates). Applies to
+ * privileged runs too: the admin/system layer routes an unsharded target to `"default"`, so a
+ * correctly-routed privileged RMW passes; only a mis-routed one trips this.
  */
 function enforceShardWrite(ctx: KernelContext, meta: TableMeta, doc: DocumentValue, op: "insert" | "replace" | "delete"): void {
   const shardKey = meta.shardKey;
-  if (!shardKey || ctx.privileged) return;
-  if (!ctx.shardDeclared) {
+  if (!shardKey) {
+    // Unsharded table: owned by the default ring for RMW. INSERT is exempt; REPLACE/DELETE off the
+    // default ring is rejected (blocker 2 — cross-ring global RMWs lose updates).
+    if (op !== "insert" && ctx.shardId !== DEFAULT_SHARD) {
+      throw new ForbiddenOperationError(
+        `table '${meta.name}' is not sharded, so its documents are owned by the 'default' shard; ` +
+          `a ${op} of one must run on the default shard, but this mutation runs on shard ${ctx.shardId}. ` +
+          `Run this update from a mutation without shardBy (which runs on the default shard), or ` +
+          `restructure so the sharded mutation only INSERTS into '${meta.name}' (inserts are allowed from any shard).`,
+      );
+    }
+    return;
+  }
+  // Declaration requirement is for NON-privileged callers only; a privileged run (admin/system/
+  // driver) skips the shardBy DECLARATION but is still held to shard OWNERSHIP below via the
+  // `RunOptions.shardId` its caller resolved from the document's key.
+  if (!ctx.privileged && !ctx.shardDeclared) {
     throw new ForbiddenOperationError(
       `table '${meta.name}' is sharded by '${shardKey}', but this mutation does not declare a shard, ` +
         `so it runs on the 'default' shard and may not write sharded tables. ` +
