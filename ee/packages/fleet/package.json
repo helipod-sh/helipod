@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "pg": "^8.13.1",
+    "@stackbase/errors": "workspace:*",
     "@stackbase/docstore-postgres": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",

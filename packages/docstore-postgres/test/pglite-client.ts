@@ -46,6 +46,23 @@ export class PgliteClient implements PgClient {
     return true;
   }
 
+  // ---- Per-shard commit pool (B2a, D1) ---------------------------------------------------------
+  // NOTE: `commitQuerierFor` is deliberately NOT implemented. PGlite is a single in-process
+  // connection with no pool, so leaving it undefined keeps `PostgresDocStore.commitWrite` on its
+  // poolless pinned-connection path — the exact path the shared conformance suite (which runs on
+  // this client) must keep proving byte-identical. The real two-connection pool is proven by the
+  // `STACKBASE_TEST_DATABASE_URL`-gated test + the T6 fleet E2E against real Postgres. The two
+  // members below ARE implemented as no-ops: they're consulted only by fleet lease code, never by
+  // the store, so they can't divert any conformance path.
+
+  /** No-op: a single in-process connection is never "lost". */
+  onShardConnectionLost(_cb: (shardId: string) => void): void {}
+
+  /** Single in-process connection: contention unobservable, mirrors `tryAcquireWriterLock`. */
+  async tryAcquireShardLock(_slot: number): Promise<boolean> {
+    return true;
+  }
+
   /** Not implemented: PGlite is a single in-process WASM instance with no cross-connection
    * notification channel to speak of; the real LISTEN/NOTIFY path is proven by the fleet E2E
    * against real Postgres, not this test client. */

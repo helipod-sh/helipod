@@ -13,6 +13,9 @@ export type FunctionReference<
 };
 
 export type Internal = {
+  "messages": {
+
+  };
   "notes": {
 
   };

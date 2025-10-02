@@ -121,6 +121,7 @@
         "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-postgres": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/errors": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
@@ -432,6 +433,9 @@
     "packages/id-codec": {
       "name": "@stackbase/id-codec",
       "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/index-key-codec": "workspace:*",
+      },
       "devDependencies": {
         "tsup": "catalog:",
         "typescript": "catalog:",

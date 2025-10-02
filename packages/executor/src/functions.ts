@@ -8,6 +8,9 @@ import type { UdfType } from "./profile";
 import type { MutationCtx, QueryCtx } from "./guest";
 import { v, type PropertyValidators, type AnyValidator, type ValidatorJSON, type ObjectType } from "@stackbase/values";
 
+/** A mutation's shard selector: a validated arg NAME (common case) or a resolver over the args. */
+export type ShardBy = string | ((args: any) => unknown);
+
 export interface RegisteredFunction {
   type: UdfType;
   handler: (ctx: unknown, args: unknown) => unknown | Promise<unknown>;
@@ -15,6 +18,13 @@ export interface RegisteredFunction {
   argsValidator?: AnyValidator;
   /** `argsValidator.toJSON()`, for codegen to emit the typed `FunctionReference`. */
   argsJson?: ValidatorJSON;
+  /**
+   * (Mutations only) which shard this mutation runs on — an arg name whose (validated) value is
+   * routed, or a resolver `(args) => value` producing the value to route. Absent → the mutation
+   * runs on the `"default"` shard (today's behavior; its writes to sharded tables error). The
+   * executor resolves this to a `ShardId` before opening the transaction (see `InlineUdfExecutor`).
+   */
+  shardBy?: ShardBy;
 }
 
 /** Build a `RegisteredFunction`, attaching an args validator when the def declares `args`. */
@@ -28,6 +38,10 @@ function build(type: UdfType, def: unknown): RegisteredFunction {
       rf.argsValidator = argsValidator;
       rf.argsJson = argsValidator.toJSON();
     }
+  }
+  if (type === "mutation" && typeof def === "object" && def !== null && "shardBy" in def) {
+    const shardBy = (def as { shardBy?: ShardBy }).shardBy;
+    if (shardBy !== undefined) rf.shardBy = shardBy;
   }
   return rf;
 }
@@ -45,11 +59,11 @@ export function query(def: unknown): RegisteredFunction {
 }
 
 type MutationDef<Args, Output> =
-  | { handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output> }
+  | { handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output>; shardBy?: ShardBy }
   | ((ctx: MutationCtx, args: Args) => Output | Promise<Output>);
 
 export function mutation<A extends PropertyValidators, Output = unknown>(
-  def: { args: A; handler: (ctx: MutationCtx, args: ObjectType<A>) => Output | Promise<Output> },
+  def: { args: A; shardBy?: string | ((args: ObjectType<A>) => unknown); handler: (ctx: MutationCtx, args: ObjectType<A>) => Output | Promise<Output> },
 ): RegisteredFunction;
 export function mutation<Args = unknown, Output = unknown>(def: MutationDef<Args, Output>): RegisteredFunction;
 export function mutation(def: unknown): RegisteredFunction {

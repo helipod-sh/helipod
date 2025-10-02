@@ -167,6 +167,38 @@ export class ServiceUnavailableError extends TransientError {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Remote errors — a typed error rehydrated after crossing a wire boundary     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A {@link StackbaseError} reconstructed from a serialized {@link StackbaseErrorJSON} that crossed a
+ * process boundary (e.g. a fleet SYNC node rehydrating the error a forwarded mutation raised on the
+ * WRITER). Carries the ORIGINAL `code`/`httpStatus`/`retryable`/`name`/`data` verbatim, so edge
+ * status mapping ({@link getHttpStatus}) and client retry semantics ({@link isRetryableError})
+ * survive the hop — without needing a code→class registry. Its `name` is the original error's
+ * concrete class name, so `instanceof StackbaseError` holds and log/message shape is preserved.
+ */
+export class RemoteError extends StackbaseError {
+  override readonly code: string;
+  override readonly httpStatus: number;
+  override readonly retryable: boolean;
+  constructor(json: StackbaseErrorJSON) {
+    super(json.message, json.data !== undefined ? { data: json.data } : undefined);
+    this.code = json.code;
+    this.httpStatus = json.httpStatus;
+    this.retryable = json.retryable;
+    this.name = json.name;
+  }
+}
+
+/** Rehydrate a {@link StackbaseError} from its serialized form (the inverse of `toJSON()`). Used at
+ *  wire boundaries so a typed error's status/code/retryable identity is not flattened to a generic
+ *  500 by {@link toStackbaseError}. */
+export function stackbaseErrorFromJSON(json: StackbaseErrorJSON): StackbaseError {
+  return new RemoteError(json);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 

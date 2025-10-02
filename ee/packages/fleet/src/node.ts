@@ -32,13 +32,14 @@ import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/
 import type { DatabaseAdapter } from "@stackbase/docstore-sqlite";
 import type { DocStore } from "@stackbase/docstore";
 import type { JSONValue } from "@stackbase/values";
+import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
 import {
   InMemoryWriteFanoutAdapter,
   type EmbeddedRuntime,
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
-import { LeaseManager } from "./lease";
+import { LeaseManager, type TryRunExclusiveOnShard } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
 import { FencedError } from "./fenced-error";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
@@ -59,6 +60,154 @@ export const REPLICA_DB_FILENAME = "fleet-replica.db";
 /** Default lease TTL (ms) when `STACKBASE_FLEET_LEASE_TTL_MS` is unset — mirrors `lease.ts`'s own
  *  default so the two never drift. */
 export const DEFAULT_LEASE_TTL_MS = 15_000;
+
+/** Default number of shards a fleet node runs (B2a). T5 owns the persist-once/env/`STACKBASE_FLEET_
+ *  SHARDS` story; this task threads it as a plain parameter (`prepareFleetNode`'s `numShards` dep),
+ *  defaulting here. The one node holds ALL N shard leases, commits in parallel across them (per-shard
+ *  commit-connection pool + per-shard `ShardedTransactor` mutexes), and F = min over the N frontiers. */
+export const DEFAULT_NUM_SHARDS = 8;
+
+/** Idle-shard frontier-closing cadence (B2a, D5). The periodic beat runs every `FRONTIER_BEAT_MS`;
+ *  a local commit additionally schedules a coalesced beat `FRONTIER_COALESCE_MS` later (so an idle
+ *  shard un-pins F within ~10ms of a commit on a sibling shard, not the full 100ms). */
+export const FRONTIER_BEAT_MS = 100;
+export const FRONTIER_COALESCE_MS = 10;
+/** Frontier-lag warn threshold (ms): if `min(frontier_ts)` hasn't advanced in this long, the writer
+ *  logs a warning naming the pinning shard (D5 observability). Also the health endpoint's warn line. */
+export const FRONTIER_LAG_WARN_MS = 5_000;
+
+/** A point-in-time frontier-lag reading for the health endpoint (D5): the fleet-wide fenced frontier
+ *  (`min(frontier_ts)` across all shard rows), how long (wall-clock ms) it has been stuck at that
+ *  value, and which shard is holding it there. */
+export interface FrontierStats {
+  frontier: bigint;
+  lagMs: number;
+  pinningShard: ShardId;
+}
+
+/**
+ * Fleet frontier-lag monitor + (writer-only) idle-shard closer (B2a, D5). One runs per fleet node:
+ *
+ *  - On the WRITER (`closeIdle: true`) each beat first CLOSES idle shards — `lease.closeIdleFrontiers`
+ *    allocates one `nextval` and advances every held shard whose frontier lags it — so an idle shard
+ *    can't pin `F = min(frontier_ts)` below the live commit position for more than a beat. A local
+ *    commit also schedules a coalesced beat (~10ms) so F reacts promptly to writes on sibling shards.
+ *  - On EITHER role each beat then READS all shard frontiers to compute `min` + the pinning shard and
+ *    track how long `min` has been stuck (wall-clock since it last advanced) → the `FrontierStats`
+ *    the health endpoint reports. A lag past `lagWarnMs` logs a warning naming the pinning shard
+ *    (once per stall, reset when it recovers), the console signal D5 asks for.
+ *
+ * A sync node runs it read-only (`closeIdle: false`) — it holds no leases, so it must NOT allocate
+ * `nextval` (only the writer drives the frontier); it just observes whether the fleet frontier is
+ * advancing.
+ */
+export class FrontierMonitor {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
+  private running = false;
+  private cached: FrontierStats | null = null;
+  /** The last-observed `min(frontier_ts)` and the wall-clock time it was first seen — lag is the age
+   *  of the CURRENT min (how long it's been stuck), so both reset whenever min advances. */
+  private lastMin: bigint | null = null;
+  private minSinceMs: number;
+  private warned = false;
+
+  constructor(
+    private readonly lease: LeaseManager,
+    private readonly opts: {
+      closeIdle: boolean;
+      /** Per-shard commit-mutex seam the idle-frontier closer runs each bump under (see
+       *  `closeIdleFrontiers`). Required when `closeIdle` is true; ignored otherwise. */
+      runExclusiveOnShard?: TryRunExclusiveOnShard;
+      beatMs?: number;
+      coalesceMs?: number;
+      lagWarnMs?: number;
+      now?: () => number;
+      warn?: (msg: string) => void;
+    },
+  ) {
+    this.minSinceMs = (opts.now ?? Date.now)();
+  }
+
+  private get now(): () => number {
+    return this.opts.now ?? Date.now;
+  }
+
+  start(): void {
+    if (this.stopped || this.timer !== null) return;
+    void this.beat(); // seed stats immediately so /api/health has a reading from the first request
+    this.timer = setInterval(() => void this.beat(), this.opts.beatMs ?? FRONTIER_BEAT_MS);
+  }
+
+  /** Schedule a single coalesced beat `coalesceMs` out — called on each local commit so an idle
+   *  sibling shard un-pins F within ~10ms instead of waiting out the periodic beat. Multiple commits
+   *  inside the window collapse onto one beat. */
+  triggerCoalesced(): void {
+    if (this.stopped || this.coalesceTimer !== null) return;
+    this.coalesceTimer = setTimeout(() => {
+      this.coalesceTimer = null;
+      void this.beat();
+    }, this.opts.coalesceMs ?? FRONTIER_COALESCE_MS);
+  }
+
+  private async beat(): Promise<void> {
+    if (this.stopped || this.running) return; // never overlap two beats (one nextval per beat)
+    this.running = true;
+    try {
+      if (this.opts.closeIdle) {
+        if (!this.opts.runExclusiveOnShard) {
+          throw new Error("fleet: FrontierMonitor closeIdle requires a runExclusiveOnShard seam (bug)");
+        }
+        await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+      }
+      const rows = await this.lease.readAllFrontiers();
+      if (rows.length === 0) return;
+      const min = rows[0]!.frontierTs; // ordered ascending → first row is the pinning shard
+      const pinningShard = rows[0]!.shardId;
+      const nowMs = this.now();
+      if (this.lastMin === null || min > this.lastMin) {
+        this.lastMin = min;
+        this.minSinceMs = nowMs;
+        this.warned = false;
+      }
+      const lagMs = nowMs - this.minSinceMs;
+      this.cached = { frontier: min, lagMs, pinningShard };
+      const lagWarnMs = this.opts.lagWarnMs ?? FRONTIER_LAG_WARN_MS;
+      if (lagMs > lagWarnMs && !this.warned) {
+        this.warned = true;
+        (this.opts.warn ?? ((m: string) => console.warn(m)))(
+          `fleet: frontier stuck for ${lagMs}ms at ${min} — shard '${pinningShard}' is pinning F`,
+        );
+      }
+    } catch {
+      // A transient read/close failure must not kill the beat loop — the next beat retries. (On the
+      // writer, a persistent failure to close idle shards surfaces as growing lag, which is exactly
+      // what the warn above reports.)
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /** The most recent frontier reading, or null if no beat has completed yet. `lagMs` is recomputed
+   *  against the current clock so a caller between beats still sees a fresh age. */
+  stats(): FrontierStats | null {
+    if (this.cached === null) return null;
+    return { ...this.cached, lagMs: this.now() - this.minSinceMs };
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.coalesceTimer !== null) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+  }
+}
 
 /**
  * Derive the failover cadences from a single knob, the lease TTL. Every timing that must stay in a
@@ -113,6 +262,18 @@ function deleteReplicaFile(path: string): void {
  * name is always deterministic and non-empty. Exported so failover tooling/tests can reconstruct a
  * specific node's discriminator without guessing.
  */
+/**
+ * True if the `documents` MVCC-log table already exists on `client`'s database. Used at writer
+ * election (which runs BEFORE `setupSchema` creates the table) to decide whether a first-created
+ * shard-lease row can safely seed its frontier from `SELECT MAX(ts) FROM documents` — referencing a
+ * non-existent `documents` in that INSERT subquery would fail to plan on a fresh database. `to_regclass`
+ * returns NULL for an absent relation rather than erroring, so this is a safe pre-DDL probe.
+ */
+async function documentsTableExists(client: NodePgClient): Promise<boolean> {
+  const rows = await client.query(`SELECT to_regclass('documents') IS NOT NULL AS present`);
+  return rows[0]?.present === true;
+}
+
 export function fleetApplicationName(advertiseUrl: string): string {
   let discriminator = advertiseUrl;
   try {
@@ -139,6 +300,10 @@ export interface FleetHandles {
   writerUrl(): Promise<string>;
   /** Register a callback fired once, when this node is promoted from sync to writer. */
   onPromoted(cb: () => void): void;
+  /** The current frontier-lag reading (D5 health observability): `min(frontier_ts)` across shards,
+   *  how long it's been stuck (ms), and the pinning shard. Null before the first frontier beat, or if
+   *  no shard rows exist yet. */
+  frontierStats(): FrontierStats | null;
   stop(): Promise<void>;
 }
 
@@ -150,6 +315,10 @@ export interface FleetRuntimeOptions {
   writeRouter: WriteRouter;
   deferDrivers: boolean;
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+  /** Number of shards this node's runtime runs (B2a). Threaded to `createEmbeddedRuntime`, which
+   *  builds ONE `ShardedTransactor` (N per-shard mutexes) over the pooled store instead of the
+   *  single-shard `SingleWriterTransactor` when >1 — so cross-shard commits run in parallel. */
+  numShards: number;
 }
 
 export interface FleetPrep {
@@ -169,6 +338,9 @@ export interface FleetPrep {
   lease: LeaseManager;
   forwarder: WriteForwarder;
   role: "sync" | "writer";
+  /** The shard count decided at boot — threaded through to `startFleetNode` (acquire-all loop,
+   *  all-rows seed, per-shard commit guard, idle closer) and the tailer's `count(*) < N` ready gate. */
+  numShards: number;
   runtimeOptions: FleetRuntimeOptions;
 }
 
@@ -303,8 +475,18 @@ export async function prepareFleetNode(deps: {
    *  `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning; the wedged-writer E2E uses 4000). Default 15000
    *  reproduces the historical constants exactly. */
   leaseTtlMs?: number;
+  /** Number of shards this fleet runs (B2a). This task threads it as a plain parameter (default 8);
+   *  T5 owns the persist-once/`STACKBASE_FLEET_SHARDS`/mismatch-fail-fast story. Drives the commit
+   *  pool's connection set, the acquire-all loop, and the runtime's `ShardedTransactor`. */
+  numShards?: number;
 }): Promise<FleetPrep> {
   const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
+  const numShards = deps.numShards ?? DEFAULT_NUM_SHARDS;
+  // Canonical ordered shard ids (`["default","s1",…,"s{N-1}"]`) — the ONE source of truth for the
+  // slot↔shardId contract shared by the commit pool (`commitPool.shards[slot]`), the per-slot
+  // advisory locks (`tryAcquireShardLock(slot)`), and the acquire-all loop below. `shards[0]` is the
+  // default shard (the writer-election slot).
+  const shards = shardIdList(numShards);
   // Tag this node's Postgres backends so they're identifiable in `pg_stat_activity` — an operator can
   // see which fleet node owns a connection, and the writer self-exit E2E targets exactly one node's
   // backends via `pg_terminate_backend(... WHERE application_name = ...)`. Derived from the advertise
@@ -316,6 +498,11 @@ export async function prepareFleetNode(deps: {
     connectionString: deps.databaseUrl,
     applicationName,
     sessionTimeouts: FLEET_WRITER_SESSION_TIMEOUTS,
+    // Per-shard commit-connection pool (B2a, D1): one dedicated connection per shard for `commitWrite`
+    // transactions, so different shards' commits run as genuinely concurrent Postgres transactions
+    // (the pinned connection keeps heartbeats/eviction/setup/queries + LISTEN). Each slot's advisory
+    // lock is taken on its own connection, so a shard's connection death releases exactly that shard.
+    commitPool: { shards },
   });
   // Read-only until (and unless) this node wins the lease. A follower still runs the idempotent
   // DDL in setupSchema but does NOT contend for the writer advisory lock (see PostgresDocStore).
@@ -339,7 +526,19 @@ export async function prepareFleetNode(deps: {
   const fanoutAdapter = new NotifyingFanoutAdapter(new InMemoryWriteFanoutAdapter(), client);
 
   await lease.setup();
-  const acquired = await lease.tryAcquire();
+  // Writer election is the DEFAULT shard's lock (slot 0). In B2a single-node the node that wins it
+  // holds ALL shards (the remaining slots are acquired in `startFleetNode`'s writer/promotion arming);
+  // drivers run on the default-shard holder only (D5). `tryAcquire` takes slot 0's per-shard lock in
+  // pool mode, else the legacy writer lock (PGlite/no-pool) — same election either way.
+  //
+  // Seed the DEFAULT shard's first-created frontier from the store max IFF `documents` already exists
+  // (F1×N residual-window fix). This election runs BEFORE `bootProject`'s `setupSchema`, so on a fresh
+  // database `documents` does NOT exist yet — but a fresh store holds no data, so `frontier_ts = 0` is
+  // correct there. On a PRE-LOADED store (single-node `serve` upgraded to `--fleet`), `documents`
+  // already exists and this seeds the default row to the real max at INSERT time, so it is never
+  // momentarily visible at 0 while the other shards are still being acquired in `armWriter`.
+  const seedDefaultFrontier = await documentsTableExists(client);
+  const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0, seedDefaultFrontier);
 
   if (acquired) {
     // Writer boot: make the Postgres store writable and promote the forwarder so writes execute
@@ -356,11 +555,13 @@ export async function prepareFleetNode(deps: {
       lease,
       forwarder,
       role: "writer",
+      numShards,
       runtimeOptions: {
         store: pgStore,
         writeRouter: forwarder,
         deferDrivers: false,
         fanoutAdapter,
+        numShards,
       },
     };
   }
@@ -386,7 +587,8 @@ export async function prepareFleetNode(deps: {
     lease,
     forwarder,
     role: "sync",
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter },
+    numShards,
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards },
   };
 }
 
@@ -409,6 +611,12 @@ export interface StartFleetNodeDeps {
    *  defaults to `console.error` + `process.exit(1)`. Fires on writer lease loss (the lease monitor)
    *  and on a failed promotion step. */
   onExit?: (reason: string) => void;
+  /** Number of shards this node runs (B2a) — from `prepareFleetNode`'s decision (`FleetPrep.numShards`).
+   *  The writer/promotion arming acquires all N shard leases (slots 1…N-1 beyond the default), seeds
+   *  all N frontiers before ready, and drives the idle-shard closer over them. Defaults to 1 so an
+   *  older single-shard call site (the B1 lifecycle tests that drive `startFleetNode` directly) is
+   *  byte-identical — one shard, one lease, one frontier. */
+  numShards?: number;
 }
 
 /** Production exit policy: log and terminate so the node restarts and rejoins the fleet as a fresh
@@ -504,24 +712,75 @@ export function installCommitGuard(
   lease: LeaseManager,
   fireFenced: (reason: string) => void,
 ): void {
-  pgStore.setCommitGuard(async (q, commitTs) => {
-    const epoch = lease.currentEpoch();
+  pgStore.setCommitGuard(async (q, commitTs, shardId) => {
+    // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
+    // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
+    // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
+    // and self-demotes, while the other shards' commits are unaffected.
+    const epoch = lease.currentEpoch(shardId);
     if (epoch === null) {
-      // Structurally shouldn't happen — the guard is only ever installed after a successful
-      // tryAcquire() (writer boot) or promotion (which itself re-acquires). Treat defensively as
-      // fenced rather than let an inconsistent guard silently allow an unfenced commit through.
-      fireFenced("commit guard invoked with no acquired epoch");
-      throw new FencedError("commit fenced: this node has not acquired a shard_leases epoch");
+      // Structurally shouldn't happen — the guard is only ever installed after this node has acquired
+      // every shard it commits on (writer boot / promotion arming). Treat defensively as fenced rather
+      // than let an inconsistent guard silently allow an unfenced commit through.
+      fireFenced(`commit guard invoked with no acquired epoch for shard '${shardId}'`);
+      throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
+    // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
+    // frontier regression: (1) the idle-shard closer now takes THIS shard's commit mutex before
+    // bumping its frontier (`closeIdleFrontiers`), so nothing can have raised it mid-commit on the
+    // same epoch, and a cross-epoch writer is fenced by the `epoch = $3` predicate; (2) GREATEST makes
+    // the write monotone regardless. The tailer's semantics already tolerate `frontier_ts` exceeding
+    // the last committed doc ts (idle bumps do exactly that, and its empty-range advance handles it),
+    // so keeping the strictly-larger of the two is always safe. `prev_ts := frontier_ts` still records
+    // the pre-write frontier as the chain's previous link.
     const rows = await q.query(
-      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = $1 WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
-      [commitTs, "default", epoch],
+      `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
+      [commitTs, shardId, epoch],
     );
     if (rows.length === 0) {
-      fireFenced("commit guard found 0 rows for this node's epoch — superseded by another writer");
-      throw new FencedError("commit fenced: epoch no longer current");
+      fireFenced(`commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
+      throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
     }
   });
+}
+
+/**
+ * Acquire one non-default shard's lease as the writer (B2a acquire-all). `tryAcquire(shardId, slot)`
+ * epoch-bumps that shard's row (fencing any prior holder) and takes its per-shard advisory lock. If
+ * the lock is still held by a wedged prior holder AND that shard's lease has expired, fence + evict +
+ * terminate its backend (the same fencing-first eviction the default-shard acquire loop uses) and
+ * retry. Bounded by a generous deadline (~10 lease TTLs): the common failover frees every slot at once
+ * when the default-shard loop terminates the whole wedged node, so this normally succeeds on the first
+ * try (fresh boot) or right after one eviction. Exceeding the deadline throws → promotion/boot fails →
+ * the node exits and rejoins fresh, never silently running as a partial-shard writer.
+ */
+export async function acquireShardAsWriter(
+  lease: LeaseManager,
+  shardId: ShardId,
+  slot: number,
+  retryMs: number,
+  seedFrontierFromDocuments = false,
+): Promise<void> {
+  const deadline = Date.now() + Math.max(1, retryMs) * 75; // ~10 TTLs at the default cadence ratios
+  for (;;) {
+    // `seedFrontierFromDocuments`: writer-boot arming passes true (post-`setupSchema`, so `documents`
+    // exists) so a FIRST-created shard row is born seeded to the store max — never momentarily visible
+    // at frontier 0 (the F1×N residual-window fix). A re-acquire (ON CONFLICT) preserves the live
+    // frontier regardless, so this is inert on promotion where the rows already exist.
+    const state = await lease.tryAcquire(shardId, slot, seedFrontierFromDocuments);
+    if (state) return;
+    // Lock held — if this shard's lease has expired, its holder is wedged: fence + terminate so the
+    // next attempt's advisory try can win. No-op when the lease is still live (a real concurrent
+    // holder, which B2a single-node never has — belt-and-braces for the B2b multi-node future).
+    if (await lease.isExpired(shardId)) {
+      const { fenced, oldAppName } = await lease.evictExpired(shardId);
+      if (fenced && oldAppName !== null) await lease.terminateBackend(oldAppName);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`fleet: could not acquire shard '${shardId}' (slot ${slot}) lease within the deadline`);
+    }
+    await new Promise((r) => setTimeout(r, Math.max(1, retryMs)));
+  }
 }
 
 /**
@@ -532,9 +791,15 @@ export function installCommitGuard(
  */
 export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHandles> {
   const { client, pgStore, runtime, lease, forwarder, switchable, replicaPath } = deps;
+  const numShards = deps.numShards ?? 1;
+  const shards = shardIdList(numShards);
   let replica = deps.replica;
   const onExit = deps.onExit ?? defaultFleetExit;
   const promotedCbs: Array<() => void> = [];
+  // The frontier-lag monitor + (writer-only) idle-shard closer. A sync node runs it read-only so
+  // /api/health can report the fleet frontier; arming as writer replaces it with an idle-closing one.
+  let frontierMonitor: FrontierMonitor | null = null;
+  let unsubscribeCommits: (() => void) | null = null;
   const firePromoted = (): void => {
     for (const cb of promotedCbs) {
       try {
@@ -561,12 +826,15 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // then throws so `LeaseMonitor.tick()`'s catch path sees an already-exited monitor and skips
       // `recordMiss` (no double-count, no delay past this single probe).
       probe: async () => {
-        const epoch = lease.currentEpoch();
-        if (epoch === null) throw new Error("fleet: heartbeat probe with no acquired epoch (bug)");
-        const rowsUpdated = await lease.heartbeat(epoch);
-        if (rowsUpdated === 0) {
-          monitor?.fenced("heartbeat found 0 rows for this node's epoch");
-          throw new FencedError("writer lease fenced: heartbeat found 0 rows for this node's epoch");
+        // B2a: batched heartbeat over ALL held shard leases in one round-trip. `updated < expected`
+        // means at least one shard's epoch was superseded — a DEFINITIVE writer-lease loss (this one
+        // node holds every shard single-node), routed straight to `fenced()` exactly like B1's
+        // single-shard 0-row heartbeat.
+        const { updated, expected } = await lease.heartbeatAll();
+        if (expected === 0) throw new Error("fleet: heartbeat probe with no acquired leases (bug)");
+        if (updated < expected) {
+          monitor?.fenced(`batched heartbeat updated ${updated}/${expected} shard leases — an epoch was superseded`);
+          throw new FencedError(`writer lease fenced: batched heartbeat updated ${updated}/${expected} shard leases`);
         }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
@@ -583,32 +851,68 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // writer (monitor non-null). A dropped pinned connection is definitive lease loss (the advisory
   // lock is released the instant that backend goes away), so it exits immediately.
   client.onConnectionLost?.(() => monitor?.connectionLost());
+  // B2a: a dead PER-SHARD commit connection = that shard's advisory lock released = that shard's lease
+  // definitively lost. This one node holds every shard (single-node), so losing any shard means it can
+  // no longer be the writer — route to the same immediate exit as the pinned connection loss. (Once
+  // per-shard failover lands in B2b, this becomes a per-shard relinquish instead of a whole-node exit.)
+  client.onShardConnectionLost?.((shardId) => monitor?.fenced(`shard '${shardId}' commit connection lost`));
 
-  // Writer boot: nothing to start (store already writable, forwarder promoted, drivers running) —
-  // except the lease monitor, since this node is the writer from the first tick.
-  if (forwarder.isLocalWriter()) {
-    startWriterMonitor();
-    // D3: install the epoch-fenced commit guard now — this node is the writer from the first tick,
-    // so every commit from here on must be fenced against its acquired epoch. `monitor` is already
-    // non-null (startWriterMonitor() just ran), so a fenced commit routes straight to its fenced().
-    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
-    // F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): seed frontier_ts up to this store's
-    // current max document ts — HERE, not inside tryAcquire() (`prepareFleetNode` runs BEFORE
-    // `bootProject`/`setupSchema`, so `documents` may not exist yet there), and BEFORE this node is
-    // reported ready (`startFleetNode`'s return is what unblocks serve's ready line). Closes the
-    // "pre-loaded database" hole: a single-node Postgres `serve` that accumulated real data before
-    // `--fleet` was ever enabled has no `shard_leases` row, so the first `tryAcquire()` after
-    // enabling it seeds `frontier_ts=0` even though history exists — without this seed, a fresh sync
-    // node's ready gate (wm=0 < target=0) is a silent no-op and it reports ready EMPTY. GREATEST
-    // inside `seedFrontier` makes this a no-op on an already-live fleet; promotion deliberately does
-    // NOT re-seed (see `promoteFleetNode` — frontier is already live by then via the commit guard).
-    const epoch = lease.currentEpoch();
-    if (epoch === null) {
-      throw new Error(
-        "fleet: writer boot has no acquired epoch (bug: forwarder.isLocalWriter() implies tryAcquire() already ran)",
-      );
+  /**
+   * Arm this node as the writer of ALL N shards (B2a). Runs at writer boot AND on promotion:
+   *   1. Acquire the non-default shards (slots 1…N-1) — the default was already won (writer-election).
+   *      Each `tryAcquire(shardId, slot)` epoch-bumps that shard's row (fencing any prior holder) and
+   *      takes its per-shard advisory lock. A wedged prior holder whose lock lingers is fenced +
+   *      terminated (its epoch is expired) and retried — though in the common failover the default
+   *      shard's acquire loop already `pg_terminate_backend`'d the whole wedged node, freeing every
+   *      slot at once.
+   *   2. `seed=true` (fresh writer boot only): seed ALL held frontiers up to the store's max BEFORE
+   *      ready (the F1×N fix). Promotion passes `seed=false` — the frontiers are already live.
+   *   3. Install the per-shard epoch-fenced commit guard.
+   *   4. Start the idle-shard closer / frontier-lag monitor and wire a coalesced beat to local commits.
+   */
+  const armWriter = async (seed: boolean): Promise<void> => {
+    for (let slot = 1; slot < numShards; slot++) {
+      // `seed` doubles as "seed a first-created shard row's frontier from the store max" — true on
+      // writer boot (post-`setupSchema`, `documents` exists), inert on promotion (rows already exist,
+      // ON CONFLICT preserves their live frontiers). Closes the F1×N residual window at INSERT time.
+      await acquireShardAsWriter(lease, shards[slot]!, slot, fleetAcquireRetryMs(lease.ttlMs), seed);
     }
-    await lease.seedFrontier(epoch, await pgStore.maxTimestamp());
+    if (seed) await lease.seedFrontierAll(await pgStore.maxTimestamp());
+    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+    // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
+    // closer would needlessly advance the lone frontier past real commits via `nextval`). At N=1 the
+    // monitor is read-only — health stats without mutating the frontier — so single-shard behavior is
+    // byte-identical to B1.
+    const closeIdle = numShards > 1;
+    // The idle-frontier closer takes each shard's commit mutex before bumping it (the frontier-
+    // inversion fix), via the runtime's per-shard exclusion seam over the same `ShardedTransactor`
+    // that this writer's commits run on. Only consulted when `closeIdle` is true.
+    frontierMonitor = new FrontierMonitor(lease, {
+      closeIdle,
+      runExclusiveOnShard: (shardId, fn) => runtime.tryRunExclusiveOnShard(shardId, fn),
+    });
+    frontierMonitor.start();
+    // Coalesced idle-close on each LOCAL commit: a commit on one shard schedules a ~10ms beat so idle
+    // sibling shards un-pin F promptly instead of waiting out the 100ms periodic beat. `?.` — a stub
+    // runtime in unit tests may omit the fan-out adapter; the periodic beat is the correctness path.
+    if (closeIdle) {
+      unsubscribeCommits = runtime.writeFanoutAdapter?.subscribe(() => frontierMonitor?.triggerCoalesced()) ?? null;
+    }
+  };
+
+  // Writer boot: store already writable, forwarder promoted, drivers running. Arm this node as writer
+  // of ALL N shards:
+  //   - acquire the non-default shards (slots 1…N-1) — the default was won in `prepareFleetNode`;
+  //   - seed ALL held frontiers up to this store's max BEFORE ready (F1×N fix): a single-node
+  //     Postgres `serve` that accumulated data pre-`--fleet` has every shard's frontier at 0 until
+  //     seeded, so a fresh sync node's ready gate (wm=0 < target=0) would be a silent no-op and it
+  //     would report ready EMPTY. `seedFrontierAll`'s GREATEST is a no-op on an already-live fleet;
+  //   - install the per-shard commit guard + start the idle-shard closer / frontier monitor.
+  // `armWriter` does all of the above (`seed=true`). Then arm the writer lease monitor (this node is
+  // the writer from the first tick) — its batched-heartbeat probe covers every held shard.
+  if (forwarder.isLocalWriter()) {
+    await armWriter(true);
+    startWriterMonitor();
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -619,8 +923,11 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       role: () => "writer",
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
       onPromoted: (cb) => promotedCbs.push(cb),
+      frontierStats: () => frontierMonitor?.stats() ?? null,
       stop: async () => {
         monitor?.stop();
+        frontierMonitor?.stop();
+        unsubscribeCommits?.();
         lease.stop();
       },
     };
@@ -674,6 +981,9 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // each applied batch: advance the oracle, translate written keys/docs into point ranges, and
   // push the transition into the sync handler.
   const tailer = new ReplicaTailer(client, pgStore, replica, {
+    // B2a: the ready gate is F = min(frontier_ts) over all N shard rows, and the tailer refuses to
+    // treat a partial `shard_leases` (count < numShards) as ready.
+    numShards,
     onInvalidation: async (inv: AppliedInvalidation) => {
       // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits
       // this and would leave one otherwise); reactivity is best-effort — reads stay correct.
@@ -698,6 +1008,13 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // watermark to reach that write's commitTs before its next read is served off the replica.
   forwarder.attachTailer(tailer);
 
+  // Read-only frontier-lag monitor so /api/health reports the fleet frontier + pinning shard even on
+  // a sync node. It holds no leases, so `closeIdle:false` — it must NOT allocate `nextval` (only the
+  // writer drives the frontier); it just observes whether F is advancing. Replaced by the writer's
+  // idle-closing monitor if this node is promoted (armWriter stops this one first).
+  frontierMonitor = new FrontierMonitor(lease, { closeIdle: false });
+  frontierMonitor.start();
+
   let promoting = false;
   lease.acquireLoop((state) => {
     if (promoting) return;
@@ -710,12 +1027,15 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // The lease row is already upserted by the tryAcquire() inside acquireLoop before this fires.
       promote: async () => {
         await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
-        // D3: install the epoch-fenced commit guard now that promotion has succeeded — this node
-        // is the writer from here on. `startMonitor` (below) hasn't run yet, but `installCommitGuard`
-        // closes over the `monitor` variable by reference, not value, so a commit that fences AFTER
-        // `startMonitor` runs (the only time commits are even possible — drivers/writes start post-
-        // promotion) still reaches the now-non-null monitor correctly.
-        installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+        // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire the
+        // remaining shards. `seed=false`: promotion never re-seeds frontiers (they're already live —
+        // the dead writer's high-water is preserved through the epoch-bumping re-acquire). armWriter
+        // also installs the per-shard commit guard (closes over `monitor` by reference, so a fence
+        // AFTER `startMonitor` runs still reaches the now-non-null monitor).
+        frontierMonitor?.stop();
+        unsubscribeCommits?.();
+        unsubscribeCommits = null;
+        await armWriter(false);
       },
       startMonitor: startWriterMonitor,
       firePromoted,
@@ -727,8 +1047,11 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     role: () => (forwarder.isLocalWriter() ? "writer" : "sync"),
     writerUrl: async () => (await lease.read())?.writerUrl ?? "",
     onPromoted: (cb) => promotedCbs.push(cb),
+    frontierStats: () => frontierMonitor?.stats() ?? null,
     stop: async () => {
       monitor?.stop(); // disarm writer self-exit BEFORE the connection is closed (if promoted)
+      frontierMonitor?.stop();
+      unsubscribeCommits?.();
       lease.stop();
       await tailer.stop();
       // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a sync

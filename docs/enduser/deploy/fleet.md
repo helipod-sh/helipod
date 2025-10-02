@@ -369,13 +369,36 @@ unused. The same goes for turning `--fleet` on for the first time against a Post
 already has data in it from single-node use: existing data is served by sync nodes as soon as the
 first fleet writer boots — no write required to "reveal" it.
 
+## Sharding: parallel writes on the writer node
+
+[Sharding](/sharding) partitions a table's writes across multiple shards (`.shardKey()` on the
+table, `shardBy` on the mutation) instead of funneling every write through one bottleneck. On a
+fleet, the current writer node commits a sharded table's writes across its shards **in
+parallel**, through separate per-shard connections to the shared Postgres database — so a
+sharded app's write throughput on today's fleet already scales with shard count, not just with
+node count.
+
+What this slice does **not** yet do: distribute different shards' write ownership across
+*different* nodes in the fleet. Every shard's writes still land through whichever single node
+currently holds the fleet's writer role — sharding today raises the *ceiling of one node*, it
+doesn't yet spread writes across the fleet's several nodes. True multi-node write distribution
+(different shards owned and written by different fleet nodes simultaneously) is a planned
+follow-on, not built in this release. See [Sharding](/sharding) for the full `shardKey`/`shardBy`
+guide, the rules the engine enforces, and the consistency model.
+
+`/api/health` grows additive fleet fields once frontier tracking is live: a stringified overall
+progress marker, how long it's been stuck (in ms), and which shard is currently holding it back —
+useful for noticing a stalled shard before it shows up as user-visible staleness. This is
+observability only; nothing to configure.
+
 ## Current limits
 
 Be realistic about what this slice is and isn't:
 
-- **Single writer.** Exactly one node executes mutations/actions at a time — write throughput is
-  the throughput of one node, same as single-node Postgres self-hosting. Multi-writer/sharded
-  writes are a later slice, not this one.
+- **One node writes at a time; sharded writes parallelize on that node, not yet across nodes.**
+  Every shard commits through whichever single node currently holds the fleet's writer role — see
+  [Sharding: parallel writes on the writer node](#sharding-parallel-writes-on-the-writer-node)
+  above. Distributing different shards to different nodes is a planned follow-on, not this slice.
 - **A sync node's data-directory uniqueness isn't validated.** Nothing stops you from accidentally
   pointing two nodes at the same `--data`/`STACKBASE_DATA_DIR` directory — see
   [Requirements](#requirements) above. Get this wrong and both nodes' replica state corrupts
@@ -397,6 +420,8 @@ Be realistic about what this slice is and isn't:
 
 ## Related
 
+- [Sharding](/sharding) — partitioning a table's writes across shards; the parallel-writes status
+  above is this fleet's current sharding story.
 - [Docker Self-Hosting](/self-hosting) — the single-node baseline this builds on, including
   [Using Postgres](/self-hosting#using-postgres) (the storage backend a fleet requires).
 - [`stackbase deploy`](/deploying) — live code push to an already-running `serve`. Works the same

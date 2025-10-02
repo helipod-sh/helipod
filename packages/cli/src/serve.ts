@@ -5,9 +5,10 @@
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
-import { bootProject, isPostgresUrl, loadDashboard } from "./boot";
+import { bootProject, isPostgresUrl, loadDashboard, resolveNumShards, parseNumShards } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
@@ -28,6 +29,9 @@ export interface FleetRuntimeOptions {
   writeRouter: WriteRouter;
   deferDrivers: boolean;
   fanoutAdapter?: EmbeddedWriteFanoutAdapter;
+  /** Shards B2a: number of shards this node runs — threaded into `createEmbeddedRuntime` (>1 builds a
+   *  `ShardedTransactor` over the pooled store for per-shard parallel commits). */
+  numShards: number;
 }
 
 /** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here
@@ -45,6 +49,9 @@ export interface FleetPrep {
   lease: unknown;
   forwarder: unknown;
   role: "sync" | "writer";
+  /** Shards B2a: shard count decided at boot — threaded to `startFleetNode` (acquire-all, seed-all,
+   *  per-shard guard, idle closer, tailer count gate). */
+  numShards: number;
   runtimeOptions: FleetRuntimeOptions;
 }
 
@@ -58,6 +65,9 @@ export interface FleetModule {
     /** Lease TTL in ms — the failover-clock knob (see `@stackbase/fleet`'s `node.ts`). Threaded from
      *  `STACKBASE_FLEET_LEASE_TTL_MS`; undefined → the fleet default (15000). Ops/test tuning. */
     leaseTtlMs?: number;
+    /** Shards B2a: shard count (default 8 in the fleet package). T5 owns the persist-once/env story;
+     *  serve threads a plain number (undefined → fleet default). */
+    numShards?: number;
   }): Promise<FleetPrep>;
   startFleetNode(deps: {
     client: unknown;
@@ -68,6 +78,8 @@ export interface FleetModule {
     replica?: unknown;
     switchable?: unknown;
     replicaPath?: string;
+    /** Shards B2a: from `FleetPrep.numShards` — drives the acquire-all/seed-all/idle-closer. */
+    numShards?: number;
   }): Promise<FleetHandles>;
 }
 
@@ -130,6 +142,30 @@ function parseLeaseTtlMs(raw: string | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * Shards B2a (T5): resolve (and, on a fresh deployment, persist) NUM_SHARDS BEFORE
+ * `prepareFleetNode` runs — it needs the final count up front to size the per-shard
+ * commit-connection pool, well before `bootProject`'s `createEmbeddedRuntime` ever calls
+ * `setupSchema()` on the real runtime store. Opens its own short-lived `NodePgClient` (no commit
+ * pool — this is a one-shot KV read/maybe-write, not a shard writer) against the SAME database
+ * `--database-url`/`STACKBASE_DATABASE_URL` names, runs `setupSchema()` (idempotent DDL only —
+ * `readOnly: true` skips just the writer-lock/ts-seq seeding, not the DDL, so `persistence_globals`
+ * is guaranteed to exist afterward even on a brand-new database) and delegates to the shared
+ * `resolveNumShards` (same persist-once/mismatch-fail-fast contract non-fleet boot uses in
+ * `boot.ts`). Any fleet node — writer or sync — can safely do this: `getGlobal`/
+ * `writeGlobalIfAbsent` are plain KV ops, not gated by the store's read-only flag.
+ */
+async function resolveFleetNumShards(databaseUrl: string, envValue: number | undefined): Promise<number> {
+  const client = new NodePgClient({ connectionString: databaseUrl });
+  try {
+    const probe = new PostgresDocStore(client, { readOnly: true });
+    await probe.setupSchema();
+    return await resolveNumShards(probe, envValue);
+  } finally {
+    await client.close();
+  }
+}
+
 export function resolveServeOptions(args: string[]): ServeOptions {
   let convexDir = "convex";
   let dataPath = process.env.STACKBASE_DATA_DIR ? join(process.env.STACKBASE_DATA_DIR, "db.sqlite") : "./data/db.sqlite";
@@ -181,7 +217,7 @@ export async function startServe(
   opts: ServeOptions & {
     adminKey: string;
     fleetModule?: FleetModule;
-    fleetConfig?: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number };
+    fleetConfig?: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number; numShards?: number };
   },
 ): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime; fleet?: FleetHandles; role?: "sync" | "writer" }> {
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
@@ -223,6 +259,7 @@ export async function startServe(
           replica: prep.replica,
           switchable: prep.switchable,
           replicaPath: prep.replicaPath,
+          numShards: prep.numShards,
         })
       : undefined;
 
@@ -274,7 +311,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   // Fleet mode: validate prerequisites and load the enterprise package (dynamic import only —
   // never a static dependency of core cli), failing fast with actionable messages.
   let fleetModule: FleetModule | undefined;
-  let fleetConfig: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number } | undefined;
+  let fleetConfig: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number; numShards?: number } | undefined;
   if (opts.fleet) {
     const v = validateFleetOptions(opts);
     if (!v.ok) {
@@ -291,12 +328,27 @@ export async function serveCommand(args: string[]): Promise<number> {
       process.stderr.write(`✗ ${FLEET_ERR_NO_PACKAGE}\n`);
       return 1;
     }
+    // `STACKBASE_FLEET_SHARDS` (Shards B2a, T5): NUM_SHARDS, persisted once at first boot and
+    // immutable after — resolved BEFORE `prepareFleetNode` (which needs the final count up front
+    // to size the per-shard commit pool). A mismatch against the persisted count fails boot fast.
+    let numShards: number;
+    try {
+      numShards = await resolveFleetNumShards(v.databaseUrl, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
+    } catch (e) {
+      process.stderr.write(`✗ ${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
     // `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning): the lease TTL in ms, the single knob the
     // whole failover clock scales from inside `@stackbase/fleet` (heartbeat + acquire cadences are
     // derived from it). Unset → the fleet default (15000ms, behavior-identical to the historical
     // constants). Only a positive finite number is honored; anything else falls through to the
     // default. The wedged-writer E2E sets this to 4000 so failover completes in a test's timescale.
-    fleetConfig = { databaseUrl: v.databaseUrl, advertiseUrl: v.advertiseUrl, leaseTtlMs: parseLeaseTtlMs(process.env.STACKBASE_FLEET_LEASE_TTL_MS) };
+    fleetConfig = {
+      databaseUrl: v.databaseUrl,
+      advertiseUrl: v.advertiseUrl,
+      leaseTtlMs: parseLeaseTtlMs(process.env.STACKBASE_FLEET_LEASE_TTL_MS),
+      numShards,
+    };
   }
 
   const { server, store, role, fleet } = await startServe({ ...opts, adminKey, fleetModule, fleetConfig });

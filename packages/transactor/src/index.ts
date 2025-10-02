@@ -15,6 +15,10 @@ export type {
 
 export { SingleWriterTransactor, type SingleWriterTransactorOptions } from "./single-writer-transactor";
 
+export { ShardedTransactor, type ShardedTransactorOptions } from "./sharded-transactor";
+
+export { ShardWriter, type RecentCommit } from "./shard-writer";
+
 export {
   HeadroomTracker,
   HeadroomExceededError,

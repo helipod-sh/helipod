@@ -13,6 +13,11 @@ export type FunctionReference<
 };
 
 export type Api = {
+  "messages": {
+    list: FunctionReference<"query", "public", any, any>;
+    send: FunctionReference<"mutation", "public", { channelId: string; body: string }, any>;
+    sendMisrouted: FunctionReference<"mutation", "public", { channelId: string; misroutedTo: string; body: string }, any>;
+  };
   "notes": {
     add: FunctionReference<"mutation", "public", any, any>;
     addViaAction: FunctionReference<"action", "public", any, any>;

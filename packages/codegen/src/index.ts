@@ -21,3 +21,6 @@ export { generateDataModel, generateApi, generateInternalApi, generateServer, ge
 
 export type { WriteResult } from "./write";
 export { writeGenerated } from "./write";
+
+export type { ShardByDeclaration } from "./shard-check";
+export { validateShardByDeclarations, assertShardByDeclarations } from "./shard-check";

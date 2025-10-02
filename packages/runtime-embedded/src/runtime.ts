@@ -9,12 +9,12 @@
  */
 import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId } from "@stackbase/id-codec";
+import { decodeStorageTableId, decodeDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
+import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
 import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
@@ -116,6 +116,22 @@ export interface EmbeddedRuntimeOptions {
    * wants drivers running once/if it becomes the writer.
    */
   deferDrivers?: boolean;
+  /**
+   * Number of shards to run (Shards B2a). When `> 1`, the runtime builds ONE `ShardedTransactor`
+   * (N independent per-shard mutexes + OCC rings + oracles) over the store instead of the
+   * single-shard `SingleWriterTransactor`, so mutations routed to different shards commit in
+   * parallel. Unset / `1` → the single-shard transactor, byte-identical to before (the existing
+   * suites are the proof). The executor resolves each mutation's shard (`shardBy`) and passes it
+   * through `runInTransaction({ shardId })`; a fleet writer pairs this with the per-shard commit
+   * pool so different shards' commits are genuinely concurrent Postgres transactions.
+   */
+  numShards?: number;
+}
+
+/** The minimal timestamp-observer seam `observeTimestamp` delegates to — a `MonotonicTimestampOracle`
+ *  (single-shard) or a `ShardedTransactor` (which fans a learned ts to every shard oracle). */
+interface TimestampObserver {
+  observeTimestamp(ts: bigint): void;
 }
 
 export class EmbeddedRuntime {
@@ -143,8 +159,12 @@ export class EmbeddedRuntime {
      * reassigning the field) keeps that closure correct without any circular-reference dance.
      */
     private tableNumberToName: Map<number, string>,
-    /** The transactor's timestamp oracle; `observeTimestamp` delegates straight to it. */
-    private readonly oracle: MonotonicTimestampOracle,
+    /** The transactor's timestamp observer (the single-shard oracle, or the `ShardedTransactor`
+     *  itself); `observeTimestamp` delegates straight to it. */
+    private readonly oracle: TimestampObserver,
+    /** The write path — retained so a fleet writer can take a shard's commit mutex non-blockingly
+     *  (`tryRunExclusiveOnShard`) to close idle frontiers without racing that shard's own commits. */
+    private readonly transactor: SingleWriterTransactor | ShardedTransactor,
     /** Threaded from `create()` so `startDrivers()` can start deferred drivers later. */
     private readonly driverCtx: DriverContext,
     /** Mutable: false when `deferDrivers` was set and `startDrivers()` hasn't run yet. */
@@ -152,6 +172,16 @@ export class EmbeddedRuntime {
     /** When set and `isLocalWriter()` is false, every mutation/action entry point forwards
      *  through it instead of executing locally. Queries never consult this. */
     private readonly writeRouter: WriteRouter | undefined,
+    /** Shards B2a (T5): the SAME resolved count `create()` used to build the transactor and every
+     *  closure's `RunOptions.numShards` — instance methods (`run`/`runAction`/`runHttpAction`/
+     *  `runSystem`/`runAdmin`) thread it through here so a call made AFTER construction routes
+     *  identically to one made during `create()`. Defaults to 1 (byte-identical to before) when
+     *  `EmbeddedRuntimeOptions.numShards` is unset. */
+    private readonly numShards: number,
+    /** The SAME catalog the executor/kernel enforce ownership against — so `runSystem`'s privileged
+     *  doc-mutation routing (`resolveDocMutationShard`) reads a table's `shardKey` from the exact
+     *  source of truth the guards use, and can never disagree with them. */
+    private readonly catalog: IndexCatalog,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -163,9 +193,30 @@ export class EmbeddedRuntime {
     // Recover the timestamp high-water mark from persisted data, so snapshot reads after a
     // restart see existing documents (a fresh oracle at 0 would read `ts <= 0` and find nothing).
     const startTs = await options.store.maxTimestamp();
-    const oracle = new MonotonicTimestampOracle(startTs);
-    const transactor = new SingleWriterTransactor(options.store, oracle, { fanout });
+    // Shards B2a: with numShards > 1, one `ShardedTransactor` (per-shard mutexes/rings/oracles) so
+    // cross-shard commits run in parallel; else the single-shard transactor, byte-identical to before.
+    // `observeTimestamp` (fleet follower catch-up + promotion) delegates to whichever we build — the
+    // ShardedTransactor fans a learned ts to every shard oracle; the single oracle takes it directly.
+    let transactor: SingleWriterTransactor | ShardedTransactor;
+    let oracle: TimestampObserver;
+    if ((options.numShards ?? 1) > 1) {
+      const sharded = new ShardedTransactor(options.store, { fanout });
+      sharded.observeTimestamp(startTs); // floor every shard oracle at the recovered high-water mark
+      transactor = sharded;
+      oracle = sharded;
+    } else {
+      const singleOracle = new MonotonicTimestampOracle(startTs);
+      transactor = new SingleWriterTransactor(options.store, singleOracle, { fanout });
+      oracle = singleOracle;
+    }
     const queryRuntime = new QueryRuntime(options.store);
+
+    // Shards B2a (T5): the SAME resolved count that decided the transactor above must reach every
+    // `executor.run` call site's `RunOptions.numShards` — the executor/kernel shard resolution (T3)
+    // defaults `numShards` to 1 there, which makes every guard short-circuit onto "default" no matter
+    // how many shards the transactor actually runs. Captured once here; every closure below and every
+    // instance method (via the constructor field) passes this same value.
+    const numShards = options.numShards ?? 1;
 
     // `invoke` is TRUSTED server re-entrancy for actions' `ctx.runQuery`/`runMutation`/`runAction`:
     // it resolves ANY registered path, including `_`-prefixed component-internal modules — unlike
@@ -185,6 +236,7 @@ export class EmbeddedRuntime {
         relationRegistry,
         functionKind,
         identity: opts?.identity ?? null,
+        numShards,
       });
     };
     const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
@@ -196,7 +248,7 @@ export class EmbeddedRuntime {
         await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
         return null;
       });
-      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards });
     }
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
@@ -224,7 +276,7 @@ export class EmbeddedRuntime {
 
     const syncExecutor: SyncUdfExecutor = {
       async runQuery(path, args, identity) {
-        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(resolve(path), jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
@@ -243,7 +295,7 @@ export class EmbeddedRuntime {
           const value = await options.writeRouter.forward("mutation", path, args, identity ?? null);
           return { value: jsonToConvex(value) as Value, tables: [], writeRanges: [], commitTs: 0 };
         }
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -254,7 +306,7 @@ export class EmbeddedRuntime {
       async runAdminQuery(path, args) {
         const fn = adminModules[path];
         if (!fn) throw new Error(`unknown admin function: ${path}`);
-        const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true });
+        const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true, numShards });
         return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
       },
       async runAction(path, args, identity) {
@@ -271,7 +323,7 @@ export class EmbeddedRuntime {
           const value = await options.writeRouter.forward("action", path, args, identity ?? null);
           return { value: jsonToConvex(value) as Value };
         }
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null });
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return { value: r.value as Value };
       },
     };
@@ -317,6 +369,7 @@ export class EmbeddedRuntime {
           functionKind,
           identity: null,
           privileged: true,
+          numShards,
         });
         return res.value;
       },
@@ -399,7 +452,7 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
-      oracle, driverCtx, driversStarted, options.writeRouter,
+      oracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
     );
   }
 
@@ -478,6 +531,7 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
   }
 
@@ -501,6 +555,7 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
   }
 
@@ -520,22 +575,72 @@ export class EmbeddedRuntime {
       relationRegistry: this.relationRegistry,
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
+      numShards: this.numShards,
     });
     return result.value;
   }
 
-  /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API). */
-  async runSystem<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
+  /**
+   * The privileged built-in doc mutations whose target is a USER table (and thus may be sharded).
+   * These are the ONLY `runSystem` paths that need shard routing — every other `_system:*`/
+   * `_storage:*`/`_test:*` built-in writes UNSHARDED component-internal tables, which are owned by
+   * the default ring (INSERT from any ring; RMW on default), so they need no override.
+   */
+  private static readonly DOC_MUTATION_PATHS: ReadonlySet<string> = new Set([
+    "_system:patchDocument",
+    "_system:deleteDocument",
+    "_system:insertDocument",
+  ]);
+
+  /** Run a privileged built-in (`_system:*`) function. Trusted callers only (the admin API).
+   *  For a doc mutation on a user table, the target document's OWNING shard is resolved and passed
+   *  through so the privileged write lands on the same ring a user's sharded mutation of that doc
+   *  would — one-doc-one-ring. `opts.shardId` lets a trusted caller override the resolution. */
+  async runSystem<T = unknown>(path: string, args: JSONValue, opts?: { shardId?: ShardId }): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+    let shardId = opts?.shardId;
+    if (shardId === undefined && this.numShards > 1 && EmbeddedRuntime.DOC_MUTATION_PATHS.has(path)) {
+      shardId = await this.resolveDocMutationShard(path, args);
+    }
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards, shardId });
+  }
+
+  /**
+   * Resolve the owning shard for a privileged admin doc mutation so the write commits on the SAME
+   * ring a user's sharded mutation of that document would use (the one-doc-one-ring invariant).
+   * Without this, a dashboard edit of a sharded doc runs on the default ring and forks the doc's
+   * prev_ts chain against its home-shard writer — a permanent tailer halt + a silently-lost update.
+   *
+   * The shard-key field is IMMUTABLE after insert, so peeking the current doc's key value BEFORE the
+   * transaction is race-free (its shard can't have changed by the time the txn opens). An unsharded
+   * target (component tables, or app tables with no `.shardKey`) resolves to `"default"` — its RMW
+   * ring per the same invariant. Called only for `DOC_MUTATION_PATHS` when `numShards > 1`.
+   */
+  private async resolveDocMutationShard(path: string, args: JSONValue): Promise<ShardId> {
+    const a = args as Record<string, unknown>;
+    if (path === "_system:insertDocument") {
+      // INSERT: route by the shard-key value in the incoming fields (privileged uses the raw table name).
+      const meta = this.catalog.getTable(a.table as string);
+      if (!meta?.shardKey) return DEFAULT_SHARD;
+      const fields = a.fields as Record<string, unknown> | undefined;
+      return shardIdForKeyValue(fields?.[meta.shardKey], this.numShards);
+    }
+    // PATCH / DELETE: route by the EXISTING document's immutable shard-key value.
+    const internalId = decodeDocumentId(a.id as string);
+    const meta = this.catalog.getTableByNumber(internalId.tableNumber);
+    if (!meta?.shardKey) return DEFAULT_SHARD;
+    const latest = await this.store.get(internalId);
+    if (!latest) return DEFAULT_SHARD; // missing → the system fn itself throws DocumentNotFound
+    const doc = latest.value.value as Record<string, unknown>;
+    return shardIdForKeyValue(doc[meta.shardKey], this.numShards);
   }
 
   /** Run a privileged admin built-in (`_admin:*`) once (e.g. for the HTTP fallback). Trusted callers only. */
   async runAdmin<T = unknown>(path: string, args: JSONValue): Promise<UdfResult<T>> {
     const fn = this.adminModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown admin function: ${path}`);
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true });
+    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
   }
 
   /** Stop all component drivers and clear all pending driver timers. Call on runtime shutdown. */
@@ -567,6 +672,17 @@ export class EmbeddedRuntime {
    */
   observeTimestamp(ts: bigint): void {
     this.oracle.observeTimestamp(ts);
+  }
+
+  /**
+   * Run `fn` under shard `shardId`'s commit mutex IFF it is free right now — the seam a fleet writer's
+   * idle-frontier closer uses to publish a shard's frontier atomically with respect to that shard's
+   * own commits (see `ShardedTransactor.tryRunExclusiveOnShard`). Returns `true` if `fn` ran, `false`
+   * if a commit currently holds the mutex (skip; retry next beat). Total across sharded/single-shard
+   * runtimes — the single-shard transactor ignores `shardId` and uses its one writer.
+   */
+  tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    return this.transactor.tryRunExclusiveOnShard(shardId, fn);
   }
 }
 

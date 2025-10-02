@@ -30,6 +30,11 @@ export interface FleetHandles {
   role(): "sync" | "writer";
   writerUrl(): Promise<string>;
   onPromoted(cb: () => void): void;
+  /** Frontier-lag reading for /api/health (B2a, D5): the fleet-wide `min(frontier_ts)`, how long it's
+   *  been stuck (ms), and which shard is pinning it. Null before the first frontier beat. Optional so
+   *  older/stub `FleetHandles` (and pre-B2a fleet builds) satisfy the structural mirror; the health
+   *  handler optional-chains it. The real `@stackbase/fleet` node always provides it. */
+  frontierStats?(): { frontier: bigint; lagMs: number; pinningShard: string } | null;
   stop(): Promise<void>;
 }
 
@@ -108,10 +113,20 @@ export async function handleHttpRequest(
       // actions (they never commit directly) — fall back to `result.commitTs`, which the executor
       // now surfaces as the MAX commitTs across the action's inner runMutation/runAction invokes
       // (0n if it committed nothing), so fleet RYOW covers actions too.
-      return json(200, { value: convexToJson(result.value as Value), commitTs: String(result.oplog?.commitTs ?? result.commitTs ?? 0n) });
+      // `shardId` (B2a, additive): the shard this run committed on, from the commit's oplog (present
+      // for a committed mutation; absent for a read/action that committed nothing — omitted then).
+      return json(200, {
+        value: convexToJson(result.value as Value),
+        commitTs: String(result.oplog?.commitTs ?? result.commitTs ?? 0n),
+        ...(result.oplog?.shardId !== undefined ? { shardId: result.oplog.shardId } : {}),
+      });
     } catch (e) {
+      // Preserve the typed error's identity across the fleet hop: return its REAL http status and the
+      // full serialized error (`errorJson`) so the forwarding SYNC node can rehydrate it and surface
+      // the correct 4xx/5xx + code/retryable, instead of collapsing every forwarded failure to a 500.
+      // `error` (the flat message) is kept for back-compat / human-readable logs.
       const err = toStackbaseError(e);
-      return json(500, { error: err.message, code: err.code });
+      return json(getHttpStatus(err), { error: err.message, code: err.code, errorJson: err.toJSON() });
     }
   }
   if (admin && deploy && req.method === "POST" && req.path === "/_admin/deploy") {
@@ -139,7 +154,15 @@ export async function handleHttpRequest(
     return html(dashboardHtml(info));
   }
   if (req.method === "GET" && req.path === "/api/health") {
-    return json(200, { status: "ok", functions: info.functions.length, tables: info.tables.length });
+    // Fleet frontier-lag observability (B2a, D5): additive `fleet` field when running under --fleet
+    // and a frontier reading is available. `frontier` is a stringified bigint (JSON can't carry one).
+    const fs = fleet?.frontierStats?.() ?? null;
+    return json(200, {
+      status: "ok",
+      functions: info.functions.length,
+      tables: info.tables.length,
+      ...(fs ? { fleet: { frontier: String(fs.frontier), lagMs: fs.lagMs, pinningShard: fs.pinningShard } } : {}),
+    });
   }
   if (req.method === "POST" && req.path === "/api/run") {
     try {

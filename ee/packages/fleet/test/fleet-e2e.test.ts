@@ -35,6 +35,11 @@ import { Client } from "pg";
 // (not `dist`) only to compute the string in-test; the spawned `serve` children run the BUILT fleet
 // code (via `packages/cli/dist/bin.js`), so both sides must agree — rebuild before running.
 import { fleetApplicationName } from "../src/node";
+// The exported shard router — the ONE source of truth both this test and the running engine share
+// for mapping a shard-key value to its shard id. Imported from `@stackbase/id-codec`'s built `dist`
+// (the spawned `serve` children run the same built code), so the shard a channelId routes to here is
+// exactly the shard the kernel guards + commit pool route it to in the child processes.
+import { shardIdForKeyValue } from "@stackbase/id-codec";
 
 /* -------------------------------------------------------------------------- */
 /* Docker availability + Postgres container lifecycle                          */
@@ -418,6 +423,56 @@ async function assertDenseChain(pg: Client): Promise<{ violations: number; multi
     violations: (violations.rows[0] as { n: number }).n,
     multiRevDocs: (multi.rows[0] as { n: number }).n,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Sharded-scenario helpers (B2a cross-shard ship gate)                        */
+/* -------------------------------------------------------------------------- */
+
+/** NUM_SHARDS this suite's sharded scenario pins (via `STACKBASE_FLEET_SHARDS`) so the in-test
+ *  router `shardIdForKeyValue(value, NUM_SHARDS)` agrees with the child processes' routing exactly,
+ *  independent of the fleet default. Matches the fleet default (8) so the density/frontier shape is
+ *  the real N-shard layout the existing scenarios exercise. */
+const NUM_SHARDS = 8;
+
+/** Find two channelId values that route to DIFFERENT non-"default" shards under `NUM_SHARDS`. Scans a
+ *  small deterministic candidate space (`chan-0`, `chan-1`, …) — the jump-hash spread means a pair is
+ *  found within the first handful. Throws (rather than silently degrading) if none is found, so a
+ *  routing regression fails loudly instead of weakening the cross-shard proof. */
+function pickTwoCrossShardKeys(numShards: number): { keyX: string; keyY: string; shardX: string; shardY: string } {
+  let firstNonDefault: { key: string; shard: string } | undefined;
+  for (let i = 0; i < 256; i++) {
+    const key = `chan-${i}`;
+    const shard = shardIdForKeyValue(key, numShards);
+    if (shard === "default") continue;
+    if (!firstNonDefault) {
+      firstNonDefault = { key, shard };
+      continue;
+    }
+    if (shard !== firstNonDefault.shard) {
+      return { keyX: firstNonDefault.key, keyY: key, shardX: firstNonDefault.shard, shardY: shard };
+    }
+  }
+  throw new Error(`could not find two channelId values routing to different non-default shards at numShards=${numShards}`);
+}
+
+/** Every `QueryUpdated` state pushed for `queryId`, in arrival order — the substrate for the
+ *  monotonic-containment (never-regressing) subscription proof. */
+function pushedQueryStates(messages: ServerMsg[], queryId: number): unknown[] {
+  const states: unknown[] = [];
+  for (const msg of messages) {
+    for (const m of msg.modifications ?? []) {
+      if (m.queryId === queryId && m.type === "QueryUpdated") states.push(m.value);
+    }
+  }
+  return states;
+}
+
+/** Reduce a `messages:list` push value to the sorted set of its bodies. */
+function bodiesOf(value: unknown): string[] {
+  return Array.isArray(value)
+    ? (value as Array<{ body?: string }>).map((m) => m.body ?? "").sort()
+    : [];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1141,6 +1196,187 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeC);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "commits concurrent cross-shard writes independently, serves a consistent cross-shard subscription, enforces the shard guard through the real server, and stays dense at N shards",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+
+      // Pin NUM_SHARDS explicitly so the in-test router matches the child processes' routing exactly.
+      const SHARDS_ENV = { STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+
+      // Two channelId values routing to DIFFERENT non-"default" shards — the whole point of this
+      // scenario. Computed with the SAME exported router the engine uses (assert they differ; neither
+      // is "default"), so the cross-shard claims below are grounded, not incidental.
+      const { keyX, keyY, shardX, shardY } = pickTwoCrossShardKeys(NUM_SHARDS);
+      expect(shardX).not.toBe(shardY);
+      expect(shardX).not.toBe("default");
+      expect(shardY).not.toBe("default");
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let wsList: WebSocket | undefined;
+      try {
+        /* ---------------------------------------------------------------- */
+        /* Boot writer A (first) + sync B, both pinned to NUM_SHARDS shards.  */
+        /* ---------------------------------------------------------------- */
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, SHARDS_ENV);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        nodeB = spawnFleetServe(databaseUrl, portB, undefined, SHARDS_ENV);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+        const urlB = bootB.ready.url;
+
+        const lease1 = await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+        expect(lease1.epoch).toBe(1);
+
+        /* ---------------------------------------------------------------- */
+        /* (2) Cross-shard subscription opened BEFORE the writes. `messages:  */
+        /* list` scans every shard (a query reads all shards); its pushed     */
+        /* states must only GROW as the two cross-shard writes land.          */
+        /* ---------------------------------------------------------------- */
+        const sub = await subscribe(`${urlB.replace("http", "ws")}/api/sync`, 1, "messages:list", {});
+        wsList = sub.ws;
+        expect(latestMod(sub.messages, 1)!.value).toEqual([]);
+
+        /* ---------------------------------------------------------------- */
+        /* (1) Concurrent cross-shard commits: fire both sends SIMULTANEOUSLY */
+        /* via the SYNC node → both forward to the writer, commit on their own */
+        /* shard's connection, and both 200 within a tight window. (The true  */
+        /* interleaving/concurrency proof lives in the DATABASE_URL-gated pool */
+        /* test — `ee/packages/docstore-postgres/test/commit-pool.*`; here we  */
+        /* prove both succeeded and the per-shard frontier state is consistent.)*/
+        /* ---------------------------------------------------------------- */
+        const t0 = Date.now();
+        const [rx, ry] = await Promise.all([
+          apiRun(urlB, "messages:send", { channelId: keyX, body: "msg-X" }),
+          apiRun(urlB, "messages:send", { channelId: keyY, body: "msg-Y" }),
+        ]);
+        const windowMs = Date.now() - t0;
+        expect(rx.status).toBe(200);
+        expect(rx.body.committed).toBe(true);
+        expect(ry.status).toBe(200);
+        expect(ry.body.committed).toBe(true);
+        expect(windowMs).toBeLessThan(15_000); // both landed together, not serialized behind a long stall
+
+        /* ---------------------------------------------------------------- */
+        /* (3) RYOW: an IMMEDIATE read-back via the SAME sync node (no sleep)  */
+        /* sees BOTH writes — the forwarder's replica catch-up wait covers     */
+        /* each forwarded commit.                                             */
+        /* ---------------------------------------------------------------- */
+        const readBack = await apiRun(urlB, "messages:list", {});
+        expect(readBack.status).toBe(200);
+        expect(bodiesOf(readBack.body.value)).toEqual(["msg-X", "msg-Y"]);
+
+        /* ---------------------------------------------------------------- */
+        /* Per-shard frontier independence (direct pg): each committed message */
+        /* doc records the shard it committed on (`documents.shard_id`, D6);   */
+        /* the two land on DIFFERENT shards (shardX / shardY), each matching    */
+        /* the router; and each target shard's `frontier_ts` absorbed its own   */
+        /* commit (>= that doc's ts). All N lease rows share one epoch + writer */
+        /* — a consistent per-shard frontier state, no partial/split writer.    */
+        /* ---------------------------------------------------------------- */
+        const docRows = (
+          await pg.query(`SELECT ts, shard_id, value FROM documents WHERE value LIKE '%"channelId"%' ORDER BY ts`)
+        ).rows as Array<{ ts: string; shard_id: string; value: string }>;
+        expect(docRows.length).toBe(2);
+        const byChannel = new Map<string, { ts: bigint; shardId: string }>();
+        for (const r of docRows) {
+          const channelId = (JSON.parse(r.value) as { channelId: string }).channelId;
+          // Each doc committed on the shard its OWN channelId routes to.
+          expect(r.shard_id).toBe(shardIdForKeyValue(channelId, NUM_SHARDS));
+          byChannel.set(channelId, { ts: BigInt(r.ts), shardId: r.shard_id });
+        }
+        expect(byChannel.get(keyX)!.shardId).toBe(shardX);
+        expect(byChannel.get(keyY)!.shardId).toBe(shardY);
+        expect(byChannel.get(keyX)!.shardId).not.toBe(byChannel.get(keyY)!.shardId); // independent shards
+
+        const leaseRows = (
+          await pg.query(`SELECT shard_id, epoch, writer_url, frontier_ts, prev_ts FROM shard_leases`)
+        ).rows as Array<{ shard_id: string; epoch: string; writer_url: string; frontier_ts: string; prev_ts: string }>;
+        expect(leaseRows.length).toBe(NUM_SHARDS); // one row per shard
+        const epochs = new Set(leaseRows.map((r) => r.epoch));
+        const writers = new Set(leaseRows.map((r) => r.writer_url));
+        expect(epochs.size).toBe(1); // one consistent epoch across all shard rows
+        expect([...writers]).toEqual([advA]); // one writer owns every shard
+        const frontierByShard = new Map(leaseRows.map((r) => [r.shard_id, BigInt(r.frontier_ts)]));
+        // Each write's shard advanced its OWN frontier past that write's commit ts.
+        expect(frontierByShard.get(shardX)!).toBeGreaterThanOrEqual(byChannel.get(keyX)!.ts);
+        expect(frontierByShard.get(shardY)!).toBeGreaterThanOrEqual(byChannel.get(keyY)!.ts);
+
+        /* ---------------------------------------------------------------- */
+        /* (2, cont.) Cross-shard subscription consistency: the pre-opened    */
+        /* subscription's final state contains BOTH docs, and NO intermediate  */
+        /* state ever regressed (each pushed state ⊇ its predecessor).         */
+        /* ---------------------------------------------------------------- */
+        await waitFor(() => {
+          const v = latestMod(sub.messages, 1)?.value;
+          return Array.isArray(v) && (v as unknown[]).length === 2;
+        }, 20_000);
+        const states = pushedQueryStates(sub.messages, 1).map(bodiesOf);
+        expect(states.length).toBeGreaterThan(0);
+        // Monotonic containment: a state never loses a body a prior state had (states only grow).
+        for (let i = 1; i < states.length; i++) {
+          const prev = new Set(states[i - 1]);
+          for (const b of prev) expect(states[i]).toContain(b);
+        }
+        expect(states[states.length - 1]).toEqual(["msg-X", "msg-Y"]);
+
+        /* ---------------------------------------------------------------- */
+        /* (4) Shard guard through the REAL server: `sendMisrouted` runs on    */
+        /* shardX (its `channelId` arg) but writes a doc whose channelId field  */
+        /* routes to shardY — the kernel's write guard rejects it. Through the   */
+        /* sync node's forward path, the response must be a 4xx whose body names */
+        /* the table, the shard-key field, BOTH shards, and the fix.            */
+        /* ---------------------------------------------------------------- */
+        const guard = await apiRun(urlB, "messages:sendMisrouted", { channelId: keyX, misroutedTo: keyY, body: "bad" });
+        expect(guard.status).toBeGreaterThanOrEqual(400);
+        expect(guard.status).toBeLessThan(500);
+        const guardErr = guard.body.error ?? "";
+        expect(guardErr).toContain("messages"); // the table
+        expect(guardErr).toContain("channelId"); // the shard-key field
+        expect(guardErr).toContain(shardX); // the shard the mutation runs on
+        expect(guardErr).toContain(shardY); // the shard the document routes to
+        expect(guardErr.toLowerCase()).toContain("shardby"); // names the fix (a shardBy that resolves to that value)
+        expect(guard.body.committed).not.toBe(true); // the misrouted write did NOT commit
+
+        // The guard rejection left the committed set unchanged (still exactly the two good writes).
+        const afterGuard = await apiRun(urlB, "messages:list", {});
+        expect(bodiesOf(afterGuard.body.value)).toEqual(["msg-X", "msg-Y"]);
+
+        /* ---------------------------------------------------------------- */
+        /* (5) Density at N shards: the whole run's MVCC log is a dense        */
+        /* prev_ts chain per document, and NOT ONE row carries ts=0 (a         */
+        /* store-allocated ts is always > 0). Non-vacuous — two cross-shard    */
+        /* commits are present.                                                */
+        /* ---------------------------------------------------------------- */
+        const chain = await assertDenseChain(pg);
+        expect(chain.violations).toBe(0);
+        const zeroTs = (await pg.query(`SELECT count(*)::int AS n FROM documents WHERE ts = 0`)).rows[0] as { n: number };
+        expect(zeroTs.n).toBe(0);
+        expect(wsList.readyState).toBe(WebSocket.OPEN); // the cross-shard subscription stayed healthy throughout
+      } finally {
+        wsList?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        await stopServe(nodeB);
         stopPostgresContainer();
       }
     },

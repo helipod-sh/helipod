@@ -14,6 +14,9 @@
     }
   },
   "files": ["dist"],
+  "dependencies": {
+    "@stackbase/index-key-codec": "workspace:*"
+  },
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
