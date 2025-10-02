@@ -1,6 +1,6 @@
 ---
 title: Write Sharding — Multi-Agent Research & the Fenced Frontier Verdict
-status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps — see docs/enduser/deploy/fleet.md); slices beyond B1 remain research/pre-spec
+status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md); B2b (fleet distribution — spreading different shards' write ownership across different nodes) is next; B3-B5 remain research/pre-spec
 date: 2025-08-28
 audience: engineering (internal)
 ---
