@@ -18,6 +18,7 @@
  * writer, replica catch-up is no longer the right thing to block on.
  */
 import type { WriteRouter } from "@stackbase/runtime-embedded";
+import type { ShardId } from "@stackbase/id-codec";
 import type { JSONValue } from "@stackbase/values";
 import { isStackbaseError, stackbaseErrorFromJSON, type StackbaseErrorJSON } from "@stackbase/errors";
 import type { LeaseManager } from "./lease";
@@ -75,7 +76,10 @@ export class WriteForwarder implements WriteRouter {
     this.tailer?.release();
   }
 
-  isLocalWriter(): boolean {
+  isLocalWriter(_shardId?: ShardId): boolean {
+    // Task 1 mechanical adaptation: the seam is now per-shard, but this node's binary writer/sync
+    // role is still whole-node (single write lease). Ignore `shardId` and return the binary answer;
+    // Task 2 makes this per-shard (membership in the held-shard set).
     return this.role === "writer";
   }
 
@@ -84,8 +88,11 @@ export class WriteForwarder implements WriteRouter {
     path: string,
     args: JSONValue,
     identity: string | null,
-  ): Promise<JSONValue> {
-    const body = { path, args, identity, kind };
+    // Task 1: threaded through into the `/_fleet/run` body (the receiver ignores it for now); Task 2
+    // uses it to resolve THAT shard's owner URL and enforce the single-hop guard.
+    shardId?: ShardId,
+  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string }> {
+    const body = { path, args, identity, kind, shardId };
     const first = await this.writerUrl();
     let result: { value: JSONValue; commitTs?: string };
     try {
@@ -107,7 +114,10 @@ export class WriteForwarder implements WriteRouter {
       result = await this.post(second, body);
     }
     await this.waitForReplicaCatchUp(path, result.commitTs);
-    return result.value;
+    // Task 1: return the object shape the per-shard `WriteRouter` seam now expects. `commitTs` stays
+    // omitted (the executor then reports 0n — byte-identical to the pre-B2b forwarded-run contract);
+    // the replica read-your-own-writes wait already happened above off `result.commitTs`.
+    return { value: result.value };
   }
 
   /** Discover the current writer URL from the lease discovery row. */

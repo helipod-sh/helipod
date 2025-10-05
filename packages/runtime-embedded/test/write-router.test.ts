@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
+import { encodeStorageIndexId, newDocumentId, shardIdForKeyValue } from "@stackbase/id-codec";
 import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
+import type { Driver, DriverContext } from "@stackbase/component";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type WriteRouter } from "../src/index";
 
@@ -31,8 +32,9 @@ async function makeRuntime(extra?: { writeRouter?: WriteRouter; deferDrivers?: b
 }
 
 describe("write-router seam", () => {
-  it("routes a mutation through forward() when not the local writer", async () => {
-    const forward = vi.fn(async () => 42);
+  it("routes a mutation through forward() when not the local writer (per-shard chokepoint)", async () => {
+    // `messages:send` has no shardBy and this runtime is 1-shard, so its resolved shard is "default".
+    const forward = vi.fn(async () => ({ value: 42 }));
     let localWriter = false;
     const router: WriteRouter = { isLocalWriter: () => localWriter, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
@@ -40,11 +42,11 @@ describe("write-router seam", () => {
     const result = await runtime.run("messages:send", { conversationId: "c1", body: "hi" });
     expect(result.value).toBe(42);
     expect(forward).toHaveBeenCalledTimes(1);
-    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "hi" }, null);
+    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "hi" }, null, "default");
   });
 
   it("never routes a query, even when not the local writer", async () => {
-    const forward = vi.fn(async () => 42);
+    const forward = vi.fn(async () => ({ value: 42 }));
     const router: WriteRouter = { isLocalWriter: () => false, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
 
@@ -54,7 +56,7 @@ describe("write-router seam", () => {
   });
 
   it("flipping isLocalWriter back to true makes the mutation execute locally again", async () => {
-    const forward = vi.fn(async () => 42);
+    const forward = vi.fn(async () => ({ value: 42 }));
     let localWriter = false;
     const router: WriteRouter = { isLocalWriter: () => localWriter, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
@@ -71,8 +73,8 @@ describe("write-router seam", () => {
     expect(list.value.map((d) => d.body)).toEqual(["local"]);
   });
 
-  it("routes an action through forward() with kind 'action' when not the local writer", async () => {
-    const forward = vi.fn(async () => "action-result");
+  it("routes an action through forward() with kind 'action' (default shard) when not the local writer", async () => {
+    const forward = vi.fn(async () => ({ value: "action-result" }));
     const router: WriteRouter = { isLocalWriter: () => false, forward };
     const actionModules: Record<string, RegisteredFunction> = {
       ...modules,
@@ -87,7 +89,39 @@ describe("write-router seam", () => {
 
     const result = await runtime.runAction("mod:doThing", { x: 1 });
     expect(result.value).toBe("action-result");
-    expect(forward).toHaveBeenCalledWith("action", "mod:doThing", { x: 1 }, null);
+    expect(forward).toHaveBeenCalledWith("action", "mod:doThing", { x: 1 }, null, "default");
+  });
+});
+
+describe("driver-path per-shard routing (the B2b driver hazard fix)", () => {
+  // A sharded mutation scheduled by a driver used to bypass the runtime-level WriteRouter check
+  // entirely (that check ran before shard resolution, and drivers call `runFunction` directly),
+  // so it would execute locally on a non-held shard, fence, and kill the node. With routing at the
+  // executor chokepoint, the driver's `runFunction` forwards it to the shard's owner instead.
+  const N = 8;
+  const shardedModules: Record<string, RegisteredFunction> = {
+    "messages:send": mutation<{ conversationId: string; body: string }, string>({
+      shardBy: "conversationId",
+      handler: (ctx, { conversationId, body }) => ctx.db.insert("messages", { conversationId, body }),
+    }),
+  };
+
+  it("a driver runFunction on a non-held sharded mutation forwards to the shard's owner", async () => {
+    const forward = vi.fn(async () => ({ value: "forwarded-by-driver" }));
+    const router: WriteRouter = { isLocalWriter: () => false, forward }; // owns nothing
+    let captured!: DriverContext;
+    const driver: Driver = { name: "probe", start: async (ctx) => void (captured = ctx) };
+
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    const catalog = new SimpleIndexCatalog();
+    catalog.addTable("messages", MESSAGES, undefined, false, "conversationId");
+    catalog.addIndex(byConversation);
+    await createEmbeddedRuntime({ store, catalog, modules: shardedModules, writeRouter: router, drivers: [driver], numShards: N });
+
+    const result = await captured.runFunction("messages:send", { conversationId: "c1", body: "tick" });
+    expect(result).toBe("forwarded-by-driver");
+    const expectedShard = shardIdForKeyValue("c1", N);
+    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "tick" }, null, expectedShard);
   });
 });
 

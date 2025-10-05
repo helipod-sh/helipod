@@ -128,7 +128,7 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     tailer.setWatermark(7n);
     const value = await pending;
     expect(resolved).toBe(true);
-    expect(value).toBe(42);
+    expect(value.value).toBe(42);
   });
 
   it("resolves immediately when the watermark has already reached commitTs", async () => {
@@ -139,7 +139,7 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     forwarder.attachTailer(tailer);
 
     const value = await forwarder.forward("mutation", "notes:add", {}, null);
-    expect(value).toBe("ok");
+    expect(value.value).toBe("ok");
     expect(tailer.pendingCount()).toBe(0);
   });
 
@@ -158,7 +158,7 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     const value = await pending;
-    expect(value).toBe("ok");
+    expect(value.value).toBe("ok");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     const [message] = warnSpy.mock.calls[0] ?? [];
     expect(String(message)).toContain("notes:add");
@@ -179,7 +179,7 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
 
     forwarder.promote();
     const value = await pending;
-    expect(value).toBe("ok");
+    expect(value.value).toBe("ok");
     expect(tailer.pendingCount()).toBe(0);
   });
 
@@ -193,8 +193,8 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     const first = await forwarder.forward("mutation", "notes:add", {}, null);
     const second = await forwarder.forward("mutation", "notes:add", {}, null);
 
-    expect(first).toBe("ok");
-    expect(second).toBe("ok");
+    expect(first.value).toBe("ok");
+    expect(second.value).toBe("ok");
     expect(tailer.pendingCount()).toBe(0);
     expect(warnSpy).toHaveBeenCalledTimes(1);
 
@@ -232,6 +232,6 @@ describe("WriteForwarder — read-your-own-writes (Task 3)", () => {
     // No attachTailer() call — this is the fleet WRITER's own forwarder (never used to forward,
     // but must not explode if it were), or a sync node before a tailer is wired in.
     const value = await forwarder.forward("mutation", "notes:add", {}, null);
-    expect(value).toBe("ok");
+    expect(value.value).toBe("ok");
   });
 });

@@ -16,7 +16,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
+import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry, type WriteRouter } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -51,18 +51,15 @@ function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record
 }
 
 /**
- * Fleet write-routing seam (Tier 2): lets a non-writer node forward mutations/actions to
- * whichever node currently holds the write lease, instead of executing them locally. Queries
- * are NEVER routed — a non-writer still serves reads from its own (replicated) storage.
- * `isLocalWriter` is checked on EVERY call (not cached at construction), so a role flip on
- * promotion/demotion takes effect immediately without recreating the runtime.
+ * Fleet write-routing seam (Tier 2), PER-SHARD. Defined in `@stackbase/executor` (where the
+ * per-shard forward chokepoint on `ExecutorDeps.writeRouter` references it, avoiding a circular dep
+ * back to this package) and re-exported here as the core seam `@stackbase/fleet` implements. A node
+ * that doesn't own a mutation's resolved shard forwards it to that shard's owner; queries are never
+ * routed. Actions still forward wholesale at the runtime level (below) to the default-shard holder —
+ * an action's INNER mutations then route per-shard from wherever the action runs. See
+ * `InlineUdfExecutor.run`'s routing hook.
  */
-export interface WriteRouter {
-  /** true → execute writes locally (this node is the writer). Checked per call. */
-  isLocalWriter(): boolean;
-  /** Forward a write to the writer node; resolves with the function's JSON result or throws. */
-  forward(kind: "mutation" | "action", path: string, args: JSONValue, identity: string | null): Promise<JSONValue>;
-}
+export type { WriteRouter } from "@stackbase/executor";
 
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
@@ -239,16 +236,19 @@ export class EmbeddedRuntime {
         numShards,
       });
     };
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter });
     executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
+    // `localOnly: true` bypasses the executor's per-shard write router — a boot step seeds this
+    // node's OWN store before it's ready to be any shard's owner; without the flag a fleet node
+    // that isn't the default-shard owner would forward its own boot seed to a peer (or fail).
     for (const step of options.bootSteps ?? []) {
       const bootFn = mutation(async (ctx) => {
         await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
         return null;
       });
-      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards, localOnly: true });
     }
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
@@ -285,16 +285,12 @@ export class EmbeddedRuntime {
       },
       async runMutation(path, args, identity) {
         const fn = resolve(path);
-        // Write-routing seam: a non-writer fleet node forwards to the writer instead of
-        // executing locally. `isLocalWriter()` is checked fresh on every call (never cached),
-        // so a role flip on promotion takes effect on the very next mutation. The forwarded
-        // write's own commit fans out through the writer's fan-out (a cross-process adapter,
-        // not this in-memory one) — there is no local `tables`/`writeRanges`/`commitTs` to
-        // report here, so those come back empty/zero.
-        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
-          const value = await options.writeRouter.forward("mutation", path, args, identity ?? null);
-          return { value: jsonToConvex(value) as Value, tables: [], writeRanges: [], commitTs: 0 };
-        }
+        // Per-shard write routing now lives at the executor chokepoint (`executor.run` forwards a
+        // mutation whose resolved shard this node doesn't own — see `InlineUdfExecutor.run`). The
+        // old runtime-level `writeRouter` check here was BEFORE shard resolution and so bypassed the
+        // driver/scheduler path; it is removed as superseded. A forwarded run comes back with a null
+        // oplog, so `tables`/`writeRanges` are empty and `commitTs` 0 — the same shape this path
+        // reported for a forwarded write before.
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
@@ -316,12 +312,12 @@ export class EmbeddedRuntime {
         // the instance `runAction` (Task 1)'s public gate.
         const fn = resolve(path);
         if (fn.type !== "action") throw new Error(`${path} is not an action`);
-        // Write-routing seam (see `runMutation` above): forward instead of executing locally
-        // when this node isn't the writer. An action has no read/write set of its own to fan
-        // out either way, so nothing extra to reconcile here.
-        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
-          const value = await options.writeRouter.forward("action", path, args, identity ?? null);
-          return { value: jsonToConvex(value) as Value };
+        // Actions still forward WHOLESALE at the runtime level (not per-shard: an action has no
+        // shard of its own), targeted at the default-shard holder. Once it runs on that writer-ish
+        // node, its inner `ctx.runMutation`s route per-shard through the executor chokepoint.
+        if (options.writeRouter && !options.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+          const res = await options.writeRouter.forward("action", path, args, identity ?? null, DEFAULT_SHARD);
+          return { value: jsonToConvex(res.value) as Value };
         }
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return { value: r.value as Value };
@@ -508,19 +504,16 @@ export class EmbeddedRuntime {
     return { value: jsonToConvex(value) as T, logs: [], committed: true, commitTs: 0n, readRanges: [], oplog: null };
   }
 
-  /** Directly invoke a function (for HTTP routes / the CLI `run` command). Routes mutations
-   *  and actions through `writeRouter` when set and this node isn't the writer; queries always
-   *  run locally. */
+  /** Directly invoke a function (for HTTP routes / the CLI `run` command). A MUTATION routes
+   *  per-shard inside the executor (`executor.run` forwards a shard this node doesn't own); an
+   *  ACTION forwards wholesale here to the default-shard holder; queries always run locally. */
   async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
-    if (
-      this.writeRouter && !this.writeRouter.isLocalWriter() &&
-      (fn.type === "mutation" || fn.type === "action")
-    ) {
-      const value = await this.writeRouter.forward(fn.type, path, args, opts?.identity ?? null);
-      return this.forwardedResult<T>(value);
+    if (fn.type === "action" && this.writeRouter && !this.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+      const res = await this.writeRouter.forward("action", path, args, opts?.identity ?? null, DEFAULT_SHARD);
+      return this.forwardedResult<T>(res.value);
     }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
@@ -542,9 +535,9 @@ export class EmbeddedRuntime {
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     if (fn.type !== "action") throw new Error(`${path} is not an action`);
-    if (this.writeRouter && !this.writeRouter.isLocalWriter()) {
-      const value = await this.writeRouter.forward("action", path, args, opts?.identity ?? null);
-      return this.forwardedResult<T>(value);
+    if (this.writeRouter && !this.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+      const res = await this.writeRouter.forward("action", path, args, opts?.identity ?? null, DEFAULT_SHARD);
+      return this.forwardedResult<T>(res.value);
     }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
