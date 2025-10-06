@@ -661,6 +661,28 @@ export class LeaseManager {
     return newTs;
   }
 
+  /**
+   * Orphan frontier bumping (B2b, D4): advance the frontier of every WRITER-LESS shard row
+   * (`writer_url IS NULL`) that lags `ceiling`, so an unassigned/relinquished/expired shard never
+   * pins the fleet's `F = min(frontier_ts)` below the live commit position. Runs on the WRITER beat
+   * alongside `closeIdleFrontiers` (which only ever touches THIS node's OWN held rows via
+   * `heldPairs()` and so structurally cannot un-pin a shard nobody holds).
+   *
+   * Safe with NO commit mutex, unlike `closeIdleFrontiers`: a writer-less shard has no in-flight
+   * commit by construction — its last writer was fenced (epoch-bumped, `writer_url` nulled) BEFORE
+   * the row became orphaned, so nothing can be mid-commit writing `frontier_ts` on it. The `UPDATE`'s
+   * own row lock serializes any two writers racing this bump, and `GREATEST` + `frontier_ts < ceiling`
+   * keep it monotone regardless. Reuses the SAME `ceiling` (one `nextval` per beat) the idle closer
+   * drew, so a beat costs one sequence draw, not two.
+   */
+  async bumpOrphanFrontiers(ceiling: bigint): Promise<void> {
+    await this.client.query(
+      `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1)
+       WHERE writer_url IS NULL AND frontier_ts < $1`,
+      [ceiling],
+    );
+  }
+
   /** Reads the current lease row for `shardId` (discovery for forwarding, plus the full fencing/
    *  frontier state); null if none exists yet. Defaults to the default shard (B1 call sites). */
   async read(shardId: ShardId = SHARD_ID): Promise<LeaseRow | null> {

@@ -641,20 +641,52 @@ export class EmbeddedRuntime {
     return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
   }
 
-  /** Stop all component drivers and clear all pending driver timers. Call on runtime shutdown. */
-  async stopDrivers(): Promise<void> {
+  /**
+   * Stop the component drivers and clear their pending timers, resetting `driversStarted` so a later
+   * `startDrivers()` can bring them back up. Shared by the driver-only `stopDriversOnly()` (B2b, D5)
+   * and the full-shutdown `stopDrivers()` — the ONLY difference is whether the sync handler is also
+   * disposed, so the two can never drift on how a driver is torn down.
+   */
+  private async stopDriversInternal(): Promise<void> {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     for (const d of this.drivers) await d.stop?.();
+    // Reset the flag (NOT one-way): a stop→start cycle must actually restart the drivers. The shipped
+    // `driversStarted` flag was write-once (only ever flipped true), so a fleet node that relinquished
+    // and later re-acquired the default shard would silently no-op the restart — the D5 regression.
+    this.driversStarted = false;
+  }
+
+  /**
+   * Stop all component drivers and clear all pending driver timers. Call on runtime shutdown.
+   * ALSO disposes the sync handler's background flush sweep — this is the full-teardown path.
+   */
+  async stopDrivers(): Promise<void> {
+    await this.stopDriversInternal();
     // Stop the sync handler's background flush sweep (per-session backpressure drain) on shutdown.
     this.handler.dispose();
   }
 
   /**
-   * Start component drivers deferred via `EmbeddedRuntimeOptions.deferDrivers`. Idempotent —
-   * a second (or later) call is a no-op once drivers are running, so callers don't need to
-   * track whether they've already called it (e.g. a fleet node calling this on every
-   * promotion attempt).
+   * Driver-only stop (B2b, D5 — "drivers follow the default shard"): stop the scheduler/workflow/cron/
+   * reaper drivers and clear their timers, WITHOUT disposing the sync handler. A fleet node that
+   * relinquishes (or gracefully releases) the default shard keeps serving reads, subscriptions, and
+   * mutations for every OTHER shard — only its drivers go quiet, because a different node now owns the
+   * default ring the scheduler tables live on. Symmetric with `startDrivers()` and idempotent both
+   * ways (the reset flag makes a later `startDrivers()` a real restart, and a second stop a no-op),
+   * so callers never need to track whether drivers are currently running. Deliberately NEVER touches
+   * `handler.dispose()` (the shipped `stopDrivers()` did — fatal on a default-relinquish, since the
+   * node stays live).
+   */
+  async stopDriversOnly(): Promise<void> {
+    await this.stopDriversInternal();
+  }
+
+  /**
+   * Start component drivers deferred via `EmbeddedRuntimeOptions.deferDrivers`, OR restart them after
+   * a `stopDriversOnly()` (B2b, D5). Idempotent — a second (or later) call is a no-op once drivers are
+   * running, so callers don't need to track whether they've already called it (e.g. a fleet node
+   * calling this on every default-shard acquisition attempt).
    */
   async startDrivers(): Promise<void> {
     if (this.driversStarted) return;

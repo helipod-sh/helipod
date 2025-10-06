@@ -160,7 +160,13 @@ export class FrontierMonitor {
         if (!this.opts.runExclusiveOnShard) {
           throw new Error("fleet: FrontierMonitor closeIdle requires a runExclusiveOnShard seam (bug)");
         }
-        await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+        // Close THIS node's held idle shards up to a fresh ceiling, then reuse that SAME ceiling
+        // (one nextval/beat) to un-pin any ORPHANED shard's frontier (B2b, D4) — a shard nobody holds
+        // (a peer died and its rows expired, or a graceful release before its new owner acquired)
+        // would otherwise pin F below the live commit position indefinitely. WRITER beat only
+        // (`closeIdle` is false on a sync node), so orphans move iff at least one writer is alive.
+        const ceiling = await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+        await this.lease.bumpOrphanFrontiers(ceiling);
       }
       const rows = await this.lease.readAllFrontiers();
       if (rows.length === 0) return;
@@ -770,8 +776,14 @@ export interface RelinquishDeps {
   shards: readonly ShardId[];
   /** Structured-log seam, defaults to `console.error`. Tests inject a spy. */
   log?: (msg: string) => void;
-  /** Warn seam (the default-shard driver caveat below), defaults to `console.warn`. Tests inject a spy. */
-  warn?: (msg: string) => void;
+  /**
+   * Invoked when the DEFAULT shard is relinquished (B2b, D5 — "drivers follow the default shard"):
+   * `startFleetNode` wires this to `runtime.stopDriversOnly()`, so the moment this node loses the
+   * default ring the scheduler/workflow/cron/reaper drivers go quiet (a different node now owns that
+   * ring). Optional — the balancer/relinquish unit tests that don't care about drivers omit it, in
+   * which case relinquishing the default shard just drops the shard with no driver side effect.
+   */
+  onDefaultRelinquished?: () => void;
 }
 
 /**
@@ -809,16 +821,15 @@ export function relinquish(
   if (deps.lease.currentEpoch(shardId) === null) return; // idempotent: not held (already gone, or never)
   deps.lease.forgetShard(shardId);
   const log = deps.log ?? ((m: string) => console.error(m));
-  const warn = deps.warn ?? ((m: string) => console.warn(m));
   log(
     `fleet: relinquish shard='${shardId}' reason='${reason}'` +
       (opts.connectionLost ? " (via commit-connection loss — its slot lock is already gone)" : ""),
   );
   if (shardId === DEFAULT_SHARD) {
-    warn(
-      `fleet: relinquished the default shard — drivers (scheduler/workflow/cron/reaper) keep running ` +
-        `on this node until a later task wires stopDriversOnly (not built here)`,
-    );
+    // B2b, D5: losing the default ring stops this node's drivers (a peer now runs the scheduler). The
+    // node keeps serving everything else — `stopDriversOnly` never disposes the sync handler.
+    log(`fleet: relinquished the default shard — stopping drivers (scheduler/workflow/cron/reaper)`);
+    deps.onDefaultRelinquished?.();
   }
   if (opts.connectionLost) return; // the lock died with the connection — nothing left to release
   const slot = deps.shards.indexOf(shardId);
@@ -910,6 +921,18 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // writer never self-promotes) and until the sync branch assigns the real trigger.
   let doPromote: () => void = () => {};
 
+  // B2b, D5 — "drivers follow the default shard": the scheduler/workflow/cron/reaper drivers run on
+  // EXACTLY the node that currently holds the DEFAULT ring (the ring the scheduler's own unsharded
+  // tables live on). Acquiring the default shard (re)starts them; relinquishing OR gracefully
+  // releasing it stops them (both routed through `relinquish`, which fires `onDefaultRelinquished`).
+  // `startDrivers`/`stopDriversOnly` are idempotent both ways, so these fire freely on every event.
+  const relinquishDeps: RelinquishDeps = {
+    lease,
+    client,
+    shards,
+    onDefaultRelinquished: () => void runtime.stopDriversOnly(),
+  };
+
   // One-tick acquire of a single shard's lease (+ its per-slot advisory lock) for the balancer. Mirrors
   // `acquireShardAsWriter`'s fencing-first eviction of a wedged EXPIRED holder, but as a SINGLE attempt
   // (a miss just retries on the next balancer beat, rather than looping to a deadline) so a beat never
@@ -918,17 +941,20 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   const tryAcquireShard = async (shardId: ShardId): Promise<boolean> => {
     const slot = shards.indexOf(shardId);
     if (slot < 0) return false;
-    const state = await lease.tryAcquire(shardId, slot, true);
-    if (state) return true;
+    let acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
     // Lock held — if this shard's lease has expired, its holder is wedged/dead: fence + terminate so
     // the retry's advisory try can win. No-op when the lease is still live (a real non-target holder,
     // which the balancer must NOT steal — so acquisition simply fails this beat and is left alone).
-    if (await lease.isExpired(shardId)) {
+    if (!acquired && (await lease.isExpired(shardId))) {
       const { fenced, oldAppName } = await lease.evictExpired(shardId);
       if (fenced && oldAppName !== null) await lease.terminateBackend(oldAppName);
-      return (await lease.tryAcquire(shardId, slot, true)) !== null;
+      acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
     }
-    return false;
+    // D5: acquiring the default ring (re)starts this node's drivers — idempotent, so a writer boot that
+    // already started them at create() is a no-op; a failover/multi-writer node that takes over the
+    // default shard wakes them here.
+    if (acquired && shardId === DEFAULT_SHARD) void runtime.startDrivers();
+    return acquired;
   };
 
   // Graceful point-in-time RELEASE of a held shard the rendezvous assignment no longer gives this node
@@ -941,7 +967,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     await runtime.tryRunExclusiveOnShard(shardId, async () => {
       await lease.selfFence(shardId);
     });
-    relinquish({ lease, client, shards }, shardId, "balancer graceful release (no longer a rendezvous target)");
+    relinquish(relinquishDeps, shardId, "balancer graceful release (no longer a rendezvous target)");
   };
 
   // The rendezvous shard balancer (B2b, D3) — runs on EVERY node. Its `requestPromotion` routes through
@@ -969,6 +995,55 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     beatMs: fleetAcquireRetryMs(lease.ttlMs),
   });
 
+  // Shared invalidation sink (B2b): advance this node's oracle past a learned ts + push a reactive
+  // transition into the sync handler, derived from ONE pulled batch. Used by BOTH the sync node's
+  // replica tailer AND the writer-ish node's derive-only listener (D5/T5-c) — the wiring is identical
+  // because both end at "invalidate my own live subscriptions"; only whether the batch was also
+  // applied to a replica differs (the tailer's mode, not this sink's concern).
+  const invalidationSink = async (inv: AppliedInvalidation): Promise<void> => {
+    // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits this);
+    // reactivity is best-effort — reads stay correct regardless.
+    try {
+      runtime.observeTimestamp(inv.newMaxTs);
+      const ranges = [
+        ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
+        ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
+      ];
+      await runtime.handler.notifyWrites({
+        tables: inv.writtenTables,
+        ranges,
+        commitTs: Number(inv.newMaxTs),
+      });
+    } catch (e) {
+      console.error("fleet: replica invalidation failed", e);
+    }
+  };
+
+  // B2b, D5/T5-c — the writer invalidation listener. In MULTI-WRITER mode a promoted/booted writer
+  // stops (or never starts) a ReplicaTailer, so on its own it has NO way to learn about ANOTHER
+  // writer's commits: its live subscriptions would silently go stale, and its oracle would never
+  // observe a foreign commit's ts (a cross-node read-your-writes miss). Every writer-ish node instead
+  // runs a DERIVE-ONLY listener: same wake sources as the sync tailer (commit NOTIFY channel + the 1s
+  // poll fallback) and the SAME (watermark, F] pull + derivation, but with an invalidate-only sink and
+  // NO replica apply — the node reads the PRIMARY directly, so the data is already there; it needs only
+  // the WAKE + invalidation ranges + observeTimestamp(F). Watermark starts at boot F (only foreign
+  // commits from here on). A writer's OWN commits are re-pulled here and re-invalidated — a harmless
+  // idempotent double-invalidation (its normal fan-out already fired), deliberately not optimized away.
+  // Off unless multi-writer is enabled (single-writer mode has no foreign commits; sync nodes have the
+  // real replica tailer).
+  let writerListener: ReplicaTailer | null = null;
+  const startWriterInvalidationListener = async (): Promise<void> => {
+    if (!multiWriter || writerListener !== null) return;
+    // `pgStore` is passed as the `replica` arg but is NEVER dereferenced in "invalidateOnly" mode
+    // (no apply, no density read, no maxTimestamp seed) — see ReplicaTailerOptions.mode.
+    writerListener = new ReplicaTailer(client, pgStore, pgStore, {
+      mode: "invalidateOnly",
+      numShards,
+      onInvalidation: invalidationSink,
+    });
+    await writerListener.start();
+  };
+
   // The writer lease monitor (C4). Runs ONLY while this node is the writer: constructed lazily at
   // writer boot OR on promotion (never on a sync node). A sync node's connection loss is survivable —
   // its reads keep working off the local replica (slice 2) — so `monitor` stays null and the
@@ -995,7 +1070,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         const { fencedShardIds } = await lease.heartbeatAll();
         for (const fencedShardId of fencedShardIds) {
           relinquish(
-            { lease, client, shards },
+            relinquishDeps,
             fencedShardId,
             "batched heartbeat found a superseded epoch",
           );
@@ -1023,7 +1098,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // `releaseShardLock`: there is no live connection left to run the unlock on, and the lock is already
   // gone), but every other shard's commit connection — and this node's writer status — is unaffected.
   client.onShardConnectionLost?.((shardId) =>
-    relinquish({ lease, client, shards }, shardId, "commit connection lost", { connectionLost: true }),
+    relinquish(relinquishDeps, shardId, "commit connection lost", { connectionLost: true }),
   );
 
   /**
@@ -1047,7 +1122,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
     // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
     installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
-      relinquish({ lease, client, shards }, fencedShardId, reason),
+      relinquish(relinquishDeps, fencedShardId, reason),
     );
     // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
     // closer would needlessly advance the lone frontier past real commits via `nextval`). At N=1 the
@@ -1081,6 +1156,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     await armWriter(true);
     startWriterMonitor();
     balancer.start();
+    // B2b, D5/T5-c: in multi-writer mode, run the derive-only listener so this writer learns about
+    // co-writers' commits (no-op when multi-writer is off). armWriter already started this node's
+    // drivers via the default-shard acquisition (writer boot holds the default shard).
+    await startWriterInvalidationListener();
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -1099,6 +1178,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         frontierMonitor?.stop();
         unsubscribeCommits?.();
         lease.stop();
+        await writerListener?.stop();
       },
     };
   }
@@ -1154,24 +1234,9 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // B2a: the ready gate is F = min(frontier_ts) over all N shard rows, and the tailer refuses to
     // treat a partial `shard_leases` (count < numShards) as ready.
     numShards,
-    onInvalidation: async (inv: AppliedInvalidation) => {
-      // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits
-      // this and would leave one otherwise); reactivity is best-effort — reads stay correct.
-      try {
-        runtime.observeTimestamp(inv.newMaxTs);
-        const ranges = [
-          ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
-          ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
-        ];
-        await runtime.handler.notifyWrites({
-          tables: inv.writtenTables,
-          ranges,
-          commitTs: Number(inv.newMaxTs),
-        });
-      } catch (e) {
-        console.error("fleet: replica invalidation failed", e);
-      }
-    },
+    // Same sink the writer-ish derive-only listener uses (D5/T5-c) — observe the ts + fan invalidation
+    // into the sync handler; only the replica-apply (this tailer's default mode) differs.
+    onInvalidation: invalidationSink,
   });
   await tailer.start(); // READY GATE: resolves only after the replica has caught up to the primary.
   // Enable read-your-own-writes: a client that wrote through this node waits for the replica's
@@ -1209,6 +1274,16 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         await armWriter(false);
         // Now writer-ish: the already-running balancer's next beat will acquire/release to converge.
         writerish = true;
+        // B2b, D5 — "drivers follow the default shard": `promoteFleetNode` eagerly started drivers
+        // (correct for the single-writer/failover path, where a promoted node holds the default ring).
+        // In MULTI-WRITER mode a node can promote for a NON-default orphaned shard while a peer still
+        // holds default — such a node must NOT run the drivers. `armWriter`'s default-shard acquisition
+        // (if it happened) already (re)started them idempotently; correct the over-eager start here if
+        // this node did not end up holding the default ring.
+        if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
+        // B2b, D5/T5-c: this node is now a writer with its replica tailer stopped — start the derive-
+        // only listener so it keeps seeing co-writers' commits (no-op when multi-writer is off).
+        await startWriterInvalidationListener();
       },
       startMonitor: startWriterMonitor,
       firePromoted,
@@ -1239,6 +1314,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       unsubscribeCommits?.();
       lease.stop();
       await tailer.stop();
+      await writerListener?.stop(); // non-null only if this sync node was promoted in multi-writer mode
       // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a sync
       // node). Close it here so the pg connection is released; `NodePgClient.close()` is idempotent,
       // so a later `switchable.close()` (if promotion had swapped it in) is a safe no-op. The

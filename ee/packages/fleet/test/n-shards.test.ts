@@ -402,18 +402,54 @@ describe("Shards B2b, Task 3 — per-shard relinquish (fence on s becomes 'drop 
     await client.close();
   });
 
-  it("relinquishing the DEFAULT shard logs the drivers-still-running warning (Task 5 caveat)", async () => {
+  it("relinquishing the DEFAULT shard fires onDefaultRelinquished (drivers follow the default shard, Task 5, D5)", async () => {
     const { client, lease } = await makeNode();
     await acquireAll(lease);
-    const warn = vi.fn();
     const log = vi.fn();
+    const onDefaultRelinquished = vi.fn();
 
-    relinquish({ lease, client, shards: SHARDS, log, warn }, DEFAULT_SHARD, "test");
+    relinquish({ lease, client, shards: SHARDS, log, onDefaultRelinquished }, DEFAULT_SHARD, "test");
 
     expect(lease.currentEpoch(DEFAULT_SHARD)).toBeNull();
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]![0]).toContain("stopDriversOnly");
+    expect(onDefaultRelinquished).toHaveBeenCalledTimes(1); // drivers get stopped
+    await client.close();
+  });
+
+  it("relinquishing a NON-default shard does NOT fire onDefaultRelinquished", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const onDefaultRelinquished = vi.fn();
+
+    relinquish({ lease, client, shards: SHARDS, log: vi.fn(), onDefaultRelinquished }, "s2", "test");
+
+    expect(lease.currentEpoch("s2")).toBeNull();
+    expect(onDefaultRelinquished).not.toHaveBeenCalled(); // only the default ring drives drivers
+    await client.close();
+  });
+
+  it("bumpOrphanFrontiers advances writer-less rows to the ceiling and leaves HELD rows untouched (D4)", async () => {
+    const { client, lease } = await makeNode();
+    // Hold "default" + "s1" as the writer; leave "s2","s3" as ORPHANED rows (writer_url NULL, low F).
+    await lease.tryAcquire(DEFAULT_SHARD, 0);
+    await acquireShardAsWriter(lease, "s1", 1, 10);
+    // Create orphaned rows for s2/s3: acquire then self-fence (epoch+1, writer_url NULL, low frontier).
+    await acquireShardAsWriter(lease, "s2", 2, 10);
+    await acquireShardAsWriter(lease, "s3", 3, 10);
+    await lease.selfFence("s2");
+    await lease.selfFence("s3");
+    // selfFence bumps frontier via nextval; capture the held/orphan frontiers BEFORE the bump.
+    const before = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+
+    const ceiling = 10_000_000_000n; // far above any nextval drawn so far
+    await lease.bumpOrphanFrontiers(ceiling);
+
+    const after = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+    // Orphaned (writer_url NULL) rows advanced to the ceiling; min-F is no longer pinned by them.
+    expect(after.get("s2")).toBe(ceiling);
+    expect(after.get("s3")).toBe(ceiling);
+    // Held rows (default, s1) were NOT touched by this query — only writer-less rows match its WHERE.
+    expect(after.get(DEFAULT_SHARD)).toBe(before.get(DEFAULT_SHARD));
+    expect(after.get("s1")).toBe(before.get("s1"));
     await client.close();
   });
 });
