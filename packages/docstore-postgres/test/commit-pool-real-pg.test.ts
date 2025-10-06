@@ -71,4 +71,41 @@ describe.skipIf(!DATABASE_URL)("commit pool — genuine cross-shard concurrency 
     await client.query("DROP TABLE b2a_pool_proof");
     await client.close();
   });
+
+  it("releaseShardLock frees a slot for a GENUINELY DIFFERENT connection to acquire, while the original connection stays alive (B2b, D2)", async () => {
+    const client = new NodePgClient({
+      connectionString: DATABASE_URL!,
+      applicationName: "stackbase-b2b-unlock-test",
+      commitPool: { shards: ["s0"] },
+    });
+    // A second, independent client — its own commit connection for the SAME slot's shard — models
+    // "another node" (or this node re-acquiring on a fresh connection after a restart).
+    const other = new NodePgClient({
+      connectionString: DATABASE_URL!,
+      applicationName: "stackbase-b2b-unlock-test-other",
+      commitPool: { shards: ["s0"] },
+    });
+
+    try {
+      // Take the lock on client's s0 connection.
+      expect(await client.tryAcquireShardLock!(0)).toBe(true);
+      // While held, a genuinely different session cannot take it (real advisory-lock exclusion —
+      // proof that this test is exercising real Postgres semantics, not the pg mock).
+      expect(await other.tryAcquireShardLock!(0)).toBe(false);
+
+      // Release it — on `client`'s own connection, per the seam's contract.
+      await client.releaseShardLock!(0);
+
+      // The SAME slot is now re-acquirable — on the OTHER (previously-blocked) connection.
+      expect(await other.tryAcquireShardLock!(0)).toBe(true);
+
+      // `client`'s original connection is still alive and usable — releasing the lock did not close
+      // or otherwise disturb the connection itself.
+      const rows = await client.query("SELECT 1 AS ok");
+      expect(rows[0]?.ok).toBe(1);
+    } finally {
+      await client.close();
+      await other.close();
+    }
+  });
 });

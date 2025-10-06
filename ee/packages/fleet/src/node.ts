@@ -701,28 +701,29 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  * := commitTs`) predicated on THIS node's epoch still being current, so frontier publication,
  * fencing, and the lease are one row with zero extra round-trips. `lease.currentEpoch()` is read
  * LIVE on every commit (not a snapshot taken at install time) so a later re-promotion's epoch bump
- * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`,
- * which aborts the whole transaction — AND fires `fireFenced()` (routes to the writer lease
- * monitor's `fenced()`, mirroring `connectionLost()`) before throwing, so the node exits
- * immediately rather than leaving the caller's mutation to fail silently with no self-demotion.
- * Called at writer boot AND on promotion success — see the two call sites below.
+ * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`, which
+ * aborts the whole transaction — AND calls `onFenced(shardId, reason)` before throwing so the caller
+ * can react (B2b, D2: `startFleetNode` wires this straight to `relinquish(shardId, reason)` — drop
+ * JUST this shard, keep serving everything else — never to a whole-node exit; see `relinquish` below
+ * for why `LeaseMonitor.fenced()`/`onExit` are NOT reached from here anymore). Called at writer boot
+ * AND on promotion success — see the two call sites below.
  */
 export function installCommitGuard(
   pgStore: PostgresDocStore,
   lease: LeaseManager,
-  fireFenced: (reason: string) => void,
+  onFenced: (shardId: ShardId, reason: string) => void,
 ): void {
   pgStore.setCommitGuard(async (q, commitTs, shardId) => {
     // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
     // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
     // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
-    // and self-demotes, while the other shards' commits are unaffected.
+    // and relinquishes ONLY s2 (B2b), while the other shards' commits are unaffected.
     const epoch = lease.currentEpoch(shardId);
     if (epoch === null) {
       // Structurally shouldn't happen — the guard is only ever installed after this node has acquired
       // every shard it commits on (writer boot / promotion arming). Treat defensively as fenced rather
       // than let an inconsistent guard silently allow an unfenced commit through.
-      fireFenced(`commit guard invoked with no acquired epoch for shard '${shardId}'`);
+      onFenced(shardId, `commit guard invoked with no acquired epoch for shard '${shardId}'`);
       throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
     // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
@@ -738,9 +739,82 @@ export function installCommitGuard(
       [commitTs, shardId, epoch],
     );
     if (rows.length === 0) {
-      fireFenced(`commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
+      onFenced(shardId, `commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
       throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
     }
+  });
+}
+
+/** The narrow seams `relinquish` needs — deliberately structural (not the concrete `NodePgClient`) so
+ *  it's unit-testable with a stub, and reusable by T4's balancer without depending on `startFleetNode`'s
+ *  internal closures. */
+export interface RelinquishDeps {
+  lease: LeaseManager;
+  /** `releaseShardLock` is consulted defensively (`?.`) — absent on a poolless/PGlite client, though
+   *  every real B2b fleet node runs in pool mode and always has it. */
+  client: { releaseShardLock?: (slot: number) => Promise<void> };
+  /** Ordered shard list (index = slot) — how `shardId`'s per-slot advisory lock is found for
+   *  `releaseShardLock`. The same list `prepareFleetNode`/`startFleetNode` derive via `shardIdList`. */
+  shards: readonly ShardId[];
+  /** Structured-log seam, defaults to `console.error`. Tests inject a spy. */
+  log?: (msg: string) => void;
+  /** Warn seam (the default-shard driver caveat below), defaults to `console.warn`. Tests inject a spy. */
+  warn?: (msg: string) => void;
+}
+
+/**
+ * Per-shard relinquish dispatcher (Fenced Frontier B2b, D2): the reduction a `FencedError` on shard
+ * `s` gets now — "drop `s`, keep serving everything else" — instead of B1/B2a's "kill the node".
+ * Routed to from the commit guard's `onFenced` (a fence discovered mid-commit — that commit itself
+ * still aborts and propagates `FencedError` to its caller, OCC-retryable; relinquish is the SIDE
+ * EFFECT, not a swallow), the batched heartbeat's `fencedShardIds` (a fence discovered on the probe
+ * beat), and a per-shard commit-connection loss.
+ *
+ * Idempotent per shard: `lease.currentEpoch(shardId) === null` means this shard is already forgotten
+ * (a prior relinquish call, or a shard this node never held) — a silent no-op, so callers never need
+ * to track "have I already relinquished this" themselves.
+ *
+ *  1. `lease.forgetShard(shardId)` — drops the held-epoch entry, so the commit guard's "no acquired
+ *     epoch" branch fences any straggler commit on `s` cleanly, and `heartbeatAll`/`closeIdleFrontiers`
+ *     stop touching it.
+ *  2. Release `s`'s per-slot advisory lock (`PgClient.releaseShardLock`) — UNLESS `opts.connectionLost`:
+ *     a dead commit connection already released its session-scoped lock the instant the backend went
+ *     away, so there is nothing left to release (and no live connection to run the unlock query on).
+ *  3. Log one structured line. Relinquishing the DEFAULT shard additionally WARNS that drivers keep
+ *     running (scheduler/workflow/cron/reaper stay armed on this node) until a later task wires
+ *     `stopDriversOnly` (D5) — driver stop/start is deliberately NOT built here.
+ *
+ * Deliberately does NOT touch `LeaseMonitor` and never calls `onExit` — the whole point of B2b is that
+ * a per-shard fence must no longer escalate to a whole-node exit. `LeaseMonitor` stays reserved for
+ * pinned-connection loss and probe exhaustion (definitive WHOLE-NODE loss); see `startFleetNode`.
+ */
+export function relinquish(
+  deps: RelinquishDeps,
+  shardId: ShardId,
+  reason: string,
+  opts: { connectionLost?: boolean } = {},
+): void {
+  if (deps.lease.currentEpoch(shardId) === null) return; // idempotent: not held (already gone, or never)
+  deps.lease.forgetShard(shardId);
+  const log = deps.log ?? ((m: string) => console.error(m));
+  const warn = deps.warn ?? ((m: string) => console.warn(m));
+  log(
+    `fleet: relinquish shard='${shardId}' reason='${reason}'` +
+      (opts.connectionLost ? " (via commit-connection loss — its slot lock is already gone)" : ""),
+  );
+  if (shardId === DEFAULT_SHARD) {
+    warn(
+      `fleet: relinquished the default shard — drivers (scheduler/workflow/cron/reaper) keep running ` +
+        `on this node until a later task wires stopDriversOnly (not built here)`,
+    );
+  }
+  if (opts.connectionLost) return; // the lock died with the connection — nothing left to release
+  const slot = deps.shards.indexOf(shardId);
+  if (slot < 0 || !deps.client.releaseShardLock) return;
+  void deps.client.releaseShardLock(slot).catch((e: unknown) => {
+    log(
+      `fleet: releaseShardLock(${slot}) for shard '${shardId}' failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
   });
 }
 
@@ -820,21 +894,21 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // Heartbeat-as-probe (Fenced Frontier B1, D2): one round-trip serves liveness-probe + TTL
       // maintenance + fence verification — NEVER pg_try_advisory_lock (re-entrant on the holding
       // session). `lease.currentEpoch()` is read live so a re-promotion's epoch bump is honored.
-      // A 0-row heartbeat means this node's epoch has been superseded (fenced) even though its
-      // connection is still alive — DEFINITIVE loss, so it routes straight to `monitor.fenced()`
-      // (bypassing the miss-tolerance below, which exists only for transient/ambiguous blips) and
-      // then throws so `LeaseMonitor.tick()`'s catch path sees an already-exited monitor and skips
-      // `recordMiss` (no double-count, no delay past this single probe).
       probe: async () => {
-        // B2a: batched heartbeat over ALL held shard leases in one round-trip. `updated < expected`
-        // means at least one shard's epoch was superseded — a DEFINITIVE writer-lease loss (this one
-        // node holds every shard single-node), routed straight to `fenced()` exactly like B1's
-        // single-shard 0-row heartbeat.
-        const { updated, expected } = await lease.heartbeatAll();
+        // B2a: batched heartbeat over ALL held shard leases in one round-trip. B2b, D2: a superseded
+        // epoch is now a PER-SHARD signal, not a whole-node one — `fencedShardIds` names exactly which
+        // held shards did NOT renew, and each is relinquished individually (`lease.forgetShard` +
+        // its slot lock released) without touching `LeaseMonitor`/`onExit`. The probe itself does NOT
+        // throw for this — a per-shard fence is normal per-shard operation now, not a probe failure,
+        // so it must never accrue toward the miss-exhaustion backstop below.
+        const { expected, fencedShardIds } = await lease.heartbeatAll();
         if (expected === 0) throw new Error("fleet: heartbeat probe with no acquired leases (bug)");
-        if (updated < expected) {
-          monitor?.fenced(`batched heartbeat updated ${updated}/${expected} shard leases — an epoch was superseded`);
-          throw new FencedError(`writer lease fenced: batched heartbeat updated ${updated}/${expected} shard leases`);
+        for (const fencedShardId of fencedShardIds) {
+          relinquish(
+            { lease, client, shards },
+            fencedShardId,
+            "batched heartbeat found a superseded epoch",
+          );
         }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
@@ -848,14 +922,19 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   };
 
   // Register the connection-lost hook ONCE, here — routed to the monitor only when this node is the
-  // writer (monitor non-null). A dropped pinned connection is definitive lease loss (the advisory
-  // lock is released the instant that backend goes away), so it exits immediately.
+  // writer (monitor non-null). A dropped pinned connection is definitive WHOLE-NODE lease loss (the
+  // advisory lock is released the instant that backend goes away, and the pinned connection is what
+  // every non-commit query — heartbeats, eviction, setup — runs on), so it exits immediately. This is
+  // the ONE loss signal `relinquish` never handles: there is no "just this shard" reading of losing
+  // the connection every shard's bookkeeping depends on.
   client.onConnectionLost?.(() => monitor?.connectionLost());
-  // B2a: a dead PER-SHARD commit connection = that shard's advisory lock released = that shard's lease
-  // definitively lost. This one node holds every shard (single-node), so losing any shard means it can
-  // no longer be the writer — route to the same immediate exit as the pinned connection loss. (Once
-  // per-shard failover lands in B2b, this becomes a per-shard relinquish instead of a whole-node exit.)
-  client.onShardConnectionLost?.((shardId) => monitor?.fenced(`shard '${shardId}' commit connection lost`));
+  // B2b, D2: a dead PER-SHARD commit connection is that shard's fence, and ONLY that shard's — the
+  // shard's session-scoped advisory lock died WITH the connection (so `relinquish` must skip
+  // `releaseShardLock`: there is no live connection left to run the unlock on, and the lock is already
+  // gone), but every other shard's commit connection — and this node's writer status — is unaffected.
+  client.onShardConnectionLost?.((shardId) =>
+    relinquish({ lease, client, shards }, shardId, "commit connection lost", { connectionLost: true }),
+  );
 
   /**
    * Arm this node as the writer of ALL N shards (B2a). Runs at writer boot AND on promotion:
@@ -878,7 +957,12 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       await acquireShardAsWriter(lease, shards[slot]!, slot, fleetAcquireRetryMs(lease.ttlMs), seed);
     }
     if (seed) await lease.seedFrontierAll(await pgStore.maxTimestamp());
-    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+    // B2b, D2: a guard-discovered fence relinquishes JUST that shard — never routes to
+    // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
+    // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
+      relinquish({ lease, client, shards }, fencedShardId, reason),
+    );
     // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
     // closer would needlessly advance the lone frontier past real commits via `nextval`). At N=1 the
     // monitor is read-only — health stats without mutating the frontier — so single-shard behavior is

@@ -11,6 +11,7 @@ export {
   runPromotion,
   acquireShardAsWriter,
   installCommitGuard,
+  relinquish,
   FrontierMonitor,
   fleetApplicationName,
   REPLICA_DB_FILENAME,
@@ -23,6 +24,7 @@ export {
   type FrontierStats,
   type StartFleetNodeDeps,
   type PromotionRunDeps,
+  type RelinquishDeps,
 } from "./node";
 export { SwitchableDocStore } from "./switchable-store";
 export { docKeyToPointRange } from "./ranges";
