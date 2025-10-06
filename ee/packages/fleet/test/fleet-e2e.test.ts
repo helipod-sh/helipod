@@ -476,6 +476,121 @@ function bodiesOf(value: unknown): string[] {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Multi-writer scenario helpers (B2b — STACKBASE_FLEET_MULTI_WRITER=1)          */
+/* -------------------------------------------------------------------------- */
+
+/** The live per-shard ownership partition the balancer maintains under multi-writer mode: every
+ *  `shard_leases` row with an UNEXPIRED, non-null `writer_url`, as `shard_id → writer_url`. Read
+ *  straight off Postgres (the same rows `readShardOwnership` derives placement from) so the test sees
+ *  exactly what the running balancers see. */
+async function readShardPartition(pg: Client): Promise<Map<string, string>> {
+  const r = await pg.query(
+    "SELECT shard_id, writer_url FROM shard_leases WHERE writer_url IS NOT NULL AND expires_at >= now()",
+  );
+  const map = new Map<string, string>();
+  for (const row of r.rows as Array<{ shard_id: string; writer_url: string }>) map.set(row.shard_id, row.writer_url);
+  return map;
+}
+
+/** Canonical signature of a partition (`shard=owner` pairs, sorted) — the substrate for the
+ *  no-thrash (stable-for-a-window) and writer_url-flipped (scale-out) assertions. */
+function partitionSig(p: Map<string, string>): string {
+  return [...p.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([s, u]) => `${s}=${u}`).join(",");
+}
+
+/** Wait until all NUM_SHARDS shards are held, disjointly, by EXACTLY the given owner set (each owner
+ *  present, no owner outside the set) — i.e. the multi-writer rendezvous partition has converged. */
+async function waitForConvergedPartition(pg: Client, owners: string[], timeoutMs = 40_000): Promise<Map<string, string>> {
+  const start = Date.now();
+  let last = new Map<string, string>();
+  for (;;) {
+    last = await readShardPartition(pg).catch(() => new Map<string, string>());
+    if (last.size === NUM_SHARDS) {
+      const held = new Set(last.values());
+      if ([...held].every((u) => owners.includes(u)) && owners.every((u) => held.has(u))) return last;
+    }
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`partition did not converge to {${owners.join(", ")}} within ${timeoutMs}ms (last=${partitionSig(last)})`);
+    }
+    await sleep(200);
+  }
+}
+
+/** Like `waitFor`, but the predicate is async (an HTTP read-back / admin browse per poll). */
+async function waitForAsync(cond: () => Promise<boolean>, timeoutMs = 20_000, what = "condition"): Promise<void> {
+  const start = Date.now();
+  while (!(await cond().catch(() => false))) {
+    if (Date.now() - start > timeoutMs) throw new Error(`waitForAsync timed out waiting for ${what}`);
+    await sleep(100);
+  }
+}
+
+/** Owner (writer_url) of the shard a channelId routes to under the live partition. */
+function ownerOfKey(partition: Map<string, string>, key: string): string | undefined {
+  return partition.get(shardIdForKeyValue(key, NUM_SHARDS));
+}
+
+/** Find a `chan-<i>` key whose shard is owned by `owner` (optionally excluding the "default" shard).
+ *  Scans a bounded deterministic candidate space; throws (loud) if none is found. */
+function pickKeyForOwner(
+  partition: Map<string, string>,
+  owner: string,
+  opts: { excludeDefault?: boolean } = {},
+): { key: string; shard: string } {
+  for (let i = 0; i < 1024; i++) {
+    const key = `chan-${i}`;
+    const shard = shardIdForKeyValue(key, NUM_SHARDS);
+    if (opts.excludeDefault && shard === "default") continue;
+    if (partition.get(shard) === owner) return { key, shard };
+  }
+  throw new Error(`no chan-<i> key routes to a shard owned by ${owner} (partition=${partitionSig(partition)})`);
+}
+
+/** A background commit loop that POSTs `path(argsFor())` to `url` every `periodMs`, recording the
+ *  wall-clock time of each committed success. `maxGapMs()` is the longest interval between consecutive
+ *  successes — the "never stalls" metric for the failover / scale-out windows. Bounded per attempt so
+ *  a transient stall can't wedge the loop. */
+interface CommitLoop {
+  successTimestamps: number[];
+  attempts: () => number;
+  maxGapMs: () => number;
+  stop: () => Promise<void>;
+}
+function startCommitLoop(
+  url: string,
+  path: string,
+  argsFor: () => Record<string, unknown>,
+  periodMs = 150,
+): CommitLoop {
+  let running = true;
+  let attempts = 0;
+  const successTimestamps: number[] = [];
+  const done = (async () => {
+    while (running) {
+      attempts += 1;
+      const r = await apiRunBounded(url, path, argsFor(), 3_000).catch(
+        () => ({ kind: "error", message: "threw" }) as BoundedRunOutcome,
+      );
+      if (r.kind === "http" && r.status === 200 && r.body.committed === true) successTimestamps.push(Date.now());
+      await sleep(periodMs);
+    }
+  })();
+  return {
+    successTimestamps,
+    attempts: () => attempts,
+    maxGapMs: () => {
+      let max = 0;
+      for (let i = 1; i < successTimestamps.length; i++) max = Math.max(max, successTimestamps[i]! - successTimestamps[i - 1]!);
+      return max;
+    },
+    stop: async () => {
+      running = false;
+      await done;
+    },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -1381,5 +1496,338 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       }
     },
     { timeout: 240_000 },
+  );
+
+  it(
+    "runs MULTI-WRITER: converges a disjoint shard partition, commits cross-node, forwards the scheduler + _system + writer-invalidation across owners, fails a default holder over without double-executing the scheduler, and scales out to a new writer gracefully",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const portD = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+      const advB = `http://127.0.0.1:${portB}`;
+      const advD = `http://127.0.0.1:${portD}`;
+
+      // Multi-writer scale-out is OPT-IN behind STACKBASE_FLEET_MULTI_WRITER (default OFF keeps the
+      // single-writer + sync-replica byte-identical path the other scenarios exercise). Short TTL 6000
+      // ⇒ balancer beat ~800ms (`fleetAcquireRetryMs`), probe ~2000ms — fast rendezvous convergence
+      // and failover in a test's timescale, while leaving ample presence-heartbeat headroom under
+      // container load. NUM_SHARDS pinned so the in-test router matches the children exactly.
+      const MW_ENV = {
+        STACKBASE_FLEET_MULTI_WRITER: "1",
+        STACKBASE_FLEET_SHARDS: String(NUM_SHARDS),
+        STACKBASE_FLEET_LEASE_TTL_MS: "6000",
+      };
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      // Advertise-URL → live child handle, so we can kill "whichever node holds the default shard"
+      // without hard-coding A vs B (rendezvous decides who owns `default`).
+      const nodes: Record<string, { proc: ServeProcess | undefined; url: string }> = {};
+      let nodeD: ServeProcess | undefined;
+      let wsA: WebSocket | undefined;
+      let ownLoop: CommitLoop | undefined;
+      let scaleLoop: CommitLoop | undefined;
+      try {
+        /* ============================================================== */
+        /* (1) CONVERGENCE: boot A (writer) + B (co-writer via rendezvous). */
+        /*     The partition converges to a DISJOINT, non-empty split of    */
+        /*     all 8 shards across {A, B}, stable (no thrash) over a window. */
+        /* ============================================================== */
+        const nodeA = spawnFleetServe(databaseUrl, portA, undefined, MW_ENV);
+        nodes[advA] = { proc: nodeA, url: advA };
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        const nodeB = spawnFleetServe(databaseUrl, portB, undefined, MW_ENV);
+        nodes[advB] = { proc: nodeB, url: advB };
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        // B boots SYNC (A holds the election); it becomes a co-writer only after rendezvous
+        // convergence (A releases B's HRW share → B promotes + acquires) — proven below.
+        expect(bootB.ready.role).toBe("sync");
+
+        const partition = await waitForConvergedPartition(pg, [advA, advB]);
+        expect(partition.size).toBe(NUM_SHARDS); // every shard held
+        const ownersA = [...partition.entries()].filter(([, u]) => u === advA).map(([s]) => s);
+        const ownersB = [...partition.entries()].filter(([, u]) => u === advB).map(([s]) => s);
+        expect(ownersA.length).toBeGreaterThan(0); // A non-empty
+        expect(ownersB.length).toBeGreaterThan(0); // B non-empty
+        expect(ownersA.length + ownersB.length).toBe(NUM_SHARDS); // disjoint, summing to 8
+
+        // No-thrash / damping: the partition signature stays IDENTICAL across a stability window.
+        const stableSig = partitionSig(partition);
+        const stabilityDeadline = Date.now() + 6_000;
+        while (Date.now() < stabilityDeadline) {
+          const now = partitionSig(await readShardPartition(pg));
+          expect(now).toBe(stableSig);
+          await sleep(400);
+        }
+
+        /* ============================================================== */
+        /* Cross-node subscriptions live on WRITER A. In multi-writer mode   */
+        /* there is NO stable pure-sync node — every node participates in     */
+        /* rendezvous and is auto-promoted to a co-writer (its replica tailer */
+        /* stops), so a subscription opened on a "sync" node goes dark the    */
+        /* instant it promotes (the T4-discovery hole). The shipped mechanism */
+        /* by which a node's subscriptions see a FOREIGN writer's commits is  */
+        /* the T5 derive-only writer-invalidation listener, which every       */
+        /* writer-ish node runs. A booted FIRST as the writer, so its listener */
+        /* has been live since boot — it is the stable observation point.     */
+        /* ============================================================== */
+        const subA = await subscribe(`${advA.replace("http", "ws")}/api/sync`, 1, "messages:list", {});
+        wsA = subA.ws;
+        expect(latestMod(subA.messages, 1)!.value).toEqual([]);
+
+        /* ============================================================== */
+        /* (2/3) CROSS-NODE COMMITS + read-your-writes.                     */
+        /*   Two keys routing to shards owned by DIFFERENT writers, fired    */
+        /*   concurrently through B: `keyOnA` forwards B→A (a non-owner       */
+        /*   forward), `keyOnB` commits locally on B. A's subscription sees    */
+        /*   BOTH — `keyOnA` via A's LOCAL fan-out, `keyOnB` (foreign) via A's  */
+        /*   writer-invalidation listener — with monotonic containment. A       */
+        /*   read-back through the routing node B sees both.                    */
+        /* ============================================================== */
+        const keyOnA = pickKeyForOwner(partition, advA).key;
+        const keyOnB = pickKeyForOwner(partition, advB).key;
+        expect(ownerOfKey(partition, keyOnA)).toBe(advA);
+        expect(ownerOfKey(partition, keyOnB)).toBe(advB);
+        expect(shardIdForKeyValue(keyOnA, NUM_SHARDS)).not.toBe(shardIdForKeyValue(keyOnB, NUM_SHARDS));
+
+        const [rX, rY] = await Promise.all([
+          apiRun(advB, "messages:send", { channelId: keyOnA, body: "msg-X" }),
+          apiRun(advB, "messages:send", { channelId: keyOnB, body: "msg-Y" }),
+        ]);
+        expect(rX.body.committed).toBe(true);
+        expect(rY.body.committed).toBe(true);
+
+        // Read-back through B sees both — `keyOnB` (B's own shard) is immediately consistent; `keyOnA`
+        // (foreign) becomes visible as B's oracle observes A's commit ts (listener-eventual), so this
+        // is a bounded wait rather than a same-instant assert.
+        await waitForAsync(
+          async () => bodiesOf((await apiRun(advB, "messages:list", {})).body.value).join() === ["msg-X", "msg-Y"].join(),
+          15_000,
+          "read-your-writes: both cross-node writes visible via B",
+        );
+
+        // A's cross-shard subscription converges to BOTH (local + listener) and never regressed.
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as unknown[]).length === 2;
+        }, 20_000);
+        const aStates = pushedQueryStates(subA.messages, 1).map(bodiesOf);
+        for (let i = 1; i < aStates.length; i++) {
+          for (const b of new Set(aStates[i - 1] ?? [])) expect(aStates[i] ?? []).toContain(b);
+        }
+        expect(aStates[aStates.length - 1]).toEqual(["msg-X", "msg-Y"]);
+
+        /* ============================================================== */
+        /* (i) WRITER INVALIDATION LISTENER, LIVE (the T4-discovery          */
+        /*   regression): A single commit on B's shard (foreign to writer A)  */
+        /*   must reach A's subscription — A, whose replica tailer is stopped,  */
+        /*   learns of a peer writer's commit ONLY via the derive-only          */
+        /*   listener. (Above proved it for the concurrent pair; this isolates   */
+        /*   a lone foreign commit as an explicit, unambiguous assertion.)       */
+        /* ============================================================== */
+        const zAdd = await apiRun(advB, "messages:send", { channelId: keyOnB, body: "msg-Z" });
+        expect(zAdd.body.committed).toBe(true);
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as Array<{ body?: string }>).some((m) => m.body === "msg-Z");
+        }, 20_000);
+
+        /* ============================================================== */
+        /* (ii) FORWARDED _system PATH, LIVE: a dashboard-style              */
+        /*   _system:patchDocument via node A's admin API, targeting a doc    */
+        /*   on a shard held by B — A's runSystem must FORWARD it to B (T2),   */
+        /*   since A does not own that shard.                                  */
+        /* ============================================================== */
+        const browse = await fetch(`${advA}/_admin/tables/messages/data`, {
+          headers: { authorization: `Bearer ${ADMIN_KEY}` },
+        });
+        expect(browse.status).toBe(200);
+        const browsePage = (await browse.json()) as { documents: Array<{ _id: string; channelId: string; body: string }> };
+        const docToPatch = browsePage.documents.find((d) => d.channelId === keyOnB && d.body === "msg-Y");
+        expect(docToPatch).toBeDefined();
+        const patchRes = await fetch(`${advA}/_admin/tables/messages/docs/${docToPatch!._id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN_KEY}` },
+          body: JSON.stringify({ channelId: keyOnB, body: "msg-Y-patched" }),
+        });
+        expect(patchRes.status).toBe(200);
+        // The forwarded _system mutation landed on B's shard — read it back through B (its owner).
+        await waitForAsync(
+          async () => bodiesOf((await apiRun(advB, "messages:list", {})).body.value).includes("msg-Y-patched"),
+          20_000,
+          "forwarded _system patch to land on B's shard",
+        );
+
+        /* ============================================================== */
+        /* (4) DRIVER-FORWARD: the scheduler driver runs on the DEFAULT-     */
+        /*   shard holder; a scheduled `messages:send` whose channelId routes  */
+        /*   to a shard held by the OTHER writer must be forwarded cross-node   */
+        /*   when the driver dispatches it — row appears + reactive push        */
+        /*   observed on A's subscription.                                      */
+        /* ============================================================== */
+        const defHolder = partition.get("default");
+        expect(defHolder === advA || defHolder === advB).toBe(true);
+        const otherWriter = defHolder === advA ? advB : advA;
+        const fwdKey = pickKeyForOwner(partition, otherWriter, { excludeDefault: true }).key;
+        expect(ownerOfKey(partition, fwdKey)).toBe(otherWriter);
+
+        const sched = await apiRun(advB, "messages:scheduleSend", { channelId: fwdKey, body: "scheduled-fwd", delayMs: 1_000 });
+        expect(sched.body.committed).toBe(true);
+        // The driver (on the default holder) dispatches → forwards to `otherWriter` → commits → fans out
+        // to A's subscription (local if A owns the shard, else via A's listener).
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as Array<{ body?: string }>).some((m) => m.body === "scheduled-fwd");
+        }, 25_000);
+        // No node process exited during the driver-forward; A's subscription socket stayed healthy.
+        expect(nodes[advA]!.proc!.exitCode).toBeNull();
+        expect(nodes[advB]!.proc!.exitCode).toBeNull();
+        expect(wsA.readyState).toBe(WebSocket.OPEN);
+
+        /* ============================================================== */
+        /* (5 + iii) DEFAULT-HOLDER FAILOVER + EXACTLY-ONCE SCHEDULER:       */
+        /*   Start a self-rescheduling `tick` chain (runs on the default        */
+        /*   holder's driver). Start an UNINTERRUPTED commit loop on the         */
+        /*   SURVIVOR's OWN shard. SIGKILL the default holder → the survivor      */
+        /*   fences + acquires all shards; the survivor's own-shard loop NEVER    */
+        /*   stalls; the tick chain resumes on the survivor with STRICTLY UNIQUE  */
+        /*   seq values (no double-execution) that keep climbing.                */
+        /* ============================================================== */
+        const survivorUrl = otherWriter; // the non-default holder survives the kill
+        const survivorKey = pickKeyForOwner(partition, survivorUrl, { excludeDefault: true }).key;
+
+        // Kick off the exactly-once tick chain (max 60 ticks, ~400ms apart) via the survivor (the
+        // scheduling mutation forwards to the default holder, which owns scheduler/jobs).
+        const kick = await apiRun(survivorUrl, "notes:scheduleTick", { max: 60, delayMs: 400 });
+        expect(kick.body.committed).toBe(true);
+        await waitForAsync(
+          async () => {
+            const r = await apiRun(survivorUrl, "notes:ticks", {});
+            return Array.isArray(r.body.value) && (r.body.value as string[]).length >= 3;
+          },
+          25_000,
+          "tick chain to start producing rows",
+        );
+        const ticksBeforeKill = (await apiRun(survivorUrl, "notes:ticks", {})).body.value as string[];
+        const maxSeqBeforeKill = Math.max(...ticksBeforeKill.map((t) => Number(t.replace("tick-", ""))));
+
+        // Uninterrupted commit loop on the survivor's OWN shard (a local commit — unaffected by the
+        // default holder's death). ~150ms cadence; the loop must never stall through the failover.
+        let loopSeq = 0;
+        ownLoop = startCommitLoop(survivorUrl, "messages:send", () => ({ channelId: survivorKey, body: `loop-${loopSeq++}` }));
+        await waitFor(() => ownLoop!.successTimestamps.length >= 3, 15_000);
+
+        // SIGKILL the default holder — the survivor must fence + acquire ALL shards (incl. default).
+        const defProc = nodes[defHolder!]!.proc!;
+        const killAt = Date.now();
+        defProc.kill("SIGKILL");
+        await new Promise<void>((r) => defProc.once("exit", () => r()));
+        nodes[defHolder!]!.proc = undefined;
+
+        const soleOwner = await waitForConvergedPartition(pg, [survivorUrl], 40_000);
+        expect([...new Set(soleOwner.values())]).toEqual([survivorUrl]); // survivor owns every shard
+        const takeoverMs = Date.now() - killAt;
+
+        // The survivor's own-shard commit loop never stalled hard across the failover window. (A commit
+        // on a shard the survivor held before AND after the kill is a local commit throughout — the
+        // generous bound tolerates container-load jitter while still proving no long wedge.)
+        await sleep(4_000); // let the loop accumulate successes spanning the failover window
+        expect(ownLoop.successTimestamps.length).toBeGreaterThan(5);
+        const ownMaxGap = ownLoop.maxGapMs();
+        expect(ownMaxGap).toBeLessThan(6_000); // never a TTL-length wedge
+
+        // (iii) EXACTLY-ONCE scheduler across the default MOVE: the tick chain resumed on the survivor
+        // (drivers followed the default shard) and produced NO duplicate seq (at-most-once dispatch).
+        await waitForAsync(
+          async () => {
+            const r = await apiRun(survivorUrl, "notes:ticks", {});
+            const seqs = (r.body.value as string[]).map((t) => Number(t.replace("tick-", "")));
+            return seqs.length > 0 && Math.max(...seqs) > maxSeqBeforeKill; // chain advanced past the kill
+          },
+          30_000,
+          "tick chain to resume on the survivor",
+        );
+        const ticksAfter = (await apiRun(survivorUrl, "notes:ticks", {})).body.value as string[];
+        const seqsAfter = ticksAfter.map((t) => Number(t.replace("tick-", "")));
+        expect(new Set(seqsAfter).size).toBe(seqsAfter.length); // STRICTLY UNIQUE — no double-execution
+        expect(Math.max(...seqsAfter)).toBeGreaterThan(maxSeqBeforeKill); // drivers continued on the survivor
+
+        await ownLoop.stop();
+        ownLoop = undefined;
+
+        /* ============================================================== */
+        /* (6) GRACEFUL SCALE-OUT: boot a fresh writer D. Under damping the   */
+        /*   survivor RELEASES D's rendezvous share (self-fence, epoch-bump —  */
+        /*   NOT a TTL-expiry takeover), so D acquires within a couple of       */
+        /*   beats. A continuous loop must not stall a full TTL during moves.   */
+        /* ============================================================== */
+        // Continuous loop through the survivor (a stable write path) during the redistribution.
+        let scaleN = 0;
+        scaleLoop = startCommitLoop(survivorUrl, "messages:send", () => ({ channelId: survivorKey, body: `scale-${scaleN++}` }));
+        await waitFor(() => scaleLoop!.successTimestamps.length >= 3, 15_000);
+
+        const dBootAt = Date.now();
+        nodeD = spawnFleetServe(databaseUrl, portD, undefined, MW_ENV);
+        const bootD = await waitForReadyOrExit(nodeD);
+        if (!bootD.ready) throw new Error(`node D failed to boot: exit=${bootD.exitCode} stderr=${bootD.stderr}`);
+
+        const twoWay = await waitForConvergedPartition(pg, [survivorUrl, advD], 40_000);
+        const dAcquiredMs = Date.now() - dBootAt;
+        const dShards = [...twoWay.entries()].filter(([, u]) => u === advD).map(([s]) => s);
+        expect(dShards.length).toBeGreaterThan(0); // D took a real share
+        // Graceful (self-fence release) redistribution: D acquired well within one full lease TTL —
+        // proving a released-then-acquired handoff, NOT waiting out the survivor's lease expiry.
+        expect(dAcquiredMs).toBeLessThan(6_000);
+        // The moved shards' epoch climbed (release → re-acquire bumps epoch), not an expiry takeover.
+        const movedEpochs = (
+          await pg.query(`SELECT epoch FROM shard_leases WHERE writer_url = $1`, [advD])
+        ).rows as Array<{ epoch: string }>;
+        expect(movedEpochs.every((r) => Number(r.epoch) >= 2)).toBe(true);
+
+        await sleep(2_000); // let the loop span the redistribution window
+        const scaleMaxGap = scaleLoop.maxGapMs();
+        expect(scaleLoop.successTimestamps.length).toBeGreaterThan(5);
+        expect(scaleMaxGap).toBeLessThan(6_000); // F never wedged a full TTL during the moves
+        await scaleLoop.stop();
+        scaleLoop = undefined;
+
+        /* ============================================================== */
+        /* WHOLE-RUN DENSITY: the MVCC log stayed a dense per-doc prev_ts    */
+        /* chain across convergence, cross-node commits, the scheduler        */
+        /* forward, the default-holder failover, and the scale-out; and NOT   */
+        /* ONE row carries ts=0 (store-allocated ts is always > 0).           */
+        /* ============================================================== */
+        const chain = await assertDenseChain(pg);
+        expect(chain.violations).toBe(0);
+        expect(chain.multiRevDocs).toBeGreaterThan(0);
+        const zeroTs = (await pg.query(`SELECT count(*)::int AS n FROM documents WHERE ts = 0`)).rows[0] as { n: number };
+        expect(zeroTs.n).toBe(0);
+
+        // eslint-disable-next-line no-console
+        console.log(
+          `[multi-writer] converged A=${ownersA.length}/B=${ownersB.length} shards; default holder ${defHolder}; ` +
+            `failover takeover ${takeoverMs}ms (own-loop maxGap ${ownMaxGap}ms); D acquired ${dShards.length} shards in ${dAcquiredMs}ms (scale-loop maxGap ${scaleMaxGap}ms)`,
+        );
+      } finally {
+        if (ownLoop) await ownLoop.stop().catch(() => {});
+        if (scaleLoop) await scaleLoop.stop().catch(() => {});
+        wsA?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodes[advA]?.proc);
+        await stopServe(nodes[advB]?.proc);
+        await stopServe(nodeD);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 300_000 },
   );
 });
