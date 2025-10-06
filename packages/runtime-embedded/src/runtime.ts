@@ -289,14 +289,19 @@ export class EmbeddedRuntime {
         // mutation whose resolved shard this node doesn't own — see `InlineUdfExecutor.run`). The
         // old runtime-level `writeRouter` check here was BEFORE shard resolution and so bypassed the
         // driver/scheduler path; it is removed as superseded. A forwarded run comes back with a null
-        // oplog, so `tables`/`writeRanges` are empty and `commitTs` 0 — the same shape this path
-        // reported for a forwarded write before.
+        // oplog, so `tables`/`writeRanges` are empty — the same shape this path reported for a
+        // forwarded write before.
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
           writeRanges: r.oplog?.writtenRanges ?? [],
-          commitTs: Number(r.oplog?.commitTs ?? 0),
+          // `commitTs` (B2b, T2): a LOCAL commit reports it via `r.oplog.commitTs`; a FORWARDED
+          // mutation has no local oplog (null), but the executor's forward branch already threads
+          // the owner's real commitTs onto `r.commitTs` itself (see `InlineUdfExecutor.run`) — fall
+          // back to that instead of silently reporting 0, so a forwarded sharded write's commitTs
+          // reaches this path the same way a local one's does.
+          commitTs: Number(r.oplog?.commitTs ?? r.commitTs ?? 0n),
         };
       },
       async runAdminQuery(path, args) {

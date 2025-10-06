@@ -304,6 +304,11 @@ export interface FleetHandles {
    *  how long it's been stuck (ms), and the pinning shard. Null before the first frontier beat, or if
    *  no shard rows exist yet. */
   frontierStats(): FrontierStats | null;
+  /** Per-shard ownership (B2b, D1): does THIS node currently hold `shardId`'s write lease? Backs
+   *  the `/_fleet/run` single-hop guard (`packages/cli`'s `http-handler.ts`) — delegates straight to
+   *  `WriteForwarder.isLocalWriter`, the same live held-set view the executor's own per-shard
+   *  router and `relinquish()` consult. */
+  isLocalWriter(shardId: ShardId): boolean;
   stop(): Promise<void>;
 }
 
@@ -1008,6 +1013,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
       onPromoted: (cb) => promotedCbs.push(cb),
       frontierStats: () => frontierMonitor?.stats() ?? null,
+      isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
       stop: async () => {
         monitor?.stop();
         frontierMonitor?.stop();
@@ -1132,6 +1138,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     writerUrl: async () => (await lease.read())?.writerUrl ?? "",
     onPromoted: (cb) => promotedCbs.push(cb),
     frontierStats: () => frontierMonitor?.stats() ?? null,
+    isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
     stop: async () => {
       monitor?.stop(); // disarm writer self-exit BEFORE the connection is closed (if promoted)
       frontierMonitor?.stop();

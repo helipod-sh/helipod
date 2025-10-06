@@ -1,15 +1,29 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 /**
- * `WriteForwarder` — the non-writer side of the fleet write path. Implements the engine's
- * `WriteRouter` seam: when this node is NOT the writer, every mutation/action entry point calls
- * `forward()`, which POSTs the call to whichever node currently holds the write lease
- * (`/_fleet/run`) and returns its JSON result. On promotion the node flips to `role="writer"` via
- * `promote()` and `isLocalWriter()` starts returning true, so writes execute locally instead.
+ * `WriteForwarder` — the non-owner side of the fleet write path. Implements the engine's
+ * per-shard `WriteRouter` seam (B2b, D1): for any shard this node does NOT currently hold,
+ * `forward()` POSTs the call to that shard's owner (`/_fleet/run`, discovered per-shard from the
+ * `shard_leases` row) and returns its JSON result. `isLocalWriter(shardId)` is a live view of the
+ * node's held-shard set (`LeaseManager.currentEpoch(shardId) !== null` — the SAME source of truth
+ * `relinquish()` uses for its own idempotency check), so a shard acquired/relinquished mid-flight
+ * (balancer rebalancing, failover) takes effect on the very next call — no caching, no stale role.
  *
- * The forwarder learns the writer's URL from the `fleet_lease` discovery row (via `LeaseManager`),
- * never from static config — so a failover to a new writer is picked up by re-reading the lease.
+ * The forwarder learns each shard's writer URL from that shard's `shard_leases` discovery row (via
+ * `LeaseManager.read(shardId)`), never from static config — so a failover to a new owner is picked
+ * up by re-reading the lease. `writerUrlFor(shardId)` caches per shard (one node normally forwards
+ * the same shard repeatedly) and refreshes on a POST failure, retrying once — same shape as the
+ * shipped single-shard `writerUrl()` this replaces, generalized per shard.
  *
- * Task 3 (read-your-own-writes): `/_fleet/run`'s response now carries the write's `commitTs`
+ * Single-hop guard (B2b, D1 spec-review edit): every forward body carries `forwarded: true`. If it
+ * lands on a node that is ALSO not the shard's owner (a point-in-time race during rebalance
+ * convergence), the receiver's `/_fleet/run` handler rejects with a typed, retryable
+ * `NotShardOwnerError` instead of re-forwarding itself (which would let a forward chase a moving
+ * target unboundedly). `forward()` treats that ONE error shape like a transport failure — refresh
+ * the shard's cached URL and retry once — then surfaces whatever the second attempt does. Any OTHER
+ * typed `StackbaseError` (an OCC conflict, a validation failure, …) means a LIVE owner answered
+ * DEFINITIVELY and is re-thrown unchanged, exactly as before.
+ *
+ * Task 3 (read-your-own-writes): `/_fleet/run`'s response carries the write's `commitTs`
  * (stringified — bigints don't survive `JSON.stringify`). If a `ReplicaTailer` has been attached
  * via `attachTailer()` (this node is a fleet SYNC node reading off a local replica), `forward()`
  * waits for that replica's watermark to reach `commitTs` before resolving — otherwise a client that
@@ -18,9 +32,9 @@
  * writer, replica catch-up is no longer the right thing to block on.
  */
 import type { WriteRouter } from "@stackbase/runtime-embedded";
-import type { ShardId } from "@stackbase/id-codec";
+import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import type { JSONValue } from "@stackbase/values";
-import { isStackbaseError, stackbaseErrorFromJSON, type StackbaseErrorJSON } from "@stackbase/errors";
+import { isStackbaseError, stackbaseErrorFromJSON, NOT_SHARD_OWNER_CODE, type StackbaseErrorJSON } from "@stackbase/errors";
 import type { LeaseManager } from "./lease";
 import type { ReplicaTailer } from "./replica-tailer";
 
@@ -49,13 +63,16 @@ const RYOW_WAIT_MS = 5000;
 export type ReplicaWaiter = Pick<ReplicaTailer, "waitFor" | "release">;
 
 export class WriteForwarder implements WriteRouter {
-  private role: "sync" | "writer" = "sync";
   private tailer: ReplicaWaiter | undefined;
   /** Guard each distinct malformed-response warning to once per process (independently — an absent
    *  commitTs and an unparseable one are different failure modes and each deserves its own log
    *  line) so a bad/old writer response doesn't spam the log on every subsequent forwarded write. */
   private warnedMissingCommitTs = false;
   private warnedUnparseableCommitTs = false;
+  /** Per-shard writer-URL cache (B2b, T2): populated on first forward for a shard, refreshed on a
+   *  POST failure (transport error OR a not-the-owner rejection) and retried once. A node normally
+   *  forwards the same shard repeatedly, so caching avoids a `shard_leases` read on every call. */
+  private readonly writerUrlCache = new Map<ShardId, string>();
 
   constructor(
     private readonly lease: LeaseManager,
@@ -68,19 +85,25 @@ export class WriteForwarder implements WriteRouter {
     this.tailer = t;
   }
 
-  /** Flip to writer: subsequent writes execute locally (isLocalWriter → true). Called on promotion. */
+  /** Called on promotion (sync → writer-ish). Releases any read-your-own-writes wait in flight —
+   *  this node no longer serves reads off a replica for its own forwarded writes, so waiting on
+   *  catch-up would only add latency. `isLocalWriter` itself needs no flip here: it already reads
+   *  the live `LeaseManager` state directly (see below), which promotion's `tryAcquire` calls
+   *  update as a side effect. */
   promote(): void {
-    this.role = "writer";
-    // Any read-your-own-writes wait in flight is now moot — this node no longer serves reads off a
-    // replica for its own forwarded writes, so waiting on catch-up would only add latency.
     this.tailer?.release();
   }
 
-  isLocalWriter(_shardId?: ShardId): boolean {
-    // Task 1 mechanical adaptation: the seam is now per-shard, but this node's binary writer/sync
-    // role is still whole-node (single write lease). Ignore `shardId` and return the binary answer;
-    // Task 2 makes this per-shard (membership in the held-shard set).
-    return this.role === "writer";
+  /**
+   * True iff this node currently holds `shardId`'s write lease (B2b, D1: per-shard membership, not
+   * a whole-node binary role). `LeaseManager.currentEpoch(shardId) !== null` is the SAME live
+   * held-set accessor `relinquish()` uses as its own idempotency check (`node.ts`) — so this can
+   * never disagree with what the commit guard / relinquish dispatcher consider "held". Consulted
+   * fresh on every call (never cached): a shard acquired or relinquished mid-flight (balancer
+   * rebalance, failover, promotion) takes effect on the very next mutation.
+   */
+  isLocalWriter(shardId: ShardId = DEFAULT_SHARD): boolean {
+    return this.lease.currentEpoch(shardId) !== null;
   }
 
   async forward(
@@ -88,56 +111,77 @@ export class WriteForwarder implements WriteRouter {
     path: string,
     args: JSONValue,
     identity: string | null,
-    // Task 1: threaded through into the `/_fleet/run` body (the receiver ignores it for now); Task 2
-    // uses it to resolve THAT shard's owner URL and enforce the single-hop guard.
-    shardId?: ShardId,
+    shardId: ShardId = DEFAULT_SHARD,
   ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string }> {
-    const body = { path, args, identity, kind, shardId };
-    const first = await this.writerUrl();
-    let result: { value: JSONValue; commitTs?: string };
+    // `forwarded: true` (B2b, D1 spec-review edit — the single-hop guard): tells the receiver this
+    // is a fleet-internal hop, so IT must check ownership itself rather than trust the caller and
+    // potentially re-forward unboundedly. `shardId` is what the receiver resolves the current owner
+    // (and checks itself against) from.
+    const body = { path, args, identity, kind, shardId, forwarded: true };
+    const first = await this.writerUrlFor(shardId);
+    let result: { value: JSONValue; commitTs?: string; shardId?: string };
     try {
       result = await this.post(first, body);
     } catch (firstErr) {
-      // A StackbaseError here means a LIVE writer answered DEFINITIVELY (a user error — e.g. the shard
-      // guard — an OCC conflict, a validation failure): the mutation reached the writer and it decided.
-      // Re-forwarding would only re-run it against the same writer, so propagate the typed error
-      // UNCHANGED (its status/code/retryable survive to the caller). Only a TRANSPORT failure (fetch
-      // rejected: the writer may have failed over or the connection blipped) is worth a single retry
-      // against the re-read (possibly new) writer URL.
-      if (isStackbaseError(firstErr)) throw firstErr;
+      // A StackbaseError here means a LIVE node answered DEFINITIVELY. Two cases:
+      //  - `NOT_SHARD_OWNER_CODE` (the single-hop guard's answer): the cached URL is stale — this is
+      //    exactly a transport-style failure from the forwarder's perspective, worth ONE retry
+      //    against a freshly-read (hopefully current) owner.
+      //  - any OTHER typed error (an OCC conflict, a validation failure, the shard guard, …): the
+      //    mutation reached an owner and it DECIDED. Re-forwarding would only re-run it against the
+      //    same target, so propagate the typed error UNCHANGED (its status/code/retryable survive).
+      // A non-StackbaseError (fetch rejected: the owner may have failed over or the connection
+      // blipped) is the original TRANSPORT-failure retry case, unchanged from before.
+      const shouldRetry = !isStackbaseError(firstErr) || firstErr.code === NOT_SHARD_OWNER_CODE;
+      if (!shouldRetry) throw firstErr;
       let second: string;
       try {
-        second = await this.writerUrl();
+        second = await this.refreshWriterUrlFor(shardId);
       } catch {
         throw firstErr;
       }
       result = await this.post(second, body);
     }
     await this.waitForReplicaCatchUp(path, result.commitTs);
-    // Task 1: return the object shape the per-shard `WriteRouter` seam now expects. `commitTs` stays
-    // omitted (the executor then reports 0n — byte-identical to the pre-B2b forwarded-run contract);
-    // the replica read-your-own-writes wait already happened above off `result.commitTs`.
-    return { value: result.value };
+    return {
+      value: result.value,
+      // `commitTs` is stringified over the wire (bigints don't survive JSON) — coerced to `number`
+      // here to match the `WriteRouter` seam's contract (consistent with how every other commitTs
+      // consumer at this precision layer already converts, e.g. `Number(r.oplog?.commitTs ?? 0)` in
+      // `runtime-embedded`'s sync path). The RYOW wait above already parsed the STRING via `BigInt`
+      // directly, so full precision was preserved for the one place that actually needs it.
+      commitTs: result.commitTs !== undefined ? Number(result.commitTs) : undefined,
+      shardId: result.shardId,
+    };
   }
 
-  /** Discover the current writer URL from the lease discovery row. */
-  private async writerUrl(): Promise<string> {
-    const state = await this.lease.read();
-    if (!state) throw new Error("fleet: no writer lease found — cannot forward write");
+  /** Discover shard `shardId`'s current writer URL — cached after the first read. */
+  private async writerUrlFor(shardId: ShardId): Promise<string> {
+    const cached = this.writerUrlCache.get(shardId);
+    if (cached !== undefined) return cached;
+    return this.refreshWriterUrlFor(shardId);
+  }
+
+  /** Force a fresh `shard_leases` read for `shardId`, overwriting any cached URL — the refresh half
+   *  of `writerUrlFor`'s cache, also used directly by `forward()`'s retry-once path. */
+  private async refreshWriterUrlFor(shardId: ShardId): Promise<string> {
+    const state = await this.lease.read(shardId);
+    if (!state) throw new Error(`fleet: no writer lease found for shard '${shardId}' — cannot forward write`);
+    this.writerUrlCache.set(shardId, state.writerUrl);
     return state.writerUrl;
   }
 
   private async post(
     writerUrl: string,
-    body: { path: string; args: JSONValue; identity: string | null; kind: "mutation" | "action" },
-  ): Promise<{ value: JSONValue; commitTs?: string }> {
+    body: { path: string; args: JSONValue; identity: string | null; kind: "mutation" | "action"; shardId: ShardId; forwarded: boolean },
+  ): Promise<{ value: JSONValue; commitTs?: string; shardId?: string }> {
     const res = await fetch(`${trimTrailingSlash(writerUrl)}/_fleet/run`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.adminKey}` },
       body: JSON.stringify(body),
     });
     const text = await res.text();
-    let parsed: { value?: JSONValue; error?: string; errorJson?: StackbaseErrorJSON; commitTs?: string };
+    let parsed: { value?: JSONValue; error?: string; errorJson?: StackbaseErrorJSON; commitTs?: string; shardId?: string };
     try {
       parsed = text ? (JSON.parse(text) as typeof parsed) : {};
     } catch {
@@ -152,7 +196,7 @@ export class WriteForwarder implements WriteRouter {
       if (parsed.errorJson) throw stackbaseErrorFromJSON(parsed.errorJson);
       throw new Error(parsed.error ?? `fleet: writer /_fleet/run returned HTTP ${res.status}`);
     }
-    return { value: parsed.value ?? null, commitTs: parsed.commitTs };
+    return { value: parsed.value ?? null, commitTs: parsed.commitTs, shardId: parsed.shardId };
   }
 
   /** Waits for the local replica to observe `commitTsStr`, when a tailer is attached. No-op on a

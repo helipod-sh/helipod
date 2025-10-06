@@ -194,3 +194,59 @@ describe("observeTimestamp", () => {
     expect(max).toBeGreaterThan(100n);
   });
 });
+
+describe("forwarded mutation commitTs threading (Shards B2b, Task 2 — RYOW wire-through)", () => {
+  it("a forwarded WS mutation's commitTs threads from the executor's forward() result, not a hardcoded 0", async () => {
+    // The executor's forward branch (`InlineUdfExecutor.run`) already threads a forwarded write's
+    // real commitTs onto its `UdfResult.commitTs` (T1). The WS sync path's `syncExecutor.runMutation`
+    // closure used to ignore that and report a hardcoded `commitTs: 0` for any forwarded write (its
+    // own `r.oplog` is always null — there's no LOCAL commit to have written one) — this pins the
+    // fix: it now falls back to `r.commitTs` instead.
+    const forward = vi.fn(async () => ({ value: "id-from-owner", commitTs: 777, shardId: "default" }));
+    const router: WriteRouter = { isLocalWriter: () => false, forward };
+    const { runtime } = await makeRuntime({ writeRouter: router });
+
+    // `EmbeddedRuntime` constructs its `SyncProtocolHandler` with `autoNotifyOnMutation: false` —
+    // production reactivity is driven by the commit fan-out queue/drain instead (see runtime.ts's
+    // doc comment), so `handleMutation`'s OWN `notifyWrites` call is normally skipped entirely. Flip
+    // it on here, isolated to this test, purely so `syncExecutor.runMutation`'s return value (what
+    // this test is pinning) becomes observable through the handler's public `notifyWrites` seam,
+    // without needing a live fleet tailer.
+    (runtime.handler as unknown as { options: { autoNotifyOnMutation?: boolean } }).options.autoNotifyOnMutation = true;
+    const notifySpy = vi.spyOn(runtime.handler, "notifyWrites");
+
+    const conn = runtime.connect("s1");
+    await conn.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "hi" } });
+
+    await waitFor(() => notifySpy.mock.calls.length > 0);
+    expect(forward).toHaveBeenCalledTimes(1);
+    const [invalidation] = notifySpy.mock.calls[0]!;
+    expect(invalidation.commitTs).toBe(777); // NOT 0 — threaded from the forwarded UdfResult.commitTs
+    // A forwarded write has no LOCAL oplog, so tables/ranges are still empty either way — only
+    // commitTs threading is what this fix changes.
+    expect(invalidation.tables).toEqual([]);
+    expect(invalidation.ranges).toEqual([]);
+  });
+
+  it("a LOCAL (non-forwarded) mutation's commitTs is unaffected — still sourced from its own oplog", async () => {
+    const { runtime } = await makeRuntime();
+    const notifySpy = vi.spyOn(runtime.handler, "notifyWrites");
+    (runtime.handler as unknown as { options: { autoNotifyOnMutation?: boolean } }).options.autoNotifyOnMutation = true;
+
+    const conn = runtime.connect("s1");
+    await conn.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "hi" } });
+
+    await waitFor(() => notifySpy.mock.calls.length > 0);
+    const [invalidation] = notifySpy.mock.calls[0]!;
+    expect(invalidation.commitTs).toBeGreaterThan(0); // a real local commit ts, from r.oplog.commitTs
+    expect(invalidation.tables).toHaveLength(1); // a real oplog's writtenTables — not the empty [] a forward reports
+  });
+});
+
+async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
