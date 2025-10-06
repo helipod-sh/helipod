@@ -372,33 +372,141 @@ first fleet writer boots — no write required to "reveal" it.
 ## Sharding: parallel writes on the writer node
 
 [Sharding](/sharding) partitions a table's writes across multiple shards (`.shardKey()` on the
-table, `shardBy` on the mutation) instead of funneling every write through one bottleneck. On a
-fleet, the current writer node commits a sharded table's writes across its shards **in
-parallel**, through separate per-shard connections to the shared Postgres database — so a
-sharded app's write throughput on today's fleet already scales with shard count, not just with
-node count.
+table, `shardBy` on the mutation) instead of funneling every write through one bottleneck. By
+default, every shard's writes still land through whichever single node currently holds the
+fleet's writer role — but that node commits them across its shards **in parallel**, through
+separate per-shard connections to the shared Postgres database, so a sharded app's write
+throughput already scales with shard count, not just with node count, even before turning on
+distribution across nodes.
 
-What this slice does **not** yet do: distribute different shards' write ownership across
-*different* nodes in the fleet. Every shard's writes still land through whichever single node
-currently holds the fleet's writer role — sharding today raises the *ceiling of one node*, it
-doesn't yet spread writes across the fleet's several nodes. True multi-node write distribution
-(different shards owned and written by different fleet nodes simultaneously) is a planned
-follow-on, not built in this release. See [Sharding](/sharding) for the full `shardKey`/`shardBy`
-guide, the rules the engine enforces, and the consistency model.
+To also spread different shards' write ownership across *different* nodes — so write throughput
+scales with node count too — turn on [multi-writer
+distribution](#multi-writer-distribution-writes-scale-with-node-count), below. See
+[Sharding](/sharding) for the full `shardKey`/`shardBy` guide, the rules the engine enforces, and
+the consistency model.
 
-`/api/health` grows additive fleet fields once frontier tracking is live: a stringified overall
+`/api/health` grows additive fleet fields since frontier tracking went live: a stringified overall
 progress marker, how long it's been stuck (in ms), and which shard is currently holding it back —
 useful for noticing a stalled shard before it shows up as user-visible staleness. This is
 observability only; nothing to configure.
+
+## Multi-writer distribution: writes scale with node count
+
+Everything above this section describes the default topology: one writer, every other node a
+read replica. Set one environment variable and that changes — different [shards](/sharding) get
+owned and written by *different* nodes at once, so a sharded app's write throughput scales with
+how many nodes you run, not just with shard count on a single node.
+
+### Turning it on
+
+```bash
+export STACKBASE_FLEET_MULTI_WRITER=1
+```
+
+Set this on **every** node in the fleet — there's no `--multi-writer` CLI flag, only the
+environment variable, and (like `--fleet` itself) it's a whole-deployment setting: mixing nodes
+that have it set with nodes that don't isn't a supported configuration. Leave it unset (the
+default) and a fleet behaves exactly as described everywhere else on this page.
+
+### What changes
+
+With it set, every node in the fleet (up to one writer per shard) owns and writes its own share
+of the shards, instead of there being one writer and the rest read replicas:
+
+- **Shard ownership is assigned automatically.** Every live node computes the same assignment
+  independently from a small set of rows in the shared Postgres database, so there's no
+  shard-to-node mapping to configure and no separate coordinator process to run.
+- **Placement converges quickly.** Ownership is re-checked every couple of seconds; a fleet whose
+  membership changes (a node joins, leaves, or dies) settles into a new, stable assignment within
+  a handful of seconds — nothing to trigger or wait out by hand.
+- **Writers stay reactive to each other.** A write committed by one writer node is picked up by
+  every other writer node too, so a live query or subscription open against any writer keeps
+  seeing changes to every shard, not just the shards that node itself owns.
+
+### Failover, per shard
+
+Losing a writer node no longer stalls the whole fleet's writes — only the shards it owned. If a
+writer dies, the shards it held free up the same way a lease-holder's shard already does today
+(see [Failover timing and in-flight requests](#failover-timing-and-in-flight-requests) above):
+once that shard's lease expires without a renewal — `STACKBASE_FLEET_LEASE_TTL_MS`, 15 seconds by
+default, the same knob used everywhere else on this page — a surviving node picks it up. Every
+surviving node's *own* shards are unaffected throughout and keep committing without interruption;
+a dead peer never blocks or slows writes to shards it didn't own. Any mutation/action in flight
+against the dying node's shard at the moment it dies fails visibly, same as the whole-writer
+case — retry from the client/app.
+
+### Adding a node
+
+A node joining a healthy fleet doesn't wait for anything to expire. Once it's up and heartbeating,
+the existing writers notice within a couple of beats and hand it its share of the shards
+directly — releasing them so the newcomer can pick them up on one of its own next beats, typically
+within a few seconds of joining. This graceful hand-off is distinct from failover above, which
+only ever kicks in for a shard whose owner has actually gone quiet.
+
+### Scheduled functions and crons
+
+Scheduled functions and cron jobs always run on exactly one node — whichever one currently owns
+the same "default" shard every unsharded table already uses. In multi-writer mode that's just one
+more shard subject to the same placement and failover rules as any other: if the node running
+scheduled work dies or is scaled down, whichever node picks up the default shard also picks up the
+scheduler, and scheduled work resumes there automatically. There's no separate scheduler
+configuration, and never more than one node running it at a time.
+
+### Scaling knobs: reads vs. writes
+
+Single-writer mode (the default) and multi-writer mode scale two different things:
+
+- **Single-writer mode** scales *reads*: add nodes and each one serves queries/subscriptions from
+  its own local replica (see [Reads served from a local replica](#reads-served-from-a-local-replica)
+  above), while every write still goes through the one writer.
+- **Multi-writer mode** scales *writes*: add nodes and each one owns and writes a share of the
+  shards directly, so total write throughput grows with node count — as long as your app actually
+  spreads its writes across shards (see [Sharding](/sharding)).
+
+One trade-off worth knowing: on a writer node, reads are answered directly from that node's own
+copy of the shards it owns, not from a local replica the way a sync node's reads are. Serving a
+writer's reads from a replica too is a possible future improvement, not built in this release.
+
+### The at-least-once note
+
+This isn't new to multi-writer mode — it already applied to write forwarding in single-writer
+mode, and multi-writer mode's node-to-node forwarding (for a mutation that lands on a node that
+doesn't own the shard it needs) shares the same behavior: if a write actually commits but the
+response back to the caller is lost to a transport failure at that exact instant, a client-side
+retry of that same call can execute it a second time. This is a narrow window — it only matters
+for the instant between a commit landing and its result making it back over the network — and
+it's unchanged from earlier releases. Design mutations that might be retried to be safe to run
+twice (the same idempotency discipline you'd already want for any network call that can fail
+after doing its work), or account for it in your own retry logic.
+
+### Ops surface
+
+Two plain Postgres tables give visibility into current shard placement, if you want to look
+directly:
+
+- **`fleet_nodes`** — one heartbeated row per live node (its advertise URL and when its presence
+  expires). This is how the fleet tracks who's currently around, in both single- and
+  multi-writer mode.
+- **`shard_leases`** — one row per shard, recording which node currently owns it. In
+  single-writer mode every row points at the same node; in multi-writer mode you'll see different
+  shards owned by different nodes.
+
+`/api/health`'s fleet fields (the frontier lag and which shard is pinning it, described above)
+are unchanged by multi-writer mode — they still describe fleet-wide progress, not per-node
+ownership.
 
 ## Current limits
 
 Be realistic about what this slice is and isn't:
 
-- **One node writes at a time; sharded writes parallelize on that node, not yet across nodes.**
-  Every shard commits through whichever single node currently holds the fleet's writer role — see
-  [Sharding: parallel writes on the writer node](#sharding-parallel-writes-on-the-writer-node)
-  above. Distributing different shards to different nodes is a planned follow-on, not this slice.
+- **By default, one node writes at a time; sharded writes parallelize on that node, not yet
+  across nodes.** Turn on [multi-writer
+  distribution](#multi-writer-distribution-writes-scale-with-node-count) (above) to spread
+  different shards' write ownership across different nodes instead.
+- **A writer node's reads come from its own primary copy, not a replica, even in multi-writer
+  mode.** Serving a writer's reads from a local replica the way a sync node's are is a possible
+  future improvement — see [Scaling knobs: reads vs.
+  writes](#scaling-knobs-reads-vs-writes) above.
 - **A sync node's data-directory uniqueness isn't validated.** Nothing stops you from accidentally
   pointing two nodes at the same `--data`/`STACKBASE_DATA_DIR` directory — see
   [Requirements](#requirements) above. Get this wrong and both nodes' replica state corrupts
