@@ -5,6 +5,8 @@ export { LeaseMonitor, type LeaseMonitorDeps } from "./lease-monitor";
 export { FencedError } from "./fenced-error";
 export { NotifyingFanoutAdapter, type CommitChannelClient } from "./commit-notifier";
 export { WriteForwarder, type WriteForwarderOptions, type ReplicaWaiter } from "./forwarder";
+export { ShardLeaseBalancer, type ShardLeaseBalancerDeps, type BalancerLease } from "./balancer";
+export { rendezvousOwner, rendezvousWeight } from "./rendezvous";
 export {
   prepareFleetNode,
   startFleetNode,
