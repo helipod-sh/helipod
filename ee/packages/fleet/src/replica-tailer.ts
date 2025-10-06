@@ -262,16 +262,43 @@ export class ReplicaTailer {
     return f;
   }
 
-  async start(): Promise<void> {
+  /**
+   * @param seedWm ONLY consulted in `"invalidateOnly"` mode (ignored in `"replica"` mode, which always
+   *   seeds from the replica's own persisted high-water mark — see below). When provided, seeds the
+   *   watermark from THIS value instead of a fresh `readFrontier()` read.
+   *
+   *   Fixes the PROMOTION-HANDOFF INVALIDATION GAP (B2b whole-branch review): a promoting node stops
+   *   its `ReplicaTailer` (sync mode) at some watermark `W`, then starts this derive-only listener.
+   *   Between the tailer's stop and the listener's start, a co-writer's commit can land and bump the
+   *   fenced frontier `F` past `W` — if the listener then seeds from a FRESH `readFrontier()` (i.e.
+   *   that same later `F`), it treats everything up to `F` as already-known and never derives/
+   *   invalidates the `(W, F]` range, even though nothing ever actually invalidated it: the sync
+   *   tailer was already stopped, and this listener starts past it. A subscription open across the
+   *   promotion goes silently stale for exactly those commits.
+   *
+   *   The caller (`node.ts`'s `startWriterInvalidationListener`) closes this gap by passing the
+   *   OUTGOING tailer's own final `watermark()` (captured right after `tailer.stop()`) as `seedWm` on
+   *   promotion, so the listener picks up exactly where the tailer left off — contiguous coverage,
+   *   with the tailer's own last-applied range harmlessly re-derived (idempotent double-invalidation).
+   *   Writer BOOT (no prior tailer, so no gap by construction) omits `seedWm` and keeps the original
+   *   fresh-`readFrontier()` behavior.
+   */
+  async start(seedWm?: bigint): Promise<void> {
     this.stopped = false;
     if (this.mode === "invalidateOnly") {
-      // Writer-ish node (multi-writer, D5/T5-c): seed the watermark at the CURRENT fenced frontier F.
-      // This node already holds every shard's data on the primary it reads from, so it must only
-      // invalidate FOREIGN commits that land from HERE ON — NOT re-derive all of history. There is
-      // nothing to bootstrap/apply, so skip the catch-up loop entirely; the LISTEN+poll wake armed
-      // below drives every subsequent derive-only tick. (`readFrontier()` returns a `StablePrefixTs`,
-      // so seeding `wm` from it keeps the brand invariant.)
-      this.wm = await this.readFrontier();
+      if (seedWm !== undefined) {
+        // Promotion handoff: pick up exactly where the just-stopped sync tailer left off, not
+        // wherever the frontier happens to be NOW (see the `seedWm` doc above for the gap this closes).
+        this.wm = stablePrefixFromFrontier(seedWm);
+      } else {
+        // Writer-ish node (multi-writer, D5/T5-c): seed the watermark at the CURRENT fenced frontier F.
+        // This node already holds every shard's data on the primary it reads from, so it must only
+        // invalidate FOREIGN commits that land from HERE ON — NOT re-derive all of history. There is
+        // nothing to bootstrap/apply, so skip the catch-up loop entirely; the LISTEN+poll wake armed
+        // below drives every subsequent derive-only tick. (`readFrontier()` returns a `StablePrefixTs`,
+        // so seeding `wm` from it keeps the brand invariant.)
+        this.wm = await this.readFrontier();
+      }
     } else {
       // Seed from the REPLICA's own high-water mark (0 for a fresh replica, or wherever a
       // previous run left off) — this is what makes catch-up resumable across restarts. This IS a

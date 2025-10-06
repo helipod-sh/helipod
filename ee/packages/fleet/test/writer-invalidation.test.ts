@@ -204,4 +204,135 @@ describe("Shards B2b, Task 5(c) — writer invalidation listener (derive-only, m
       await primary.close();
     }
   });
+
+  // B2b whole-branch review, Fix 1 (Medium — promotion-handoff invalidation gap): `promoteFleetNode`
+  // stops the outgoing sync `ReplicaTailer` (say at watermark W), then starts THIS derive-only
+  // listener. A foreign co-writer's commit landing in between — after the tailer stopped, before the
+  // listener starts — used to be invalidated by NEITHER: the pre-fix listener seeded from a FRESH
+  // `readFrontier()` (i.e. whatever F had already become), so it silently treated the whole (W, F]
+  // range as already-known. The fix: `start(seedWm)` seeds from the outgoing tailer's own final
+  // watermark instead, so the two hand off contiguously. These two tests prove (a) the fix closes the
+  // gap and (b) the gap is real absent the fix — i.e. the fix is load-bearing, not a no-op.
+  it("promotion handoff: seedWm keeps invalidation contiguous across the tailer-stop -> listener-start gap", async () => {
+    const client = new PgliteClient();
+    const primary = new PostgresDocStore(client);
+    await primary.setupSchema();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://writer-c:4000" });
+    await lease.setup();
+    await lease.tryAcquire(DEFAULT_SHARD, 0);
+    await acquireShardAsWriter(lease, "s1", 1, 10);
+
+    // Simulate the outgoing sync tailer: start it (seeds W=0, F still 0), then stop it immediately —
+    // exactly the `tailer.stop()` step `promoteFleetNode` runs before this listener is ever started.
+    // Capture its own final watermark, mirroring the `tailer.watermark()` call node.ts's promotion path
+    // makes right after `promoteFleetNode` returns.
+    const outgoing = new ReplicaTailer(client, primary, primary, {
+      mode: "invalidateOnly",
+      numShards: 2,
+      pollMs: 20,
+      onInvalidation: async () => {},
+    });
+    await outgoing.start();
+    await outgoing.stop();
+    const seedWm = outgoing.watermark();
+    expect(seedWm).toBe(0n);
+
+    // While NOTHING is listening (the "promoting" node hasn't started its listener yet), two foreign
+    // commits land directly on the primary — a live co-writer — advancing the frontier past W.
+    const doc1 = newDocumentId(MESSAGES);
+    const doc2 = newDocumentId(MESSAGES);
+    await primary.write(
+      [{ ts: 1n, id: doc1, prev_ts: null, value: { id: doc1, value: { conversationId: "c1", body: "one" } } }],
+      [{ ts: 1n, update: { indexId: INDEX_ID, key: encodeIndexKey(["c1"]), value: { type: "NonClustered", docId: doc1 } } }],
+      "Error",
+    );
+    await primary.write(
+      [{ ts: 2n, id: doc2, prev_ts: null, value: { id: doc2, value: { conversationId: "c1", body: "two" } } }],
+      [{ ts: 2n, update: { indexId: INDEX_ID, key: encodeIndexKey(["c1"]), value: { type: "NonClustered", docId: doc2 } } }],
+      "Error",
+    );
+    await client.query(`UPDATE shard_leases SET frontier_ts = 2 WHERE frontier_ts < 2`);
+
+    // The new writer-ish listener seeds from the OUTGOING tailer's own final watermark (0), NOT a
+    // fresh readFrontier() (which would already read F=2 by the time this starts).
+    const invs: AppliedInvalidation[] = [];
+    const listener = new ReplicaTailer(client, primary, primary, {
+      mode: "invalidateOnly",
+      numShards: 2,
+      pollMs: 20,
+      onInvalidation: async (inv) => void invs.push(inv),
+    });
+    await listener.start(seedWm);
+
+    try {
+      await waitUntil(() => listener.watermark() >= 2n);
+      // Both commits from the handoff gap (ts 1 and 2) were derived and invalidated — neither was
+      // silently skipped, and the listener's own watermark (a stand-in for the oracle's observed ts,
+      // same `runtime.observeTimestamp(inv.newMaxTs)` the real sink calls) reached the new F.
+      const allDocs = invs.flatMap((inv) => inv.writtenDocs);
+      expect(allDocs.length).toBe(2);
+      expect(invs.some((inv) => inv.newMaxTs === 2n)).toBe(true);
+    } finally {
+      await listener.stop();
+      await primary.close();
+    }
+  });
+
+  it("REGRESSION shape: without seedWm, a listener seeded at the fresh frontier misses the handoff-gap commits (proves the fix is load-bearing)", async () => {
+    const client = new PgliteClient();
+    const primary = new PostgresDocStore(client);
+    await primary.setupSchema();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://writer-d:4000" });
+    await lease.setup();
+    await lease.tryAcquire(DEFAULT_SHARD, 0);
+    await acquireShardAsWriter(lease, "s1", 1, 10);
+
+    // Same gap-inducing setup as above: the outgoing tailer stops at W=0...
+    const outgoing = new ReplicaTailer(client, primary, primary, {
+      mode: "invalidateOnly",
+      numShards: 2,
+      pollMs: 20,
+      onInvalidation: async () => {},
+    });
+    await outgoing.start();
+    await outgoing.stop();
+
+    // ...and two foreign commits land + the frontier advances to F=2 WHILE NOTHING IS LISTENING —
+    // identical gap window to the test above.
+    const doc1 = newDocumentId(MESSAGES);
+    const doc2 = newDocumentId(MESSAGES);
+    await primary.write(
+      [{ ts: 1n, id: doc1, prev_ts: null, value: { id: doc1, value: { conversationId: "c1", body: "one" } } }],
+      [{ ts: 1n, update: { indexId: INDEX_ID, key: encodeIndexKey(["c1"]), value: { type: "NonClustered", docId: doc1 } } }],
+      "Error",
+    );
+    await primary.write(
+      [{ ts: 2n, id: doc2, prev_ts: null, value: { id: doc2, value: { conversationId: "c1", body: "two" } } }],
+      [{ ts: 2n, update: { indexId: INDEX_ID, key: encodeIndexKey(["c1"]), value: { type: "NonClustered", docId: doc2 } } }],
+      "Error",
+    );
+    await client.query(`UPDATE shard_leases SET frontier_ts = 2 WHERE frontier_ts < 2`);
+
+    // WITHOUT seedWm (the pre-fix call shape): the listener seeds from a FRESH readFrontier(), which is
+    // already F=2 by now — it treats the (0, 2] range as already-known and never derives it.
+    const invs: AppliedInvalidation[] = [];
+    const listener = new ReplicaTailer(client, primary, primary, {
+      mode: "invalidateOnly",
+      numShards: 2,
+      pollMs: 20,
+      onInvalidation: async (inv) => void invs.push(inv),
+    });
+    await listener.start(); // no seedWm
+
+    try {
+      expect(listener.watermark()).toBe(2n); // seeded straight at the fresh frontier, skipping ts 1/2
+      // Give the poll loop several beats to prove this isn't just a timing fluke — nothing more will
+      // EVER be derived for ts 1/2: they're already "behind" the seeded watermark, permanently.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(invs.length).toBe(0); // the gap this fix closes: both commits' invalidations were missed
+    } finally {
+      await listener.stop();
+      await primary.close();
+    }
+  });
 });

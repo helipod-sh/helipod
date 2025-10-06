@@ -1032,7 +1032,16 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // Off unless multi-writer is enabled (single-writer mode has no foreign commits; sync nodes have the
   // real replica tailer).
   let writerListener: ReplicaTailer | null = null;
-  const startWriterInvalidationListener = async (): Promise<void> => {
+  /**
+   * @param seedWm Promotion-handoff gap fix (B2b whole-branch review): a promoting node stops its
+   *   `ReplicaTailer` and then starts this derive-only listener; without `seedWm` the listener would
+   *   seed from a FRESH `readFrontier()`, silently skipping any foreign commit that lands between the
+   *   tailer's stop and the listener's start. Pass the outgoing tailer's own final `watermark()`
+   *   (captured right after `tailer.stop()`, see the promotion call site below) so the listener picks
+   *   up contiguously where the tailer left off. Writer BOOT omits this (no prior tailer, no gap) and
+   *   falls back to `ReplicaTailer`'s own fresh-`readFrontier()` seed — see `ReplicaTailer.start`'s doc.
+   */
+  const startWriterInvalidationListener = async (seedWm?: bigint): Promise<void> => {
     if (!multiWriter || writerListener !== null) return;
     // `pgStore` is passed as the `replica` arg but is NEVER dereferenced in "invalidateOnly" mode
     // (no apply, no density read, no maxTimestamp seed) — see ReplicaTailerOptions.mode.
@@ -1041,7 +1050,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       numShards,
       onInvalidation: invalidationSink,
     });
-    await writerListener.start();
+    await writerListener.start(seedWm);
   };
 
   // The writer lease monitor (C4). Runs ONLY while this node is the writer: constructed lazily at
@@ -1263,6 +1272,13 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // the election path fires; the balancer path promotes first, then acquires its targets below.
       promote: async () => {
         await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
+        // Promotion-handoff gap fix (B2b whole-branch review): capture the JUST-STOPPED tailer's own
+        // final watermark now — `promoteFleetNode`'s step 5 already awaited `tailer.stop()` internally
+        // by the time this line runs — so the derive-only listener below can seed from it instead of a
+        // fresh `readFrontier()`. See `startWriterInvalidationListener`'s and `ReplicaTailer.start`'s
+        // doc comments for the gap this closes: without it, a foreign co-writer's commit landing between
+        // the tailer's stop and the listener's start would be invalidated by NEITHER.
+        const seedWm = tailer.watermark();
         // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire this
         // node's rendezvous targets. `seed=false`: promotion never re-seeds frontiers (they're already
         // live — a dead writer's high-water is preserved through the epoch-bumping re-acquire).
@@ -1283,7 +1299,8 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
         // B2b, D5/T5-c: this node is now a writer with its replica tailer stopped — start the derive-
         // only listener so it keeps seeing co-writers' commits (no-op when multi-writer is off).
-        await startWriterInvalidationListener();
+        // `seedWm` closes the promotion-handoff gap (see above).
+        await startWriterInvalidationListener(seedWm);
       },
       startMonitor: startWriterMonitor,
       firePromoted,
