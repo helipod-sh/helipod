@@ -194,6 +194,26 @@ export class LeaseManager {
   }
 
   /**
+   * Drop `shardId` from this node's held-epoch map (Fenced Frontier B2b, D2 — per-shard relinquish).
+   * After this call `currentEpoch(shardId)` returns `null`, so:
+   *  - the commit guard's "no acquired epoch" branch fences any straggler commit on `shardId`
+   *    cleanly (rather than a stale epoch happening to still match a row some other node has since
+   *    re-fenced and moved on from);
+   *  - `heldPairs()` (and therefore `heartbeatAll()`/`closeIdleFrontiers()`/`seedFrontierAll()`) stop
+   *    including this shard.
+   * Idempotent: forgetting a shard this node doesn't currently hold is a silent no-op — the
+   * relinquish dispatcher (`node.ts`) relies on exactly this for ITS OWN idempotency, via
+   * `currentEpoch(shardId) === null` as its "already relinquished" check. Deliberately does NOT touch
+   * the `shard_leases` ROW — only the caller's advisory-lock release (`PgClient.releaseShardLock`) and
+   * this in-memory forget are relinquish's job; the row itself was already epoch-bumped by whoever
+   * fenced this node (or will lapse via TTL), and a future re-acquire (`tryAcquire`) is a fresh INSERT/
+   * ON CONFLICT UPDATE regardless of what this map remembers.
+   */
+  forgetShard(shardId: ShardId): void {
+    this.lastEpochByShard.delete(shardId);
+  }
+
+  /**
    * One non-blocking attempt: takes the advisory lock (fast path); on success, runs the fencing
    * upsert against `shard_leases` (bumping `epoch`, recording this node's URL/app-name, extending
    * `expires_at`) and returns the new state. On failure to take the lock, returns null.
@@ -269,15 +289,18 @@ export class LeaseManager {
   /**
    * Batched heartbeat over EVERY (shard, epoch) pair this node holds — one UPDATE per beat (B2a):
    * the writer holds N leases and must renew all of them in a single round-trip, not N. Returns
-   * `{ updated, expected }` where `expected` is how many pairs this node believes it holds and
-   * `updated` is how many rows actually matched: `updated < expected` means at least one shard's
-   * epoch was superseded (fenced) — a DEFINITIVE writer-lease loss, exactly like a single-shard
-   * `heartbeat()` returning 0. A no-op returning `{updated:0, expected:0}` when this node holds
-   * nothing (never a writer). The `(shard_id, epoch) IN ((..),(..))` tuple form fences per row.
+   * `{ updated, expected, fencedShardIds }` where `expected` is how many pairs this node believes it
+   * holds, `updated` is how many rows actually matched, and `fencedShardIds` (B2b, D2) is PRECISELY
+   * which held shards did NOT match — diffing the `RETURNING shard_id` rows against the held set —
+   * so the caller can relinquish exactly those shards rather than treat `updated < expected` as an
+   * undifferentiated whole-node signal. `updated < expected` (equivalently `fencedShardIds.length >
+   * 0`) means at least one shard's epoch was superseded; `fencedShardIds` is always `[]` when this
+   * node holds nothing (never a writer) — see the early return. The `(shard_id, epoch) IN ((..),(..))`
+   * tuple form fences per row.
    */
-  async heartbeatAll(): Promise<{ updated: number; expected: number }> {
+  async heartbeatAll(): Promise<{ updated: number; expected: number; fencedShardIds: ShardId[] }> {
     const pairs = this.heldPairs();
-    if (pairs.length === 0) return { updated: 0, expected: 0 };
+    if (pairs.length === 0) return { updated: 0, expected: 0, fencedShardIds: [] };
     const { clause, params } = this.tupleInClause(pairs, 0);
     const rows = await this.client.query(
       `UPDATE shard_leases SET expires_at = now() + interval '${this.ttlMsSql} milliseconds'
@@ -285,7 +308,9 @@ export class LeaseManager {
        RETURNING shard_id`,
       params,
     );
-    return { updated: rows.length, expected: pairs.length };
+    const renewedIds = new Set(rows.map((r) => r.shard_id as ShardId));
+    const fencedShardIds = pairs.filter((p) => !renewedIds.has(p.shardId)).map((p) => p.shardId);
+    return { updated: rows.length, expected: pairs.length, fencedShardIds };
   }
 
   /**

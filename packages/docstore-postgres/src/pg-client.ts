@@ -56,6 +56,17 @@ export interface PgClient extends PgQuerier {
    * exactly that shard's lock, nothing else. `slot` indexes the ordered commit-pool shard list.
    * Non-blocking: resolves `true`/`false`. */
   tryAcquireShardLock?(slot: number): Promise<boolean>;
+  /**
+   * Pool mode only (Fenced Frontier B2b, D2): release slot `slot`'s advisory lock via
+   * `pg_advisory_unlock({@link SHARD_ADVISORY_LOCK_CLASS}, slot)`, executed ON that shard's commit
+   * connection — the exact mirror of {@link tryAcquireShardLock}'s acquire, since a two-int advisory
+   * lock is only released by the session that took it (or by that session ending). Used by the
+   * per-shard relinquish dispatcher when a fence policy decides to drop a shard WITHOUT killing the
+   * node: the shard's slot lock is freed so ANY node (including this one, later) can cleanly
+   * re-acquire it, while the connection itself — and every other shard's lock — stays untouched.
+   * A slot with no lock currently held is a harmless no-op.
+   */
+  releaseShardLock?(slot: number): Promise<void>;
   close(): Promise<void>;
 }
 

@@ -112,6 +112,7 @@ export class NodePgClient implements PgClient {
   readonly commitQuerierFor?: (shardId: string) => Promise<PgTransactionalQuerier>;
   readonly onShardConnectionLost?: (cb: (shardId: string) => void) => void;
   readonly tryAcquireShardLock?: (slot: number) => Promise<boolean>;
+  readonly releaseShardLock?: (slot: number) => Promise<void>;
 
   constructor(opts: {
     connectionString: string;
@@ -134,6 +135,7 @@ export class NodePgClient implements PgClient {
         this.shardConnectionLostCbs.push(cb);
       };
       this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
+      this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
     }
   }
 
@@ -346,6 +348,27 @@ export class NodePgClient implements PgClient {
       slot,
     ]);
     return rows[0]?.ok === true;
+  }
+
+  /**
+   * Release slot `slot`'s per-shard advisory lock — the exact mirror of {@link tryAcquireShardLockImpl}:
+   * same shard resolution, same connection, the `pg_advisory_unlock` two-int counterpart of the
+   * `pg_try_advisory_lock` it undoes. Used by the fleet relinquish dispatcher (B2b, D2) when a fence
+   * policy decides to drop a shard WITHOUT tearing down the connection itself — releasing here leaves
+   * the connection open and every OTHER slot's lock untouched, so the same node can re-acquire this
+   * slot later (or another node can, immediately). A slot with no lock held resolves as a no-op (the
+   * caller doesn't need the boolean `pg_advisory_unlock` returns — either way the lock is not held by
+   * this session afterward).
+   */
+  private async releaseShardLockImpl(slot: number): Promise<void> {
+    if (!this.commitPoolShards) throw new Error("NodePgClient: commit pool not configured (no commitPool option)");
+    const shardId = this.commitPoolShards[slot];
+    if (shardId === undefined) {
+      throw new Error(`NodePgClient: shard slot ${slot} out of range (pool has ${this.commitPoolShards.length} shards)`);
+    }
+    const conn = this.ensureShardConn(shardId);
+    await conn.connectPromise;
+    await this.queryOn(conn.client, `SELECT pg_advisory_unlock($1, $2) AS ok`, [SHARD_ADVISORY_LOCK_CLASS, slot]);
   }
 
   /**

@@ -41,6 +41,13 @@ export class PgliteClient implements PgClient {
     return true;
   }
 
+  /** No-op: mirrors `packages/docstore-postgres/test/pglite-client.ts` — a single in-process
+   *  connection has no per-slot commit-pool lock state (this client doesn't implement
+   *  `tryAcquireShardLock` either, so `LeaseManager` falls back to the legacy single writer lock;
+   *  present here only so relinquish-path code that defensively checks `client.releaseShardLock`
+   *  finds a consistent, harmless no-op instead of `undefined`). */
+  async releaseShardLock(_slot: number): Promise<void> {}
+
   async listen(_channel: string, _onNotify: (payload: string) => void): Promise<() => Promise<void>> {
     throw new Error("listen/notify not supported on PGlite test client");
   }

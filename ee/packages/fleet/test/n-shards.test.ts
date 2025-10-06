@@ -6,14 +6,15 @@
  * file proves the SHARD SEMANTICS (per-shard fencing, all-rows seeding, min-F, idle closing) which
  * are connection-agnostic; genuine cross-connection parallelism + failover are the fleet-e2e's job.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { newDocumentId, shardIdList, DEFAULT_SHARD, encodeStorageIndexId, type InternalDocumentId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { FencedError } from "../src/fenced-error";
 import { LeaseManager } from "../src/lease";
-import { installCommitGuard, FrontierMonitor, acquireShardAsWriter } from "../src/node";
+import { installCommitGuard, relinquish, FrontierMonitor, acquireShardAsWriter } from "../src/node";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { PgliteClient } from "./pglite-client";
 
@@ -105,15 +106,19 @@ describe("Shards B2a — N shard leases", () => {
     const before = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
     void before;
 
+    // Mechanical call-site update (Shards B2b, Task 3): heartbeatAll now also returns `fencedShardIds`
+    // — every held pair still renewed, so it's empty here.
     const first = await lease.heartbeatAll();
-    expect(first).toEqual({ updated: N, expected: N });
+    expect(first).toEqual({ updated: N, expected: N, fencedShardIds: [] });
 
-    // Supersede s2's epoch; the next batched heartbeat updates only N-1 rows → definitive loss signal.
+    // Supersede s2's epoch; the next batched heartbeat updates only N-1 rows → a PER-SHARD loss signal
+    // (B2b, D2) naming s2 precisely, not just an undifferentiated updated<expected count.
     const other = new LeaseManager(client, { advertiseUrl: "http://node-b:5000" });
     await other.tryAcquire("s2", 2);
     const second = await lease.heartbeatAll();
     expect(second.expected).toBe(N);
     expect(second.updated).toBe(N - 1);
+    expect(second.fencedShardIds).toEqual(["s2"]);
     await client.close();
   });
 
@@ -318,6 +323,97 @@ describe("Shards B2a — N shard leases", () => {
     expect(tailer.watermark()).toBeGreaterThanOrEqual(commitTs);
     await tailer.stop();
     await replica.close();
+    await client.close();
+  });
+});
+
+describe("Shards B2b, Task 3 — per-shard relinquish (fence on s becomes 'drop s, keep serving')", () => {
+  it("(c) relinquish('s2'): held map loses s2 → guard fences a straggler s2 commit cleanly, s3 keeps committing, no exit fires, and a SECOND relinquish('s2') is a no-op", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    const onExit = vi.fn();
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) => relinquish({ lease, client, shards: SHARDS }, fencedShardId, reason));
+    const releaseSpy = vi.spyOn(client, "releaseShardLock");
+
+    expect(lease.currentEpoch("s2")).toBe(1n); // held before relinquish
+
+    relinquish({ lease, client, shards: SHARDS }, "s2", "test: manual relinquish");
+
+    expect(lease.currentEpoch("s2")).toBeNull(); // held map lost s2
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+    expect(releaseSpy).toHaveBeenCalledWith(SHARDS.indexOf("s2"));
+    expect(onExit).not.toHaveBeenCalled(); // relinquish structurally cannot reach an exit callback
+
+    // A straggler commit attempt on the now-relinquished shard fences cleanly — the guard's "no
+    // acquired epoch" branch, NOT a live-epoch mismatch.
+    await expect(pgStore.commitWrite([doc(newDocumentId(TABLE), "straggler")], [], "s2")).rejects.toThrow(FencedError);
+
+    // A sibling shard this node STILL holds commits fine — relinquish is scoped to s2 alone.
+    const ts = await pgStore.commitWrite([doc(newDocumentId(TABLE), "s3-still-fine")], [], "s3");
+    expect((await lease.read("s3"))?.frontierTs).toBe(ts);
+
+    // Idempotent: a second relinquish("s2") is a no-op — no further releaseShardLock/lease mutation.
+    relinquish({ lease, client, shards: SHARDS }, "s2", "test: second call");
+    expect(releaseSpy).toHaveBeenCalledTimes(1); // still just the one call from above
+    expect(lease.currentEpoch("s2")).toBeNull();
+    expect(onExit).not.toHaveBeenCalled();
+
+    await client.close();
+  });
+
+  it("(d) the commit guard's fence path routes to relinquish, never to an exit callback", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    const onExit = vi.fn();
+    const relinquishCalls: Array<{ shardId: string; reason: string }> = [];
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) => {
+      relinquishCalls.push({ shardId: fencedShardId, reason });
+      relinquish({ lease, client, shards: SHARDS }, fencedShardId, reason);
+    });
+
+    // Another node steals s1's lease (epoch bump) — s1's guard now fences on its next commit.
+    const other = new LeaseManager(client, { advertiseUrl: "http://node-b:5000" });
+    await other.tryAcquire("s1", 1);
+
+    await expect(pgStore.commitWrite([doc(newDocumentId(TABLE), "x")], [], "s1")).rejects.toThrow(FencedError);
+
+    // The guard routed to relinquish exactly once, naming s1 — and NEVER reached any exit callback
+    // (there is none reachable from `relinquish`'s dependency shape — RelinquishDeps has no onExit).
+    expect(relinquishCalls).toEqual([{ shardId: "s1", reason: expect.stringContaining("s1") }]);
+    expect(lease.currentEpoch("s1")).toBeNull(); // relinquished
+    expect(onExit).not.toHaveBeenCalled();
+
+    // Sibling shards this node still holds are unaffected.
+    const ts = await pgStore.commitWrite([doc(newDocumentId(TABLE), "default-fine")], [], DEFAULT_SHARD);
+    expect((await lease.read(DEFAULT_SHARD))?.frontierTs).toBe(ts);
+
+    await client.close();
+  });
+
+  it("relinquish with { connectionLost: true } skips releaseShardLock (the lock already died with the connection)", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const releaseSpy = vi.spyOn(client, "releaseShardLock");
+
+    relinquish({ lease, client, shards: SHARDS }, "s1", "commit connection lost", { connectionLost: true });
+
+    expect(lease.currentEpoch("s1")).toBeNull();
+    expect(releaseSpy).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("relinquishing the DEFAULT shard logs the drivers-still-running warning (Task 5 caveat)", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const warn = vi.fn();
+    const log = vi.fn();
+
+    relinquish({ lease, client, shards: SHARDS, log, warn }, DEFAULT_SHARD, "test");
+
+    expect(lease.currentEpoch(DEFAULT_SHARD)).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toContain("stopDriversOnly");
     await client.close();
   });
 });
