@@ -16,7 +16,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry } from "@stackbase/executor";
+import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry, type WriteRouter } from "@stackbase/executor";
 import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
@@ -51,18 +51,15 @@ function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record
 }
 
 /**
- * Fleet write-routing seam (Tier 2): lets a non-writer node forward mutations/actions to
- * whichever node currently holds the write lease, instead of executing them locally. Queries
- * are NEVER routed — a non-writer still serves reads from its own (replicated) storage.
- * `isLocalWriter` is checked on EVERY call (not cached at construction), so a role flip on
- * promotion/demotion takes effect immediately without recreating the runtime.
+ * Fleet write-routing seam (Tier 2), PER-SHARD. Defined in `@stackbase/executor` (where the
+ * per-shard forward chokepoint on `ExecutorDeps.writeRouter` references it, avoiding a circular dep
+ * back to this package) and re-exported here as the core seam `@stackbase/fleet` implements. A node
+ * that doesn't own a mutation's resolved shard forwards it to that shard's owner; queries are never
+ * routed. Actions still forward wholesale at the runtime level (below) to the default-shard holder —
+ * an action's INNER mutations then route per-shard from wherever the action runs. See
+ * `InlineUdfExecutor.run`'s routing hook.
  */
-export interface WriteRouter {
-  /** true → execute writes locally (this node is the writer). Checked per call. */
-  isLocalWriter(): boolean;
-  /** Forward a write to the writer node; resolves with the function's JSON result or throws. */
-  forward(kind: "mutation" | "action", path: string, args: JSONValue, identity: string | null): Promise<JSONValue>;
-}
+export type { WriteRouter } from "@stackbase/executor";
 
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
@@ -239,16 +236,19 @@ export class EmbeddedRuntime {
         numShards,
       });
     };
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter });
     executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
+    // `localOnly: true` bypasses the executor's per-shard write router — a boot step seeds this
+    // node's OWN store before it's ready to be any shard's owner; without the flag a fleet node
+    // that isn't the default-shard owner would forward its own boot seed to a peer (or fail).
     for (const step of options.bootSteps ?? []) {
       const bootFn = mutation(async (ctx) => {
         await step.run({ db: ctx.db as unknown as GuestDatabaseWriter, now: ctx.now() });
         return null;
       });
-      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards });
+      await executor.run(bootFn, {}, { path: `_boot:${step.name}`, namespace: step.name, identity: null, numShards, localOnly: true });
     }
 
     // A mutable map the closures read, so `setModules` hot-swaps functions in place
@@ -285,22 +285,23 @@ export class EmbeddedRuntime {
       },
       async runMutation(path, args, identity) {
         const fn = resolve(path);
-        // Write-routing seam: a non-writer fleet node forwards to the writer instead of
-        // executing locally. `isLocalWriter()` is checked fresh on every call (never cached),
-        // so a role flip on promotion takes effect on the very next mutation. The forwarded
-        // write's own commit fans out through the writer's fan-out (a cross-process adapter,
-        // not this in-memory one) — there is no local `tables`/`writeRanges`/`commitTs` to
-        // report here, so those come back empty/zero.
-        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
-          const value = await options.writeRouter.forward("mutation", path, args, identity ?? null);
-          return { value: jsonToConvex(value) as Value, tables: [], writeRanges: [], commitTs: 0 };
-        }
+        // Per-shard write routing now lives at the executor chokepoint (`executor.run` forwards a
+        // mutation whose resolved shard this node doesn't own — see `InlineUdfExecutor.run`). The
+        // old runtime-level `writeRouter` check here was BEFORE shard resolution and so bypassed the
+        // driver/scheduler path; it is removed as superseded. A forwarded run comes back with a null
+        // oplog, so `tables`/`writeRanges` are empty — the same shape this path reported for a
+        // forwarded write before.
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
           writeRanges: r.oplog?.writtenRanges ?? [],
-          commitTs: Number(r.oplog?.commitTs ?? 0),
+          // `commitTs` (B2b, T2): a LOCAL commit reports it via `r.oplog.commitTs`; a FORWARDED
+          // mutation has no local oplog (null), but the executor's forward branch already threads
+          // the owner's real commitTs onto `r.commitTs` itself (see `InlineUdfExecutor.run`) — fall
+          // back to that instead of silently reporting 0, so a forwarded sharded write's commitTs
+          // reaches this path the same way a local one's does.
+          commitTs: Number(r.oplog?.commitTs ?? r.commitTs ?? 0n),
         };
       },
       async runAdminQuery(path, args) {
@@ -316,12 +317,12 @@ export class EmbeddedRuntime {
         // the instance `runAction` (Task 1)'s public gate.
         const fn = resolve(path);
         if (fn.type !== "action") throw new Error(`${path} is not an action`);
-        // Write-routing seam (see `runMutation` above): forward instead of executing locally
-        // when this node isn't the writer. An action has no read/write set of its own to fan
-        // out either way, so nothing extra to reconcile here.
-        if (options.writeRouter && !options.writeRouter.isLocalWriter()) {
-          const value = await options.writeRouter.forward("action", path, args, identity ?? null);
-          return { value: jsonToConvex(value) as Value };
+        // Actions still forward WHOLESALE at the runtime level (not per-shard: an action has no
+        // shard of its own), targeted at the default-shard holder. Once it runs on that writer-ish
+        // node, its inner `ctx.runMutation`s route per-shard through the executor chokepoint.
+        if (options.writeRouter && !options.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+          const res = await options.writeRouter.forward("action", path, args, identity ?? null, DEFAULT_SHARD);
+          return { value: jsonToConvex(res.value) as Value };
         }
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return { value: r.value as Value };
@@ -508,19 +509,16 @@ export class EmbeddedRuntime {
     return { value: jsonToConvex(value) as T, logs: [], committed: true, commitTs: 0n, readRanges: [], oplog: null };
   }
 
-  /** Directly invoke a function (for HTTP routes / the CLI `run` command). Routes mutations
-   *  and actions through `writeRouter` when set and this node isn't the writer; queries always
-   *  run locally. */
+  /** Directly invoke a function (for HTTP routes / the CLI `run` command). A MUTATION routes
+   *  per-shard inside the executor (`executor.run` forwards a shard this node doesn't own); an
+   *  ACTION forwards wholesale here to the default-shard holder; queries always run locally. */
   async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
-    if (
-      this.writeRouter && !this.writeRouter.isLocalWriter() &&
-      (fn.type === "mutation" || fn.type === "action")
-    ) {
-      const value = await this.writeRouter.forward(fn.type, path, args, opts?.identity ?? null);
-      return this.forwardedResult<T>(value);
+    if (fn.type === "action" && this.writeRouter && !this.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+      const res = await this.writeRouter.forward("action", path, args, opts?.identity ?? null, DEFAULT_SHARD);
+      return this.forwardedResult<T>(res.value);
     }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
@@ -542,9 +540,9 @@ export class EmbeddedRuntime {
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
     if (fn.type !== "action") throw new Error(`${path} is not an action`);
-    if (this.writeRouter && !this.writeRouter.isLocalWriter()) {
-      const value = await this.writeRouter.forward("action", path, args, opts?.identity ?? null);
-      return this.forwardedResult<T>(value);
+    if (this.writeRouter && !this.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
+      const res = await this.writeRouter.forward("action", path, args, opts?.identity ?? null, DEFAULT_SHARD);
+      return this.forwardedResult<T>(res.value);
     }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
@@ -643,20 +641,52 @@ export class EmbeddedRuntime {
     return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards });
   }
 
-  /** Stop all component drivers and clear all pending driver timers. Call on runtime shutdown. */
-  async stopDrivers(): Promise<void> {
+  /**
+   * Stop the component drivers and clear their pending timers, resetting `driversStarted` so a later
+   * `startDrivers()` can bring them back up. Shared by the driver-only `stopDriversOnly()` (B2b, D5)
+   * and the full-shutdown `stopDrivers()` — the ONLY difference is whether the sync handler is also
+   * disposed, so the two can never drift on how a driver is torn down.
+   */
+  private async stopDriversInternal(): Promise<void> {
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     for (const d of this.drivers) await d.stop?.();
+    // Reset the flag (NOT one-way): a stop→start cycle must actually restart the drivers. The shipped
+    // `driversStarted` flag was write-once (only ever flipped true), so a fleet node that relinquished
+    // and later re-acquired the default shard would silently no-op the restart — the D5 regression.
+    this.driversStarted = false;
+  }
+
+  /**
+   * Stop all component drivers and clear all pending driver timers. Call on runtime shutdown.
+   * ALSO disposes the sync handler's background flush sweep — this is the full-teardown path.
+   */
+  async stopDrivers(): Promise<void> {
+    await this.stopDriversInternal();
     // Stop the sync handler's background flush sweep (per-session backpressure drain) on shutdown.
     this.handler.dispose();
   }
 
   /**
-   * Start component drivers deferred via `EmbeddedRuntimeOptions.deferDrivers`. Idempotent —
-   * a second (or later) call is a no-op once drivers are running, so callers don't need to
-   * track whether they've already called it (e.g. a fleet node calling this on every
-   * promotion attempt).
+   * Driver-only stop (B2b, D5 — "drivers follow the default shard"): stop the scheduler/workflow/cron/
+   * reaper drivers and clear their timers, WITHOUT disposing the sync handler. A fleet node that
+   * relinquishes (or gracefully releases) the default shard keeps serving reads, subscriptions, and
+   * mutations for every OTHER shard — only its drivers go quiet, because a different node now owns the
+   * default ring the scheduler tables live on. Symmetric with `startDrivers()` and idempotent both
+   * ways (the reset flag makes a later `startDrivers()` a real restart, and a second stop a no-op),
+   * so callers never need to track whether drivers are currently running. Deliberately NEVER touches
+   * `handler.dispose()` (the shipped `stopDrivers()` did — fatal on a default-relinquish, since the
+   * node stays live).
+   */
+  async stopDriversOnly(): Promise<void> {
+    await this.stopDriversInternal();
+  }
+
+  /**
+   * Start component drivers deferred via `EmbeddedRuntimeOptions.deferDrivers`, OR restart them after
+   * a `stopDriversOnly()` (B2b, D5). Idempotent — a second (or later) call is a no-op once drivers are
+   * running, so callers don't need to track whether they've already called it (e.g. a fleet node
+   * calling this on every default-shard acquisition attempt).
    */
   async startDrivers(): Promise<void> {
     if (this.driversStarted) return;

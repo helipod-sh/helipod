@@ -1,6 +1,6 @@
 ---
 title: Write Sharding — Multi-Agent Research & the Fenced Frontier Verdict
-status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md); B2b (fleet distribution — spreading different shards' write ownership across different nodes) is next; B3-B5 remain research/pre-spec
+status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node) + B2b SHIPPED (fleet distribution — opt-in STACKBASE_FLEET_MULTI_WRITER spreads different shards' write ownership across different nodes via deterministic rendezvous placement, converging in seconds with no coordinator service; per-shard failover; a writer-to-writer invalidation listener keeps every writer reactive to every other writer's commits; graceful damped release on scale-out; scheduled functions/crons ride the default shard and survive it moving; default OFF keeps single-writer + sync-replica topology byte-identical — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md); next: B3 latency/ops polish (single-shard fast path, stall alerting) and B4 per-shard group commit; B5 remains design-doc-only
 date: 2025-08-28
 audience: engineering (internal)
 ---
@@ -98,9 +98,13 @@ ports to the object-storage substrate (CAS frontier manifests).
 
 - **B1 — Fenced frontier at one shard**: pure hardening of the SHIPPED fleet (closes its
   skipped-ts/promotion-fencing class), behavior-identical, valuable even if sharding stopped here.
-- **B2 — N shards live**: `shardBy` API + codegen cross-check + kernel guards at every tier,
+- **B2a — N shards live**: `shardBy` API + codegen cross-check + kernel guards at every tier,
   per-shard leases/transactors/drivers, split snapshot, frontier closing, 8-virtual-shard dev,
-  the 2-writer cross-shard-subscription E2E.
+  parallel per-shard commits on one fleet writer node.
+- **B2b — fleet distribution**: opt-in `STACKBASE_FLEET_MULTI_WRITER` spreads shard ownership
+  across nodes (deterministic rendezvous placement, per-shard failover, a writer-to-writer
+  invalidation listener, damped graceful scale-out, drivers following the default shard), proven
+  by a live multi-node E2E; default OFF keeps the shipped single-writer topology unchanged.
 - **B3 — latency/ops polish** (single-shard fast path, stall alerting).
 - **B4 — per-shard group commit** (the Postgres-fsync ceiling raise — where the throughput
   headline gets earned).

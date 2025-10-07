@@ -28,6 +28,38 @@ export const update = mutation({
   },
 });
 
+// A self-perpetuating scheduled chain (the multi-writer E2E's "exactly ONE node runs the scheduler
+// through a default-shard MOVE" proof). Each tick inserts a `notes` row tagged `box:"tick"`,
+// `text:"tick-<seq>"`, then — while `seq < max` — reschedules ITSELF for `seq+1` after `delayMs`.
+// The whole chain runs on the DEFAULT-shard holder (the scheduler driver's node). Kill that holder
+// mid-chain and the driver resumes on the new default holder: the `text` seq values stay STRICTLY
+// UNIQUE (at-most-once dispatch — no double-execution) and keep climbing (drivers continue). `ctx`
+// is cast to `any` for the injected `ctx.scheduler` surface.
+export const tick = mutation({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  handler: async (ctx: any, { seq, max, delayMs }: { seq: number; max: number; delayMs: number }) => {
+    await ctx.db.insert("notes", { box: "tick", text: `tick-${seq}` });
+    if (seq < max) await ctx.scheduler.runAfter(delayMs, "notes:tick", { seq: seq + 1, max, delayMs });
+    return null;
+  },
+});
+
+// Kicks off the `tick` chain at `seq` 0 (a plain scheduling entrypoint a client/test POSTs).
+export const scheduleTick = mutation({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  handler: (ctx: any, { max, delayMs }: { max: number; delayMs: number }) =>
+    ctx.scheduler.runAfter(delayMs, "notes:tick", { seq: 0, max, delayMs }),
+});
+
+// A `notes` query filtered to the tick chain — returns each tick row's `text`, in insertion order,
+// so the E2E can assert seq uniqueness + growth across the default-shard move.
+export const ticks = query({
+  handler: async (ctx) =>
+    (await ctx.db.query("notes", "by_box").collect())
+      .filter((d) => d.box === "tick")
+      .map((d) => d.text),
+});
+
 // An ACTION that writes via ctx.runMutation — exercises the fleet action-forwarding + read-your-own-
 // writes path (the writer surfaces the inner mutation's commitTs; the sync node's forwarder waits for
 // its replica watermark to reach it, so an IMMEDIATE read on the same sync node sees the row).

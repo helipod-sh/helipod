@@ -116,6 +116,22 @@ export class OccConflictError extends ConflictError {
   override readonly code = "OCC_CONFLICT";
 }
 
+/**
+ * Fleet-internal (Tier 2, sharding B2b): the single-hop guard's answer when a `/_fleet/run`
+ * receiver is NOT the current owner of the forwarded write's resolved shard — a point-in-time
+ * race during rebalance/failover convergence (the shard moved between the original forwarder's
+ * lease read and this hop landing). Thrown ONLY by that guard, never by user code; a client never
+ * sees it directly. Retryable: the ORIGINAL forwarder's existing refresh+retry-once (a fresh
+ * `shard_leases` read) picks up the shard's current owner and re-routes there — the receiver
+ * itself MUST NOT re-forward (that would let a forward chase a moving target unboundedly). Extends
+ * `ConflictError` (409) rather than a 503 `TransientError`: this is a definitive, immediate
+ * "wrong target" answer from a live, reachable node, not "try again later" for an unreachable one.
+ */
+export const NOT_SHARD_OWNER_CODE = "NOT_SHARD_OWNER";
+export class NotShardOwnerError extends ConflictError {
+  override readonly code = NOT_SHARD_OWNER_CODE;
+}
+
 /* -------------------------------------------------------------------------- */
 /* System errors — 5xx, not retryable                                         */
 /* -------------------------------------------------------------------------- */

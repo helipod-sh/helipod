@@ -41,6 +41,7 @@ import {
 } from "@stackbase/runtime-embedded";
 import { LeaseManager, type TryRunExclusiveOnShard } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
+import { ShardLeaseBalancer } from "./balancer";
 import { FencedError } from "./fenced-error";
 import { NotifyingFanoutAdapter } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
@@ -159,7 +160,13 @@ export class FrontierMonitor {
         if (!this.opts.runExclusiveOnShard) {
           throw new Error("fleet: FrontierMonitor closeIdle requires a runExclusiveOnShard seam (bug)");
         }
-        await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+        // Close THIS node's held idle shards up to a fresh ceiling, then reuse that SAME ceiling
+        // (one nextval/beat) to un-pin any ORPHANED shard's frontier (B2b, D4) — a shard nobody holds
+        // (a peer died and its rows expired, or a graceful release before its new owner acquired)
+        // would otherwise pin F below the live commit position indefinitely. WRITER beat only
+        // (`closeIdle` is false on a sync node), so orphans move iff at least one writer is alive.
+        const ceiling = await this.lease.closeIdleFrontiers(this.opts.runExclusiveOnShard);
+        await this.lease.bumpOrphanFrontiers(ceiling);
       }
       const rows = await this.lease.readAllFrontiers();
       if (rows.length === 0) return;
@@ -304,6 +311,11 @@ export interface FleetHandles {
    *  how long it's been stuck (ms), and the pinning shard. Null before the first frontier beat, or if
    *  no shard rows exist yet. */
   frontierStats(): FrontierStats | null;
+  /** Per-shard ownership (B2b, D1): does THIS node currently hold `shardId`'s write lease? Backs
+   *  the `/_fleet/run` single-hop guard (`packages/cli`'s `http-handler.ts`) — delegates straight to
+   *  `WriteForwarder.isLocalWriter`, the same live held-set view the executor's own per-shard
+   *  router and `relinquish()` consult. */
+  isLocalWriter(shardId: ShardId): boolean;
   stop(): Promise<void>;
 }
 
@@ -526,6 +538,12 @@ export async function prepareFleetNode(deps: {
   const fanoutAdapter = new NotifyingFanoutAdapter(new InMemoryWriteFanoutAdapter(), client);
 
   await lease.setup();
+  // B2b, D3: write this node's `fleet_nodes` presence row FIRST — BEFORE the writer-election
+  // `tryAcquire`, so a node that LOSES the election and boots sync is already visible in every peer's
+  // live set (and thus a rendezvous participant) from the instant it exists, not only once it holds a
+  // shard. This is the bootstrap-deadlock fix: a shardless node must be discoverable or scale-out
+  // never happens. Idempotent upsert; the balancer/probe re-heartbeats it on the TTL clock.
+  await lease.heartbeatPresence();
   // Writer election is the DEFAULT shard's lock (slot 0). In B2a single-node the node that wins it
   // holds ALL shards (the remaining slots are acquired in `startFleetNode`'s writer/promotion arming);
   // drivers run on the default-shard holder only (D5). `tryAcquire` takes slot 0's per-shard lock in
@@ -701,28 +719,29 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  * := commitTs`) predicated on THIS node's epoch still being current, so frontier publication,
  * fencing, and the lease are one row with zero extra round-trips. `lease.currentEpoch()` is read
  * LIVE on every commit (not a snapshot taken at install time) so a later re-promotion's epoch bump
- * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`,
- * which aborts the whole transaction — AND fires `fireFenced()` (routes to the writer lease
- * monitor's `fenced()`, mirroring `connectionLost()`) before throwing, so the node exits
- * immediately rather than leaving the caller's mutation to fail silently with no self-demotion.
- * Called at writer boot AND on promotion success — see the two call sites below.
+ * is honored automatically. Zero rows updated (a stale/superseded epoch) throws `FencedError`, which
+ * aborts the whole transaction — AND calls `onFenced(shardId, reason)` before throwing so the caller
+ * can react (B2b, D2: `startFleetNode` wires this straight to `relinquish(shardId, reason)` — drop
+ * JUST this shard, keep serving everything else — never to a whole-node exit; see `relinquish` below
+ * for why `LeaseMonitor.fenced()`/`onExit` are NOT reached from here anymore). Called at writer boot
+ * AND on promotion success — see the two call sites below.
  */
 export function installCommitGuard(
   pgStore: PostgresDocStore,
   lease: LeaseManager,
-  fireFenced: (reason: string) => void,
+  onFenced: (shardId: ShardId, reason: string) => void,
 ): void {
   pgStore.setCommitGuard(async (q, commitTs, shardId) => {
     // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
     // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
     // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
-    // and self-demotes, while the other shards' commits are unaffected.
+    // and relinquishes ONLY s2 (B2b), while the other shards' commits are unaffected.
     const epoch = lease.currentEpoch(shardId);
     if (epoch === null) {
       // Structurally shouldn't happen — the guard is only ever installed after this node has acquired
       // every shard it commits on (writer boot / promotion arming). Treat defensively as fenced rather
       // than let an inconsistent guard silently allow an unfenced commit through.
-      fireFenced(`commit guard invoked with no acquired epoch for shard '${shardId}'`);
+      onFenced(shardId, `commit guard invoked with no acquired epoch for shard '${shardId}'`);
       throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
     // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
@@ -738,9 +757,87 @@ export function installCommitGuard(
       [commitTs, shardId, epoch],
     );
     if (rows.length === 0) {
-      fireFenced(`commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
+      onFenced(shardId, `commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
       throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
     }
+  });
+}
+
+/** The narrow seams `relinquish` needs — deliberately structural (not the concrete `NodePgClient`) so
+ *  it's unit-testable with a stub, and reusable by T4's balancer without depending on `startFleetNode`'s
+ *  internal closures. */
+export interface RelinquishDeps {
+  lease: LeaseManager;
+  /** `releaseShardLock` is consulted defensively (`?.`) — absent on a poolless/PGlite client, though
+   *  every real B2b fleet node runs in pool mode and always has it. */
+  client: { releaseShardLock?: (slot: number) => Promise<void> };
+  /** Ordered shard list (index = slot) — how `shardId`'s per-slot advisory lock is found for
+   *  `releaseShardLock`. The same list `prepareFleetNode`/`startFleetNode` derive via `shardIdList`. */
+  shards: readonly ShardId[];
+  /** Structured-log seam, defaults to `console.error`. Tests inject a spy. */
+  log?: (msg: string) => void;
+  /**
+   * Invoked when the DEFAULT shard is relinquished (B2b, D5 — "drivers follow the default shard"):
+   * `startFleetNode` wires this to `runtime.stopDriversOnly()`, so the moment this node loses the
+   * default ring the scheduler/workflow/cron/reaper drivers go quiet (a different node now owns that
+   * ring). Optional — the balancer/relinquish unit tests that don't care about drivers omit it, in
+   * which case relinquishing the default shard just drops the shard with no driver side effect.
+   */
+  onDefaultRelinquished?: () => void;
+}
+
+/**
+ * Per-shard relinquish dispatcher (Fenced Frontier B2b, D2): the reduction a `FencedError` on shard
+ * `s` gets now — "drop `s`, keep serving everything else" — instead of B1/B2a's "kill the node".
+ * Routed to from the commit guard's `onFenced` (a fence discovered mid-commit — that commit itself
+ * still aborts and propagates `FencedError` to its caller, OCC-retryable; relinquish is the SIDE
+ * EFFECT, not a swallow), the batched heartbeat's `fencedShardIds` (a fence discovered on the probe
+ * beat), and a per-shard commit-connection loss.
+ *
+ * Idempotent per shard: `lease.currentEpoch(shardId) === null` means this shard is already forgotten
+ * (a prior relinquish call, or a shard this node never held) — a silent no-op, so callers never need
+ * to track "have I already relinquished this" themselves.
+ *
+ *  1. `lease.forgetShard(shardId)` — drops the held-epoch entry, so the commit guard's "no acquired
+ *     epoch" branch fences any straggler commit on `s` cleanly, and `heartbeatAll`/`closeIdleFrontiers`
+ *     stop touching it.
+ *  2. Release `s`'s per-slot advisory lock (`PgClient.releaseShardLock`) — UNLESS `opts.connectionLost`:
+ *     a dead commit connection already released its session-scoped lock the instant the backend went
+ *     away, so there is nothing left to release (and no live connection to run the unlock query on).
+ *  3. Log one structured line. Relinquishing the DEFAULT shard additionally WARNS that drivers keep
+ *     running (scheduler/workflow/cron/reaper stay armed on this node) until a later task wires
+ *     `stopDriversOnly` (D5) — driver stop/start is deliberately NOT built here.
+ *
+ * Deliberately does NOT touch `LeaseMonitor` and never calls `onExit` — the whole point of B2b is that
+ * a per-shard fence must no longer escalate to a whole-node exit. `LeaseMonitor` stays reserved for
+ * pinned-connection loss and probe exhaustion (definitive WHOLE-NODE loss); see `startFleetNode`.
+ */
+export function relinquish(
+  deps: RelinquishDeps,
+  shardId: ShardId,
+  reason: string,
+  opts: { connectionLost?: boolean } = {},
+): void {
+  if (deps.lease.currentEpoch(shardId) === null) return; // idempotent: not held (already gone, or never)
+  deps.lease.forgetShard(shardId);
+  const log = deps.log ?? ((m: string) => console.error(m));
+  log(
+    `fleet: relinquish shard='${shardId}' reason='${reason}'` +
+      (opts.connectionLost ? " (via commit-connection loss — its slot lock is already gone)" : ""),
+  );
+  if (shardId === DEFAULT_SHARD) {
+    // B2b, D5: losing the default ring stops this node's drivers (a peer now runs the scheduler). The
+    // node keeps serving everything else — `stopDriversOnly` never disposes the sync handler.
+    log(`fleet: relinquished the default shard — stopping drivers (scheduler/workflow/cron/reaper)`);
+    deps.onDefaultRelinquished?.();
+  }
+  if (opts.connectionLost) return; // the lock died with the connection — nothing left to release
+  const slot = deps.shards.indexOf(shardId);
+  if (slot < 0 || !deps.client.releaseShardLock) return;
+  void deps.client.releaseShardLock(slot).catch((e: unknown) => {
+    log(
+      `fleet: releaseShardLock(${slot}) for shard '${shardId}' failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
   });
 }
 
@@ -810,6 +907,152 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     }
   };
 
+  // B2b, D3: this node's writer-ish state for the balancer. A writer boot is writer-ish from the
+  // start; a sync node flips this true when it promotes (below). The balancer only ACQUIRES/RELEASES
+  // shards while writer-ish; a pure sync node only heartbeats presence and may request promotion.
+  let writerish = forwarder.isLocalWriter();
+  // Guards the whole-node promotion so it runs at most once, whichever trigger fires first — the
+  // shipped default-shard `acquireLoop` election OR the balancer's generalized trigger (a sync node
+  // whose rendezvous targets include an orphaned non-default shard). Both route through the same
+  // `runPromotion` via `doPromote`.
+  let promoting = false;
+  // Indirection so the balancer (constructed below, before the sync branch wires the real promotion
+  // sequence) can trigger promotion without a definition cycle. Stays a no-op on a writer boot (a
+  // writer never self-promotes) and until the sync branch assigns the real trigger.
+  let doPromote: () => void = () => {};
+
+  // B2b, D5 — "drivers follow the default shard": the scheduler/workflow/cron/reaper drivers run on
+  // EXACTLY the node that currently holds the DEFAULT ring (the ring the scheduler's own unsharded
+  // tables live on). Acquiring the default shard (re)starts them; relinquishing OR gracefully
+  // releasing it stops them (both routed through `relinquish`, which fires `onDefaultRelinquished`).
+  // `startDrivers`/`stopDriversOnly` are idempotent both ways, so these fire freely on every event.
+  const relinquishDeps: RelinquishDeps = {
+    lease,
+    client,
+    shards,
+    onDefaultRelinquished: () => void runtime.stopDriversOnly(),
+  };
+
+  // One-tick acquire of a single shard's lease (+ its per-slot advisory lock) for the balancer. Mirrors
+  // `acquireShardAsWriter`'s fencing-first eviction of a wedged EXPIRED holder, but as a SINGLE attempt
+  // (a miss just retries on the next balancer beat, rather than looping to a deadline) so a beat never
+  // blocks. `seedFrontierFromDocuments = true`: a first-created row is born seeded to the store max
+  // (post-`setupSchema`, `documents` exists on every path the balancer runs), never momentarily at 0.
+  const tryAcquireShard = async (shardId: ShardId): Promise<boolean> => {
+    const slot = shards.indexOf(shardId);
+    if (slot < 0) return false;
+    let acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
+    // Lock held — if this shard's lease has expired, its holder is wedged/dead: fence + terminate so
+    // the retry's advisory try can win. No-op when the lease is still live (a real non-target holder,
+    // which the balancer must NOT steal — so acquisition simply fails this beat and is left alone).
+    if (!acquired && (await lease.isExpired(shardId))) {
+      const { fenced, oldAppName } = await lease.evictExpired(shardId);
+      if (fenced && oldAppName !== null) await lease.terminateBackend(oldAppName);
+      acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
+    }
+    // D5: acquiring the default ring (re)starts this node's drivers — idempotent, so a writer boot that
+    // already started them at create() is a no-op; a failover/multi-writer node that takes over the
+    // default shard wakes them here.
+    if (acquired && shardId === DEFAULT_SHARD) void runtime.startDrivers();
+    return acquired;
+  };
+
+  // Graceful point-in-time RELEASE of a held shard the rendezvous assignment no longer gives this node
+  // (B2b, D3): under the shard's commit mutex (so no in-flight commit's frontier write races it),
+  // self-fence the row (epoch+1, writer_url NULL, frontier GREATEST-bump) then run the T3 relinquish
+  // unwind (drop the held-epoch entry + release the slot lock). The rightful owner acquires it on its
+  // own next beat — no TTL wait, no failover event. A mutation mid-execute at release time hits
+  // `FencedError` at commit (OCC-retryable; the forwarder re-routes the retry to the new owner).
+  const releaseShard = async (shardId: ShardId): Promise<void> => {
+    await runtime.tryRunExclusiveOnShard(shardId, async () => {
+      await lease.selfFence(shardId);
+    });
+    relinquish(relinquishDeps, shardId, "balancer graceful release (no longer a rendezvous target)");
+  };
+
+  // The rendezvous shard balancer (B2b, D3) — runs on EVERY node. Its `requestPromotion` routes through
+  // `doPromote` (wired by the sync branch); `isWriterish` gates acquire/release; the acquire/release
+  // thunks are the two above. Beat cadence scales with the lease TTL (2000ms at the default 15000ms).
+  // Multi-writer scale-out is OPT-IN (`STACKBASE_FLEET_MULTI_WRITER`), off by default — see the
+  // balancer's `multiWriter` doc. Off = single writer holds all shards + additional nodes are read
+  // replicas (the shipped single-writer/sync-replica behavior, byte-identical to B2a); the balancer
+  // still heartbeats presence (the bootstrap fix) and performs FAILOVER acquisition regardless. On =
+  // full rendezvous distribution across co-writers. Read here (a contained node.ts read) rather than
+  // threaded through serve's config, so this task touches no core `packages/cli` surface.
+  const multiWriter = /^(1|true|yes)$/i.test(process.env.STACKBASE_FLEET_MULTI_WRITER ?? "");
+  const balancer = new ShardLeaseBalancer({
+    lease,
+    myUrl: lease.advertiseUrl,
+    numShards,
+    multiWriter,
+    isHeld: (shardId) => lease.currentEpoch(shardId) !== null,
+    isWriterish: () => writerish,
+    tryAcquireShard,
+    releaseShard,
+    requestPromotion: async () => {
+      doPromote();
+    },
+    beatMs: fleetAcquireRetryMs(lease.ttlMs),
+  });
+
+  // Shared invalidation sink (B2b): advance this node's oracle past a learned ts + push a reactive
+  // transition into the sync handler, derived from ONE pulled batch. Used by BOTH the sync node's
+  // replica tailer AND the writer-ish node's derive-only listener (D5/T5-c) — the wiring is identical
+  // because both end at "invalidate my own live subscriptions"; only whether the batch was also
+  // applied to a replica differs (the tailer's mode, not this sink's concern).
+  const invalidationSink = async (inv: AppliedInvalidation): Promise<void> => {
+    // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits this);
+    // reactivity is best-effort — reads stay correct regardless.
+    try {
+      runtime.observeTimestamp(inv.newMaxTs);
+      const ranges = [
+        ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
+        ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
+      ];
+      await runtime.handler.notifyWrites({
+        tables: inv.writtenTables,
+        ranges,
+        commitTs: Number(inv.newMaxTs),
+      });
+    } catch (e) {
+      console.error("fleet: replica invalidation failed", e);
+    }
+  };
+
+  // B2b, D5/T5-c — the writer invalidation listener. In MULTI-WRITER mode a promoted/booted writer
+  // stops (or never starts) a ReplicaTailer, so on its own it has NO way to learn about ANOTHER
+  // writer's commits: its live subscriptions would silently go stale, and its oracle would never
+  // observe a foreign commit's ts (a cross-node read-your-writes miss). Every writer-ish node instead
+  // runs a DERIVE-ONLY listener: same wake sources as the sync tailer (commit NOTIFY channel + the 1s
+  // poll fallback) and the SAME (watermark, F] pull + derivation, but with an invalidate-only sink and
+  // NO replica apply — the node reads the PRIMARY directly, so the data is already there; it needs only
+  // the WAKE + invalidation ranges + observeTimestamp(F). Watermark starts at boot F (only foreign
+  // commits from here on). A writer's OWN commits are re-pulled here and re-invalidated — a harmless
+  // idempotent double-invalidation (its normal fan-out already fired), deliberately not optimized away.
+  // Off unless multi-writer is enabled (single-writer mode has no foreign commits; sync nodes have the
+  // real replica tailer).
+  let writerListener: ReplicaTailer | null = null;
+  /**
+   * @param seedWm Promotion-handoff gap fix (B2b whole-branch review): a promoting node stops its
+   *   `ReplicaTailer` and then starts this derive-only listener; without `seedWm` the listener would
+   *   seed from a FRESH `readFrontier()`, silently skipping any foreign commit that lands between the
+   *   tailer's stop and the listener's start. Pass the outgoing tailer's own final `watermark()`
+   *   (captured right after `tailer.stop()`, see the promotion call site below) so the listener picks
+   *   up contiguously where the tailer left off. Writer BOOT omits this (no prior tailer, no gap) and
+   *   falls back to `ReplicaTailer`'s own fresh-`readFrontier()` seed — see `ReplicaTailer.start`'s doc.
+   */
+  const startWriterInvalidationListener = async (seedWm?: bigint): Promise<void> => {
+    if (!multiWriter || writerListener !== null) return;
+    // `pgStore` is passed as the `replica` arg but is NEVER dereferenced in "invalidateOnly" mode
+    // (no apply, no density read, no maxTimestamp seed) — see ReplicaTailerOptions.mode.
+    writerListener = new ReplicaTailer(client, pgStore, pgStore, {
+      mode: "invalidateOnly",
+      numShards,
+      onInvalidation: invalidationSink,
+    });
+    await writerListener.start(seedWm);
+  };
+
   // The writer lease monitor (C4). Runs ONLY while this node is the writer: constructed lazily at
   // writer boot OR on promotion (never on a sync node). A sync node's connection loss is survivable —
   // its reads keep working off the local replica (slice 2) — so `monitor` stays null and the
@@ -820,21 +1063,26 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // Heartbeat-as-probe (Fenced Frontier B1, D2): one round-trip serves liveness-probe + TTL
       // maintenance + fence verification — NEVER pg_try_advisory_lock (re-entrant on the holding
       // session). `lease.currentEpoch()` is read live so a re-promotion's epoch bump is honored.
-      // A 0-row heartbeat means this node's epoch has been superseded (fenced) even though its
-      // connection is still alive — DEFINITIVE loss, so it routes straight to `monitor.fenced()`
-      // (bypassing the miss-tolerance below, which exists only for transient/ambiguous blips) and
-      // then throws so `LeaseMonitor.tick()`'s catch path sees an already-exited monitor and skips
-      // `recordMiss` (no double-count, no delay past this single probe).
       probe: async () => {
-        // B2a: batched heartbeat over ALL held shard leases in one round-trip. `updated < expected`
-        // means at least one shard's epoch was superseded — a DEFINITIVE writer-lease loss (this one
-        // node holds every shard single-node), routed straight to `fenced()` exactly like B1's
-        // single-shard 0-row heartbeat.
-        const { updated, expected } = await lease.heartbeatAll();
-        if (expected === 0) throw new Error("fleet: heartbeat probe with no acquired leases (bug)");
-        if (updated < expected) {
-          monitor?.fenced(`batched heartbeat updated ${updated}/${expected} shard leases — an epoch was superseded`);
-          throw new FencedError(`writer lease fenced: batched heartbeat updated ${updated}/${expected} shard leases`);
+        // B2b, D3 (the sanctioned evolution of the B1/T3 probe): the probe's liveness question is now
+        // "can I heartbeat my PRESENCE row" — heartbeat `fleet_nodes` ALWAYS. That is a plain query on
+        // the pinned connection, so a genuine connection loss makes it THROW → accrues toward the
+        // miss-exhaustion backstop → whole-node exit, preserving B1's exit semantics for real
+        // connection loss (the LeaseMonitor stays wired for exactly that). Held shard leases are
+        // heartbeated too, but ONLY when this node holds any — in the balancer world zero-held is a
+        // VALID state (a node whose targets all moved away), so the old `expected === 0` throw is GONE:
+        // it would wrongly self-exit a legitimately-shardless writer-ish node via miss-exhaustion.
+        // B2a/B2b, D2: a superseded epoch is a PER-SHARD signal — `fencedShardIds` names exactly which
+        // held shards did NOT renew, each relinquished individually without touching `onExit`.
+        await lease.heartbeatPresence();
+        if (lease.heldPairs().length === 0) return; // zero-held: presence beat is the whole liveness check
+        const { fencedShardIds } = await lease.heartbeatAll();
+        for (const fencedShardId of fencedShardIds) {
+          relinquish(
+            relinquishDeps,
+            fencedShardId,
+            "batched heartbeat found a superseded epoch",
+          );
         }
       },
       onExit: (reason) => onExit(`writer lease lost: ${reason}`),
@@ -848,37 +1096,43 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   };
 
   // Register the connection-lost hook ONCE, here — routed to the monitor only when this node is the
-  // writer (monitor non-null). A dropped pinned connection is definitive lease loss (the advisory
-  // lock is released the instant that backend goes away), so it exits immediately.
+  // writer (monitor non-null). A dropped pinned connection is definitive WHOLE-NODE lease loss (the
+  // advisory lock is released the instant that backend goes away, and the pinned connection is what
+  // every non-commit query — heartbeats, eviction, setup — runs on), so it exits immediately. This is
+  // the ONE loss signal `relinquish` never handles: there is no "just this shard" reading of losing
+  // the connection every shard's bookkeeping depends on.
   client.onConnectionLost?.(() => monitor?.connectionLost());
-  // B2a: a dead PER-SHARD commit connection = that shard's advisory lock released = that shard's lease
-  // definitively lost. This one node holds every shard (single-node), so losing any shard means it can
-  // no longer be the writer — route to the same immediate exit as the pinned connection loss. (Once
-  // per-shard failover lands in B2b, this becomes a per-shard relinquish instead of a whole-node exit.)
-  client.onShardConnectionLost?.((shardId) => monitor?.fenced(`shard '${shardId}' commit connection lost`));
+  // B2b, D2: a dead PER-SHARD commit connection is that shard's fence, and ONLY that shard's — the
+  // shard's session-scoped advisory lock died WITH the connection (so `relinquish` must skip
+  // `releaseShardLock`: there is no live connection left to run the unlock on, and the lock is already
+  // gone), but every other shard's commit connection — and this node's writer status — is unaffected.
+  client.onShardConnectionLost?.((shardId) =>
+    relinquish(relinquishDeps, shardId, "commit connection lost", { connectionLost: true }),
+  );
 
   /**
-   * Arm this node as the writer of ALL N shards (B2a). Runs at writer boot AND on promotion:
-   *   1. Acquire the non-default shards (slots 1…N-1) — the default was already won (writer-election).
-   *      Each `tryAcquire(shardId, slot)` epoch-bumps that shard's row (fencing any prior holder) and
-   *      takes its per-shard advisory lock. A wedged prior holder whose lock lingers is fenced +
-   *      terminated (its epoch is expired) and retried — though in the common failover the default
-   *      shard's acquire loop already `pg_terminate_backend`'d the whole wedged node, freeing every
-   *      slot at once.
-   *   2. `seed=true` (fresh writer boot only): seed ALL held frontiers up to the store's max BEFORE
+   * ROLE-ARM this node as a writer-ish node (B2b, D3 — the armWriter SPLIT). Runs at writer boot AND on
+   * promotion. Unlike B2a's `armWriter`, this NO LONGER hard-loops an acquire-all over slots 1…N-1
+   * (that would fence a live peer in a multi-writer fleet). Instead:
+   *   1. `balancer.acquireTargetsNow()` — a single un-damped pass acquiring only this node's CURRENT
+   *      rendezvous TARGET shards that are orphaned/expired/missing. In a single-node fleet the target
+   *      set is EVERY shard, so this acquires all N — byte-identical steady state to B2a's acquire-all
+   *      (the E2E single-node scenarios are that proof). In a multi-node fleet it acquires only this
+   *      node's share; the balancer's periodic beat does all ongoing (re)distribution.
+   *   2. `seed=true` (fresh writer boot only): seed ALL now-held frontiers up to the store's max BEFORE
    *      ready (the F1×N fix). Promotion passes `seed=false` — the frontiers are already live.
    *   3. Install the per-shard epoch-fenced commit guard.
    *   4. Start the idle-shard closer / frontier-lag monitor and wire a coalesced beat to local commits.
    */
   const armWriter = async (seed: boolean): Promise<void> => {
-    for (let slot = 1; slot < numShards; slot++) {
-      // `seed` doubles as "seed a first-created shard row's frontier from the store max" — true on
-      // writer boot (post-`setupSchema`, `documents` exists), inert on promotion (rows already exist,
-      // ON CONFLICT preserves their live frontiers). Closes the F1×N residual window at INSERT time.
-      await acquireShardAsWriter(lease, shards[slot]!, slot, fleetAcquireRetryMs(lease.ttlMs), seed);
-    }
+    await balancer.acquireTargetsNow();
     if (seed) await lease.seedFrontierAll(await pgStore.maxTimestamp());
-    installCommitGuard(pgStore, lease, (reason) => monitor?.fenced(reason));
+    // B2b, D2: a guard-discovered fence relinquishes JUST that shard — never routes to
+    // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
+    // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
+      relinquish(relinquishDeps, fencedShardId, reason),
+    );
     // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
     // closer would needlessly advance the lone frontier past real commits via `nextval`). At N=1 the
     // monitor is read-only — health stats without mutating the frontier — so single-shard behavior is
@@ -900,19 +1154,21 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     }
   };
 
-  // Writer boot: store already writable, forwarder promoted, drivers running. Arm this node as writer
-  // of ALL N shards:
-  //   - acquire the non-default shards (slots 1…N-1) — the default was won in `prepareFleetNode`;
-  //   - seed ALL held frontiers up to this store's max BEFORE ready (F1×N fix): a single-node
-  //     Postgres `serve` that accumulated data pre-`--fleet` has every shard's frontier at 0 until
-  //     seeded, so a fresh sync node's ready gate (wm=0 < target=0) would be a silent no-op and it
-  //     would report ready EMPTY. `seedFrontierAll`'s GREATEST is a no-op on an already-live fleet;
-  //   - install the per-shard commit guard + start the idle-shard closer / frontier monitor.
-  // `armWriter` does all of the above (`seed=true`). Then arm the writer lease monitor (this node is
-  // the writer from the first tick) — its batched-heartbeat probe covers every held shard.
+  // Writer boot: store already writable, forwarder promoted, drivers running. Role-arm this node as a
+  // writer-ish node (B2b, D3): `armWriter(true)` acquires its rendezvous targets NOW (= all N shards
+  // in a single-node fleet, so all N frontier rows exist + are seeded BEFORE ready — the F1×N fix and
+  // the byte-identity path), seeds all held frontiers, installs the commit guard, and starts the idle-
+  // closer. Then arm the writer lease monitor (writer from the first tick) and START the balancer,
+  // which maintains placement (acquire orphaned targets on failover, gracefully release non-targets
+  // as peers join) from here on.
   if (forwarder.isLocalWriter()) {
     await armWriter(true);
     startWriterMonitor();
+    balancer.start();
+    // B2b, D5/T5-c: in multi-writer mode, run the derive-only listener so this writer learns about
+    // co-writers' commits (no-op when multi-writer is off). armWriter already started this node's
+    // drivers via the default-shard acquisition (writer boot holds the default shard).
+    await startWriterInvalidationListener();
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
@@ -924,11 +1180,14 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
       onPromoted: (cb) => promotedCbs.push(cb),
       frontierStats: () => frontierMonitor?.stats() ?? null,
+      isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
       stop: async () => {
         monitor?.stop();
+        balancer.stop();
         frontierMonitor?.stop();
         unsubscribeCommits?.();
         lease.stop();
+        await writerListener?.stop();
       },
     };
   }
@@ -984,24 +1243,9 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // B2a: the ready gate is F = min(frontier_ts) over all N shard rows, and the tailer refuses to
     // treat a partial `shard_leases` (count < numShards) as ready.
     numShards,
-    onInvalidation: async (inv: AppliedInvalidation) => {
-      // Wrapped so a rejection never surfaces as an unhandled promise rejection (the tailer awaits
-      // this and would leave one otherwise); reactivity is best-effort — reads stay correct.
-      try {
-        runtime.observeTimestamp(inv.newMaxTs);
-        const ranges = [
-          ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
-          ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
-        ];
-        await runtime.handler.notifyWrites({
-          tables: inv.writtenTables,
-          ranges,
-          commitTs: Number(inv.newMaxTs),
-        });
-      } catch (e) {
-        console.error("fleet: replica invalidation failed", e);
-      }
-    },
+    // Same sink the writer-ish derive-only listener uses (D5/T5-c) — observe the ts + fan invalidation
+    // into the sync handler; only the replica-apply (this tailer's default mode) differs.
+    onInvalidation: invalidationSink,
   });
   await tailer.start(); // READY GATE: resolves only after the replica has caught up to the primary.
   // Enable read-your-own-writes: a client that wrote through this node waits for the replica's
@@ -1015,45 +1259,79 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   frontierMonitor = new FrontierMonitor(lease, { closeIdle: false });
   frontierMonitor.start();
 
-  let promoting = false;
-  lease.acquireLoop((state) => {
+  // The CRITICAL PROMOTION ORDER, wrapped by C5 error policy — runs at most once, whichever trigger
+  // fires first: the shipped DEFAULT-shard `acquireLoop` election (below), OR the balancer's
+  // generalized trigger (a sync node whose rendezvous targets include an orphaned NON-default shard —
+  // routed here via `doPromote`, B2b, D3). The shared `promoting` guard (declared at the top) makes
+  // the two triggers idempotent at the node level.
+  const triggerPromotion = (): void => {
     if (promoting) return;
     promoting = true;
-    void state; // (writerUrl now points at us via the lease tryAcquire() just upserted)
-    // C5: the promotion sequence is wrapped — any step failure exits(1) instead of leaving this node
-    // stuck half-promoted with an unhandled rejection. On success the lease monitor is armed (this
-    // node is now the writer) and the http layer drops its proxy.
     void runPromotion({
-      // The lease row is already upserted by the tryAcquire() inside acquireLoop before this fires.
+      // The lease row (default shard) is already upserted by the tryAcquire() inside acquireLoop when
+      // the election path fires; the balancer path promotes first, then acquires its targets below.
       promote: async () => {
         await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
-        // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire the
-        // remaining shards. `seed=false`: promotion never re-seeds frontiers (they're already live —
-        // the dead writer's high-water is preserved through the epoch-bumping re-acquire). armWriter
-        // also installs the per-shard commit guard (closes over `monitor` by reference, so a fence
-        // AFTER `startMonitor` runs still reaches the now-non-null monitor).
+        // Promotion-handoff gap fix (B2b whole-branch review): capture the JUST-STOPPED tailer's own
+        // final watermark now — `promoteFleetNode`'s step 5 already awaited `tailer.stop()` internally
+        // by the time this line runs — so the derive-only listener below can seed from it instead of a
+        // fresh `readFrontier()`. See `startWriterInvalidationListener`'s and `ReplicaTailer.start`'s
+        // doc comments for the gap this closes: without it, a foreign co-writer's commit landing between
+        // the tailer's stop and the listener's start would be invalidated by NEITHER.
+        const seedWm = tailer.watermark();
+        // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire this
+        // node's rendezvous targets. `seed=false`: promotion never re-seeds frontiers (they're already
+        // live — a dead writer's high-water is preserved through the epoch-bumping re-acquire).
+        // `armWriter` also installs the per-shard commit guard (closes over `monitor` by reference, so
+        // a fence AFTER `startMonitor` runs still reaches the now-non-null monitor).
         frontierMonitor?.stop();
         unsubscribeCommits?.();
         unsubscribeCommits = null;
         await armWriter(false);
+        // Now writer-ish: the already-running balancer's next beat will acquire/release to converge.
+        writerish = true;
+        // B2b, D5 — "drivers follow the default shard": `promoteFleetNode` eagerly started drivers
+        // (correct for the single-writer/failover path, where a promoted node holds the default ring).
+        // In MULTI-WRITER mode a node can promote for a NON-default orphaned shard while a peer still
+        // holds default — such a node must NOT run the drivers. `armWriter`'s default-shard acquisition
+        // (if it happened) already (re)started them idempotently; correct the over-eager start here if
+        // this node did not end up holding the default ring.
+        if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
+        // B2b, D5/T5-c: this node is now a writer with its replica tailer stopped — start the derive-
+        // only listener so it keeps seeing co-writers' commits (no-op when multi-writer is off).
+        // `seedWm` closes the promotion-handoff gap (see above).
+        await startWriterInvalidationListener(seedWm);
       },
       startMonitor: startWriterMonitor,
       firePromoted,
       onExit,
     });
-  });
+  };
+  // The balancer's generalized promotion trigger routes here (was a no-op until now).
+  doPromote = triggerPromotion;
+  // The shipped DEFAULT-shard election path (fast failover — grabs the freed advisory lock the instant
+  // the prior writer dies, without waiting out any presence TTL) also triggers the same promotion.
+  lease.acquireLoop(() => triggerPromotion());
+
+  // Start the balancer on the sync node too: it heartbeats this node's presence (its liveness signal —
+  // a shardless sync node has no shard_leases row and no LeaseMonitor), and requests promotion when
+  // its rendezvous share includes an orphaned non-default shard. Its first beat fires after ~2s.
+  balancer.start();
 
   return {
     role: () => (forwarder.isLocalWriter() ? "writer" : "sync"),
     writerUrl: async () => (await lease.read())?.writerUrl ?? "",
     onPromoted: (cb) => promotedCbs.push(cb),
     frontierStats: () => frontierMonitor?.stats() ?? null,
+    isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
     stop: async () => {
       monitor?.stop(); // disarm writer self-exit BEFORE the connection is closed (if promoted)
+      balancer.stop();
       frontierMonitor?.stop();
       unsubscribeCommits?.();
       lease.stop();
       await tailer.stop();
+      await writerListener?.stop(); // non-null only if this sync node was promoted in multi-writer mode
       // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a sync
       // node). Close it here so the pg connection is released; `NodePgClient.close()` is idempotent,
       // so a later `switchable.close()` (if promotion had swapped it in) is a safe no-op. The

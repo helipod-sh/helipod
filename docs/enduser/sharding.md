@@ -214,10 +214,12 @@ never exercised.
 A [fleet](/deploy/fleet) node running `stackbase serve --fleet` commits a sharded table's writes
 across its shards in parallel, through separate per-shard connections to the shared Postgres
 database — write throughput for a sharded table scales with shard count instead of being capped
-at one writer's throughput. Today this parallelism happens on **one writer node**; distributing
-different shards' write ownership across *different* nodes in the fleet is a follow-on step, not
-part of this release — see [Fleet (Multi-Node)](/deploy/fleet#sharding) for the current status
-and what's next.
+at one writer's throughput. By default this parallelism happens on **one writer node**; turn on
+[multi-writer distribution](/deploy/fleet#multi-writer-distribution-writes-scale-with-node-count)
+(`STACKBASE_FLEET_MULTI_WRITER=1`) and different shards' write ownership spreads across
+*different* nodes too, so throughput scales with node count as well as shard count — see that
+section of [Fleet (Multi-Node)](/deploy/fleet) for the failover, scheduling, and scaling-knob
+details.
 
 ## Related
 

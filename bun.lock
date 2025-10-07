@@ -131,6 +131,7 @@
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
         "@stackbase/executor": "workspace:*",
+        "@stackbase/scheduler": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
         "@types/ws": "^8.5.13",

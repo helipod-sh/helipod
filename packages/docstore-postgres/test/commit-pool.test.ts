@@ -94,6 +94,7 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
     expect(client.commitQuerierFor).toBeUndefined();
     expect(client.onShardConnectionLost).toBeUndefined();
     expect(client.tryAcquireShardLock).toBeUndefined();
+    expect(client.releaseShardLock).toBeUndefined();
   });
 
   it("a pool client exposes the pool capabilities and records the ordered shard list", () => {
@@ -105,6 +106,7 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
     expect(typeof client.commitQuerierFor).toBe("function");
     expect(typeof client.onShardConnectionLost).toBe("function");
     expect(typeof client.tryAcquireShardLock).toBe("function");
+    expect(typeof client.releaseShardLock).toBe("function");
   });
 
   it("opens NO commit connection until commitQuerierFor is first called, one per shard, reused", async () => {
@@ -239,6 +241,41 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
     expect(lock.params).toEqual([SHARD_ADVISORY_LOCK_CLASS, 2]);
     // …and it ran on the shard's OWN connection, so the lock is session-scoped to that shard.
     expect(state.instances[0]!.queries).toHaveLength(0); // pinned untouched
+  });
+
+  it("releaseShardLock(slot) issues the two-int pg_advisory_unlock ON THE SAME connection tryAcquireShardLock used, without ending it (B2b, D2)", async () => {
+    const client = new NodePgClient({
+      connectionString: "postgres://fake",
+      applicationName: "app",
+      commitPool: { shards: ["default", "s1", "s2"] },
+    });
+    const ok = await client.tryAcquireShardLock!(2);
+    expect(ok).toBe(true);
+    expect(state.instances).toHaveLength(2); // pinned + s2's commit connection
+
+    await client.releaseShardLock!(2);
+
+    // No THIRD connection was opened — the unlock reused the exact same shard connection.
+    expect(state.instances).toHaveLength(2);
+    const s2 = state.instances[1]!;
+    expect(s2.opts.application_name).toBe("app-commit-s2");
+    const unlock = s2.queries.find((q) => /pg_advisory_unlock/.test(q.text))!;
+    expect(unlock.text).toBe("SELECT pg_advisory_unlock($1, $2) AS ok");
+    // Two-int form, same class id + slot as the acquire it mirrors.
+    expect(unlock.params).toEqual([SHARD_ADVISORY_LOCK_CLASS, 2]);
+    // The connection itself is untouched — still open (not `end()`ed) — so a caller keeps using it
+    // for OTHER shards' locks / future re-acquisition of this same slot.
+    expect(s2.ended).toBe(false);
+    // The pinned connection never saw any of this.
+    expect(state.instances[0]!.queries).toHaveLength(0);
+  });
+
+  it("releaseShardLock rejects for an unknown shard or out-of-range slot (mirrors tryAcquireShardLock)", async () => {
+    const client = new NodePgClient({
+      connectionString: "postgres://fake",
+      commitPool: { shards: ["default", "s1"] },
+    });
+    await expect(client.releaseShardLock!(5)).rejects.toThrow(/slot 5 out of range/);
   });
 
   it("onShardConnectionLost fires with the shardId exactly once (error, then end-guarded)", async () => {

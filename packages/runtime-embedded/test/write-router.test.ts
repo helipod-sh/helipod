@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
+import { encodeStorageIndexId, newDocumentId, shardIdForKeyValue } from "@stackbase/id-codec";
 import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
+import type { Driver, DriverContext } from "@stackbase/component";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type WriteRouter } from "../src/index";
 
@@ -31,8 +32,9 @@ async function makeRuntime(extra?: { writeRouter?: WriteRouter; deferDrivers?: b
 }
 
 describe("write-router seam", () => {
-  it("routes a mutation through forward() when not the local writer", async () => {
-    const forward = vi.fn(async () => 42);
+  it("routes a mutation through forward() when not the local writer (per-shard chokepoint)", async () => {
+    // `messages:send` has no shardBy and this runtime is 1-shard, so its resolved shard is "default".
+    const forward = vi.fn(async () => ({ value: 42 }));
     let localWriter = false;
     const router: WriteRouter = { isLocalWriter: () => localWriter, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
@@ -40,11 +42,11 @@ describe("write-router seam", () => {
     const result = await runtime.run("messages:send", { conversationId: "c1", body: "hi" });
     expect(result.value).toBe(42);
     expect(forward).toHaveBeenCalledTimes(1);
-    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "hi" }, null);
+    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "hi" }, null, "default");
   });
 
   it("never routes a query, even when not the local writer", async () => {
-    const forward = vi.fn(async () => 42);
+    const forward = vi.fn(async () => ({ value: 42 }));
     const router: WriteRouter = { isLocalWriter: () => false, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
 
@@ -54,7 +56,7 @@ describe("write-router seam", () => {
   });
 
   it("flipping isLocalWriter back to true makes the mutation execute locally again", async () => {
-    const forward = vi.fn(async () => 42);
+    const forward = vi.fn(async () => ({ value: 42 }));
     let localWriter = false;
     const router: WriteRouter = { isLocalWriter: () => localWriter, forward };
     const { runtime } = await makeRuntime({ writeRouter: router });
@@ -71,8 +73,8 @@ describe("write-router seam", () => {
     expect(list.value.map((d) => d.body)).toEqual(["local"]);
   });
 
-  it("routes an action through forward() with kind 'action' when not the local writer", async () => {
-    const forward = vi.fn(async () => "action-result");
+  it("routes an action through forward() with kind 'action' (default shard) when not the local writer", async () => {
+    const forward = vi.fn(async () => ({ value: "action-result" }));
     const router: WriteRouter = { isLocalWriter: () => false, forward };
     const actionModules: Record<string, RegisteredFunction> = {
       ...modules,
@@ -87,7 +89,39 @@ describe("write-router seam", () => {
 
     const result = await runtime.runAction("mod:doThing", { x: 1 });
     expect(result.value).toBe("action-result");
-    expect(forward).toHaveBeenCalledWith("action", "mod:doThing", { x: 1 }, null);
+    expect(forward).toHaveBeenCalledWith("action", "mod:doThing", { x: 1 }, null, "default");
+  });
+});
+
+describe("driver-path per-shard routing (the B2b driver hazard fix)", () => {
+  // A sharded mutation scheduled by a driver used to bypass the runtime-level WriteRouter check
+  // entirely (that check ran before shard resolution, and drivers call `runFunction` directly),
+  // so it would execute locally on a non-held shard, fence, and kill the node. With routing at the
+  // executor chokepoint, the driver's `runFunction` forwards it to the shard's owner instead.
+  const N = 8;
+  const shardedModules: Record<string, RegisteredFunction> = {
+    "messages:send": mutation<{ conversationId: string; body: string }, string>({
+      shardBy: "conversationId",
+      handler: (ctx, { conversationId, body }) => ctx.db.insert("messages", { conversationId, body }),
+    }),
+  };
+
+  it("a driver runFunction on a non-held sharded mutation forwards to the shard's owner", async () => {
+    const forward = vi.fn(async () => ({ value: "forwarded-by-driver" }));
+    const router: WriteRouter = { isLocalWriter: () => false, forward }; // owns nothing
+    let captured!: DriverContext;
+    const driver: Driver = { name: "probe", start: async (ctx) => void (captured = ctx) };
+
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    const catalog = new SimpleIndexCatalog();
+    catalog.addTable("messages", MESSAGES, undefined, false, "conversationId");
+    catalog.addIndex(byConversation);
+    await createEmbeddedRuntime({ store, catalog, modules: shardedModules, writeRouter: router, drivers: [driver], numShards: N });
+
+    const result = await captured.runFunction("messages:send", { conversationId: "c1", body: "tick" });
+    expect(result).toBe("forwarded-by-driver");
+    const expectedShard = shardIdForKeyValue("c1", N);
+    expect(forward).toHaveBeenCalledWith("mutation", "messages:send", { conversationId: "c1", body: "tick" }, null, expectedShard);
   });
 });
 
@@ -160,3 +194,59 @@ describe("observeTimestamp", () => {
     expect(max).toBeGreaterThan(100n);
   });
 });
+
+describe("forwarded mutation commitTs threading (Shards B2b, Task 2 — RYOW wire-through)", () => {
+  it("a forwarded WS mutation's commitTs threads from the executor's forward() result, not a hardcoded 0", async () => {
+    // The executor's forward branch (`InlineUdfExecutor.run`) already threads a forwarded write's
+    // real commitTs onto its `UdfResult.commitTs` (T1). The WS sync path's `syncExecutor.runMutation`
+    // closure used to ignore that and report a hardcoded `commitTs: 0` for any forwarded write (its
+    // own `r.oplog` is always null — there's no LOCAL commit to have written one) — this pins the
+    // fix: it now falls back to `r.commitTs` instead.
+    const forward = vi.fn(async () => ({ value: "id-from-owner", commitTs: 777, shardId: "default" }));
+    const router: WriteRouter = { isLocalWriter: () => false, forward };
+    const { runtime } = await makeRuntime({ writeRouter: router });
+
+    // `EmbeddedRuntime` constructs its `SyncProtocolHandler` with `autoNotifyOnMutation: false` —
+    // production reactivity is driven by the commit fan-out queue/drain instead (see runtime.ts's
+    // doc comment), so `handleMutation`'s OWN `notifyWrites` call is normally skipped entirely. Flip
+    // it on here, isolated to this test, purely so `syncExecutor.runMutation`'s return value (what
+    // this test is pinning) becomes observable through the handler's public `notifyWrites` seam,
+    // without needing a live fleet tailer.
+    (runtime.handler as unknown as { options: { autoNotifyOnMutation?: boolean } }).options.autoNotifyOnMutation = true;
+    const notifySpy = vi.spyOn(runtime.handler, "notifyWrites");
+
+    const conn = runtime.connect("s1");
+    await conn.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "hi" } });
+
+    await waitFor(() => notifySpy.mock.calls.length > 0);
+    expect(forward).toHaveBeenCalledTimes(1);
+    const [invalidation] = notifySpy.mock.calls[0]!;
+    expect(invalidation.commitTs).toBe(777); // NOT 0 — threaded from the forwarded UdfResult.commitTs
+    // A forwarded write has no LOCAL oplog, so tables/ranges are still empty either way — only
+    // commitTs threading is what this fix changes.
+    expect(invalidation.tables).toEqual([]);
+    expect(invalidation.ranges).toEqual([]);
+  });
+
+  it("a LOCAL (non-forwarded) mutation's commitTs is unaffected — still sourced from its own oplog", async () => {
+    const { runtime } = await makeRuntime();
+    const notifySpy = vi.spyOn(runtime.handler, "notifyWrites");
+    (runtime.handler as unknown as { options: { autoNotifyOnMutation?: boolean } }).options.autoNotifyOnMutation = true;
+
+    const conn = runtime.connect("s1");
+    await conn.send({ type: "Mutation", requestId: "r1", udfPath: "messages:send", args: { conversationId: "c1", body: "hi" } });
+
+    await waitFor(() => notifySpy.mock.calls.length > 0);
+    const [invalidation] = notifySpy.mock.calls[0]!;
+    expect(invalidation.commitTs).toBeGreaterThan(0); // a real local commit ts, from r.oplog.commitTs
+    expect(invalidation.tables).toHaveLength(1); // a real oplog's writtenTables — not the empty [] a forward reports
+  });
+});
+
+async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}

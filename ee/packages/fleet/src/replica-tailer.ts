@@ -145,6 +145,18 @@ export interface AppliedInvalidation {
 }
 
 export interface ReplicaTailerOptions {
+  /**
+   * Tailer mode (B2b, D5/T5-c):
+   *  - `"replica"` (default, sync node): verbatim-apply the primary's MVCC log onto the local replica
+   *    `DocStore` AND derive invalidation from the applied batch — the shipped follower behavior.
+   *  - `"invalidateOnly"` (writer-ish node in MULTI-WRITER mode): DERIVE-ONLY. The node already has
+   *    every shard's data (it reads the primary directly), so it never applies to a replica and never
+   *    runs the density assertions — it only pulls `(watermark, F]` to derive what a FOREIGN writer's
+   *    commit touched, then fires `onInvalidation` so its own live subscriptions re-run and its oracle
+   *    observes the new ts. Watermark seeds at boot F (only invalidate commits from here on, not
+   *    re-derive all history). In this mode the `replica` constructor arg is NEVER dereferenced.
+   */
+  mode?: "replica" | "invalidateOnly";
   /** Wall-clock poll fallback interval, in ms. Default 1000. */
   pollMs?: number;
   /** Max `DocumentLogEntry` rows pulled per tick (bootstrap catch-up + steady state). Default
@@ -171,6 +183,7 @@ interface Waiter {
 /** Verbatim log-apply tailer: primary Postgres MVCC log -> local replica `DocStore`, plus the
  *  batch-derived invalidation feed and the `waitFor` read-your-own-writes primitive Task 3 needs. */
 export class ReplicaTailer {
+  private readonly mode: "replica" | "invalidateOnly";
   private readonly pollMs: number;
   private readonly batchSize: number;
   private readonly numShards: number;
@@ -198,6 +211,7 @@ export class ReplicaTailer {
     private readonly replica: DocStore,
     opts: ReplicaTailerOptions,
   ) {
+    this.mode = opts.mode ?? "replica";
     this.pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
     this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
     this.numShards = opts.numShards ?? DEFAULT_NUM_SHARDS;
@@ -248,19 +262,56 @@ export class ReplicaTailer {
     return f;
   }
 
-  async start(): Promise<void> {
+  /**
+   * @param seedWm ONLY consulted in `"invalidateOnly"` mode (ignored in `"replica"` mode, which always
+   *   seeds from the replica's own persisted high-water mark — see below). When provided, seeds the
+   *   watermark from THIS value instead of a fresh `readFrontier()` read.
+   *
+   *   Fixes the PROMOTION-HANDOFF INVALIDATION GAP (B2b whole-branch review): a promoting node stops
+   *   its `ReplicaTailer` (sync mode) at some watermark `W`, then starts this derive-only listener.
+   *   Between the tailer's stop and the listener's start, a co-writer's commit can land and bump the
+   *   fenced frontier `F` past `W` — if the listener then seeds from a FRESH `readFrontier()` (i.e.
+   *   that same later `F`), it treats everything up to `F` as already-known and never derives/
+   *   invalidates the `(W, F]` range, even though nothing ever actually invalidated it: the sync
+   *   tailer was already stopped, and this listener starts past it. A subscription open across the
+   *   promotion goes silently stale for exactly those commits.
+   *
+   *   The caller (`node.ts`'s `startWriterInvalidationListener`) closes this gap by passing the
+   *   OUTGOING tailer's own final `watermark()` (captured right after `tailer.stop()`) as `seedWm` on
+   *   promotion, so the listener picks up exactly where the tailer left off — contiguous coverage,
+   *   with the tailer's own last-applied range harmlessly re-derived (idempotent double-invalidation).
+   *   Writer BOOT (no prior tailer, so no gap by construction) omits `seedWm` and keeps the original
+   *   fresh-`readFrontier()` behavior.
+   */
+  async start(seedWm?: bigint): Promise<void> {
     this.stopped = false;
-    // Seed from the REPLICA's own high-water mark (0 for a fresh replica, or wherever a
-    // previous run left off) — this is what makes catch-up resumable across restarts. This IS a
-    // prior watermark (this node's own last-applied frontier), so it's a legitimate StablePrefixTs.
-    this.wm = stablePrefixFromFrontier(await this.replica.maxTimestamp());
-    const target = await this.readFrontier();
+    if (this.mode === "invalidateOnly") {
+      if (seedWm !== undefined) {
+        // Promotion handoff: pick up exactly where the just-stopped sync tailer left off, not
+        // wherever the frontier happens to be NOW (see the `seedWm` doc above for the gap this closes).
+        this.wm = stablePrefixFromFrontier(seedWm);
+      } else {
+        // Writer-ish node (multi-writer, D5/T5-c): seed the watermark at the CURRENT fenced frontier F.
+        // This node already holds every shard's data on the primary it reads from, so it must only
+        // invalidate FOREIGN commits that land from HERE ON — NOT re-derive all of history. There is
+        // nothing to bootstrap/apply, so skip the catch-up loop entirely; the LISTEN+poll wake armed
+        // below drives every subsequent derive-only tick. (`readFrontier()` returns a `StablePrefixTs`,
+        // so seeding `wm` from it keeps the brand invariant.)
+        this.wm = await this.readFrontier();
+      }
+    } else {
+      // Seed from the REPLICA's own high-water mark (0 for a fresh replica, or wherever a
+      // previous run left off) — this is what makes catch-up resumable across restarts. This IS a
+      // prior watermark (this node's own last-applied frontier), so it's a legitimate StablePrefixTs.
+      this.wm = stablePrefixFromFrontier(await this.replica.maxTimestamp());
+      const target = await this.readFrontier();
 
-    // Bootstrap catch-up: repeat batch-capped ticks until the replica has caught up to the FENCED
-    // FRONTIER F AT CALL TIME (the ready gate). Writes that land after this point are the
-    // LISTEN+poll loop's job below, same as CommitTailer.
-    while (!this.stopped && this.wm < target) {
-      await this.tick();
+      // Bootstrap catch-up: repeat batch-capped ticks until the replica has caught up to the FENCED
+      // FRONTIER F AT CALL TIME (the ready gate). Writes that land after this point are the
+      // LISTEN+poll loop's job below, same as CommitTailer.
+      while (!this.stopped && this.wm < target) {
+        await this.tick();
+      }
     }
     // `stop()` can land while the bootstrap loop above is awaiting a `tick()` — it already cleared
     // (then-undefined) `timer`/`unlisten` and is done, so falling through to arm either here would
@@ -387,34 +438,40 @@ export class ReplicaTailer {
       return;
     }
 
-    // Invert postgres-docstore.ts's write() serialization exactly: `deleted` -> the Deleted
-    // variant (table_id/internal_id are NULL on those rows and must not be read), else
-    // NonClustered carrying the decoded docId.
-    const indexWrites: IndexWrite[] = indexRows.map((r) => {
-      const deleted = r.deleted as boolean;
-      const value: DatabaseIndexValue = deleted
-        ? { type: "Deleted" }
-        : {
-            type: "NonClustered",
-            docId: {
-              tableNumber: decodeStorageTableId(r.table_id as string),
-              internalId: r.internal_id as Uint8Array,
-            },
-          };
-      return {
-        ts: r.ts as bigint,
-        update: { indexId: r.index_id as string, key: r.key as Uint8Array, value },
-      };
-    });
+    // Verbatim apply — ONLY in "replica" mode. An "invalidateOnly" writer-ish node (D5/T5-c) has no
+    // replica and already holds this data on the primary it reads; it skips the apply AND the density
+    // assertions (which the invalidate-only sink has no replica head to check against — the pull-
+    // through-F contract below is what guarantees no missed range regardless). See the mode doc.
+    if (this.mode === "replica") {
+      // Invert postgres-docstore.ts's write() serialization exactly: `deleted` -> the Deleted
+      // variant (table_id/internal_id are NULL on those rows and must not be read), else
+      // NonClustered carrying the decoded docId.
+      const indexWrites: IndexWrite[] = indexRows.map((r) => {
+        const deleted = r.deleted as boolean;
+        const value: DatabaseIndexValue = deleted
+          ? { type: "Deleted" }
+          : {
+              type: "NonClustered",
+              docId: {
+                tableNumber: decodeStorageTableId(r.table_id as string),
+                internalId: r.internal_id as Uint8Array,
+              },
+            };
+        return {
+          ts: r.ts as bigint,
+          update: { indexId: r.index_id as string, key: r.key as Uint8Array, value },
+        };
+      });
 
-    // Density assertions (D5, defense-in-depth) — MUST run against the replica's PRE-apply
-    // state, so before the write() below (which would otherwise make every check trivially
-    // pass, since the entry itself would already be its own head by the time it's checked).
-    await this.assertDensity(docs);
+      // Density assertions (D5, defense-in-depth) — MUST run against the replica's PRE-apply
+      // state, so before the write() below (which would otherwise make every check trivially
+      // pass, since the entry itself would already be its own head by the time it's checked).
+      await this.assertDensity(docs);
 
-    // Verbatim apply — exactly what load_documents yielded, plus the reconstructed index
-    // writes, under "Overwrite" so a second application of the same range is a safe no-op.
-    await this.replica.write(docs, indexWrites, "Overwrite");
+      // Verbatim apply — exactly what load_documents yielded, plus the reconstructed index
+      // writes, under "Overwrite" so a second application of the same range is a safe no-op.
+      await this.replica.write(docs, indexWrites, "Overwrite");
+    }
 
     const tableIds = new Set<string>();
     for (const r of indexRows) if (r.table_id !== null) tableIds.add(String(r.table_id));

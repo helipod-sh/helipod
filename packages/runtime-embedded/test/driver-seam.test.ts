@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
@@ -66,5 +66,60 @@ describe("driver seam", () => {
     await new Promise((res) => setTimeout(res, 100)); // let the async commit fan-out settle
     expect(driver1Commits.length).toBeGreaterThan(0);  // driver1's onCommit was called (and threw)
     expect(driver2Commits.length).toBeGreaterThan(0);  // driver2's onCommit was STILL called, not starved
+  });
+
+  it("stopDriversOnly stops drivers + resets the flag WITHOUT disposing the handler; startDrivers restarts (B2b, D5)", async () => {
+    let starts = 0;
+    let stops = 0;
+    const commits: number[] = [];
+    let unsub: (() => void) | undefined;
+    const driver = {
+      name: "toy",
+      start(ctx: any) {
+        starts += 1;
+        unsub = ctx.onCommit((inv: any) => commits.push(inv.commitTs));
+      },
+      async stop() {
+        stops += 1;
+        unsub?.(); // a real driver unsubscribes its onCommit in stop()
+      },
+    };
+    const schema = defineSchema({ counters: defineTable({ n: v.number() }) });
+    const c = composeComponents(
+      { schemaJson: schema.export(), moduleMap: { "app:add": mutation(async (ctx) => ctx.db.insert("counters", { n: 1 })) } },
+      [{ name: "toy", schema: defineSchema({}), modules: {}, driver }],
+    );
+    const r = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      componentNames: c.componentNames, contextProviders: c.contextProviders, policyRegistry: c.policyRegistry,
+      policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps, drivers: c.drivers,
+    });
+    const disposeSpy = vi.spyOn(r.handler, "dispose");
+
+    // Drivers started at create() (not deferred): a commit wakes the driver.
+    await r.run("app:add", {});
+    await new Promise((res) => setTimeout(res, 30));
+    expect(starts).toBe(1);
+    const afterFirst = commits.length;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    // stopDriversOnly: driver stopped, handler NOT disposed, and a later commit does NOT wake the driver.
+    await r.stopDriversOnly();
+    expect(stops).toBe(1);
+    expect(disposeSpy).not.toHaveBeenCalled(); // the sync handler keeps serving — never disposed
+    await r.run("app:add", {});
+    await new Promise((res) => setTimeout(res, 30));
+    expect(commits.length).toBe(afterFirst); // driver did not run (onCommit unsubscribed, flag reset)
+
+    // startDrivers restarts them — the one-way-flag regression (a write-once flag would no-op this).
+    await r.startDrivers();
+    expect(starts).toBe(2);
+    await r.run("app:add", {});
+    await new Promise((res) => setTimeout(res, 30));
+    expect(commits.length).toBeGreaterThan(afterFirst); // driver runs again
+
+    // Full teardown DOES dispose the handler (stopDrivers, unlike stopDriversOnly).
+    await r.stopDrivers();
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
   });
 });

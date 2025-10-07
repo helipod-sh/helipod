@@ -6,14 +6,15 @@
  * file proves the SHARD SEMANTICS (per-shard fencing, all-rows seeding, min-F, idle closing) which
  * are connection-agnostic; genuine cross-connection parallelism + failover are the fleet-e2e's job.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { newDocumentId, shardIdList, DEFAULT_SHARD, encodeStorageIndexId, type InternalDocumentId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { FencedError } from "../src/fenced-error";
 import { LeaseManager } from "../src/lease";
-import { installCommitGuard, FrontierMonitor, acquireShardAsWriter } from "../src/node";
+import { installCommitGuard, relinquish, FrontierMonitor, acquireShardAsWriter } from "../src/node";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { PgliteClient } from "./pglite-client";
 
@@ -105,15 +106,19 @@ describe("Shards B2a — N shard leases", () => {
     const before = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
     void before;
 
+    // Mechanical call-site update (Shards B2b, Task 3): heartbeatAll now also returns `fencedShardIds`
+    // — every held pair still renewed, so it's empty here.
     const first = await lease.heartbeatAll();
-    expect(first).toEqual({ updated: N, expected: N });
+    expect(first).toEqual({ updated: N, expected: N, fencedShardIds: [] });
 
-    // Supersede s2's epoch; the next batched heartbeat updates only N-1 rows → definitive loss signal.
+    // Supersede s2's epoch; the next batched heartbeat updates only N-1 rows → a PER-SHARD loss signal
+    // (B2b, D2) naming s2 precisely, not just an undifferentiated updated<expected count.
     const other = new LeaseManager(client, { advertiseUrl: "http://node-b:5000" });
     await other.tryAcquire("s2", 2);
     const second = await lease.heartbeatAll();
     expect(second.expected).toBe(N);
     expect(second.updated).toBe(N - 1);
+    expect(second.fencedShardIds).toEqual(["s2"]);
     await client.close();
   });
 
@@ -318,6 +323,133 @@ describe("Shards B2a — N shard leases", () => {
     expect(tailer.watermark()).toBeGreaterThanOrEqual(commitTs);
     await tailer.stop();
     await replica.close();
+    await client.close();
+  });
+});
+
+describe("Shards B2b, Task 3 — per-shard relinquish (fence on s becomes 'drop s, keep serving')", () => {
+  it("(c) relinquish('s2'): held map loses s2 → guard fences a straggler s2 commit cleanly, s3 keeps committing, no exit fires, and a SECOND relinquish('s2') is a no-op", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    const onExit = vi.fn();
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) => relinquish({ lease, client, shards: SHARDS }, fencedShardId, reason));
+    const releaseSpy = vi.spyOn(client, "releaseShardLock");
+
+    expect(lease.currentEpoch("s2")).toBe(1n); // held before relinquish
+
+    relinquish({ lease, client, shards: SHARDS }, "s2", "test: manual relinquish");
+
+    expect(lease.currentEpoch("s2")).toBeNull(); // held map lost s2
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+    expect(releaseSpy).toHaveBeenCalledWith(SHARDS.indexOf("s2"));
+    expect(onExit).not.toHaveBeenCalled(); // relinquish structurally cannot reach an exit callback
+
+    // A straggler commit attempt on the now-relinquished shard fences cleanly — the guard's "no
+    // acquired epoch" branch, NOT a live-epoch mismatch.
+    await expect(pgStore.commitWrite([doc(newDocumentId(TABLE), "straggler")], [], "s2")).rejects.toThrow(FencedError);
+
+    // A sibling shard this node STILL holds commits fine — relinquish is scoped to s2 alone.
+    const ts = await pgStore.commitWrite([doc(newDocumentId(TABLE), "s3-still-fine")], [], "s3");
+    expect((await lease.read("s3"))?.frontierTs).toBe(ts);
+
+    // Idempotent: a second relinquish("s2") is a no-op — no further releaseShardLock/lease mutation.
+    relinquish({ lease, client, shards: SHARDS }, "s2", "test: second call");
+    expect(releaseSpy).toHaveBeenCalledTimes(1); // still just the one call from above
+    expect(lease.currentEpoch("s2")).toBeNull();
+    expect(onExit).not.toHaveBeenCalled();
+
+    await client.close();
+  });
+
+  it("(d) the commit guard's fence path routes to relinquish, never to an exit callback", async () => {
+    const { client, pgStore, lease } = await makeNode();
+    await acquireAll(lease);
+    const onExit = vi.fn();
+    const relinquishCalls: Array<{ shardId: string; reason: string }> = [];
+    installCommitGuard(pgStore, lease, (fencedShardId, reason) => {
+      relinquishCalls.push({ shardId: fencedShardId, reason });
+      relinquish({ lease, client, shards: SHARDS }, fencedShardId, reason);
+    });
+
+    // Another node steals s1's lease (epoch bump) — s1's guard now fences on its next commit.
+    const other = new LeaseManager(client, { advertiseUrl: "http://node-b:5000" });
+    await other.tryAcquire("s1", 1);
+
+    await expect(pgStore.commitWrite([doc(newDocumentId(TABLE), "x")], [], "s1")).rejects.toThrow(FencedError);
+
+    // The guard routed to relinquish exactly once, naming s1 — and NEVER reached any exit callback
+    // (there is none reachable from `relinquish`'s dependency shape — RelinquishDeps has no onExit).
+    expect(relinquishCalls).toEqual([{ shardId: "s1", reason: expect.stringContaining("s1") }]);
+    expect(lease.currentEpoch("s1")).toBeNull(); // relinquished
+    expect(onExit).not.toHaveBeenCalled();
+
+    // Sibling shards this node still holds are unaffected.
+    const ts = await pgStore.commitWrite([doc(newDocumentId(TABLE), "default-fine")], [], DEFAULT_SHARD);
+    expect((await lease.read(DEFAULT_SHARD))?.frontierTs).toBe(ts);
+
+    await client.close();
+  });
+
+  it("relinquish with { connectionLost: true } skips releaseShardLock (the lock already died with the connection)", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const releaseSpy = vi.spyOn(client, "releaseShardLock");
+
+    relinquish({ lease, client, shards: SHARDS }, "s1", "commit connection lost", { connectionLost: true });
+
+    expect(lease.currentEpoch("s1")).toBeNull();
+    expect(releaseSpy).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("relinquishing the DEFAULT shard fires onDefaultRelinquished (drivers follow the default shard, Task 5, D5)", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const log = vi.fn();
+    const onDefaultRelinquished = vi.fn();
+
+    relinquish({ lease, client, shards: SHARDS, log, onDefaultRelinquished }, DEFAULT_SHARD, "test");
+
+    expect(lease.currentEpoch(DEFAULT_SHARD)).toBeNull();
+    expect(onDefaultRelinquished).toHaveBeenCalledTimes(1); // drivers get stopped
+    await client.close();
+  });
+
+  it("relinquishing a NON-default shard does NOT fire onDefaultRelinquished", async () => {
+    const { client, lease } = await makeNode();
+    await acquireAll(lease);
+    const onDefaultRelinquished = vi.fn();
+
+    relinquish({ lease, client, shards: SHARDS, log: vi.fn(), onDefaultRelinquished }, "s2", "test");
+
+    expect(lease.currentEpoch("s2")).toBeNull();
+    expect(onDefaultRelinquished).not.toHaveBeenCalled(); // only the default ring drives drivers
+    await client.close();
+  });
+
+  it("bumpOrphanFrontiers advances writer-less rows to the ceiling and leaves HELD rows untouched (D4)", async () => {
+    const { client, lease } = await makeNode();
+    // Hold "default" + "s1" as the writer; leave "s2","s3" as ORPHANED rows (writer_url NULL, low F).
+    await lease.tryAcquire(DEFAULT_SHARD, 0);
+    await acquireShardAsWriter(lease, "s1", 1, 10);
+    // Create orphaned rows for s2/s3: acquire then self-fence (epoch+1, writer_url NULL, low frontier).
+    await acquireShardAsWriter(lease, "s2", 2, 10);
+    await acquireShardAsWriter(lease, "s3", 3, 10);
+    await lease.selfFence("s2");
+    await lease.selfFence("s3");
+    // selfFence bumps frontier via nextval; capture the held/orphan frontiers BEFORE the bump.
+    const before = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+
+    const ceiling = 10_000_000_000n; // far above any nextval drawn so far
+    await lease.bumpOrphanFrontiers(ceiling);
+
+    const after = new Map((await lease.readAllFrontiers()).map((r) => [r.shardId, r.frontierTs]));
+    // Orphaned (writer_url NULL) rows advanced to the ceiling; min-F is no longer pinned by them.
+    expect(after.get("s2")).toBe(ceiling);
+    expect(after.get("s3")).toBe(ceiling);
+    // Held rows (default, s1) were NOT touched by this query — only writer-less rows match its WHERE.
+    expect(after.get(DEFAULT_SHARD)).toBe(before.get(DEFAULT_SHARD));
+    expect(after.get("s1")).toBe(before.get("s1"));
     await client.close();
   });
 });

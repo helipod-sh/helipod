@@ -27,6 +27,30 @@ function resolveRef(ref: FunctionReference | string): string {
   return typeof ref === "string" ? ref : ref.__path;
 }
 
+/**
+ * Fleet write-routing seam (Tier 2), PER-SHARD. Lets a node that does NOT own a mutation's
+ * resolved shard forward that mutation to whichever node currently owns the shard, instead of
+ * committing locally (which would fence its OCC ring). Checked at the executor's ONE chokepoint —
+ * AFTER `shardBy`/privileged shard resolution — so every entry point routes identically: client WS
+ * mutations, `/api/run`, an action's inner `ctx.runMutation` (via `ExecutorDeps.invoke`), AND the
+ * scheduler/driver path (which calls `run()` directly and previously bypassed routing entirely,
+ * the driver hazard this move fixes). Queries are never routed. `isLocalWriter` is consulted per
+ * call (never cached), so a per-shard role flip takes effect on the very next mutation.
+ */
+export interface WriteRouter {
+  /** true → this node owns `shardId`; commit locally. false → forward to the owner. Per call. */
+  isLocalWriter(shardId: ShardId): boolean;
+  /** Forward a write to the shard's owner; resolves with the function's JSON result (plus, when the
+   *  owner reports them, the commit's `commitTs`/`shardId`) or throws the owner's typed error. */
+  forward(
+    kind: "mutation" | "action",
+    path: string,
+    args: JSONValue,
+    identity: string | null,
+    shardId: ShardId,
+  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string }>;
+}
+
 export interface ExecutorDeps {
   transactor: Transactor;
   queryRuntime: QueryRuntime;
@@ -40,6 +64,14 @@ export interface ExecutorDeps {
    * independent top-level run (its own transaction, or its own action execution).
    */
   invoke?: (path: string, args: JSONValue, opts?: { identity?: string | null }) => Promise<UdfResult>;
+  /**
+   * Per-shard write routing (fleet Tier 2). When set and this node is NOT the owner of a mutation's
+   * resolved shard, the mutation is forwarded instead of committed locally — see `WriteRouter`. On
+   * `ExecutorDeps` (not `RunOptions`) so the trusted `invoke` path sees it too: an action's inner
+   * `ctx.runMutation` forwards per-shard exactly like a top-level mutation. Unset → never routes
+   * (byte-identical to a single-node engine).
+   */
+  writeRouter?: WriteRouter;
 }
 
 export interface ComponentContext {
@@ -125,6 +157,13 @@ export interface RunOptions {
    * behavior is byte-identical to a non-sharded engine. T5 threads the real value from boot.
    */
   numShards?: number;
+  /**
+   * Boot-step / trusted-local escape hatch: when true, the per-shard `writeRouter` check is skipped
+   * and the mutation ALWAYS commits locally, even if this node doesn't own the resolved shard. Used
+   * by `runtime.create`'s boot steps (they run before the node is ready to be the default-shard
+   * owner and must seed locally). Non-boot callers never set this — their write routes normally.
+   */
+  localOnly?: boolean;
   /**
    * Explicit shard override for the transaction — honored ONLY when `privileged: true`. A
    * privileged run (admin `_system:*` doc edits, drivers) skips the shardBy *declaration* path, so
@@ -227,6 +266,40 @@ export class InlineUdfExecutor {
         ...(error !== undefined ? { error } : {}),
       });
     };
+
+    // Per-shard write routing (fleet Tier 2): the ONE chokepoint. Now that `shardId` is resolved
+    // (from `shardBy` OR a privileged `options.shardId`), forward the mutation to the shard's owner
+    // instead of committing locally when this node doesn't own it. Because this sits AFTER
+    // resolution, EVERY path routes: WS mutations, `/api/run`, an action's inner `ctx.runMutation`
+    // (via `invoke`), and the scheduler/driver path (which calls `run()` directly and used to
+    // bypass routing — the node-killing driver hazard this fixes). Queries are never routed
+    // (`fn.type` guard); boot steps opt out with `localOnly`. Actions never reach here (they return
+    // via `runActionFn` above). `args` are converted `Value`s here, so re-serialize with
+    // `convexToJson` for the JSON hop.
+    const router = this.deps.writeRouter;
+    if (fn.type === "mutation" && router && !options.localOnly && !router.isLocalWriter(shardId)) {
+      try {
+        const fwd = await router.forward(
+          "mutation",
+          options.path ?? "<anonymous>",
+          convexToJson(args as Value),
+          options.identity ?? null,
+          shardId,
+        );
+        logEntry("ok");
+        return {
+          value: jsonToConvex(fwd.value) as T,
+          logs: [],
+          committed: true,
+          commitTs: fwd.commitTs !== undefined ? BigInt(fwd.commitTs) : 0n,
+          readRanges: [],
+          oplog: null,
+        };
+      } catch (e) {
+        logEntry("error", e instanceof Error ? e.message : String(e));
+        throw e;
+      }
+    }
 
     try {
       const commit = await this.deps.transactor.runInTransaction(async (txn) => {

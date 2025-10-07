@@ -115,7 +115,10 @@ function rowToLeaseRow(row: PgRow): LeaseRow {
  */
 export class LeaseManager {
   private readonly client: PgClient;
-  private readonly advertiseUrl: string;
+  /** This node's advertised URL, recorded onto `shard_leases`/`fleet_nodes`. Public so the balancer
+   *  can use it as this node's rendezvous identity (`ShardLeaseBalancer.myUrl`) without threading it
+   *  separately through `startFleetNode`. */
+  readonly advertiseUrl: string;
   private readonly applicationName: string | null;
   private readonly retryMs: number;
   /** The lease TTL in ms this manager stamps onto `expires_at`. Public so the LeaseMonitor can
@@ -173,6 +176,101 @@ export class LeaseManager {
         prev_ts         BIGINT NOT NULL DEFAULT 0
       )
     `);
+    // `fleet_nodes` presence table (B2b, D3 — the bootstrap-deadlock fix). Every fleet node, INCLUDING
+    // a shardless sync node that appears in no `shard_leases` row, heartbeats its row here, so it is
+    // visible in every peer's live set and thus a rendezvous participant. Without this table a
+    // shardless node is invisible → never assigned a shard → never holds one → scale-out never
+    // happens (and the incumbent, not seeing the newcomer, releases nothing). Run as its own statement
+    // (single-statement drivers like PGlite), mirroring the schema discipline in `docstore-postgres`.
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS fleet_nodes (
+        advertise_url TEXT PRIMARY KEY,
+        epoch         BIGINT NOT NULL,
+        expires_at    TIMESTAMPTZ NOT NULL
+      )
+    `);
+  }
+
+  /**
+   * Upsert this node's `fleet_nodes` presence row (B2b, D3), extending `expires_at` by the lease TTL.
+   * Called at boot (BEFORE the writer-election `tryAcquire`, so a losing node is already visible when
+   * it boots sync) and on every balancer beat / writer probe — the node's liveness signal now. A node
+   * whose process dies stops heartbeating; its row expires after the TTL and it drops out of every
+   * survivor's `liveNodes()`, re-converging the rendezvous assignment. `epoch` increments per beat —
+   * carried only for observability/debugging (which incarnation of a node the row belongs to); the
+   * live-set membership check keys off `expires_at`, not `epoch`.
+   */
+  async heartbeatPresence(): Promise<void> {
+    await this.client.query(
+      `INSERT INTO fleet_nodes (advertise_url, epoch, expires_at)
+       VALUES ($1, 1, now() + interval '${this.ttlMsSql} milliseconds')
+       ON CONFLICT (advertise_url) DO UPDATE SET
+         epoch = fleet_nodes.epoch + 1,
+         expires_at = now() + interval '${this.ttlMsSql} milliseconds'`,
+      [this.advertiseUrl],
+    );
+  }
+
+  /**
+   * The live fleet node set (B2b, D3): distinct unexpired `fleet_nodes` advertise URLs, UNION the live
+   * `shard_leases` writer URLs (belt-and-braces — a writer whose presence heartbeat momentarily lapsed
+   * but whose shard lease is still live is unambiguously alive). Every node computes rendezvous over
+   * this set, so they all derive the same shard→owner assignment. Expiry is `expires_at >= now()` per
+   * the DB's OWN clock, authoritative against host clock skew.
+   */
+  async liveNodes(): Promise<string[]> {
+    const rows = await this.client.query(
+      `SELECT advertise_url AS url FROM fleet_nodes WHERE expires_at >= now()
+       UNION
+       SELECT writer_url AS url FROM shard_leases WHERE writer_url IS NOT NULL AND expires_at >= now()`,
+    );
+    return rows.map((r) => r.url as string).filter((u): u is string => typeof u === "string" && u.length > 0);
+  }
+
+  /**
+   * Per-shard ownership snapshot for the balancer (B2b, D3): for each EXISTING `shard_leases` row, its
+   * `writer_url` (null = orphaned) and whether it has expired per the DB clock. A shard with no row is
+   * simply absent from the map — the balancer treats an absent shard as acquirable (never created, or
+   * fully reaped), the same as an orphaned one. Read-only; the balancer decides acquire/release from it.
+   */
+  async readShardOwnership(): Promise<Map<ShardId, { writerUrl: string | null; expired: boolean }>> {
+    const rows = await this.client.query(
+      `SELECT shard_id, writer_url, (expires_at < now()) AS expired FROM shard_leases`,
+    );
+    const map = new Map<ShardId, { writerUrl: string | null; expired: boolean }>();
+    for (const r of rows) {
+      map.set(r.shard_id as ShardId, {
+        writerUrl: (r.writer_url as string | null | undefined) ?? null,
+        expired: r.expired === true,
+      });
+    }
+    return map;
+  }
+
+  /**
+   * Self-fence a shard this node currently holds, for a GRACEFUL balancer release (B2b, D3): bump the
+   * epoch (so this node's own subsequent commit/heartbeat on the now-stale epoch fences cleanly),
+   * clear `writer_url` (so the shard reads as orphaned and its rightful rendezvous owner acquires it),
+   * and GREATEST-bump `frontier_ts` from the shared sequence (so F never regresses across the handoff).
+   * Predicated on this node's currently-held epoch — a silent no-op if the shard is already fenced/
+   * relinquished (`currentEpoch === null`). The caller runs this UNDER the shard's commit mutex
+   * (`runtime.tryRunExclusiveOnShard`) so no in-flight commit's frontier write races it — a mutation
+   * mid-execute at release time simply hits `FencedError` at its own commit (OCC-retryable, the
+   * forwarder re-routes the retry to the new owner). Mirrors `evictExpired`'s frontier-bump SQL, but
+   * unconditional on expiry (this is a voluntary handoff, not an eviction of a wedged peer).
+   */
+  async selfFence(shardId: ShardId): Promise<void> {
+    const epoch = this.currentEpoch(shardId);
+    if (epoch === null) return;
+    await this.client.query(
+      `UPDATE shard_leases SET
+         epoch = epoch + 1,
+         writer_url = NULL,
+         writer_app_name = NULL,
+         frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))
+       WHERE shard_id = $1 AND epoch = $2`,
+      [shardId, epoch],
+    );
   }
 
   /**
@@ -191,6 +289,26 @@ export class LeaseManager {
    *  of the live per-shard epoch map, so it reflects any re-promotion's epoch bumps. */
   heldPairs(): Array<{ shardId: ShardId; epoch: bigint }> {
     return [...this.lastEpochByShard].map(([shardId, epoch]) => ({ shardId, epoch }));
+  }
+
+  /**
+   * Drop `shardId` from this node's held-epoch map (Fenced Frontier B2b, D2 — per-shard relinquish).
+   * After this call `currentEpoch(shardId)` returns `null`, so:
+   *  - the commit guard's "no acquired epoch" branch fences any straggler commit on `shardId`
+   *    cleanly (rather than a stale epoch happening to still match a row some other node has since
+   *    re-fenced and moved on from);
+   *  - `heldPairs()` (and therefore `heartbeatAll()`/`closeIdleFrontiers()`/`seedFrontierAll()`) stop
+   *    including this shard.
+   * Idempotent: forgetting a shard this node doesn't currently hold is a silent no-op — the
+   * relinquish dispatcher (`node.ts`) relies on exactly this for ITS OWN idempotency, via
+   * `currentEpoch(shardId) === null` as its "already relinquished" check. Deliberately does NOT touch
+   * the `shard_leases` ROW — only the caller's advisory-lock release (`PgClient.releaseShardLock`) and
+   * this in-memory forget are relinquish's job; the row itself was already epoch-bumped by whoever
+   * fenced this node (or will lapse via TTL), and a future re-acquire (`tryAcquire`) is a fresh INSERT/
+   * ON CONFLICT UPDATE regardless of what this map remembers.
+   */
+  forgetShard(shardId: ShardId): void {
+    this.lastEpochByShard.delete(shardId);
   }
 
   /**
@@ -269,15 +387,18 @@ export class LeaseManager {
   /**
    * Batched heartbeat over EVERY (shard, epoch) pair this node holds — one UPDATE per beat (B2a):
    * the writer holds N leases and must renew all of them in a single round-trip, not N. Returns
-   * `{ updated, expected }` where `expected` is how many pairs this node believes it holds and
-   * `updated` is how many rows actually matched: `updated < expected` means at least one shard's
-   * epoch was superseded (fenced) — a DEFINITIVE writer-lease loss, exactly like a single-shard
-   * `heartbeat()` returning 0. A no-op returning `{updated:0, expected:0}` when this node holds
-   * nothing (never a writer). The `(shard_id, epoch) IN ((..),(..))` tuple form fences per row.
+   * `{ updated, expected, fencedShardIds }` where `expected` is how many pairs this node believes it
+   * holds, `updated` is how many rows actually matched, and `fencedShardIds` (B2b, D2) is PRECISELY
+   * which held shards did NOT match — diffing the `RETURNING shard_id` rows against the held set —
+   * so the caller can relinquish exactly those shards rather than treat `updated < expected` as an
+   * undifferentiated whole-node signal. `updated < expected` (equivalently `fencedShardIds.length >
+   * 0`) means at least one shard's epoch was superseded; `fencedShardIds` is always `[]` when this
+   * node holds nothing (never a writer) — see the early return. The `(shard_id, epoch) IN ((..),(..))`
+   * tuple form fences per row.
    */
-  async heartbeatAll(): Promise<{ updated: number; expected: number }> {
+  async heartbeatAll(): Promise<{ updated: number; expected: number; fencedShardIds: ShardId[] }> {
     const pairs = this.heldPairs();
-    if (pairs.length === 0) return { updated: 0, expected: 0 };
+    if (pairs.length === 0) return { updated: 0, expected: 0, fencedShardIds: [] };
     const { clause, params } = this.tupleInClause(pairs, 0);
     const rows = await this.client.query(
       `UPDATE shard_leases SET expires_at = now() + interval '${this.ttlMsSql} milliseconds'
@@ -285,7 +406,9 @@ export class LeaseManager {
        RETURNING shard_id`,
       params,
     );
-    return { updated: rows.length, expected: pairs.length };
+    const renewedIds = new Set(rows.map((r) => r.shard_id as ShardId));
+    const fencedShardIds = pairs.filter((p) => !renewedIds.has(p.shardId)).map((p) => p.shardId);
+    return { updated: rows.length, expected: pairs.length, fencedShardIds };
   }
 
   /**
@@ -536,6 +659,28 @@ export class LeaseManager {
       });
     }
     return newTs;
+  }
+
+  /**
+   * Orphan frontier bumping (B2b, D4): advance the frontier of every WRITER-LESS shard row
+   * (`writer_url IS NULL`) that lags `ceiling`, so an unassigned/relinquished/expired shard never
+   * pins the fleet's `F = min(frontier_ts)` below the live commit position. Runs on the WRITER beat
+   * alongside `closeIdleFrontiers` (which only ever touches THIS node's OWN held rows via
+   * `heldPairs()` and so structurally cannot un-pin a shard nobody holds).
+   *
+   * Safe with NO commit mutex, unlike `closeIdleFrontiers`: a writer-less shard has no in-flight
+   * commit by construction — its last writer was fenced (epoch-bumped, `writer_url` nulled) BEFORE
+   * the row became orphaned, so nothing can be mid-commit writing `frontier_ts` on it. The `UPDATE`'s
+   * own row lock serializes any two writers racing this bump, and `GREATEST` + `frontier_ts < ceiling`
+   * keep it monotone regardless. Reuses the SAME `ceiling` (one `nextval` per beat) the idle closer
+   * drew, so a beat costs one sequence draw, not two.
+   */
+  async bumpOrphanFrontiers(ceiling: bigint): Promise<void> {
+    await this.client.query(
+      `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1)
+       WHERE writer_url IS NULL AND frontier_ts < $1`,
+      [ceiling],
+    );
   }
 
   /** Reads the current lease row for `shardId` (discovery for forwarding, plus the full fencing/

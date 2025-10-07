@@ -63,6 +63,10 @@ export class PgliteClient implements PgClient {
     return true;
   }
 
+  /** No-op mirror of `tryAcquireShardLock`: a single in-process connection has no per-slot lock
+   *  state to release (contention was never observable to acquire in the first place). */
+  async releaseShardLock(_slot: number): Promise<void> {}
+
   /** Not implemented: PGlite is a single in-process WASM instance with no cross-connection
    * notification channel to speak of; the real LISTEN/NOTIFY path is proven by the fleet E2E
    * against real Postgres, not this test client. */

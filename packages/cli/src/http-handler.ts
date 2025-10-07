@@ -4,8 +4,9 @@
  * function invocation, and `/_admin/*` for the admin API (behind an admin key).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { getHttpStatus, toStackbaseError } from "@stackbase/errors";
+import { getHttpStatus, toStackbaseError, NotShardOwnerError } from "@stackbase/errors";
 import { matchRoute } from "@stackbase/executor";
+import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { handleAdminRequest, verifyAdminKey, type AdminApi } from "@stackbase/admin";
 import type { ResolvedRoute } from "./project";
@@ -35,6 +36,13 @@ export interface FleetHandles {
    *  older/stub `FleetHandles` (and pre-B2a fleet builds) satisfy the structural mirror; the health
    *  handler optional-chains it. The real `@stackbase/fleet` node always provides it. */
   frontierStats?(): { frontier: bigint; lagMs: number; pinningShard: string } | null;
+  /**
+   * Per-shard ownership (B2b, D1): true when THIS node currently holds `shardId`'s write lease.
+   * Backs the `/_fleet/run` single-hop guard below — optional so older/stub `FleetHandles` satisfy
+   * the structural mirror; the guard skips (fail open) when absent. The real `@stackbase/fleet` node
+   * always provides it (delegates to its `WriteForwarder.isLocalWriter`).
+   */
+  isLocalWriter?(shardId: string): boolean;
   stop(): Promise<void>;
 }
 
@@ -101,13 +109,42 @@ export async function handleHttpRequest(
         args?: JSONValue;
         identity?: string | null;
         kind?: string;
+        shardId?: string;
+        /** Set by the forwarder (T2, single-hop guard) — signals this is a fleet-internal hop, not
+         *  a fresh dispatch, so the receiver checks ownership itself rather than trusting the caller. */
+        forwarded?: boolean;
       };
       if (!p.path) return json(400, { error: "missing function path" });
       const identity = p.identity ?? null;
+      const shardId = (p.shardId ?? DEFAULT_SHARD) as ShardId;
+      // Single-hop guard (B2b, D1 spec-review edit): a forward that lands on a node which is ALSO
+      // not `shardId`'s owner (a point-in-time race during rebalance/failover convergence) must
+      // NEVER re-forward — that would let a forward chase a moving target unboundedly. Reject with
+      // a typed, RETRYABLE error instead; the ORIGINAL forwarder's refresh+retry-once re-reads the
+      // lease and re-routes to the current owner. `isLocalWriter` is optional (older/stub
+      // `FleetHandles`) — absent, this check is skipped (fail open): ordinary, non-forwarded traffic
+      // is unaffected either way, since the executor's own per-shard router already forwards
+      // correctly on a genuine ownership mismatch.
+      if (p.forwarded && fleet.isLocalWriter && !fleet.isLocalWriter(shardId)) {
+        throw new NotShardOwnerError(
+          `fleet: this node is not the owner of shard '${shardId}' — refresh and retry against the current owner`,
+        );
+      }
+      // `_system:*`/`_storage:*` (and any other underscore-namespaced) built-in mutations reach here
+      // when a privileged doc mutation — the admin dashboard editor's `_system:patchDocument`/
+      // `deleteDocument`/`insertDocument`, which already carries its resolved `shardId` (B2a) — is
+      // forwarded here because this node doesn't hold that shard (B2b, D1: "the router forwards them
+      // like any other when the shard isn't held"). `runtime.run`'s PUBLIC gate rejects any
+      // underscore-segment path outright (`FunctionNotFoundError`), so those must instead route
+      // through the SAME privileged entrypoint the origin node used — `runSystem`, with the resolved
+      // `shardId` threaded through — rather than the public `run`.
+      const isInternalForwardPath = p.path.split(":").some((seg) => seg.startsWith("_"));
       const result =
         p.kind === "action"
           ? await runtime.runAction(p.path, p.args ?? {}, { identity })
-          : await runtime.run(p.path, p.args ?? {}, { identity });
+          : isInternalForwardPath
+            ? await runtime.runSystem(p.path, p.args ?? {}, { shardId })
+            : await runtime.run(p.path, p.args ?? {}, { identity });
       // Stringified: a replica's `WriteForwarder` waits on this via `ReplicaTailer.waitFor` for
       // read-your-own-writes, and bigints don't survive JSON.stringify. `result.oplog` is null for
       // actions (they never commit directly) — fall back to `result.commitTs`, which the executor

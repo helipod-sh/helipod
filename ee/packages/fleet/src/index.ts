@@ -5,12 +5,15 @@ export { LeaseMonitor, type LeaseMonitorDeps } from "./lease-monitor";
 export { FencedError } from "./fenced-error";
 export { NotifyingFanoutAdapter, type CommitChannelClient } from "./commit-notifier";
 export { WriteForwarder, type WriteForwarderOptions, type ReplicaWaiter } from "./forwarder";
+export { ShardLeaseBalancer, type ShardLeaseBalancerDeps, type BalancerLease } from "./balancer";
+export { rendezvousOwner, rendezvousWeight } from "./rendezvous";
 export {
   prepareFleetNode,
   startFleetNode,
   runPromotion,
   acquireShardAsWriter,
   installCommitGuard,
+  relinquish,
   FrontierMonitor,
   fleetApplicationName,
   REPLICA_DB_FILENAME,
@@ -23,6 +26,7 @@ export {
   type FrontierStats,
   type StartFleetNodeDeps,
   type PromotionRunDeps,
+  type RelinquishDeps,
 } from "./node";
 export { SwitchableDocStore } from "./switchable-store";
 export { docKeyToPointRange } from "./ranges";
