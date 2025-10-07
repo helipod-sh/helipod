@@ -38,11 +38,29 @@ writer half beside it:
   OCC) — byte-identical to B2b.
 - **Queries/subscriptions:** a replica-backed read path. New seam:
   `ExecutorDeps.queryTransactor?: Transactor` — `run()` picks it for `fn.type === "query"`
-  (mutations/actions unaffected); `QueryRuntime` construction likewise takes the replica
-  store on hybrids. The replica-backed transactor is a read-only construction over the
-  SwitchableDocStore-wrapped replica (same shape the sync node runtime uses today — reuse
-  that construction, do not invent a new transactor class unless the reuse is genuinely
-  awkward; queries never commit, so single-writer machinery over the replica is sufficient).
+  (mutations/actions unaffected). **Three spec-review requirements make this correct rather
+  than corrupting:**
+  1. **A SEPARATE query-path oracle, advanced ONLY by the tailer's post-apply sink** (the
+     sync-node invariant that bounds query snapshotTs ≤ replica wm — today `snapshotTs =
+     oracle.getLastCommittedTimestamp()` and the sync node's oracle is fed exclusively
+     post-apply). The write transactor's oracle advances with its own primary commits as
+     shipped; **own local commits must NEVER advance the query oracle** — if they share an
+     oracle, a query snapshots ABOVE wm and reads holes. `runtime.observeTimestamp` (which
+     today targets the single transactor) routes tailer-driven observations to the query
+     oracle on hybrids; the fleet sink wiring is explicit in the plan.
+  2. **QueryRuntime is selected by fn.type IN LOCKSTEP with the transactor** — the kernel's
+     scans run through `kctx.queryRuntime` (kernel collect/paginate), which is set
+     unconditionally today. Mutations MUST keep the primary-backed QueryRuntime (their
+     `ctx.txn.get` point reads follow the transactor to the primary — a replica-backed
+     QueryRuntime would give one mutation split-brain reads: scans from the lagging replica
+     at a primary snapshotTs, point reads from the primary). Only queries get the
+     replica-backed QueryRuntime. `ExecutorDeps.queryPath?: { transactor, queryRuntime }` —
+     one seam, both selected together, impossible to wire halfway.
+  3. **startTs seeding is per-store:** the write transactor seeds from the PRIMARY's
+     maxTimestamp (as shipped); the query transactor seeds from the REPLICA's (its oracle
+     then rides the tailer).
+  The replica-backed transactor itself reuses the sync-node construction (SingleWriter over
+  the SwitchableDocStore-wrapped replica — queries never commit).
 - **Boot order (multi-writer writer-ish):** open/recover the replica + start the tailer
   (sync-node machinery) FIRST, then arm the writer half (pool/guards/balancer). Promotion
   sync→writer-ish no longer stops the tailer — it only ADDS the writer half. The
@@ -61,10 +79,12 @@ writer half beside it:
   `forwarder.attachTailer` works as on any sync node.
 - **Own local commits (new gate):** a locally-committed mutation's fan-out triggers
   subscription re-runs that read the REPLICA — which may not have applied the commit yet.
-  Gate them: the hybrid's local-commit fan-out path routes re-runs through the same
-  wait-for-wm ≥ commitTs the forwarded path uses (bounded by the shipped progress-aware
-  wait; the tailer applies own commits in ~one NOTIFY round-trip). This removes the briefly-
-  stale re-run rather than relying on client ts-gating to suppress it.
+  **The core seam (spec-review edit):** the runtime's serial fan-out `drain()` gains an
+  injected `beforeNotify?(commitTs): Promise<void>` hook (runtime stays fleet-ignorant);
+  the hybrid node wires it to `tailer.waitFor(commitTs)`. It serializes the drain — bounded
+  by one NOTIFY round-trip steady-state, and by the progress-aware wait when the replica
+  lags (during which re-runs are queued, not stale). This removes the briefly-stale re-run
+  rather than relying on client ts-gating to suppress it.
 - The mutation RESPONSE itself (value + commitTs) is unchanged — only subscription re-run
   timing gates.
 
@@ -91,6 +111,22 @@ writer half beside it:
   key first — hit → replay `{commitTs, value|valueMissing}` WITHOUT executing; miss → run
   with the meta threaded. Value cap 64KB (larger → `oversized=true`, value NULL, replay
   returns success + commitTs + valueMissing).
+- **The concurrent-duplicate race (spec-review edit — decides correctness):** two
+  simultaneous retries can BOTH pass the SELECT-miss and BOTH execute the handler body. The
+  durable WRITE stays exactly-once — the loser's `fleet_idempotency` INSERT (PK) blocks on
+  the winner's uncommitted row and throws `unique_violation` when the winner commits, which
+  aborts the loser's ENTIRE commit transaction (guard-inside-txn atomicity). The handler
+  MUST catch that unique_violation, re-SELECT the key, and return the replay
+  `{commitTs, value|valueMissing}` — NOT surface a generic error (per the shipped forward
+  policy, a generic typed error is terminal and would turn the idempotent case into a 500).
+  Contract, stated in docs: handler-body EXECUTION is at-least-once under concurrent retry;
+  the durable write and its fan-out are exactly-once.
+- **Signature ripple (spec-review edit, explicit):** `commitWrite` today has NO opts param —
+  the change touches `DocStore.commitWrite` (docstore/types.ts), both store impls (SQLite
+  ignores meta), `SingleWriterTransactor`/`ShardWriter.commit`,
+  `RunInTransactionOptions.commitMeta`, `RunOptions.commitMeta`, and the guard signature
+  `(q, commitTs, shardId, meta?)` (additive 4th param; B2a/B2b guard installers updated
+  mechanically).
 - **Sweep:** the balancer beat DELETEs rows older than 1h (any writer node; cheap indexed
   delete). Non-forwarded writes carry no meta and pay nothing.
 
@@ -99,12 +135,15 @@ writer half beside it:
 - **Driver start/stop churn:** serialize `startDrivers`/`stopDriversOnly` through an
   in-process promise chain on the fleet node (last-writer-wins ordering — a stop issued
   after a start always lands after it).
-- **Concurrent-boot count==N stall:** B2a's INSERT-time frontier seeding made setup-time row
-  creation safe again (rows are born seeded ≥ maxTs) — `setup()` creates all N
-  `shard_leases` rows at DDL time; the tailer's count-gate satisfies immediately;
-  concurrent multi-writer boots no longer stall. (This deliberately reverses B2a-T4's
-  "rows at acquire" deviation, which existed only because seeding then happened post-create;
-  INSERT-time seeding removed the reason.)
+- **Concurrent-boot count==N stall:** `setup()` creates all N `shard_leases` rows at DDL
+  time; the tailer's count-gate satisfies immediately; concurrent multi-writer boots no
+  longer stall. **(Spec-review edit — the seed MUST travel with the move:** setup's row
+  INSERT uses the same `documentsTableExists` probe + `(SELECT COALESCE(MAX(ts),0) FROM
+  documents)` seed that `tryAcquire`'s INSERT uses — fresh DB → 0 (correct, empty store),
+  upgrade with existing data → MAX(ts) (correct). Creating rows at the DDL DEFAULT 0 would
+  reintroduce the F1×N fake-ready hole on upgrades — the exact reason B2a-T4 moved creation
+  to acquire-time; INSERT-time seeding is what makes the reversal safe, so it is a
+  REQUIREMENT of the reversal, not an optimization.)
 - **Stall UX audit:** the shipped health fields + pinning-shard warning stay; ADD the same
   operator warning shape for hybrid replica lag (tailer wm falling > ~5s behind F names the
   node's replica, not a shard).
@@ -132,7 +171,12 @@ writer half beside it:
 - **E2E ship gate** (extend fleet-e2e; existing scenarios byte-unmodified): multi-writer
   fleet: (1) **the writer-replica offload proof:** a live subscription served BY A WRITER
   NODE keeps updating from its replica while `docker pause` freezes the primary (reads flow;
-  a concurrent write fails visibly; unpause → writes resume) — slice 2's proof, on a writer;
+  a concurrent write fails visibly; unpause → writes resume) — slice 2's proof, on a writer.
+  **(Spec-review edit — the writer is on a self-exit countdown under pause:** unlike
+  slice-2's sync node, a writer's LeaseMonitor probe hangs on a paused primary and exits
+  after ~4 misses (~8s at the shipped 6s test TTL). The scenario MUST bound the pause window
+  BELOW the probe-exhaustion budget — run this scenario at a longer TTL (default 15s →
+  ~20s budget, pause ≤ ~10s) and assert the node did NOT exit during the pause;)
   (2) RYOW-on-hybrid: local commit + forwarded commit both immediately readable via the
   committing/forwarding node's own subscription; (3) **effectively-once:** force a duplicate
   forward (send the same idempotencyKey twice via a raw /_fleet/run POST) → exactly one row
