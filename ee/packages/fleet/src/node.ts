@@ -301,6 +301,19 @@ function replicaAdapter(path: string): DatabaseAdapter {
   return isBun ? new BunSqliteAdapter({ path }) : new NodeSqliteAdapter({ path });
 }
 
+/**
+ * Whether this deployment runs in MULTI-WRITER mode (`STACKBASE_FLEET_MULTI_WRITER`), read in ONE
+ * place so `prepareFleetNode` (which decides the runtime store/queryStore wiring) and
+ * `startFleetNode` (which decides the tailer/promotion wiring) can never disagree about a node's
+ * shape. Multi-writer IS the hybrid regime (Fleet B3): every writer-ish node keeps a local replica
+ * and serves queries from it while committing to the primary. Off (the production default) → the
+ * shipped single-writer topology: the sole writer holds every shard and reads the primary, additional
+ * nodes are pure read-replica sync nodes — no hybrid machinery anywhere (byte-identical to B2b).
+ */
+export function fleetMultiWriterEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.STACKBASE_FLEET_MULTI_WRITER ?? "");
+}
+
 export interface FleetHandles {
   role(): "sync" | "writer";
   /** The current writer's URL — the proxy target for public httpActions handled on a sync node. */
@@ -320,8 +333,10 @@ export interface FleetHandles {
 }
 
 /** The createEmbeddedRuntime option deltas the caller threads through `bootProject`. `store` is the
- *  node's RUNTIME store: the writable Postgres store for a writer, the `SwitchableDocStore` (over the
- *  local replica, until promotion swaps in the Postgres store) for a sync node. */
+ *  node's RUNTIME (WRITE) store: the writable Postgres store for a writer, the `SwitchableDocStore`
+ *  (over the local replica, until promotion swaps in the Postgres store) for a single-writer sync
+ *  node, and — for a HYBRID (multi-writer) node — ALWAYS the Postgres store (mutations commit to the
+ *  primary), paired with `queryStore` for the replica-backed read path. */
 export interface FleetRuntimeOptions {
   store: DocStore;
   writeRouter: WriteRouter;
@@ -331,6 +346,23 @@ export interface FleetRuntimeOptions {
    *  builds ONE `ShardedTransactor` (N per-shard mutexes) over the pooled store instead of the
    *  single-shard `SingleWriterTransactor` when >1 — so cross-shard commits run in parallel. */
   numShards: number;
+  /**
+   * Fleet B3 hybrid nodes (D1) — the replica-backed QUERY store (the `SwitchableDocStore` over the
+   * local replica). Set ONLY on a hybrid (multi-writer) node: `store` (above) is the primary, where
+   * mutations commit, while queries/subscriptions read this replica store. `createEmbeddedRuntime`
+   * builds a separate query-path transactor + QueryRuntime over it, and routes `observeTimestamp`
+   * (fed by this node's ReplicaTailer post-apply) to the query oracle so a query snapshot never
+   * exceeds the replica watermark. Absent → every query runs against `store` (single-writer/sync/
+   * non-fleet), byte-identical to before B3.
+   */
+  queryStore?: DocStore;
+  /**
+   * Fleet B3 hybrid RYOW (D2) — awaited in the runtime's serial fan-out `drain()` before a local
+   * commit's subscription re-runs, so those re-runs (reading the replica) don't observe the commit's
+   * absence on a replica that hasn't applied it yet. Wired to `forwarder.waitForReplica`. Set only on
+   * a hybrid node. Absent → the drain is byte-identical to before B3.
+   */
+  beforeNotify?: (commitTs: bigint) => Promise<void>;
 }
 
 export interface FleetPrep {
@@ -339,13 +371,16 @@ export interface FleetPrep {
    *  swap target (read-only until promoted) — NOT the runtime store (`runtimeOptions.store` is the
    *  `SwitchableDocStore` over the local replica for a sync node). */
   pgStore: PostgresDocStore;
-  /** Sync only: the local file-backed replica the runtime reads through, and the switchable wrapper
-   *  the runtime store points at. Absent for a writer boot. */
+  /** The local file-backed replica the runtime reads queries through, and the switchable wrapper it
+   *  points at. Present for a single-writer SYNC boot (runtime store = the switchable) AND for a
+   *  HYBRID (multi-writer) boot of EITHER role (the switchable is `runtimeOptions.queryStore`, the
+   *  read path beside the primary write store). Absent only for a single-writer WRITER boot (no
+   *  replica — it reads the primary). */
   replica?: SqliteDocStore;
   switchable?: SwitchableDocStore;
-  /** Sync only: the on-disk path of `replica`, threaded through to `startFleetNode` so its C7
+  /** The on-disk path of `replica`, threaded through to `startFleetNode` so its C7
    *  `reconcileReplicaIdentity` call (deferred there — see that function's doc comment) can rebuild
-   *  the file in place if needed. Absent for a writer boot. */
+   *  the file in place if needed. Present whenever `replica` is (sync boot, or any hybrid boot). */
   replicaPath?: string;
   lease: LeaseManager;
   forwarder: WriteForwarder;
@@ -558,34 +593,45 @@ export async function prepareFleetNode(deps: {
   const seedDefaultFrontier = await documentsTableExists(client);
   const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0, seedDefaultFrontier);
 
+  // Fleet B3: multi-writer IS the hybrid regime. A hybrid node — of EITHER boot role — keeps a local
+  // replica and serves queries from it while committing to the primary, so BOTH branches below open
+  // the replica and wire it as `runtimeOptions.queryStore` (the write store stays the PRIMARY). The
+  // `beforeNotify` RYOW gate delegates to `forwarder.waitForReplica` (which the forwarder answers via
+  // the tailer `startFleetNode` attaches). Off → the shipped single-writer/sync store wiring below.
+  const multiWriter = fleetMultiWriterEnabled();
+  const replicaPath = join(deps.dataDir, REPLICA_DB_FILENAME);
+  const beforeNotify = (commitTs: bigint): Promise<void> => forwarder.waitForReplica(commitTs);
+
   if (acquired) {
     // Writer boot: make the Postgres store writable and promote the forwarder so writes execute
-    // locally. The runtime runs directly on the writable Postgres store — no replica, no switchable.
+    // locally. C7: the deployment-id mint (writeGlobalIfAbsent) needs `persistence_globals` to already
+    // exist, which `bootProject`'s `createEmbeddedRuntime` only creates via `store.setupSchema()`
+    // AFTER this function returns — so the mint itself happens in `startFleetNode`'s writer branch,
+    // not here. See that comment for the full rationale.
     pgStore.setWritable();
     forwarder.promote();
-    // C7: the deployment-id mint (writeGlobalIfAbsent) needs `persistence_globals` to already
-    // exist, which `bootProject`'s `createEmbeddedRuntime` only creates via `store.setupSchema()`
-    // AFTER this function returns — so the mint itself happens in `startFleetNode`'s writer
-    // branch, not here. See that comment for the full rationale.
+    if (multiWriter) {
+      // HYBRID writer boot: the runtime commits to the writable Postgres store (primary) but serves
+      // queries from a local replica (queryStore). `startFleetNode` starts the ReplicaTailer over that
+      // replica. Drivers ON (this node holds the default ring at boot).
+      const { replica, switchable } = await openSyncReplica(replicaPath);
+      return {
+        client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "writer", numShards,
+        runtimeOptions: {
+          store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards,
+          queryStore: switchable, beforeNotify,
+        },
+      };
+    }
+    // Single-writer boot: the runtime runs directly on the writable Postgres store — no replica, no
+    // switchable, no query-path split (it reads the primary, as shipped).
     return {
-      client,
-      pgStore,
-      lease,
-      forwarder,
-      role: "writer",
-      numShards,
-      runtimeOptions: {
-        store: pgStore,
-        writeRouter: forwarder,
-        deferDrivers: false,
-        fanoutAdapter,
-        numShards,
-      },
+      client, pgStore, lease, forwarder, role: "writer", numShards,
+      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards },
     };
   }
 
-  // Sync boot: the runtime store is a local file-backed replica behind a SwitchableDocStore. The
-  // read-only Postgres store is the tail source + promotion swap target only. Drivers deferred until
+  // Sync boot: open the local file-backed replica behind a SwitchableDocStore. Drivers deferred until
   // (if) promoted; writes forwarded to the current writer.
   //
   // C7: the replica's deployment-id stamp is reconciled against the primary's in `startFleetNode`,
@@ -594,18 +640,25 @@ export async function prepareFleetNode(deps: {
   // `createEmbeddedRuntime`, which runs AFTER this function returns; reading it here would crash on a
   // concurrent multi-node first boot, before ANY node's schema DDL has run. See
   // `reconcileReplicaIdentity`'s doc comment for the full rationale.
-  const replicaPath = join(deps.dataDir, REPLICA_DB_FILENAME);
   const { replica, switchable } = await openSyncReplica(replicaPath);
+  if (multiWriter) {
+    // HYBRID sync boot: the runtime's WRITE store is the (read-only-until-promoted) PRIMARY, and the
+    // replica is the queryStore. Unlike the single-writer sync node below (whose runtime store IS the
+    // replica, swapped to the primary on promotion), a hybrid's store is ALREADY the primary — so a
+    // promotion just makes it writable (no swapTo) and the tailer KEEPS running to serve replica reads.
+    // No local commit lands on the read-only primary meanwhile (writes forward via `forwarder`).
+    return {
+      client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
+      runtimeOptions: {
+        store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
+        queryStore: switchable, beforeNotify,
+      },
+    };
+  }
+  // Single-writer sync boot: the runtime store is the replica behind the SwitchableDocStore; the
+  // read-only Postgres store is the tail source + promotion swap target only.
   return {
-    client,
-    pgStore,
-    replica,
-    switchable,
-    replicaPath,
-    lease,
-    forwarder,
-    role: "sync",
-    numShards,
+    client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
     runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards },
   };
 }
@@ -977,9 +1030,11 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // balancer's `multiWriter` doc. Off = single writer holds all shards + additional nodes are read
   // replicas (the shipped single-writer/sync-replica behavior, byte-identical to B2a); the balancer
   // still heartbeats presence (the bootstrap fix) and performs FAILOVER acquisition regardless. On =
-  // full rendezvous distribution across co-writers. Read here (a contained node.ts read) rather than
-  // threaded through serve's config, so this task touches no core `packages/cli` surface.
-  const multiWriter = /^(1|true|yes)$/i.test(process.env.STACKBASE_FLEET_MULTI_WRITER ?? "");
+  // full rendezvous distribution across co-writers, and (Fleet B3) every writer-ish node is a HYBRID:
+  // it keeps its replica + real ReplicaTailer and serves queries from the replica while committing to
+  // the primary. The SAME `fleetMultiWriterEnabled()` `prepareFleetNode` reads to decide the store/
+  // queryStore wiring — so the two halves can never disagree about whether this node is a hybrid.
+  const multiWriter = fleetMultiWriterEnabled();
   const balancer = new ShardLeaseBalancer({
     lease,
     myUrl: lease.advertiseUrl,
@@ -1019,39 +1074,37 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     }
   };
 
-  // B2b, D5/T5-c — the writer invalidation listener. In MULTI-WRITER mode a promoted/booted writer
-  // stops (or never starts) a ReplicaTailer, so on its own it has NO way to learn about ANOTHER
-  // writer's commits: its live subscriptions would silently go stale, and its oracle would never
-  // observe a foreign commit's ts (a cross-node read-your-writes miss). Every writer-ish node instead
-  // runs a DERIVE-ONLY listener: same wake sources as the sync tailer (commit NOTIFY channel + the 1s
-  // poll fallback) and the SAME (watermark, F] pull + derivation, but with an invalidate-only sink and
-  // NO replica apply — the node reads the PRIMARY directly, so the data is already there; it needs only
-  // the WAKE + invalidation ranges + observeTimestamp(F). Watermark starts at boot F (only foreign
-  // commits from here on). A writer's OWN commits are re-pulled here and re-invalidated — a harmless
-  // idempotent double-invalidation (its normal fan-out already fired), deliberately not optimized away.
-  // Off unless multi-writer is enabled (single-writer mode has no foreign commits; sync nodes have the
-  // real replica tailer).
-  let writerListener: ReplicaTailer | null = null;
-  /**
-   * @param seedWm Promotion-handoff gap fix (B2b whole-branch review): a promoting node stops its
-   *   `ReplicaTailer` and then starts this derive-only listener; without `seedWm` the listener would
-   *   seed from a FRESH `readFrontier()`, silently skipping any foreign commit that lands between the
-   *   tailer's stop and the listener's start. Pass the outgoing tailer's own final `watermark()`
-   *   (captured right after `tailer.stop()`, see the promotion call site below) so the listener picks
-   *   up contiguously where the tailer left off. Writer BOOT omits this (no prior tailer, no gap) and
-   *   falls back to `ReplicaTailer`'s own fresh-`readFrontier()` seed — see `ReplicaTailer.start`'s doc.
-   */
-  const startWriterInvalidationListener = async (seedWm?: bigint): Promise<void> => {
-    if (!multiWriter || writerListener !== null) return;
-    // `pgStore` is passed as the `replica` arg but is NEVER dereferenced in "invalidateOnly" mode
-    // (no apply, no density read, no maxTimestamp seed) — see ReplicaTailerOptions.mode.
-    writerListener = new ReplicaTailer(client, pgStore, pgStore, {
-      mode: "invalidateOnly",
-      numShards,
-      onInvalidation: invalidationSink,
-    });
-    await writerListener.start(seedWm);
+  // Fleet B3 (D1) — the HYBRID replica read path. In MULTI-WRITER mode EVERY writer-ish node keeps a
+  // local replica and serves queries from it, so it ALWAYS runs the REAL ReplicaTailer (verbatim apply
+  // + derive-only invalidation), never the B2b derive-only `invalidateOnly` listener (which is now
+  // superseded on this path — the mode remains in `replica-tailer.ts` for its own tests). Shared by a
+  // hybrid WRITER boot and a hybrid PROMOTION (the tailer never stops across promotion, so there is no
+  // handoff gap to seed around — the B2b `seedWm` machinery is gone from this path).
+  //
+  // Reconciles the replica's deployment identity (post-DDL — createEmbeddedRuntime ran
+  // `pgStore.setupSchema()` for a hybrid, whose runtime WRITE store IS `pgStore`), opens the tailer
+  // over the replica, gates on catch-up to F (the ready gate), and attaches it to the forwarder so
+  // BOTH forwarded-write RYOW and the own-commit `beforeNotify` gate resolve against the same replica
+  // watermark. `replica`/`switchable`/`replicaPath` are guaranteed present on any hybrid boot by
+  // `prepareFleetNode` (both roles open the replica in multi-writer mode).
+  const startHybridTailer = async (): Promise<ReplicaTailer> => {
+    if (!replica || !switchable || !replicaPath) {
+      throw new Error(
+        "fleet: hybrid boot requires a replica + switchable store + replicaPath (bug: prepareFleetNode multi-writer path must provide them)",
+      );
+    }
+    await pgStore.setupSchema(); // idempotent (readOnly skips the writer lock); C7 self-sufficiency
+    const reconciled = await reconcileReplicaIdentity({ pgStore, replica, switchable, replicaPath });
+    replica = reconciled.replica; // may be a freshly-rebuilt replica; `switchable` was repointed in place
+    const t = new ReplicaTailer(client, pgStore, replica, { numShards, onInvalidation: invalidationSink });
+    await t.start(); // READY GATE: resolves after the replica has caught up to F.
+    // Read-your-own-writes (forwarded writes) AND the own-commit `beforeNotify` gate both wait on this.
+    forwarder.attachTailer(t);
+    return t;
   };
+  // The hybrid replica tailer, once started (writer boot, or on promotion). Stopped on shutdown; NEVER
+  // stopped on promotion (unlike the single-writer path). Null on a single-writer node (no replica).
+  let hybridTailer: ReplicaTailer | null = null;
 
   // The writer lease monitor (C4). Runs ONLY while this node is the writer: constructed lazily at
   // writer boot OR on promotion (never on a sync node). A sync node's connection loss is survivable —
@@ -1162,18 +1215,23 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // which maintains placement (acquire orphaned targets on failover, gracefully release non-targets
   // as peers join) from here on.
   if (forwarder.isLocalWriter()) {
+    // Fleet B3 — HYBRID writer boot (multi-writer): stand up the replica read path (the REAL tailer)
+    // BEFORE arming the writer half, so queries serve from the replica from the ready tick on. A fresh
+    // single-node writer boot seeds all N frontier rows in `armWriter` (below), so the tailer's ready
+    // gate here sees F = 0 (partial `shard_leases`) and resolves immediately; the poll loop then
+    // catches the replica up as `armWriter`/commits advance F. On a PRE-LOADED upgrade this is a
+    // bounded one-beat-early ready (accepted de-minimis, B2a-T4; it self-heals as the replica catches
+    // up). Single-writer boot (multi-writer off): no replica, reads hit the primary as shipped.
+    if (multiWriter) hybridTailer = await startHybridTailer();
     await armWriter(true);
     startWriterMonitor();
     balancer.start();
-    // B2b, D5/T5-c: in multi-writer mode, run the derive-only listener so this writer learns about
-    // co-writers' commits (no-op when multi-writer is off). armWriter already started this node's
-    // drivers via the default-shard acquisition (writer boot holds the default shard).
-    await startWriterInvalidationListener();
     // C7: mint the deployment id once, now that `bootProject` has run `pgStore.setupSchema()`
     // (this runs AFTER `prepareFleetNode` — `persistence_globals` doesn't exist before that).
     // Race-safe no-op if it's already set (e.g. this writer restarted, or a sync node minted it
     // first while this node was still booting). Sync nodes read this to detect a foreign-primary
-    // replica file and rebuild rather than serve it.
+    // replica file and rebuild rather than serve it. On a hybrid boot `startHybridTailer`'s reconcile
+    // may already have mint-adopted it (writer lost the race) — this stays a race-safe no-op then.
     await pgStore.writeGlobalIfAbsent(FLEET_DEPLOYMENT_ID_KEY, crypto.randomUUID());
     return {
       role: () => "writer",
@@ -1187,7 +1245,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         frontierMonitor?.stop();
         unsubscribeCommits?.();
         lease.stop();
-        await writerListener?.stop();
+        await hybridTailer?.stop();
+        // Hybrid writer boot: this node owns the replica (queryStore) lifecycle — serve closes the
+        // WRITE store (`pgStore`), never the switchable, so close it here after the tailer stops.
+        if (hybridTailer) await switchable?.close();
       },
     };
   }
@@ -1249,8 +1310,13 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   });
   await tailer.start(); // READY GATE: resolves only after the replica has caught up to the primary.
   // Enable read-your-own-writes: a client that wrote through this node waits for the replica's
-  // watermark to reach that write's commitTs before its next read is served off the replica.
+  // watermark to reach that write's commitTs before its next read is served off the replica. On a
+  // HYBRID node this same wait ALSO backs the own-commit `beforeNotify` gate (D2) once promoted.
   forwarder.attachTailer(tailer);
+  // Fleet B3: on a HYBRID (multi-writer) sync node this same tailer KEEPS RUNNING across promotion
+  // (the promotion below adds the writer half without stopping it), so track it as `hybridTailer` for
+  // the shutdown path. On a single-writer sync node it's stopped/closed by `promoteFleetNode` instead.
+  if (multiWriter) hybridTailer = tailer;
 
   // Read-only frontier-lag monitor so /api/health reports the fleet frontier + pinning shard even on
   // a sync node. It holds no leases, so `closeIdle:false` — it must NOT allocate `nextval` (only the
@@ -1271,14 +1337,36 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // The lease row (default shard) is already upserted by the tryAcquire() inside acquireLoop when
       // the election path fires; the balancer path promotes first, then acquires its targets below.
       promote: async () => {
-        await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica });
-        // Promotion-handoff gap fix (B2b whole-branch review): capture the JUST-STOPPED tailer's own
-        // final watermark now — `promoteFleetNode`'s step 5 already awaited `tailer.stop()` internally
-        // by the time this line runs — so the derive-only listener below can seed from it instead of a
-        // fresh `readFrontier()`. See `startWriterInvalidationListener`'s and `ReplicaTailer.start`'s
-        // doc comments for the gap this closes: without it, a foreign co-writer's commit landing between
-        // the tailer's stop and the listener's start would be invalidated by NEITHER.
-        const seedWm = tailer.watermark();
+        if (multiWriter) {
+          // Fleet B3 — HYBRID promotion: ADD the writer half WITHOUT tearing down the read path. The
+          // runtime WRITE store is ALREADY `pgStore` (a hybrid's queries route to `queryStore`=replica),
+          // so there is NO `switchable.swapTo`; the ReplicaTailer KEEPS RUNNING (queries keep serving
+          // from the replica, and foreign + own commits keep being invalidated with NO handoff gap — so
+          // none of B2b's `seedWm`/derive-only-listener machinery is needed here), and the forwarder
+          // KEEPS its tailer (forwarded writes to shards this node still doesn't own keep their RYOW
+          // wait). Deliberately NOT `promoteFleetNode`: its swap + `tailer.stop()` + `replica.close()`
+          // are single-writer-only, and its `observeTimestamp(maxTimestamp())` would push the QUERY
+          // oracle above the replica watermark and read holes (only the tailer's own post-apply sink may
+          // advance it — D1). Just make the store writable and arm the writer half beside the tailer.
+          pgStore.setWritable();
+          frontierMonitor?.stop();
+          unsubscribeCommits?.();
+          unsubscribeCommits = null;
+          await armWriter(false);
+          writerish = true;
+          // "Drivers follow the default shard": `armWriter`'s default-shard acquisition (re)started them
+          // if this node took the default ring; stop them if it promoted for a NON-default shard only.
+          if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
+          return;
+        }
+        // Single-writer FAILOVER promotion (multi-writer off): the shipped CRITICAL PROMOTION ORDER —
+        // swap the runtime store from the replica to the (now writable) primary, stop the tailer + close
+        // the replica (this node reads the primary directly from here on), observe the primary max onto
+        // the write oracle, start drivers. No replica read path survives, so nothing tails afterward.
+        // `replica` is a `let` reassigned inside `startHybridTailer` (a nested closure), which defeats
+        // TS control-flow narrowing here — but the sync-boot invariant above threw unless it was
+        // present, and `reconcileReplicaIdentity` reassigned it to a non-null store, so it is defined.
+        await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica: replica! });
         // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire this
         // node's rendezvous targets. `seed=false`: promotion never re-seeds frontiers (they're already
         // live — a dead writer's high-water is preserved through the epoch-bumping re-acquire).
@@ -1290,17 +1378,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         await armWriter(false);
         // Now writer-ish: the already-running balancer's next beat will acquire/release to converge.
         writerish = true;
-        // B2b, D5 — "drivers follow the default shard": `promoteFleetNode` eagerly started drivers
-        // (correct for the single-writer/failover path, where a promoted node holds the default ring).
-        // In MULTI-WRITER mode a node can promote for a NON-default orphaned shard while a peer still
-        // holds default — such a node must NOT run the drivers. `armWriter`'s default-shard acquisition
-        // (if it happened) already (re)started them idempotently; correct the over-eager start here if
-        // this node did not end up holding the default ring.
         if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
-        // B2b, D5/T5-c: this node is now a writer with its replica tailer stopped — start the derive-
-        // only listener so it keeps seeing co-writers' commits (no-op when multi-writer is off).
-        // `seedWm` closes the promotion-handoff gap (see above).
-        await startWriterInvalidationListener(seedWm);
       },
       startMonitor: startWriterMonitor,
       firePromoted,
@@ -1331,12 +1409,16 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       unsubscribeCommits?.();
       lease.stop();
       await tailer.stop();
-      await writerListener?.stop(); // non-null only if this sync node was promoted in multi-writer mode
-      // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a sync
-      // node). Close it here so the pg connection is released; `NodePgClient.close()` is idempotent,
-      // so a later `switchable.close()` (if promotion had swapped it in) is a safe no-op. The
-      // replica is closed either by promotion (swapped out) or by serve's `store.close()` on the
-      // switchable (unpromoted) — never here, to avoid a double close.
+      // Fleet B3: a HYBRID sync node's runtime WRITE store is `pgStore` (serve closes THAT on
+      // shutdown), and its promotion never swaps the replica out — so serve never closes the
+      // switchable/replica (the queryStore). Close it here, after the tailer stops writing to it. A
+      // single-writer sync node's runtime store IS the switchable (serve closes it) or it was closed
+      // by `promoteFleetNode` on promotion, so this node must NOT close it in that mode (double close).
+      if (multiWriter) await switchable?.close();
+      // This node owns the Postgres store's lifecycle (it's not the serve runtime store for a
+      // single-writer sync node). Close it here so the pg connection is released; `NodePgClient.close()`
+      // is idempotent, so a later `switchable.close()` (single-writer, if promotion swapped it in) OR
+      // serve's own `store.close()` on `pgStore` (hybrid) is a safe no-op.
       await pgStore.close();
     },
   };

@@ -228,6 +228,11 @@ export async function bootLoaded(opts: {
     fanoutAdapter?: EmbeddedWriteFanoutAdapter;
     /** Shards B2a: shard count — >1 builds a ShardedTransactor (per-shard parallel commits). */
     numShards?: number;
+    /** Fleet B3 hybrid (multi-writer): the replica-backed query store (queries route here; mutations
+     *  commit to `store`). Threaded straight into `createEmbeddedRuntime`. */
+    queryStore?: DocStore;
+    /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
+    beforeNotify?: (commitTs: bigint) => Promise<void>;
   };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
@@ -291,6 +296,9 @@ export async function bootLoaded(opts: {
     ...(opts.fleet?.writeRouter ? { writeRouter: opts.fleet.writeRouter } : {}),
     ...(opts.fleet?.deferDrivers ? { deferDrivers: true } : {}),
     ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
+    // Fleet B3 hybrid (multi-writer): the replica-backed query path + the own-commit RYOW drain gate.
+    ...(opts.fleet?.queryStore ? { queryStore: opts.fleet.queryStore } : {}),
+    ...(opts.fleet?.beforeNotify ? { beforeNotify: opts.fleet.beforeNotify } : {}),
     // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the store — resolved
     // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
     numShards,
@@ -355,6 +363,11 @@ export async function bootProject(opts: {
     fanoutAdapter?: EmbeddedWriteFanoutAdapter;
     /** Shards B2a: shard count — >1 builds a ShardedTransactor (per-shard parallel commits). */
     numShards?: number;
+    /** Fleet B3 hybrid (multi-writer): the replica-backed query store (queries route here; mutations
+     *  commit to `store`). Threaded straight into `createEmbeddedRuntime`. */
+    queryStore?: DocStore;
+    /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
+    beforeNotify?: (commitTs: bigint) => Promise<void>;
   };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);

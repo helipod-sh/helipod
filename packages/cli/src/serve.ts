@@ -32,6 +32,12 @@ export interface FleetRuntimeOptions {
   /** Shards B2a: number of shards this node runs — threaded into `createEmbeddedRuntime` (>1 builds a
    *  `ShardedTransactor` over the pooled store for per-shard parallel commits). */
   numShards: number;
+  /** Fleet B3 hybrid (multi-writer): the replica-backed query store — queries route here while
+   *  mutations commit to `store` (the primary). Threaded straight into `createEmbeddedRuntime`. */
+  queryStore?: DocStore;
+  /** Fleet B3 hybrid RYOW: awaited in the runtime's fan-out drain before a local commit's
+   *  subscription re-runs (wired to the fleet forwarder's replica-catch-up wait). */
+  beforeNotify?: (commitTs: bigint) => Promise<void>;
 }
 
 /** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here

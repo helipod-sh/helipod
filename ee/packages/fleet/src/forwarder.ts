@@ -89,9 +89,30 @@ export class WriteForwarder implements WriteRouter {
    *  this node no longer serves reads off a replica for its own forwarded writes, so waiting on
    *  catch-up would only add latency. `isLocalWriter` itself needs no flip here: it already reads
    *  the live `LeaseManager` state directly (see below), which promotion's `tryAcquire` calls
-   *  update as a side effect. */
+   *  update as a side effect.
+   *
+   *  NOTE (Fleet B3): a HYBRID promotion (multi-writer) does NOT call this — a hybrid keeps its
+   *  replica + tailer running past promotion and STILL serves reads (and forwarded writes to shards
+   *  it doesn't own) off the replica, so releasing the RYOW waits would be wrong. Only the
+   *  single-writer failover promotion (`promoteFleetNode`, no replica read path afterward) calls it. */
   promote(): void {
     this.tailer?.release();
+  }
+
+  /**
+   * Fleet B3 (D2) — the HYBRID own-commit RYOW gate. Wired as the runtime's `beforeNotify` drain
+   * hook: awaited before a LOCALLY-committed mutation's subscription re-runs fire, so those re-runs
+   * (which read this node's replica, via the hybrid query path) don't observe the commit's absence on
+   * a replica that hasn't applied it yet. Delegates to the SAME attached `ReplicaTailer.waitFor` the
+   * forwarded-write RYOW uses (`attachTailer`), so local and forwarded writes share one catch-up
+   * primitive. No-op when no tailer is attached (a single-writer node with no replica, or before the
+   * tailer exists) or when nothing committed (`0n`). A timeout is swallowed — reactivity is
+   * best-effort; the read path stays correct regardless (the re-run just fires against a replica that
+   * is still catching up, no worse than the pre-gate behavior).
+   */
+  async waitForReplica(commitTs: bigint): Promise<void> {
+    if (!this.tailer || commitTs === 0n) return;
+    await this.tailer.waitFor(commitTs, RYOW_WAIT_MS);
   }
 
   /**

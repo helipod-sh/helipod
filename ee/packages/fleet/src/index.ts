@@ -16,6 +16,7 @@ export {
   relinquish,
   FrontierMonitor,
   fleetApplicationName,
+  fleetMultiWriterEnabled,
   REPLICA_DB_FILENAME,
   FLEET_WRITER_SESSION_TIMEOUTS,
   DEFAULT_NUM_SHARDS,
