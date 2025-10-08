@@ -70,9 +70,12 @@ export class SwitchableDocStore implements DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
+    // Additive 4th param (Fleet B3, D3 — opaque commit metadata): forwarded through mechanically,
+    // same as every other argument this pass-through wrapper already relays untouched.
+    opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
     const d = this.delegate;
-    return d.commitWrite(documents, indexUpdates, shardId);
+    return d.commitWrite(documents, indexUpdates, shardId, opts);
   }
 
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {

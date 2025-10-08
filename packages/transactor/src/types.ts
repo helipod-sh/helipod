@@ -83,6 +83,14 @@ export interface RunInTransactionOptions {
   /** Max deterministic replays on conflict (default 8). */
   maxRetries?: number;
   headroom?: Partial<HeadroomLimits>;
+  /**
+   * Opaque commit metadata (Fleet B3, D3 — effectively-once forwarding): threaded straight
+   * through to `DocStore.commitWrite`'s `opts.meta`, never interpreted by the transactor itself.
+   * Only meaningful for a transaction that actually commits (a pure read never reaches
+   * `commitWrite`); unset → `commitWrite` still gets called with `{ meta: undefined }`, which
+   * SQLite ignores and an unset Postgres commit guard never sees.
+   */
+  commitMeta?: Record<string, string>;
 }
 
 export interface Transactor {

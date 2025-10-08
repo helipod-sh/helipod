@@ -123,6 +123,26 @@ export interface EmbeddedRuntimeOptions {
    * pool so different shards' commits are genuinely concurrent Postgres transactions.
    */
   numShards?: number;
+  /**
+   * Hybrid-node split-read seam (Fleet B3, D1). When set, `create()` builds a SECOND, separate
+   * query-path transactor (`SingleWriterTransactor` — queries never commit, so no sharding is
+   * needed here regardless of the write side) + `QueryRuntime` over this store, seeded from ITS
+   * OWN `maxTimestamp()` (not the write store's) and wired onto `ExecutorDeps.queryPath`, so
+   * `fn.type === "query"` runs against `queryStore` instead of `store`. Its oracle is advanced
+   * ONLY by `observeTimestamp` (see below) — never by this runtime's own local commits, which
+   * only ever land on the WRITE store. Unset → `queryPath` is never built; every query runs
+   * against `store` through the primary pair, byte-identical to before this option existed.
+   */
+  queryStore?: DocStore;
+  /**
+   * Hybrid-node RYOW gate (Fleet B3, D2). Awaited in the runtime's serial fan-out `drain()`
+   * BEFORE each queued invalidation's `handler.notifyWrites` — e.g. a hybrid node's
+   * `tailer.waitFor(commitTs)`, so a locally-committed mutation's subscription re-runs don't fire
+   * against a replica that hasn't applied that commit yet. A rejection is caught and logged; the
+   * drain loop continues to the next queued invalidation rather than wedging the whole queue on
+   * one bad wait. Unset → `drain()` is byte-identical to before this hook existed.
+   */
+  beforeNotify?: (commitTs: bigint) => Promise<void>;
 }
 
 /** The minimal timestamp-observer seam `observeTimestamp` delegates to — a `MonotonicTimestampOracle`
@@ -156,9 +176,22 @@ export class EmbeddedRuntime {
      * reassigning the field) keeps that closure correct without any circular-reference dance.
      */
     private tableNumberToName: Map<number, string>,
-    /** The transactor's timestamp observer (the single-shard oracle, or the `ShardedTransactor`
-     *  itself); `observeTimestamp` delegates straight to it. */
+    /** The WRITE transactor's timestamp observer (the single-shard oracle, or the
+     *  `ShardedTransactor` itself). `observeTimestamp` delegates to this UNLESS `queryOracle` is
+     *  set (see it below) — this oracle's own local commits always advance it directly via
+     *  `ShardWriter.commit`'s `oracle.publishCommitted`; `observeTimestamp` is the SEPARATE
+     *  fleet-follower/tailer-observation channel, which a hybrid node must NOT point back at the
+     *  write oracle (D1 — own local commits must never advance the query oracle, and observed
+     *  foreign timestamps must never advance the write oracle either, once a hybrid has a real
+     *  query-path oracle of its own). */
     private readonly oracle: TimestampObserver,
+    /** Fleet B3 (D1): the QUERY-path oracle, set only when `EmbeddedRuntimeOptions.queryStore` was
+     *  configured. When set, `observeTimestamp` routes to THIS oracle instead of `oracle` — its
+     *  purpose is tailer post-apply feeding (a hybrid node's replica-backed query snapshot rises
+     *  only as the tailer confirms applied writes), never this runtime's own local commits (those
+     *  land on the write store and advance `oracle` directly, as shipped). Undefined when
+     *  `queryStore` is unset → `observeTimestamp` keeps the exact shipped write-oracle routing. */
+    private readonly queryOracle: TimestampObserver | undefined,
     /** The write path — retained so a fleet writer can take a shard's commit mutex non-blockingly
      *  (`tryRunExclusiveOnShard`) to close idle frontiers without racing that shard's own commits. */
     private readonly transactor: SingleWriterTransactor | ShardedTransactor,
@@ -183,6 +216,11 @@ export class EmbeddedRuntime {
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
     await options.store.setupSchema();
+    // Mirror the primary store's schema setup for `queryStore` (Fleet B3, D1) — idempotent on both
+    // backends (SQLite `CREATE TABLE IF NOT EXISTS`; Postgres swallows the duplicate-object race),
+    // so a caller handing in an already-initialized replica pays nothing extra, while a fresh store
+    // (e.g. a test, or a from-scratch replica) doesn't footgun on missing tables.
+    if (options.queryStore) await options.queryStore.setupSchema();
 
     const adapter = options.fanoutAdapter ?? new InMemoryWriteFanoutAdapter();
     const fanout = new EmbeddedWriteFanout(adapter, options.originId ?? "embedded");
@@ -207,6 +245,25 @@ export class EmbeddedRuntime {
       oracle = singleOracle;
     }
     const queryRuntime = new QueryRuntime(options.store);
+
+    // Hybrid-node split-read seam (Fleet B3, D1): when `queryStore` is configured, build a SEPARATE
+    // query-path transactor + QueryRuntime over it. Queries never commit, so a plain
+    // `SingleWriterTransactor` is the right shape regardless of whether the WRITE side is sharded —
+    // this reuses the sync-node construction (a query transactor over a replica-backed store). Its
+    // oracle seeds from `queryStore`'s OWN `maxTimestamp()` (not the write store's `startTs` above)
+    // and then rides ONLY `observeTimestamp` (below) — never this runtime's own local commits, which
+    // land on `options.store` and advance `oracle` (the write oracle) directly, unaffected by this.
+    // Unset `queryStore` → `queryPath`/`queryOracle` stay undefined: `ExecutorDeps.queryPath` is
+    // never set, and `observeTimestamp` keeps the exact shipped write-oracle routing (see below).
+    let queryPath: { transactor: SingleWriterTransactor; queryRuntime: QueryRuntime } | undefined;
+    let queryOracle: TimestampObserver | undefined;
+    if (options.queryStore) {
+      const queryStartTs = await options.queryStore.maxTimestamp();
+      const qOracle = new MonotonicTimestampOracle(queryStartTs);
+      const queryTransactor = new SingleWriterTransactor(options.queryStore, qOracle);
+      queryPath = { transactor: queryTransactor, queryRuntime: new QueryRuntime(options.queryStore) };
+      queryOracle = qOracle;
+    }
 
     // Shards B2a (T5): the SAME resolved count that decided the transactor above must reach every
     // `executor.run` call site's `RunOptions.numShards` — the executor/kernel shard resolution (T3)
@@ -236,7 +293,7 @@ export class EmbeddedRuntime {
         numShards,
       });
     };
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter, queryPath });
     executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
@@ -342,6 +399,18 @@ export class EmbeddedRuntime {
       try {
         while (queue.length > 0) {
           const inv = queue.shift()!;
+          // Hybrid RYOW gate (Fleet B3, D2): awaited BEFORE this invalidation's `notifyWrites`, so
+          // e.g. a hybrid node's `tailer.waitFor(commitTs)` can hold a locally-committed mutation's
+          // subscription re-run until the replica-backed query path has actually applied it — the
+          // removes-the-briefly-stale-re-run gate. A throwing/rejecting hook is caught and logged;
+          // one bad wait must not wedge every OTHER queued invalidation behind it forever.
+          if (options.beforeNotify) {
+            try {
+              await options.beforeNotify(BigInt(inv.commitTs));
+            } catch (e) {
+              console.error("[runtime] beforeNotify hook threw:", e);
+            }
+          }
           await handler.notifyWrites(inv);
         }
       } finally {
@@ -453,7 +522,7 @@ export class EmbeddedRuntime {
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
-      oracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
+      oracle, queryOracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
     );
   }
 
@@ -697,11 +766,19 @@ export class EmbeddedRuntime {
   /**
    * Lets a non-writer fleet node advance its local timestamp oracle past timestamps it learns
    * from the writer's change stream, so its own next allocated timestamp (if/when it becomes
-   * the writer) never collides with or precedes one it already observed. Delegates straight to
-   * `MonotonicTimestampOracle.observeTimestamp`.
+   * the writer) never collides with or precedes one it already observed.
+   *
+   * Fleet B3 (D1) routing: WITHOUT a `queryStore` (`queryOracle` undefined), this is the shipped
+   * behavior — delegates straight to the WRITE oracle (`this.oracle`; a `ShardedTransactor` fans
+   * it to every shard). WITH a `queryStore` configured, a hybrid node has a real query-path oracle
+   * whose sole purpose IS tailer post-apply feeding — so this routes to `queryOracle` INSTEAD, and
+   * the write oracle is left untouched by tailer observations (it advances only via this runtime's
+   * own local commits, through `ShardWriter.commit`'s `oracle.publishCommitted`). Sharing one
+   * oracle between the two would let a query snapshot ABOVE the replica's actual watermark and
+   * read holes (D1's spec-review requirement) — this branch is what keeps them separate.
    */
   observeTimestamp(ts: bigint): void {
-    this.oracle.observeTimestamp(ts);
+    (this.queryOracle ?? this.oracle).observeTimestamp(ts);
   }
 
   /**

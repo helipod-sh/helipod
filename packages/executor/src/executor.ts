@@ -72,6 +72,17 @@ export interface ExecutorDeps {
    * (byte-identical to a single-node engine).
    */
   writeRouter?: WriteRouter;
+  /**
+   * Hybrid-node split-read seam (Fleet B3, D1). When set, `run()` for `fn.type === "query"` uses
+   * `queryPath.transactor` for `runInTransaction` AND `queryPath.queryRuntime` for
+   * `kctx.queryRuntime` — BOTH together, never one without the other (a half-switched wiring
+   * would let a query's index scans read one store while nothing else changed, or — worse, if
+   * ever misapplied to a mutation — split a mutation's scans from its point reads across two
+   * stores, corrupting read-your-own-writes). Mutations and actions always use `deps.transactor`/
+   * `deps.queryRuntime`, the primary pair, regardless of `queryPath`. Unset → every call uses the
+   * primary pair, byte-identical to before this seam existed.
+   */
+  queryPath?: { transactor: Transactor; queryRuntime: QueryRuntime };
 }
 
 export interface ComponentContext {
@@ -174,6 +185,14 @@ export interface RunOptions {
    * invariant: user code declares its shard, it never overrides it).
    */
   shardId?: ShardId;
+  /**
+   * Opaque commit metadata (Fleet B3, D3 — effectively-once forwarding), threaded straight
+   * through to `Transactor.runInTransaction`'s `commitMeta` and never interpreted by the executor
+   * itself. Meaningful for mutations only — a query never reaches the commit path (a pure read
+   * returns before `DocStore.commitWrite` is ever called), so setting this on a query call is a
+   * harmless no-op. Unset → identical to before this field existed.
+   */
+  commitMeta?: Record<string, string>;
 }
 
 export interface UdfResult<T = unknown> {
@@ -301,14 +320,24 @@ export class InlineUdfExecutor {
       }
     }
 
+    // Hybrid-node split-read seam (Fleet B3, D1): a query uses `queryPath`'s transactor +
+    // QueryRuntime when configured; a mutation always uses the primary pair. Selected ONCE, here,
+    // as a single unit — impossible to wire the transactor from one source and the QueryRuntime
+    // from another (see `ExecutorDeps.queryPath`'s doc comment for why that split would corrupt
+    // reads). Unset `queryPath` (or `fn.type === "mutation"`) → the primary pair, byte-identical.
+    const txPath =
+      fn.type === "query" && this.deps.queryPath
+        ? this.deps.queryPath
+        : { transactor: this.deps.transactor, queryRuntime: this.deps.queryRuntime };
+
     try {
-      const commit = await this.deps.transactor.runInTransaction(async (txn) => {
+      const commit = await txPath.transactor.runInTransaction(async (txn) => {
         // Base context: NO policy enforcement. Used for the facade readers and the rule-context's own
         // db reader, so a policy's internal reads are never themselves re-gated (no re-entrancy).
         const baseKctx: KernelContext = {
           profile,
           txn,
-          queryRuntime: this.deps.queryRuntime,
+          queryRuntime: txPath.queryRuntime,
           catalog: this.deps.catalog,
           snapshotTs: txn.snapshotTs,
           random: createSeededRandom(seed),
@@ -362,7 +391,7 @@ export class InlineUdfExecutor {
 
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
-      }, { shardId });
+      }, { shardId, commitMeta: options.commitMeta });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.

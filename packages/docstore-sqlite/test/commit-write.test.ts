@@ -34,4 +34,26 @@ describe("SqliteDocStore commitWrite shard_id", () => {
 
     store.close();
   });
+
+  // Fleet B3, D3: SQLite has no commit guard to hand `opts.meta` to — the opts param exists only
+  // for interface conformance with `DocStore.commitWrite` and is silently ignored (non-fleet /
+  // single-node SQLite pays nothing).
+  it("accepts commitWrite's 4th `opts` param and ignores it", async () => {
+    const adapter = new NodeSqliteAdapter();
+    const store = new SqliteDocStore(adapter);
+    await store.setupSchema();
+
+    const id = newDocumentId(TABLE);
+    const commitTs = await store.commitWrite([doc(id, "with-meta")], [], undefined, {
+      meta: { idempotencyKey: "abc-123" },
+    });
+
+    // Same result shape/behavior as a commitWrite with no opts at all.
+    expect(commitTs).toBeGreaterThan(0n);
+    expect((await store.get(id))!.ts).toBe(commitTs);
+    const drows = adapter.prepare(`SELECT shard_id FROM documents WHERE internal_id = ?`).all(id.internalId);
+    expect(drows.every((r) => r.shard_id === "default")).toBe(true);
+
+    store.close();
+  });
 });

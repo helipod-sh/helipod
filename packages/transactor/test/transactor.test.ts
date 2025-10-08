@@ -252,3 +252,47 @@ describe("headroom", () => {
     ).rejects.toBeInstanceOf(HeadroomExceededError);
   });
 });
+
+// Fleet B3, D3 — the opaque commit-metadata channel: `RunInTransactionOptions.commitMeta` reaches
+// `DocStore.commitWrite`'s `opts.meta`, unmodified, on every actual commit. A pure read never
+// stages anything, so it never reaches `commitWrite` at all — `commitMeta` on a read-only run is
+// simply never consulted.
+describe("commitMeta threading (Fleet B3, D3)", () => {
+  it("RunInTransactionOptions.commitMeta reaches DocStore.commitWrite's opts.meta", async () => {
+    const { store, transactor } = await makeTransactor();
+    const commitWriteSpy = vi.spyOn(store, "commitWrite");
+    const id = newDocumentId(TABLE);
+
+    await transactor.runInTransaction(async (ctx) => ctx.put(id, { body: "meta'd" }), {
+      commitMeta: { idempotencyKey: "req-1" },
+    });
+
+    expect(commitWriteSpy).toHaveBeenCalledTimes(1);
+    const [, , , opts] = commitWriteSpy.mock.calls[0]!;
+    expect(opts).toEqual({ meta: { idempotencyKey: "req-1" } });
+  });
+
+  it("no commitMeta → commitWrite still called, with meta undefined", async () => {
+    const { store, transactor } = await makeTransactor();
+    const commitWriteSpy = vi.spyOn(store, "commitWrite");
+    const id = newDocumentId(TABLE);
+
+    await transactor.runInTransaction(async (ctx) => ctx.put(id, { body: "no-meta" }));
+
+    expect(commitWriteSpy).toHaveBeenCalledTimes(1);
+    const [, , , opts] = commitWriteSpy.mock.calls[0]!;
+    expect(opts).toEqual({ meta: undefined });
+  });
+
+  it("a pure read never reaches commitWrite, regardless of commitMeta", async () => {
+    const { store, transactor } = await makeTransactor();
+    const commitWriteSpy = vi.spyOn(store, "commitWrite");
+
+    const r = await transactor.runInTransaction(async (ctx) => ctx.get(newDocumentId(TABLE)), {
+      commitMeta: { idempotencyKey: "unused" },
+    });
+
+    expect(r.committed).toBe(false);
+    expect(commitWriteSpy).not.toHaveBeenCalled();
+  });
+});
