@@ -490,7 +490,7 @@ describe("F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): writer-boot 
     const lease = new LeaseManager(client, { advertiseUrl: "http://writer:9001" });
     await lease.setup();
     const acquired = await lease.tryAcquire();
-    expect(acquired).toEqual({ epoch: 1n, writerUrl: "http://writer:9001" });
+    expect(acquired).toEqual({ epoch: 1n, writerUrl: "http://writer:9001", frontierTs: 0n });
     expect((await lease.read())?.frontierTs).toBe(0n);
 
     primary.setWritable();

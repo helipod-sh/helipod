@@ -31,6 +31,11 @@ export type TryRunExclusiveOnShard = (shardId: ShardId, fn: () => Promise<void>)
 export interface LeaseState {
   epoch: bigint;
   writerUrl: string;
+  /** The row's fenced-frontier high-water mark at acquisition time (Fleet B3). On an `ON CONFLICT`
+   *  re-acquire the upsert leaves `frontier_ts` untouched, so this returns the value an INTERIM owner
+   *  advanced it to while this node didn't hold the shard — the exact floor the caller feeds to
+   *  `runtime.observeWriteTimestamp` so a re-acquired shard's write snapshot never sits stale. */
+  frontierTs: bigint;
 }
 
 /** `LeaseManager.read()`'s full row — every `shard_leases` column (Fenced Frontier B1, D2). The
@@ -357,12 +362,18 @@ export class LeaseManager {
          writer_url = $2,
          writer_app_name = $3,
          expires_at = now() + interval '${this.ttlMsSql} milliseconds'
-       RETURNING epoch, writer_url`,
+       RETURNING epoch, writer_url, frontier_ts`,
       [shardId, this.advertiseUrl, this.applicationName],
     );
     const row = rows[0];
     if (!row) throw new Error("shard_leases upsert returned no row");
-    const state: LeaseState = { epoch: row.epoch as bigint, writerUrl: row.writer_url as string };
+    const state: LeaseState = {
+      epoch: row.epoch as bigint,
+      writerUrl: row.writer_url as string,
+      // On a re-acquire this is the frontier an interim owner left; on a fresh INSERT it's the seed
+      // (`frontierSeed` — store max or 0). Feeds `runtime.observeWriteTimestamp` at every acquisition.
+      frontierTs: toBigIntOrZero(row.frontier_ts as PgValue | undefined),
+    };
     this.lastEpochByShard.set(shardId, state.epoch);
     return state;
   }

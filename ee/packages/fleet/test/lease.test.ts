@@ -33,10 +33,10 @@ describe("LeaseManager", () => {
     await mgr.setup();
 
     const first = await mgr.tryAcquire();
-    expect(first).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000" });
+    expect(first).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 0n });
 
     const second = await mgr.tryAcquire();
-    expect(second).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000" });
+    expect(second).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000", frontierTs: 0n });
   });
 
   it("read() returns the latest lease row, including the fencing/frontier columns", async () => {
@@ -79,7 +79,7 @@ describe("LeaseManager", () => {
       // Let the loop's first (immediate or timer-driven) attempt run.
       await vi.advanceTimersByTimeAsync(10);
       expect(onAcquired).toHaveBeenCalledTimes(1);
-      expect(onAcquired).toHaveBeenCalledWith({ epoch: 1n, writerUrl: "http://node-a:4000" });
+      expect(onAcquired).toHaveBeenCalledWith({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 0n });
 
       mgr.stop();
 
@@ -114,7 +114,7 @@ describe("LeaseManager", () => {
 
       await vi.advanceTimersByTimeAsync(10);
       expect(onAcquired).toHaveBeenCalledTimes(1);
-      expect(onAcquired).toHaveBeenCalledWith({ epoch: 1n, writerUrl: "http://node-a:4000" });
+      expect(onAcquired).toHaveBeenCalledWith({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 0n });
 
       mgr.stop();
     } finally {

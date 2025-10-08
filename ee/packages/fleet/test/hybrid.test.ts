@@ -28,14 +28,14 @@ import { join } from "node:path";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { NodePgClient } from "@stackbase/docstore-postgres";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { newDocumentId, encodeStorageIndexId, DEFAULT_SHARD } from "@stackbase/id-codec";
+import { newDocumentId, encodeStorageIndexId, shardIdList, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { PgliteClient } from "./pglite-client";
 import { LeaseManager } from "../src/lease";
 import { WriteForwarder, type ReplicaWaiter } from "../src/forwarder";
-import { openSyncReplica, startFleetNode, REPLICA_DB_FILENAME } from "../src/node";
+import { openSyncReplica, startFleetNode, relinquish, REPLICA_DB_FILENAME } from "../src/node";
 import { ReplicaTailer } from "../src/replica-tailer";
 import { SwitchableDocStore } from "../src/switchable-store";
 
@@ -364,6 +364,127 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
       const list = await runtime.run<Array<{ body: string }>>("messages:list", { conversationId: "c1" });
       expect(list.value.map((d) => d.body)).toEqual(["direct"]); // reads the primary immediately (no lag)
       expect(r.commitTs).toBeGreaterThan(0n);
+      expect(onExit).not.toHaveBeenCalled();
+    } finally {
+      await handles.stop();
+    }
+  });
+});
+
+describe("Fleet B3 hazard — re-acquired shard re-floors the WRITE oracle (no stale RMW snapshot)", () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "fleet-reacq-"));
+    process.env.STACKBASE_FLEET_MULTI_WRITER = "1"; // hybrid regime — observeTimestamp feeds the QUERY oracle
+  });
+  afterEach(() => {
+    delete process.env.STACKBASE_FLEET_MULTI_WRITER;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("a shard RELEASED then RE-ACQUIRED (an interim owner committed meanwhile) re-floors the write oracle: an RMW mutation on it sees the interim state, not a stale snapshot", async () => {
+    const N = 4;
+    const SHARDS = shardIdList(N);
+    const targetShard: ShardId = "s3";
+    // A conversationId that shards to `targetShard`, so this is a NON-default re-acquire (routed via
+    // the mutations' `shardBy` and the runtime's own `shardIdForKeyValue`, N=4 — identical resolution).
+    let convo = "";
+    for (let i = 0; ; i++) {
+      if (shardIdForKeyValue(`c${i}`, N) === targetShard) {
+        convo = `c${i}`;
+        break;
+      }
+    }
+
+    const client = new PgliteClient();
+    const primary = new PostgresDocStore(client);
+    await primary.setupSchema();
+    // Short TTL → the balancer beats quickly (beatMs = fleetAcquireRetryMs(ttl) ≈ 200ms at 1500). A
+    // single in-process PGlite node never contends, so every held lease renews well within the TTL.
+    const lease = new LeaseManager(client, { advertiseUrl: "http://reacq:1", ttlMs: 1500, retryMs: 3_600_000 });
+    await lease.setup();
+    await lease.heartbeatPresence();
+    // Writer boot: win the default-shard election, make the store writable, promote the forwarder.
+    expect(await lease.tryAcquire(DEFAULT_SHARD, 0, true)).toBeTruthy();
+    primary.setWritable();
+    const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://reacq:1" });
+    forwarder.promote();
+
+    // `messages` sharded by `conversationId`; both mutations DECLARE shardBy so they route by it.
+    const catalog = new SimpleIndexCatalog()
+      .addTable("messages", MESSAGES, undefined, false, "conversationId")
+      .addIndex(byConversation);
+    const shardedModules: Record<string, RegisteredFunction> = {
+      "messages:send": mutation<{ conversationId: string; body: string }, string>({
+        shardBy: "conversationId",
+        handler: (ctx, { conversationId, body }) => ctx.db.insert("messages", { conversationId, body }),
+      }),
+      // A read-modify-write mutation: READ the conversation's rows at the WRITE oracle's snapshot and
+      // return how many the handler saw — its view of state. Routed to `targetShard` by shardBy.
+      "messages:rmw": mutation<{ conversationId: string }, number>({
+        shardBy: "conversationId",
+        handler: async (ctx, { conversationId }) =>
+          (await ctx.db.query("messages", "by_conversation").eq("conversationId", conversationId).collect()).length,
+      }),
+    };
+
+    const replicaPath = join(tmp, REPLICA_DB_FILENAME);
+    const { replica, switchable } = await openSyncReplica(replicaPath);
+    const runtime = await createEmbeddedRuntime({
+      store: primary,
+      queryStore: switchable, // hybrid: observeTimestamp feeds the QUERY oracle, NOT the write oracle
+      catalog,
+      modules: shardedModules,
+      numShards: N,
+      writeRouter: forwarder,
+      beforeNotify: (ts) => forwarder.waitForReplica(ts),
+    });
+    const onExit = vi.fn();
+    const handles = await startFleetNode({
+      client: client as unknown as NodePgClient,
+      pgStore: primary,
+      runtime,
+      lease,
+      forwarder,
+      replica,
+      switchable,
+      replicaPath,
+      numShards: N,
+      onExit,
+    });
+    try {
+      // 1. Commit an ORIGINAL row on the target shard through the runtime — this creates the shard's
+      //    ShardWriter and advances ITS oracle to this commit.
+      const orig = await runtime.run<string>("messages:send", { conversationId: convo, body: "original" });
+      expect(orig.commitTs).toBeGreaterThan(0n);
+      expect(handles.isLocalWriter(targetShard)).toBe(true);
+
+      // 2. RELEASE the target shard WITHOUT tearing down its ShardWriter — the exact balancer/relinquish
+      //    reduction: drop the fleet epoch (+ slot lock), leave the transactor's ShardWriter (and its
+      //    now-FROZEN oracle) in the Map. `writer_url` stays ours (not orphaned yet), so the balancer
+      //    won't re-acquire until we orphan it below — a deterministic window for the interim commit.
+      relinquish({ lease, client: client as unknown as NodePgClient, shards: SHARDS }, targetShard, "test release");
+      expect(lease.currentEpoch(targetShard)).toBeNull();
+
+      // 3. INTERIM OWNER commits directly on the shared primary (a NEW row for the same conversation +
+      //    its index entry) at a ts ABOVE our last commit, and advances the shard's fenced frontier to
+      //    it — exactly the row state a co-writer's commit guard would leave.
+      const interimTs = (await primary.maxTimestamp()) + 1n;
+      await rawPrimaryWrite(primary, convo, "interim", interimTs);
+      await client.query(`UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2`, [interimTs, targetShard]);
+
+      // 4. Orphan the shard row so the RUNNING balancer RE-ACQUIRES it on its next beat via the REAL
+      //    `tryAcquireShard` — the production path that now floors the write oracle to the row's frontier.
+      //    Driving the real balancer (not a direct call) is what makes this guard the fix WIRING.
+      await client.query(`UPDATE shard_leases SET writer_url = NULL WHERE shard_id = $1`, [targetShard]);
+      await waitUntil(() => lease.currentEpoch(targetShard) !== null); // balancer re-acquired it
+
+      // 5. The RMW reads at the re-acquired shard's write oracle snapshot. WITH the fix that oracle was
+      //    floored to the frontier (≥ interimTs), so the handler sees BOTH rows. WITHOUT it, the shard's
+      //    stale ShardWriter oracle sits at our own last commit and the handler sees only the original —
+      //    the silent lost update the hazard describes.
+      const rmw = await runtime.run<number>("messages:rmw", { conversationId: convo });
+      expect(rmw.value).toBe(2);
       expect(onExit).not.toHaveBeenCalled();
     } finally {
       await handles.stop();

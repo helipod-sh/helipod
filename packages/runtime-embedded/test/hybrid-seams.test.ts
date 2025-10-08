@@ -170,3 +170,90 @@ describe("observeTimestamp routing (Fleet B3, D1)", () => {
     expect(() => runtime.observeTimestamp(5n)).not.toThrow();
   });
 });
+
+describe("observeWriteTimestamp routing (Fleet B3 hazard fix — the write-path counterpart)", () => {
+  // A read-only MUTATION: it runs on the WRITE transactor and reads the primary at the write oracle's
+  // snapshot (`getLastCommittedTimestamp`) — the exact clock `observeWriteTimestamp` floors. A query
+  // instead reads the query oracle (proving the two are separate).
+  const probeModules: Record<string, RegisteredFunction> = {
+    ...modules,
+    "messages:probe": mutation<{ conversationId: string }, string[]>({
+      handler: async (ctx, { conversationId }) =>
+        (
+          await ctx.db.query("messages", "by_conversation").eq("conversationId", conversationId).collect()
+        ).map((d) => (d as { body: string }).body),
+    }),
+  };
+
+  it("advances the WRITE oracle (the write snapshot floor) and NEVER the query oracle", async () => {
+    const primaryStore = new SqliteDocStore(new NodeSqliteAdapter());
+    const queryStore = new SqliteDocStore(new NodeSqliteAdapter());
+    await primaryStore.setupSchema();
+    await queryStore.setupSchema();
+
+    const runtime = await EmbeddedRuntime.create({
+      store: primaryStore,
+      queryStore,
+      catalog: freshCatalog(),
+      modules: probeModules,
+    });
+
+    // Seed a row DIRECTLY onto the primary AFTER create (an interim owner's foreign commit on the
+    // shared primary), so the runtime's WRITE oracle — seeded from `primaryStore.maxTimestamp()` = 0
+    // at create — does not know that ts exists yet. Its OWN oracle instance drives the seed.
+    const primarySeed = new InlineUdfExecutor({
+      transactor: new SingleWriterTransactor(primaryStore, new MonotonicTimestampOracle(0n)),
+      queryRuntime: new QueryRuntime(primaryStore),
+      catalog: freshCatalog(),
+    });
+    await primarySeed.run(probeModules["messages:send"]!, { conversationId: "c1", body: "on-primary" }, { path: "seed-primary" });
+    const primaryTs = await primaryStore.maxTimestamp();
+    expect(primaryTs).toBeGreaterThan(0n);
+
+    // Likewise seed a DIFFERENT row onto the replica (queryStore) AFTER create — invisible to the
+    // runtime's query oracle until an `observeTimestamp` reveals it.
+    const replicaSeed = new InlineUdfExecutor({
+      transactor: new SingleWriterTransactor(queryStore, new MonotonicTimestampOracle(0n)),
+      queryRuntime: new QueryRuntime(queryStore),
+      catalog: freshCatalog(),
+    });
+    await replicaSeed.run(probeModules["messages:send"]!, { conversationId: "c1", body: "in-replica" }, { path: "seed-replica" });
+
+    // Before: the write snapshot (oracle frozen at 0) can't see the primary row; the query snapshot
+    // (oracle frozen at 0) can't see the replica row.
+    expect((await runtime.run<string[]>("messages:probe", { conversationId: "c1" })).value).toEqual([]);
+    expect((await runtime.run<Array<{ body: string }>>("messages:list", { conversationId: "c1" })).value).toEqual([]);
+
+    // `observeWriteTimestamp` floors the WRITE oracle only → the probe mutation now sees the primary row.
+    runtime.observeWriteTimestamp(primaryTs);
+    expect((await runtime.run<string[]>("messages:probe", { conversationId: "c1" })).value).toEqual(["on-primary"]);
+
+    // ... while the QUERY oracle is untouched — the query still can't see the replica row.
+    expect((await runtime.run<Array<{ body: string }>>("messages:list", { conversationId: "c1" })).value).toEqual([]);
+
+    // The read-path observer (`observeTimestamp`) is what advances the query oracle — the two are
+    // separate clocks fed by separate methods.
+    runtime.observeTimestamp(await queryStore.maxTimestamp());
+    const q = await runtime.run<Array<{ body: string }>>("messages:list", { conversationId: "c1" });
+    expect(q.value.map((d) => d.body)).toEqual(["in-replica"]);
+  });
+
+  it("without queryStore routes to the same write oracle as observeTimestamp (both advance the write snapshot)", async () => {
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    await store.setupSchema();
+    const runtime = await createEmbeddedRuntime({ store, catalog: freshCatalog(), modules: probeModules });
+
+    // Seed the primary out-of-band after create (write oracle stays at 0).
+    const seed = new InlineUdfExecutor({
+      transactor: new SingleWriterTransactor(store, new MonotonicTimestampOracle(0n)),
+      queryRuntime: new QueryRuntime(store),
+      catalog: freshCatalog(),
+    });
+    await seed.run(probeModules["messages:send"]!, { conversationId: "c1", body: "x" }, { path: "seed" });
+    const ts = await store.maxTimestamp();
+
+    expect((await runtime.run<string[]>("messages:probe", { conversationId: "c1" })).value).toEqual([]);
+    runtime.observeWriteTimestamp(ts); // no queryStore → this.oracle is the sole (write) oracle
+    expect((await runtime.run<string[]>("messages:probe", { conversationId: "c1" })).value).toEqual(["x"]);
+  });
+});

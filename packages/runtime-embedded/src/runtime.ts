@@ -776,9 +776,38 @@ export class EmbeddedRuntime {
    * own local commits, through `ShardWriter.commit`'s `oracle.publishCommitted`). Sharing one
    * oracle between the two would let a query snapshot ABOVE the replica's actual watermark and
    * read holes (D1's spec-review requirement) — this branch is what keeps them separate.
+   *
+   * This is the READ-PATH observer (tailer/follower freshness → query snapshot). Its write-path
+   * counterpart, `observeWriteTimestamp` (below), always targets the WRITE oracle and exists
+   * precisely because this method stopped feeding the write side once a hybrid has a query oracle.
    */
   observeTimestamp(ts: bigint): void {
     (this.queryOracle ?? this.oracle).observeTimestamp(ts);
+  }
+
+  /**
+   * Advance the WRITE transactor's timestamp oracle(s) past `ts` — the write-path counterpart to
+   * `observeTimestamp` above, and the pre-T1 semantics of what `observeTimestamp` used to do before
+   * hybrid routing split the two. ALWAYS targets `this.oracle` (the write side), independent of
+   * `queryStore`/`queryOracle` routing: a `ShardedTransactor` fans `ts` to every existing shard
+   * oracle AND raises its `observedHighWater` floor (so a shard writer CREATED later seeds at-or-past
+   * `ts`); the single-shard `MonotonicTimestampOracle` takes it directly.
+   *
+   * Purpose (distinct from `observeTimestamp`): re-floor the WRITE snapshot on a shard OWNERSHIP
+   * CHANGE. On a hybrid node `observeTimestamp` feeds the QUERY oracle, so nothing feeds the write
+   * oracle from foreign observations anymore. A shard this node held, RELEASED (its `ShardWriter`
+   * stays in the transactor's Map — only the fleet epoch is dropped), and later RE-ACQUIRES would
+   * keep that `ShardWriter`'s oracle frozen at this node's own last commit; the next mutation would
+   * snapshot BELOW an interim owner's commits and an RMW handler would compute on stale state (the
+   * durable chain stays intact via latest-`prev_ts`, but the update is semantically lost). The fleet
+   * calls this on EVERY shard acquisition with the lease row's `frontier_ts` — which is >= every
+   * prior commit on that shard by the fence invariant (the commit guard writes `frontier_ts =
+   * GREATEST(frontier_ts, commitTs)` inside each commit txn) — so it is the exact correct floor.
+   * Idempotent/monotone: a `ts` at or below the oracle's position is a no-op (harmless on a
+   * fresh/never-released shard, and on every non-hybrid node where it is called uniformly too).
+   */
+  observeWriteTimestamp(ts: bigint): void {
+    this.oracle.observeTimestamp(ts);
   }
 
   /**

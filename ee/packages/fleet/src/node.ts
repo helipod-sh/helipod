@@ -994,20 +994,31 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   const tryAcquireShard = async (shardId: ShardId): Promise<boolean> => {
     const slot = shards.indexOf(shardId);
     if (slot < 0) return false;
-    let acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
+    let state = await lease.tryAcquire(shardId, slot, true);
     // Lock held — if this shard's lease has expired, its holder is wedged/dead: fence + terminate so
     // the retry's advisory try can win. No-op when the lease is still live (a real non-target holder,
     // which the balancer must NOT steal — so acquisition simply fails this beat and is left alone).
-    if (!acquired && (await lease.isExpired(shardId))) {
+    if (!state && (await lease.isExpired(shardId))) {
       const { fenced, oldAppName } = await lease.evictExpired(shardId);
       if (fenced && oldAppName !== null) await lease.terminateBackend(oldAppName);
-      acquired = (await lease.tryAcquire(shardId, slot, true)) !== null;
+      state = await lease.tryAcquire(shardId, slot, true);
     }
+    if (!state) return false;
+    // Fleet B3 hazard fix: floor this node's WRITE oracle for `shardId` to the row's fenced frontier.
+    // `frontier_ts` is >= every prior commit on this shard by the fence invariant (the commit guard
+    // writes `frontier_ts = GREATEST(frontier_ts, commitTs)` inside each commit txn), INCLUDING commits
+    // an interim owner made while this node didn't hold the shard. Without this, a shard this node
+    // RELEASED (its `ShardWriter` stays in the transactor Map, only the fleet epoch dropped) and now
+    // RE-ACQUIRES keeps that writer's oracle frozen at this node's own last commit — on a hybrid,
+    // `observeTimestamp` feeds the QUERY oracle, so nothing else advances the write side — and the next
+    // RMW mutation snapshots below the interim commits and silently loses the update. A no-op on a
+    // fresh/never-released shard (frontier == our own max). See `EmbeddedRuntime.observeWriteTimestamp`.
+    runtime.observeWriteTimestamp(state.frontierTs);
     // D5: acquiring the default ring (re)starts this node's drivers — idempotent, so a writer boot that
     // already started them at create() is a no-op; a failover/multi-writer node that takes over the
     // default shard wakes them here.
-    if (acquired && shardId === DEFAULT_SHARD) void runtime.startDrivers();
-    return acquired;
+    if (shardId === DEFAULT_SHARD) void runtime.startDrivers();
+    return true;
   };
 
   // Graceful point-in-time RELEASE of a held shard the rendezvous assignment no longer gives this node
@@ -1389,7 +1400,15 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   doPromote = triggerPromotion;
   // The shipped DEFAULT-shard election path (fast failover — grabs the freed advisory lock the instant
   // the prior writer dies, without waiting out any presence TTL) also triggers the same promotion.
-  lease.acquireLoop(() => triggerPromotion());
+  lease.acquireLoop((state) => {
+    // Fleet B3 hazard fix (default-shard re-acquire): floor the WRITE oracle to the election-won lease
+    // row's fenced frontier before promotion arms the writer half. This is the ONLY observeWriteTimestamp
+    // for a re-acquired DEFAULT shard on the election path — `armWriter`'s `acquireTargetsNow` won't
+    // re-acquire the default shard (the election already holds it, so `isHeld` is true → skipped). Same
+    // stale-snapshot hazard the balancer's `tryAcquireShard` guards above; see observeWriteTimestamp.
+    runtime.observeWriteTimestamp(state.frontierTs);
+    triggerPromotion();
+  });
 
   // Start the balancer on the sync node too: it heartbeats this node's presence (its liveness signal —
   // a shardless sync node has no shard_leases row and no LeaseMonitor), and requests promotion when
