@@ -440,6 +440,10 @@ export class EmbeddedRuntime {
           identity: null,
           privileged: true,
           numShards,
+          // A driver runs on the writer that owns its control tables and must read-its-own-writes:
+          // force its queries onto the PRIMARY, never a hybrid node's lagging replica queryPath, so
+          // a just-enqueued scheduler job is visible on the very next peek. No-op off a hybrid.
+          primaryRead: true,
         });
         return res.value;
       },
