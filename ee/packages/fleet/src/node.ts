@@ -113,6 +113,12 @@ export class FrontierMonitor {
   private lastMin: bigint | null = null;
   private minSinceMs: number;
   private warned = false;
+  /** D4 — replica-lag tracking: wall-clock time this node's OWN tailer watermark was first observed
+   *  BEHIND the fleet frontier F, or `null` while it's caught up. Mirrors `minSinceMs`/`lastMin`'s
+   *  "age of the current stuck condition" shape, but for the replica catch-up gap rather than F's own
+   *  advance. Reset the instant `wm` reaches `F` again — a transient blip re-arms silently. */
+  private replicaLagSinceMs: number | null = null;
+  private replicaLagWarned = false;
 
   constructor(
     private readonly lease: LeaseManager,
@@ -126,6 +132,17 @@ export class FrontierMonitor {
       lagWarnMs?: number;
       now?: () => number;
       warn?: (msg: string) => void;
+      /**
+       * D4 — this node's own local replica-tailer watermark, when it has one: a sync node's
+       * `ReplicaTailer`, or (in the hybrid/multi-writer regime) a writer's own read-replica tailer.
+       * Omitted for a non-hybrid writer (it reads the primary directly — no replica, no lag to track).
+       * Compared against the fleet frontier `F = min(frontier_ts)` each beat; `wm` falling more than
+       * `lagWarnMs` behind `F` logs ONE operator warning naming this node's replica (`lease.advertiseUrl`
+       * — there is only ever one replica per node, so naming the NODE identifies it), silent below the
+       * threshold and while caught up. Same shape/once-ness as the pinning-shard warning above; applies
+       * identically whether this monitor is a sync node's or a hybrid writer's (same `beat()` code path).
+       */
+      tailerWatermark?: () => bigint;
     },
   ) {
     this.minSinceMs = (opts.now ?? Date.now)();
@@ -187,6 +204,27 @@ export class FrontierMonitor {
           `fleet: frontier stuck for ${lagMs}ms at ${min} — shard '${pinningShard}' is pinning F`,
         );
       }
+      // D4 — replica-lag warning: this node's own tailer watermark falling behind the fleet frontier.
+      // Same shape as the pinning-shard warning above (age-of-current-condition tracking, warn once,
+      // silent below threshold, re-arms on recovery), applied to `wm` vs `F` instead of `min`'s own
+      // advance. Only when this monitor was given a tailer to watch (sync nodes always have one; a
+      // non-hybrid writer reads the primary directly and has none — `tailerWatermark` is omitted there).
+      if (this.opts.tailerWatermark) {
+        const wm = this.opts.tailerWatermark();
+        if (wm < min) {
+          if (this.replicaLagSinceMs === null) this.replicaLagSinceMs = nowMs;
+          const replicaLagMs = nowMs - this.replicaLagSinceMs;
+          if (replicaLagMs > lagWarnMs && !this.replicaLagWarned) {
+            this.replicaLagWarned = true;
+            (this.opts.warn ?? ((m: string) => console.warn(m)))(
+              `fleet: replica for '${this.lease.advertiseUrl}' lagging ${replicaLagMs}ms behind frontier ${min} (watermark ${wm})`,
+            );
+          }
+        } else {
+          this.replicaLagSinceMs = null;
+          this.replicaLagWarned = false;
+        }
+      }
     } catch {
       // A transient read/close failure must not kill the beat loop — the next beat retries. (On the
       // writer, a persistent failure to close idle shards surfaces as growing lag, which is exactly
@@ -214,6 +252,29 @@ export class FrontierMonitor {
       this.coalesceTimer = null;
     }
   }
+}
+
+/**
+ * D4 — a generic async-op serializer: returns a `run(op)` function where every queued `op` executes
+ * only after the PREVIOUS one has settled (resolved OR rejected — `.then(op, op)`, so one op
+ * rejecting never wedges the chain for the next). Callers that fire-and-forget a burst of overlapping
+ * async calls (see `startFleetNode`'s `startDriversChained`/`stopDriversOnlyChained`) get a
+ * deterministic EXECUTION order matching the ISSUE order, even when the callee itself is merely
+ * idempotent (idempotence alone doesn't prevent a later-issued-but-faster call from resolving before
+ * an earlier one, which is the race this closes). Each call to `createAsyncChain()` returns an
+ * independent chain — callers needing one shared serialization point construct exactly one instance
+ * and route every op through the same returned function.
+ */
+export function createAsyncChain(): (op: () => Promise<void>) => Promise<void> {
+  let tail: Promise<void> = Promise.resolve();
+  return (op: () => Promise<void>): Promise<void> => {
+    const settled = tail.then(op, op);
+    tail = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return settled;
+  };
 }
 
 /**
@@ -584,7 +645,19 @@ export async function prepareFleetNode(deps: {
   // fallback in the tailer for the rest of the process lifetime.
   const fanoutAdapter = new NotifyingFanoutAdapter(new InMemoryWriteFanoutAdapter(), client);
 
-  await lease.setup();
+  // Probed ONCE, up front — nothing between here and `startFleetNode`'s sync/writer branches creates
+  // `documents` (that's `bootProject`'s `store.setupSchema()`, which runs AFTER this function
+  // returns), so this single read is valid for every seed decision below: `lease.setup()`'s all-N-row
+  // pre-seed (D4) AND the default shard's own `tryAcquire` seed (the original F1×N residual-window
+  // fix) both gate on the SAME boolean — a fresh database (no `documents` yet) seeds every row's
+  // frontier to 0 (correct: no history to protect), an upgrade (already exists) seeds every row to the
+  // store's real max (correct: never momentarily visible below it).
+  const documentsExist = await documentsTableExists(client);
+  // D4 — pre-seed all N shard rows at DDL time (same seed as tryAcquire's first-creation INSERT; see
+  // `LeaseManager.setup`'s doc comment for why this reversal of B2a's "no pre-seeding" call is safe):
+  // the tailer's `count(*) < numShards → not-ready` gate is satisfied the instant this returns, so a
+  // concurrent multi-writer boot no longer stalls waiting for a writer's acquire-all pass to finish.
+  await lease.setup(shards, documentsExist);
   // B2b, D3: write this node's `fleet_nodes` presence row FIRST — BEFORE the writer-election
   // `tryAcquire`, so a node that LOSES the election and boots sync is already visible in every peer's
   // live set (and thus a rendezvous participant) from the instant it exists, not only once it holds a
@@ -594,16 +667,11 @@ export async function prepareFleetNode(deps: {
   // Writer election is the DEFAULT shard's lock (slot 0). In B2a single-node the node that wins it
   // holds ALL shards (the remaining slots are acquired in `startFleetNode`'s writer/promotion arming);
   // drivers run on the default-shard holder only (D5). `tryAcquire` takes slot 0's per-shard lock in
-  // pool mode, else the legacy writer lock (PGlite/no-pool) — same election either way.
-  //
-  // Seed the DEFAULT shard's first-created frontier from the store max IFF `documents` already exists
-  // (F1×N residual-window fix). This election runs BEFORE `bootProject`'s `setupSchema`, so on a fresh
-  // database `documents` does NOT exist yet — but a fresh store holds no data, so `frontier_ts = 0` is
-  // correct there. On a PRE-LOADED store (single-node `serve` upgraded to `--fleet`), `documents`
-  // already exists and this seeds the default row to the real max at INSERT time, so it is never
-  // momentarily visible at 0 while the other shards are still being acquired in `armWriter`.
-  const seedDefaultFrontier = await documentsTableExists(client);
-  const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0, seedDefaultFrontier);
+  // pool mode, else the legacy writer lock (PGlite/no-pool) — same election either way. The row was
+  // very likely already created (seeded) by `lease.setup()` above, so this normally lands on the
+  // `ON CONFLICT` branch (frontier untouched, already correctly seeded) — `documentsExist` is passed
+  // regardless as belt-and-braces for the (never, in production) case this is the row's first creation.
+  const acquired = await lease.tryAcquire(DEFAULT_SHARD, 0, documentsExist);
 
   // Fleet B3: multi-writer IS the hybrid regime. A hybrid node — of EITHER boot role — keeps a local
   // replica and serves queries from it while committing to the primary, so BOTH branches below open
@@ -1005,16 +1073,32 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // writer never self-promotes) and until the sync branch assigns the real trigger.
   let doPromote: () => void = () => {};
 
+  // D4 — driver-chain serialization: every `startDrivers()`/`stopDriversOnly()` call site below fires
+  // fire-and-forget (`void ...()`), from several independent triggers (the balancer's per-shard
+  // acquire, `relinquish`'s default-shard drop, and either promotion path) that can land in the SAME
+  // tick — a default-shard acquire immediately followed by a fence, or vice versa. Each op is
+  // individually idempotent on the runtime (`driversStarted` is reset/re-checked), but idempotence
+  // alone does NOT order two overlapping async calls: `startDrivers()`'s `for (const d of
+  // this.drivers) await d.start(...)` loop can still be mid-flight when an unawaited `stopDriversOnly()`
+  // issued a moment later actually RESOLVES first (its own loop may simply have less to await), so
+  // "last call wins" is not guaranteed by the runtime alone — the calls must be serialized in the
+  // ORDER THEY WERE ISSUED via `createAsyncChain()` (below) — scoped to this ONE node's driver
+  // lifecycle (a fresh chain per `startFleetNode` call), not shared across nodes.
+  const chainDriverOp = createAsyncChain();
+  const startDriversChained = (): Promise<void> => chainDriverOp(() => runtime.startDrivers());
+  const stopDriversOnlyChained = (): Promise<void> => chainDriverOp(() => runtime.stopDriversOnly());
+
   // B2b, D5 — "drivers follow the default shard": the scheduler/workflow/cron/reaper drivers run on
   // EXACTLY the node that currently holds the DEFAULT ring (the ring the scheduler's own unsharded
   // tables live on). Acquiring the default shard (re)starts them; relinquishing OR gracefully
   // releasing it stops them (both routed through `relinquish`, which fires `onDefaultRelinquished`).
-  // `startDrivers`/`stopDriversOnly` are idempotent both ways, so these fire freely on every event.
+  // `startDrivers`/`stopDriversOnly` are idempotent both ways, so these fire freely on every event —
+  // routed through `chainDriverOp` (above) so overlapping fires stay ORDERED, not just idempotent.
   const relinquishDeps: RelinquishDeps = {
     lease,
     client,
     shards,
-    onDefaultRelinquished: () => void runtime.stopDriversOnly(),
+    onDefaultRelinquished: () => void stopDriversOnlyChained(),
   };
 
   // One-tick acquire of a single shard's lease (+ its per-slot advisory lock) for the balancer. Mirrors
@@ -1048,7 +1132,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // D5: acquiring the default ring (re)starts this node's drivers — idempotent, so a writer boot that
     // already started them at create() is a no-op; a failover/multi-writer node that takes over the
     // default shard wakes them here.
-    if (shardId === DEFAULT_SHARD) void runtime.startDrivers();
+    if (shardId === DEFAULT_SHARD) void startDriversChained();
     return true;
   };
 
@@ -1243,6 +1327,11 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     frontierMonitor = new FrontierMonitor(lease, {
       closeIdle,
       runExclusiveOnShard: (shardId, fn) => runtime.tryRunExclusiveOnShard(shardId, fn),
+      // D4 — replica-lag warning: a hybrid writer keeps a local read-replica tailer (`hybridTailer`,
+      // already started above/on the prior sync boot by the time `armWriter` runs) even though it
+      // commits to the primary — watch ITS watermark against F too. A non-hybrid writer has no
+      // replica (reads the primary directly), so this is omitted there — nothing to lag.
+      tailerWatermark: multiWriter ? () => hybridTailer!.watermark() : undefined,
     });
     frontierMonitor.start();
     // Coalesced idle-close on each LOCAL commit: a commit on one shard schedules a ~10ms beat so idle
@@ -1369,8 +1458,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // Read-only frontier-lag monitor so /api/health reports the fleet frontier + pinning shard even on
   // a sync node. It holds no leases, so `closeIdle:false` — it must NOT allocate `nextval` (only the
   // writer drives the frontier); it just observes whether F is advancing. Replaced by the writer's
-  // idle-closing monitor if this node is promoted (armWriter stops this one first).
-  frontierMonitor = new FrontierMonitor(lease, { closeIdle: false });
+  // idle-closing monitor if this node is promoted (armWriter stops this one first). D4: a sync node
+  // ALWAYS has a local tailer (`tailer`, above) — watch its watermark against F for the replica-lag
+  // warning, regardless of single-writer vs hybrid mode.
+  frontierMonitor = new FrontierMonitor(lease, { closeIdle: false, tailerWatermark: () => tailer.watermark() });
   frontierMonitor.start();
 
   // The CRITICAL PROMOTION ORDER, wrapped by C5 error policy — runs at most once, whichever trigger
@@ -1404,7 +1495,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
           writerish = true;
           // "Drivers follow the default shard": `armWriter`'s default-shard acquisition (re)started them
           // if this node took the default ring; stop them if it promoted for a NON-default shard only.
-          if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
+          if (lease.currentEpoch(DEFAULT_SHARD) === null) void stopDriversOnlyChained();
           return;
         }
         // Single-writer FAILOVER promotion (multi-writer off): the shipped CRITICAL PROMOTION ORDER —
@@ -1414,7 +1505,18 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         // `replica` is a `let` reassigned inside `startHybridTailer` (a nested closure), which defeats
         // TS control-flow narrowing here — but the sync-boot invariant above threw unless it was
         // present, and `reconcileReplicaIdentity` reassigned it to a non-null store, so it is defined.
-        await promoteFleetNode({ runtime, pgStore, switchable, forwarder, tailer, replica: replica! });
+        await promoteFleetNode({
+          // D4: `startDrivers` routed through the SAME driver chain as every other call site, so this
+          // promotion's step 7 (`await runtime.startDrivers()`) is ordered against any overlapping
+          // `stopDriversOnly()`/`startDrivers()` fired from the balancer or a relinquish, rather than
+          // racing the runtime's own bare call directly.
+          runtime: { observeTimestamp: (ts) => runtime.observeTimestamp(ts), startDrivers: startDriversChained },
+          pgStore,
+          switchable,
+          forwarder,
+          tailer,
+          replica: replica!,
+        });
         // Swap the read-only frontier monitor for the writer's idle-closing one, and acquire this
         // node's rendezvous targets. `seed=false`: promotion never re-seeds frontiers (they're already
         // live — a dead writer's high-water is preserved through the epoch-bumping re-acquire).
@@ -1426,7 +1528,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         await armWriter(false);
         // Now writer-ish: the already-running balancer's next beat will acquire/release to converge.
         writerish = true;
-        if (lease.currentEpoch(DEFAULT_SHARD) === null) void runtime.stopDriversOnly();
+        if (lease.currentEpoch(DEFAULT_SHARD) === null) void stopDriversOnlyChained();
       },
       startMonitor: startWriterMonitor,
       firePromoted,

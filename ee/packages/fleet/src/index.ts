@@ -22,6 +22,7 @@ export {
   installCommitGuard,
   relinquish,
   FrontierMonitor,
+  createAsyncChain,
   fleetApplicationName,
   fleetMultiWriterEnabled,
   REPLICA_DB_FILENAME,

@@ -181,20 +181,35 @@ export class LeaseManager {
   }
 
   /**
-   * Idempotent DDL: creates shard_leases if it doesn't already exist.
+   * Idempotent DDL: creates shard_leases if it doesn't already exist, and — when `shardIds` is
+   * non-empty — pre-seeds a row for every shard in the list (Fleet B3, D4: the concurrent-boot
+   * count-gate fix, reversing B2a's "no pre-seeding" call).
    *
-   * Deliberately does NOT pre-seed any shard rows (B2a): the rows are created on demand by the
-   * writer's per-shard `tryAcquire(shardId, slot)` (the acquire-all loop in `node.ts`), each stamped
-   * with the acquiring node's epoch/url and — crucially — its frontier seeded up to the store's max
-   * BEFORE the node reports ready (the F1×N fix). If `setup()` instead pre-created all N rows at
-   * `frontier_ts = 0`, a sync node booting concurrently (before any writer seeds) would see
-   * `count(*) = N` AND `min(frontier_ts) = 0` and fake-report ready with an EMPTY replica — the exact
-   * F1 hole, recurring ×N. So row existence is tied to a real, frontier-seeded acquisition, and the
-   * tailer's belt-and-braces `count(*) < NUM_SHARDS → not-ready` gate holds until the writer has
-   * genuinely claimed and seeded every shard. See `node.ts`'s writer boot for the acquire-all+seed
-   * order and `replica-tailer.ts`'s `readFrontier` for the count gate.
+   * B2a originally left this deliberately EMPTY (no pre-seeded rows): a bare `frontier_ts = 0` row
+   * created at DDL time, on a database that already held documents (a pre-`--fleet` upgrade), would
+   * be momentarily visible at `frontier_ts = 0` to a concurrently-booting sync node — `count(*) = N`
+   * AND `min(frontier_ts) = 0` would fake-report ready with an EMPTY replica (the F1×N hole,
+   * recurring ×N). That is why row existence used to be tied to a REAL, frontier-seeded acquisition
+   * (`tryAcquire`) rather than to `setup()`.
+   *
+   * The reversal here is safe ONLY because the seed now travels WITH the row: `documentsExist` (the
+   * caller's `documentsTableExists` probe, run BEFORE calling this) selects the exact same
+   * `frontierSeedExpr` fragment `tryAcquire` uses — `0` on a fresh database (no `documents` table
+   * yet: correct, there is no history to protect against), or `(SELECT COALESCE(MAX(ts), 0) FROM
+   * documents)` on an upgrade (`documents` already exists: correct, the row is born at the true
+   * high-water mark, never momentarily at 0). A pre-seeded row is created UNACQUIRED — `epoch = 0`,
+   * `writer_url = NULL`, already-expired `expires_at` — so the FIRST real `tryAcquire` still lands on
+   * its `ON CONFLICT` branch and bumps `epoch` from 0 to 1, byte-identical to a fresh INSERT's
+   * `epoch = 1`; every existing epoch/ownership assertion in the test suite is unaffected. Idempotent
+   * (`ON CONFLICT (shard_id) DO NOTHING`): a row already created by a peer's concurrent `setup()` or
+   * by a real acquisition is left untouched — this can only ever RAISE a row into existence, never
+   * clobber one. With every shard row present immediately, the tailer's `count(*) < NUM_SHARDS →
+   * not-ready` gate is satisfied the instant `setup()` returns — a concurrent multi-writer boot no
+   * longer stalls waiting for a writer to finish its acquire-all pass. See `node.ts`'s
+   * `prepareFleetNode` for the `documentsTableExists` probe + call site, and `replica-tailer.ts`'s
+   * `readFrontier` for the count gate.
    */
-  async setup(): Promise<void> {
+  async setup(shardIds: readonly ShardId[] = [], documentsExist = false): Promise<void> {
     await this.client.query(`
       CREATE TABLE IF NOT EXISTS shard_leases (
         shard_id        TEXT PRIMARY KEY,
@@ -237,6 +252,39 @@ export class LeaseManager {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
+
+    if (shardIds.length === 0) return;
+    // Batched pre-seed, one row per shard, all sharing the SAME `frontierSeedExpr` snapshot (the
+    // subquery is re-evaluated per VALUES row within the one statement's snapshot, so every row gets
+    // an identical seed). `epoch = 0`/`writer_url = NULL`/already-expired `expires_at` mark the row as
+    // UNACQUIRED — see the class doc comment above for why the first real `tryAcquire` still bumps
+    // epoch 0 -> 1, byte-identical to a fresh INSERT. `ON CONFLICT DO NOTHING`: idempotent against a
+    // concurrent peer's `setup()` (same shard list) or a row a real acquisition already created.
+    const frontierSeed = this.frontierSeedExpr(documentsExist);
+    const params: string[] = [];
+    const values = shardIds.map((shardId, i) => {
+      params.push(shardId);
+      return `($${i + 1}, 0, NULL, NULL, now(), ${frontierSeed}, 0)`;
+    });
+    await this.client.query(
+      `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
+       VALUES ${values.join(", ")}
+       ON CONFLICT (shard_id) DO NOTHING`,
+      params,
+    );
+  }
+
+  /**
+   * The `frontier_ts` seed SQL fragment shared by `setup()`'s row pre-seed and `tryAcquire()`'s
+   * first-creation INSERT (Fleet B3, D4 — the one place this reasoning is written down): `0` when the
+   * caller has verified `documents` does not exist yet (a fresh database — no history to protect
+   * against), else `(SELECT COALESCE(MAX(ts), 0) FROM documents)` (an upgrade — the row is born at the
+   * store's true high-water mark, never momentarily visible below it). Both call sites gate this on
+   * the SAME `documentsTableExists` probe (`node.ts`), so a row is never seeded incorrectly regardless
+   * of which of the two code paths creates it first.
+   */
+  private frontierSeedExpr(documentsExist: boolean): string {
+    return documentsExist ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)` : `0`;
   }
 
   /**
@@ -396,7 +444,7 @@ export class LeaseManager {
     // Seed a FIRST-creation frontier from the store's current max (atomic with the INSERT) when the
     // caller vouches `documents` exists; else 0. The `frontier_ts < $N`-style guards elsewhere and
     // `GREATEST` on every later write mean this only ever RAISES the seed, never regresses it.
-    const frontierSeed = seedFrontierFromDocuments ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)` : `0`;
+    const frontierSeed = this.frontierSeedExpr(seedFrontierFromDocuments);
     const rows = await this.client.query(
       `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
        VALUES ($1, 1, $2, $3, now() + interval '${this.ttlMsSql} milliseconds', ${frontierSeed}, 0)

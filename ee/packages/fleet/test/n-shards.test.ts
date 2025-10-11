@@ -453,3 +453,219 @@ describe("Shards B2b, Task 3 — per-shard relinquish (fence on s becomes 'drop 
     await client.close();
   });
 });
+
+describe("Fleet B3, Task 4 (D4) — setup()-time row seeding: the concurrent-boot count-gate fix", () => {
+  it("fresh DB: setup(shards, documentsExist=false) pre-creates all N rows at frontier 0", async () => {
+    const client = new PgliteClient();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    // `documents` does not exist yet (no `PostgresDocStore.setupSchema()` has run) — mirrors writer
+    // election running BEFORE `bootProject`'s DDL on a genuinely fresh database.
+    await lease.setup(SHARDS, false);
+    const rows = await lease.readAllFrontiers();
+    expect(rows.map((r) => r.shardId).sort()).toEqual([...SHARDS].sort());
+    expect(rows.every((r) => r.frontierTs === 0n)).toBe(true); // correct: no history to protect
+    await client.close();
+  });
+
+  it("PRE-LOADED store: setup(shards, documentsExist=true) pre-creates all N rows born ≥ MAX(ts) — the F1×N regression re-check at setup-time creation", async () => {
+    const client = new PgliteClient();
+    const pgStore = new PostgresDocStore(client);
+    await pgStore.setupSchema();
+    // Real pre-existing history via the raw write() path — no fleet/lease machinery involved yet,
+    // mirroring a single-node `serve` that later enables `--fleet` against data it already holds.
+    const a = newDocumentId(TABLE);
+    const b = newDocumentId(TABLE);
+    await pgStore.write([rev(a, 1n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 1n)], "Error");
+    await pgStore.write([rev(b, 2n, null, "B1")], [idxPut(b, encodeIndexKey(["b"]), 2n)], "Error");
+    expect(await pgStore.maxTimestamp()).toBe(2n);
+
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    // documentsExist=true — the row must NEVER be momentarily visible at frontier 0 (the F1×N hole
+    // this reversal reintroduces if the seed doesn't travel with the row's creation).
+    await lease.setup(SHARDS, true);
+    const rows = await lease.readAllFrontiers();
+    expect(rows.map((r) => r.shardId).sort()).toEqual([...SHARDS].sort());
+    expect(rows.every((r) => r.frontierTs === 2n)).toBe(true); // every row born at the true max, ≥ max
+    await client.close();
+  });
+
+  it("count-gate satisfied immediately after setup() — a fresh tailer's ready gate resolves with NO acquisition at all (the concurrent-boot stall fix)", async () => {
+    const client = new PgliteClient();
+    const pgStore = new PostgresDocStore(client);
+    await pgStore.setupSchema();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    // Pre-seed all N rows via setup() alone — NO tryAcquire/acquireShardAsWriter call at all. Before
+    // this fix, `count(*) < numShards` would hold until a writer's acquire-all pass finished, so a
+    // concurrently-booting node's ready gate would stall; now `setup()` alone satisfies it.
+    await lease.setup(SHARDS, false);
+
+    const replica = new SqliteDocStore(new NodeSqliteAdapter());
+    await replica.setupSchema();
+    const tailer = new ReplicaTailer(client, pgStore, replica, {
+      numShards: N,
+      pollMs: 10,
+      onInvalidation: async () => {},
+    });
+    // Must resolve promptly (count(*) === N is already satisfied) rather than hang waiting for an
+    // acquisition that never comes in this test.
+    await tailer.start();
+    expect(tailer.watermark()).toBe(0n); // fresh store, F = 0 — correctly "ready, empty"
+    await tailer.stop();
+    await replica.close();
+    await client.close();
+  });
+
+  it("tryAcquire's ON CONFLICT still preserves a LIVE frontier on a setup()-pre-seeded row (never resets on the first real acquisition)", async () => {
+    const client = new PgliteClient();
+    const pgStore = new PostgresDocStore(client);
+    await pgStore.setupSchema();
+    const a = newDocumentId(TABLE);
+    await pgStore.write([rev(a, 5n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 5n)], "Error");
+
+    const lease = new LeaseManager(client, { advertiseUrl: "http://node-a:4000" });
+    await lease.setup(SHARDS, true); // pre-seeds every row's frontier to the store max (5)
+    const preSeeded = await lease.readAllFrontiers();
+    expect(preSeeded.every((r) => r.frontierTs === 5n)).toBe(true);
+
+    // The FIRST real tryAcquire on a pre-seeded row lands on the ON CONFLICT branch (epoch 0 -> 1) —
+    // byte-identical epoch semantics to a fresh INSERT — and must NOT touch frontier_ts.
+    const state = await lease.tryAcquire(DEFAULT_SHARD, 0);
+    expect(state).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 5n });
+    expect((await lease.read(DEFAULT_SHARD))?.frontierTs).toBe(5n); // untouched by the acquire
+
+    // A commit advances the frontier for real…
+    installCommitGuard(pgStore, lease, () => {});
+    const ts = await pgStore.commitWrite([doc(newDocumentId(TABLE), "x")], [], DEFAULT_SHARD);
+    expect((await lease.read(DEFAULT_SHARD))?.frontierTs).toBe(ts);
+
+    // …and a RE-acquisition (failover/promotion) still must not regress it below the live commit.
+    const reacquired = await lease.tryAcquire(DEFAULT_SHARD, 0);
+    expect(reacquired?.epoch).toBe(2n);
+    expect(reacquired?.frontierTs).toBe(ts); // preserved, not reset to the pre-seed value
+    await client.close();
+  });
+
+  it("setup() row-seeding is idempotent: calling it twice (concurrent-boot simulation) never clobbers an already-seeded/acquired row", async () => {
+    const client = new PgliteClient();
+    const pgStore = new PostgresDocStore(client);
+    await pgStore.setupSchema();
+    const a = newDocumentId(TABLE);
+    await pgStore.write([rev(a, 3n, null, "A1")], [idxPut(a, encodeIndexKey(["a"]), 3n)], "Error");
+
+    const leaseX = new LeaseManager(client, { advertiseUrl: "http://node-x:4000" });
+    const leaseY = new LeaseManager(client, { advertiseUrl: "http://node-y:4000" });
+    // Two nodes racing setup() concurrently against a preloaded store — both must seed the SAME max,
+    // ON CONFLICT DO NOTHING makes the second call a no-op rather than an error or a clobber.
+    await Promise.all([leaseX.setup(SHARDS, true), leaseY.setup(SHARDS, true)]);
+    const rows = await leaseX.readAllFrontiers();
+    expect(rows.map((r) => r.shardId).sort()).toEqual([...SHARDS].sort());
+    expect(rows.every((r) => r.frontierTs === 3n)).toBe(true);
+    await client.close();
+  });
+});
+
+describe("Fleet B3, Task 4 (D4) — FrontierMonitor replica-lag warning", () => {
+  // Short real-time beat interval so these tests don't need to sleep for the production 100ms cadence
+  // — `now`/the fake clock (not real wall time) is what drives the lagMs math the warning gates on.
+  const BEAT_MS = 15;
+  /** Wait long enough for at least one more real interval tick to have landed. */
+  const tick = () => new Promise((r) => setTimeout(r, BEAT_MS * 3));
+  /** Calls matching the REPLICA-lag warning specifically (as opposed to the pre-existing pinning-
+   *  shard warning, which fires independently whenever F itself sits unchanged past the threshold —
+   *  an orthogonal, expected side effect of these tests never advancing F via a real commit). */
+  const lagCalls = (warn: ReturnType<typeof vi.fn>) => warn.mock.calls.filter((c) => String(c[0]).includes("lagging"));
+
+  it("fires ONE warning once the tailer watermark falls > lagWarnMs behind the fleet frontier F, naming this node's replica", async () => {
+    const { client, lease } = await makeNode("http://sync-node:7000");
+    await acquireAll(lease);
+    // Seed EVERY shard's F to the same nonzero value (min is unambiguous; no per-shard skew to muddy
+    // the pinning-shard warning's own text) so there's a real gap for the "replica" watermark to lag.
+    await lease.seedFrontierAll(100n);
+
+    let clock = 1_000;
+    const warn = vi.fn();
+    // A stand-in for a local replica tailer stuck behind F (never catches up during this test).
+    const mon = new FrontierMonitor(lease, {
+      closeIdle: false,
+      beatMs: BEAT_MS,
+      now: () => clock,
+      warn,
+      tailerWatermark: () => 0n, // this node's replica hasn't applied anything
+    });
+    mon.start(); // beats immediately at clock=1000 — arms replicaLagSinceMs, still below threshold
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(0); // below threshold — silent
+
+    clock += 6_000; // past FRONTIER_LAG_WARN_MS (5000)
+    await tick(); // a real interval tick re-beats, now computing lagMs against the advanced clock
+    expect(lagCalls(warn)).toHaveLength(1);
+    expect(lagCalls(warn)[0]![0]).toContain("http://sync-node:7000"); // names this node's replica
+    expect(lagCalls(warn)[0]![0]).toContain("lagging");
+
+    // Stays silent on further beats past the threshold (warn-once, mirrors the pinning-shard warning).
+    clock += 1_000;
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(1);
+
+    mon.stop();
+    await client.close();
+  });
+
+  it("stays silent while the tailer watermark is caught up to (or ahead of) F, and re-arms after a lag recovers then recurs", async () => {
+    const { client, lease } = await makeNode("http://sync-node:7001");
+    await acquireAll(lease);
+    await lease.seedFrontierAll(100n);
+
+    let clock = 1_000;
+    let wm = 100n; // caught up
+    const warn = vi.fn();
+    const mon = new FrontierMonitor(lease, {
+      closeIdle: false,
+      beatMs: BEAT_MS,
+      now: () => clock,
+      warn,
+      tailerWatermark: () => wm,
+    });
+    mon.start();
+    await tick();
+    clock += 10_000; // way past threshold, but caught up the whole time
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(0);
+
+    // Now it falls behind…
+    wm = 0n;
+    await tick();
+    clock += 6_000;
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(1);
+
+    // …recovers…
+    wm = 100n;
+    await tick();
+    // …and lags again — re-arms and warns a SECOND time (not suppressed by the first firing).
+    wm = 0n;
+    await tick();
+    clock += 6_000;
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(2);
+
+    mon.stop();
+    await client.close();
+  });
+
+  it("omitted tailerWatermark (a non-hybrid writer, no local replica) never warns", async () => {
+    const { client, lease } = await makeNode("http://writer-only:7002");
+    await acquireAll(lease);
+    await lease.seedFrontierAll(100n);
+    let clock = 1_000;
+    const warn = vi.fn();
+    const mon = new FrontierMonitor(lease, { closeIdle: false, beatMs: BEAT_MS, now: () => clock, warn }); // no tailerWatermark
+    mon.start();
+    await tick();
+    clock += 20_000;
+    await tick();
+    expect(lagCalls(warn)).toHaveLength(0);
+    mon.stop();
+    await client.close();
+  });
+});
