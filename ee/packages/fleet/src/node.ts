@@ -1547,6 +1547,16 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // stale-snapshot hazard the balancer's `tryAcquireShard` guards above; see observeWriteTimestamp.
     runtime.observeWriteTimestamp(state.frontierTs);
     triggerPromotion();
+    // "Drivers follow the default shard": winning the DEFAULT-shard election means this node now holds
+    // the default ring, so its scheduler/cron/reaper/workflow drivers must run. The balancer's
+    // `tryAcquireShard` starts them when IT acquires a shard, but the DEFAULT shard is acquired via THIS
+    // election path (which `acquireTargetsNow` deliberately skips once the election holds it), and the
+    // multi-writer HYBRID promotion branch below only ever STOPS drivers (never starts) — so without
+    // this, a rendezvous/failover MOVE of the default shard onto an already-promoted co-writer would
+    // leave its drivers silent (scheduled jobs enqueued on it never dispatch). Idempotent and
+    // chain-ordered against the promotion branch's own stop/start, so a redundant fire is a safe no-op
+    // (e.g. single-writer failover, where `promoteFleetNode` already starts them).
+    void startDriversChained();
   });
 
   // Start the balancer on the sync node too: it heartbeats this node's presence (its liveness signal —
