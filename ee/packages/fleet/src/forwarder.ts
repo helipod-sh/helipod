@@ -138,7 +138,15 @@ export class WriteForwarder implements WriteRouter {
     // is a fleet-internal hop, so IT must check ownership itself rather than trust the caller and
     // potentially re-forward unboundedly. `shardId` is what the receiver resolves the current owner
     // (and checks itself against) from.
-    const body = { path, args, identity, kind, shardId, forwarded: true };
+    //
+    // `idempotencyKey` (Fleet B3, D3 — effectively-once forwarding): minted ONCE, here, per LOGICAL
+    // write — BEFORE the first attempt — and reused verbatim across the retry-once (a transport
+    // failure or a stale-owner rejection) and the eventual re-routed POST. The receiving `/_fleet/
+    // run` handler uses it to make a duplicate delivery replay rather than re-execute: two attempts
+    // that both carry this SAME key can only ever land ONE durable write (see node.ts's commit guard
+    // + packages/cli's http-handler catch-and-replay). A fresh UUID per `forward()` CALL (not
+    // per-POST) is what makes this "one key per logical write" rather than "one key per HTTP hop".
+    const body = { path, args, identity, kind, shardId, forwarded: true, idempotencyKey: crypto.randomUUID() };
     const first = await this.writerUrlFor(shardId);
     let result: { value: JSONValue; commitTs?: string; shardId?: string };
     try {
@@ -194,7 +202,15 @@ export class WriteForwarder implements WriteRouter {
 
   private async post(
     writerUrl: string,
-    body: { path: string; args: JSONValue; identity: string | null; kind: "mutation" | "action"; shardId: ShardId; forwarded: boolean },
+    body: {
+      path: string;
+      args: JSONValue;
+      identity: string | null;
+      kind: "mutation" | "action";
+      shardId: ShardId;
+      forwarded: boolean;
+      idempotencyKey: string;
+    },
   ): Promise<{ value: JSONValue; commitTs?: string; shardId?: string }> {
     const res = await fetch(`${trimTrailingSlash(writerUrl)}/_fleet/run`, {
       method: "POST",
@@ -202,7 +218,20 @@ export class WriteForwarder implements WriteRouter {
       body: JSON.stringify(body),
     });
     const text = await res.text();
-    let parsed: { value?: JSONValue; error?: string; errorJson?: StackbaseErrorJSON; commitTs?: string; shardId?: string };
+    let parsed: {
+      value?: JSONValue;
+      error?: string;
+      errorJson?: StackbaseErrorJSON;
+      commitTs?: string;
+      shardId?: string;
+      /** Effectively-once forwarding (Fleet B3, D3): true when the receiver replayed a
+       *  previously-committed write instead of re-executing. Informational only here — `forward()`
+       *  surfaces `value`/`commitTs` uniformly regardless of whether this hop was a replay. */
+      replayed?: boolean;
+      /** Set instead of `value` when the replayed row's value wasn't recorded (the crash-window or
+       *  oversized-cap case) — `parsed.value ?? null` below already surfaces this as `value: null`. */
+      valueMissing?: boolean;
+    };
     try {
       parsed = text ? (JSON.parse(text) as typeof parsed) : {};
     } catch {

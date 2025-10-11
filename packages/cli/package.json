@@ -47,6 +47,7 @@
     "@stackbase/dashboard": "workspace:*"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
     "@stackbase/client": "workspace:*",
     "@stackbase/fleet": "workspace:*",
     "@stackbase/scheduler": "workspace:*",

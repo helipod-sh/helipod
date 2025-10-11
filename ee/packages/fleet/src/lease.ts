@@ -1,6 +1,7 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type { PgClient, PgRow, PgValue } from "@stackbase/docstore-postgres";
 import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
+import type { JSONValue } from "@stackbase/values";
 
 /** The default shard every single-shard caller (B1 tests, the writer-election loop) targets when
  *  no explicit `shardId` is passed. B2a generalizes the per-row methods below to any shard id —
@@ -69,6 +70,30 @@ export interface LeaseManagerOptions {
 }
 
 const DEFAULT_RETRY_MS = 2000;
+
+/** Effectively-once forwarding (Fleet B3, D3): the `fleet_idempotency.value_json` cap. A recorded
+ *  mutation result larger than this is NOT stored — the row keeps `value_json = NULL` and
+ *  `oversized = true` instead, so a replay reports `valueMissing: true` rather than growing this
+ *  control table unboundedly on a large mutation return value. The WRITE itself is unaffected
+ *  either way (this cap only governs the best-effort RESULT-VALUE cache, not the commit). */
+export const IDEMPOTENCY_VALUE_CAP_BYTES = 64 * 1024;
+
+/** How long a `fleet_idempotency` row survives before the sweep reclaims it (Fleet B3, D3) — a
+ *  retry arriving after this window re-executes rather than replaying (documented boundary;
+ *  retries are seconds-scale in practice, so 1h is generous headroom). */
+const IDEMPOTENCY_TTL_INTERVAL = "1 hour";
+
+/** A `fleet_idempotency` row read back for replay (Fleet B3, D3). `hasValue` distinguishes a
+ *  genuinely-recorded value (including a mutation that legitimately returned JSON `null`, which is
+ *  still stored as the TEXT `"null"`) from `value_json` being SQL NULL — the crash-window
+ *  (commit landed, the post-run value UPDATE never ran) and the oversized-cap cases both leave
+ *  `value_json` SQL NULL, and both replay as `valueMissing: true` uniformly. */
+export interface IdempotencyReplay {
+  commitTs: bigint;
+  hasValue: boolean;
+  value: JSONValue | null;
+  oversized: boolean;
+}
 
 function toBigIntOrZero(v: PgValue | undefined): bigint {
   if (v === null || v === undefined) return 0n;
@@ -192,6 +217,24 @@ export class LeaseManager {
         advertise_url TEXT PRIMARY KEY,
         epoch         BIGINT NOT NULL,
         expires_at    TIMESTAMPTZ NOT NULL
+      )
+    `);
+    // `fleet_idempotency` (B3, D3 — effectively-once forwarding): one row per forwarded logical
+    // write, INSERTed by the commit guard (`node.ts`'s `installCommitGuard`) INSIDE the same
+    // transaction as the commit itself — atomic by construction, so a `key` PK collision aborts
+    // the whole commit (the concurrent-duplicate race's loser path). `value_json` is filled in by
+    // `recordIdempotencyValue` AFTER the run completes (the value isn't known inside the commit
+    // txn) — best-effort, so a crash between commit and that UPDATE leaves it NULL; `oversized`
+    // distinguishes "too big to cache" from "not recorded yet", though both replay as
+    // `valueMissing: true` (see `IdempotencyReplay`). `created_at` drives the 1h sweep
+    // (`sweepIdempotency`), run on the balancer beat.
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS fleet_idempotency (
+        key        TEXT PRIMARY KEY,
+        commit_ts  BIGINT NOT NULL,
+        value_json TEXT,
+        oversized  BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
   }
@@ -715,6 +758,65 @@ export class LeaseManager {
       `SELECT shard_id, frontier_ts FROM shard_leases ORDER BY frontier_ts ASC, shard_id ASC`,
     );
     return rows.map((r) => ({ shardId: r.shard_id as ShardId, frontierTs: toBigIntOrZero(r.frontier_ts) }));
+  }
+
+  /**
+   * Read back `key`'s `fleet_idempotency` row for a replay decision (Fleet B3, D3), or `null` if no
+   * such key has ever committed (a genuine miss — proceed to run). Called by `packages/cli`'s
+   * `/_fleet/run` handler BOTH before running (the SELECT-first check) and after catching a
+   * unique_violation on this table (the concurrent-duplicate race's loser re-selecting the
+   * winner's row). See `IdempotencyReplay` for what `hasValue`/`oversized` distinguish.
+   */
+  async lookupIdempotency(key: string): Promise<IdempotencyReplay | null> {
+    const rows = await this.client.query(
+      `SELECT commit_ts, value_json, oversized FROM fleet_idempotency WHERE key = $1`,
+      [key],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const raw = row.value_json as string | null | undefined;
+    return {
+      commitTs: toBigIntOrZero(row.commit_ts as PgValue | undefined),
+      hasValue: raw !== null && raw !== undefined,
+      value: raw !== null && raw !== undefined ? (JSON.parse(raw) as JSONValue) : null,
+      oversized: row.oversized === true,
+    };
+  }
+
+  /**
+   * Best-effort post-run recording of a forwarded mutation's return VALUE onto its already-committed
+   * `fleet_idempotency` row (Fleet B3, D3) — the value isn't known inside the commit transaction (the
+   * guard only sees `commitTs`), so this runs AFTER `runtime.run`/`runAction`/`runSystem` returns,
+   * from `packages/cli`'s `/_fleet/run` handler. Over `IDEMPOTENCY_VALUE_CAP_BYTES` → `value_json`
+   * stays/goes NULL and `oversized = true` instead of storing it (a replay then reports
+   * `valueMissing: true`, same as the crash-window case where this UPDATE never ran at all). A
+   * missing row (no matching `key` — e.g. a no-op mutation that staged nothing, so the guard never
+   * ran) silently affects 0 rows; the caller doesn't need to check for that itself.
+   */
+  async recordIdempotencyValue(key: string, value: JSONValue): Promise<void> {
+    const json = JSON.stringify(value ?? null);
+    if (Buffer.byteLength(json, "utf8") > IDEMPOTENCY_VALUE_CAP_BYTES) {
+      await this.client.query(
+        `UPDATE fleet_idempotency SET value_json = NULL, oversized = true WHERE key = $1`,
+        [key],
+      );
+      return;
+    }
+    await this.client.query(
+      `UPDATE fleet_idempotency SET value_json = $1, oversized = false WHERE key = $2`,
+      [json, key],
+    );
+  }
+
+  /**
+   * Reclaim `fleet_idempotency` rows older than the TTL (Fleet B3, D3) — a cheap indexed (PK-only
+   * table, no index needed at this scale) delete run on the balancer beat of every WRITER-ish node
+   * (see `ShardLeaseBalancerDeps.sweepIdempotency` / `node.ts`'s wiring). A retry arriving after a
+   * row has been swept simply re-executes (documented boundary — retries are seconds-scale, the
+   * sweep window is 1h).
+   */
+  async sweepIdempotency(): Promise<void> {
+    await this.client.query(`DELETE FROM fleet_idempotency WHERE created_at < now() - interval '${IDEMPOTENCY_TTL_INTERVAL}'`);
   }
 
   /**

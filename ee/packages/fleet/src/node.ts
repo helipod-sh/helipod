@@ -39,7 +39,7 @@ import {
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
 } from "@stackbase/runtime-embedded";
-import { LeaseManager, type TryRunExclusiveOnShard } from "./lease";
+import { LeaseManager, type TryRunExclusiveOnShard, type IdempotencyReplay } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
 import { ShardLeaseBalancer } from "./balancer";
 import { FencedError } from "./fenced-error";
@@ -329,6 +329,18 @@ export interface FleetHandles {
    *  `WriteForwarder.isLocalWriter`, the same live held-set view the executor's own per-shard
    *  router and `relinquish()` consult. */
   isLocalWriter(shardId: ShardId): boolean;
+  /**
+   * Effectively-once forwarding (Fleet B3, D3): read back `key`'s `fleet_idempotency` row for a
+   * replay decision. Delegates to `LeaseManager.lookupIdempotency` — the SAME control table the
+   * commit guard (`installCommitGuard`) writes into, on the SAME `client`, so a lookup immediately
+   * after a catch always sees a just-committed sibling's row. `packages/cli`'s `/_fleet/run`
+   * handler calls this BOTH before running (SELECT-first) and after catching a unique_violation on
+   * this table (the concurrent-duplicate race's loser re-selecting the winner's row).
+   */
+  idempotencyLookup(key: string): Promise<IdempotencyReplay | null>;
+  /** Best-effort post-run recording of a forwarded mutation's return value — see
+   *  `LeaseManager.recordIdempotencyValue`. */
+  idempotencyRecordValue(key: string, value: JSONValue): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -784,7 +796,7 @@ export function installCommitGuard(
   lease: LeaseManager,
   onFenced: (shardId: ShardId, reason: string) => void,
 ): void {
-  pgStore.setCommitGuard(async (q, commitTs, shardId) => {
+  pgStore.setCommitGuard(async (q, commitTs, shardId, meta) => {
     // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
     // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
     // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
@@ -812,6 +824,25 @@ export function installCommitGuard(
     if (rows.length === 0) {
       onFenced(shardId, `commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
       throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
+    }
+
+    // Fleet B3, D3 — effectively-once forwarding: when the commit carries an idempotency key
+    // (`RunOptions.commitMeta` → ... → `DocStore.commitWrite`'s `opts.meta`, threaded here as this
+    // guard's additive 4th param), INSERT the `fleet_idempotency` row in the SAME transaction as the
+    // commit — atomic by construction. A `key` PK collision (the concurrent-duplicate race's loser:
+    // another commit already claimed this key) throws a raw `unique_violation` here, which aborts
+    // the WHOLE transaction (nothing above has committed yet — Postgres rolls back the frontier
+    // bump and the staged document/index rows together with this INSERT). `packages/cli`'s
+    // `/_fleet/run` handler catches that specific shape (code 23505 on THIS table/constraint — never
+    // treating an app-schema unique violation as a replay) and re-SELECTs to return the winner's
+    // commitTs as a replay instead of a 500. Non-forwarded / non-fleet commits carry no meta (this
+    // node's own local mutations never set `commitMeta`), so `meta` is `undefined` and this is a
+    // silent no-op — the whole idempotency machinery costs nothing outside a forwarded write.
+    if (meta?.idempotencyKey) {
+      await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
+        meta.idempotencyKey,
+        commitTs,
+      ]);
     }
   });
 }
@@ -1058,6 +1089,10 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     requestPromotion: async () => {
       doPromote();
     },
+    // Fleet B3, D3: reclaim expired `fleet_idempotency` rows on every writer-ish beat (cheap indexed
+    // delete) — see `LeaseManager.sweepIdempotency`. The balancer runs `sweepIdempotency` only while
+    // `isWriterish()`; a pure sync node holds no writer-side state to sweep.
+    sweepIdempotency: () => lease.sweepIdempotency(),
     beatMs: fleetAcquireRetryMs(lease.ttlMs),
   });
 
@@ -1250,6 +1285,8 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       onPromoted: (cb) => promotedCbs.push(cb),
       frontierStats: () => frontierMonitor?.stats() ?? null,
       isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
+      idempotencyLookup: (key) => lease.lookupIdempotency(key),
+      idempotencyRecordValue: (key, value) => lease.recordIdempotencyValue(key, value),
       stop: async () => {
         monitor?.stop();
         balancer.stop();
@@ -1421,6 +1458,8 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     onPromoted: (cb) => promotedCbs.push(cb),
     frontierStats: () => frontierMonitor?.stats() ?? null,
     isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
+    idempotencyLookup: (key) => lease.lookupIdempotency(key),
+    idempotencyRecordValue: (key, value) => lease.recordIdempotencyValue(key, value),
     stop: async () => {
       monitor?.stop(); // disarm writer self-exit BEFORE the connection is closed (if promoted)
       balancer.stop();

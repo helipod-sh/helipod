@@ -581,7 +581,11 @@ export class EmbeddedRuntime {
   /** Directly invoke a function (for HTTP routes / the CLI `run` command). A MUTATION routes
    *  per-shard inside the executor (`executor.run` forwards a shard this node doesn't own); an
    *  ACTION forwards wholesale here to the default-shard holder; queries always run locally. */
-  async run<T = unknown>(path: string, args: JSONValue, opts?: { identity?: string | null }): Promise<UdfResult<T>> {
+  async run<T = unknown>(
+    path: string,
+    args: JSONValue,
+    opts?: { identity?: string | null; commitMeta?: Record<string, string> },
+  ): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown function: ${path}`);
@@ -599,6 +603,11 @@ export class EmbeddedRuntime {
       functionKind: this.functionKind,
       identity: opts?.identity ?? null,
       numShards: this.numShards,
+      // Fleet B3, D3 (effectively-once forwarding): opaque commit metadata threaded straight through
+      // to `Transactor.runInTransaction`'s `commitMeta` — meaningful only for a mutation that
+      // actually commits (see `RunOptions.commitMeta`'s doc comment). `packages/cli`'s `/_fleet/run`
+      // handler is the one caller that sets this, carrying a forwarded write's idempotency key.
+      commitMeta: opts?.commitMeta,
     });
   }
 
@@ -663,14 +672,26 @@ export class EmbeddedRuntime {
    *  For a doc mutation on a user table, the target document's OWNING shard is resolved and passed
    *  through so the privileged write lands on the same ring a user's sharded mutation of that doc
    *  would — one-doc-one-ring. `opts.shardId` lets a trusted caller override the resolution. */
-  async runSystem<T = unknown>(path: string, args: JSONValue, opts?: { shardId?: ShardId }): Promise<UdfResult<T>> {
+  async runSystem<T = unknown>(
+    path: string,
+    args: JSONValue,
+    opts?: { shardId?: ShardId; commitMeta?: Record<string, string> },
+  ): Promise<UdfResult<T>> {
     const fn = this.systemModules[path];
     if (!fn) throw new FunctionNotFoundError(`unknown system function: ${path}`);
     let shardId = opts?.shardId;
     if (shardId === undefined && this.numShards > 1 && EmbeddedRuntime.DOC_MUTATION_PATHS.has(path)) {
       shardId = await this.resolveDocMutationShard(path, args);
     }
-    return this.executor.run<T>(fn, jsonToConvex(args), { path, privileged: true, numShards: this.numShards, shardId });
+    return this.executor.run<T>(fn, jsonToConvex(args), {
+      path,
+      privileged: true,
+      numShards: this.numShards,
+      shardId,
+      // Fleet B3, D3: see `run()`'s doc comment above — the forwarded-`_system:*`-doc-mutation path
+      // (an admin dashboard edit landing on a non-owner) threads the same idempotency key through.
+      commitMeta: opts?.commitMeta,
+    });
   }
 
   /**
