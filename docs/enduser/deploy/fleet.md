@@ -481,6 +481,14 @@ read capacity too — the same as slice 2 already gave sync nodes. Budget disk f
 node's replica the same way you already do for a sync node's (see
 [Requirements](#requirements)).
 
+One nuance a sync node never faces: when a writer node commits a write *locally*, its live
+subscriptions are held until its own replica has caught up to that write (so they never show a
+stale result), but a separate one-off query fired immediately afterwards — say a bare `/api/run`
+call racing its own preceding write — reads the replica and may run a beat before the write
+appears there. Live subscriptions and forwarded writes are always read-your-own-writes; racing an
+imperative query against your own just-committed write on the same writer node is the one
+eventually-consistent corner, and it converges within the replication beat.
+
 One narrow, deliberate exception: a small number of reads inside the engine's own internal
 control-plane logic — the scheduler's periodic wake scan, for example — still go straight to the
 primary rather than a replica, because they need up-to-the-instant freshness more than they need

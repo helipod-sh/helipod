@@ -1351,12 +1351,12 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // as peers join) from here on.
   if (forwarder.isLocalWriter()) {
     // Fleet B3 — HYBRID writer boot (multi-writer): stand up the replica read path (the REAL tailer)
-    // BEFORE arming the writer half, so queries serve from the replica from the ready tick on. A fresh
-    // single-node writer boot seeds all N frontier rows in `armWriter` (below), so the tailer's ready
-    // gate here sees F = 0 (partial `shard_leases`) and resolves immediately; the poll loop then
-    // catches the replica up as `armWriter`/commits advance F. On a PRE-LOADED upgrade this is a
-    // bounded one-beat-early ready (accepted de-minimis, B2a-T4; it self-heals as the replica catches
-    // up). Single-writer boot (multi-writer off): no replica, reads hit the primary as shipped.
+    // BEFORE arming the writer half, so queries serve from the replica from the ready tick on. Since
+    // B3-T4, `setup()` pre-seeds all N `shard_leases` rows (frontier = MAX(ts) via the shared probe),
+    // so the tailer's ready gate sees the TRUE F here: a fresh database resolves immediately (F = 0,
+    // nothing to apply), and a PRE-LOADED upgrade does a FULL replica bootstrap to F = MAX(ts) before
+    // ready — no early-ready window. Single-writer boot (multi-writer off): no replica, reads hit the
+    // primary as shipped.
     if (multiWriter) hybridTailer = await startHybridTailer();
     await armWriter(true);
     startWriterMonitor();
