@@ -1,6 +1,6 @@
 ---
 title: Write Sharding — Multi-Agent Research & the Fenced Frontier Verdict
-status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node) + B2b SHIPPED (fleet distribution — opt-in STACKBASE_FLEET_MULTI_WRITER spreads different shards' write ownership across different nodes via deterministic rendezvous placement, converging in seconds with no coordinator service; per-shard failover; a writer-to-writer invalidation listener keeps every writer reactive to every other writer's commits; graceful damped release on scale-out; scheduled functions/crons ride the default shard and survive it moving; default OFF keeps single-writer + sync-replica topology byte-identical — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md); next: B3 latency/ops polish (single-shard fast path, stall alerting) and B4 per-shard group commit; B5 remains design-doc-only
+status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node) + B2b SHIPPED (fleet distribution — opt-in STACKBASE_FLEET_MULTI_WRITER spreads different shards' write ownership across different nodes via deterministic rendezvous placement, converging in seconds with no coordinator service; per-shard failover; a writer-to-writer invalidation listener keeps every writer reactive to every other writer's commits; graceful damped release on scale-out; scheduled functions/crons ride the default shard and survive it moving; default OFF keeps single-writer + sync-replica topology byte-identical — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md) + B3 SHIPPED (hybrid nodes + effectively-once forwarding — a multi-writer writer node now keeps the same local file-backed replica a sync node does and serves its own queries/subscriptions from it, closing the read-scaling gap that existed while a writer answered reads straight from the primary; forwarded writes, single-writer and multi-writer alike, are now effectively-once via an idempotency marker recorded atomically with the write's own commit; a single-shard fast path was assessed and explicitly not built — see the B3 entry below; default topology and non-fleet remain byte-identical — see docs/enduser/deploy/fleet.md); next: B4 per-shard group commit; B5 remains design-doc-only
 date: 2025-08-28
 audience: engineering (internal)
 ---
@@ -105,9 +105,33 @@ ports to the object-storage substrate (CAS frontier manifests).
   across nodes (deterministic rendezvous placement, per-shard failover, a writer-to-writer
   invalidation listener, damped graceful scale-out, drivers following the default shard), proven
   by a live multi-node E2E; default OFF keeps the shipped single-writer topology unchanged.
-- **B3 — latency/ops polish** (single-shard fast path, stall alerting).
+- **B3 — hybrid nodes + effectively-once forwarding — SHIPPED**: a multi-writer writer node keeps
+  its replica tailer running instead of stopping it at promotion, and gains a paired read path
+  (a separate query-side transactor + `QueryRuntime`, seeded from and advanced only by the
+  replica, selected in lockstep by `fn.type` so a mutation's point reads never split from its
+  scans) so its own queries/subscriptions are served from that replica exactly like a sync
+  node's — closing the read-scaling gap where a writer answered reads straight from the primary.
+  A local commit's subscription re-run is gated on the replica catching up to that commit (a
+  `beforeNotify` hook in the runtime's fan-out drain) so a hybrid node's own reads never see a
+  stale intermediate. Forwarded writes (single-writer client→writer, and multi-writer
+  node-to-node) became effectively-once: an idempotency key, minted once per logical write and
+  reused across retries, is recorded in the same commit transaction as the write itself (an
+  opaque `commitMeta` channel threaded through the transactor/docstore seam, interpreted only by
+  the fleet's own commit guard — non-fleet and single-shard pay nothing). A duplicate replays the
+  recorded commit instead of re-executing; the documented contract is handler-body execution
+  at-least-once under a concurrent duplicate, but the durable write and its fan-out
+  exactly-once, a crash between commit and value-record replays as success + commitTs +
+  `valueMissing`, and keys expire after 1h. Also folded in: driver start/stop churn
+  serialization, shard-lease rows seeded at setup time (closing a concurrent-boot count-gate
+  stall), and a replica-lag operator warning. Proven end-to-end against a real `postgres:16`
+  container, including a writer surviving a paused primary without self-exiting. Single-writer
+  topology and non-fleet are unchanged — hybrid behavior is multi-writer-only, no new knob. **A
+  single-shard fast path was assessed and explicitly not built**: a fleet's per-commit overhead
+  is one extra `UPDATE` inside a commit transaction that's already multi-statement, and a
+  non-fleet deployment already pays none of it — there was no hot path left to skip. See
+  `docs/enduser/deploy/fleet.md` for the operator-facing guide.
 - **B4 — per-shard group commit** (the Postgres-fsync ceiling raise — where the throughput
-  headline gets earned).
+  headline gets earned) — next.
 - **B5 — design-doc only**: object-storage substrate mapping, offline reshard tool.
 
 ## Open questions for the spec phase

@@ -115,6 +115,14 @@ export interface DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
+    /**
+     * Opaque commit metadata (Fleet B3, D3 — effectively-once forwarding): threaded straight
+     * through from `RunOptions.commitMeta` → `RunInTransactionOptions.commitMeta` → here, never
+     * interpreted by core. SQLite ignores it entirely (non-fleet pays nothing); Postgres passes
+     * `opts.meta` on to an installed commit guard's 4th parameter, which fleet code uses to write
+     * an idempotency row atomically inside the same commit transaction.
+     */
+    opts?: { meta?: Record<string, string> },
   ): Promise<bigint>;
 
   /** The newest visible revision of a document at `readTimestamp` (or latest), or null. */

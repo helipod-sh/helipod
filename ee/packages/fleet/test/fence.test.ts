@@ -39,7 +39,7 @@ describe("Fenced Frontier B1: shard_leases + epoch-fenced commit guard (Task 3)"
   it("acquisition creates the row with epoch 1 and all D2 columns (frontier/prev seeded to 0)", async () => {
     const { client, lease } = await makeFencedStore();
     const state = await lease.tryAcquire();
-    expect(state).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000" });
+    expect(state).toEqual({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 0n });
 
     const row = await lease.read();
     expect(row).toMatchObject({ epoch: 1n, writerUrl: "http://node-a:4000", frontierTs: 0n, prevTs: 0n });
@@ -50,7 +50,7 @@ describe("Fenced Frontier B1: shard_leases + epoch-fenced commit guard (Task 3)"
     const { client, lease } = await makeFencedStore();
     await lease.tryAcquire();
     const second = await lease.tryAcquire();
-    expect(second).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000" });
+    expect(second).toEqual({ epoch: 2n, writerUrl: "http://node-a:4000", frontierTs: 0n });
     expect(await lease.read()).toMatchObject({ epoch: 2n, frontierTs: 0n, prevTs: 0n });
     await client.close();
   });

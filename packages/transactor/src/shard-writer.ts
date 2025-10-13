@@ -191,7 +191,7 @@ export class ShardWriter {
           return { value, committed: false, commitTs: snapshotTs, shardId, oplog: null };
         }
 
-        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value));
+        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value, options.commitMeta));
       } catch (e) {
         if (e instanceof OccConflictError && attempt < maxRetries) continue; // deterministic replay
         throw e;
@@ -206,6 +206,7 @@ export class ShardWriter {
     snapshotTs: bigint,
     shardId: ShardId,
     value: T,
+    commitMeta?: Record<string, string>,
   ): Promise<CommitResult<T>> {
     // Phase 1 — validate: any commit after our snapshot that touched something we (validated-ly)
     // read? Consults ONLY `validatedReads` (D4) — `recordReadUnvalidated` ranges never abort a
@@ -234,7 +235,10 @@ export class ShardWriter {
       });
     }
     const indexWrites: IndexWrite[] = ctx.indexUpdates.map((update) => ({ ts: 0n, update }));
-    const commitTs = await this.docStore.commitWrite(entries, indexWrites, shardId);
+    // Opaque commit metadata (Fleet B3, D3): always passed as an `opts` object so the shape at
+    // `DocStore.commitWrite` is uniform whether or not a caller set `commitMeta` — SQLite ignores
+    // it either way, and an unset Postgres commit guard never sees `{ meta: undefined }`.
+    const commitTs = await this.docStore.commitWrite(entries, indexWrites, shardId, { meta: commitMeta });
 
     this.recentCommits.push({ ts: commitTs, writes: ctx.writeRanges });
     // Advance the committed clock only now that writes are applied + recorded (still under

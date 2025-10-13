@@ -253,3 +253,56 @@ describe("WriteForwarder — outbound not-the-owner handling (Task 2, test c)", 
     expect(fetchSpy).toHaveBeenCalledTimes(1); // no retry — the owner answered definitively
   });
 });
+
+describe("WriteForwarder — effectively-once forwarding: one idempotencyKey per logical write (Fleet B3, Task 3)", () => {
+  let originalFetch: typeof fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function parseBody(call: unknown[]): { idempotencyKey?: string } {
+    const init = call[1] as { body?: string } | undefined;
+    return init?.body ? (JSON.parse(init.body) as { idempotencyKey?: string }) : {};
+  }
+
+  it("mints ONE UUID and sends the SAME idempotencyKey on both the failed first POST and the retry", async () => {
+    const rows = new Map<string, StubRow>([["s3", { epoch: 1n, writer_url: "http://stale-node:4000" }]]);
+    const { forwarder } = make(rows);
+
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call++;
+      if (call === 1) throw new TypeError("fetch failed"); // transport failure — triggers retry-once
+      return jsonResponse({ value: "ok", commitTs: "5" });
+    }) as unknown as typeof fetch;
+
+    await forwarder.forward("mutation", "notes:add", { title: "x" }, null, "s3");
+
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const key1 = parseBody(fetchSpy.mock.calls[0]!).idempotencyKey;
+    const key2 = parseBody(fetchSpy.mock.calls[1]!).idempotencyKey;
+    expect(typeof key1).toBe("string");
+    expect(key1).toBeTruthy();
+    expect(key2).toBe(key1); // reused verbatim across the retry — NOT a fresh UUID per hop
+  });
+
+  it("two SEPARATE forward() calls (two distinct logical writes) mint two DIFFERENT keys", async () => {
+    const rows = new Map<string, StubRow>([["s3", { epoch: 1n, writer_url: "http://owner:4000" }]]);
+    const { forwarder } = make(rows);
+    globalThis.fetch = vi.fn(async () => jsonResponse({ value: "ok", commitTs: "5" })) as unknown as typeof fetch;
+
+    await forwarder.forward("mutation", "notes:add", { title: "a" }, null, "s3");
+    await forwarder.forward("mutation", "notes:add", { title: "b" }, null, "s3");
+
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const key1 = parseBody(fetchSpy.mock.calls[0]!).idempotencyKey;
+    const key2 = parseBody(fetchSpy.mock.calls[1]!).idempotencyKey;
+    expect(key1).toBeTruthy();
+    expect(key2).toBeTruthy();
+    expect(key1).not.toBe(key2);
+  });
+});

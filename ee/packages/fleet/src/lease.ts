@@ -1,6 +1,7 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type { PgClient, PgRow, PgValue } from "@stackbase/docstore-postgres";
 import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
+import type { JSONValue } from "@stackbase/values";
 
 /** The default shard every single-shard caller (B1 tests, the writer-election loop) targets when
  *  no explicit `shardId` is passed. B2a generalizes the per-row methods below to any shard id —
@@ -31,6 +32,11 @@ export type TryRunExclusiveOnShard = (shardId: ShardId, fn: () => Promise<void>)
 export interface LeaseState {
   epoch: bigint;
   writerUrl: string;
+  /** The row's fenced-frontier high-water mark at acquisition time (Fleet B3). On an `ON CONFLICT`
+   *  re-acquire the upsert leaves `frontier_ts` untouched, so this returns the value an INTERIM owner
+   *  advanced it to while this node didn't hold the shard — the exact floor the caller feeds to
+   *  `runtime.observeWriteTimestamp` so a re-acquired shard's write snapshot never sits stale. */
+  frontierTs: bigint;
 }
 
 /** `LeaseManager.read()`'s full row — every `shard_leases` column (Fenced Frontier B1, D2). The
@@ -64,6 +70,30 @@ export interface LeaseManagerOptions {
 }
 
 const DEFAULT_RETRY_MS = 2000;
+
+/** Effectively-once forwarding (Fleet B3, D3): the `fleet_idempotency.value_json` cap. A recorded
+ *  mutation result larger than this is NOT stored — the row keeps `value_json = NULL` and
+ *  `oversized = true` instead, so a replay reports `valueMissing: true` rather than growing this
+ *  control table unboundedly on a large mutation return value. The WRITE itself is unaffected
+ *  either way (this cap only governs the best-effort RESULT-VALUE cache, not the commit). */
+export const IDEMPOTENCY_VALUE_CAP_BYTES = 64 * 1024;
+
+/** How long a `fleet_idempotency` row survives before the sweep reclaims it (Fleet B3, D3) — a
+ *  retry arriving after this window re-executes rather than replaying (documented boundary;
+ *  retries are seconds-scale in practice, so 1h is generous headroom). */
+const IDEMPOTENCY_TTL_INTERVAL = "1 hour";
+
+/** A `fleet_idempotency` row read back for replay (Fleet B3, D3). `hasValue` distinguishes a
+ *  genuinely-recorded value (including a mutation that legitimately returned JSON `null`, which is
+ *  still stored as the TEXT `"null"`) from `value_json` being SQL NULL — the crash-window
+ *  (commit landed, the post-run value UPDATE never ran) and the oversized-cap cases both leave
+ *  `value_json` SQL NULL, and both replay as `valueMissing: true` uniformly. */
+export interface IdempotencyReplay {
+  commitTs: bigint;
+  hasValue: boolean;
+  value: JSONValue | null;
+  oversized: boolean;
+}
 
 function toBigIntOrZero(v: PgValue | undefined): bigint {
   if (v === null || v === undefined) return 0n;
@@ -151,20 +181,35 @@ export class LeaseManager {
   }
 
   /**
-   * Idempotent DDL: creates shard_leases if it doesn't already exist.
+   * Idempotent DDL: creates shard_leases if it doesn't already exist, and — when `shardIds` is
+   * non-empty — pre-seeds a row for every shard in the list (Fleet B3, D4: the concurrent-boot
+   * count-gate fix, reversing B2a's "no pre-seeding" call).
    *
-   * Deliberately does NOT pre-seed any shard rows (B2a): the rows are created on demand by the
-   * writer's per-shard `tryAcquire(shardId, slot)` (the acquire-all loop in `node.ts`), each stamped
-   * with the acquiring node's epoch/url and — crucially — its frontier seeded up to the store's max
-   * BEFORE the node reports ready (the F1×N fix). If `setup()` instead pre-created all N rows at
-   * `frontier_ts = 0`, a sync node booting concurrently (before any writer seeds) would see
-   * `count(*) = N` AND `min(frontier_ts) = 0` and fake-report ready with an EMPTY replica — the exact
-   * F1 hole, recurring ×N. So row existence is tied to a real, frontier-seeded acquisition, and the
-   * tailer's belt-and-braces `count(*) < NUM_SHARDS → not-ready` gate holds until the writer has
-   * genuinely claimed and seeded every shard. See `node.ts`'s writer boot for the acquire-all+seed
-   * order and `replica-tailer.ts`'s `readFrontier` for the count gate.
+   * B2a originally left this deliberately EMPTY (no pre-seeded rows): a bare `frontier_ts = 0` row
+   * created at DDL time, on a database that already held documents (a pre-`--fleet` upgrade), would
+   * be momentarily visible at `frontier_ts = 0` to a concurrently-booting sync node — `count(*) = N`
+   * AND `min(frontier_ts) = 0` would fake-report ready with an EMPTY replica (the F1×N hole,
+   * recurring ×N). That is why row existence used to be tied to a REAL, frontier-seeded acquisition
+   * (`tryAcquire`) rather than to `setup()`.
+   *
+   * The reversal here is safe ONLY because the seed now travels WITH the row: `documentsExist` (the
+   * caller's `documentsTableExists` probe, run BEFORE calling this) selects the exact same
+   * `frontierSeedExpr` fragment `tryAcquire` uses — `0` on a fresh database (no `documents` table
+   * yet: correct, there is no history to protect against), or `(SELECT COALESCE(MAX(ts), 0) FROM
+   * documents)` on an upgrade (`documents` already exists: correct, the row is born at the true
+   * high-water mark, never momentarily at 0). A pre-seeded row is created UNACQUIRED — `epoch = 0`,
+   * `writer_url = NULL`, already-expired `expires_at` — so the FIRST real `tryAcquire` still lands on
+   * its `ON CONFLICT` branch and bumps `epoch` from 0 to 1, byte-identical to a fresh INSERT's
+   * `epoch = 1`; every existing epoch/ownership assertion in the test suite is unaffected. Idempotent
+   * (`ON CONFLICT (shard_id) DO NOTHING`): a row already created by a peer's concurrent `setup()` or
+   * by a real acquisition is left untouched — this can only ever RAISE a row into existence, never
+   * clobber one. With every shard row present immediately, the tailer's `count(*) < NUM_SHARDS →
+   * not-ready` gate is satisfied the instant `setup()` returns — a concurrent multi-writer boot no
+   * longer stalls waiting for a writer to finish its acquire-all pass. See `node.ts`'s
+   * `prepareFleetNode` for the `documentsTableExists` probe + call site, and `replica-tailer.ts`'s
+   * `readFrontier` for the count gate.
    */
-  async setup(): Promise<void> {
+  async setup(shardIds: readonly ShardId[] = [], documentsExist = false): Promise<void> {
     await this.client.query(`
       CREATE TABLE IF NOT EXISTS shard_leases (
         shard_id        TEXT PRIMARY KEY,
@@ -189,6 +234,57 @@ export class LeaseManager {
         expires_at    TIMESTAMPTZ NOT NULL
       )
     `);
+    // `fleet_idempotency` (B3, D3 — effectively-once forwarding): one row per forwarded logical
+    // write, INSERTed by the commit guard (`node.ts`'s `installCommitGuard`) INSIDE the same
+    // transaction as the commit itself — atomic by construction, so a `key` PK collision aborts
+    // the whole commit (the concurrent-duplicate race's loser path). `value_json` is filled in by
+    // `recordIdempotencyValue` AFTER the run completes (the value isn't known inside the commit
+    // txn) — best-effort, so a crash between commit and that UPDATE leaves it NULL; `oversized`
+    // distinguishes "too big to cache" from "not recorded yet", though both replay as
+    // `valueMissing: true` (see `IdempotencyReplay`). `created_at` drives the 1h sweep
+    // (`sweepIdempotency`), run on the balancer beat.
+    await this.client.query(`
+      CREATE TABLE IF NOT EXISTS fleet_idempotency (
+        key        TEXT PRIMARY KEY,
+        commit_ts  BIGINT NOT NULL,
+        value_json TEXT,
+        oversized  BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+
+    if (shardIds.length === 0) return;
+    // Batched pre-seed, one row per shard, all sharing the SAME `frontierSeedExpr` snapshot (the
+    // subquery is re-evaluated per VALUES row within the one statement's snapshot, so every row gets
+    // an identical seed). `epoch = 0`/`writer_url = NULL`/already-expired `expires_at` mark the row as
+    // UNACQUIRED — see the class doc comment above for why the first real `tryAcquire` still bumps
+    // epoch 0 -> 1, byte-identical to a fresh INSERT. `ON CONFLICT DO NOTHING`: idempotent against a
+    // concurrent peer's `setup()` (same shard list) or a row a real acquisition already created.
+    const frontierSeed = this.frontierSeedExpr(documentsExist);
+    const params: string[] = [];
+    const values = shardIds.map((shardId, i) => {
+      params.push(shardId);
+      return `($${i + 1}, 0, NULL, NULL, now(), ${frontierSeed}, 0)`;
+    });
+    await this.client.query(
+      `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
+       VALUES ${values.join(", ")}
+       ON CONFLICT (shard_id) DO NOTHING`,
+      params,
+    );
+  }
+
+  /**
+   * The `frontier_ts` seed SQL fragment shared by `setup()`'s row pre-seed and `tryAcquire()`'s
+   * first-creation INSERT (Fleet B3, D4 — the one place this reasoning is written down): `0` when the
+   * caller has verified `documents` does not exist yet (a fresh database — no history to protect
+   * against), else `(SELECT COALESCE(MAX(ts), 0) FROM documents)` (an upgrade — the row is born at the
+   * store's true high-water mark, never momentarily visible below it). Both call sites gate this on
+   * the SAME `documentsTableExists` probe (`node.ts`), so a row is never seeded incorrectly regardless
+   * of which of the two code paths creates it first.
+   */
+  private frontierSeedExpr(documentsExist: boolean): string {
+    return documentsExist ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)` : `0`;
   }
 
   /**
@@ -348,7 +444,7 @@ export class LeaseManager {
     // Seed a FIRST-creation frontier from the store's current max (atomic with the INSERT) when the
     // caller vouches `documents` exists; else 0. The `frontier_ts < $N`-style guards elsewhere and
     // `GREATEST` on every later write mean this only ever RAISES the seed, never regresses it.
-    const frontierSeed = seedFrontierFromDocuments ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)` : `0`;
+    const frontierSeed = this.frontierSeedExpr(seedFrontierFromDocuments);
     const rows = await this.client.query(
       `INSERT INTO shard_leases (shard_id, epoch, writer_url, writer_app_name, expires_at, frontier_ts, prev_ts)
        VALUES ($1, 1, $2, $3, now() + interval '${this.ttlMsSql} milliseconds', ${frontierSeed}, 0)
@@ -357,12 +453,18 @@ export class LeaseManager {
          writer_url = $2,
          writer_app_name = $3,
          expires_at = now() + interval '${this.ttlMsSql} milliseconds'
-       RETURNING epoch, writer_url`,
+       RETURNING epoch, writer_url, frontier_ts`,
       [shardId, this.advertiseUrl, this.applicationName],
     );
     const row = rows[0];
     if (!row) throw new Error("shard_leases upsert returned no row");
-    const state: LeaseState = { epoch: row.epoch as bigint, writerUrl: row.writer_url as string };
+    const state: LeaseState = {
+      epoch: row.epoch as bigint,
+      writerUrl: row.writer_url as string,
+      // On a re-acquire this is the frontier an interim owner left; on a fresh INSERT it's the seed
+      // (`frontierSeed` — store max or 0). Feeds `runtime.observeWriteTimestamp` at every acquisition.
+      frontierTs: toBigIntOrZero(row.frontier_ts as PgValue | undefined),
+    };
     this.lastEpochByShard.set(shardId, state.epoch);
     return state;
   }
@@ -704,6 +806,65 @@ export class LeaseManager {
       `SELECT shard_id, frontier_ts FROM shard_leases ORDER BY frontier_ts ASC, shard_id ASC`,
     );
     return rows.map((r) => ({ shardId: r.shard_id as ShardId, frontierTs: toBigIntOrZero(r.frontier_ts) }));
+  }
+
+  /**
+   * Read back `key`'s `fleet_idempotency` row for a replay decision (Fleet B3, D3), or `null` if no
+   * such key has ever committed (a genuine miss — proceed to run). Called by `packages/cli`'s
+   * `/_fleet/run` handler BOTH before running (the SELECT-first check) and after catching a
+   * unique_violation on this table (the concurrent-duplicate race's loser re-selecting the
+   * winner's row). See `IdempotencyReplay` for what `hasValue`/`oversized` distinguish.
+   */
+  async lookupIdempotency(key: string): Promise<IdempotencyReplay | null> {
+    const rows = await this.client.query(
+      `SELECT commit_ts, value_json, oversized FROM fleet_idempotency WHERE key = $1`,
+      [key],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const raw = row.value_json as string | null | undefined;
+    return {
+      commitTs: toBigIntOrZero(row.commit_ts as PgValue | undefined),
+      hasValue: raw !== null && raw !== undefined,
+      value: raw !== null && raw !== undefined ? (JSON.parse(raw) as JSONValue) : null,
+      oversized: row.oversized === true,
+    };
+  }
+
+  /**
+   * Best-effort post-run recording of a forwarded mutation's return VALUE onto its already-committed
+   * `fleet_idempotency` row (Fleet B3, D3) — the value isn't known inside the commit transaction (the
+   * guard only sees `commitTs`), so this runs AFTER `runtime.run`/`runAction`/`runSystem` returns,
+   * from `packages/cli`'s `/_fleet/run` handler. Over `IDEMPOTENCY_VALUE_CAP_BYTES` → `value_json`
+   * stays/goes NULL and `oversized = true` instead of storing it (a replay then reports
+   * `valueMissing: true`, same as the crash-window case where this UPDATE never ran at all). A
+   * missing row (no matching `key` — e.g. a no-op mutation that staged nothing, so the guard never
+   * ran) silently affects 0 rows; the caller doesn't need to check for that itself.
+   */
+  async recordIdempotencyValue(key: string, value: JSONValue): Promise<void> {
+    const json = JSON.stringify(value ?? null);
+    if (Buffer.byteLength(json, "utf8") > IDEMPOTENCY_VALUE_CAP_BYTES) {
+      await this.client.query(
+        `UPDATE fleet_idempotency SET value_json = NULL, oversized = true WHERE key = $1`,
+        [key],
+      );
+      return;
+    }
+    await this.client.query(
+      `UPDATE fleet_idempotency SET value_json = $1, oversized = false WHERE key = $2`,
+      [json, key],
+    );
+  }
+
+  /**
+   * Reclaim `fleet_idempotency` rows older than the TTL (Fleet B3, D3) — a cheap indexed (PK-only
+   * table, no index needed at this scale) delete run on the balancer beat of every WRITER-ish node
+   * (see `ShardLeaseBalancerDeps.sweepIdempotency` / `node.ts`'s wiring). A retry arriving after a
+   * row has been swept simply re-executes (documented boundary — retries are seconds-scale, the
+   * sweep window is 1h).
+   */
+  async sweepIdempotency(): Promise<void> {
+    await this.client.query(`DELETE FROM fleet_idempotency WHERE created_at < now() - interval '${IDEMPOTENCY_TTL_INTERVAL}'`);
   }
 
   /**

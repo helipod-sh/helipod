@@ -66,6 +66,13 @@ export interface ShardLeaseBalancerDeps {
   /** Run the shipped whole-node promotion (sync → writer-ish). Idempotent at the node level. */
   requestPromotion(): Promise<void>;
   /**
+   * Fleet B3, D3 (effectively-once forwarding): reclaim `fleet_idempotency` rows older than the
+   * TTL — a cheap indexed delete, run on every WRITER-ish beat (see `LeaseManager.sweepIdempotency`).
+   * Optional so an older/stub `ShardLeaseBalancerDeps` (and every existing balancer test) needs no
+   * change; a pure sync node never has this called regardless (see `tick()`).
+   */
+  sweepIdempotency?(): Promise<void>;
+  /**
    * Multi-writer scale-out mode (B2b, D3 — the "writer nodes vs sync nodes" scaling knob, off by
    * default). When OFF (the default, and the shipped single-writer behavior): this node's target set is
    * EVERY shard (the sole writer owns them all), the balancer NEVER gracefully releases a live-held
@@ -217,6 +224,17 @@ export class ShardLeaseBalancer {
           if (this.deps.isHeld(s) && !targets.has(s)) {
             await this.deps.releaseShard(s);
           }
+        }
+      }
+
+      // Fleet B3, D3: sweep expired `fleet_idempotency` rows on every writer-ish beat. Own try/catch
+      // so a sweep hiccup never overshadows (or is overshadowed by) this beat's acquire/release work,
+      // which has already completed by this point regardless.
+      if (this.deps.sweepIdempotency) {
+        try {
+          await this.deps.sweepIdempotency();
+        } catch (e) {
+          this.log(`fleet: idempotency sweep failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     } catch (e) {

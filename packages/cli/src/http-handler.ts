@@ -43,7 +43,54 @@ export interface FleetHandles {
    * always provides it (delegates to its `WriteForwarder.isLocalWriter`).
    */
   isLocalWriter?(shardId: string): boolean;
+  /**
+   * Effectively-once forwarding (Fleet B3, D3): read back `key`'s `fleet_idempotency` row for a
+   * replay decision — a hit means this write already committed (possibly on a sibling concurrent
+   * attempt) and the caller must NOT re-execute. Optional so older/stub `FleetHandles` satisfy the
+   * structural mirror; the `/_fleet/run` handler below skips the whole idempotency path when absent
+   * (byte-identical to before this feature existed). The real `@stackbase/fleet` node always
+   * provides it (delegates to `LeaseManager.lookupIdempotency`).
+   */
+  idempotencyLookup?(key: string): Promise<{ commitTs: bigint; hasValue: boolean; value: JSONValue | null; oversized: boolean } | null>;
+  /** Best-effort post-run recording of a forwarded mutation's return value — see
+   *  `LeaseManager.recordIdempotencyValue`. Optional for the same reason as `idempotencyLookup`. */
+  idempotencyRecordValue?(key: string, value: JSONValue): Promise<void>;
   stop(): Promise<void>;
+}
+
+/**
+ * True iff `e` is a Postgres `unique_violation` (23505) on the `fleet_idempotency` table
+ * specifically (Fleet B3, D3 spec-review requirement) — the concurrent-duplicate race's loser: its
+ * own commit guard INSERT collided with a sibling attempt that committed first, aborting its ENTIRE
+ * commit transaction. This must be narrow: a 23505 from an APP-schema unique index (a genuine
+ * uniqueness-constraint mutation failure) is a completely different, real error and must NEVER be
+ * silently turned into a replay. Checked on the RAW thrown error — `DocStore.commitWrite`/
+ * `ShardWriter.commit`/`InlineUdfExecutor.run` all rethrow a guard's failure unchanged (no
+ * wrapping), so the underlying `pg`/PGlite driver error's `code`/`table`/`constraint` fields survive
+ * unmodified all the way up to this catch.
+ */
+function isFleetIdempotencyConflict(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  if ((e as { code?: unknown }).code !== "23505") return false;
+  const table = (e as { table?: unknown }).table;
+  if (table === "fleet_idempotency") return true;
+  const constraint = (e as { constraint?: unknown }).constraint;
+  return typeof constraint === "string" && constraint.startsWith("fleet_idempotency");
+}
+
+/** The `/_fleet/run` replay response body (Fleet B3, D3) — additive: `replayed: true` alongside
+ *  either `value` (a genuinely-recorded result, including a legitimate JSON `null`) or
+ *  `valueMissing: true` (the crash-window or oversized-cap case — `hasValue` is false either way). */
+function idempotencyReplayBody(hit: {
+  commitTs: bigint;
+  hasValue: boolean;
+  value: JSONValue | null;
+}): { replayed: true; commitTs: string; value?: JSONValue; valueMissing?: true } {
+  return {
+    replayed: true,
+    commitTs: String(hit.commitTs),
+    ...(hit.hasValue ? { value: hit.value } : { valueMissing: true }),
+  };
 }
 
 export interface HttpResponse {
@@ -113,6 +160,11 @@ export async function handleHttpRequest(
         /** Set by the forwarder (T2, single-hop guard) — signals this is a fleet-internal hop, not
          *  a fresh dispatch, so the receiver checks ownership itself rather than trusting the caller. */
         forwarded?: boolean;
+        /** Fleet B3, D3 (effectively-once forwarding): the forwarder's one-per-logical-write UUID,
+         *  reused verbatim across its retry-once — see `WriteForwarder.forward`. Absent for a
+         *  non-forwarded call (e.g. a fleet-internal system forward from an older node, or any
+         *  direct non-fleet caller), which carries no idempotency tracking at all. */
+        idempotencyKey?: string;
       };
       if (!p.path) return json(400, { error: "missing function path" });
       const identity = p.identity ?? null;
@@ -130,6 +182,17 @@ export async function handleHttpRequest(
           `fleet: this node is not the owner of shard '${shardId}' — refresh and retry against the current owner`,
         );
       }
+
+      const idempotencyKey = p.idempotencyKey;
+      // SELECT-first (Fleet B3, D3): a duplicate delivery of an ALREADY-committed write replays
+      // without ever touching the runtime — no re-execution, no double side effects. `idempotencyLookup`
+      // is optional (older/stub `FleetHandles`) — absent, this whole path is skipped and behavior is
+      // byte-identical to before this feature existed.
+      if (idempotencyKey && fleet.idempotencyLookup) {
+        const hit = await fleet.idempotencyLookup(idempotencyKey);
+        if (hit) return json(200, idempotencyReplayBody(hit));
+      }
+
       // `_system:*`/`_storage:*` (and any other underscore-namespaced) built-in mutations reach here
       // when a privileged doc mutation — the admin dashboard editor's `_system:patchDocument`/
       // `deleteDocument`/`insertDocument`, which already carries its resolved `shardId` (B2a) — is
@@ -139,12 +202,48 @@ export async function handleHttpRequest(
       // through the SAME privileged entrypoint the origin node used — `runSystem`, with the resolved
       // `shardId` threaded through — rather than the public `run`.
       const isInternalForwardPath = p.path.split(":").some((seg) => seg.startsWith("_"));
-      const result =
-        p.kind === "action"
-          ? await runtime.runAction(p.path, p.args ?? {}, { identity })
-          : isInternalForwardPath
-            ? await runtime.runSystem(p.path, p.args ?? {}, { shardId })
-            : await runtime.run(p.path, p.args ?? {}, { identity });
+      // Opaque commit metadata (Fleet B3, D3): threaded through `run`/`runSystem` -> `RunOptions.
+      // commitMeta` -> ... -> the fleet commit guard's atomic `fleet_idempotency` INSERT. Actions
+      // never reach a top-level commit themselves (their inner `ctx.runMutation` calls are each a
+      // fresh `invoke` with their own options), so this is a harmless no-op for `kind === "action"`.
+      const commitMeta = idempotencyKey ? { idempotencyKey } : undefined;
+
+      let result: Awaited<ReturnType<typeof runtime.run>>;
+      try {
+        result =
+          p.kind === "action"
+            ? await runtime.runAction(p.path, p.args ?? {}, { identity })
+            : isInternalForwardPath
+              ? await runtime.runSystem(p.path, p.args ?? {}, { shardId, commitMeta })
+              : await runtime.run(p.path, p.args ?? {}, { identity, commitMeta });
+      } catch (runErr) {
+        // The concurrent-duplicate race's loser (Fleet B3, D3 spec-review requirement): this
+        // attempt ALSO passed the SELECT-miss above, then its own commit guard's `fleet_idempotency`
+        // INSERT collided with a sibling attempt that committed first — aborting this entire commit
+        // transaction (nothing landed; see `installCommitGuard`'s doc comment). That is NOT a
+        // caller-visible failure: re-SELECT the row the winner just committed and replay it, rather
+        // than surfacing a generic 500 for what is, from the caller's perspective, a successful
+        // (if duplicated) write.
+        if (idempotencyKey && fleet.idempotencyLookup && isFleetIdempotencyConflict(runErr)) {
+          const hit = await fleet.idempotencyLookup(idempotencyKey);
+          if (hit) return json(200, idempotencyReplayBody(hit));
+        }
+        throw runErr;
+      }
+
+      // Post-run best-effort value recording (Fleet B3, D3): the guard only ever saw `commitTs` (the
+      // VALUE isn't known inside the commit transaction), so record it now that `run`/`runAction`/
+      // `runSystem` has returned. A failure here (e.g. a transient connection hiccup) must NOT fail
+      // an otherwise-successful mutation response — a later replay simply reports `valueMissing:
+      // true` for this key, the documented crash-window contract.
+      if (idempotencyKey && fleet.idempotencyRecordValue) {
+        try {
+          await fleet.idempotencyRecordValue(idempotencyKey, convexToJson(result.value as Value));
+        } catch {
+          // best-effort — see the doc comment above.
+        }
+      }
+
       // Stringified: a replica's `WriteForwarder` waits on this via `ReplicaTailer.waitFor` for
       // read-your-own-writes, and bigints don't survive JSON.stringify. `result.oplog` is null for
       // actions (they never commit directly) — fall back to `result.commitTs`, which the executor

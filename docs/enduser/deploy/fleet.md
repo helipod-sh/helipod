@@ -68,11 +68,13 @@ forwarding.
 - **The same `STACKBASE_ADMIN_KEY` on every node.** Nodes authenticate to each other's internal
   forwarding endpoint with this key (a plain bearer token), so it must be identical across the
   fleet — same as it already needs to be a single strong secret per deployment.
-- **A unique data directory per node.** A sync node now keeps its own local replica file
-  alongside its SQLite data path — at `<dir>/fleet-replica.db`, where `<dir>` is the directory
-  containing whatever `--data`/`STACKBASE_DATA_DIR` you gave it (see [Reads served from a local
-  replica](#reads-served-from-a-local-replica) below). Every node in the fleet must point at its
-  own directory — this is not currently validated, so two nodes sharing a data directory will
+- **A unique data directory per node.** A sync node — and, in [multi-writer
+  mode](#multi-writer-distribution-writes-scale-with-node-count), a writer node too — keeps its
+  own local replica file alongside its SQLite data path — at `<dir>/fleet-replica.db`, where
+  `<dir>` is the directory containing whatever `--data`/`STACKBASE_DATA_DIR` you gave it (see
+  [Reads served from a local replica](#reads-served-from-a-local-replica) below). Budget disk for
+  this replica on every node, writers included. Every node in the fleet must point at its own
+  directory — this is not currently validated, so two nodes sharing a data directory will
   silently stomp each other's replica file (and each other's SQLite file, if not on Postgres)
   rather than fail fast. Give each node's `--data`/`STACKBASE_DATA_DIR` its own path, the same way
   you'd already isolate two ordinary `stackbase serve` processes.
@@ -223,6 +225,11 @@ on that node are served entirely from this local file; the node's connection to 
 **only** to pull the next batch of committed writes, never to answer a read. This is what removes
 the slice-1 concern about primary read load growing with fleet size — a sync node's load on the
 shared database is one tail cursor, not a live connection serving arbitrary reads.
+
+A writer node in [multi-writer mode](#multi-writer-distribution-writes-scale-with-node-count) runs
+this exact same replica tailer alongside its writing duties, and answers its own reads from it too
+— see [Scaling knobs: reads vs. writes](#scaling-knobs-reads-vs-writes) below. Single-writer mode's
+one writer is unaffected: it still answers reads directly, as it always has.
 
 - **New nodes catch up before reporting ready.** A brand-new node (or one whose replica file was
   deleted) starts its replica from scratch and replays the write log before its startup line
@@ -463,21 +470,62 @@ Single-writer mode (the default) and multi-writer mode scale two different thing
   shards directly, so total write throughput grows with node count — as long as your app actually
   spreads its writes across shards (see [Sharding](/sharding)).
 
-One trade-off worth knowing: on a writer node, reads are answered directly from that node's own
-copy of the shards it owns, not from a local replica the way a sync node's reads are. Serving a
-writer's reads from a replica too is a possible future improvement, not built in this release.
+**Reads scale on every node, writers included.** A writer node in multi-writer mode keeps the
+same local file-backed replica a sync node does (see [Reads served from a local
+replica](#reads-served-from-a-local-replica) above) and answers its own queries and subscriptions
+from it, exactly the way a sync node does. Writing is the only thing that goes straight to the
+shards a node owns — reading never waits on that path. This closes what used to be multi-writer's
+main catch: earlier, a writer's reads went straight to the shared database, so adding writer
+nodes grew write throughput but not read capacity. Now every node you add, writer or not, adds
+read capacity too — the same as slice 2 already gave sync nodes. Budget disk for each writer
+node's replica the same way you already do for a sync node's (see
+[Requirements](#requirements)).
 
-### The at-least-once note
+One nuance a sync node never faces: when a writer node commits a write *locally*, its live
+subscriptions are held until its own replica has caught up to that write (so they never show a
+stale result), but a separate one-off query fired immediately afterwards — say a bare `/api/run`
+call racing its own preceding write — reads the replica and may run a beat before the write
+appears there. Live subscriptions and forwarded writes are always read-your-own-writes; racing an
+imperative query against your own just-committed write on the same writer node is the one
+eventually-consistent corner, and it converges within the replication beat.
 
-This isn't new to multi-writer mode — it already applied to write forwarding in single-writer
-mode, and multi-writer mode's node-to-node forwarding (for a mutation that lands on a node that
-doesn't own the shard it needs) shares the same behavior: if a write actually commits but the
-response back to the caller is lost to a transport failure at that exact instant, a client-side
-retry of that same call can execute it a second time. This is a narrow window — it only matters
-for the instant between a commit landing and its result making it back over the network — and
-it's unchanged from earlier releases. Design mutations that might be retried to be safe to run
-twice (the same idempotency discipline you'd already want for any network call that can fail
-after doing its work), or account for it in your own retry logic.
+One narrow, deliberate exception: a small number of reads inside the engine's own internal
+control-plane logic — the scheduler's periodic wake scan, for example — still go straight to the
+primary rather than a replica, because they need up-to-the-instant freshness more than they need
+replica-scale. This never touches your app's queries or subscriptions and needs no
+configuration — it's mentioned here only for completeness.
+
+### Effectively-once forwarding
+
+Earlier releases documented write forwarding — both a sync node forwarding to the single writer,
+and multi-writer's node-to-node forwarding for a mutation that lands on a node that doesn't own
+the shard it needs — as **at-least-once**: if a write actually committed but the response back to
+the caller was lost to a transport failure at that exact instant, a client-side retry of that same
+call could execute it a second time. That gap is closed. Forwarded writes are now
+**effectively-once**, on both single-writer and multi-writer topologies — there's nothing to turn
+on and no new setting.
+
+Every forwarded write carries a one-time marker that Stackbase records atomically as part of the
+same commit as the write itself. If the same forwarded write is retried — because the original
+response never made it back to the caller — Stackbase recognizes the marker and hands back the
+original result instead of running the write a second time.
+
+The contract, stated precisely, because it's worth knowing exactly what's guaranteed:
+
+- **Your mutation's handler body can still run more than once** if two retries of the very same
+  write race each other concurrently. **The durable write itself — and everything it fans out to
+  (subscriptions and the rest) — happens exactly once**, no matter how many concurrent attempts
+  are in flight; only one attempt's effects ever land.
+- **A crash in the narrow window after a write commits but before its result is recorded** leaves
+  a retry able to confirm the write succeeded (and when it committed) without being able to hand
+  back the value the write returned. Treat this the same as any response dropped after a
+  successful write: the write happened — proceed accordingly, just without its return value in
+  hand.
+- **Retry markers are kept for one hour.** A retry that arrives after that window re-executes the
+  write rather than replaying it — this only matters for a retry arriving wildly late, since
+  ordinary network retries happen within seconds, not hours.
+
+None of this changes how you write mutations — it's automatic on every forwarded write.
 
 ### Ops surface
 
@@ -503,10 +551,6 @@ Be realistic about what this slice is and isn't:
   across nodes.** Turn on [multi-writer
   distribution](#multi-writer-distribution-writes-scale-with-node-count) (above) to spread
   different shards' write ownership across different nodes instead.
-- **A writer node's reads come from its own primary copy, not a replica, even in multi-writer
-  mode.** Serving a writer's reads from a local replica the way a sync node's are is a possible
-  future improvement — see [Scaling knobs: reads vs.
-  writes](#scaling-knobs-reads-vs-writes) above.
 - **A sync node's data-directory uniqueness isn't validated.** Nothing stops you from accidentally
   pointing two nodes at the same `--data`/`STACKBASE_DATA_DIR` directory — see
   [Requirements](#requirements) above. Get this wrong and both nodes' replica state corrupts

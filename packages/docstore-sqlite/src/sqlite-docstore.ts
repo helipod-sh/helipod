@@ -155,6 +155,9 @@ export class SqliteDocStore implements DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
+    // Opaque commit metadata (Fleet B3, D3): SQLite has no commit guard to hand it to, so it is
+    // accepted (interface conformance) and ignored — non-fleet / single-node SQLite pays nothing.
+    _opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
     // Allocate + stamp + write in ONE synchronous transaction. Under the single-writer invariant,
     // `MAX(ts) + 1` computed inside the transaction is race-free: no other writer can interleave a

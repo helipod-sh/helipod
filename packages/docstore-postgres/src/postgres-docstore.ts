@@ -65,8 +65,14 @@ export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
   /** Fleet-installed epoch fence (D3/D5). Runs inside every `commitWrite` transaction, after the row
    * inserts and before COMMIT; throwing aborts the whole commit. Never set at Tier 0. The `shardId` is
-   * passed so a per-shard fleet fence can check THAT shard's epoch row (B2a per-shard guards). */
-  private commitGuard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId) => Promise<void>) | null = null;
+   * passed so a per-shard fleet fence can check THAT shard's epoch row (B2a per-shard guards).
+   * `meta` (Fleet B3, D3, additive 4th param): the caller's opaque `commitWrite` `opts.meta`,
+   * forwarded verbatim — undefined when the commit carried none. Existing 3-arg guard callbacks
+   * (e.g. the epoch fence installed by `ee/packages/fleet/src/node.ts`) stay valid as-is: a
+   * callback that ignores its 4th parameter is still assignable to this type. */
+  private commitGuard:
+    | ((q: PgQuerier, commitTs: bigint, shardId: ShardId, meta?: Record<string, string>) => Promise<void>)
+    | null = null;
 
   constructor(
     private readonly db: PgClient,
@@ -77,7 +83,9 @@ export class PostgresDocStore implements DocStore {
 
   /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
    * (the epoch fence); at Tier 0 no guard is ever set and `commitWrite` never calls one. */
-  setCommitGuard(guard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId) => Promise<void>) | null): void {
+  setCommitGuard(
+    guard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId, meta?: Record<string, string>) => Promise<void>) | null,
+  ): void {
     this.commitGuard = guard;
   }
 
@@ -246,6 +254,7 @@ export class PostgresDocStore implements DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
+    opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
     if (this.readOnly) throw new ReadOnlyStoreError();
     const shard = shardId ?? DEFAULT_SHARD;
@@ -267,7 +276,7 @@ export class PostgresDocStore implements DocStore {
       const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
       const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
       await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shard);
-      if (this.commitGuard) await this.commitGuard(tx, commitTs, shard);
+      if (this.commitGuard) await this.commitGuard(tx, commitTs, shard, opts?.meta);
       return commitTs;
     };
     // Pool mode (D1): route the whole commit onto THIS shard's dedicated commit connection, so
