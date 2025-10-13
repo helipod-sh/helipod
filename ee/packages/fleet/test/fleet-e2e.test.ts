@@ -1830,4 +1830,307 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
     },
     { timeout: 300_000 },
   );
+
+  /* ====================================================================== */
+  /* Fleet B3 (Task 5) — hybrid ship gate: writer-replica offload, hybrid    */
+  /* RYOW, effectively-once forwarding, concurrent multi-writer boot.        */
+  /* ====================================================================== */
+
+  it(
+    "offloads reads to a hybrid WRITER's own replica while the primary is paused (default TTL, no self-exit) and serves read-your-own-writes for local + forwarded commits",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+      const advB = `http://127.0.0.1:${portB}`;
+
+      // Multi-writer at the DEFAULT 15s lease TTL (NO STACKBASE_FLEET_LEASE_TTL_MS). This is
+      // load-bearing: under a paused primary a writer's LeaseMonitor probe HANGS and the node self-
+      // demotes only ~TTL later — at the 6s TTL the other multi-writer scenario uses a writer would
+      // exit ~8s into the pause, but the default 15s leaves ample headroom for a <=10s pause, which is
+      // exactly what lets us assert the node did NOT exit while reads kept flowing off its replica.
+      const MW_ENV = { STACKBASE_FLEET_MULTI_WRITER: "1", STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let wsA: WebSocket | undefined;
+      let paused = false;
+      try {
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, MW_ENV);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+
+        nodeB = spawnFleetServe(databaseUrl, portB, undefined, MW_ENV);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+
+        const partition = await waitForConvergedPartition(pg, [advA, advB]);
+        expect(partition.size).toBe(NUM_SHARDS);
+
+        // A is a HYBRID writer: its WRITE store is the primary, its READ path is its OWN local replica.
+        const keyOnA = pickKeyForOwner(partition, advA).key;
+        const keyOnB = pickKeyForOwner(partition, advB).key;
+        expect(shardIdForKeyValue(keyOnA, NUM_SHARDS)).not.toBe(shardIdForKeyValue(keyOnB, NUM_SHARDS));
+
+        // Subscription on A (booted first as the writer — its writer-invalidation listener is live since
+        // boot, the stable observation point in multi-writer mode).
+        const subA = await subscribe(`${advA.replace("http", "ws")}/api/sync`, 1, "messages:list", {});
+        wsA = subA.ws;
+        expect(latestMod(subA.messages, 1)!.value).toEqual([]);
+
+        /* -------------------------------------------------------------- */
+        /* HYBRID own-commit visibility (Fleet B3, D2): a hybrid writer's     */
+        /* public reads come from its LOCAL replica, so a LOCAL commit (A owns */
+        /* keyOnA) is reflected via A's own SUBSCRIPTION — the `beforeNotify`   */
+        /* replica gate holds the re-run until A's replica applied it. A         */
+        /* FORWARDED commit (A -> B for keyOnB, a shard A does NOT own) ALSO      */
+        /* gives synchronous read-your-writes: the forwarder's `waitForReplica`   */
+        /* blocks the response until A's replica caught up to that commitTs (by    */
+        /* which point A's replica has applied BOTH, in ts order).                 */
+        /* -------------------------------------------------------------- */
+        const localAdd = await apiRun(advA, "messages:send", { channelId: keyOnA, body: "local-1" });
+        expect(localAdd.body.committed).toBe(true);
+        // Local commit readable via A's own subscription (bounded — the beforeNotify replica gate).
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as Array<{ body?: string }>).some((m) => m.body === "local-1");
+        }, 20_000);
+
+        const fwdAdd = await apiRun(advA, "messages:send", { channelId: keyOnB, body: "fwd-1" });
+        expect(fwdAdd.body.committed).toBe(true);
+        const afterFwd = await apiRun(advA, "messages:list", {}); // no sleep — forwarded RYOW must hold
+        expect(bodiesOf(afterFwd.body.value)).toEqual(["fwd-1", "local-1"]);
+
+        // A's own subscription converges to both (local fan-out + writer-invalidation listener).
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as unknown[]).length === 2;
+        }, 20_000);
+
+        /* -------------------------------------------------------------- */
+        /* OFFLOAD: freeze the primary. A's replica-backed reads keep         */
+        /* flowing (NO Postgres round-trip on the read path); a WRITE fails    */
+        /* visibly; and A must NOT self-exit within the <=10s pause window.    */
+        /* -------------------------------------------------------------- */
+        expect(runDocker(["pause", CONTAINER_NAME]).status).toBe(0);
+        paused = true;
+        const pauseStart = Date.now();
+
+        // Read still answers 200 with correct data — served entirely from A's local replica.
+        const readDuringPause = await apiRunBounded(advA, "messages:list", {}, 8_000);
+        expect(readDuringPause.kind).toBe("http");
+        if (readDuringPause.kind === "http") {
+          expect(readDuringPause.status).toBe(200);
+          expect(bodiesOf(readDuringPause.body.value)).toEqual(["fwd-1", "local-1"]);
+        }
+        expect(wsA.readyState).toBe(WebSocket.OPEN);
+
+        // A mutation fails visibly (its commit hangs on the frozen primary) — bounded, not silent.
+        const writeDuringPause = await apiRunBounded(advA, "messages:send", { channelId: keyOnA, body: "during-pause" }, 6_000);
+        const committedDuringPause =
+          writeDuringPause.kind === "http" &&
+          writeDuringPause.status === 200 &&
+          writeDuringPause.body.committed === true;
+        expect(committedDuringPause).toBe(false);
+
+        // The offload assertion the DEFAULT TTL exists for: the node did NOT exit during the pause.
+        expect(Date.now() - pauseStart).toBeLessThan(10_000);
+        expect(nodeA.exitCode).toBeNull();
+        expect(nodeA.signalCode).toBeNull();
+
+        // Unpause -> writes resume, subscription converges on a fresh commit.
+        expect(runDocker(["unpause", CONTAINER_NAME]).status).toBe(0);
+        paused = false;
+
+        const reconverge = await (async () => {
+          const deadline = Date.now() + 30_000;
+          for (;;) {
+            const r = await apiRun(advA, "messages:send", { channelId: keyOnA, body: "reconverge" }).catch(
+              () => ({ status: 0, body: {} }) as RunResult,
+            );
+            if (r.status === 200 && r.body.committed === true) return r;
+            if (Date.now() > deadline) throw new Error(`post-unpause mutation never committed: ${JSON.stringify(r.body)}`);
+            await sleep(300);
+          }
+        })();
+        expect(reconverge.body.committed).toBe(true);
+
+        await waitFor(() => {
+          const v = latestMod(subA.messages, 1)?.value;
+          return Array.isArray(v) && (v as Array<{ body?: string }>).some((m) => m.body === "reconverge");
+        }, 20_000);
+      } finally {
+        wsA?.close();
+        await pg.end().catch(() => {});
+        if (paused) runDocker(["unpause", CONTAINER_NAME]); // never leave a paused container behind
+        await stopServe(nodeA);
+        await stopServe(nodeB);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "replays an effectively-once forwarded write: the same idempotencyKey commits ONCE and the duplicate replays the same commitTs (sequential AND simultaneous)",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+      const portA = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+
+      // Single-writer fleet (A owns every shard). `STACKBASE_FLEET_SHARDS=1` pins every write to the
+      // "default" shard so the raw `/_fleet/run` body carries a deterministic, always-owned shardId.
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      try {
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, { STACKBASE_FLEET_SHARDS: "1" });
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+        await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+
+        const shardId = shardIdForKeyValue("chan-eo", 1); // numShards=1 -> "default"
+        // A raw `/_fleet/run` POST — the EXACT body the WriteForwarder sends (forwarded + per-write
+        // idempotencyKey), admin-key gated. Bypassing the client forwarder is what makes this the TRUE
+        // cross-connection duplicate the PGlite tier could only simulate with `forceMissOnce`.
+        const fleetRun = async (
+          idempotencyKey: string,
+          body: string,
+        ): Promise<{ status: number; body: { value?: unknown; commitTs?: string; replayed?: boolean } }> => {
+          const res = await fetch(`${advA}/_fleet/run`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN_KEY}` },
+            body: JSON.stringify({
+              path: "messages:send",
+              args: { channelId: "chan-eo", body },
+              identity: null,
+              kind: "mutation",
+              shardId,
+              forwarded: true,
+              idempotencyKey,
+            }),
+          });
+          return { status: res.status, body: (await res.json()) as { value?: unknown; commitTs?: string; replayed?: boolean } };
+        };
+
+        /* (a) SEQUENTIAL duplicate = the replay proof. */
+        const key1 = crypto.randomUUID();
+        const first = await fleetRun(key1, "eo-once");
+        expect(first.status).toBe(200);
+        expect(first.body.replayed).toBeUndefined(); // a genuine fresh commit
+        expect(typeof first.body.commitTs).toBe("string");
+        expect(first.body.commitTs).not.toBe("0");
+
+        const second = await fleetRun(key1, "eo-once-DUP"); // same key, different body — must NOT re-run
+        expect(second.status).toBe(200);
+        expect(second.body.replayed).toBe(true); // a replay, not a re-execution
+        expect(second.body.commitTs).toBe(first.body.commitTs); // the SAME commitTs
+
+        // Exactly ONE app row landed (and it's the FIRST body — the duplicate never executed).
+        const afterSeq = await apiRun(advA, "messages:list", {});
+        expect(bodiesOf(afterSeq.body.value)).toEqual(["eo-once"]);
+
+        /* (b) SIMULTANEOUS duplicate = the concurrent cross-connection race. Two in-flight POSTs with
+           the SAME new key: one commits, the other's own commit-guard INSERT collides (or its SELECT-
+           first hits the winner) and replays — both observe the SAME commitTs, and only ONE row lands. */
+        const key2 = crypto.randomUUID();
+        const [c1, c2] = await Promise.all([fleetRun(key2, "eo-race"), fleetRun(key2, "eo-race")]);
+        expect(c1.status).toBe(200);
+        expect(c2.status).toBe(200);
+        expect(typeof c1.body.commitTs).toBe("string");
+        expect(c1.body.commitTs).toBe(c2.body.commitTs); // both resolve to the one committed write
+        expect(c1.body.commitTs).not.toBe("0");
+        // Exactly one NEW "eo-race" row (plus the earlier "eo-once").
+        const afterRace = await apiRun(advA, "messages:list", {});
+        expect(bodiesOf(afterRace.body.value).filter((b) => b === "eo-race")).toEqual(["eo-race"]);
+        expect(bodiesOf(afterRace.body.value)).toEqual(["eo-once", "eo-race"]);
+      } finally {
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 180_000 },
+  );
+
+  it(
+    "boots two multi-writer nodes SIMULTANEOUSLY: the count-gate converges to a disjoint non-empty partition without wedging, and the sync read path fans out",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+      const advB = `http://127.0.0.1:${portB}`;
+      const MW_ENV = {
+        STACKBASE_FLEET_MULTI_WRITER: "1",
+        STACKBASE_FLEET_SHARDS: String(NUM_SHARDS),
+        STACKBASE_FLEET_LEASE_TTL_MS: "6000",
+      };
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      let ws: WebSocket | undefined;
+      try {
+        /* SIMULTANEOUS boot — no sequential staging (no "boot A, await ready, THEN boot B"). Both nodes
+           race the default election + rendezvous at once; T4's setup-time seeded shard rows are what
+           make the count==N gate satisfiable without a sequential warm-up (the accepted-edge triage
+           item this scenario closes). */
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, MW_ENV);
+        nodeB = spawnFleetServe(databaseUrl, portB, undefined, MW_ENV);
+        const [bootA, bootB] = await Promise.all([waitForReadyOrExit(nodeA), waitForReadyOrExit(nodeB)]);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        // Exactly one wins the atomic default election at boot; the other boots sync then promotes.
+        expect([bootA.ready.role, bootB.ready.role].sort()).toEqual(["sync", "writer"]);
+
+        // The count-gate never wedges: all N shards converge, held disjointly + non-empty by BOTH nodes.
+        const partition = await waitForConvergedPartition(pg, [advA, advB]);
+        expect(partition.size).toBe(NUM_SHARDS);
+        const ownersA = [...partition.entries()].filter(([, u]) => u === advA).map(([s]) => s);
+        const ownersB = [...partition.entries()].filter(([, u]) => u === advB).map(([s]) => s);
+        expect(ownersA.length).toBeGreaterThan(0); // A holds a real share
+        expect(ownersB.length).toBeGreaterThan(0); // B holds a real share
+        expect(ownersA.length + ownersB.length).toBe(NUM_SHARDS); // disjoint, summing to N
+
+        /* The read/sync path works after the concurrent boot: subscribe on the boot writer (its writer-
+           invalidation listener has been live since boot), commit a message on a shard owned by the OTHER
+           writer, and watch it fan out. */
+        const bootWriterUrl = bootA.ready.role === "writer" ? advA : advB;
+        const otherUrl = bootWriterUrl === advA ? advB : advA;
+        const sub = await subscribe(`${bootWriterUrl.replace("http", "ws")}/api/sync`, 1, "messages:list", {});
+        ws = sub.ws;
+        expect(latestMod(sub.messages, 1)!.value).toEqual([]);
+
+        const key = pickKeyForOwner(partition, otherUrl).key;
+        const send = await apiRun(bootWriterUrl, "messages:send", { channelId: key, body: "concurrent-boot" });
+        expect(send.body.committed).toBe(true);
+        await waitFor(() => {
+          const v = latestMod(sub.messages, 1)?.value;
+          return Array.isArray(v) && (v as Array<{ body?: string }>).some((m) => m.body === "concurrent-boot");
+        }, 20_000);
+      } finally {
+        ws?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        await stopServe(nodeB);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
 });
