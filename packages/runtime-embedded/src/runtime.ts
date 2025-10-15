@@ -124,6 +124,16 @@ export interface EmbeddedRuntimeOptions {
    */
   numShards?: number;
   /**
+   * Fleet B4 (group commit): route commits through the two-buffer stage-then-flush committer loop
+   * instead of the byte-identical single-commit path. Threaded straight into the transactor
+   * (`ShardedTransactor`/`SingleWriterTransactor`) constructed below — every shard batches when this
+   * is set, none do when it's unset/false. The CLI resolves this from `STACKBASE_GROUP_COMMIT`
+   * (default OFF at Fleet B4/T4 — T5 owns flipping the production default); leaving it unset keeps a
+   * non-fleet / flag-off deployment structurally on today's path, byte-identical to before this
+   * option existed. See `ShardedTransactorOptions.groupCommit`'s doc comment for the mechanism.
+   */
+  groupCommit?: boolean;
+  /**
    * Hybrid-node split-read seam (Fleet B3, D1). When set, `create()` builds a SECOND, separate
    * query-path transactor (`SingleWriterTransactor` — queries never commit, so no sharding is
    * needed here regardless of the write side) + `QueryRuntime` over this store, seeded from ITS
@@ -235,13 +245,13 @@ export class EmbeddedRuntime {
     let transactor: SingleWriterTransactor | ShardedTransactor;
     let oracle: TimestampObserver;
     if ((options.numShards ?? 1) > 1) {
-      const sharded = new ShardedTransactor(options.store, { fanout });
+      const sharded = new ShardedTransactor(options.store, { fanout, groupCommit: options.groupCommit ?? false });
       sharded.observeTimestamp(startTs); // floor every shard oracle at the recovered high-water mark
       transactor = sharded;
       oracle = sharded;
     } else {
       const singleOracle = new MonotonicTimestampOracle(startTs);
-      transactor = new SingleWriterTransactor(options.store, singleOracle, { fanout });
+      transactor = new SingleWriterTransactor(options.store, singleOracle, { fanout, groupCommit: options.groupCommit ?? false });
       oracle = singleOracle;
     }
     const queryRuntime = new QueryRuntime(options.store);
@@ -844,6 +854,19 @@ export class EmbeddedRuntime {
    */
   tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
     return this.transactor.tryRunExclusiveOnShard(shardId, fn);
+  }
+
+  /**
+   * Group-commit counters (Fleet B4, T4 health) — total across the transactor, whichever shape it
+   * is: `ShardedTransactor.groupCommitStats()` aggregates over every live shard,
+   * `SingleWriterTransactor.groupCommitStats()` mirrors it for the one writer. Both are
+   * structurally all-zero when `EmbeddedRuntimeOptions.groupCommit` is unset/false (the underlying
+   * `ShardWriter` never touches these fields on the single-commit path) — callers need no separate
+   * on/off branch. The fleet health seam (`@stackbase/fleet`'s `node.ts`) reads this to derive
+   * `flushesPerSec` between successive `/api/health` reads.
+   */
+  groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number } {
+    return this.transactor.groupCommitStats();
   }
 }
 

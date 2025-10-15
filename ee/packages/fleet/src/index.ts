@@ -25,6 +25,8 @@ export {
   createAsyncChain,
   fleetApplicationName,
   fleetMultiWriterEnabled,
+  groupCommitEnabled,
+  deriveFlushesPerSec,
   REPLICA_DB_FILENAME,
   FLEET_WRITER_SESSION_TIMEOUTS,
   DEFAULT_NUM_SHARDS,

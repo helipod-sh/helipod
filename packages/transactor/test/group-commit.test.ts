@@ -19,7 +19,8 @@ import {
   type ShardId,
   type InternalDocumentId,
 } from "@stackbase/id-codec";
-import { ShardedTransactor, type OplogDelta } from "../src/index";
+import { MonotonicTimestampOracle } from "@stackbase/docstore";
+import { ShardedTransactor, SingleWriterTransactor, type OplogDelta } from "../src/index";
 
 const TABLE = 20001;
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -329,5 +330,26 @@ describe("group commit — flag-off byte-identity + pure reads", () => {
     expect(deltas[0]!.commitTs).toBe(r.commitTs);
     const read = await transactor.runInTransaction(async (ctx) => ctx.get(id));
     expect(read.value).toEqual({ body: "hi" });
+  });
+});
+
+describe("SingleWriterTransactor.groupCommitStats — T4 health mirror", () => {
+  it("all zero when groupCommit is unset (byte-identical single-commit path)", async () => {
+    const store = new SqliteDocStore(new NodeSqliteAdapter());
+    await store.setupSchema();
+    const t = new SingleWriterTransactor(store, new MonotonicTimestampOracle(0n));
+    await t.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: 0n }));
+    expect(t.groupCommitStats()).toEqual({ lastBatchSize: 0, maxBatchSize: 0, flushCount: 0 });
+  });
+
+  it("reports a flushed batch's size when groupCommit is on", async () => {
+    const store = new HookedSqliteStore(new NodeSqliteAdapter());
+    await store.setupSchema();
+    const t = new SingleWriterTransactor(store, new MonotonicTimestampOracle(0n), { groupCommit: true });
+    await t.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: 0n }));
+    const stats = t.groupCommitStats();
+    expect(stats.flushCount).toBe(1);
+    expect(stats.lastBatchSize).toBe(1);
+    expect(stats.maxBatchSize).toBe(1);
   });
 });

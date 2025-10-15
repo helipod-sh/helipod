@@ -58,6 +58,16 @@ export class SingleWriterTransactor implements Transactor {
   }
 
   /**
+   * Group-commit counters (Fleet B4, T4 health) — the single-writer mirror of
+   * `ShardedTransactor.groupCommitStats()`, for the one writer this class holds. Zero when
+   * `groupCommit` is off or has never flushed (the underlying `ShardWriter` never touches these
+   * fields on the single-commit path), so callers need no separate on/off branch.
+   */
+  groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number } {
+    return { lastBatchSize: this.writer.lastBatchSize, maxBatchSize: this.writer.maxBatchSize, flushCount: this.writer.flushCount };
+  }
+
+  /**
    * Test/back-compat accessor: the existing suite reaches into the recent-commits ring
    * directly (private-field peek) to assert the store-allocated commit ts lands there. Now
    * delegates to the extracted `ShardWriter` (D1) — same array, same semantics, just no

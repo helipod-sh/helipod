@@ -38,6 +38,10 @@ export interface FleetRuntimeOptions {
   /** Fleet B3 hybrid RYOW: awaited in the runtime's fan-out drain before a local commit's
    *  subscription re-runs (wired to the fleet forwarder's replica-catch-up wait). */
   beforeNotify?: (commitTs: bigint) => Promise<void>;
+  /** Fleet B4 (T4): group commit — resolved fleet-side from `STACKBASE_GROUP_COMMIT` (mirrors how
+   *  `@stackbase/fleet`'s `node.ts` resolves `STACKBASE_FLEET_MULTI_WRITER`), threaded straight
+   *  into `createEmbeddedRuntime` via `bootProject`'s `fleet.groupCommit`. Unset → `false`. */
+  groupCommit?: boolean;
 }
 
 /** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here
