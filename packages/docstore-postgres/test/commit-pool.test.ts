@@ -381,7 +381,7 @@ describe("PostgresDocStore.commitWrite — pool routing (D1) + shardId to the gu
     const client = new StubPoolClient();
     const store = new PostgresDocStore(client);
     const seenShard: string[] = [];
-    store.setCommitGuard(async (_q, _ts, shardId) => {
+    store.setCommitGuard(async (_q, _units, shardId) => {
       seenShard.push(shardId);
     });
 
