@@ -864,10 +864,15 @@ export function installCommitGuard(
   lease: LeaseManager,
   onFenced: (shardId: ShardId, reason: string) => void,
 ): void {
-  pgStore.setCommitGuard(async (q, commitTs, shardId, meta) => {
-    // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
+  pgStore.setCommitGuard(async (q, units, shardId) => {
+    // Fleet B4 (batch-shaped guard): `commitWriteBatch` invokes this ONCE per transaction over ALL its
+    // units (`{ts, meta}` in unit/ts order); a single `commitWrite` reaches here as a one-unit array.
+    // We fence ONCE, advance the frontier ONCE to the batch's last ts, and loop the per-unit idempotency
+    // INSERTs each at its own ts. ANY throw here aborts the WHOLE batch — no unit lands (D1).
+    //
+    // B2a: the guard is PER-SHARD. `commitWriteBatch` routes each batch to its shard's connection and
     // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
-    // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
+    // advance THAT row's frontier chain. A batch on shard s2 whose s2 epoch was superseded aborts
     // and relinquishes ONLY s2 (B2b), while the other shards' commits are unaffected.
     const epoch = lease.currentEpoch(shardId);
     if (epoch === null) {
@@ -877,40 +882,43 @@ export function installCommitGuard(
       onFenced(shardId, `commit guard invoked with no acquired epoch for shard '${shardId}'`);
       throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
-    // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
-    // frontier regression: (1) the idle-shard closer now takes THIS shard's commit mutex before
-    // bumping its frontier (`closeIdleFrontiers`), so nothing can have raised it mid-commit on the
-    // same epoch, and a cross-epoch writer is fenced by the `epoch = $3` predicate; (2) GREATEST makes
-    // the write monotone regardless. The tailer's semantics already tolerate `frontier_ts` exceeding
-    // the last committed doc ts (idle bumps do exactly that, and its empty-range advance handles it),
-    // so keeping the strictly-larger of the two is always safe. `prev_ts := frontier_ts` still records
-    // the pre-write frontier as the chain's previous link.
+    // The batch's frontier lands at ts_N (the last, largest unit ts) — the units are ts-ordered, so
+    // this is the batch high-water mark. `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1`
+    // — two layers of defense against a frontier regression: (1) the idle-shard closer now takes THIS
+    // shard's commit mutex before bumping its frontier (`closeIdleFrontiers`), so nothing can have
+    // raised it mid-commit on the same epoch, and a cross-epoch writer is fenced by the `epoch = $3`
+    // predicate; (2) GREATEST makes the write monotone regardless. The tailer already tolerates
+    // `frontier_ts` exceeding the last committed doc ts, so keeping the strictly-larger is always safe.
+    // `prev_ts := frontier_ts` records the pre-BATCH frontier as the chain's previous link — the whole
+    // batch appears atomically to the tailer as ts's 1..N landing with F = ts_N (D3).
+    const tsN = units[units.length - 1]!.ts;
     const rows = await q.query(
       `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
-      [commitTs, shardId, epoch],
+      [tsN, shardId, epoch],
     );
     if (rows.length === 0) {
       onFenced(shardId, `commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
       throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
     }
 
-    // Fleet B3, D3 — effectively-once forwarding: when the commit carries an idempotency key
-    // (`RunOptions.commitMeta` → ... → `DocStore.commitWrite`'s `opts.meta`, threaded here as this
-    // guard's additive 4th param), INSERT the `fleet_idempotency` row in the SAME transaction as the
-    // commit — atomic by construction. A `key` PK collision (the concurrent-duplicate race's loser:
-    // another commit already claimed this key) throws a raw `unique_violation` here, which aborts
-    // the WHOLE transaction (nothing above has committed yet — Postgres rolls back the frontier
-    // bump and the staged document/index rows together with this INSERT). `packages/cli`'s
-    // `/_fleet/run` handler catches that specific shape (code 23505 on THIS table/constraint — never
-    // treating an app-schema unique violation as a replay) and re-SELECTs to return the winner's
-    // commitTs as a replay instead of a 500. Non-forwarded / non-fleet commits carry no meta (this
-    // node's own local mutations never set `commitMeta`), so `meta` is `undefined` and this is a
-    // silent no-op — the whole idempotency machinery costs nothing outside a forwarded write.
-    if (meta?.idempotencyKey) {
-      await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
-        meta.idempotencyKey,
-        commitTs,
-      ]);
+    // Fleet B3, D3 — effectively-once forwarding, PER UNIT (B4): when a unit carries an idempotency key
+    // (`RunOptions.commitMeta` → ... → `commitWriteBatch`'s per-unit `meta`), INSERT its `fleet_idempotency`
+    // row at THAT unit's own ts, in the SAME transaction — atomic by construction. Looping per unit is
+    // what makes the batch-shaped guard correct: a single last-ts guard call would drop units 1..N-1's
+    // rows and stamp the wrong ts. A `key` PK collision (the concurrent-duplicate race's loser: another
+    // commit already claimed this key) throws a raw `unique_violation`, aborting the WHOLE batch (nothing
+    // above has committed — Postgres rolls back every unit's frontier bump and rows together with this
+    // INSERT). `packages/cli`'s `/_fleet/run` handler catches that specific shape (code 23505 on THIS
+    // table/constraint — never an app-schema unique violation) and re-SELECTs the winner's commitTs as a
+    // replay. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
+    // idempotency machinery costs nothing outside a forwarded write.
+    for (const unit of units) {
+      if (unit.meta?.idempotencyKey) {
+        await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
+          unit.meta.idempotencyKey,
+          unit.ts,
+        ]);
+      }
     }
   });
 }

@@ -1,5 +1,6 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type {
+  CommitUnit,
   ConflictStrategy,
   DocStore,
   DocumentLogEntry,
@@ -76,6 +77,11 @@ export class SwitchableDocStore implements DocStore {
   ): Promise<bigint> {
     const d = this.delegate;
     return d.commitWrite(documents, indexUpdates, shardId, opts);
+  }
+
+  async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
+    const d = this.delegate;
+    return d.commitWriteBatch(units, shardId);
   }
 
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {

@@ -257,5 +257,93 @@ export function runDocStoreConformance(
         expect(commitTs).toBeGreaterThanOrEqual(1n);
       });
     });
+
+    // Group commit (Fleet B4, D1): `commitWriteBatch` commits N units as ONE store transaction, each
+    // unit stamped with its own strictly-increasing ts (in unit order), all-or-nothing on any error.
+    // These are the store-agnostic behaviors both backends must satisfy identically; the Postgres
+    // batch-shaped guard (fence-once, frontier at ts_N, per-unit idempotency) lives in the fleet suite.
+    describe("commitWriteBatch (group commit — Fleet B4)", () => {
+      // (a) unit order = ts order, strictly increasing; each unit's rows visible at its own ts.
+      it("stamps each unit its own strictly-increasing ts in unit order", async () => {
+        const [a, b, c] = [newDocumentId(TABLE), newDocumentId(TABLE), newDocumentId(TABLE)];
+        const tss = await store.commitWriteBatch([
+          { documents: [rev(a, 0n, null, "a")], indexUpdates: [] },
+          { documents: [rev(b, 0n, null, "b")], indexUpdates: [] },
+          { documents: [rev(c, 0n, null, "c")], indexUpdates: [] },
+        ]);
+
+        expect(tss).toHaveLength(3);
+        expect(tss[0]! < tss[1]! && tss[1]! < tss[2]!).toBe(true); // strictly increasing, in unit order
+        // Each unit's doc is the one stamped with THAT unit's returned ts.
+        expect((await store.get(a))!.ts).toBe(tss[0]);
+        expect((await store.get(b))!.ts).toBe(tss[1]);
+        expect((await store.get(c))!.ts).toBe(tss[2]);
+        expect(await store.maxTimestamp()).toBe(tss[2]); // batch high-water mark
+      });
+
+      // (b) single ≡ one-unit batch: commitWrite delegates to a one-unit commitWriteBatch, so the two
+      // paths allocate + land identically (the store never distinguishes them).
+      it("commitWrite is byte-identical to a one-unit commitWriteBatch", async () => {
+        const single = newDocumentId(TABLE);
+        const t1 = await store.commitWrite([rev(single, 0n, null, "via-single")], []);
+
+        const batched = newDocumentId(TABLE);
+        const [t2] = await store.commitWriteBatch([{ documents: [rev(batched, 0n, null, "via-batch")], indexUpdates: [] }]);
+
+        expect(t2).toBe(t1 + 1n); // consecutive: the one-unit batch is just the next commit
+        expect((await store.get(single))!.value.value.body).toBe("via-single");
+        expect((await store.get(batched))!.value.value.body).toBe("via-batch");
+      });
+
+      // (c) atomicity: a failure on a later unit aborts ALL units — nothing lands (D1). Portable poison:
+      // a `value` that fails serialization on both stores (an `undefined` field), thrown mid-batch AFTER
+      // unit 1 has already inserted — proving unit 1 rolls back with the transaction.
+      it("aborts the WHOLE batch when a later unit fails — zero rows land", async () => {
+        const good = newDocumentId(TABLE);
+        const bad = newDocumentId(TABLE);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const poison = { ts: 0n, id: bad, prev_ts: null, value: { id: bad, value: { body: undefined } } } as any;
+
+        await expect(
+          store.commitWriteBatch([
+            { documents: [rev(good, 0n, null, "unit-1")], indexUpdates: [] },
+            { documents: [poison], indexUpdates: [] },
+          ]),
+        ).rejects.toThrow();
+
+        // Unit 1 rolled back together with the failing unit 2 — neither doc exists.
+        expect(await store.get(good)).toBeNull();
+        expect(await store.get(bad)).toBeNull();
+      });
+
+      // (d) cross-unit density: two units writing DIFFERENT docs chain their own per-doc prev_ts
+      // revisions correctly and independently. (The batch-cut rule means the SAME doc never appears in
+      // two units of one batch — the store need not, and does not, handle that; documented on `CommitUnit`.)
+      it("chains per-doc prev_ts revisions across units writing different docs", async () => {
+        const x = newDocumentId(TABLE);
+        const y = newDocumentId(TABLE);
+        const [tx0, ty0] = await store.commitWriteBatch([
+          { documents: [rev(x, 0n, null, "x0")], indexUpdates: [] },
+          { documents: [rev(y, 0n, null, "y0")], indexUpdates: [] },
+        ]);
+
+        // A second batch updates each doc, chaining prev_ts back to that doc's own first revision.
+        const [tx1, ty1] = await store.commitWriteBatch([
+          { documents: [rev(x, 0n, tx0!, "x1")], indexUpdates: [] },
+          { documents: [rev(y, 0n, ty0!, "y1")], indexUpdates: [] },
+        ]);
+
+        expect(tx0! < ty0! && ty0! < tx1! && tx1! < ty1!).toBe(true); // all four strictly increasing
+        const latestX = (await store.get(x))!;
+        const latestY = (await store.get(y))!;
+        expect(latestX.value.value.body).toBe("x1");
+        expect(latestX.prev_ts).toBe(tx0); // X's chain points back to X's first rev, not Y's
+        expect(latestY.value.value.body).toBe("y1");
+        expect(latestY.prev_ts).toBe(ty0); // Y's chain is independent
+        // The historical revisions are still visible at their own ts.
+        expect((await store.get(x, tx0!))!.value.value.body).toBe("x0");
+        expect((await store.get(y, ty0!))!.value.value.body).toBe("y0");
+      });
+    });
   });
 }
