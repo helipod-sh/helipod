@@ -50,6 +50,13 @@ export interface ShardedTransactorOptions {
    * correctly recovers its high-water mark from persisted data on first use.
    */
   seedTs?: bigint;
+  /**
+   * Fleet B4 (group commit): route EVERY shard's commits through the two-buffer stage-then-flush
+   * committer loop. Default false = the byte-identical single-commit path on every shard. The
+   * runtime threads this from `STACKBASE_GROUP_COMMIT` (T4); leaving it unset keeps a non-fleet /
+   * flag-off deployment structurally on today's path.
+   */
+  groupCommit?: boolean;
 }
 
 export class ShardedTransactor implements Transactor {
@@ -156,8 +163,28 @@ export class ShardedTransactor implements Transactor {
       shardId,
       this.options.fanout,
       this.options.headroom ?? DEFAULT_HEADROOM,
+      this.options.groupCommit ?? false,
     );
     this.shards.set(shardId, writer);
     return writer;
+  }
+
+  /**
+   * Aggregate group-commit counters (Fleet B4, D4 — health) across all live shards: `maxBatchSize`
+   * is the max over shards (the headline "batching engaged" signal), `flushCount` the sum, and
+   * `lastBatchSize` the max of each shard's most-recent batch (a coarse "batches forming right now"
+   * read). All zero when group commit is off or has never flushed. T4 reads these for the health
+   * endpoint's `groupCommit` section and the benchmark's engagement check.
+   */
+  groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number } {
+    let lastBatchSize = 0;
+    let maxBatchSize = 0;
+    let flushCount = 0;
+    for (const writer of this.shards.values()) {
+      lastBatchSize = Math.max(lastBatchSize, writer.lastBatchSize);
+      maxBatchSize = Math.max(maxBatchSize, writer.maxBatchSize);
+      flushCount += writer.flushCount;
+    }
+    return { lastBatchSize, maxBatchSize, flushCount };
   }
 }

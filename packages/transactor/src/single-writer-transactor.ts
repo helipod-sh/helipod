@@ -19,6 +19,10 @@ export interface SingleWriterTransactorOptions {
   shardId?: ShardId;
   fanout?: WriteFanout;
   defaultHeadroom?: HeadroomLimits;
+  /** Fleet B4: route commits through the two-buffer group-commit committer loop (default false =
+   *  byte-identical single-commit path). Rarely set on a single-shard Tier-0 writer — batching only
+   *  amortizes I/O under concurrent load against an async store — but wired for parity and tests. */
+  groupCommit?: boolean;
 }
 
 export class SingleWriterTransactor implements Transactor {
@@ -31,6 +35,7 @@ export class SingleWriterTransactor implements Transactor {
       options.shardId ?? DEFAULT_SHARD,
       options.fanout,
       options.defaultHeadroom ?? DEFAULT_HEADROOM,
+      options.groupCommit ?? false,
     );
   }
 
