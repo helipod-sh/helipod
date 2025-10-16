@@ -100,6 +100,11 @@ export interface CommitBenchOpts {
   /** Warmup window before measurement starts, milliseconds. Default 2000 (the brief's "warmup 2s")
    *  — overridable so CI-fast smoke cells don't have to pay the full warmup. */
   warmupMs?: number;
+  /** Fleet B4, T5 — the group-commit flag under test. When true the runtime routes every shard's
+   *  commits through the two-buffer stage-then-flush committer (`STACKBASE_GROUP_COMMIT=1`'s runtime
+   *  effect). Default false: the "before" run measures the exact shipped path the T1 baseline did, so
+   *  the baseline call sites (and the PGlite smokes) are behavior-unchanged. */
+  groupCommit?: boolean;
 }
 
 export interface CommitBenchResult {
@@ -146,6 +151,7 @@ export async function runCommitBench(opts: CommitBenchOpts): Promise<CommitBench
     catalog: freshCatalog(),
     modules: benchModules(),
     numShards,
+    groupCommit: opts.groupCommit ?? false,
   });
 
   // Pre-seed the RMW pool (untimed — runs before warmup even starts).
@@ -399,5 +405,118 @@ maybeDescribe("Fleet B4, Task 1 — commit-throughput benchmark (real Postgres, 
       }
     },
     600_000,
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/* Fleet B4, Task 5 — group commit ON: the before/after gate run (real PG)     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The gate run. For every matrix cell, `runCommitBench` is invoked TWICE against the SAME container
+ * (same session, same machine state) — once with the flag OFF (the "before", re-establishing the
+ * baseline apples-to-apples rather than trusting a prior recording) and once with it ON. Prints a
+ * combined before/after table with the per-cell speedup. The decisive insert-heavy 64-client cells
+ * (1-shard and 8-shard) are additionally re-run a SECOND time with the flag ON so the report can
+ * quote both if they differ materially (the brief's anti-massage rule). This test only prints; the
+ * numbers are transcribed by hand into `b4-benchmark.md` — a routine docker-gated CI run cannot
+ * silently overwrite the recorded gate result.
+ */
+const T5_CONTAINER_NAME = `sb-fleet-bench-t5-${process.pid}`;
+
+async function startT5Postgres(): Promise<{ port: number }> {
+  runDocker(["rm", "-f", T5_CONTAINER_NAME]);
+  const run = runDocker([
+    "run", "-d", "--name", T5_CONTAINER_NAME,
+    "-e", "POSTGRES_PASSWORD=postgres",
+    "-p", "127.0.0.1::5432",
+    "postgres:16",
+  ]);
+  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
+  const portRes = runDocker(["port", T5_CONTAINER_NAME, "5432/tcp"]);
+  const line = portRes.stdout.trim().split("\n")[0] ?? "";
+  const m = line.match(/:(\d+)$/);
+  if (!m) throw new Error(`could not parse \`docker port\` output: ${JSON.stringify(portRes.stdout)}`);
+  const port = Number(m[1]);
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    if (runDocker(["exec", T5_CONTAINER_NAME, "pg_isready", "-U", "postgres"]).status === 0) break;
+    if (Date.now() > deadline) throw new Error("postgres container did not become ready within 60s");
+    await sleep(500);
+  }
+  return { port };
+}
+
+interface BeforeAfterCell {
+  numShards: number;
+  clients: number;
+  mix: "insert" | "rmw80";
+  before: CommitBenchResult;
+  after: CommitBenchResult;
+}
+
+maybeDescribe("Fleet B4, Task 5 — group commit ON vs OFF (real Postgres, gate run)", () => {
+  afterAll(() => {
+    runDocker(["rm", "-f", T5_CONTAINER_NAME]);
+  });
+
+  it(
+    "before/after matrix: 1/8/64 clients × 1/8 shards × insert/rmw80, flag OFF then ON — prints the gate table",
+    async () => {
+      const { port } = await startT5Postgres();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
+
+      const CLIENT_COUNTS = [1, 8, 64];
+      const SHARD_COUNTS = [1, 8];
+      const MIXES: Array<"insert" | "rmw80"> = ["insert", "rmw80"];
+
+      async function runCell(numShards: number, clients: number, mix: "insert" | "rmw80", groupCommit: boolean): Promise<CommitBenchResult> {
+        const { store, client } = buildRealPgStore(databaseUrl, numShards);
+        try {
+          const result = await runCommitBench({ store, numShards, clients, mix, seconds: 5, warmupMs: 2000, groupCommit });
+          expect(result.opsPerSec).toBeGreaterThan(0);
+          expect(result.errors).toBe(0);
+          return result;
+        } finally {
+          await client.close();
+        }
+      }
+
+      const cells: BeforeAfterCell[] = [];
+      for (const numShards of SHARD_COUNTS) {
+        for (const mix of MIXES) {
+          for (const clients of CLIENT_COUNTS) {
+            const before = await runCell(numShards, clients, mix, false);
+            const after = await runCell(numShards, clients, mix, true);
+            cells.push({ numShards, clients, mix, before, after });
+          }
+        }
+      }
+
+      // Decisive-cell repeat (flag ON, second run) — 64-client insert at 1 and 8 shards.
+      const decisive1 = await runCell(1, 64, "insert", true);
+      const decisive8 = await runCell(8, 64, "insert", true);
+
+      // eslint-disable-next-line no-console
+      console.log("\n=== Fleet B4 T5 gate (real Postgres, this machine) — before(OFF) / after(ON) ===");
+      // eslint-disable-next-line no-console
+      console.log("shards | mix    | clients | before ops/s | after ops/s | speedup | after p50 | after p99 | occ(a) | err(a)");
+      for (const c of cells) {
+        const speedup = c.after.opsPerSec / c.before.opsPerSec;
+        // eslint-disable-next-line no-console
+        console.log(
+          `${String(c.numShards).padStart(6)} | ${c.mix.padEnd(6)} | ${String(c.clients).padStart(7)} | ` +
+            `${c.before.opsPerSec.toFixed(1).padStart(12)} | ${c.after.opsPerSec.toFixed(1).padStart(11)} | ` +
+            `${speedup.toFixed(2).padStart(6)}x | ${c.after.p50Ms.toFixed(2).padStart(9)} | ${c.after.p99Ms.toFixed(2).padStart(9)} | ` +
+            `${String(c.after.occConflicts).padStart(6)} | ${c.after.errors}`,
+        );
+      }
+      // eslint-disable-next-line no-console
+      console.log(
+        `\nDecisive cell repeats (flag ON, 2nd run): ` +
+          `1sh/64/insert = ${decisive1.opsPerSec.toFixed(1)} ops/s; 8sh/64/insert = ${decisive8.opsPerSec.toFixed(1)} ops/s`,
+      );
+    },
+    900_000,
   );
 });
