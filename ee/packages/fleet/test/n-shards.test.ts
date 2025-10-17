@@ -11,9 +11,11 @@ import { newDocumentId, shardIdList, DEFAULT_SHARD, encodeStorageIndexId, type I
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import type { CommitUnit } from "@stackbase/docstore";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { ShardedTransactor } from "@stackbase/transactor";
 import { FencedError } from "../src/fenced-error";
-import { LeaseManager } from "../src/lease";
+import { LeaseManager, type TryRunExclusiveOnShard } from "../src/lease";
 import { installCommitGuard, relinquish, FrontierMonitor, acquireShardAsWriter } from "../src/node";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { PgliteClient } from "./pglite-client";
@@ -666,6 +668,82 @@ describe("Fleet B3, Task 4 (D4) — FrontierMonitor replica-lag warning", () => 
     await tick();
     expect(lagCalls(warn)).toHaveLength(0);
     mon.stop();
+    await client.close();
+  });
+});
+
+/** A `PostgresDocStore` whose `commitWriteBatch` can be gated at its ENTRY — before the transaction
+ *  opens — so the batch sits in the writer's in-flight (flushing) state while the PGlite connection
+ *  stays FREE for the idle-frontier closer to run its `nextval`/`UPDATE` against. (PGlite is a single
+ *  in-process connection, so gating INSIDE the open transaction would simply serialize the closer
+ *  behind it — no interleaving observable. Gating at entry reproduces the hazard window the fix
+ *  guards: `hasInFlightWork()` is true from batch-detach through publish, spanning the whole flush.) */
+class GatedPgStore extends PostgresDocStore {
+  beforeCommitBatch?: () => Promise<void>;
+  override async commitWriteBatch(units: readonly CommitUnit[], shardId?: string): Promise<bigint[]> {
+    if (this.beforeCommitBatch) await this.beforeCommitBatch();
+    return super.commitWriteBatch(units, shardId as never);
+  }
+}
+
+const gcDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+function gcGate() {
+  let release!: () => void;
+  const promise = new Promise<void>((r) => (release = r));
+  return { promise, release };
+}
+
+describe("Fleet B4 — group commit ∩ idle-frontier closer (frontier-inversion fix, composed)", () => {
+  it("a mid-flush group-commit batch reads BUSY through the REAL transactor seam: the closer SKIPS it (frontier never leads the batch), lands at ts_N, then bumps on the next beat", async () => {
+    const client = new PgliteClient();
+    const store = new GatedPgStore(client);
+    await store.setupSchema();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://writer:9000" });
+    await lease.setup();
+    await lease.tryAcquire(DEFAULT_SHARD, 0); // hold ONLY the default shard → heldPairs() = [default]
+    installCommitGuard(store, lease, () => {});
+
+    // A REAL group-commit transactor over the same store — its `ShardWriter.hasInFlightWork()` is what
+    // `tryRunExclusiveOnShard` now consults, and it is what the closer's seam is wired to below.
+    const transactor = new ShardedTransactor(store, { groupCommit: true });
+    const seam: TryRunExclusiveOnShard = (shardId, fn) => transactor.tryRunExclusiveOnShard(shardId, fn);
+
+    // Floor commit: establish a nonzero frontier so "did the closer advance it?" is crisp.
+    const floorR = await transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { body: "x" }));
+    const floor = (await lease.read(DEFAULT_SHARD))!.frontierTs;
+    expect(floor).toBe(floorR.commitTs);
+    expect(floor).toBeGreaterThan(0n);
+
+    // Gate the NEXT flush: the batch detaches into the writer's flushing slot and blocks here — the
+    // exact in-flight window the hole exploited (rows not yet landed, mutex FREE).
+    const g = gcGate();
+    let seen = 0;
+    store.beforeCommitBatch = async () => {
+      if (seen++ === 0) await g.promise;
+    };
+    const p = transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { body: "y" }));
+    await gcDelay(20); // p's batch is now flushing (gated) — hasInFlightWork() === true
+
+    // One idle-closer beat WHILE the batch is in flight. The real seam reports the shard busy (even
+    // though the commit mutex itself is free), so the closer draws its ceiling but performs NO UPDATE.
+    const ceiling = await lease.closeIdleFrontiers(seam);
+    const midFrontier = (await lease.read(DEFAULT_SHARD))!.frontierTs;
+    expect(ceiling).toBeGreaterThan(floor); // the beat DID draw a nextval (proving a genuine skip…)
+    expect(midFrontier).toBe(floor); // …NOT a bump: the frontier never passed the in-flight batch.
+
+    // Ungate → the flush lands → the commit guard advances the frontier to the batch's own ts_N.
+    g.release();
+    const r = await p;
+    const landed = (await lease.read(DEFAULT_SHARD))!.frontierTs;
+    expect(landed).toBe(r.commitTs); // frontier == the batch's committed ts (never a "closed" value above it)
+    expect(landed).toBeGreaterThan(floor);
+
+    // Shard idle again → the NEXT closer beat bumps its frontier above ts_N (the normal steady state).
+    const ceiling2 = await lease.closeIdleFrontiers(seam);
+    const bumped = (await lease.read(DEFAULT_SHARD))!.frontierTs;
+    expect(bumped).toBeGreaterThanOrEqual(ceiling2);
+    expect(bumped).toBeGreaterThan(landed);
+
     await client.close();
   });
 });

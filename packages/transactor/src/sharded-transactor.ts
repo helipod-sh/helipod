@@ -124,15 +124,26 @@ export class ShardedTransactor implements Transactor {
    * holds the mutex, in which case `fn` is NOT run and the caller should retry later.
    *
    * The fleet idle-frontier closer (`closeIdleFrontiers`) uses this to bump a held-but-idle shard's
-   * frontier atomically with respect to that shard's own commits: an in-flight commit (drawing ts T)
-   * is skipped (mutex busy) rather than raced, and a commit that starts *after* the closer releases
-   * acquires the mutex afterward and stamps its own (later) ts, so the closer can never publish a
-   * frontier ahead of an in-flight commit's not-yet-landed rows. The shard's `ShardWriter` is created
-   * on demand if it doesn't exist yet, so the mutex the closer takes is the very one a first-ever
-   * commit on that shard would take (no create-vs-close race).
+   * frontier atomically with respect to that shard's own commits. A shard is "idle" — and this returns
+   * `true` — only if BOTH (a) the commit mutex is free AND (b) the writer has no staged/flushing
+   * group-commit batch (`hasInFlightWork()`). Both conditions matter:
+   *   - (a) An in-flight single-commit holds the mutex for its whole validate→allocate→apply section,
+   *     so a mutex-busy shard is skipped (left for the next beat) rather than raced.
+   *   - (b) Group commit (Fleet B4) runs the flush I/O OFF the mutex, so a batch can be mid-flush —
+   *     ts's already drawn at detach, rows not yet landed — while the mutex reads FREE. Skipping on
+   *     `hasInFlightWork()` too closes the frontier-inversion hole that mutex-freedom alone reopened:
+   *     otherwise the closer could draw a LATER `nextval` and publish a frontier above those
+   *     not-yet-landed ts's (silent replica miss / density halt).
+   * A commit (or batch) that STARTS after this check passes draws its ts at commit/flush time, AFTER
+   * the closer's `nextval` — so `GREATEST` keeps `frontier_ts` monotone and nothing in-flight ever
+   * sits below the closed frontier. The shard's `ShardWriter` is created on demand if it doesn't exist
+   * yet, so the mutex the closer takes is the very one a first-ever commit on that shard would take
+   * (no create-vs-close race). The `hasInFlightWork()` read and the `tryRunExclusive` mutex probe run
+   * with no `await` between them, so the two-part idle decision is one synchronous step.
    */
   async tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
     const writer = await this.getOrCreateShard(shardId);
+    if (writer.hasInFlightWork()) return false;
     return writer.mutex.tryRunExclusive(fn);
   }
 

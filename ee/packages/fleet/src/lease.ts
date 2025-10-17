@@ -18,13 +18,16 @@ const DEFAULT_LEASE_TTL_MS = 15_000;
 
 /**
  * Non-blocking per-shard commit-mutex seam (see `Transactor.tryRunExclusiveOnShard` /
- * `EmbeddedRuntime.tryRunExclusiveOnShard`): run `fn` under shard `shardId`'s commit mutex if it is
- * free right now (returns `true`), else skip without running it (returns `false`). `closeIdleFrontiers`
- * takes this so each idle shard's frontier bump is mutually exclusive with that shard's own commits —
- * the fix for the frontier-inversion race (an idle-closer publishing a frontier ahead of an in-flight
- * commit's not-yet-landed rows). The writer owns both the closer and every shard's commits, so this
- * single-process mutex is airtight for B2a; cross-node closing of a held shard is impossible by design
- * (only the lease holder closes its own held shards).
+ * `EmbeddedRuntime.tryRunExclusiveOnShard`): run `fn` under shard `shardId`'s commit mutex if that
+ * shard is IDLE right now (returns `true`), else skip without running it (returns `false`). "Idle"
+ * means BOTH the commit mutex is free AND no group-commit batch is staged/flushing — Fleet B4's group
+ * commit runs the flush I/O OFF the mutex, so mutex-freedom alone no longer implies "nothing in
+ * flight". `closeIdleFrontiers` takes this so each idle shard's frontier bump is mutually exclusive
+ * with that shard's own commits AND with any mid-flush batch — the fix for the frontier-inversion race
+ * (an idle-closer publishing a frontier ahead of an in-flight commit's or batch's not-yet-landed
+ * rows). The writer owns both the closer and every shard's commits, so this single-process check is
+ * airtight; cross-node closing of a held shard is impossible by design (only the lease holder closes
+ * its own held shards).
  */
 export type TryRunExclusiveOnShard = (shardId: ShardId, fn: () => Promise<void>) => Promise<boolean>;
 
@@ -349,11 +352,14 @@ export class LeaseManager {
    * clear `writer_url` (so the shard reads as orphaned and its rightful rendezvous owner acquires it),
    * and GREATEST-bump `frontier_ts` from the shared sequence (so F never regresses across the handoff).
    * Predicated on this node's currently-held epoch — a silent no-op if the shard is already fenced/
-   * relinquished (`currentEpoch === null`). The caller runs this UNDER the shard's commit mutex
-   * (`runtime.tryRunExclusiveOnShard`) so no in-flight commit's frontier write races it — a mutation
-   * mid-execute at release time simply hits `FencedError` at its own commit (OCC-retryable, the
-   * forwarder re-routes the retry to the new owner). Mirrors `evictExpired`'s frontier-bump SQL, but
-   * unconditional on expiry (this is a voluntary handoff, not an eviction of a wedged peer).
+   * relinquished (`currentEpoch === null`). The caller runs this only when the shard is fully IDLE —
+   * `runtime.tryRunExclusiveOnShard` grants the mutex only if no commit holds it AND no group-commit
+   * batch is staged/flushing (Fleet B4), so no in-flight commit's OR batch's frontier write races the
+   * GREATEST-bump here; the release is deferred a beat if the shard is busy rather than fencing
+   * mid-flush (see `releaseShard` in `node.ts`). A mutation that begins mid-execute after the fence
+   * simply hits `FencedError` at its own commit (OCC-retryable, the forwarder re-routes the retry to
+   * the new owner). Mirrors `evictExpired`'s frontier-bump SQL, but unconditional on expiry (this is a
+   * voluntary handoff, not an eviction of a wedged peer).
    */
   async selfFence(shardId: ShardId): Promise<void> {
     const epoch = this.currentEpoch(shardId);
@@ -727,17 +733,22 @@ export class LeaseManager {
    * (`runExclusiveOnShard`), skipping any shard currently mid-commit (mutex busy → left for the next
    * beat). Returns the `nextval` used (the ceiling this beat closed idle shards up to).
    *
-   * Why per-shard-mutex, not the old bare batched UPDATE (the frontier-inversion fix): the commit
+   * Why skip-if-busy, not the old bare batched UPDATE (the frontier-inversion fix): the commit
    * guard writes `frontier_ts := commitTs` for a commit that drew its ts `T` from the SAME sequence,
-   * *inside* the commit transaction — which runs under the shard's commit mutex. If the closer drew
-   * `N > T` and bare-wrote `frontier_ts = N` while that commit's rows had not yet landed, a tailer
-   * could read `F ≥ N`, pull `(watermark, N]`, and MISS `T`'s rows when they land afterward (silent
-   * replica miss), or the guard's later write of `T` would trip a frontier-regression assert. Taking
-   * the shard's commit mutex makes the closer and that shard's commits mutually exclusive on this
-   * (single, writer-owned) node: a commit that started BEFORE the draw holds the mutex → skipped
-   * this beat; a commit that starts AFTER the closer releases acquires the mutex afterward and its
-   * `T` (drawn later) is `> N`, so `GREATEST` keeps `frontier_ts ≥ N` with no regression and nothing
-   * in-flight ever sits below `N`. Cross-node closing of a held shard is impossible by design (only
+   * *inside* the commit transaction — which runs under the shard's commit mutex (single-commit) or at
+   * FLUSH time for a group-commit batch (Fleet B4). If the closer drew `N > T` and bare-wrote
+   * `frontier_ts = N` while that commit's/batch's rows had not yet landed, a tailer could read `F ≥
+   * N`, pull `(watermark, N]`, and MISS `T`'s rows when they land afterward (silent replica miss), or
+   * the guard's later write of `T` would trip a frontier-regression assert. `runExclusiveOnShard`
+   * treats a shard as available only when it is fully IDLE — mutex free AND no staged/flushing
+   * group-commit batch (`ShardWriter.hasInFlightWork()`): group commit runs the flush OFF the mutex,
+   * so a mid-flush batch (ts's already drawn, rows not yet landed) reads BUSY even though the mutex is
+   * free, and is skipped for the next beat. Given that, the closer and that shard's commits are
+   * mutually exclusive on this (single, writer-owned) node: any commit/batch STARTED before the draw
+   * either holds the mutex or is staged/flushing → skipped this beat; any commit/batch that STARTS
+   * after the closer's `nextval` draws its `T` at commit/flush time, AFTER `N`, so `T > N` and
+   * `GREATEST` keeps `frontier_ts ≥ N` with no regression and nothing in-flight ever sits below `N`.
+   * Cross-node closing of a held shard is impossible by design (only
    * the lease holder closes its own held shards; orphan bumping via `evictExpired` targets
    * writer-less rows, where no commit can be in flight). Epoch-fenced per pair. No-op (returns the
    * allocated ts anyway) when this node holds nothing.
@@ -749,9 +760,10 @@ export class LeaseManager {
     const tsRows = await this.client.query(`SELECT nextval('stackbase_ts') AS ts`);
     const newTs = toBigIntOrZero(tsRows[0]?.ts as PgValue | undefined);
     for (const { shardId, epoch } of pairs) {
-      // Skip-if-busy: an in-flight commit on this shard holds its mutex, so `runExclusiveOnShard`
-      // returns false and we leave the shard for the next beat — that commit will itself set
-      // `frontier_ts` to its own (later) commit ts, which is `≥ N` anyway.
+      // Skip-if-busy: an in-flight commit holds this shard's mutex, OR a group-commit batch is
+      // staged/flushing (Fleet B4 — flush runs off the mutex), so `runExclusiveOnShard` returns false
+      // and we leave the shard for the next beat — that commit/batch will itself set `frontier_ts` to
+      // its own (later) commit ts, which is `≥ N` anyway.
       await runExclusiveOnShard(shardId, async () => {
         await this.client.query(
           `UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1)

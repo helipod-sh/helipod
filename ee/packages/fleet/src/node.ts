@@ -1217,10 +1217,21 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // unwind (drop the held-epoch entry + release the slot lock). The rightful owner acquires it on its
   // own next beat — no TTL wait, no failover event. A mutation mid-execute at release time hits
   // `FencedError` at commit (OCC-retryable; the forwarder re-routes the retry to the new owner).
+  //
+  // Skip-if-busy (Fleet B4): `tryRunExclusiveOnShard` now returns `false` when the shard has a
+  // staged/flushing group-commit batch too, not just a mutex-held commit. If it returns `false` we do
+  // NOT relinquish — we leave the shard held and let the balancer's next beat retry (the shard is
+  // still a non-target, so the release fires again). Fencing mid-flush would be SAFE — the epoch bump
+  // cleanly fences the in-flight batch, so its `commitWriteBatch` hits `FencedError` and NOTHING lands
+  // below the bumped frontier — but pointlessly disruptive (the whole batch rejects + its callers
+  // retry). Waiting one beat for the flush to drain, then fencing a genuinely-idle shard, is the
+  // better posture and costs at most a beat of extra hold. (Failover eviction of a DEAD peer is
+  // row-lock-based via `evictExpired`, not this mutex path, and so is unaffected.)
   const releaseShard = async (shardId: ShardId): Promise<void> => {
-    await runtime.tryRunExclusiveOnShard(shardId, async () => {
+    const fenced = await runtime.tryRunExclusiveOnShard(shardId, async () => {
       await lease.selfFence(shardId);
     });
+    if (!fenced) return; // shard busy (commit or in-flight batch) — retry next beat, still held
     relinquish(relinquishDeps, shardId, "balancer graceful release (no longer a rendezvous target)");
   };
 

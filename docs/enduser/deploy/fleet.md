@@ -403,8 +403,10 @@ observability only; nothing to configure.
 fleet, which is just shard count 1) so they share one Postgres round trip instead of each
 paying its own. It's worth trying if a single shard is your write bottleneck — measured **1.6×**
 at 64 concurrent clients on a single shard. Default is **off**, because a sharded fleet already
-spreads commits across per-shard connections and sees no additional benefit from also batching —
-see [`b4-benchmark.md`](../../dev/research/write-sharding/b4-benchmark.md) for the full numbers.
+spreads commits across per-shard connections and sees no additional benefit (and, since the
+idle-frontier closer treats a shard with an in-flight batch as busy and skips it, no additional
+risk) from also batching — see
+[`b4-benchmark.md`](../../dev/research/write-sharding/b4-benchmark.md) for the full numbers.
 
 ## Multi-writer distribution: writes scale with node count
 

@@ -846,11 +846,15 @@ export class EmbeddedRuntime {
   }
 
   /**
-   * Run `fn` under shard `shardId`'s commit mutex IFF it is free right now — the seam a fleet writer's
-   * idle-frontier closer uses to publish a shard's frontier atomically with respect to that shard's
-   * own commits (see `ShardedTransactor.tryRunExclusiveOnShard`). Returns `true` if `fn` ran, `false`
-   * if a commit currently holds the mutex (skip; retry next beat). Total across sharded/single-shard
-   * runtimes — the single-shard transactor ignores `shardId` and uses its one writer.
+   * Run `fn` under shard `shardId`'s commit mutex IFF that shard is idle right now — the seam a fleet
+   * writer's idle-frontier closer uses to publish a shard's frontier atomically with respect to that
+   * shard's own commits (see `ShardedTransactor.tryRunExclusiveOnShard`). A shard is idle only when
+   * the commit mutex is free AND no group-commit batch is staged/flushing (Fleet B4: the flush runs
+   * OFF the mutex, so mutex-freedom alone is not enough — a mid-flush batch has ts's drawn but rows
+   * not yet landed, and must read as busy to keep the closer from publishing a frontier above them).
+   * Returns `true` if `fn` ran, `false` if the shard is busy (skip; retry next beat). Total across
+   * sharded/single-shard runtimes — the single-shard transactor ignores `shardId` and uses its one
+   * writer.
    */
   tryRunExclusiveOnShard(shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
     return this.transactor.tryRunExclusiveOnShard(shardId, fn);

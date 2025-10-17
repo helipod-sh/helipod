@@ -258,6 +258,25 @@ export class ShardWriter {
       : this.runInTransactionSingle(fn, options);
   }
 
+  /**
+   * True iff this shard has a group-commit batch that is staged-but-unflushed OR mid-flush right now
+   * (Fleet B4 frontier-inversion fix). ALWAYS false in single-commit mode — there is no batch state,
+   * and the commit mutex alone already covers the whole commit, so the mutex-free check at
+   * `tryRunExclusiveOnShard` is sufficient there.
+   *
+   * Why this exists: group commit runs the flush I/O (`commitWriteBatch`) OFF the mutex, between the
+   * detach and the publish. During that window the mutex is FREE, yet the batch drew its ts's at
+   * detach time and its rows are not yet landed — a `tryRunExclusiveOnShard` decision made on mutex
+   * freedom alone would let the idle-frontier closer draw a LATER `nextval` and publish a frontier
+   * ABOVE those in-flight ts's, so a tailer pulls an empty range and advances its watermark past
+   * rows that land afterward (silent replica miss / density halt). A busy writer must therefore read
+   * as UNAVAILABLE even when the mutex is free. Read on the writer-owning node only, no `await` before
+   * the caller's mutex probe, so the pair is a single synchronous decision.
+   */
+  hasInFlightWork(): boolean {
+    return this.flushingBatch !== null || (this.pendingBatch !== null && this.pendingBatch.units.length > 0);
+  }
+
   private async runInTransactionSingle<T>(
     fn: (ctx: TransactionContext) => Promise<T>,
     options: RunInTransactionOptions = {},

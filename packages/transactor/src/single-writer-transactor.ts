@@ -50,10 +50,14 @@ export class SingleWriterTransactor implements Transactor {
    * Non-blocking run of `fn` under this (single) writer's commit mutex — the API-total mirror of
    * `ShardedTransactor.tryRunExclusiveOnShard`, so a caller (the fleet runtime seam) can invoke it
    * uniformly regardless of whether the runtime is sharded. `shardId` is ignored: a single-shard
-   * transactor has exactly one writer. Returns `false` (skip) if a commit currently holds the mutex.
-   * In practice unused single-shard (the fleet idle-frontier closer only runs at `numShards > 1`).
+   * transactor has exactly one writer. Returns `false` (skip) if a commit currently holds the mutex
+   * OR the writer has a staged/flushing group-commit batch (`hasInFlightWork()` — the same Fleet B4
+   * frontier-inversion guard `ShardedTransactor` applies; a no-op in single-commit mode, where it is
+   * always false). In practice unused single-shard (the fleet idle-frontier closer only runs at
+   * `numShards > 1`).
    */
   tryRunExclusiveOnShard(_shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    if (this.writer.hasInFlightWork()) return Promise.resolve(false);
     return this.writer.mutex.tryRunExclusive(fn);
   }
 

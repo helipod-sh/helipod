@@ -16,11 +16,18 @@ import type { CommitUnit } from "@stackbase/docstore";
 import {
   newDocumentId,
   documentIdKey,
+  DEFAULT_SHARD,
   type ShardId,
   type InternalDocumentId,
 } from "@stackbase/id-codec";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { ShardedTransactor, SingleWriterTransactor, type OplogDelta } from "../src/index";
+import {
+  ShardedTransactor,
+  SingleWriterTransactor,
+  ShardWriter,
+  DEFAULT_HEADROOM,
+  type OplogDelta,
+} from "../src/index";
 
 const TABLE = 20001;
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -278,6 +285,92 @@ describe("group commit — ordering, failure, retry", () => {
     const final = await transactor.runInTransaction(async (ctx) => ctx.get(x));
     // pR must have seen pU's write (x=5) and produced 6 — not 1 (which would mean it lost U's update).
     expect((final.value as { count: bigint }).count).toBe(6n);
+  });
+});
+
+describe("group commit — idle-frontier-closer seam (Fleet B4 frontier-inversion fix)", () => {
+  it("ShardWriter.hasInFlightWork: false idle, true while pending non-empty AND while flushing, false when drained", async () => {
+    const store = new HookedSqliteStore(new NodeSqliteAdapter());
+    await store.setupSchema();
+    const writer = new ShardWriter(
+      store,
+      new MonotonicTimestampOracle(0n),
+      DEFAULT_SHARD,
+      undefined,
+      DEFAULT_HEADROOM,
+      true, // group commit
+    );
+
+    expect(writer.hasInFlightWork()).toBe(false); // no batch yet
+
+    const g = gate();
+    let seen = 0;
+    store.beforeCommitBatch = async () => {
+      if (seen++ === 0) await g.promise; // hold the first flush in flight
+    };
+
+    const p1 = writer.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: 0n }));
+    await delay(20); // p1's batch has detached and is now flushing (gated)
+    expect(writer.hasInFlightWork()).toBe(true); // flushingBatch !== null
+
+    // While flush #1 is gated, a second write accumulates into the pending batch.
+    const p2 = writer.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: 1n }));
+    await delay(20);
+    expect(writer.hasInFlightWork()).toBe(true); // pendingBatch non-empty too
+
+    g.release();
+    await Promise.all([p1, p2]);
+    expect(writer.hasInFlightWork()).toBe(false); // fully drained → idle
+  });
+
+  it("tryRunExclusiveOnShard returns FALSE mid-flush though the mutex is FREE, TRUE once drained", async () => {
+    const { store, transactor } = await makeGroup();
+    const ids = Array.from({ length: 3 }, () => newDocumentId(TABLE));
+    const g = gate();
+    let seen = 0;
+    store.beforeCommitBatch = async () => {
+      if (seen++ === 0) await g.promise; // hold the first flush in flight
+    };
+
+    // Idle: no batch, mutex free → the closer would run.
+    let ranIdle = false;
+    expect(
+      await transactor.tryRunExclusiveOnShard(DEFAULT_SHARD, async () => {
+        ranIdle = true;
+      }),
+    ).toBe(true);
+    expect(ranIdle).toBe(true);
+
+    // Stage a batch → it detaches and enters the flushing state (gated). The commit mutex is FREE now
+    // (the flush I/O runs OFF the mutex) — this is the load-bearing assertion: mutex-free yet BUSY.
+    const p1 = transactor.runInTransaction(async (ctx) => ctx.put(ids[0]!, { i: 0n }));
+    await delay(20);
+    let ranMidFlush = false;
+    expect(
+      await transactor.tryRunExclusiveOnShard(DEFAULT_SHARD, async () => {
+        ranMidFlush = true;
+      }),
+    ).toBe(false);
+    expect(ranMidFlush).toBe(false); // fn must NOT have run — the closer skipped this beat
+
+    // More units accumulate into the pending batch while flush #1 is gated → still busy.
+    const rest = Array.from({ length: 2 }, (_, k) =>
+      transactor.runInTransaction(async (ctx) => ctx.put(ids[k + 1]!, { i: BigInt(k + 1) })),
+    );
+    await delay(20);
+    expect(await transactor.tryRunExclusiveOnShard(DEFAULT_SHARD, async () => {})).toBe(false);
+
+    g.release();
+    await Promise.all([p1, ...rest]);
+
+    // Drained → idle again → the closer runs.
+    let ranDrained = false;
+    expect(
+      await transactor.tryRunExclusiveOnShard(DEFAULT_SHARD, async () => {
+        ranDrained = true;
+      }),
+    ).toBe(true);
+    expect(ranDrained).toBe(true);
   });
 });
 
