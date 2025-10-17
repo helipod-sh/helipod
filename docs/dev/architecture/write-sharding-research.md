@@ -1,6 +1,6 @@
 ---
 title: Write Sharding — Multi-Agent Research & the Fenced Frontier Verdict
-status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node) + B2b SHIPPED (fleet distribution — opt-in STACKBASE_FLEET_MULTI_WRITER spreads different shards' write ownership across different nodes via deterministic rendezvous placement, converging in seconds with no coordinator service; per-shard failover; a writer-to-writer invalidation listener keeps every writer reactive to every other writer's commits; graceful damped release on scale-out; scheduled functions/crons ride the default shard and survive it moving; default OFF keeps single-writer + sync-replica topology byte-identical — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md) + B3 SHIPPED (hybrid nodes + effectively-once forwarding — a multi-writer writer node now keeps the same local file-backed replica a sync node does and serves its own queries/subscriptions from it, closing the read-scaling gap that existed while a writer answered reads straight from the primary; forwarded writes, single-writer and multi-writer alike, are now effectively-once via an idempotency marker recorded atomically with the write's own commit; a single-shard fast path was assessed and explicitly not built — see the B3 entry below; default topology and non-fleet remain byte-identical — see docs/enduser/deploy/fleet.md); next: B4 per-shard group commit; B5 remains design-doc-only
+status: B1 SHIPPED (wedged-writer TTL failover + commit-allocated timestamps) + B2a SHIPPED (N shards live — shardKey/shardBy API, always-on kernel ownership guards at every tier, codegen cross-check, per-shard leases, 8-virtual-shard stackbase dev, parallel per-shard commits on the fleet writer node) + B2b SHIPPED (fleet distribution — opt-in STACKBASE_FLEET_MULTI_WRITER spreads different shards' write ownership across different nodes via deterministic rendezvous placement, converging in seconds with no coordinator service; per-shard failover; a writer-to-writer invalidation listener keeps every writer reactive to every other writer's commits; graceful damped release on scale-out; scheduled functions/crons ride the default shard and survive it moving; default OFF keeps single-writer + sync-replica topology byte-identical — see docs/enduser/sharding.md and docs/enduser/deploy/fleet.md) + B3 SHIPPED (hybrid nodes + effectively-once forwarding — a multi-writer writer node now keeps the same local file-backed replica a sync node does and serves its own queries/subscriptions from it, closing the read-scaling gap that existed while a writer answered reads straight from the primary; forwarded writes, single-writer and multi-writer alike, are now effectively-once via an idempotency marker recorded atomically with the write's own commit; a single-shard fast path was assessed and explicitly not built — see the B3 entry below; default topology and non-fleet remain byte-identical — see docs/enduser/deploy/fleet.md) + B4 ASSESSED (per-shard group commit — built, gated, shipped DARK-OFF: the benchmark-first ≥ 2× gate came back 1.63× at 1 shard / 1.04× at 8 shards on the decisive 64-client cells, so the default stays OFF and STACKBASE_GROUP_COMMIT=1 remains a supported ops escape hatch for single-shard/write-heavy deployments (measured 1.4–1.65×); the per-shard commit pool had already captured the parallelism — see docs/dev/research/write-sharding/b4-benchmark.md); B5 (reshard design-doc) remains — the arc is otherwise complete
 date: 2025-08-28
 audience: engineering (internal)
 ---
@@ -130,9 +130,27 @@ ports to the object-storage substrate (CAS frontier manifests).
   is one extra `UPDATE` inside a commit transaction that's already multi-statement, and a
   non-fleet deployment already pays none of it — there was no hot path left to skip. See
   `docs/enduser/deploy/fleet.md` for the operator-facing guide.
-- **B4 — per-shard group commit** (the Postgres-fsync ceiling raise — where the throughput
-  headline gets earned) — next.
-- **B5 — design-doc only**: object-storage substrate mapping, offline reshard tool.
+- **B4 — per-shard group commit — ASSESSED (shipped dark-off)**: the mechanism was built in full
+  (a two-buffer stage-then-flush committer per shard, a batch-shaped commit guard,
+  `commitWriteBatch`, health counters, CLI/fleet wiring — flag OFF is byte-identical by
+  construction, the single-commit path a structurally separate branch) and then held to the
+  spec's benchmark-first honest-abort criterion: a same-session before/after `runCommitBench`
+  matrix on real Postgres, with a ≥ 2× bar on the decisive 64-client insert-heavy cells to flip
+  the default ON. **The gate came back < 2× — 1.63× at 1 shard, 1.04× at 8 shards — so the
+  default stays OFF.** The read: group commit amortizes the same per-commit serialization cost
+  the per-shard commit-connection pool (B2a) already spreads across concurrent Postgres
+  sessions, so on the sharded shape that is the recommended production default there was almost
+  nothing left to reclaim; the genuine win — a measured **1.4–1.65×** at 8–64 clients with no
+  regression of the 1-client idle-latency floor — lives on the single-shard/write-heavy shape,
+  where `STACKBASE_GROUP_COMMIT=1` remains a supported ops escape hatch (correct under a
+  64-client E2E storm: zero errors, dense chain, effectively-once forwarding, RYOW). The
+  honest-abort discipline worked exactly as designed: the baseline was recorded before any
+  batching code existed, the criterion was fixed in the spec before the result was known, and
+  the negative outcome is the shipped record rather than a quietly-flipped default. Full
+  numbers, machine caveats, and the harness-saturation nuance on the 8-shard cells:
+  [`../research/write-sharding/b4-benchmark.md`](../research/write-sharding/b4-benchmark.md).
+- **B5 — design-doc only**: object-storage substrate mapping, offline reshard tool — the one
+  remaining item; the build arc (B1 → B4) is otherwise complete.
 
 ## Open questions for the spec phase
 

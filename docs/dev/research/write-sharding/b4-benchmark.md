@@ -1,11 +1,12 @@
 # Fleet B4 — Commit-Throughput Benchmark (baseline, pre-batching)
 
-**Status:** BASELINE recorded (Task 1, 2025-10-01) — measured on the SHIPPED commit path,
-**before any group-commit code exists**, per the spec's benchmark-first honest-abort criterion
+**Status:** GATE DECIDED (T5, 2025-10-16) — **the < 2× branch: default stays OFF** (1sh 1.63×,
+8sh 1.04× on the decisive cells; see [the gate decision](#the-gate-decision-default-stays-off-assessed-not-worth-it)
+below). The baseline below was measured on the SHIPPED commit path, **before any group-commit
+code existed**, per the spec's benchmark-first honest-abort criterion
 ([`../../../superpowers/specs/2025-10-16-fleet-b4-group-commit-design.md`](../../../superpowers/specs/2025-10-16-fleet-b4-group-commit-design.md)).
-T5 re-runs the same `runCommitBench` harness verbatim post-batching and appends the "after"
-table here; **if the final real-PG concurrent-load win is < 2×, the slice concludes
-assessed-not-worth-it** with these numbers on record.
+T5 re-ran the same `runCommitBench` harness post-batching and appended the "after" table and
+decision here.
 
 **Harness:** `ee/packages/fleet/test/bench-commit.test.ts` — `runCommitBench({store, numShards,
 clients, mix, seconds})` → `{opsPerSec, p50Ms, p99Ms, errors, occConflicts, totalOps}`.
@@ -142,6 +143,17 @@ shape — is essentially flat. The gate FAILS. The default remains OFF.**
   single-shard case — there is far less to batch per shard, and the measured gain collapses to
   **1.01–1.09×**. Group commit and sharding are amortizing the *same* per-commit serialization cost;
   once sharding has paid most of it, group commit has little left to reclaim.
+- **Honest caveat: the queue-depth analogy is incomplete for the 8-shard magnitude.** Queue-depth
+  dilution predicts a *smaller* win at 8 shards, but 64 clients ÷ 8 shards still leaves ~8 clients
+  per shard — the depth that earned ~1.4× in the 1-shard/8-client cells — so the analogy alone does
+  not fully explain a collapse to ~1.01–1.09×. A second factor plausibly contributes: the harness's
+  shared Node event loop (see machine context above — the client loops, the `EmbeddedRuntime`, and
+  the `pg` driver all share one loop). At 8 shards × 64 clients the load driver is running near its
+  own ceiling (~2 000 ops/s regardless of flag state), so part of the 8-shard flatness may be
+  harness saturation rather than a pure property of the mechanism. This does not change the gate
+  decision — a win invisible under a realistic in-process driver is still not a default-flip case,
+  and the single-shard rows (nowhere near loop saturation) remain the clean signal we quote — but
+  the 8-shard rows should not be read as proof that sharding leaves *nothing* to batch.
 - **Net:** the two mechanisms overlap. For the sharded, multi-writer deployment shape B2a/B2b make
   the default, the incremental throughput from also enabling group commit is within noise — not the
   step change the ≥ 2× gate demanded.
