@@ -266,6 +266,22 @@ async function apiRun(url: string, path: string, args: Record<string, unknown>):
   return { status: res.status, body };
 }
 
+/** The shape `/api/health` returns for a fleet node — the additive `fleet.groupCommit` block (Fleet
+ *  B4, T4) is present when group commit is wired, zeroed when the flag is off. Used by the
+ *  concurrent-load scenario to assert batching engaged (`maxBatchSize > 1`) under the storm. */
+interface HealthBody {
+  status: string;
+  fleet?: {
+    frontier?: string;
+    groupCommit?: { lastBatchSize: number; maxBatchSize: number; flushCount: number; flushesPerSec: number };
+  };
+}
+
+async function apiHealth(url: string): Promise<HealthBody> {
+  const res = await fetch(`${url}/api/health`);
+  return (await res.json()) as HealthBody;
+}
+
 /** A `/api/run` call bounded by an `AbortController` timeout. The offload proof needs this: with the
  *  primary paused, a mutation forwarded from a SYNC node reaches the writer, whose commit then hangs
  *  on the frozen Postgres TCP connection (the commit itself is unbounded — only the forwarder's
@@ -2125,6 +2141,199 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         }, 20_000);
       } finally {
         ws?.close();
+        await pg.end().catch(() => {});
+        await stopServe(nodeA);
+        await stopServe(nodeB);
+        stopPostgresContainer();
+      }
+    },
+    { timeout: 240_000 },
+  );
+
+  it(
+    "sustains a 64-client sharded storm under GROUP COMMIT: zero errors, batching engages (health maxBatchSize > 1), the MVCC log stays dense with no ts=0, a duplicate forward replays mid-storm, and RYOW holds",
+    async () => {
+      const { port: pgPort } = await startPostgresContainer();
+      const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${pgPort}/postgres`;
+
+      const portA = await freePort();
+      const portB = await freePort();
+      const advA = `http://127.0.0.1:${portA}`;
+
+      // Group commit ON (the whole point of this scenario) + NUM_SHARDS pinned so the in-test router
+      // agrees with the children exactly. Writer A owns every shard; B is sync. The 64 clients hammer
+      // the SYNC node B, so every write forwards B→A and A's per-shard two-buffer committers see
+      // genuinely concurrent commits to batch — the condition `maxBatchSize > 1` requires.
+      const GC_ENV = { STACKBASE_GROUP_COMMIT: "1", STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+
+      const pg = new Client({ connectionString: databaseUrl });
+      await pg.connect();
+
+      let nodeA: ServeProcess | undefined;
+      let nodeB: ServeProcess | undefined;
+      try {
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, GC_ENV);
+        const bootA = await waitForReadyOrExit(nodeA);
+        if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
+        expect(bootA.ready.role).toBe("writer");
+        const urlA = bootA.ready.url;
+
+        nodeB = spawnFleetServe(databaseUrl, portB, undefined, GC_ENV);
+        const bootB = await waitForReadyOrExit(nodeB);
+        if (!bootB.ready) throw new Error(`node B failed to boot: exit=${bootB.exitCode} stderr=${bootB.stderr}`);
+        expect(bootB.ready.role).toBe("sync");
+        const urlB = bootB.ready.url;
+
+        await waitForLease(pg, (l) => l.epoch >= 1 && l.writerUrl === advA);
+
+        /* ---------------------------------------------------------------- */
+        /* Seed one message per client-owned RMW channel (`pool-<i>`). Each   */
+        /* client bumps ONLY its own pool channel during the storm, so the    */
+        /* RMWs exercise the read-then-replace path + grow each doc's MVCC     */
+        /* chain WITHOUT cross-client same-doc contention — that keeps the     */
+        /* storm's zero-error invariant honest (no OCC-exhaustion) while still */
+        /* producing multi-revision documents for the density proof.          */
+        /* ---------------------------------------------------------------- */
+        const CLIENTS = 64;
+        for (let i = 0; i < CLIENTS; i++) {
+          const seed = await apiRun(urlB, "messages:send", { channelId: `pool-${i}`, body: `seed#0` });
+          expect(seed.body.committed).toBe(true);
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* RYOW spot-check (pre-storm): a forwarded insert via B is visible to */
+        /* an IMMEDIATE read via B (no sleep) — the forwarder's replica         */
+        /* catch-up wait covers the write before it returns.                   */
+        /* ---------------------------------------------------------------- */
+        const ryowAdd = await apiRun(urlB, "messages:send", { channelId: "ryow-pre", body: "ryow-pre-body" });
+        expect(ryowAdd.body.committed).toBe(true);
+        const ryowRead = await apiRun(urlB, "messages:list", {});
+        expect(bodiesOf(ryowRead.body.value)).toContain("ryow-pre-body");
+
+        /* ---------------------------------------------------------------- */
+        /* The storm: 64 concurrent client loops fire back-to-back mutations   */
+        /* at the SYNC node B for ~10s — 80% unique-doc inserts spread across   */
+        /* every shard (high-entropy channelId → jump-hash spread), 20% RMW on  */
+        /* the client's own pool channel. Errors are counted per-op (a thrown   */
+        /* or non-committed op does NOT abort the loop); the invariant is ZERO. */
+        /* ---------------------------------------------------------------- */
+        let opCount = 0;
+        let errorCount = 0;
+        const STORM_MS = 10_000;
+        const endAt = Date.now() + STORM_MS;
+
+        async function clientLoop(clientIdx: number): Promise<void> {
+          let seq = 0;
+          let iter = 0;
+          while (Date.now() < endAt) {
+            const doInsert = Math.random() < 0.8;
+            try {
+              let r: RunResult;
+              if (doInsert) {
+                seq += 1;
+                const channelId = `ins-${clientIdx}-${seq}-${Math.random().toString(36).slice(2, 8)}`;
+                r = await apiRun(urlB, "messages:send", { channelId, body: `s-${clientIdx}-${seq}` });
+              } else {
+                r = await apiRun(urlB, "messages:bump", { channelId: `pool-${clientIdx}` });
+              }
+              if (r.status === 200 && r.body.committed === true) opCount += 1;
+              else errorCount += 1;
+            } catch {
+              errorCount += 1;
+            }
+            // Periodic macrotask yield so no single loop starves the other 63 (fairness under load).
+            iter += 1;
+            if (iter % 32 === 0) await new Promise<void>((res) => setImmediate(res));
+          }
+        }
+
+        const stormDone = Promise.all(Array.from({ length: CLIENTS }, (_, i) => clientLoop(i)));
+
+        /* ---------------------------------------------------------------- */
+        /* Duplicate forward MID-STORM: a raw `/_fleet/run` to the writer with */
+        /* a fixed idempotencyKey, fired twice while the storm rages. The       */
+        /* second is a REPLAY (same commitTs), not a re-execution — effectively-*/
+        /* once forwarding holds under concurrent load, not just when idle.     */
+        /* ---------------------------------------------------------------- */
+        await sleep(1_500);
+        const eoChannel = "eo-storm";
+        const eoShardId = shardIdForKeyValue(eoChannel, NUM_SHARDS);
+        const fleetRun = async (
+          idempotencyKey: string,
+          body: string,
+        ): Promise<{ status: number; body: { commitTs?: string; replayed?: boolean } }> => {
+          const res = await fetch(`${urlA}/_fleet/run`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN_KEY}` },
+            body: JSON.stringify({
+              path: "messages:send",
+              args: { channelId: eoChannel, body },
+              identity: null,
+              kind: "mutation",
+              shardId: eoShardId,
+              forwarded: true,
+              idempotencyKey,
+            }),
+          });
+          return { status: res.status, body: (await res.json()) as { commitTs?: string; replayed?: boolean } };
+        };
+        const eoKey = crypto.randomUUID();
+        const eoFirst = await fleetRun(eoKey, "eo-storm-first");
+        expect(eoFirst.status).toBe(200);
+        expect(eoFirst.body.replayed).toBeUndefined(); // a genuine fresh commit
+        expect(typeof eoFirst.body.commitTs).toBe("string");
+        expect(eoFirst.body.commitTs).not.toBe("0");
+        const eoSecond = await fleetRun(eoKey, "eo-storm-DUP"); // same key, different body — must replay
+        expect(eoSecond.status).toBe(200);
+        expect(eoSecond.body.replayed).toBe(true);
+        expect(eoSecond.body.commitTs).toBe(eoFirst.body.commitTs);
+
+        // Sample health on the WRITER mid-storm — batching should already be engaged by now. Read it
+        // again after the storm too (the running max only grows), and assert on the later reading so a
+        // momentarily-idle sampling instant can't flake the batching claim.
+        const healthMid = await apiHealth(urlA);
+
+        await stormDone;
+
+        /* ---------------------------------------------------------------- */
+        /* Zero errors across the whole storm; the storm was non-vacuous.      */
+        /* ---------------------------------------------------------------- */
+        expect(errorCount).toBe(0);
+        expect(opCount).toBeGreaterThan(200); // the storm actually ran (thousands typical)
+
+        /* ---------------------------------------------------------------- */
+        /* Batching ENGAGED: the writer's group-commit counters report a max   */
+        /* batch size > 1 (multiple commits flushed together in one stage).    */
+        /* ---------------------------------------------------------------- */
+        const healthAfter = await apiHealth(urlA);
+        const gc = healthAfter.fleet?.groupCommit;
+        expect(gc).toBeDefined();
+        expect(gc!.maxBatchSize).toBeGreaterThan(1);
+        expect(gc!.flushCount).toBeGreaterThan(0);
+        // The mid-storm reading already saw batching too (its max is <= the final max).
+        expect(healthMid.fleet?.groupCommit?.maxBatchSize ?? 0).toBeGreaterThan(0);
+
+        /* ---------------------------------------------------------------- */
+        /* Density over the WHOLE run: a dense prev_ts chain per document (no  */
+        /* skipped/reordered commit under batched group commit) and NOT ONE    */
+        /* ts=0 row (a store-allocated ts is always > 0). Non-vacuous — the RMW */
+        /* bumps produced many multi-revision documents.                       */
+        /* ---------------------------------------------------------------- */
+        const chain = await assertDenseChain(pg);
+        expect(chain.violations).toBe(0);
+        expect(chain.multiRevDocs).toBeGreaterThan(0);
+        const zeroTs = (await pg.query(`SELECT count(*)::int AS n FROM documents WHERE ts = 0`)).rows[0] as { n: number };
+        expect(zeroTs.n).toBe(0);
+
+        /* ---------------------------------------------------------------- */
+        /* RYOW spot-check (post-storm): a fresh forwarded insert via B is      */
+        /* immediately visible on B after the storm has drained.               */
+        /* ---------------------------------------------------------------- */
+        const ryowPostAdd = await apiRun(urlB, "messages:send", { channelId: "ryow-post", body: "ryow-post-body" });
+        expect(ryowPostAdd.body.committed).toBe(true);
+        const ryowPostRead = await apiRun(urlB, "messages:list", {});
+        expect(bodiesOf(ryowPostRead.body.value)).toContain("ryow-post-body");
+      } finally {
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);

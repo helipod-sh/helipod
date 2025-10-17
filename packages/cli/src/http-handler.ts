@@ -37,6 +37,17 @@ export interface FleetHandles {
    *  handler optional-chains it. The real `@stackbase/fleet` node always provides it. */
   frontierStats?(): { frontier: bigint; lagMs: number; pinningShard: string } | null;
   /**
+   * Group-commit counters (Fleet B4, T4 health observability): the aggregate `EmbeddedRuntime.
+   * groupCommitStats()` reading plus a derived `flushesPerSec` (a rolling delta between successive
+   * calls — see `@stackbase/fleet`'s `node.ts`). Structurally all-zero when `STACKBASE_GROUP_COMMIT`
+   * is off (the underlying counters are simply never touched on the single-commit path), so the
+   * health handler below shows zeroed fields rather than omitting them once fleet mode + this method
+   * are both present — `undefined` is reserved for "not wired at all" (an older/stub `FleetHandles`),
+   * mirroring `frontierStats?`'s same optional-for-backward-compat shape. The real `@stackbase/fleet`
+   * node always provides it.
+   */
+  groupCommitStats?(): { lastBatchSize: number; maxBatchSize: number; flushCount: number; flushesPerSec: number };
+  /**
    * Per-shard ownership (B2b, D1): true when THIS node currently holds `shardId`'s write lease.
    * Backs the `/_fleet/run` single-hop guard below — optional so older/stub `FleetHandles` satisfy
    * the structural mirror; the guard skips (fail open) when absent. The real `@stackbase/fleet` node
@@ -293,11 +304,20 @@ export async function handleHttpRequest(
     // Fleet frontier-lag observability (B2a, D5): additive `fleet` field when running under --fleet
     // and a frontier reading is available. `frontier` is a stringified bigint (JSON can't carry one).
     const fs = fleet?.frontierStats?.() ?? null;
+    // Fleet B4 (T4) group-commit counters: additive `fleet.groupCommit`, nested inside the SAME `fleet`
+    // gate as the frontier reading above (so a build/fleet-mode that hasn't reported ANY health data
+    // yet stays byte-identical to before this field existed). `gc` is zeroed (not absent) when
+    // `STACKBASE_GROUP_COMMIT` is off — `groupCommitStats()` structurally returns zeros in that case
+    // (see its doc comment) — and the field is omitted only when `groupCommitStats` itself isn't wired
+    // (an older/stub `FleetHandles`), which is what `?.` falls through to `null` for.
+    const gc = fleet?.groupCommitStats?.() ?? null;
     return json(200, {
       status: "ok",
       functions: info.functions.length,
       tables: info.tables.length,
-      ...(fs ? { fleet: { frontier: String(fs.frontier), lagMs: fs.lagMs, pinningShard: fs.pinningShard } } : {}),
+      ...(fs
+        ? { fleet: { frontier: String(fs.frontier), lagMs: fs.lagMs, pinningShard: fs.pinningShard, ...(gc ? { groupCommit: gc } : {}) } }
+        : {}),
     });
   }
   if (req.method === "POST" && req.path === "/api/run") {

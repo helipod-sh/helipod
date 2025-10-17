@@ -17,6 +17,7 @@ import type { DocumentLogEntry } from "@stackbase/docstore";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import { LeaseManager, IDEMPOTENCY_VALUE_CAP_BYTES } from "../src/lease";
 import { installCommitGuard } from "../src/node";
+import { FencedError } from "../src/fenced-error";
 import { ShardLeaseBalancer, type ShardLeaseBalancerDeps } from "../src/balancer";
 import { PgliteClient } from "./pglite-client";
 
@@ -209,6 +210,79 @@ describe("Fleet B3, D3: fleet_idempotency + the commit guard's atomic INSERT", (
     expect(await lease.lookupIdempotency("old-key")).toBeNull();
     expect(await lease.lookupIdempotency("fresh-key")).not.toBeNull();
 
+    await client.close();
+  });
+});
+
+// Fleet B4 (batch-shaped guard): a group-committed batch runs the epoch fence ONCE and loops the
+// per-unit idempotency INSERTs, each at ITS OWN unit ts. These are the E2E-class assertions the spec
+// calls out: N keyed units → N DISTINCT fleet_idempotency rows at N distinct ts's; a fence aborts the
+// WHOLE batch (no unit's row lands); the frontier advances once to ts_N.
+describe("Fleet B4: batch-shaped commit guard (group commit)", () => {
+  it("N keyed units → N DISTINCT fleet_idempotency rows, each at its own unit's ts", async () => {
+    const { client, pgStore, lease } = await makeFencedStore();
+    await lease.tryAcquire();
+    installCommitGuard(pgStore, lease, () => {});
+
+    const [a, b, c] = [newDocumentId(TABLE), newDocumentId(TABLE), newDocumentId(TABLE)];
+    const tss = await pgStore.commitWriteBatch([
+      { documents: [doc(a, "a")], indexUpdates: [], meta: { idempotencyKey: "k-a" } },
+      { documents: [doc(b, "b")], indexUpdates: [], meta: { idempotencyKey: "k-b" } },
+      { documents: [doc(c, "c")], indexUpdates: [], meta: { idempotencyKey: "k-c" } },
+    ]);
+
+    const rows = await client.query(
+      `SELECT key, commit_ts FROM fleet_idempotency ORDER BY commit_ts ASC`,
+    );
+    expect(rows.map((r) => r.key)).toEqual(["k-a", "k-b", "k-c"]);
+    // Each row's commit_ts is its OWN unit's ts — NOT all collapsed onto ts_N (the bug a single
+    // last-ts guard call would cause). Distinct, strictly increasing, matching the returned array.
+    expect(rows.map((r) => BigInt(r.commit_ts as string | bigint))).toEqual(tss);
+    const distinct = new Set(rows.map((r) => String(r.commit_ts)));
+    expect(distinct.size).toBe(3);
+    await client.close();
+  });
+
+  it("the frontier advances ONCE to ts_N (the batch's last unit ts)", async () => {
+    const { client, pgStore, lease } = await makeFencedStore();
+    await lease.tryAcquire();
+    installCommitGuard(pgStore, lease, () => {});
+
+    const tss = await pgStore.commitWriteBatch([
+      { documents: [doc(newDocumentId(TABLE), "a")], indexUpdates: [] },
+      { documents: [doc(newDocumentId(TABLE), "b")], indexUpdates: [] },
+      { documents: [doc(newDocumentId(TABLE), "c")], indexUpdates: [] },
+    ]);
+
+    const row = await lease.read();
+    expect(row?.frontierTs).toBe(tss[tss.length - 1]); // frontier = ts_N, not ts_1 or an intermediate
+    expect(row?.prevTs).toBe(0n); // prev_ts is the PRE-batch frontier (seeded 0), advanced once
+    await client.close();
+  });
+
+  it("a fence (stale epoch) aborts the WHOLE batch — no unit's rows OR idempotency rows land", async () => {
+    const { client, pgStore, lease } = await makeFencedStore();
+    await lease.tryAcquire(); // epoch 1
+    const fenced = vi.fn();
+    installCommitGuard(pgStore, lease, fenced);
+
+    // A competing node supersedes epoch 1 → the guard's epoch-predicated UPDATE matches 0 rows.
+    const other = new LeaseManager(client, { advertiseUrl: "http://node-b:4001" });
+    await other.tryAcquire(); // epoch 2
+
+    await expect(
+      pgStore.commitWriteBatch([
+        { documents: [doc(newDocumentId(TABLE), "a")], indexUpdates: [], meta: { idempotencyKey: "fk-a" } },
+        { documents: [doc(newDocumentId(TABLE), "b")], indexUpdates: [], meta: { idempotencyKey: "fk-b" } },
+      ]),
+    ).rejects.toThrow(FencedError);
+    expect(fenced).toHaveBeenCalledTimes(1); // fence fires ONCE for the whole batch
+
+    // Nothing landed: no document rows, no idempotency rows for either unit.
+    const docs = await client.query(`SELECT COUNT(*)::int AS n FROM documents`);
+    expect(Number(docs[0]!.n)).toBe(0);
+    const idem = await client.query(`SELECT COUNT(*)::int AS n FROM fleet_idempotency`);
+    expect(Number(idem[0]!.n)).toBe(0);
     await client.close();
   });
 });

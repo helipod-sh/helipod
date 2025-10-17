@@ -16,6 +16,8 @@ export type {
   DatabaseIndexValue,
   DatabaseIndexUpdate,
   IndexWrite,
+  CommitUnit,
+  CommitGuardUnit,
   IndexOverlayEntry,
   PrevRevQuery,
   SchemaSetupOptions,

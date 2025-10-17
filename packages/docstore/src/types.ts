@@ -66,6 +66,36 @@ export interface IndexWrite {
 }
 
 /**
+ * One commit's worth of staged rows for `commitWriteBatch` (Fleet B4, D1 — group commit). Each unit
+ * is stamped with its OWN freshly-allocated, strictly-increasing timestamp inside a single store
+ * transaction, so a batch of N units lands as N consecutive commits in one fsync. The `documents`/
+ * `indexUpdates` arrive with `ts: 0n` placeholders, exactly like `commitWrite`.
+ *
+ * CONTRACT — same-doc entries across units are ILLEGAL input: no two units in one batch may write
+ * the SAME document id. The transactor's batch-cut rule (spec §D2) guarantees this upstream (a blind
+ * write to an in-flight doc is held to the next batch; an RMW aborts on OCC), so the store does NOT
+ * detect or resolve cross-unit same-doc collisions — it stamps each unit's `prev_ts` verbatim.
+ */
+export interface CommitUnit {
+  documents: readonly DocumentLogEntry[];
+  indexUpdates: readonly IndexWrite[];
+  /** Opaque per-unit commit metadata (Fleet B3/B4) — forwarded to the commit guard's per-unit entry. */
+  meta?: Record<string, string>;
+}
+
+/**
+ * The per-unit view a batch-shaped commit guard receives (Fleet B4, D1): the store's freshly
+ * allocated `ts` for that unit plus its opaque `meta`. The guard runs ONCE per `commitWriteBatch`
+ * transaction with the whole `readonly CommitGuardUnit[]` (in unit/ts order) — it fences once and
+ * loops the per-unit effects (e.g. an idempotency-row INSERT at each unit's own `ts`). The
+ * single-commit `commitWrite` path passes a one-unit array, so there is exactly ONE guard contract.
+ */
+export interface CommitGuardUnit {
+  ts: bigint;
+  meta?: Record<string, string>;
+}
+
+/**
  * A single index-key change staged by the current transaction, projected for read-your-own-writes
  * overlay onto a query scan. `value === null` means the key is deleted (tombstoned) in the pending
  * write set; a non-null `value` is the pending document at that key (insert or update).
@@ -124,6 +154,21 @@ export interface DocStore {
      */
     opts?: { meta?: Record<string, string> },
   ): Promise<bigint>;
+
+  /**
+   * Group commit (Fleet B4, D1). Commit N `units` as ONE store transaction: each unit is stamped with
+   * its own freshly-allocated, STRICTLY-INCREASING timestamp (allocated in unit order), its rows are
+   * inserted, and — for Postgres — a single batch-shaped commit guard runs ONCE at the end over all N
+   * `{ts, meta}` entries (epoch fence once, frontier once at ts_N, per-unit idempotency INSERT each at
+   * its own ts). ANY error — including the guard — aborts the WHOLE transaction: no unit lands. Returns
+   * the allocated ts's in unit order.
+   *
+   * `commitWrite` (single) is exactly this with a one-unit batch — both share one implementation, so
+   * the guard invocation shape is identical (a one-unit array) whether one or many units commit.
+   * SQLite has no guard and ignores per-unit `meta`; its consecutive `MAX(ts)+1` per unit yields the
+   * same strictly-increasing contract (correct-but-inert batching — Tier-0 flushes synchronously).
+   */
+  commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]>;
 
   /** The newest visible revision of a document at `readTimestamp` (or latest), or null. */
   get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null>;

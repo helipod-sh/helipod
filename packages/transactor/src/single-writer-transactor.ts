@@ -19,6 +19,10 @@ export interface SingleWriterTransactorOptions {
   shardId?: ShardId;
   fanout?: WriteFanout;
   defaultHeadroom?: HeadroomLimits;
+  /** Fleet B4: route commits through the two-buffer group-commit committer loop (default false =
+   *  byte-identical single-commit path). Rarely set on a single-shard Tier-0 writer — batching only
+   *  amortizes I/O under concurrent load against an async store — but wired for parity and tests. */
+  groupCommit?: boolean;
 }
 
 export class SingleWriterTransactor implements Transactor {
@@ -31,6 +35,7 @@ export class SingleWriterTransactor implements Transactor {
       options.shardId ?? DEFAULT_SHARD,
       options.fanout,
       options.defaultHeadroom ?? DEFAULT_HEADROOM,
+      options.groupCommit ?? false,
     );
   }
 
@@ -45,11 +50,25 @@ export class SingleWriterTransactor implements Transactor {
    * Non-blocking run of `fn` under this (single) writer's commit mutex — the API-total mirror of
    * `ShardedTransactor.tryRunExclusiveOnShard`, so a caller (the fleet runtime seam) can invoke it
    * uniformly regardless of whether the runtime is sharded. `shardId` is ignored: a single-shard
-   * transactor has exactly one writer. Returns `false` (skip) if a commit currently holds the mutex.
-   * In practice unused single-shard (the fleet idle-frontier closer only runs at `numShards > 1`).
+   * transactor has exactly one writer. Returns `false` (skip) if a commit currently holds the mutex
+   * OR the writer has a staged/flushing group-commit batch (`hasInFlightWork()` — the same Fleet B4
+   * frontier-inversion guard `ShardedTransactor` applies; a no-op in single-commit mode, where it is
+   * always false). In practice unused single-shard (the fleet idle-frontier closer only runs at
+   * `numShards > 1`).
    */
   tryRunExclusiveOnShard(_shardId: ShardId, fn: () => Promise<void>): Promise<boolean> {
+    if (this.writer.hasInFlightWork()) return Promise.resolve(false);
     return this.writer.mutex.tryRunExclusive(fn);
+  }
+
+  /**
+   * Group-commit counters (Fleet B4, T4 health) — the single-writer mirror of
+   * `ShardedTransactor.groupCommitStats()`, for the one writer this class holds. Zero when
+   * `groupCommit` is off or has never flushed (the underlying `ShardWriter` never touches these
+   * fields on the single-commit path), so callers need no separate on/off branch.
+   */
+  groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number } {
+    return { lastBatchSize: this.writer.lastBatchSize, maxBatchSize: this.writer.maxBatchSize, flushCount: this.writer.flushCount };
   }
 
   /**

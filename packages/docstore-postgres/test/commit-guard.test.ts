@@ -28,11 +28,14 @@ async function makeStore(): Promise<{ store: PostgresDocStore; client: PgClient 
 // Postgres semantics, in-process). Also covers the raw shard_id stamping (conformance case (e),
 // which needs storage-specific SQL the shared suite can't express).
 describe("PostgresDocStore commit guard", () => {
-  it("invokes the guard with (querier, allocatedTs) after inserts, before COMMIT", async () => {
+  it("invokes the batch-shaped guard (querier, units[]) after inserts, before COMMIT — one unit for a single commitWrite", async () => {
     const { store, client } = await makeStore();
     const seen: { ts: bigint; docCount: number }[] = [];
-    store.setCommitGuard(async (q: PgQuerier, commitTs: bigint) => {
-      // The staged rows are visible inside the same transaction the guard runs in.
+    store.setCommitGuard(async (q: PgQuerier, units) => {
+      // A single commitWrite reaches the guard as a ONE-unit array (Fleet B4). The staged rows are
+      // visible inside the same transaction the guard runs in.
+      expect(units).toHaveLength(1);
+      const commitTs = units[0]!.ts;
       const rows = await q.query(`SELECT COUNT(*)::int AS n FROM documents WHERE ts = $1`, [commitTs]);
       seen.push({ ts: commitTs, docCount: Number(rows[0]!.n) });
     });
@@ -89,13 +92,15 @@ describe("PostgresDocStore commit guard", () => {
     await client.close();
   });
 
-  // Fleet B3, D3: opaque commit metadata threaded through `commitWrite`'s 4th `opts` param to the
-  // guard's 4th `meta` param — the "opaque meta channel" the design spec's D3 describes.
-  it("threads RunOptions-shaped commitMeta through commitWrite's opts to the guard's 4th param", async () => {
+  // Fleet B3, D3 (batch-shaped since B4): opaque commit metadata threaded through `commitWrite`'s 4th
+  // `opts` param to the guard's per-unit `meta` — the "opaque meta channel" the design spec's D3
+  // describes. A single commitWrite → one unit, so the guard sees `units[0].meta`.
+  it("threads RunOptions-shaped commitMeta through commitWrite's opts to the guard's per-unit meta", async () => {
     const { store, client } = await makeStore();
     const seenMeta: (Record<string, string> | undefined)[] = [];
-    store.setCommitGuard(async (_q, _commitTs, _shardId, meta) => {
-      seenMeta.push(meta);
+    store.setCommitGuard(async (_q, units) => {
+      expect(units).toHaveLength(1);
+      seenMeta.push(units[0]!.meta);
     });
 
     const id1 = newDocumentId(TABLE);
@@ -109,22 +114,69 @@ describe("PostgresDocStore commit guard", () => {
     await client.close();
   });
 
-  // Existing 3-arg guard installers (e.g. `ee/packages/fleet/src/node.ts`'s epoch fence, and the
-  // 2/3-arg guards above in this file) stay valid unmodified against the new 4-param guard type —
-  // TS function-type assignability allows a callback with fewer declared params than the type
-  // requires, as long as it never references the extra ones. Proven here directly: a guard that
-  // only destructures its first 3 params still installs and runs.
-  it("a pre-existing 3-arg guard callback (ignoring the additive 4th `meta` param) still works", async () => {
+  // The single-commit path is exactly a one-unit batch (Fleet B4, D1): commitWrite delegates to
+  // commitWriteBatch, so the guard's invocation shape is byte-identical whether one or many units
+  // commit — always a `readonly CommitGuardUnit[]`. Proven: the guard for a single commitWrite gets
+  // an array of length 1 whose sole entry's ts is the returned commit ts.
+  it("commitWrite reaches the guard as a one-unit batch (single ≡ one-unit-batch)", async () => {
     const { store, client } = await makeStore();
-    const seen: bigint[] = [];
-    store.setCommitGuard(async (_q, commitTs, _shardId) => {
-      seen.push(commitTs);
+    const seen: bigint[][] = [];
+    store.setCommitGuard(async (_q, units) => {
+      seen.push(units.map((u) => u.ts));
     });
 
     const id = newDocumentId(TABLE);
-    const commitTs = await store.commitWrite([doc(id, "x")], [], undefined, { meta: { idempotencyKey: "ignored" } });
+    const commitTs = await store.commitWrite([doc(id, "x")], [], undefined, { meta: { idempotencyKey: "one" } });
 
-    expect(seen).toEqual([commitTs]);
+    expect(seen).toEqual([[commitTs]]);
+    await client.close();
+  });
+
+  // Fleet B4 (batch-shaped guard): a multi-unit commitWriteBatch invokes the guard ONCE with all N
+  // units in strictly-increasing ts order, each unit's own staged rows already visible in the txn.
+  it("invokes the guard ONCE per batch with all units in ts order (each unit's rows visible)", async () => {
+    const { store, client } = await makeStore();
+    const seen: { ts: bigint; docCount: number }[][] = [];
+    store.setCommitGuard(async (q: PgQuerier, units) => {
+      const snapshot: { ts: bigint; docCount: number }[] = [];
+      for (const u of units) {
+        const rows = await q.query(`SELECT COUNT(*)::int AS n FROM documents WHERE ts = $1`, [u.ts]);
+        snapshot.push({ ts: u.ts, docCount: Number(rows[0]!.n) });
+      }
+      seen.push(snapshot);
+    });
+
+    const [a, b, c] = [newDocumentId(TABLE), newDocumentId(TABLE), newDocumentId(TABLE)];
+    const tss = await store.commitWriteBatch([
+      { documents: [doc(a, "a")], indexUpdates: [] },
+      { documents: [doc(b, "b")], indexUpdates: [] },
+      { documents: [doc(c, "c")], indexUpdates: [] },
+    ]);
+
+    expect(seen).toHaveLength(1); // the guard ran ONCE for the whole batch
+    expect(seen[0]!.map((s) => s.ts)).toEqual(tss); // units in the returned ts order
+    expect(tss[0]! < tss[1]! && tss[1]! < tss[2]!).toBe(true); // strictly increasing
+    expect(seen[0]!.every((s) => s.docCount === 1)).toBe(true); // each unit's own row visible in-txn
+    await client.close();
+  });
+
+  // Atomicity: a guard that throws on unit 2's meta aborts the WHOLE batch — zero rows land (D1).
+  it("a guard throwing on a later unit aborts ALL units — zero rows land", async () => {
+    const { store, client } = await makeStore();
+    store.setCommitGuard(async (_q, units) => {
+      if (units.some((u) => u.meta?.idempotencyKey === "poison")) throw new Error("unit-2 poisoned");
+    });
+
+    const [a, b] = [newDocumentId(TABLE), newDocumentId(TABLE)];
+    await expect(
+      store.commitWriteBatch([
+        { documents: [doc(a, "a")], indexUpdates: [] },
+        { documents: [doc(b, "b")], indexUpdates: [], meta: { idempotencyKey: "poison" } },
+      ]),
+    ).rejects.toThrow("unit-2 poisoned");
+
+    const docs = await client.query(`SELECT COUNT(*)::int AS n FROM documents`);
+    expect(Number(docs[0]!.n)).toBe(0); // unit 1 rolled back too
     await client.close();
   });
 

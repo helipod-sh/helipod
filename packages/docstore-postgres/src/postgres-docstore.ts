@@ -14,6 +14,8 @@
  * previous-revisions lookup) are all implemented over the async `PgClient` seam.
  */
 import type {
+  CommitGuardUnit,
+  CommitUnit,
   ConflictStrategy,
   DocStore,
   DocumentLogEntry,
@@ -63,15 +65,15 @@ export interface PostgresDocStoreOptions {
 
 export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
-  /** Fleet-installed epoch fence (D3/D5). Runs inside every `commitWrite` transaction, after the row
-   * inserts and before COMMIT; throwing aborts the whole commit. Never set at Tier 0. The `shardId` is
-   * passed so a per-shard fleet fence can check THAT shard's epoch row (B2a per-shard guards).
-   * `meta` (Fleet B3, D3, additive 4th param): the caller's opaque `commitWrite` `opts.meta`,
-   * forwarded verbatim — undefined when the commit carried none. Existing 3-arg guard callbacks
-   * (e.g. the epoch fence installed by `ee/packages/fleet/src/node.ts`) stay valid as-is: a
-   * callback that ignores its 4th parameter is still assignable to this type. */
+  /** Fleet-installed epoch fence (D3/D5, batch-shaped since Fleet B4). Runs ONCE inside every
+   * `commitWriteBatch` transaction, after ALL units' row inserts and before COMMIT; throwing aborts
+   * the whole commit (every unit). Never set at Tier 0. The `shardId` is passed so a per-shard fleet
+   * fence can check THAT shard's epoch row (B2a per-shard guards). `units` is the batch's per-unit
+   * `{ts, meta}` in unit/ts order (Fleet B4, D1): the guard fences once, advances the frontier once at
+   * the last unit's ts, and loops the per-unit `meta` effects (idempotency INSERT at each unit's own
+   * ts). The single-commit `commitWrite` path passes a one-unit array, so there is ONE guard contract. */
   private commitGuard:
-    | ((q: PgQuerier, commitTs: bigint, shardId: ShardId, meta?: Record<string, string>) => Promise<void>)
+    | ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>)
     | null = null;
 
   constructor(
@@ -82,9 +84,14 @@ export class PostgresDocStore implements DocStore {
   }
 
   /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
-   * (the epoch fence); at Tier 0 no guard is ever set and `commitWrite` never calls one. */
+   * (the epoch fence); at Tier 0 no guard is ever set and the commit path never calls one.
+   *
+   * BREAKING (Fleet B4): the guard is BATCH-SHAPED — `(q, units: readonly CommitGuardUnit[], shardId)`,
+   * invoked ONCE per `commitWriteBatch` transaction over all units. The prior single-commit shape
+   * `(q, commitTs, shardId, meta)` is gone; fleet's `installCommitGuard` and every direct installer
+   * were updated in lockstep. A single `commitWrite` reaches the guard as a one-unit array. */
   setCommitGuard(
-    guard: ((q: PgQuerier, commitTs: bigint, shardId: ShardId, meta?: Record<string, string>) => Promise<void>) | null,
+    guard: ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>) | null,
   ): void {
     this.commitGuard = guard;
   }
@@ -256,30 +263,47 @@ export class PostgresDocStore implements DocStore {
     shardId?: ShardId,
     opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
+    // Single commit = a one-unit batch (Fleet B4, D1) — ONE implementation, so the guard invocation
+    // shape (a one-unit array) is identical to any batch. The store never sees the difference.
+    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: opts?.meta }], shardId);
+    return ts!;
+  }
+
+  async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
     if (this.readOnly) throw new ReadOnlyStoreError();
     const shard = shardId ?? DEFAULT_SHARD;
-    // One transaction: allocate the commit ts from the sequence, stamp every staged row with it,
-    // insert, run the epoch fence (if installed), COMMIT. `nextval` inside the transaction makes
-    // the ts visible atomically with its rows — no allocated-but-unlanded window (D1). A throwing
-    // guard (D3) rolls the whole thing back; the advanced sequence value is not reclaimed on
-    // rollback (Postgres sequences are non-transactional), which is harmless — ts gaps are legal.
-    const runCommit = async (tx: PgQuerier): Promise<bigint> => {
-      // `nextval` is the primary allocator (and the shared clock the D4 eviction fencer bumps).
-      // `GREATEST(nextval, MAX(ts)+1)` also covers out-of-band `write()` rows whose ts did not come
-      // from this sequence (e.g. a pre-B1 upgrade before the setup-time setval lands, or a replica
-      // that also applies via `write()`), keeping commitWrite strictly above every existing ts —
-      // byte-identical to SQLite's `MAX(ts)+1` semantics. Race-free under the single writer.
-      const rows = await tx.query(
-        `SELECT GREATEST(nextval('stackbase_ts'), (SELECT COALESCE(MAX(ts), 0) FROM documents) + 1) AS ts`,
-      );
-      const commitTs = asBigInt(rows[0]!.ts);
-      const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
-      const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
-      await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shard);
-      if (this.commitGuard) await this.commitGuard(tx, commitTs, shard, opts?.meta);
-      return commitTs;
+    // ONE transaction for the whole batch (Fleet B4, D1): per unit, allocate a strictly-increasing ts
+    // and stamp+insert its rows; then run the batch-shaped epoch fence ONCE over all units; COMMIT.
+    // `nextval` inside the transaction makes each ts visible atomically with its rows — no
+    // allocated-but-unlanded window. ANY error — including the guard — rolls the WHOLE batch back, so
+    // no unit lands. Advanced sequence values are not reclaimed on rollback (Postgres sequences are
+    // non-transactional), which is harmless — ts gaps are legal.
+    const runCommit = async (tx: PgQuerier): Promise<bigint[]> => {
+      const commitTsList: bigint[] = [];
+      const guardUnits: CommitGuardUnit[] = [];
+      for (const unit of units) {
+        // `nextval` is the primary allocator (and the shared clock the D4 eviction fencer bumps).
+        // `GREATEST(nextval, MAX(ts)+1)` also covers out-of-band `write()` rows whose ts did not come
+        // from this sequence, keeping each commit strictly above every existing ts (incl. this batch's
+        // already-inserted earlier units, which MAX(ts) now sees) — byte-identical to SQLite's
+        // `MAX(ts)+1`. So ts's are strictly increasing across units, in unit order. Race-free under the
+        // single writer.
+        const rows = await tx.query(
+          `SELECT GREATEST(nextval('stackbase_ts'), (SELECT COALESCE(MAX(ts), 0) FROM documents) + 1) AS ts`,
+        );
+        const commitTs = asBigInt(rows[0]!.ts);
+        const stampedDocs = unit.documents.map((e) => ({ ...e, ts: commitTs }));
+        const stampedIdx = unit.indexUpdates.map((w) => ({ ...w, ts: commitTs }));
+        await this.writeRows(tx, stampedDocs, stampedIdx, "Error", shard);
+        commitTsList.push(commitTs);
+        guardUnits.push({ ts: commitTs, meta: unit.meta });
+      }
+      // ONE guard invocation over the whole batch (epoch fence once, frontier once at ts_N, per-unit
+      // idempotency INSERT). Skipped for an empty batch — nothing to commit, nothing to fence.
+      if (this.commitGuard && guardUnits.length > 0) await this.commitGuard(tx, guardUnits, shard);
+      return commitTsList;
     };
-    // Pool mode (D1): route the whole commit onto THIS shard's dedicated commit connection, so
+    // Pool mode (D1): route the whole batch onto THIS shard's dedicated commit connection, so
     // concurrent cross-shard commits run on independent Postgres sessions. Without a pool (single-node,
     // Tier-0 tests, PGlite) the transaction runs on the pinned connection — byte-identical to before,
     // which the existing conformance suite proves.

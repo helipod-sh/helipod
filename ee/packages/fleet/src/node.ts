@@ -375,6 +375,19 @@ export function fleetMultiWriterEnabled(): boolean {
   return /^(1|true|yes)$/i.test(process.env.STACKBASE_FLEET_MULTI_WRITER ?? "");
 }
 
+/**
+ * Whether group commit (Fleet B4) is enabled (`STACKBASE_GROUP_COMMIT`), read the SAME way as
+ * `fleetMultiWriterEnabled` above — one place, so every `runtimeOptions` construction site in
+ * `prepareFleetNode` reads the identical value. Threaded straight into `createEmbeddedRuntime`
+ * (`EmbeddedRuntimeOptions.groupCommit`), which routes every shard's commits through the two-buffer
+ * stage-then-flush committer loop. Default OFF at Fleet B4/T4 — T5 owns flipping the production
+ * default once the throughput win is E2E-proven; unset/anything else → the byte-identical
+ * single-commit path every shard already runs.
+ */
+export function groupCommitEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.STACKBASE_GROUP_COMMIT ?? "");
+}
+
 export interface FleetHandles {
   role(): "sync" | "writer";
   /** The current writer's URL — the proxy target for public httpActions handled on a sync node. */
@@ -385,6 +398,16 @@ export interface FleetHandles {
    *  how long it's been stuck (ms), and the pinning shard. Null before the first frontier beat, or if
    *  no shard rows exist yet. */
   frontierStats(): FrontierStats | null;
+  /**
+   * Group-commit counters (Fleet B4, T4 health observability): `EmbeddedRuntime.groupCommitStats()`'s
+   * aggregate reading plus a derived `flushesPerSec` — a rolling delta between successive calls
+   * (`(flushCount now - flushCount at the prior call) / elapsed seconds`), the simplest honest
+   * throughput signal without a dedicated timer. The first call after boot (or after any gap) has no
+   * prior sample, so it reports 0 for that one call. Structurally all-zero when `STACKBASE_GROUP_
+   * COMMIT` is off (the underlying counters are never touched on the single-commit path) — never
+   * null, unlike `frontierStats` (no "before the first beat" gating applies here).
+   */
+  groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number; flushesPerSec: number };
   /** Per-shard ownership (B2b, D1): does THIS node currently hold `shardId`'s write lease? Backs
    *  the `/_fleet/run` single-hop guard (`packages/cli`'s `http-handler.ts`) — delegates straight to
    *  `WriteForwarder.isLocalWriter`, the same live held-set view the executor's own per-shard
@@ -436,6 +459,12 @@ export interface FleetRuntimeOptions {
    * a hybrid node. Absent → the drain is byte-identical to before B3.
    */
   beforeNotify?: (commitTs: bigint) => Promise<void>;
+  /**
+   * Fleet B4 (T4): group commit — resolved once via `groupCommitEnabled()` (above) and threaded
+   * uniformly onto every boot shape (writer/sync × single-writer/hybrid). Unset/false →
+   * `createEmbeddedRuntime` builds the byte-identical single-commit path, as shipped.
+   */
+  groupCommit?: boolean;
 }
 
 export interface FleetPrep {
@@ -681,6 +710,9 @@ export async function prepareFleetNode(deps: {
   const multiWriter = fleetMultiWriterEnabled();
   const replicaPath = join(deps.dataDir, REPLICA_DB_FILENAME);
   const beforeNotify = (commitTs: bigint): Promise<void> => forwarder.waitForReplica(commitTs);
+  // Fleet B4 (T4): group commit — resolved ONCE here, threaded uniformly onto every
+  // `runtimeOptions` literal below regardless of boot shape (writer/sync × single-writer/hybrid).
+  const groupCommit = groupCommitEnabled();
 
   if (acquired) {
     // Writer boot: make the Postgres store writable and promote the forwarder so writes execute
@@ -699,7 +731,7 @@ export async function prepareFleetNode(deps: {
         client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "writer", numShards,
         runtimeOptions: {
           store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards,
-          queryStore: switchable, beforeNotify,
+          queryStore: switchable, beforeNotify, groupCommit,
         },
       };
     }
@@ -707,7 +739,7 @@ export async function prepareFleetNode(deps: {
     // switchable, no query-path split (it reads the primary, as shipped).
     return {
       client, pgStore, lease, forwarder, role: "writer", numShards,
-      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards },
+      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit },
     };
   }
 
@@ -731,7 +763,7 @@ export async function prepareFleetNode(deps: {
       client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
       runtimeOptions: {
         store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
-        queryStore: switchable, beforeNotify,
+        queryStore: switchable, beforeNotify, groupCommit,
       },
     };
   }
@@ -739,7 +771,7 @@ export async function prepareFleetNode(deps: {
   // read-only Postgres store is the tail source + promotion swap target only.
   return {
     client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards },
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit },
   };
 }
 
@@ -864,10 +896,15 @@ export function installCommitGuard(
   lease: LeaseManager,
   onFenced: (shardId: ShardId, reason: string) => void,
 ): void {
-  pgStore.setCommitGuard(async (q, commitTs, shardId, meta) => {
-    // B2a: the guard is now PER-SHARD. `commitWrite` routes each commit to its shard's connection and
+  pgStore.setCommitGuard(async (q, units, shardId) => {
+    // Fleet B4 (batch-shaped guard): `commitWriteBatch` invokes this ONCE per transaction over ALL its
+    // units (`{ts, meta}` in unit/ts order); a single `commitWrite` reaches here as a one-unit array.
+    // We fence ONCE, advance the frontier ONCE to the batch's last ts, and loop the per-unit idempotency
+    // INSERTs each at its own ts. ANY throw here aborts the WHOLE batch — no unit lands (D1).
+    //
+    // B2a: the guard is PER-SHARD. `commitWriteBatch` routes each batch to its shard's connection and
     // passes that `shardId` here; fence against THAT shard's epoch (the per-shard epoch map) and
-    // advance THAT row's frontier chain. A commit on shard s2 whose s2 epoch was superseded aborts
+    // advance THAT row's frontier chain. A batch on shard s2 whose s2 epoch was superseded aborts
     // and relinquishes ONLY s2 (B2b), while the other shards' commits are unaffected.
     const epoch = lease.currentEpoch(shardId);
     if (epoch === null) {
@@ -877,40 +914,43 @@ export function installCommitGuard(
       onFenced(shardId, `commit guard invoked with no acquired epoch for shard '${shardId}'`);
       throw new FencedError(`commit fenced: this node has not acquired a shard_leases epoch for shard '${shardId}'`);
     }
-    // `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1` — two layers of defense against a
-    // frontier regression: (1) the idle-shard closer now takes THIS shard's commit mutex before
-    // bumping its frontier (`closeIdleFrontiers`), so nothing can have raised it mid-commit on the
-    // same epoch, and a cross-epoch writer is fenced by the `epoch = $3` predicate; (2) GREATEST makes
-    // the write monotone regardless. The tailer's semantics already tolerate `frontier_ts` exceeding
-    // the last committed doc ts (idle bumps do exactly that, and its empty-range advance handles it),
-    // so keeping the strictly-larger of the two is always safe. `prev_ts := frontier_ts` still records
-    // the pre-write frontier as the chain's previous link.
+    // The batch's frontier lands at ts_N (the last, largest unit ts) — the units are ts-ordered, so
+    // this is the batch high-water mark. `frontier_ts = GREATEST(frontier_ts, $1)`, not a bare `= $1`
+    // — two layers of defense against a frontier regression: (1) the idle-shard closer now takes THIS
+    // shard's commit mutex before bumping its frontier (`closeIdleFrontiers`), so nothing can have
+    // raised it mid-commit on the same epoch, and a cross-epoch writer is fenced by the `epoch = $3`
+    // predicate; (2) GREATEST makes the write monotone regardless. The tailer already tolerates
+    // `frontier_ts` exceeding the last committed doc ts, so keeping the strictly-larger is always safe.
+    // `prev_ts := frontier_ts` records the pre-BATCH frontier as the chain's previous link — the whole
+    // batch appears atomically to the tailer as ts's 1..N landing with F = ts_N (D3).
+    const tsN = units[units.length - 1]!.ts;
     const rows = await q.query(
       `UPDATE shard_leases SET prev_ts = frontier_ts, frontier_ts = GREATEST(frontier_ts, $1) WHERE shard_id = $2 AND epoch = $3 RETURNING epoch`,
-      [commitTs, shardId, epoch],
+      [tsN, shardId, epoch],
     );
     if (rows.length === 0) {
       onFenced(shardId, `commit guard found 0 rows for shard '${shardId}' epoch ${epoch} — superseded by another writer`);
       throw new FencedError(`commit fenced: epoch no longer current for shard '${shardId}'`);
     }
 
-    // Fleet B3, D3 — effectively-once forwarding: when the commit carries an idempotency key
-    // (`RunOptions.commitMeta` → ... → `DocStore.commitWrite`'s `opts.meta`, threaded here as this
-    // guard's additive 4th param), INSERT the `fleet_idempotency` row in the SAME transaction as the
-    // commit — atomic by construction. A `key` PK collision (the concurrent-duplicate race's loser:
-    // another commit already claimed this key) throws a raw `unique_violation` here, which aborts
-    // the WHOLE transaction (nothing above has committed yet — Postgres rolls back the frontier
-    // bump and the staged document/index rows together with this INSERT). `packages/cli`'s
-    // `/_fleet/run` handler catches that specific shape (code 23505 on THIS table/constraint — never
-    // treating an app-schema unique violation as a replay) and re-SELECTs to return the winner's
-    // commitTs as a replay instead of a 500. Non-forwarded / non-fleet commits carry no meta (this
-    // node's own local mutations never set `commitMeta`), so `meta` is `undefined` and this is a
-    // silent no-op — the whole idempotency machinery costs nothing outside a forwarded write.
-    if (meta?.idempotencyKey) {
-      await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
-        meta.idempotencyKey,
-        commitTs,
-      ]);
+    // Fleet B3, D3 — effectively-once forwarding, PER UNIT (B4): when a unit carries an idempotency key
+    // (`RunOptions.commitMeta` → ... → `commitWriteBatch`'s per-unit `meta`), INSERT its `fleet_idempotency`
+    // row at THAT unit's own ts, in the SAME transaction — atomic by construction. Looping per unit is
+    // what makes the batch-shaped guard correct: a single last-ts guard call would drop units 1..N-1's
+    // rows and stamp the wrong ts. A `key` PK collision (the concurrent-duplicate race's loser: another
+    // commit already claimed this key) throws a raw `unique_violation`, aborting the WHOLE batch (nothing
+    // above has committed — Postgres rolls back every unit's frontier bump and rows together with this
+    // INSERT). `packages/cli`'s `/_fleet/run` handler catches that specific shape (code 23505 on THIS
+    // table/constraint — never an app-schema unique violation) and re-SELECTs the winner's commitTs as a
+    // replay. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
+    // idempotency machinery costs nothing outside a forwarded write.
+    for (const unit of units) {
+      if (unit.meta?.idempotencyKey) {
+        await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
+          unit.meta.idempotencyKey,
+          unit.ts,
+        ]);
+      }
     }
   });
 }
@@ -1033,6 +1073,24 @@ export async function acquireShardAsWriter(
 }
 
 /**
+ * Pure throughput derivation for group-commit health (Fleet B4, T4): a rolling delta of
+ * `flushCount` between two `groupCommitStats()` reads, over the elapsed wall-clock time — the
+ * simplest honest `flushesPerSec` signal without a dedicated timer/interval. `prevReadMs === null`
+ * (no prior sample — the first read after boot, or after any gap) and a non-positive elapsed time
+ * (a clock that hasn't advanced, or moved backward) both report 0 rather than a division artifact.
+ * Extracted as a standalone pure function so it's unit-testable without booting a fleet node.
+ */
+export function deriveFlushesPerSec(
+  prevReadMs: number | null,
+  prevFlushCount: number,
+  nowMs: number,
+  nowFlushCount: number,
+): number {
+  if (prevReadMs === null || nowMs <= prevReadMs) return 0;
+  return Math.max(0, (nowFlushCount - prevFlushCount) / ((nowMs - prevReadMs) / 1000));
+}
+
+/**
  * Wire the running fleet node. A writer node is already fully live (promoted in `prepareFleetNode`,
  * drivers started at `create()`) — it just gets handles. A sync node starts the replica tailer (its
  * `start()` catch-up is the node's ready gate) and the lease acquire loop, and promotes on acquire
@@ -1049,6 +1107,23 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // /api/health can report the fleet frontier; arming as writer replaces it with an idle-closing one.
   let frontierMonitor: FrontierMonitor | null = null;
   let unsubscribeCommits: (() => void) | null = null;
+
+  // Group-commit health counters (Fleet B4, T4): `flushesPerSec` is a rolling delta between
+  // successive `groupCommitStats()` calls — the simplest honest throughput signal without a
+  // dedicated timer/interval. `runtime.groupCommitStats()` is structurally all-zero when
+  // `groupCommit` is off (see its doc comment), so this closure needs no separate on/off branch —
+  // the delta of two zero readings is zero, same as never having flushed.
+  let lastGroupCommitReadMs: number | null = null;
+  let lastFlushCount = 0;
+  const groupCommitStats = (): { lastBatchSize: number; maxBatchSize: number; flushCount: number; flushesPerSec: number } => {
+    const stats = runtime.groupCommitStats();
+    const now = Date.now();
+    const flushesPerSec = deriveFlushesPerSec(lastGroupCommitReadMs, lastFlushCount, now, stats.flushCount);
+    lastGroupCommitReadMs = now;
+    lastFlushCount = stats.flushCount;
+    return { ...stats, flushesPerSec };
+  };
+
   const firePromoted = (): void => {
     for (const cb of promotedCbs) {
       try {
@@ -1142,10 +1217,21 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // unwind (drop the held-epoch entry + release the slot lock). The rightful owner acquires it on its
   // own next beat — no TTL wait, no failover event. A mutation mid-execute at release time hits
   // `FencedError` at commit (OCC-retryable; the forwarder re-routes the retry to the new owner).
+  //
+  // Skip-if-busy (Fleet B4): `tryRunExclusiveOnShard` now returns `false` when the shard has a
+  // staged/flushing group-commit batch too, not just a mutex-held commit. If it returns `false` we do
+  // NOT relinquish — we leave the shard held and let the balancer's next beat retry (the shard is
+  // still a non-target, so the release fires again). Fencing mid-flush would be SAFE — the epoch bump
+  // cleanly fences the in-flight batch, so its `commitWriteBatch` hits `FencedError` and NOTHING lands
+  // below the bumped frontier — but pointlessly disruptive (the whole batch rejects + its callers
+  // retry). Waiting one beat for the flush to drain, then fencing a genuinely-idle shard, is the
+  // better posture and costs at most a beat of extra hold. (Failover eviction of a DEAD peer is
+  // row-lock-based via `evictExpired`, not this mutex path, and so is unaffected.)
   const releaseShard = async (shardId: ShardId): Promise<void> => {
-    await runtime.tryRunExclusiveOnShard(shardId, async () => {
+    const fenced = await runtime.tryRunExclusiveOnShard(shardId, async () => {
       await lease.selfFence(shardId);
     });
+    if (!fenced) return; // shard busy (commit or in-flight batch) — retry next beat, still held
     relinquish(relinquishDeps, shardId, "balancer graceful release (no longer a rendezvous target)");
   };
 
@@ -1373,6 +1459,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       writerUrl: async () => (await lease.read())?.writerUrl ?? "",
       onPromoted: (cb) => promotedCbs.push(cb),
       frontierStats: () => frontierMonitor?.stats() ?? null,
+      groupCommitStats,
       isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
       idempotencyLookup: (key) => lease.lookupIdempotency(key),
       idempotencyRecordValue: (key, value) => lease.recordIdempotencyValue(key, value),
@@ -1569,6 +1656,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     writerUrl: async () => (await lease.read())?.writerUrl ?? "",
     onPromoted: (cb) => promotedCbs.push(cb),
     frontierStats: () => frontierMonitor?.stats() ?? null,
+    groupCommitStats,
     isLocalWriter: (shardId) => forwarder.isLocalWriter(shardId),
     idempotencyLookup: (key) => lease.lookupIdempotency(key),
     idempotencyRecordValue: (key, value) => lease.recordIdempotencyValue(key, value),

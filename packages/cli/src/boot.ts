@@ -77,6 +77,19 @@ export function parseNumShards(raw: string | undefined): number | undefined {
   return Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : undefined;
 }
 
+/**
+ * Parse `STACKBASE_GROUP_COMMIT` (Fleet B4) — a boolean env flag, same `1`/`true`/`yes`
+ * (case-insensitive) shape `@stackbase/fleet`'s `fleetMultiWriterEnabled` uses for
+ * `STACKBASE_FLEET_MULTI_WRITER`. Default OFF (unset/anything else → false) at this task — T5 owns
+ * flipping the production default once the throughput win is E2E-proven. Unlike `STACKBASE_FLEET_
+ * SHARDS`, group commit needs no persist-once story: it's a per-boot transactor construction choice,
+ * not a durable invariant the log depends on, so a plain env read (no `resolveNumShards`-style
+ * mismatch-fail-fast) is the right shape.
+ */
+export function groupCommitEnabled(raw: string | undefined): boolean {
+  return /^(1|true|yes)$/i.test(raw ?? "");
+}
+
 /** Build the fail-fast message for a `STACKBASE_FLEET_SHARDS` value that disagrees with what's
  *  already persisted — named verbatim so tests can assert on it without re-deriving the string. */
 export function numShardsMismatchError(envValue: number, persisted: number): Error {
@@ -233,6 +246,10 @@ export async function bootLoaded(opts: {
     queryStore?: DocStore;
     /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
     beforeNotify?: (commitTs: bigint) => Promise<void>;
+    /** Fleet B4: group commit — resolved by `@stackbase/fleet`'s `node.ts` from its OWN
+     *  `STACKBASE_GROUP_COMMIT` read (mirrors how `numShards` is resolved fleet-side, before
+     *  `bootLoaded` runs) and threaded straight into `createEmbeddedRuntime`. Unset → `false`. */
+    groupCommit?: boolean;
   };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
@@ -254,6 +271,13 @@ export async function bootLoaded(opts: {
     await store.setupSchema();
     numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
   }
+
+  // Fleet B4 (T4): resolve GROUP_COMMIT the same shape as `numShards` above — a fleet caller has
+  // already resolved its own `STACKBASE_GROUP_COMMIT` read (mirrors `fleetMultiWriterEnabled`'s
+  // pattern in `@stackbase/fleet`'s `node.ts`) and threads it in as `opts.fleet.groupCommit`; the
+  // non-fleet path (dev, `serve` without `--fleet`, the single binary) reads the env var directly.
+  // No persist-once story needed (see `groupCommitEnabled`'s doc comment) — a plain per-boot read.
+  const groupCommit = opts.fleet ? (opts.fleet.groupCommit ?? false) : groupCommitEnabled(process.env.STACKBASE_GROUP_COMMIT);
 
   // File storage is always on. Blobs sit beside the SQLite file (`<dataDir>/storage`); the signing
   // key is the deployment admin key (already fail-fasted-if-unset by `serve`). The `_storage` table
@@ -302,6 +326,9 @@ export async function bootLoaded(opts: {
     // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the store — resolved
     // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
     numShards,
+    // Fleet B4 (T4): route every shard's commits through the group-commit committer loop — resolved
+    // above (fleet: threaded in already-resolved; non-fleet: read from STACKBASE_GROUP_COMMIT).
+    groupCommit,
   });
 
   const storageRouteDeps: StorageRouteDeps = {
@@ -368,6 +395,8 @@ export async function bootProject(opts: {
     queryStore?: DocStore;
     /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
     beforeNotify?: (commitTs: bigint) => Promise<void>;
+    /** Fleet B4: group commit — resolved fleet-side, threaded straight into `createEmbeddedRuntime`. */
+    groupCommit?: boolean;
   };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);

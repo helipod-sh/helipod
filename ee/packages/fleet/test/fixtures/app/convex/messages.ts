@@ -26,6 +26,28 @@ export const scheduleSend = mutation({
     ctx.scheduler.runAfter(args.delayMs, "messages:send", { channelId: args.channelId, body: args.body }),
 });
 
+// Sharded read-modify-write: read the (single, pre-seeded) message for `channelId` on the shard that
+// owns it, then replace its body with a bumped `<body>#<n>` suffix. Stackbase has no `ctx.db.patch`
+// (a documented Convex divergence) — read-merge-replace, same shape as `notes:update`. `shardBy`
+// routes the whole RMW to the channel's owning shard. Used by the B4 group-commit concurrent-load
+// E2E as the 20% RMW slice of the storm (each client bumps its OWN dedicated channel, so the RMWs
+// exercise the read-then-replace path + grow the MVCC chain per doc WITHOUT cross-client same-doc
+// contention — the storm's zero-error invariant, not an OCC-conflict probe).
+export const bump = mutation({
+  args: { channelId: v.string() },
+  shardBy: "channelId",
+  handler: async (ctx, args) => {
+    const docs = await ctx.db.query("messages", "by_channel").eq("channelId", args.channelId).collect();
+    const d = docs[0];
+    if (!d) return null; // channel not seeded — no-op rather than throw (keeps the storm error-free)
+    const body = d.body;
+    const m = /#(\d+)$/.exec(body);
+    const next = m ? Number(m[1]) + 1 : 1;
+    await ctx.db.replace(d["_id"] as string, { ...d, body: `${body.replace(/#\d+$/, "")}#${next}` });
+    return null;
+  },
+});
+
 // Cross-shard list: a QUERY reads every shard (the scan guard short-circuits for non-sharded
 // readers), so an open scan over `by_channel` returns rows from ALL shards — the substrate for the
 // consistent cross-shard subscription proof.

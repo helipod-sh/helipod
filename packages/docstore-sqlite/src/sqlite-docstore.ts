@@ -10,6 +10,7 @@
  * and resolve the pointed document at the same timestamp.
  */
 import type {
+  CommitUnit,
   ConflictStrategy,
   DocStore,
   DocumentLogEntry,
@@ -159,17 +160,33 @@ export class SqliteDocStore implements DocStore {
     // accepted (interface conformance) and ignored — non-fleet / single-node SQLite pays nothing.
     _opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
-    // Allocate + stamp + write in ONE synchronous transaction. Under the single-writer invariant,
-    // `MAX(ts) + 1` computed inside the transaction is race-free: no other writer can interleave a
-    // higher ts between the read and the insert.
+    // Single commit = a one-unit batch (Fleet B4, D1) — one implementation. `meta` is threaded
+    // through for interface parity but SQLite (no guard) ignores it, exactly as before.
+    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: _opts?.meta }], shardId);
+    return ts!;
+  }
+
+  async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
+    // Allocate + stamp + write the WHOLE batch in ONE synchronous transaction (Fleet B4, D1). Under
+    // the single-writer invariant, `MAX(ts) + 1` computed inside the transaction is race-free: no other
+    // writer can interleave a higher ts. Each unit re-reads MAX(ts), which now includes the prior
+    // units' just-inserted rows, so the batch stamps CONSECUTIVE, strictly-increasing ts's in unit
+    // order. SQLite has no commit guard, so per-unit `meta` is ignored (matches `commitWrite`). Note:
+    // SQLite's flush is synchronous — nothing accumulates during it — so real batching is opportunistic
+    // (typically batch-of-1) on Tier 0; the shared path is correct-but-inert here.
     return this.db.transaction(() => {
-      const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
-      const m = row?.m;
-      const commitTs = (m === null || m === undefined ? 0n : asBigInt(m)) + 1n;
-      const stampedDocs = documents.map((e) => ({ ...e, ts: commitTs }));
-      const stampedIdx = indexUpdates.map((w) => ({ ...w, ts: commitTs }));
-      this.insertRows(stampedDocs, stampedIdx, "Error", shardId ?? DEFAULT_SHARD);
-      return commitTs;
+      const out: bigint[] = [];
+      const shard = shardId ?? DEFAULT_SHARD;
+      for (const unit of units) {
+        const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
+        const m = row?.m;
+        const commitTs = (m === null || m === undefined ? 0n : asBigInt(m)) + 1n;
+        const stampedDocs = unit.documents.map((e) => ({ ...e, ts: commitTs }));
+        const stampedIdx = unit.indexUpdates.map((w) => ({ ...w, ts: commitTs }));
+        this.insertRows(stampedDocs, stampedIdx, "Error", shard);
+        out.push(commitTs);
+      }
+      return out;
     });
   }
 

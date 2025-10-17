@@ -397,6 +397,17 @@ progress marker, how long it's been stuck (in ms), and which shard is currently 
 useful for noticing a stalled shard before it shows up as user-visible staleness. This is
 observability only; nothing to configure.
 
+### Group commit (single-shard escape hatch)
+
+`STACKBASE_GROUP_COMMIT=1` batches concurrent writes on a **single shard** (or an unsharded
+fleet, which is just shard count 1) so they share one Postgres round trip instead of each
+paying its own. It's worth trying if a single shard is your write bottleneck — measured **1.6×**
+at 64 concurrent clients on a single shard. Default is **off**, because a sharded fleet already
+spreads commits across per-shard connections and sees no additional benefit (and, since the
+idle-frontier closer treats a shard with an in-flight batch as busy and skips it, no additional
+risk) from also batching — see
+[`b4-benchmark.md`](../../dev/research/write-sharding/b4-benchmark.md) for the full numbers.
+
 ## Multi-writer distribution: writes scale with node count
 
 Everything above this section describes the default topology: one writer, every other node a

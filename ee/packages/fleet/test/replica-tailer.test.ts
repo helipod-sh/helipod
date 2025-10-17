@@ -99,6 +99,9 @@ class ZeroWatermarkDocStore implements DocStore {
   commitWrite(...args: Parameters<DocStore["commitWrite"]>) {
     return this.real.commitWrite(...args);
   }
+  commitWriteBatch(...args: Parameters<DocStore["commitWriteBatch"]>) {
+    return this.real.commitWriteBatch(...args);
+  }
   get(...args: Parameters<DocStore["get"]>) {
     return this.real.get(...args);
   }
