@@ -45,19 +45,37 @@ readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
                           // scanned-but-unmatched ranges must not be rescanned forever
 }>;
 ```
-- Implemented over `store.load_documents({ start: afterTs, exclusive }, "asc")` with a
-  bounded scan (limit applies to SCANNED entries, not matched — a quiet watched table on a
-  busy log must still make cursor progress); `tableNumberToName` (already on the runtime)
-  maps ids to app-visible table names; component-internal tables (namespaced) and app-root
-  system tables (`_storage`) are EXCLUDED from `changes` but still advance `maxScannedTs`.
+- **The stable-prefix bound (spec-review fix — THE design-deciding correction; the prior
+  "no frontier bounds apply" claim was FALSE):** the raw log tail is gap-free ONLY where
+  commits share one serialized session. Per topology: non-fleet SQLite — one connection,
+  safe to `maxTimestamp()`; non-fleet Postgres — the single PINNED connection serializes
+  all shard commits (no commitPool outside fleet — verified node.ts:654 is the only pool
+  site), safe to `maxTimestamp()`; **FLEET (commitPool, single- or multi-writer) — N
+  per-shard commit connections land out of order: a scan can see ts 10 while ts 9 is still
+  in-flight, and a cursor advanced to 10 permanently misses 9 — the exact class the
+  tailer's F-bound prevents. readLog's scan upper bound = `min(shard_leases.frontier_ts)`
+  (the fleet stable prefix), threaded into the DriverContext implementation as an optional
+  stable-prefix accessor (non-null only in fleet — the fleet node wires it; the
+  idle-frontier closer keeps it unpinned).** The oracle's lastCommitted is a max
+  high-water, NOT a contiguous prefix — it cannot serve as the bound.
+- **Two store seams, not one (spec-review fix):** `load_documents(range, order)` takes
+  `TimestampRange {minInclusive, maxExclusive}` (afterTs-exclusive = `minInclusive:
+  afterTs+1n`) and the ts index exists on both backends — but the POSTGRES implementation
+  buffers the whole range before yielding, so generator-break does not bound the SQL.
+  `load_documents` gains an optional `limit` (pushed into the SQL LIMIT; sqlite + postgres +
+  conformance additions). readLog's `limit` applies to SCANNED entries, not matched — a
+  quiet watched table on a busy log still makes cursor progress.
+- `tableNumberToName` (already on the runtime) maps ids to app-visible table names;
+  component-internal tables (namespaced) and app-root system tables (`_storage`) are
+  EXCLUDED from `changes` but still advance `maxScannedTs`.
 - `op` derivation: entry `value === null` → delete; `prev_ts === null` → insert; else
-  update. `oldDoc`: the prev revision via the `prev_ts` chain (one point read per
-  update/delete in the batch; insert → null). `newDoc`: the entry's value (null on delete).
-- Reads the runtime's WRITE store (the primary — complete at commit; drivers run only on
-  the default-shard holder, so no replica/frontier bounds apply; on hybrids this is the
-  pgStore by construction).
-- Ts serialization: the driver seam's existing number-typed commitTs convention (safe below
-  2^53 per the shipped B2b analysis) — keep consistent, document the bound.
+  update. `oldDoc`: the prev revision via the `prev_ts` chain (`get(id, prev_ts)` — one
+  point read per update/delete; insert → null; **a tombstone prev (delete→re-insert)
+  yields oldDoc null with op "update" — documented edge**). `newDoc`: the entry's value.
+- **Reads `options.store` explicitly** (the primary write store — NEVER the B3 queryStore
+  replica); invoked only on the default-shard holder by the driver lifecycle.
+- Ts serialization: the driver seam's number-typed convention (safe below 2^53, the shipped
+  B2b analysis) — documented bound.
 
 ### D2. The `@stackbase/triggers` component
 
@@ -75,17 +93,27 @@ readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
 - **The driver loop** (the scheduler's shape: `onCommit`-woken + a periodic beat, `__tick`/
   `__wake` test seams): per trigger with state "running": `readLog({ afterTs: cursorTs,
   tables: [name], limit: batchSize })` → if changes: run the handler via
-  `runFunction(handlerPath, { changes, deliveryId })` (`deliveryId` = `"<name>:<maxScannedTs>"`
-  — stable across redelivery, the app-side dedup key) → on success: advance the cursor to
-  `maxScannedTs` via an internal mutation → loop while the batch was full. If NO changes but
-  `maxScannedTs > cursorTs`: advance the cursor (quiet-table progress). One delivery in
-  flight per trigger (sequential per trigger; concurrent across triggers).
-- **Failure handling:** handler error → retry with the scheduler's backoff discipline
-  (bounded attempts); after N consecutive failures (default 8): `state = "paused"`,
-  `pausedReason` recorded, one operator-visible error log. Un-pause = an internal mutation
+  `runFunction(handlerPath, { changes })` — **dedup is PER-CHANGE (spec-review fix — the
+  prior batch-level deliveryId was NOT stable across redelivery: a post-crash rescan runs
+  to a newer bound, sees more commits, and produces a superset batch with a different id):**
+  each change carries its stable identity `changeId = "<table>:<id>:<ts>"` (immutable — it
+  IS the log coordinate); handlers dedup per change, and redelivered changes carry
+  identical changeIds by construction even when the batch boundary shifts → on success:
+  advance the cursor to `maxScannedTs` via an internal mutation → loop while the batch was
+  full. If NO changes but `maxScannedTs > cursorTs`: advance the cursor (quiet-table
+  progress). One delivery in flight per trigger (sequential per trigger — a slow ACTION
+  handler head-of-line-blocks its own trigger's backlog by design, documented; concurrent
+  across triggers). Batch bound: `batchSize` count AND a byte budget (~1MB serialized —
+  full docs travel in the args; cut the batch early when exceeded).
+- **Failure handling:** handler error → retry with the scheduler's `computeBackoff`
+  (importable, standalone); **`failureCount` persists on the cursor row (restart-safe);
+  the backoff delay timer is in-memory (a restart retries immediately — acceptable,
+  stated)**; after N consecutive failures (default 8): `state = "paused"`, `pausedReason`
+  recorded, one operator-visible error log. Un-pause = an internal mutation
   (`triggers:resume`), callable from the dashboard function runner. The cursor NEVER
-  advances past an undelivered batch (retries redeliver the same batch — at-least-once,
-  in-order preserved).
+  advances past an undelivered batch (retries redeliver — at-least-once, in-order
+  preserved; the redelivered set may be a superset when new commits landed, but every
+  change's changeId is stable).
 - **The circuit breaker (cascade safety net):** DB-trigger semantics — a trigger's own
   handler writes to its watched table ARE delivered (legitimate patterns need it; the
   recursion footgun is documented with the auth-style plain example). Safety net: a
@@ -95,13 +123,19 @@ readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
 
 ### D3. Delivery contract (documented verbatim)
 
-Bounded at-least-once: a crash between handler success and cursor advance redelivers
-exactly the last batch (same `deliveryId`); handlers must be idempotent or dedup on
-`deliveryId`. Per-document in-order within a trigger (global ts order, sequential
+Bounded at-least-once: a crash between handler success and cursor advance redelivers the
+last batch's changes (possibly within a LARGER batch if new commits landed — the batch
+boundary is not stable, but every change's `changeId` is); handlers must be idempotent or
+dedup on `changeId`. Per-document in-order within a trigger (global ts order, sequential
 delivery). Changes are observed at commit granularity — a document written twice before the
 cursor reaches it yields the revisions the log holds (both — the log is append-only; no
 coalescing in v1). Ordering across triggers: none. New triggers start at the current tip
-unless `fromStart`.
+unless `fromStart` — **whose cost is documented honestly: a full historical replay (every
+revision, one oldDoc point read per update/delete) delivered in bounded batches; on large
+histories this is minutes of catch-up, throttled by the batch/byte budget**. A watched
+table renamed/dropped by a deploy: the cursor row keys by table NAME; a rename orphans the
+cursor (paused with an instructive reason on the next tick's name-resolution failure) — the
+additive-deploy rule already prevents silent renames, stated for completeness.
 
 ### D4. Fleet/topology
 
