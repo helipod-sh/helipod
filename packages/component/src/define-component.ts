@@ -5,6 +5,31 @@ import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 
 export interface BootContext { db: GuestDatabaseWriter; now: number }
 
+/**
+ * One observed change in the MVCC log, as surfaced by `DriverContext.readLog` (the change-feed seam
+ * `@stackbase/triggers` consumes). `op` is derived from the log entry: `value === null` → `"delete"`,
+ * else `prev_ts === null` → `"insert"`, else `"update"`. `oldDoc` is the previous revision reached
+ * through the `prev_ts` chain (`null` for an insert, and — the documented edge — `null` for an
+ * `"update"` whose `prev_ts` points at a tombstone, i.e. a delete→re-insert reusing the id).
+ * `changeId` is the change's immutable log coordinate `"<table>:<id>:<ts>"`, stable across
+ * redelivery — a consumer dedups on it.
+ */
+export interface LogChange {
+  /** App-visible table name (component-namespaced and app-root system tables are never surfaced). */
+  table: string;
+  /** The document's public id string. */
+  id: string;
+  op: "insert" | "update" | "delete";
+  /** The revision's value as JSON (`null` for a delete). */
+  newDoc: JSONValue | null;
+  /** The prior revision's value as JSON (`null` for an insert or a tombstone-prev update). */
+  oldDoc: JSONValue | null;
+  /** The commit timestamp of this revision (safe below 2^53 — the driver seam's number convention). */
+  ts: number;
+  /** Immutable log coordinate `"<table>:<id>:<ts>"` — stable across redelivery. */
+  changeId: string;
+}
+
 /** The capabilities a `Driver` gets to wake on commits/timers and act outside a request. */
 export interface DriverContext {
   /** Runs a registered fn privileged + namespaced, outside a request. */
@@ -15,6 +40,21 @@ export interface DriverContext {
   setTimer(atMs: number, cb: () => void): number;
   clearTimer(handle: number): void;
   now(): number;
+  /**
+   * Read committed changes from the MVCC log after `afterTs`, in ascending ts order — the durable
+   * change feed (`@stackbase/triggers`). `limit` bounds the number of SCANNED revisions (not matched
+   * ones), so a quiet watched table on a busy log still makes cursor progress; `tables` filters the
+   * returned `changes` to those app tables by name (unset → every app table).
+   *
+   * `maxScannedTs` is how far the scan definitively reached (only past fully-scanned timestamps) —
+   * ADVANCE THE CURSOR TO THIS, not to the last change's ts, so scanned-but-unmatched ranges are not
+   * rescanned forever. The scan's upper bound is the stable log prefix (in a fleet, `min(frontier_ts)`;
+   * otherwise the max committed ts), so a change above an in-flight gap is never surfaced or skipped.
+   */
+  readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
+    changes: LogChange[];
+    maxScannedTs: number;
+  }>;
 }
 
 /** A recurring runtime seam: started once after boot, woken by commits and/or timers. */

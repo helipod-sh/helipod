@@ -113,6 +113,7 @@ function makeFakeDriverContext(runtime: EmbeddedRuntime): {
       timers.delete(h);
     },
     now: () => clock,
+    readLog: async () => ({ changes: [], maxScannedTs: 0 }),
   };
 
   return {

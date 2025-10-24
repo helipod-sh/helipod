@@ -389,13 +389,23 @@ export class PostgresDocStore implements DocStore {
     }
   }
 
-  async *load_documents(range: TimestampRange, order: Order): AsyncGenerator<DocumentLogEntry> {
+  async *load_documents(
+    range: TimestampRange,
+    order: Order,
+    limit?: number,
+  ): AsyncGenerator<DocumentLogEntry> {
     const dir = order === "desc" ? "DESC" : "ASC";
-    const rows = await this.db.query(
-      `SELECT table_id, internal_id, ts, prev_ts, value FROM documents WHERE ts >= $1 AND ts < $2
-       ORDER BY ts ${dir}, table_id ${dir}, internal_id ${dir}`,
-      [range.minInclusive, range.maxExclusive],
-    );
+    // The LIMIT MUST land in the SQL: this implementation buffers the whole result before yielding,
+    // so a caller-side generator break would not bound the query. A raw LIMIT is correct here (the
+    // log tail returns every revision incl. tombstones — nothing is dropped after the LIMIT counts it).
+    const params: PgValue[] = [range.minInclusive, range.maxExclusive];
+    let sql = `SELECT table_id, internal_id, ts, prev_ts, value FROM documents WHERE ts >= $1 AND ts < $2
+       ORDER BY ts ${dir}, table_id ${dir}, internal_id ${dir}`;
+    if (limit !== undefined) {
+      params.push(Math.max(0, Math.floor(limit)));
+      sql += ` LIMIT $${params.length}`;
+    }
+    const rows = await this.db.query(sql, params);
     for (const row of rows) {
       const id: InternalDocumentId = {
         tableNumber: decodeStorageTableId(row.table_id as string),

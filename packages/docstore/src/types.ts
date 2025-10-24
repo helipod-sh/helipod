@@ -183,8 +183,19 @@ export interface DocStore {
     limit?: number,
   ): AsyncGenerator<readonly [Uint8Array, LatestDocument]>;
 
-  /** Tail the log over a timestamp range (the change feed / fan-out source). */
-  load_documents(range: TimestampRange, order: Order): AsyncGenerator<DocumentLogEntry>;
+  /**
+   * Tail the log over a timestamp range (the change feed / fan-out source).
+   *
+   * `limit`, when set, caps the number of revisions returned and is pushed into the backend's SQL
+   * `LIMIT` clause (NOT a generator break — the Postgres implementation buffers the whole range
+   * before yielding, so a caller-side break would not bound the query). Rows are returned in `order`
+   * (asc for the change feed), so a limited `asc` scan yields the `limit` LOWEST-timestamped
+   * revisions at or after `range.minInclusive`; a follow-up call resumes from the last returned ts.
+   * Because a single commit stamps every one of its documents with the SAME ts, a `limit` can cut
+   * in the middle of a commit's revisions — the log-tail consumer (`readLog`) accounts for this by
+   * only advancing its cursor past fully-scanned timestamps.
+   */
+  load_documents(range: TimestampRange, order: Order, limit?: number): AsyncGenerator<DocumentLogEntry>;
 
   /** The revisions visible at each `(id, ts)` — used by OCC validation. */
   previous_revisions(queries: readonly PrevRevQuery[]): Promise<Map<string, DocumentLogEntry>>;

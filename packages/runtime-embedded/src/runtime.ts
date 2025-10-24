@@ -7,12 +7,12 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
-import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
+import { namespaceForPath, type Driver, type DriverContext, type LogChange } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId, decodeDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
+import { decodeStorageTableId, decodeDocumentId, encodeInternalDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
-import type { DocStore } from "@stackbase/docstore";
+import { jsonToConvex, convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import type { DocStore, DocumentLogEntry } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
@@ -153,6 +153,18 @@ export interface EmbeddedRuntimeOptions {
    * one bad wait. Unset → `drain()` is byte-identical to before this hook existed.
    */
   beforeNotify?: (commitTs: bigint) => Promise<void>;
+  /**
+   * The stable-prefix accessor for `DriverContext.readLog` (triggers D1). Returns the highest log
+   * timestamp below which the log is GAP-FREE — the upper bound `readLog` scans to. Non-null ONLY in
+   * a fleet, where N per-shard commit connections land timestamps out of order (a scan can see ts 10
+   * while ts 9 is still in flight), so the bound must be `min(shard_leases.frontier_ts)` — the fleet
+   * node wires it to exactly that. A `null` return (or an unset accessor) means "no fleet gap": every
+   * non-fleet topology commits over one serialized session (SQLite's single connection; the single
+   * PINNED Postgres connection — the commit pool is fleet-only), so `readLog` falls back to
+   * `store.maxTimestamp()`. Consulted per `readLog` call; only ever invoked on the default-shard
+   * holder by the driver lifecycle.
+   */
+  stablePrefix?: () => Promise<bigint | null>;
 }
 
 /** The minimal timestamp-observer seam `observeTimestamp` delegates to — a `MonotonicTimestampOracle`
@@ -474,6 +486,93 @@ export class EmbeddedRuntime {
         }
       },
       now: () => options.now?.() ?? Date.now(),
+      readLog: async (opts) => {
+        // Reads the PRIMARY WRITE store explicitly — never a hybrid node's lagging query replica: a
+        // driver runs on the writer that owns the log and must see its own committed writes.
+        const store = options.store;
+        const afterTs = BigInt(Math.trunc(opts.afterTs));
+        // Upper scan bound = the stable log prefix. Fleet → `min(shard_leases.frontier_ts)` (N per-shard
+        // commit connections land ts out of order — a gap below the max must not be crossed); every
+        // non-fleet topology commits over one serialized session, so a null accessor falls back to the
+        // max committed ts. This bound is what makes at-least-once delivery gap-free by construction.
+        const stable = options.stablePrefix ? await options.stablePrefix() : null;
+        const bound = stable ?? (await store.maxTimestamp());
+        if (bound <= afterTs) return { changes: [], maxScannedTs: Number(afterTs) };
+
+        const limit = opts.limit;
+        // Scan (afterTs, bound]  →  half-open [afterTs+1, bound+1).
+        const scanned: DocumentLogEntry[] = [];
+        for await (const e of store.load_documents(
+          { minInclusive: afterTs + 1n, maxExclusive: bound + 1n },
+          "asc",
+          limit,
+        )) {
+          scanned.push(e);
+        }
+
+        // A commit stamps every one of its documents with the SAME ts, so a `limit` can cut in the
+        // middle of a commit's revisions. Never advance the cursor past a partially-scanned ts.
+        let maxScannedTs: bigint;
+        let rows: DocumentLogEntry[];
+        const limitHit = limit !== undefined && scanned.length === limit;
+        if (!limitHit) {
+          maxScannedTs = bound; // the whole range was scanned
+          rows = scanned;
+        } else {
+          const lastTs = scanned[scanned.length - 1]!.ts;
+          if (lastTs > afterTs + 1n) {
+            // A complete ts group sits below `lastTs`: stop just below it and drop the (possibly
+            // partial) `lastTs` group — it redelivers next scan (its changeIds are stable).
+            maxScannedTs = lastTs - 1n;
+            rows = scanned.filter((e) => e.ts < lastTs);
+          } else {
+            // Degenerate: every scanned row shares one ts (a single commit larger than `limit`). To
+            // make progress the whole commit must be delivered — re-scan exactly that ts UNBOUNDED.
+            maxScannedTs = lastTs;
+            rows = [];
+            for await (const e of store.load_documents(
+              { minInclusive: lastTs, maxExclusive: lastTs + 1n },
+              "asc",
+            )) {
+              rows.push(e);
+            }
+          }
+        }
+
+        const tableFilter = opts.tables ? new Set(opts.tables) : null;
+        const changes: LogChange[] = [];
+        for (const e of rows) {
+          const name = tableNumberToName.get(e.id.tableNumber);
+          // Exclude (from `changes`, but they ALREADY counted toward maxScannedTs): unresolvable ids,
+          // component-namespaced tables ("<component>/<table>"), and app-root system tables ("_...").
+          if (name === undefined || name.includes("/") || name.startsWith("_")) continue;
+          if (tableFilter && !tableFilter.has(name)) continue;
+
+          const op: LogChange["op"] =
+            e.value === null ? "delete" : e.prev_ts === null ? "insert" : "update";
+          const newDoc = e.value === null ? null : (convexToJson(e.value.value as Value) as JSONValue);
+          let oldDoc: JSONValue | null = null;
+          if (e.prev_ts !== null) {
+            // The prior revision via the prev_ts chain. A tombstone prev (delete→re-insert reusing the
+            // id) returns null here → oldDoc null with op "update" (the documented edge).
+            const prev = await store.get(e.id, e.prev_ts);
+            oldDoc = prev === null ? null : (convexToJson(prev.value.value as Value) as JSONValue);
+          }
+          const idStr = encodeInternalDocumentId(e.id);
+          const tsNum = Number(e.ts);
+          changes.push({
+            table: name,
+            id: idStr,
+            op,
+            newDoc,
+            oldDoc,
+            ts: tsNum,
+            changeId: `${name}:${idStr}:${tsNum}`,
+          });
+        }
+
+        return { changes, maxScannedTs: Number(maxScannedTs) };
+      },
     };
 
     // Inverse of `tableNumbers` (tableNumber → fullTableName), seeded here from
