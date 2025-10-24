@@ -48,12 +48,34 @@ caveats matter and are stated honestly, not buried.
   this as "Stackbase is 8× faster than Convex"** — see the caveats. The honest takeaway is that
   Stackbase's per-operation path is lean and adds no pathological overhead over the reference.
 
+## Concurrency (N writers, both in Docker — 2025-10-16)
+
+The counterweight to the single-client throughput number. N independent clients each fire mutations
+back-to-back; we measure aggregate mut/s and latency.
+
+| writers | Stackbase mut/s (p50 / p99) | Convex mut/s (p50 / p99) |
+|--------:|----------------------------:|-------------------------:|
+|       1 | 2 321  (0.27 / 1.87 ms)     | 353  (2.63 / 5.15 ms)    |
+|      16 | 1 553  (9.24 / 25.3 ms)     | 365  (41.5 / 80.7 ms)    |
+|      32 | 1 849  (16.7 / 37.8 ms)     | 279  (113 / 183 ms)      |
+
+- **Neither backend scales throughput with concurrency — both are single-writer-serialized.** Adding
+  writers does not raise mut/s; it just deepens the commit queue (latency grows). This is
+  architecturally expected (a single serializable writer per node) and is the same shape Stackbase's
+  own `bench-commit` shows for one shard. So "throughput" here is really the **single-writer
+  commit-rate ceiling**, and Stackbase's ceiling (~2 000 mut/s) sits above Convex's (~350) *in this
+  config* — the caveats below still bound that.
+- **Convex hits a hard concurrency cap.** At 32 writers Convex throughput *drops* to 279 mut/s with
+  p50 113 ms — it is past its `APPLICATION_MAX_CONCURRENT_MUTATIONS=16` limit (queueing/rejection).
+  Stackbase has no such fixed cap here and degrades gracefully (1 849 mut/s, p50 17 ms at 32).
+- This test **did not** show Convex's Rust core pulling ahead under load (the hypothesis it was run to
+  check) — it confirmed the single-client result and the single-writer shape on both sides.
+
 ## Caveats (these bound every number above — do not quote absolutes without them)
 
-- **Single-client sequential** for throughput/query: this measures **per-op latency**, not a
-  concurrency throughput ceiling. Convex's Rust core + concurrency controls
-  (`APPLICATION_MAX_CONCURRENT_MUTATIONS`) may well pull ahead under many concurrent writers — a test
-  this scorecard does not run.
+- **Single-node, single-writer** on both sides: these are per-node write-ceiling numbers, not a
+  distributed throughput test. Stackbase's own multi-shard/multi-node path (fleet) and Convex's are
+  out of scope here.
 - **Default-vs-default config, not tuned-vs-tuned.** Convex self-hosted runs `RUST_LOG=info` (per-
   request logging overhead) and may fsync per commit; Stackbase's SQLite may sync less aggressively.
   Part of Convex's higher per-op latency is plausibly durability/logging it is paying for and
