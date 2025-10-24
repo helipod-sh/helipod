@@ -75,6 +75,51 @@ Warmup 2 s discarded, measure 5 s per cell. Zero errors, zero OCC conflicts acro
   100→10 000 subscribers (it barely grows with fan-out width), confirming the notification/push step
   itself is cheap; the cost that scales is the per-write O(N) matching, most visible in selective.
 
+## Real Postgres (Docker-gated, N ≤ 1000 cap — 2025-10-16)
+
+Recorded from `STACKBASE_BENCH_FANOUT_PG=1 bun run --filter @stackbase/fleet test -- bench-fanout-pg`
+(a real `postgres:16` container, `NodePgClient` + per-shard commit pool, wired like a production
+writer — mirrors `bench-commit`'s harness). The PG variant lives in `ee/packages/fleet` (not
+`packages/test`) because it needs `@stackbase/docstore-postgres`, which depends on `@stackbase/test` —
+so it would create a build cycle in `packages/test`; it imports the store-agnostic `runFanoutBench`
+from `@stackbase/test` and passes a `PostgresDocStore`. Capped at N ≤ 1000: seeding 10 000 channels +
+subscriptions over real PG is prohibitively slow (a documented cap, not a silent truncation).
+
+| subs   | shape      | reRuns/s | propP50 | propP99 | **ELU** | writes/s | matchedAvg |
+|-------:|------------|---------:|--------:|--------:|--------:|---------:|-----------:|
+|    100 | broadcast  |   29 040 |  3.73   |  7.63   | **0.132** |    290 |    100.1   |
+|  1 000 | broadcast  |  292 200 |  3.93   |  6.90   | **0.148** |    292 |   1000.7   |
+|    100 | selective  |      370 |  2.76   |  5.05   | **0.172** |    370 |      1.0   |
+|  1 000 | selective  |      273 |  3.74   |  6.77   | **0.366** |    273 |      1.0   |
+
+### The Postgres run resolves the confound — and the Workers question
+
+The single most important comparison in this document is the **ELU column, SQLite vs Postgres**, at
+the same cells:
+
+| cell            | SQLite ELU | Postgres ELU |
+|-----------------|-----------:|-------------:|
+| 100  broadcast  |      0.981 |    **0.132** |
+| 1000 broadcast  |      0.980 |    **0.148** |
+| 100  selective  |      0.980 |    **0.172** |
+| 1000 selective  |      0.980 |    **0.366** |
+
+On in-memory SQLite the event loop is pinned at ~0.98; on real Postgres it is **0.13–0.37**. SQLite's
+0.98 was the confound (synchronous in-memory reads + a busy driver loop = the process is always
+CPU-active). Postgres tells the truth: **the reactive re-execution path is I/O-bound — the core sits
+mostly idle waiting on Postgres round-trips.** This is exactly the case where the async event loop
+already overlaps the waiting, and it is the case that matters, because the deployment shape that would
+ever approach a reactive fan-out wall is multi-node = Postgres, not single-node SQLite.
+
+Two secondary observations, both consistent:
+- **ELU climbs with subscription count in selective** (0.172 → 0.366 as N goes 100 → 1000). That is
+  the O(N) match scan (pure CPU) taking a larger share as N grows, on top of the fixed per-write PG
+  I/O. At very high N the CPU match would eventually dominate — but the *fix* for that is the indexed
+  matcher (below), which removes the CPU, not more threads.
+- **The O(N) match still shows on PG** (selective writes/s 370 → 273, propP50 2.76 → 3.74 ms as N
+  grows) — dampened relative to SQLite only because PG's per-write I/O baseline is larger, so the O(N)
+  addition is a smaller *relative* share at these N. The finding is store-independent, as predicted.
+
 ## WebSocket end-to-end (real server + real sockets — 2025-10-16)
 
 Recorded from `STACKBASE_BENCH_FANOUT_WS=1 bun run --filter @stackbase/cli test -- bench-fanout-ws`.
@@ -89,36 +134,33 @@ All 100 clients received the push; end-to-end write→client-receives is ~4.5 ms
 sync-protocol serialization and the loopback socket — close to the in-process broadcast/100 propP50
 (2.81 ms), i.e. the WS/serialization overhead for this fan-out is on the order of ~1.5–2 ms.
 
-## On Bun Workers — the question this benchmark was meant to inform (and why it can't, cleanly)
+## On Bun Workers — the question this benchmark was meant to inform
 
-The design intended `eluDuringStorm` (event-loop utilization) to be the verdict: ELU → ~1.0 under a
-storm ⇒ the main thread is CPU-saturated ⇒ Workers justified. **That metric came back confounded and
-should not be read as a Workers verdict.** ELU is pinned at ~0.98 in *every* cell — including the
-selective/10k cell doing only 108 writes/s, which is nowhere near a fan-out storm. The cause is the
-harness itself: the writer is a tight back-to-back `await runtime.run(...)` loop, so the event loop is
-~98 % active regardless of fan-out. ELU here measures "the process is CPU-busy" (trivially true with a
-busy driver and a synchronous in-memory store), not "re-execution specifically saturates a core." This
-is the same shared-event-loop confound documented in `b4-benchmark.md`'s in-process driver caveat.
+The design intended `eluDuringStorm` to be the verdict: ELU → ~1.0 under a storm ⇒ the main thread is
+CPU-saturated ⇒ Workers justified. On **in-memory SQLite** that metric was confounded — pinned at
+~0.98 in every cell (synchronous reads + a busy back-to-back writer loop = the process is always
+CPU-active, regardless of fan-out; the same shared-event-loop confound `b4-benchmark.md` documents).
 
-What ELU *does* weakly confirm: with in-memory SQLite the reactive path is CPU-bound, not I/O-bound
-(no socket waits diluting it) — which is a precondition for Workers helping at all. But it does not
-discriminate a storm from light load, so it cannot set a saturation threshold.
+The **real-Postgres run resolves it decisively.** Against a real store, ELU is **0.13–0.37**, not
+0.98 (see the SQLite-vs-Postgres table above). The reactive path against the production backend is
+**I/O-bound**: the core spends most of its time waiting on Postgres round-trips, not executing.
 
-**The honest read on Workers from this data:**
+**The verdict: Bun Workers are the wrong tool for this, on the backend that matters.**
 
-- The single-core reactive ceiling (~3.77 M notifications/s broadcast) is high; most single-node
-  deployments will not approach it, so parallelizing re-execution across cores is **not** an obvious
-  near-term need.
-- The concrete single-node scaling wall this benchmark actually found is the **O(N) invalidation
-  match**, and the cheapest fix for that is an **indexed matcher** (O(matches) instead of O(total)),
-  which needs no threads and removes the selective wall directly. That is a better first lever than
-  Bun Workers.
-- Workers remain a valid *later* option for parallelizing independent re-execution once (a) the
-  matcher is indexed and (b) a corrected benchmark — one whose driver does not itself pin the event
-  loop — shows re-execution CPU as the bottleneck. Getting a clean saturation signal requires
-  decoupling the load driver from the measured work (e.g. a fixed-rate driver, or measuring
-  `process.cpuUsage()` attributable to re-execution separately from the driver loop). That correction
-  is deferred; this baseline does not make the Workers case either way.
+- Workers parallelize **CPU-bound** work across cores. Here, on Postgres, the single core is already
+  ~65–87 % idle (ELU 0.13–0.37) — there is no saturated core to relieve. Adding worker threads would
+  add more threads that mostly wait on Postgres; the async event loop already overlaps that I/O. The
+  SQLite ELU=0.98 that made Workers look plausible was an artifact of a synchronous, in-memory,
+  no-network store — not how Stackbase runs at the scale where fan-out matters (multi-node = Postgres).
+- The concrete scaling wall this benchmark actually found is the **O(N) invalidation match** — which
+  is CPU, and store-independent. Its cheapest fix is an **indexed matcher** (O(matches) instead of
+  O(total live subscriptions)), which needs **no threads** and removes the selective wall directly.
+  That is the real lever; Workers are not.
+- Workers remain a theoretical option only in a narrow future case: a *single-node SQLite* deployment
+  (the one place re-execution is synchronous CPU) holding enough live subscriptions that the O(N)
+  match — after indexing — still saturates a core. That is not a near-term shape, and even then the
+  indexed matcher is the first move. **This benchmark's recommendation: index the subscription matcher;
+  do not pursue Bun Workers for the reactive path.**
 
 ## Machine context (caveats — read before comparing numbers)
 
@@ -141,8 +183,10 @@ discriminate a storm from light load, so it cannot set a saturation threshold.
 ## Reproduce
 
 ```bash
-# in-process matrix (7 cells, ~1–2 min)
+# in-process matrix, in-memory SQLite (7 cells, ~1–2 min)
 STACKBASE_BENCH_FANOUT=1 bun run --filter @stackbase/test test -- bench-fanout
+# in-process matrix, real Postgres (Docker-gated, N<=1000, ~2–3 min) — lives in ee/fleet
+STACKBASE_BENCH_FANOUT_PG=1 bun run --filter @stackbase/fleet test -- bench-fanout-pg
 # WebSocket end-to-end cell
 STACKBASE_BENCH_FANOUT_WS=1 bun run --filter @stackbase/cli test -- bench-fanout-ws
 ```

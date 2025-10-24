@@ -34,6 +34,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.2.17",
     "@stackbase/executor": "workspace:*",
+    "@stackbase/test": "workspace:*",
     "@stackbase/scheduler": "workspace:*",
     "@stackbase/transactor": "workspace:*",
     "@types/pg": "^8.11.10",
