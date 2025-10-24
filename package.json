@@ -16,7 +16,8 @@
       "components/*",
       "examples/*",
       "apps/*",
-      "ee/packages/*"
+      "ee/packages/*",
+      "benchmarks/convex-comparison"
     ],
     "catalog": {
       "typescript": "^5.7.2",
