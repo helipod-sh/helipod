@@ -486,6 +486,11 @@ export class EmbeddedRuntime {
         }
       },
       now: () => options.now?.() ?? Date.now(),
+      // Same resolver as `create()`'s local `functionKind` closure (used elsewhere for
+      // `ComponentContext.functionKind`) — reused here, not recomputed, so a driver's path
+      // validation (e.g. `@stackbase/triggers`' boot-time handler check) and every other kind
+      // lookup in this runtime always agree.
+      functionKind,
       readLog: async (opts) => {
         // Reads the PRIMARY WRITE store explicitly — never a hybrid node's lagging query replica: a
         // driver runs on the writer that owns the log and must see its own committed writes.
@@ -498,6 +503,22 @@ export class EmbeddedRuntime {
         const stable = options.stablePrefix ? await options.stablePrefix() : null;
         const bound = stable ?? (await store.maxTimestamp());
         if (bound <= afterTs) return { changes: [], maxScannedTs: Number(afterTs) };
+
+        // `limit: 0` is a DELIBERATE, DOCUMENTED escape hatch (triggers D2's boot idiom — see
+        // `@stackbase/triggers`' `src/boot.ts`): "peek the current stable bound without scanning
+        // anything." A caller that only wants to know the log's current tip (e.g. to seed a new
+        // trigger's cursor AT the tip rather than replay history) asks for zero scanned entries and
+        // gets `maxScannedTs = bound` back for free — `bound` was already computed above with no
+        // per-row cost. This deliberately does NOT return `changes: []`-with-`maxScannedTs: afterTs`
+        // (i.e. "no progress", the naive reading of "scanned zero entries"): that reading is useless
+        // for the tip-peek use case (it would just echo `afterTs` back), and no legitimate caller
+        // needs "confirm zero rows were examined" as a distinct signal from "give me the bound
+        // cheaply" — so `limit: 0` unambiguously means the latter. Guarded here, before the
+        // `load_documents` scan below, which would otherwise crash on `limit: 0` (a SQL `LIMIT 0`
+        // yields zero rows, so `scanned.length === limit` (0===0) trips the `limitHit` branch, whose
+        // `scanned[scanned.length - 1]` access is `undefined` — this early return avoids that path
+        // entirely rather than requiring one to reason about it).
+        if (opts.limit === 0) return { changes: [], maxScannedTs: Number(bound) };
 
         const limit = opts.limit;
         // Scan (afterTs, bound]  →  half-open [afterTs+1, bound+1).

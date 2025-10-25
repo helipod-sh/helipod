@@ -95,6 +95,24 @@
         "vitest": "catalog:",
       },
     },
+    "components/triggers": {
+      "name": "@stackbase/triggers",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/component": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/scheduler": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "components/workflow": {
       "name": "@stackbase/workflow",
       "version": "0.0.0",
@@ -885,6 +903,8 @@
     "@stackbase/test": ["@stackbase/test@workspace:packages/test"],
 
     "@stackbase/transactor": ["@stackbase/transactor@workspace:packages/transactor"],
+
+    "@stackbase/triggers": ["@stackbase/triggers@workspace:components/triggers"],
 
     "@stackbase/values": ["@stackbase/values@workspace:packages/values"],
 

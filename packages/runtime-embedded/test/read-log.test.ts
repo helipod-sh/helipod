@@ -187,4 +187,23 @@ describe("DriverContext.readLog", () => {
     expect(page.changes).toHaveLength(3); // whole commit delivered
     expect(page.maxScannedTs).toBe(1);    // cursor advanced — no infinite loop
   });
+
+  it("limit:0 peeks the current bound at O(1) cost — no scan, no crash — on a non-empty log", async () => {
+    // Regression: a naive reading of `scanned.length === limit` (0 === 0) would fall into the
+    // `limitHit` branch and crash on `scanned[scanned.length - 1]` (empty array) — see the `limit:
+    // 0` special-case in `runtime.ts`'s `readLog`. `@stackbase/triggers` relies on this exact idiom
+    // to seed a new trigger's cursor at the log's current tip without paying for a scan.
+    const { ctx, store, tableNumbers } = await harness();
+    const m = newDocumentId(tableNumbers.messages!);
+    await put(store, [rev(m, 1n, null, "v1"), rev(m, 2n, 1n, "v2")]);
+
+    const peek = await ctx.readLog({ afterTs: 0, tables: [], limit: 0 });
+    expect(peek.changes).toEqual([]);
+    expect(peek.maxScannedTs).toBe(2); // the bound, not `afterTs` — the whole point of the peek
+
+    // An empty log still returns the (trivial) bound, not a crash.
+    const { ctx: ctxEmpty } = await harness();
+    const peekEmpty = await ctxEmpty.readLog({ afterTs: 0, tables: [], limit: 0 });
+    expect(peekEmpty).toEqual({ changes: [], maxScannedTs: 0 });
+  });
 });

@@ -50,11 +50,31 @@ export interface DriverContext {
    * ADVANCE THE CURSOR TO THIS, not to the last change's ts, so scanned-but-unmatched ranges are not
    * rescanned forever. The scan's upper bound is the stable log prefix (in a fleet, `min(frontier_ts)`;
    * otherwise the max committed ts), so a change above an in-flight gap is never surfaced or skipped.
+   *
+   * `limit: 0` — a deliberate, documented escape hatch: "peek the current stable bound without
+   * scanning anything." Returns `{ changes: [], maxScannedTs: <the bound> }` at O(1) cost (no
+   * `load_documents` scan at all). This is how `@stackbase/triggers` seeds a NEW (non-`fromStart`)
+   * trigger's cursor at the log's current tip cheaply, instead of paying for a scan just to discover
+   * where "now" is — see `@stackbase/triggers`' `src/boot.ts`.
    */
   readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
     changes: LogChange[];
     maxScannedTs: number;
   }>;
+  /**
+   * Resolves a registered path's real kind (`"query"`/`"mutation"`/`"action"`/`"httpAction"`), or
+   * `undefined` if the path isn't registered at all — the same resolver `ComponentContext.
+   * functionKind` exposes to an in-transaction facade (see its doc comment in
+   * `packages/executor/src/executor.ts`), threaded onto `DriverContext` too so a driver's own
+   * startup can validate a config-supplied function path (e.g. `@stackbase/triggers`' `handler`
+   * option) BEFORE ever calling it — "unknown path" vs "wrong kind" are both fail-fast, instructive
+   * errors at driver start, not a confusing runtime crash on the first commit.
+   *
+   * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
+   * doesn't need path validation (e.g. `@stackbase/scheduler`'s, which dispatches whatever `fnPath`
+   * a `jobs` row already carries) can ignore it entirely; existing drivers/fakes are unaffected.
+   */
+  functionKind?(path: string): "query" | "mutation" | "action" | "httpAction" | undefined;
 }
 
 /** A recurring runtime seam: started once after boot, woken by commits and/or timers. */
