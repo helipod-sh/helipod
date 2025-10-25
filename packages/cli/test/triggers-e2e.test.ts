@@ -29,6 +29,10 @@
  *     kinds proven);
  *  3. crash-resume (the headline): a genuine undelivered backlog accrues while the driver is DOWN,
  *     restart → every change delivered, in order, none missed (asserted by seq sequence + changeIds);
+ *  3b. partial-advance crash-resume: the sharper case the T3 review flagged as uncovered — the cursor
+ *     has already advanced past a REAL delivery (not sitting at the log tip from birth) before a second,
+ *     independent backlog accrues while the driver is DOWN; restart delivers EXACTLY the new backlog,
+ *     the already-delivered prefix is not redelivered/reprocessed, and the whole ledger stays in ts order;
  *  4. the recursion breaker: a trigger writing its OWN watched table trips the circuit breaker,
  *     pausing with `pausedReason: "circuit-breaker"`, and the server stays healthy for other work;
  *  5. existing cli scenarios are byte-unmodified (verified by running the suite, not asserted here).
@@ -412,6 +416,114 @@ describe("triggers — end-to-end through the real dev server", () => {
         const byOrder = [...delivered].sort((x, y) => x.order - y.order);
         expect(byOrder.map((d) => d.order)).toEqual(Array.from({ length: K }, (_, i) => i));
         expect(byOrder.map((d) => d.seq)).toEqual(Array.from({ length: K }, (_, i) => i));
+      } finally {
+        await c.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /* ------------------------------------------------------------------------ */
+  /* Scenario 3b — partial-advance crash-resume                               */
+  /* ------------------------------------------------------------------------ */
+
+  it("partial-advance crash-resume: a backlog accrued AFTER the cursor already advanced delivers exactly the new changes, none redelivered", async () => {
+    // Scenario 3 proves FROM-ZERO backlog resume (cursor sits at the log tip, never having delivered
+    // anything, when the backlog accrues). This proves the sharper case the T3 review flagged as
+    // uncovered: the cursor has already advanced past a REAL delivery (a non-zero cursorTs, past
+    // committed revisions) before the crash. Phase A runs the driver live and delivers K1 changes for
+    // real — the cursor genuinely moves. Phase B (drivers deferred, same durable dbPath) accrues K2 MORE
+    // changes on top of that advanced cursor. Phase C (drivers live again) must deliver EXACTLY the K2
+    // new changes — the K1 already-delivered ones must not reappear in the ledger (the `_record`
+    // dedup-on-changeId handler would silently mask a redelivery as a no-op, so we assert the ledger's
+    // `order` continuation directly: order 0..K1-1 stay the untouched phase-A rows, order K1..K1+K2-1 are
+    // the phase-C deliveries, in ts order) — a stronger claim than "no dupes in the end state."
+    const K1 = 5;
+    const K2 = 7;
+    const dir = mkdtempSync(join(tmpdir(), "triggers-e2e-partial-"));
+    const dbPath = join(dir, "db.sqlite");
+
+    const schema = defineSchema({
+      messages: defineTable({ seq: v.number() }),
+      delivered: defineTable({ changeId: v.string(), seq: v.number(), order: v.number() }),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const appModule: Record<string, any> = {
+      add: mutation<{ seq: number }, string>({ handler: (ctx, { seq }) => ctx.db.insert("messages", { seq }) }),
+      // Identical idempotent-on-changeId ledger handler as scenario 3: a redelivered change is a no-op,
+      // and `order` = prior delivered-row count + in-batch index — a strictly increasing true-delivery
+      // index that survives across restarts (it reads the persisted `delivered` count fresh each call).
+      _record: mutation<{ changes: Array<{ changeId: string; newDoc: { seq: number } }> }, null>({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        handler: async (ctx: any, { changes }) => {
+          const existing = (await ctx.db.query("delivered", "by_creation").collect()) as Array<{ changeId: string }>;
+          const seen = new Set(existing.map((d) => d.changeId));
+          let order = existing.length;
+          for (const c of changes) {
+            if (seen.has(c.changeId)) continue;
+            await ctx.db.insert("delivered", { changeId: c.changeId, seq: c.newDoc.seq, order: order++ });
+          }
+          return null;
+        },
+      }),
+    };
+    const components = (): ComponentDefinition[] => [
+      defineScheduler(),
+      defineTriggers({ messages: { handler: "app:_record", batchSize: 3 } }),
+    ];
+
+    try {
+      // Phase A — drivers LIVE: write K1 messages and wait for all K1 to be delivered for real. This is
+      // the "cursor genuinely advances" precondition the from-zero scenario doesn't exercise.
+      const a = await buildStack({ schema, appModule, components: components(), dbPath });
+      for (let i = 0; i < K1; i++) await runMutation(a.server, "app:add", { seq: i });
+      await waitFor(async () => (await browse(a.server, "delivered")).length >= K1);
+      const deliveredAfterA = (await browse(a.server, "delivered")) as Array<{ changeId: string; seq: number; order: number }>;
+      expect(deliveredAfterA.length).toBe(K1);
+      const cursorAfterA = (await browse(a.server, "triggers/cursors")).find((c) => c.name === "messages")!;
+      expect(cursorAfterA.cursorTs).toBeGreaterThan(0); // genuinely advanced past the log start
+      await a.close();
+
+      // Phase B — the "server is DOWN" window AFTER a real partial delivery: boot with drivers DEFERRED
+      // (same durable dbPath, so the advanced cursor + K1 ledger rows persist), write K2 more messages.
+      // The driver never runs, so neither the cursor nor the ledger move.
+      const b = await buildStack({ schema, appModule, components: components(), dbPath, deferDrivers: true });
+      for (let i = 0; i < K2; i++) await runMutation(b.server, "app:add", { seq: K1 + i });
+      expect((await browse(b.server, "messages")).length).toBe(K1 + K2);
+      expect((await browse(b.server, "delivered")).length).toBe(K1); // untouched — no redelivery, no new delivery
+      const cursorStill = (await browse(b.server, "triggers/cursors")).find((c) => c.name === "messages")!;
+      expect(cursorStill.cursorTs).toBe(cursorAfterA.cursorTs); // cursor did not move while deferred
+      await b.close();
+
+      // Phase C — restart with drivers LIVE again. The persisted cursor is behind exactly K2 committed
+      // revisions (not K1+K2 — K1 was already durably delivered past the cursor in phase A).
+      const c = await buildStack({ schema, appModule, components: components(), dbPath });
+      try {
+        await waitFor(async () => (await browse(c.server, "delivered")).length >= K1 + K2);
+        const delivered = (await browse(c.server, "delivered")) as Array<{ changeId: string; seq: number; order: number }>;
+
+        // Exactly K1 + K2 total — the K2 new ones delivered, the K1 already-delivered ones NOT
+        // redelivered (dedup would mask a redelivery as a no-op, so the total count alone would not
+        // catch a "delivered twice, deduped down" bug as cleanly as this: any actual duplicate insert
+        // attempt would still have been filtered by `seen`, but a wrong exactly-once-per-ledger-row
+        // claim is instead nailed by the changeId-uniqueness check below).
+        expect(delivered.length).toBe(K1 + K2);
+        expect(new Set(delivered.map((d) => d.changeId)).size).toBe(K1 + K2);
+
+        // The K1 phase-A rows are untouched: same changeIds/order/seq as recorded right after phase A —
+        // proof the phase-C drain did not re-run the handler for already-delivered changes.
+        const byOrder = [...delivered].sort((x, y) => x.order - y.order);
+        expect(byOrder.slice(0, K1).map((d) => d.changeId)).toEqual(deliveredAfterA.map((d) => d.changeId));
+        expect(byOrder.slice(0, K1).map((d) => d.seq)).toEqual(deliveredAfterA.map((d) => d.seq));
+
+        // The K2 NEW changes fill order K1..K1+K2-1, in ts order, matching seq K1..K1+K2-1 — exactly the
+        // undelivered backlog accrued in phase B, none missed, none reordered.
+        expect(byOrder.slice(K1).map((d) => d.order)).toEqual(Array.from({ length: K2 }, (_, i) => K1 + i));
+        expect(byOrder.slice(K1).map((d) => d.seq)).toEqual(Array.from({ length: K2 }, (_, i) => K1 + i));
+
+        // Every row overall in strict ts order (order-sorted seq is monotonically ascending 0..K1+K2-1).
+        expect(byOrder.map((d) => d.seq)).toEqual(Array.from({ length: K1 + K2 }, (_, i) => i));
       } finally {
         await c.close();
       }
