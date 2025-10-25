@@ -4,5 +4,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["convex", "test", "scripts"]
+  "include": ["convex", "stackbase.config.ts", "test", "scripts"]
 }

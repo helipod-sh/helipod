@@ -190,7 +190,9 @@
       "name": "stackbase-example-chat",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/component": "workspace:*",
         "@stackbase/executor": "workspace:*",
+        "@stackbase/triggers": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
