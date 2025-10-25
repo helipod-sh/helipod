@@ -1297,11 +1297,22 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
         ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
       ];
+      const commitTs = Number(inv.newMaxTs);
       await runtime.handler.notifyWrites({
         tables: inv.writtenTables,
         ranges,
-        commitTs: Number(inv.newMaxTs),
+        commitTs,
       });
+      // Trigger-wake gap fix: `notifyWrites` above only re-runs live QUERY subscriptions — it never
+      // touches `commitSubs`, the driver `onCommit` fan-out (that only fires from THIS node's own
+      // local `adapter.subscribe`, in `packages/runtime-embedded`). Without this, a driver here (e.g.
+      // `@stackbase/triggers`) never wakes on a co-writer's commit and instead sleeps up to its own
+      // wall-clock beat — delivery is still guaranteed (the durable cursor), this is latency-only.
+      // `inv.writtenTables` is already ENCODED STORAGE-TABLE IDS (see `AppliedInvalidation`'s doc
+      // comment in `replica-tailer.ts`), the same format `notifyExternalCommit` expects (it applies
+      // the identical translation `adapter.subscribe`'s local path uses). No-op on a node with no
+      // registered drivers.
+      runtime.notifyExternalCommit({ tables: inv.writtenTables, ranges, commitTs });
     } catch (e) {
       console.error("fleet: replica invalidation failed", e);
     }

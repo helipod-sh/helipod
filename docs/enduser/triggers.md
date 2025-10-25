@@ -204,8 +204,11 @@ table that needs to backfill from day one, for example — not by default.
 - **Renamed or dropped watched tables:** a cursor row is keyed by the table's **name**. Since Stackbase
   deploys are additive-only (no table renames/drops via `stackbase deploy`), this mostly can't happen
   in the ordinary flow — but if a table a trigger watches does disappear from the schema (e.g. a local
-  schema edit + restart), the trigger pauses with an instructive name-resolution error on its next
-  tick, rather than failing silently.
+  schema edit + restart), there's no name-resolution error: the trigger simply stops matching any
+  changes for that name. It goes quiet rather than pausing — its cursor keeps advancing along with the
+  log (a watched-but-now-nonexistent table just never contributes a change to scan), so nothing is
+  flagged as broken. If a trigger seems to have stopped delivering, check that its watched table names
+  still exist in the current schema.
 
 ## Composition pattern: a trigger that starts a workflow
 

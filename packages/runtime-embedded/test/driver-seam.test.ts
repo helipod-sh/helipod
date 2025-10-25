@@ -122,4 +122,55 @@ describe("driver seam", () => {
     await r.stopDrivers();
     expect(disposeSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("notifyExternalCommit (fleet foreign-commit wake) fires onCommit with translated table names", async () => {
+    const commits: Array<{ tables: string[]; commitTs: number }> = [];
+    const driver = {
+      name: "toy",
+      start(ctx: any) {
+        ctx.onCommit((inv: any) => commits.push({ tables: inv.tables, commitTs: inv.commitTs }));
+      },
+    };
+    const schema = defineSchema({ counters: defineTable({ n: v.number() }) });
+    const c = composeComponents(
+      { schemaJson: schema.export(), moduleMap: { "app:add": mutation(async (ctx) => ctx.db.insert("counters", { n: 1 })) } },
+      [{ name: "toy", schema: defineSchema({}), modules: {}, driver }],
+    );
+    const r = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      componentNames: c.componentNames, contextProviders: c.contextProviders, policyRegistry: c.policyRegistry,
+      policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps, drivers: c.drivers,
+      tableNumbers: c.tableNumbers,
+    });
+
+    // Encode "counters"'s table number the same way `adapter.subscribe`'s real payload would
+    // (a fleet's `AppliedInvalidation.writtenTables` carries this same encoded-storage-id shape —
+    // see `replica-tailer.ts`'s doc comment on `AppliedInvalidation`).
+    const { encodeStorageTableId } = await import("@stackbase/id-codec");
+    const countersTableNumber = c.tableNumbers["counters"]!;
+    const encoded = encodeStorageTableId(countersTableNumber);
+
+    r.notifyExternalCommit({ tables: [encoded], ranges: [], commitTs: 42 });
+    await new Promise((res) => setTimeout(res, 10));
+
+    expect(commits.length).toBe(1);
+    expect(commits[0]!.tables).toEqual(["counters"]); // translated from the encoded id to the full name
+    expect(commits[0]!.commitTs).toBe(42);
+  });
+
+  it("notifyExternalCommit is a no-op when no drivers are registered", async () => {
+    const schema = defineSchema({ counters: defineTable({ n: v.number() }) });
+    const c = composeComponents(
+      { schemaJson: schema.export(), moduleMap: { "app:add": mutation(async (ctx) => ctx.db.insert("counters", { n: 1 })) } },
+      [],
+    );
+    const r = await EmbeddedRuntime.create({
+      store: new SqliteDocStore(new NodeSqliteAdapter()), catalog: c.catalog, modules: c.moduleMap,
+      componentNames: c.componentNames, contextProviders: c.contextProviders, policyRegistry: c.policyRegistry,
+      policyProviders: c.policyProviders, relationRegistry: c.relationRegistry, bootSteps: c.bootSteps,
+      tableNumbers: c.tableNumbers,
+    });
+    // No registered driver → commitSubs is empty; must not throw.
+    expect(() => r.notifyExternalCommit({ tables: ["1"], ranges: [], commitTs: 1 })).not.toThrow();
+  });
 });
