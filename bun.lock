@@ -301,6 +301,7 @@
         "@stackbase/client": "workspace:*",
         "@stackbase/fleet": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
+        "@stackbase/triggers": "workspace:*",
         "@stackbase/workflow": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
