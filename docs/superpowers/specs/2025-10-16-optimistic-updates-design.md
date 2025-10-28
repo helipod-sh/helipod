@@ -23,6 +23,11 @@ The server repairs are prerequisites for the client work's own tests, fix two re
 regardless (the G1 base-regression race; droppable mutation responses), and serve every future
 client. Reconnect (T6) is the verdict's designated cut line if the slice runs long — cutting it
 keeps the close rules and loses the flush path (re-scope S4 consciously if cut).
+**Plan constraints (spec-review edits):** G4 and G1 are SEPARATE plan tasks (each protocol-
+critical with its own proof obligations — never bundled). Two verdict §(i) items ride the plan
+as non-blocking measurements: (i)5 re-render mitigation (rebuild-replay makes fresh arrays per
+ingest — measure in the chat example; structural sharing is the candidate fix, not required
+for correctness) and (i)6 dev-freeze perf on large results (gate the freeze if it measures hot).
 
 ## The design (by reference + the fixed decisions)
 
@@ -60,20 +65,28 @@ keeps the close rules and loses the flush path (re-scope S4 consciously if cut).
    on the wire. Backward compatible.
 2. **G4 origin-frontier guarantee** — the invariant verbatim: after a session's mutation
    commits, that session's `version.ts` advances to ≥ its commitTs, never before the session
-   received every modification the commit implies. **Fixed decision (open question 1): the
-   ephemeral origin tag is `origin?: string` (the sync session id)** threaded `executor.run`
-   opts → transactor commitMeta (the plumbing exists) → `OplogDelta.origin` → `fanout.publish`
-   → the subscribe payload → the drain queue entry → `notifyWrites(inv)`; `doNotifyWrites`
-   emits the empty ts-advancing Transition when the origin session is absent from `bySession`.
-   In-memory only — the tag is NEVER persisted (it must not enter commitMeta's guard-visible
-   meta on the wire-to-store path; plan detail: carry it beside, not inside, the durable meta).
-   Fleet-forward fallback per the verdict (tail-enqueued origin-check gated on the drain's
-   last-processed commitTs). **The adapter-timing test on BOTH docstores is mandatory.**
-3. **G1 serialization** — **fixed decision (open question 2): MQS processing enqueues onto the
-   per-session notify tail** (ordering-by-construction; subscribe latency behind pending
-   notifies is the accepted cost). The invariant: per-session monotone `serverValue`. A short
-   spike confirms no deadlock with the existing tail (the fallback — tagged re-subscribe
-   responses — only if the spike fails, documented).
+   received every modification the commit implies. **Fixed decision (open question 1,
+   spec-review-corrected): the ephemeral origin tag is `origin?: string` (the sync session
+   id) carried BESIDE commitMeta, never through it** — commitMeta is the guard-visible/
+   durable channel (types.ts:88-93 → commitWrite's opts.meta → the fleet idempotency guard)
+   and the session id must never enter it. The carrier: `origin?: string` on
+   `RunInTransactionOptions` AND on `OplogDelta`, stamped at oplog construction
+   (shard-writer.ts:~364, AFTER commitWrite returns — never passed to commitWrite). **A new
+   `origin` param parallels commitMeta at every hop** (sync runMutation → executor.run opts →
+   runInTransaction → commit/stageUnit → OplogDelta → fanout → the subscribe payload
+   (runtime.ts:~657 gains it) → the drain queue entry → `notifyWrites(inv)`) — priced as a
+   chain, not "the plumbing exists". `doNotifyWrites` emits the empty ts-advancing Transition
+   when the origin session is absent from `bySession`. Fleet-forward fallback per the verdict
+   (tail-enqueued origin-check gated on the drain's last-processed commitTs). **The
+   adapter-timing test on BOTH docstores is mandatory.**
+3. **G1 serialization** — **fixed decision (open question 2): MQS processing enqueues onto
+   the per-session notify tail** (ordering-by-construction; subscribe latency behind pending
+   notifies is the accepted cost). The invariant: per-session monotone `serverValue`.
+   **Bracket-timing invariant (spec-review edit): the enqueued MQS unit reads
+   `session.version` at EXECUTION time, not enqueue time** (handler.ts:198-199 already does —
+   preserve it; enqueue-time capture would produce non-contiguous brackets → false resyncs).
+   Deadlock: verified — `execSub` → `executor.runQuery` is a pure read that never re-enters
+   the tail; no spike needed, the invariant is pinned by a test.
 4. **Backpressure exemption** — `MutationResponse`/`ActionResponse` are undroppable
    (session-controllers.ts:76-95); responses are small/rare/per-request.
 - **Locked non-changes pinned by tests:** `excludeOriginFromTransition` stays off;
@@ -82,14 +95,19 @@ keeps the close rules and loses the flush path (re-scope S4 consciously if cut).
 
 ### Return-type codegen (D10 — in-slice prerequisite)
 
-**Fixed decision (open question 3): inference from handler types as primary** — the generated
-`api.d.ts` references the app modules' actual function types (the mechanism Convex's own
-generated api uses), so `FunctionReturnType<typeof api.messages.list>` is the handler's real
-return type with zero migrant burden; explicit `returns` validators (the argument-validation
-machinery's sibling) are the ENHANCEMENT path, accepted when present, not required. Thread
-`FunctionArgs`/`FunctionReturnType` generics through `OptimisticLocalStore`, `useQuery`,
-`useMutation`. If inference proves infeasible against our codegen's module-analysis shape
-(spec-review checks), fall back to `returns`-validators-primary with the migration cost stated.
+**Fixed decision (open question 3, spec-review-corrected): `returns`-validators are the v1
+primary** — the exact `argsJson` precedent (project.ts:98 `validatorToTsType`; the
+generate.ts:133 returnsType slot already exists): `query/mutation/action({ returns, ... })`
+adds `returnsJson` in build(), codegen threads it to typed `FunctionReturnType`. Inference
+from handler types is INFEASIBLE as v1-primary against the tree: `RegisteredFunction` erases
+the handler's Output type (functions.ts:14-28 — non-generic), and the manifest analyzer runs
+on executed runtime VALUES, not the typechecker (project.ts:90-99) — inference-primary would
+require making RegisteredFunction generic (a public authoring-type refactor) plus switching
+api.d.ts to `typeof import(...)` reference emission. That upgrade is a NAMED FOLLOW-ON
+(zero-burden migrant typing), not this slice. Functions without `returns` stay `any` with the
+gap documented (migrants add `returns` incrementally — also gains runtime return validation
+as the argument-validation slice's sibling). Thread `FunctionArgs`/`FunctionReturnType`
+generics through `OptimisticLocalStore`, `useQuery`, `useMutation` regardless.
 
 ### The outbox-alignment check (the next slice's receiving seams — verdict §(g) table)
 
