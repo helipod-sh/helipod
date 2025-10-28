@@ -7,12 +7,12 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
-import { namespaceForPath, type Driver, type DriverContext } from "@stackbase/component";
+import { namespaceForPath, type Driver, type DriverContext, type LogChange } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId, decodeDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
+import { decodeStorageTableId, decodeDocumentId, encodeInternalDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
-import type { DocStore } from "@stackbase/docstore";
+import { jsonToConvex, convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import type { DocStore, DocumentLogEntry } from "@stackbase/docstore";
 import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
@@ -48,6 +48,45 @@ function isInternalPath(path: string): boolean {
 function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record<string, number>): void {
   map.clear();
   for (const [name, num] of Object.entries(tableNumbers)) map.set(num, name);
+}
+
+/** The payload shape `DriverContext.onCommit` callbacks receive (same shape as
+ *  `@stackbase/component`'s `DriverContext["onCommit"]` parameter — kept as a local alias here
+ *  rather than importing it, since the interface only inlines the object type). */
+type CommitEvent = { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number };
+
+/**
+ * Translates a commit payload's ENCODED STORAGE-TABLE IDS (e.g. `"3"`, `decodeStorageTableId`'s
+ * input) into full table names (e.g. `"scheduler/jobs"`) via `tableNumberToName` — drivers filter
+ * `inv.tables` by full name (e.g. `t.startsWith("scheduler/")`), so both the local commit fan-out
+ * (`adapter.subscribe`'s callback, in `create()`) and a foreign fleet commit
+ * (`notifyExternalCommit`, below) must translate identically before firing `commitSubs`. Shared
+ * so the two paths can never drift. An id that fails to decode (not a recognized storage-table id
+ * shape) passes through unchanged rather than being dropped.
+ */
+function translateTableIds(tableIds: readonly string[], tableNumberToName: ReadonlyMap<number, string>): string[] {
+  return tableIds.map((id) => {
+    try {
+      return tableNumberToName.get(decodeStorageTableId(id)) ?? id;
+    } catch {
+      return id; // not a decodable storage id — pass through rather than drop
+    }
+  });
+}
+
+/**
+ * Fires every registered driver `onCommit` subscriber with the same commit event, isolating one
+ * throwing/rejecting callback from starving the rest (a driver's `onCommit` must never prevent
+ * another driver from seeing the commit signal — see the try/catch below).
+ */
+function fireCommitSubs(commitSubs: ReadonlySet<(inv: CommitEvent) => void>, inv: CommitEvent): void {
+  for (const cb of commitSubs) {
+    try {
+      cb(inv);
+    } catch (e) {
+      console.error("[runtime] driver onCommit callback threw:", e);
+    }
+  }
 }
 
 /**
@@ -153,6 +192,18 @@ export interface EmbeddedRuntimeOptions {
    * one bad wait. Unset → `drain()` is byte-identical to before this hook existed.
    */
   beforeNotify?: (commitTs: bigint) => Promise<void>;
+  /**
+   * The stable-prefix accessor for `DriverContext.readLog` (triggers D1). Returns the highest log
+   * timestamp below which the log is GAP-FREE — the upper bound `readLog` scans to. Non-null ONLY in
+   * a fleet, where N per-shard commit connections land timestamps out of order (a scan can see ts 10
+   * while ts 9 is still in flight), so the bound must be `min(shard_leases.frontier_ts)` — the fleet
+   * node wires it to exactly that. A `null` return (or an unset accessor) means "no fleet gap": every
+   * non-fleet topology commits over one serialized session (SQLite's single connection; the single
+   * PINNED Postgres connection — the commit pool is fleet-only), so `readLog` falls back to
+   * `store.maxTimestamp()`. Consulted per `readLog` call; only ever invoked on the default-shard
+   * holder by the driver lifecycle.
+   */
+  stablePrefix?: () => Promise<bigint | null>;
 }
 
 /** The minimal timestamp-observer seam `observeTimestamp` delegates to — a `MonotonicTimestampOracle`
@@ -222,6 +273,11 @@ export class EmbeddedRuntime {
      *  doc-mutation routing (`resolveDocMutationShard`) reads a table's `shardKey` from the exact
      *  source of truth the guards use, and can never disagree with them. */
     private readonly catalog: IndexCatalog,
+    /** The SAME `commitSubs` set `create()`'s `adapter.subscribe` callback fires on every LOCAL
+     *  commit — also fired by `notifyExternalCommit` (below) for a FOREIGN (fleet) commit, so a
+     *  driver's `onCommit` wakes on both without the two paths ever drifting on which set they
+     *  target. */
+    private readonly commitSubs: ReadonlySet<(inv: CommitEvent) => void>,
   ) {}
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
@@ -474,6 +530,114 @@ export class EmbeddedRuntime {
         }
       },
       now: () => options.now?.() ?? Date.now(),
+      // Same resolver as `create()`'s local `functionKind` closure (used elsewhere for
+      // `ComponentContext.functionKind`) — reused here, not recomputed, so a driver's path
+      // validation (e.g. `@stackbase/triggers`' boot-time handler check) and every other kind
+      // lookup in this runtime always agree.
+      functionKind,
+      readLog: async (opts) => {
+        // Reads the PRIMARY WRITE store explicitly — never a hybrid node's lagging query replica: a
+        // driver runs on the writer that owns the log and must see its own committed writes.
+        const store = options.store;
+        const afterTs = BigInt(Math.trunc(opts.afterTs));
+        // Upper scan bound = the stable log prefix. Fleet → `min(shard_leases.frontier_ts)` (N per-shard
+        // commit connections land ts out of order — a gap below the max must not be crossed); every
+        // non-fleet topology commits over one serialized session, so a null accessor falls back to the
+        // max committed ts. This bound is what makes at-least-once delivery gap-free by construction.
+        const stable = options.stablePrefix ? await options.stablePrefix() : null;
+        const bound = stable ?? (await store.maxTimestamp());
+        if (bound <= afterTs) return { changes: [], maxScannedTs: Number(afterTs) };
+
+        // `limit: 0` is a DELIBERATE, DOCUMENTED escape hatch (triggers D2's boot idiom — see
+        // `@stackbase/triggers`' `src/boot.ts`): "peek the current stable bound without scanning
+        // anything." A caller that only wants to know the log's current tip (e.g. to seed a new
+        // trigger's cursor AT the tip rather than replay history) asks for zero scanned entries and
+        // gets `maxScannedTs = bound` back for free — `bound` was already computed above with no
+        // per-row cost. This deliberately does NOT return `changes: []`-with-`maxScannedTs: afterTs`
+        // (i.e. "no progress", the naive reading of "scanned zero entries"): that reading is useless
+        // for the tip-peek use case (it would just echo `afterTs` back), and no legitimate caller
+        // needs "confirm zero rows were examined" as a distinct signal from "give me the bound
+        // cheaply" — so `limit: 0` unambiguously means the latter. Guarded here, before the
+        // `load_documents` scan below, which would otherwise crash on `limit: 0` (a SQL `LIMIT 0`
+        // yields zero rows, so `scanned.length === limit` (0===0) trips the `limitHit` branch, whose
+        // `scanned[scanned.length - 1]` access is `undefined` — this early return avoids that path
+        // entirely rather than requiring one to reason about it).
+        if (opts.limit === 0) return { changes: [], maxScannedTs: Number(bound) };
+
+        const limit = opts.limit;
+        // Scan (afterTs, bound]  →  half-open [afterTs+1, bound+1).
+        const scanned: DocumentLogEntry[] = [];
+        for await (const e of store.load_documents(
+          { minInclusive: afterTs + 1n, maxExclusive: bound + 1n },
+          "asc",
+          limit,
+        )) {
+          scanned.push(e);
+        }
+
+        // A commit stamps every one of its documents with the SAME ts, so a `limit` can cut in the
+        // middle of a commit's revisions. Never advance the cursor past a partially-scanned ts.
+        let maxScannedTs: bigint;
+        let rows: DocumentLogEntry[];
+        const limitHit = limit !== undefined && scanned.length === limit;
+        if (!limitHit) {
+          maxScannedTs = bound; // the whole range was scanned
+          rows = scanned;
+        } else {
+          const lastTs = scanned[scanned.length - 1]!.ts;
+          if (lastTs > afterTs + 1n) {
+            // A complete ts group sits below `lastTs`: stop just below it and drop the (possibly
+            // partial) `lastTs` group — it redelivers next scan (its changeIds are stable).
+            maxScannedTs = lastTs - 1n;
+            rows = scanned.filter((e) => e.ts < lastTs);
+          } else {
+            // Degenerate: every scanned row shares one ts (a single commit larger than `limit`). To
+            // make progress the whole commit must be delivered — re-scan exactly that ts UNBOUNDED.
+            maxScannedTs = lastTs;
+            rows = [];
+            for await (const e of store.load_documents(
+              { minInclusive: lastTs, maxExclusive: lastTs + 1n },
+              "asc",
+            )) {
+              rows.push(e);
+            }
+          }
+        }
+
+        const tableFilter = opts.tables ? new Set(opts.tables) : null;
+        const changes: LogChange[] = [];
+        for (const e of rows) {
+          const name = tableNumberToName.get(e.id.tableNumber);
+          // Exclude (from `changes`, but they ALREADY counted toward maxScannedTs): unresolvable ids,
+          // component-namespaced tables ("<component>/<table>"), and app-root system tables ("_...").
+          if (name === undefined || name.includes("/") || name.startsWith("_")) continue;
+          if (tableFilter && !tableFilter.has(name)) continue;
+
+          const op: LogChange["op"] =
+            e.value === null ? "delete" : e.prev_ts === null ? "insert" : "update";
+          const newDoc = e.value === null ? null : (convexToJson(e.value.value as Value) as JSONValue);
+          let oldDoc: JSONValue | null = null;
+          if (e.prev_ts !== null) {
+            // The prior revision via the prev_ts chain. A tombstone prev (delete→re-insert reusing the
+            // id) returns null here → oldDoc null with op "update" (the documented edge).
+            const prev = await store.get(e.id, e.prev_ts);
+            oldDoc = prev === null ? null : (convexToJson(prev.value.value as Value) as JSONValue);
+          }
+          const idStr = encodeInternalDocumentId(e.id);
+          const tsNum = Number(e.ts);
+          changes.push({
+            table: name,
+            id: idStr,
+            op,
+            newDoc,
+            oldDoc,
+            ts: tsNum,
+            changeId: `${name}:${idStr}:${tsNum}`,
+          });
+        }
+
+        return { changes, maxScannedTs: Number(maxScannedTs) };
+      },
     };
 
     // Inverse of `tableNumbers` (tableNumber → fullTableName), seeded here from
@@ -487,28 +651,13 @@ export class EmbeddedRuntime {
     // reassignment), so this closure's `namesForCommit` stays correct after a later rebuild.
     const tableNumberToName = new Map<number, string>();
     rebuildTableNumberToName(tableNumberToName, options.tableNumbers ?? {});
-    const namesForCommit = (tableIds: readonly string[]): string[] =>
-      tableIds.map((id) => {
-        try {
-          return tableNumberToName.get(decodeStorageTableId(id)) ?? id;
-        } catch {
-          return id; // not a decodable storage id — pass through rather than drop
-        }
-      });
+    const namesForCommit = (tableIds: readonly string[]): string[] => translateTableIds(tableIds, tableNumberToName);
 
     adapter.subscribe((payload) => {
       queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
       void drain();
       if (commitSubs.size > 0) {
-        const tables = namesForCommit(payload.tables);
-        for (const cb of commitSubs) {
-          try {
-            cb({ tables, ranges: payload.ranges, commitTs: payload.commitTs });
-          } catch (e) {
-            // A driver's onCommit must never starve other drivers of the commit signal.
-            console.error("[runtime] driver onCommit callback threw:", e);
-          }
-        }
+        fireCommitSubs(commitSubs, { tables: namesForCommit(payload.tables), ranges: payload.ranges, commitTs: payload.commitTs });
       }
     });
 
@@ -537,6 +686,7 @@ export class EmbeddedRuntime {
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
       contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
       oracle, queryOracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
+      commitSubs,
     );
   }
 
@@ -562,6 +712,32 @@ export class EmbeddedRuntime {
    */
   setTableNumbers(tableNumbers: Record<string, number>): void {
     rebuildTableNumberToName(this.tableNumberToName, tableNumbers);
+  }
+
+  /**
+   * The FOREIGN-COMMIT driver wake for a multi-writer fleet hybrid (Fleet B3, trigger-wake gap
+   * fix). `commitSubs` (driver `onCommit` wakes) normally fires only from `create()`'s
+   * `adapter.subscribe` callback — the LOCAL commit fan-out. In an opt-in multi-writer fleet, a
+   * co-writer's commit reaches THIS node only through the hybrid-tailer `invalidationSink`
+   * (`ee/packages/fleet/src/node.ts`), which calls `handler.notifyWrites` directly — bypassing
+   * `adapter.subscribe` entirely, so a driver here (e.g. `@stackbase/triggers`) never woke on a
+   * foreign writer's commit and instead slept up to its own wall-clock beat. Delivery was always
+   * guaranteed (the durable cursor over the log) — this is a LATENCY fix, not a correctness one.
+   *
+   * The caller (the fleet's `invalidationSink`) invokes this after `notifyWrites`, passing the
+   * SAME derived invalidation. Translates `inv.tables` with the identical `translateTableIds`
+   * helper the local path uses, so a driver's `t.startsWith("scheduler/")`-style filter matches
+   * either source the same way. A local commit and a foreign commit that happen to touch the same
+   * table may both wake a driver for what is conceptually "the same" change window — harmless,
+   * since driver wakes are level-triggered (a driver re-checks its own state, it doesn't trust the
+   * wake payload as the sole source of truth).
+   *
+   * A no-op on any node with no registered drivers (`commitSubs` empty) — cheap to call
+   * unconditionally from every fleet node, writer-ish or not.
+   */
+  notifyExternalCommit(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }): void {
+    if (this.commitSubs.size === 0) return;
+    fireCommitSubs(this.commitSubs, { tables: translateTableIds(inv.tables, this.tableNumberToName), ranges: inv.ranges, commitTs: inv.commitTs });
   }
 
   /**

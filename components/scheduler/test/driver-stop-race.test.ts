@@ -32,6 +32,7 @@ function makeFakeCtx(runFn: (path: string) => Promise<unknown>): { ctx: DriverCo
       if (t) t.cleared = true;
     },
     now: () => 1000,
+    readLog: async () => ({ changes: [], maxScannedTs: 0 }),
   };
   return { ctx, timers };
 }

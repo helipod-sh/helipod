@@ -8,8 +8,9 @@ import { StackbaseClient, loopbackTransport, anyApi } from "@stackbase/client";
 import { loadProject, push, type LoadedProject } from "@stackbase/cli";
 import schema from "../convex/schema";
 import * as messages from "../convex/messages";
+import * as audit from "../convex/audit";
 
-const loaded: LoadedProject = { schema, modules: { messages } };
+const loaded: LoadedProject = { schema, modules: { messages, audit } };
 const api = anyApi as {
   messages: { send: { __path: string }; list: { __path: string }; listPaginated: { __path: string } };
 };

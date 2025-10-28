@@ -179,6 +179,73 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
     }
   });
 
+  // Trigger-wake gap fix (whole-branch review, Fix 1): `invalidationSink` (node.ts) used to call
+  // ONLY `runtime.handler.notifyWrites` on a foreign co-writer's commit — that re-runs live QUERY
+  // subscriptions but never touches `commitSubs`, the driver `onCommit` fan-out (which normally
+  // fires only from a node's own LOCAL `adapter.subscribe`, in `packages/runtime-embedded`). A
+  // driver here (e.g. `@stackbase/triggers`) would sleep on its wall-clock beat instead of waking
+  // immediately on a foreign commit. This proves the wiring: driving a REAL foreign commit through
+  // the REAL `startFleetNode` hybrid tailer reaches `runtime.notifyExternalCommit` — spied on the
+  // real runtime instance, not a hand-rolled stand-in for `invalidationSink`.
+  it("hybrid WRITER boot: a FOREIGN commit reaches runtime.notifyExternalCommit (the driver onCommit wake), not just notifyWrites", async () => {
+    const client = new PgliteClient();
+    const primary = new PostgresDocStore(client);
+    await primary.setupSchema();
+    const lease = new LeaseManager(client, { advertiseUrl: "http://hybrid-writer-ext:1", retryMs: 3_600_000 });
+    await lease.setup();
+    await lease.heartbeatPresence();
+    expect(await lease.tryAcquire(DEFAULT_SHARD, 0)).toBeTruthy();
+    primary.setWritable();
+    const forwarder = new WriteForwarder(lease, { adminKey: "k", selfUrl: "http://hybrid-writer-ext:1" });
+    forwarder.promote();
+
+    const replicaPath = join(tmp, REPLICA_DB_FILENAME);
+    const { replica, switchable } = await openSyncReplica(replicaPath);
+    const runtime = await createEmbeddedRuntime({
+      store: primary,
+      queryStore: switchable,
+      catalog: freshCatalog(),
+      modules,
+      numShards: 1,
+      beforeNotify: (ts) => forwarder.waitForReplica(ts),
+    });
+    const notifyExternalSpy = vi.spyOn(runtime, "notifyExternalCommit");
+    const notifyWritesSpy = vi.spyOn(runtime.handler, "notifyWrites");
+    const handles = await startFleetNode({
+      client: client as unknown as NodePgClient,
+      pgStore: primary,
+      runtime,
+      lease,
+      forwarder,
+      replica,
+      switchable,
+      replicaPath,
+      numShards: 1,
+    });
+    try {
+      expect(notifyExternalSpy).not.toHaveBeenCalled(); // nothing foreign has landed yet
+
+      // A FOREIGN commit lands directly on the primary (simulating a co-writer) — never through
+      // THIS node's `runtime.run`/`adapter.subscribe`, so the ONLY way it can wake a local driver
+      // is via `invalidationSink`'s `notifyExternalCommit` call.
+      const T = (await primary.maxTimestamp()) + 1n;
+      await rawPrimaryWrite(primary, "cExt", "foreign", T);
+      await client.query(`UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, $1) WHERE frontier_ts < $1`, [T]);
+
+      await waitUntil(() => notifyExternalSpy.mock.calls.length > 0);
+
+      // Same commitTs/tables/ranges shape `notifyWrites` was called with for this batch — the two
+      // calls are meant to carry the SAME derived invalidation, just to two different fan-outs.
+      expect(notifyWritesSpy).toHaveBeenCalled();
+      const notifyWritesArg = notifyWritesSpy.mock.calls[notifyWritesSpy.mock.calls.length - 1]![0];
+      const notifyExternalArg = notifyExternalSpy.mock.calls[notifyExternalSpy.mock.calls.length - 1]![0];
+      expect(notifyExternalArg.commitTs).toBe(notifyWritesArg.commitTs);
+      expect(notifyExternalArg.tables).toEqual(notifyWritesArg.tables);
+    } finally {
+      await handles.stop();
+    }
+  });
+
   it("hybrid WRITER boot: own-commit RYOW — a local commit's subscription re-run is gated until the replica applies it (never a stale intermediate)", async () => {
     const client = new PgliteClient();
     const primary = new PostgresDocStore(client);

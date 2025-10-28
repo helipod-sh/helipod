@@ -247,11 +247,18 @@ export class SqliteDocStore implements DocStore {
     }
   }
 
-  async *load_documents(range: TimestampRange, order: Order): AsyncGenerator<DocumentLogEntry> {
+  async *load_documents(
+    range: TimestampRange,
+    order: Order,
+    limit?: number,
+  ): AsyncGenerator<DocumentLogEntry> {
     const dir = order === "desc" ? "DESC" : "ASC";
+    // A raw SQL LIMIT is correct here (unlike `index_scan`, which post-filters tombstones): the log
+    // tail returns EVERY revision including tombstones, so no row is dropped after the LIMIT counts it.
+    const limitSql = limit !== undefined ? ` LIMIT ${Math.max(0, Math.floor(limit))}` : "";
     const rows = this.prep(
       `SELECT table_id, internal_id, ts, prev_ts, value FROM documents WHERE ts >= ? AND ts < ? ` +
-        `ORDER BY ts ${dir}, table_id ${dir}, internal_id ${dir}`,
+        `ORDER BY ts ${dir}, table_id ${dir}, internal_id ${dir}${limitSql}`,
     ).all(range.minInclusive, range.maxExclusive);
 
     for (const row of rows) {

@@ -12,7 +12,9 @@
     "dev": "bun ../../packages/cli/dist/bin.js dev --dir convex --web web --port 3210"
   },
   "dependencies": {
+    "@stackbase/component": "workspace:*",
     "@stackbase/executor": "workspace:*",
+    "@stackbase/triggers": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {

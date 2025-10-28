@@ -101,9 +101,13 @@ export class SwitchableDocStore implements DocStore {
     yield* d.index_scan(indexId, tableId, readTimestamp, interval, order, limit);
   }
 
-  async *load_documents(range: TimestampRange, order: Order): AsyncGenerator<DocumentLogEntry> {
+  async *load_documents(
+    range: TimestampRange,
+    order: Order,
+    limit?: number,
+  ): AsyncGenerator<DocumentLogEntry> {
     const d = this.delegate; // captured before the first yield — see class docstring
-    yield* d.load_documents(range, order);
+    yield* d.load_documents(range, order, limit);
   }
 
   async previous_revisions(

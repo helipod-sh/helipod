@@ -250,6 +250,9 @@ export async function bootLoaded(opts: {
      *  `STACKBASE_GROUP_COMMIT` read (mirrors how `numShards` is resolved fleet-side, before
      *  `bootLoaded` runs) and threaded straight into `createEmbeddedRuntime`. Unset → `false`. */
     groupCommit?: boolean;
+    /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
+     *  in a fleet). Threaded straight into `createEmbeddedRuntime`; absent outside a fleet. */
+    stablePrefix?: () => Promise<bigint | null>;
   };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
@@ -323,6 +326,8 @@ export async function bootLoaded(opts: {
     // Fleet B3 hybrid (multi-writer): the replica-backed query path + the own-commit RYOW drain gate.
     ...(opts.fleet?.queryStore ? { queryStore: opts.fleet.queryStore } : {}),
     ...(opts.fleet?.beforeNotify ? { beforeNotify: opts.fleet.beforeNotify } : {}),
+    // Triggers D1: the fleet stable-prefix bound for `readLog` (`min(shard_leases.frontier_ts)`).
+    ...(opts.fleet?.stablePrefix ? { stablePrefix: opts.fleet.stablePrefix } : {}),
     // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the store — resolved
     // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
     numShards,
@@ -397,6 +402,9 @@ export async function bootProject(opts: {
     beforeNotify?: (commitTs: bigint) => Promise<void>;
     /** Fleet B4: group commit — resolved fleet-side, threaded straight into `createEmbeddedRuntime`. */
     groupCommit?: boolean;
+    /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
+     *  in a fleet). Threaded straight into `createEmbeddedRuntime`; absent outside a fleet. */
+    stablePrefix?: () => Promise<bigint | null>;
   };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);

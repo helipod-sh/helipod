@@ -13,6 +13,9 @@ export type FunctionReference<
 };
 
 export type Api = {
+  "audit": {
+    _onChange: FunctionReference<"mutation", "public", any, any>;
+  };
   "messages": {
     list: FunctionReference<"query", "public", any, any>;
     listPaginated: FunctionReference<"query", "public", any, any>;

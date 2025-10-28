@@ -1,8 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true,
+    "rootDir": ".",
+    "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["convex", "stackbase.config.ts", "test", "scripts"]
+  "include": ["src", "test"]
 }

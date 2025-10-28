@@ -143,6 +143,41 @@ export function runDocStoreConformance(
         expect(entries.map((e) => e.ts)).toEqual([1n, 2n, 3n]);
         expect(entries.map((e) => (e.value === null ? null : e.value.value.body))).toEqual(["v1", "v2", null]);
       });
+
+      it("bounds the scan by `limit`, returning the N lowest-ts revisions, and resumes", async () => {
+        // Five commits across two docs, one revision per ts (1..5).
+        const a = newDocumentId(TABLE);
+        const b = newDocumentId(TABLE);
+        await store.write([rev(a, 1n, null, "a1")], [], "Error");
+        await store.write([rev(b, 2n, null, "b1")], [], "Error");
+        await store.write([rev(a, 3n, 1n, "a2")], [], "Error");
+        await store.write([rev(b, 4n, 2n, "b2")], [], "Error");
+        await store.write([rev(a, 5n, 3n, "a3")], [], "Error");
+
+        // limit=2 → exactly the two lowest-ts revisions from minInclusive.
+        const page1 = await collect(store.load_documents({ minInclusive: 1n, maxExclusive: 100n }, "asc", 2));
+        expect(page1.map((e) => e.ts)).toEqual([1n, 2n]);
+
+        // Resume strictly after the last returned ts → the next two.
+        const page2 = await collect(store.load_documents({ minInclusive: 3n, maxExclusive: 100n }, "asc", 2));
+        expect(page2.map((e) => e.ts)).toEqual([3n, 4n]);
+
+        // A limit larger than the remaining range returns just what's left (no padding, no error).
+        const page3 = await collect(store.load_documents({ minInclusive: 5n, maxExclusive: 100n }, "asc", 2));
+        expect(page3.map((e) => e.ts)).toEqual([5n]);
+      });
+
+      it("counts every revision (including tombstones) toward `limit`", async () => {
+        const id = newDocumentId(TABLE);
+        await store.write([rev(id, 1n, null, "v1")], [], "Error");
+        await store.write([rev(id, 2n, 1n, null)], [], "Error"); // tombstone
+        await store.write([rev(id, 3n, 2n, "v3")], [], "Error");
+
+        // limit=2 must include the tombstone at ts 2 (a raw LIMIT that skipped it would be a bug).
+        const page = await collect(store.load_documents({ minInclusive: 1n, maxExclusive: 100n }, "asc", 2));
+        expect(page.map((e) => e.ts)).toEqual([1n, 2n]);
+        expect(page[1]!.value).toBeNull();
+      });
     });
 
     describe("previous_revisions (OCC support)", () => {

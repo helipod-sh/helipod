@@ -465,6 +465,15 @@ export interface FleetRuntimeOptions {
    * `createEmbeddedRuntime` builds the byte-identical single-commit path, as shipped.
    */
   groupCommit?: boolean;
+  /**
+   * Triggers D1 — the stable-prefix accessor for `DriverContext.readLog`. In a fleet, N per-shard
+   * commit connections land timestamps out of order, so the log tail is gap-free ONLY below
+   * `min(shard_leases.frontier_ts)` (the fenced fleet frontier). Wired here to exactly that read (the
+   * same `readAllFrontiers`-min the frontier-lag monitor uses), so `readLog` never surfaces — nor
+   * skips — a change above an in-flight gap. Threaded onto every boot shape; consulted only when a
+   * driver runs (post-promotion on a sync node), by which point `store` points at the primary.
+   */
+  stablePrefix?: () => Promise<bigint | null>;
 }
 
 export interface FleetPrep {
@@ -713,6 +722,14 @@ export async function prepareFleetNode(deps: {
   // Fleet B4 (T4): group commit — resolved ONCE here, threaded uniformly onto every
   // `runtimeOptions` literal below regardless of boot shape (writer/sync × single-writer/hybrid).
   const groupCommit = groupCommitEnabled();
+  // Triggers D1 — the fleet stable prefix `readLog` scans to: `min(shard_leases.frontier_ts)` across
+  // all shard rows (the same fenced frontier the frontier-lag monitor reads). `readAllFrontiers`
+  // returns rows ordered by frontier ascending, so `[0]` is the pinning shard. Null while no shard
+  // row exists yet (pre-seed boot) → `readLog` falls back to `store.maxTimestamp()`.
+  const stablePrefix = async (): Promise<bigint | null> => {
+    const rows = await lease.readAllFrontiers();
+    return rows.length > 0 ? rows[0]!.frontierTs : null;
+  };
 
   if (acquired) {
     // Writer boot: make the Postgres store writable and promote the forwarder so writes execute
@@ -731,7 +748,7 @@ export async function prepareFleetNode(deps: {
         client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "writer", numShards,
         runtimeOptions: {
           store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards,
-          queryStore: switchable, beforeNotify, groupCommit,
+          queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
         },
       };
     }
@@ -739,7 +756,7 @@ export async function prepareFleetNode(deps: {
     // switchable, no query-path split (it reads the primary, as shipped).
     return {
       client, pgStore, lease, forwarder, role: "writer", numShards,
-      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit },
+      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit, stablePrefix },
     };
   }
 
@@ -763,7 +780,7 @@ export async function prepareFleetNode(deps: {
       client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
       runtimeOptions: {
         store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
-        queryStore: switchable, beforeNotify, groupCommit,
+        queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
       },
     };
   }
@@ -771,7 +788,7 @@ export async function prepareFleetNode(deps: {
   // read-only Postgres store is the tail source + promotion swap target only.
   return {
     client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit },
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix },
   };
 }
 
@@ -1280,11 +1297,22 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         ...inv.writtenKeys.map((k) => keyToPointRange(k.indexId, k.key)),
         ...inv.writtenDocs.map((d) => docKeyToPointRange(d.tableId, d.internalId)),
       ];
+      const commitTs = Number(inv.newMaxTs);
       await runtime.handler.notifyWrites({
         tables: inv.writtenTables,
         ranges,
-        commitTs: Number(inv.newMaxTs),
+        commitTs,
       });
+      // Trigger-wake gap fix: `notifyWrites` above only re-runs live QUERY subscriptions — it never
+      // touches `commitSubs`, the driver `onCommit` fan-out (that only fires from THIS node's own
+      // local `adapter.subscribe`, in `packages/runtime-embedded`). Without this, a driver here (e.g.
+      // `@stackbase/triggers`) never wakes on a co-writer's commit and instead sleeps up to its own
+      // wall-clock beat — delivery is still guaranteed (the durable cursor), this is latency-only.
+      // `inv.writtenTables` is already ENCODED STORAGE-TABLE IDS (see `AppliedInvalidation`'s doc
+      // comment in `replica-tailer.ts`), the same format `notifyExternalCommit` expects (it applies
+      // the identical translation `adapter.subscribe`'s local path uses). No-op on a node with no
+      // registered drivers.
+      runtime.notifyExternalCommit({ tables: inv.writtenTables, ranges, commitTs });
     } catch (e) {
       console.error("fleet: replica invalidation failed", e);
     }

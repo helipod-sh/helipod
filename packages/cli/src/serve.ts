@@ -42,6 +42,10 @@ export interface FleetRuntimeOptions {
    *  `@stackbase/fleet`'s `node.ts` resolves `STACKBASE_FLEET_MULTI_WRITER`), threaded straight
    *  into `createEmbeddedRuntime` via `bootProject`'s `fleet.groupCommit`. Unset → `false`. */
   groupCommit?: boolean;
+  /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` — `min(shard_leases.frontier_ts)`
+   *  in a fleet (the log tail is gap-free only below the fenced frontier). Threaded straight into
+   *  `createEmbeddedRuntime`; unset outside a fleet → `readLog` falls back to `store.maxTimestamp()`. */
+  stablePrefix?: () => Promise<bigint | null>;
 }
 
 /** `prepareFleetNode`'s result. `client`/`lease`/`forwarder`/`replica`/`switchable` are opaque here
