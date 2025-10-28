@@ -97,6 +97,15 @@ S1 persists (IndexedDB) · S4 swaps fail-fast→park-and-resend · the registry-
 for reload replay · server dedup atomic with commit (the B3 fleet_idempotency relative) + poison
 pill + session resume are the outbox slice's server bill. NOTHING in this slice's design may
 close those doors; the plan's final review checks each seam against this table.
+**Lunora input (user-flagged, confirmed by docs/dev/research/lunora.md §5):** the closest
+competitor ships the full story via `clientId + monotone clientSeq` per-client watermarks
+(`seq ≤ watermark` acked without re-running — ordered server dedup that also rejects
+out-of-order) reconciled by `lastMutationId` — the Replicache-lmid family the verdict defers
+behind the `versionCoversCommit` seam. Consequences bound HERE: (a) S1's `requestId` must not
+preclude a monotone per-client sequence (the outbox slice decides clientSeq-vs-uuid; keep
+requestId opaque-string so either fits); (b) the outbox slice evaluates Lunora's watermark
+shape as its server-dedup design head-to-head with random-key fleet_idempotency; (c) the D12
+revisit note gains Lunora as the third convergent lmid datapoint (with Replicache and Zero).
 
 ## Error handling (the verdict's §(c)/(f) rows govern)
 
