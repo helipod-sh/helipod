@@ -140,7 +140,32 @@ export class SyncProtocolHandler {
   }
 
   private send(session: Session, msg: ServerMessage): void {
-    session.bp.send(encodeServerMessage(msg));
+    // MutationResponse/ActionResponse are undroppable under backpressure (§(d) item 4 of the
+    // client-sync verdict): a dropped Transition self-heals via the version-gap resync, but a
+    // dropped response has no bracket and no retransmit — it would strand the mutation/action
+    // as permanently "inflight" on an otherwise-healthy connection. They're small, rare, and
+    // per-request, so always queuing (never dropping) them is cheap.
+    const undroppable = msg.type === "MutationResponse" || msg.type === "ActionResponse";
+    session.bp.send(encodeServerMessage(msg), undroppable);
+  }
+
+  /**
+   * `MutationResponse.ts` (W1) must be the mutation's real commitTs — a client-side optimistic-
+   * update gate treats it as an ack signal, and a `0` (or absent) commitTs there would either
+   * false-close the gate immediately or wedge a pending layer forever. `commitTs` SHOULD always
+   * be a positive integer for a committed mutation; the one known way it can leak as `<= 0` is
+   * the `?? 0n` fallback for a forwarded-fleet-write whose owner commitTs didn't make it back
+   * (`runtime-embedded/src/runtime.ts`). This codebase has no existing dev/prod split (no
+   * `NODE_ENV`/`__DEV__` convention anywhere in `packages/`), so this is unconditional: log
+   * loudly every time, and never put a lying `0` on the wire — omit `ts` instead, which is
+   * exactly the pre-W1 wire shape every client already knows how to handle.
+   */
+  private mutationResponseTs(commitTs: number): number | undefined {
+    if (commitTs > 0) return commitTs;
+    console.error(
+      `[sync] MutationResponse: commitTs invariant violated (expected > 0, got ${commitTs}); omitting ts from the wire`,
+    );
+    return undefined;
   }
 
   async handleMessage(sessionId: string, raw: string): Promise<void> {
@@ -207,7 +232,13 @@ export class SyncProtocolHandler {
   ): Promise<void> {
     try {
       const { value, tables, writeRanges, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args, session.identity);
-      this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: true, value: convexToJson(value) });
+      this.send(session, {
+        type: "MutationResponse",
+        requestId: msg.requestId,
+        success: true,
+        value: convexToJson(value),
+        ts: this.mutationResponseTs(commitTs),
+      });
       if (this.options.autoNotifyOnMutation !== false) {
         await this.notifyWrites({ tables, ranges: writeRanges, commitTs }, session.sessionId);
       }

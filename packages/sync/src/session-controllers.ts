@@ -7,7 +7,11 @@
  *    outbound chokepoint for a session, sending straight through when the socket has room, queueing
  *    (up to a frame cap) when it doesn't, and DROPPING frames once the queue is full or the client
  *    has been backpressured for too long. Dropped frames are safe — the client resyncs from its last
- *    acknowledged version — so we favour dropping over stalling the whole node.
+ *    acknowledged version — so we favour dropping over stalling the whole node. `MutationResponse`/
+ *    `ActionResponse` frames are the one exception: they carry `undroppable: true` and are never
+ *    dropped by cap or timeout (they only queue behind the cap; the queue's timeout-abandon path
+ *    also spares them) — a dropped response has no version bracket and no retransmit, so losing one
+ *    would strand a client-side mutation as permanently "inflight" instead of self-healing.
  *  - **A dead-but-not-closed connection** (half-open TCP: the peer vanished, no FIN/RST). Nothing
  *    reads, nothing errors; the session lingers forever holding subscriptions. `SessionHeartbeat-
  *    Controller` reaps it via transport-level ping/pong liveness — NOT inbound-message silence (an
@@ -41,11 +45,18 @@ const DEFAULT_SLOW_CLIENT_MS = 30_000;
  * queue is abandoned to drops. Drops are counted and warned about exactly once per episode (an
  * episode ends when the session fully drains back to an empty queue with a below-high-water buffer).
  */
+/** One queued frame, tagged with whether it may ever be dropped. */
+interface QueuedFrame {
+  data: string;
+  /** True for MutationResponse/ActionResponse — never dropped by cap or by timeout-abandon. */
+  undroppable: boolean;
+}
+
 export class SessionBackpressureController {
   private readonly highWaterBytes: number;
   private readonly maxQueuedFrames: number;
   private readonly slowClientTimeoutMs: number;
-  private readonly queue: string[] = [];
+  private readonly queue: QueuedFrame[] = [];
   private _droppedFrames = 0;
   /** Wall-clock ms at which the current backpressure episode began, or null if not backpressured. */
   private backpressureSince: number | null = null;
@@ -71,17 +82,26 @@ export class SessionBackpressureController {
     return this._droppedThisEpisode;
   }
 
-  /** The ONLY way frames leave a session. Sends now, queues, or drops per the class contract. */
-  send(data: string): void {
+  /**
+   * The ONLY way frames leave a session. Sends now, queues, or drops per the class contract.
+   * `undroppable` (default false) exempts a frame from BOTH drop paths below — the cap check
+   * and the sustained-backpressure abandon — so it only ever queues or sends, never vanishes.
+   */
+  send(data: string, undroppable = false): void {
     // Drain first so a recovered client immediately gets both its backlog and this frame in order.
     this.flush();
     if (this.queue.length === 0 && this.socket.bufferedAmount < this.highWaterBytes) {
       this.socket.send(data);
       return;
     }
+    if (undroppable) {
+      this.queue.push({ data, undroppable: true });
+      return;
+    }
     // Backpressured: mark the episode start on first entry.
     if (this.backpressureSince === null) this.backpressureSince = this.now();
-    // Give up on a client that has been backpressured too long — abandon the whole backlog + this frame.
+    // Give up on a client that has been backpressured too long — abandon the whole backlog + this frame
+    // (undroppable frames already queued survive; see `dropQueue`).
     if (this.now() - this.backpressureSince >= this.slowClientTimeoutMs) {
       this.dropQueue();
       this.countDrop();
@@ -92,7 +112,7 @@ export class SessionBackpressureController {
       this.countDrop();
       return;
     }
-    this.queue.push(data);
+    this.queue.push({ data, undroppable: false });
   }
 
   /**
@@ -102,7 +122,7 @@ export class SessionBackpressureController {
    */
   flush(): void {
     while (this.queue.length > 0 && this.socket.bufferedAmount < this.highWaterBytes) {
-      this.socket.send(this.queue.shift() as string);
+      this.socket.send((this.queue.shift() as QueuedFrame).data);
     }
     if (this.queue.length === 0 && this.socket.bufferedAmount < this.highWaterBytes) {
       // Fully caught up — end the episode so a later re-entry warns afresh.
@@ -117,10 +137,14 @@ export class SessionBackpressureController {
     }
   }
 
+  /** Abandon the queue to drops — EXCEPT undroppable frames, which stay queued for a later flush. */
   private dropQueue(): void {
-    if (this.queue.length === 0) return;
-    this._droppedFrames += this.queue.length;
+    const survivors = this.queue.filter((f) => f.undroppable);
+    const droppedCount = this.queue.length - survivors.length;
+    if (droppedCount === 0) return;
+    this._droppedFrames += droppedCount;
     this.queue.length = 0;
+    this.queue.push(...survivors);
     this.markEpisodeDropped();
   }
 
