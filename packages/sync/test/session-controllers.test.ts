@@ -178,6 +178,56 @@ describe("SessionBackpressureController", () => {
     }
   });
 
+  it("undroppable frames past maxUndroppableQueuedFrames terminate the session via onOverflow instead of dropping", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const s = makeSocket();
+      const onOverflow = vi.fn();
+      const bp = new SessionBackpressureController(s, { maxQueuedFrames: 5, maxUndroppableQueuedFrames: 2 }, undefined, onOverflow);
+      s.bufferedAmount = 2 * MiB;
+      bp.send("resp1", true); // queued (1)
+      bp.send("resp2", true); // queued (2) — cap reached
+      expect(onOverflow).not.toHaveBeenCalled();
+      bp.send("resp3", true); // past cap — session dies, frame is NOT queued
+      expect(onOverflow).toHaveBeenCalledTimes(1);
+      bp.send("resp4", true); // already overflowed — no second kill signal
+      expect(onOverflow).toHaveBeenCalledTimes(1);
+      // The overflow is a termination, not a drop — droppedFrames is unaffected by it.
+      expect(bp.droppedFrames).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("undroppable-queue-overflow"));
+      // Below the cap, prior behavior holds: the two frames that DID queue are still delivered.
+      s.bufferedAmount = 0;
+      bp.flush();
+      expect(s.sent).toEqual(["resp1", "resp2"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("maxUndroppableQueuedFrames defaults to maxQueuedFrames's effective value", () => {
+    const s = makeSocket();
+    const onOverflow = vi.fn();
+    const bp = new SessionBackpressureController(s, { maxQueuedFrames: 1 }, undefined, onOverflow);
+    s.bufferedAmount = 2 * MiB;
+    bp.send("resp1", true); // queued (1) — cap (defaulted to 1) reached
+    bp.send("resp2", true); // past cap — overflow
+    expect(onOverflow).toHaveBeenCalledTimes(1);
+  });
+
+  it("the undroppable cap is counted SEPARATELY from the droppable queue — a full droppable queue doesn't count against it, and vice versa", () => {
+    const s = makeSocket();
+    const onOverflow = vi.fn();
+    const bp = new SessionBackpressureController(s, { maxQueuedFrames: 1, maxUndroppableQueuedFrames: 1 }, undefined, onOverflow);
+    s.bufferedAmount = 2 * MiB;
+    bp.send("t1"); // droppable — queued (1), droppable cap reached
+    bp.send("t2"); // droppable — dropped (past droppable cap)
+    expect(bp.droppedFrames).toBe(1);
+    bp.send("resp1", true); // undroppable — queued (1); droppable fullness doesn't consume this budget
+    expect(onOverflow).not.toHaveBeenCalled();
+    bp.send("resp2", true); // undroppable — past its OWN cap now
+    expect(onOverflow).toHaveBeenCalledTimes(1);
+  });
+
   it("an undroppable send past the slow-client timeout still queues instead of dropping", () => {
     vi.useFakeTimers();
     try {

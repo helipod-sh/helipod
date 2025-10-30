@@ -112,7 +112,10 @@ export class SyncProtocolHandler {
   }
 
   connect(sessionId: string, socket: SyncWebSocket): void {
-    const bp = new SessionBackpressureController(socket, this.options.backpressure);
+    // The undroppable-queue-overflow cap terminates the session through the SAME reap-and-close
+    // path a dead heartbeat uses (see session-controllers.ts) — one place that owns "this session
+    // is being torn down", not two independently-evolving ones.
+    const bp = new SessionBackpressureController(socket, this.options.backpressure, undefined, () => this.reap(sessionId));
     const hb = new SessionHeartbeatController(socket, () => this.reap(sessionId), this.options.heartbeat);
     this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false, bp, hb });
     hb.start();

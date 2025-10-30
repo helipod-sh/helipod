@@ -146,3 +146,47 @@ describe("backpressure exemption: MutationResponse/ActionResponse are undroppabl
     }
   });
 });
+
+describe("undroppable-queue-overflow: flooding mutations past the cap terminates the session", () => {
+  /** A socket that never drains and tracks close() so termination is observable. */
+  function stuckSocketWithClose() {
+    const sent: ServerMessage[] = [];
+    return {
+      sent,
+      bufferedAmount: 2 * 1024 * 1024, // above the 1 MiB default high-water mark
+      send: (d: string) => sent.push(JSON.parse(d) as ServerMessage),
+      close: vi.fn(),
+    };
+  }
+
+  it("terminates the session with a distinct reason once queued undroppable frames exceed the cap; below the cap, all queue (never dropped)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = new SyncProtocolHandler(mkExec(1), {
+        autoNotifyOnMutation: false,
+        backpressure: { maxUndroppableQueuedFrames: 2 }, // small cap — easy to flood
+      });
+      const s = stuckSocketWithClose();
+      h.connect("s1", s as never);
+
+      // Below the cap: two mutations queue their MutationResponse — no drop, no termination.
+      await h.handleMessage("s1", JSON.stringify({ type: "Mutation", requestId: "m0", udfPath: "app:mut", args: {} }));
+      await h.handleMessage("s1", JSON.stringify({ type: "Mutation", requestId: "m1", udfPath: "app:mut", args: {} }));
+      expect(s.close).not.toHaveBeenCalled();
+      expect(s.sent.filter((m) => m.type === "MutationResponse")).toHaveLength(0); // still queued, socket stuck
+
+      // Past the cap: the session is terminated instead of silently dropping the 3rd response.
+      await h.handleMessage("s1", JSON.stringify({ type: "Mutation", requestId: "m2", udfPath: "app:mut", args: {} }));
+      expect(s.close).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("undroppable-queue-overflow"));
+
+      // The session is gone — a further message on it is an explicit, loud failure (unknown
+      // session), never a silent no-op. This is the "in-flight becomes an explicit error" contract.
+      await expect(
+        h.handleMessage("s1", JSON.stringify({ type: "Mutation", requestId: "m3", udfPath: "app:mut", args: {} })),
+      ).rejects.toThrow(/unknown session/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
