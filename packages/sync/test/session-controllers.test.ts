@@ -138,6 +138,67 @@ describe("SessionBackpressureController", () => {
       warn.mockRestore();
     }
   });
+
+  it("undroppable frames survive the maxQueuedFrames cap — only droppable frames past the cap are dropped", () => {
+    const s = makeSocket();
+    const bp = new SessionBackpressureController(s, { maxQueuedFrames: 2 });
+    s.bufferedAmount = 2 * MiB;
+    bp.send("t1"); // droppable — queued (1)
+    bp.send("t2"); // droppable — queued (2), cap reached
+    bp.send("t3"); // droppable — past cap, dropped
+    bp.send("resp1", true); // undroppable — queued regardless of cap
+    expect(bp.droppedFrames).toBe(1);
+    s.bufferedAmount = 0;
+    bp.flush();
+    // Order preserved: the two surviving droppable frames, then the undroppable one queued after them.
+    expect(s.sent).toEqual(["t1", "t2", "resp1"]);
+  });
+
+  it("undroppable frames survive sustained-backpressure queue abandonment; droppable frames don't", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const s = makeSocket();
+      const bp = new SessionBackpressureController(s, { slowClientTimeoutMs: 30_000 });
+      s.bufferedAmount = 2 * MiB;
+      bp.send("t1"); // droppable
+      bp.send("resp1", true); // undroppable
+      bp.send("t2"); // droppable
+      // 31s of sustained backpressure — the client is declared slow; droppable frames are abandoned.
+      vi.advanceTimersByTime(31_000);
+      bp.flush();
+      expect(bp.droppedFrames).toBe(2); // t1 + t2, NOT resp1
+      expect(s.sent).toEqual([]); // nothing delivered yet — still backpressured
+      // Once the client recovers, the surviving undroppable frame is still delivered.
+      s.bufferedAmount = 0;
+      bp.flush();
+      expect(s.sent).toEqual(["resp1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an undroppable send past the slow-client timeout still queues instead of dropping", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const s = makeSocket();
+      const bp = new SessionBackpressureController(s, { slowClientTimeoutMs: 30_000 });
+      s.bufferedAmount = 2 * MiB;
+      bp.send("t1"); // droppable
+      vi.advanceTimersByTime(31_000);
+      // resp1 arrives already past the timeout — its OWN send must not drop it. (The pre-send
+      // flush() does abandon the already-queued droppable "t1" — that's the pre-existing
+      // sustained-backpressure behavior, unrelated to resp1's undroppability.)
+      bp.send("resp1", true);
+      expect(bp.droppedFrames).toBe(1); // t1 only
+      s.bufferedAmount = 0;
+      bp.flush();
+      expect(s.sent).toEqual(["resp1"]); // resp1 survived and was delivered; t1 did not survive
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("SessionHeartbeatController", () => {
