@@ -6,7 +6,19 @@
  */
 import type { UdfType } from "./profile";
 import type { MutationCtx, QueryCtx } from "./guest";
-import { v, type PropertyValidators, type AnyValidator, type ValidatorJSON, type ObjectType } from "@stackbase/values";
+import {
+  v,
+  type PropertyValidators,
+  type AnyValidator,
+  type ValidatorJSON,
+  type ObjectType,
+  type Validator,
+  type OptionalProperty,
+} from "@stackbase/values";
+
+/** A validator over an arbitrary return type `T` (any optionality — a return value isn't itself
+ * an object field, but reuses the same `Validator` carrier as `args`). */
+type ReturnsValidator<T> = Validator<T, OptionalProperty>;
 
 /** A mutation's shard selector: a validated arg NAME (common case) or a resolver over the args. */
 export type ShardBy = string | ((args: any) => unknown);
@@ -18,6 +30,17 @@ export interface RegisteredFunction {
   argsValidator?: AnyValidator;
   /** `argsValidator.toJSON()`, for codegen to emit the typed `FunctionReference`. */
   argsJson?: ValidatorJSON;
+  /**
+   * Live validator for the return value, when the function declares `returns`. Mirrors
+   * `argsValidator`/`argsJson` exactly — see `build()`. NO runtime enforcement this slice (typing
+   * only, threaded through codegen to the generated `FunctionReference`'s `Returns` slot);
+   * enforcing it against the actual handler result is the argument-validation slice's sibling
+   * follow-on (same `DocumentValidationError`-style shape, applied to the return value instead of
+   * the call args).
+   */
+  returnsValidator?: AnyValidator;
+  /** `returnsValidator.toJSON()`, for codegen to emit the typed `FunctionReference`'s `Returns` slot. */
+  returnsJson?: ValidatorJSON;
   /**
    * (Mutations only) which shard this mutation runs on — an arg name whose (validated) value is
    * routed, or a resolver `(args) => value` producing the value to route. Absent → the mutation
@@ -39,6 +62,13 @@ function build(type: UdfType, def: unknown): RegisteredFunction {
       rf.argsJson = argsValidator.toJSON();
     }
   }
+  if (typeof def === "object" && def !== null && "returns" in def) {
+    const returns = (def as { returns?: AnyValidator }).returns;
+    if (returns) {
+      rf.returnsValidator = returns;
+      rf.returnsJson = returns.toJSON();
+    }
+  }
   if (type === "mutation" && typeof def === "object" && def !== null && "shardBy" in def) {
     const shardBy = (def as { shardBy?: ShardBy }).shardBy;
     if (shardBy !== undefined) rf.shardBy = shardBy;
@@ -47,11 +77,15 @@ function build(type: UdfType, def: unknown): RegisteredFunction {
 }
 
 type QueryDef<Args, Output> =
-  | { handler: (ctx: QueryCtx, args: Args) => Output | Promise<Output> }
+  | { handler: (ctx: QueryCtx, args: Args) => Output | Promise<Output>; returns?: ReturnsValidator<Output> }
   | ((ctx: QueryCtx, args: Args) => Output | Promise<Output>);
 
 export function query<A extends PropertyValidators, Output = unknown>(
-  def: { args: A; handler: (ctx: QueryCtx, args: ObjectType<A>) => Output | Promise<Output> },
+  def: {
+    args: A;
+    returns?: ReturnsValidator<Output>;
+    handler: (ctx: QueryCtx, args: ObjectType<A>) => Output | Promise<Output>;
+  },
 ): RegisteredFunction;
 export function query<Args = unknown, Output = unknown>(def: QueryDef<Args, Output>): RegisteredFunction;
 export function query(def: unknown): RegisteredFunction {
@@ -59,11 +93,20 @@ export function query(def: unknown): RegisteredFunction {
 }
 
 type MutationDef<Args, Output> =
-  | { handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output>; shardBy?: ShardBy }
+  | {
+      handler: (ctx: MutationCtx, args: Args) => Output | Promise<Output>;
+      shardBy?: ShardBy;
+      returns?: ReturnsValidator<Output>;
+    }
   | ((ctx: MutationCtx, args: Args) => Output | Promise<Output>);
 
 export function mutation<A extends PropertyValidators, Output = unknown>(
-  def: { args: A; shardBy?: string | ((args: ObjectType<A>) => unknown); handler: (ctx: MutationCtx, args: ObjectType<A>) => Output | Promise<Output> },
+  def: {
+    args: A;
+    shardBy?: string | ((args: ObjectType<A>) => unknown);
+    returns?: ReturnsValidator<Output>;
+    handler: (ctx: MutationCtx, args: ObjectType<A>) => Output | Promise<Output>;
+  },
 ): RegisteredFunction;
 export function mutation<Args = unknown, Output = unknown>(def: MutationDef<Args, Output>): RegisteredFunction;
 export function mutation(def: unknown): RegisteredFunction {
@@ -71,11 +114,15 @@ export function mutation(def: unknown): RegisteredFunction {
 }
 
 type ActionDef<Args, Output> =
-  | { handler: (ctx: unknown, args: Args) => Output | Promise<Output> }
+  | { handler: (ctx: unknown, args: Args) => Output | Promise<Output>; returns?: ReturnsValidator<Output> }
   | ((ctx: unknown, args: Args) => Output | Promise<Output>);
 
 export function action<A extends PropertyValidators, Output = unknown>(
-  def: { args: A; handler: (ctx: unknown, args: ObjectType<A>) => Output | Promise<Output> },
+  def: {
+    args: A;
+    returns?: ReturnsValidator<Output>;
+    handler: (ctx: unknown, args: ObjectType<A>) => Output | Promise<Output>;
+  },
 ): RegisteredFunction;
 export function action<Args = unknown, Output = unknown>(def: ActionDef<Args, Output>): RegisteredFunction;
 export function action(def: unknown): RegisteredFunction {
