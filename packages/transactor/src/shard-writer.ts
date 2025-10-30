@@ -178,6 +178,9 @@ interface StagedUnit {
   readonly documents: DocumentLogEntry[];
   readonly indexUpdates: IndexWrite[];
   readonly meta?: Record<string, string>;
+  /** G4 origin-frontier tag — the originating session id, stamped per-unit onto this unit's
+   *  `OplogDelta.origin` at publish time. NEVER folded into `meta` (which reaches the store). */
+  readonly origin?: string;
   readonly writeRanges: RangeSet;
   readonly shardId: ShardId;
   readonly value: unknown;
@@ -305,7 +308,7 @@ export class ShardWriter {
           return { value, committed: false, commitTs: snapshotTs, shardId, oplog: null };
         }
 
-        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value, options.commitMeta));
+        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value, options.commitMeta, options.origin));
       } catch (e) {
         if (e instanceof OccConflictError && attempt < maxRetries) continue; // deterministic replay
         throw e;
@@ -321,6 +324,7 @@ export class ShardWriter {
     shardId: ShardId,
     value: T,
     commitMeta?: Record<string, string>,
+    origin?: string,
   ): Promise<CommitResult<T>> {
     // Phase 1 — validate: any commit after our snapshot that touched something we (validated-ly)
     // read? Consults ONLY `validatedReads` (D4) — `recordReadUnvalidated` ranges never abort a
@@ -361,11 +365,14 @@ export class ShardWriter {
     this.prune();
 
     const ranges = ctx.writeRanges.toArray();
+    // G4: stamp the origin tag HERE, at oplog construction, AFTER `commitWrite` has returned — it
+    // never reached the store (see `commitWrite` above, called with `{ meta: commitMeta }` only).
     const oplog: OplogDelta = {
       commitTs,
       shardId,
       writtenRanges: ranges.map(serializeKeyRange),
       writtenTables: writtenTablesFromRanges(ranges),
+      origin,
     };
     // Fire-and-forget so a slow/failing subscriber never stalls or aborts the single writer.
     if (this.fanout) {
@@ -420,7 +427,7 @@ export class ShardWriter {
         // the stage step runs in a loop (each iteration re-takes the mutex and re-validates).
         for (;;) {
           const outcome = await this.mutex.runExclusive(() =>
-            this.stageUnit(ctx, snapshotTs, shardId, value, options.commitMeta),
+            this.stageUnit(ctx, snapshotTs, shardId, value, options.commitMeta, options.origin),
           );
           if (outcome.kind === "cut") {
             await outcome.wait; // the in-flight same-doc batch promoted; re-stage against committed state
@@ -457,6 +464,7 @@ export class ShardWriter {
     shardId: ShardId,
     value: T,
     commitMeta: Record<string, string> | undefined,
+    origin: string | undefined,
   ): Promise<StageOutcome<T>> {
     // Phase 1 — VALIDATE against `recentCommits ∪ flushingBatch ∪ pendingBatch` (D2 two-buffer
     // visibility). Every staged-but-unlanded write is logically after every current snapshot, so a
@@ -516,6 +524,7 @@ export class ShardWriter {
       documents,
       indexUpdates,
       meta: commitMeta,
+      origin,
       writeRanges: ctx.writeRanges,
       shardId,
       value,
@@ -605,6 +614,7 @@ export class ShardWriter {
               shardId: u.shardId,
               writtenRanges: ranges.map(serializeKeyRange),
               writtenTables: writtenTablesFromRanges(ranges),
+              origin: u.origin, // G4: per-unit origin — stamped at publish, never sent to the store
             };
             if (this.fanout) {
               try {

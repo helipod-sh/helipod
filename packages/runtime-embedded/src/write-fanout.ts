@@ -13,6 +13,14 @@ export interface EmbeddedWriteFanoutPayload {
   tables: string[];
   ranges: SerializedKeyRange[];
   originId: string;
+  /**
+   * G4 origin-frontier tag (client-sync verdict §(d) item 2) — the originating sync SESSION id,
+   * sourced verbatim from `OplogDelta.origin`. Distinct from `originId` (the fleet-node/process
+   * origin used for the cross-process self-loop guard): this is a per-commit ephemeral session tag
+   * the drain hands to `handler.notifyWrites(inv, origin)` so the origin session's `version.ts` is
+   * advanced past its own commit. Undefined for commits with no originating session.
+   */
+  origin?: string;
   /** The shard this commit landed on (Fenced Frontier B1, D6) — sourced verbatim from
    *  `OplogDelta.shardId`. Additive: single-shard (Tier 0/B1) deployments always see `"default"`
    *  (`DEFAULT_SHARD`); a multi-shard fan-out consumer (B2+) can use it to route/filter, but every
@@ -56,6 +64,7 @@ export class EmbeddedWriteFanout implements WriteFanout {
       tables: delta.writtenTables,
       ranges: delta.writtenRanges,
       originId: this.originId,
+      origin: delta.origin,
       shardId: delta.shardId,
     });
   }

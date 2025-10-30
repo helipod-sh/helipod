@@ -44,7 +44,14 @@ export interface SyncWebSocket {
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
   runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
-  runMutation(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number }>;
+  /**
+   * `origin` (G4, client-sync verdict §(d) item 2): the committing session's id, threaded onto the
+   * commit's `OplogDelta.origin` so the fan-out can advance THAT session's own `version.ts` past its
+   * commit even when it touched nothing the session subscribes to. `forwarded` (fleet): true when
+   * the mutation committed on ANOTHER node (no local oplog) — its origin tag couldn't ride this
+   * node's local fan-out, so the handler advances the origin frontier via a drain-gated fallback.
+   */
+  runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number; forwarded?: boolean }>;
   runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
@@ -95,6 +102,15 @@ export class SyncProtocolHandler {
   private readonly sessions = new Map<string, Session>();
   private readonly subscriptions = new SubscriptionManager();
   private notifyTail: Promise<void> = Promise.resolve();
+  /**
+   * G4 fleet fallback (client-sync verdict §(d) item 2): sessionId → the commitTs of a FORWARDED
+   * mutation whose origin tag couldn't ride this (forwarding) node's local fan-out. Satisfied with
+   * an empty ts-advancing Transition once the drain processes a commit at-or-above it (gated on the
+   * drain's last-processed commitTs — see `sweepPendingFrontiers`). Holds at most one entry per
+   * in-flight forwarded mutation per session; cleared on satisfy or disconnect, so the sweep it
+   * drives stays tiny (usually empty on a single-node deployment, where nothing is ever forwarded).
+   */
+  private readonly pendingFrontiers = new Map<string, number>();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -126,6 +142,7 @@ export class SyncProtocolHandler {
     session?.hb.stop();
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
+    this.pendingFrontiers.delete(sessionId);
   }
 
   /** Reap a session whose heartbeat went dead: close the socket, then tear down like a disconnect. */
@@ -204,7 +221,27 @@ export class SyncProtocolHandler {
     return this.executor.runQuery(udfPath, args, session.identity);
   }
 
-  private async handleModifyQuerySet(
+  /**
+   * G1 hardening (client-sync verdict §(d) item 3): a query-set change is SERIALIZED with the
+   * reactive fan-out on the same `notifyTail`, per handler. The shipped code ran MQS inline while
+   * `notifyWrites` ran on the tail, so a concurrent invalidation could deliver a NEWER value and
+   * then MQS deliver an OLDER one under contiguous brackets — a silent base regression (with
+   * optimistic layers, "your own committed write vanishes"). Enqueuing MQS on the tail makes the two
+   * strictly ordered: the enqueued unit reads `session.version` at EXECUTION time (inside
+   * `doModifyQuerySet`), so its bracket chains contiguously off whatever notify ran just before it.
+   * `execSub`→`runQuery` never re-enters this tail (it's a pure engine read), so there is no
+   * deadlock — subscribe just waits behind any pending notifies (the accepted latency cost).
+   */
+  private handleModifyQuerySet(
+    session: Session,
+    msg: Extract<ClientMessage, { type: "ModifyQuerySet" }>,
+  ): Promise<void> {
+    const run = this.notifyTail.then(() => this.doModifyQuerySet(session, msg));
+    this.notifyTail = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doModifyQuerySet(
     session: Session,
     msg: Extract<ClientMessage, { type: "ModifyQuerySet" }>,
   ): Promise<void> {
@@ -234,7 +271,13 @@ export class SyncProtocolHandler {
     msg: Extract<ClientMessage, { type: "Mutation" }>,
   ): Promise<void> {
     try {
-      const { value, tables, writeRanges, commitTs } = await this.executor.runMutation(msg.udfPath, msg.args, session.identity);
+      // G4: pass this session's id as `origin` so the commit's fan-out advances its own frontier.
+      const { value, tables, writeRanges, commitTs, forwarded } = await this.executor.runMutation(
+        msg.udfPath,
+        msg.args,
+        session.identity,
+        session.sessionId,
+      );
       this.send(session, {
         type: "MutationResponse",
         requestId: msg.requestId,
@@ -242,6 +285,13 @@ export class SyncProtocolHandler {
         value: convexToJson(value),
         ts: this.mutationResponseTs(commitTs),
       });
+      if (forwarded && commitTs > 0) {
+        // G4 fleet fallback: the origin tag rode a fan-out on ANOTHER node, so it can't reach this
+        // node's `doNotifyWrites`. Record the frontier; `sweepPendingFrontiers` advances this
+        // session's `version.ts` once the drain locally processes a commit at-or-above `commitTs`.
+        const prev = this.pendingFrontiers.get(session.sessionId);
+        if (prev === undefined || commitTs > prev) this.pendingFrontiers.set(session.sessionId, commitTs);
+      }
       if (this.options.autoNotifyOnMutation !== false) {
         await this.notifyWrites({ tables, ranges: writeRanges, commitTs }, session.sessionId);
       }
@@ -307,6 +357,61 @@ export class SyncProtocolHandler {
       const end: StateVersion = { querySet: start.querySet, ts: invalidation.commitTs };
       session.version = end;
       this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
+    }
+
+    // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
+    // advance past its commit. If this commit touched some of ITS subscriptions it is in `bySession`
+    // and the loop above already advanced its ts alongside the write's own modifications — so the ts
+    // advance NEVER precedes the modifications it confirms (ordering correct by construction). Only
+    // when the commit touched NOTHING it subscribes to (absent from `bySession`) do we emit a
+    // standalone empty (`modifications: []`) ts-advancing Transition here.
+    this.advanceOriginFrontier(originSessionId, bySession, invalidation.commitTs);
+
+    // G4 fleet fallback: a FORWARDED mutation's commit fanned out on the OWNER node, so its origin
+    // tag never reached this forwarding node — `handleMutation` recorded a pending frontier instead.
+    // Now that the drain has locally processed a commit at `invalidation.commitTs` (the drain's
+    // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
+    // subscription update this drain didn't already cover.
+    this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+  }
+
+  /** Emit a standalone empty ts-advancing Transition — advances `session.version.ts` to `ts` with no
+   *  modifications. The one construct that closes a client's optimistic-update gate for a commit that
+   *  touched nothing the session subscribes to. Callers guard `ts > session.version.ts` (monotone). */
+  private emitEmptyFrontier(session: Session, ts: number): void {
+    const start = session.version;
+    const end: StateVersion = { querySet: start.querySet, ts };
+    session.version = end;
+    this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications: [] });
+  }
+
+  /** G4 primary: advance the LOCAL origin session's frontier when its own commit missed all its
+   *  subscriptions. A local commit supersedes any stale forwarded fallback entry for that session. */
+  private advanceOriginFrontier(
+    originSessionId: string | undefined,
+    bySession: Map<string, Subscription[]>,
+    commitTs: number,
+  ): void {
+    if (!originSessionId || bySession.has(originSessionId)) return;
+    const session = this.sessions.get(originSessionId);
+    if (!session || commitTs <= session.version.ts) return;
+    this.emitEmptyFrontier(session, commitTs);
+    this.pendingFrontiers.delete(originSessionId);
+  }
+
+  /** G4 fleet fallback: satisfy pending forwarded-mutation frontiers now that the drain reached
+   *  `drainTs`. A frontier still above `drainTs` waits for a later drain; one already covered by the
+   *  session's own subscription update (in `bySession` this drain, or an earlier ts advance) clears
+   *  without a redundant frame; otherwise an empty ts-advance to the frontier is emitted. */
+  private sweepPendingFrontiers(drainTs: number, bySession: Map<string, Subscription[]>): void {
+    if (this.pendingFrontiers.size === 0) return;
+    for (const [sessionId, frontierTs] of this.pendingFrontiers) {
+      if (frontierTs > drainTs) continue; // the forwarded commit hasn't drained locally yet
+      const session = this.sessions.get(sessionId);
+      if (session && session.version.ts < frontierTs && !bySession.has(sessionId)) {
+        this.emitEmptyFrontier(session, frontierTs);
+      }
+      this.pendingFrontiers.delete(sessionId);
     }
   }
 

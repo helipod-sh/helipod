@@ -19,6 +19,16 @@ export interface OplogDelta {
   shardId: ShardId;
   writtenRanges: SerializedKeyRange[];
   writtenTables: string[];
+  /**
+   * G4 origin-frontier tag (client-sync verdict §(d) item 2). The sync SESSION id that originated
+   * this commit — an ephemeral, in-memory-fan-out-only string, stamped HERE at oplog construction
+   * (AFTER `commitWrite` returns) and NEVER passed into `DocStore.commitWrite`/`commitMeta` (it is
+   * not durable state — a spy test asserts it never reaches either store). Rides the fan-out so the
+   * origin session's `version.ts` can be advanced past its own commit even when the commit touched
+   * nothing that session subscribes to. Undefined for any commit with no originating session (HTTP
+   * `/api/run`, drivers, boot steps) — those simply don't get an origin-frontier advance.
+   */
+  origin?: string;
 }
 
 export interface CommitResult<T> {
@@ -91,6 +101,14 @@ export interface RunInTransactionOptions {
    * SQLite ignores and an unset Postgres commit guard never sees.
    */
   commitMeta?: Record<string, string>;
+  /**
+   * G4 origin-frontier tag (client-sync verdict §(d) item 2). The sync SESSION id that originated
+   * this transaction, threaded straight onto the emitted `OplogDelta.origin` at oplog construction
+   * and NOTHING else — the transactor never interprets it, and it is DELIBERATELY not forwarded to
+   * `DocStore.commitWrite`'s `opts` (unlike `commitMeta`): origin is an ephemeral fan-out routing
+   * hint, never durable commit state. Unset → the emitted oplog carries no origin.
+   */
+  origin?: string;
 }
 
 export interface Transactor {
