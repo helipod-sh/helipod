@@ -96,6 +96,10 @@ export function loadProject(
           type: value.type,
           visibility: "public",
           argsType: value.argsJson ? validatorToTsType(value.argsJson) : undefined,
+          // D10: mirrors argsType exactly. A function without `returns` stays `undefined` here,
+          // which `generateApi`/`generateInternalApi` (generate.ts:133) fall back to `any` for —
+          // the documented gap until the inference follow-on (see functions.ts's returnsJson doc).
+          returnsType: value.returnsJson ? validatorToTsType(value.returnsJson) : undefined,
         });
       }
       if (value.type === "mutation" && typeof value.shardBy === "string") {
