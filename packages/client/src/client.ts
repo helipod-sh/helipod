@@ -1,38 +1,41 @@
 /**
- * `StackbaseClient` — the reactive client. It manages query subscriptions (deduped by
- * path+args), applies the version-bracketed sync protocol via the shared client reducer, and
- * resolves mutations against their `MutationResponse`. Subscriptions are reactive: when the
- * server pushes a `Transition`, the affected query's listeners fire with the new value.
+ * `StackbaseClient` — the reactive client, now a **Gated Ledger** (verdict §(b)-(c)). It manages
+ * query subscriptions (deduped by path+args), applies the version-bracketed sync protocol, and
+ * layers optimistic updates over a serializable pending log:
+ *
+ *  - S1 `MutationLog` — one serializable entry per unconfirmed mutation (`./mutation-log`).
+ *  - S2 `LayeredQueryStore` — per-subscription `serverValue` (server ingest) vs `composedValue`
+ *    (server base + surviving optimistic layers replayed on top); what listeners see (`./layered-store`).
+ *  - S3 `Reconciler` — the ONE chokepoint every state change routes through (`./reconcile`).
+ *  - S4 `DeliveryPolicy` — close rules; NO layer crosses a session (`./delivery-policy`).
+ *
+ * Promise resolution is at `MutationResponse` (D3) — today's timing, an explicit divergence from
+ * convex-js's gate-time resolution. A one-shot `query()` returns the **composed** view (D15).
  */
-import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateModification, type StateVersion } from "@stackbase/sync";
+import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateVersion } from "@stackbase/sync";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { ClientTransport } from "./transport";
+import { LayeredQueryStore, queryHash, type Listener, type OptimisticUpdate, type QueryErrorListener, type QueryListener } from "./layered-store";
+import { Reconciler } from "./reconcile";
+import { MutationUndeliveredError } from "./delivery-policy";
+import type { PendingMutation } from "./mutation-log";
 
-export type QueryListener = (value: Value) => void;
-/** Fires when a subscribed query throws server-side (its handler errored). */
-export type QueryErrorListener = (error: string) => void;
+export type { QueryListener, QueryErrorListener };
 
-interface Listener {
-  onUpdate: QueryListener;
-  onError?: QueryErrorListener;
-}
-
-interface Subscription {
-  queryId: number;
-  path: string;
-  args: JSONValue;
-  hash: string;
-  value: Value | undefined;
-  listeners: Set<Listener>;
+let entropyCounter = 0;
+function makeEntropy(): string {
+  return `${Date.now().toString(36)}-${(entropyCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export class StackbaseClient {
   private readonly transport: ClientTransport;
   private version: StateVersion = { ...INITIAL_VERSION };
   private resyncing = false;
-  private readonly subsByHash = new Map<string, Subscription>();
-  private readonly subsById = new Map<number, Subscription>();
+  private closed = false;
+  private readonly store = new LayeredQueryStore();
+  private readonly reconciler: Reconciler;
+  /** Mutation promise callbacks, keyed by requestId — resolved/rejected here; layers live in the log. */
   private readonly pendingMutations = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly pendingActions = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly broadcastListeners = new Set<(topic: string, event: Value) => void>();
@@ -41,16 +44,17 @@ export class StackbaseClient {
   private nextQueryId = 1;
   private nextRequestId = 1;
 
-  constructor(transport: ClientTransport) {
+  constructor(transport: ClientTransport, opts: { gateTimeoutMs?: number } = {}) {
     this.transport = transport;
+    this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs });
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
   }
 
   /**
-   * Subscribe to a reactive query. `onUpdate` fires with the latest value (immediately if cached).
-   * `onError` (optional) fires if the query's handler throws server-side — otherwise a failing
-   * query is logged and leaves the last known value in place.
+   * Subscribe to a reactive query. `onUpdate` fires with the latest **composed** value (immediately
+   * if cached). `onError` (optional) fires if the query's handler throws server-side — otherwise a
+   * failing query is logged and leaves the last known value in place.
    */
   subscribe(
     ref: FunctionReference | string,
@@ -60,33 +64,32 @@ export class StackbaseClient {
   ): () => void {
     const path = getFunctionPath(ref);
     const argsJson = convexToJson(args as Value);
-    const hash = `${path}:${JSON.stringify(argsJson)}`;
+    const hash = queryHash(path, argsJson);
 
-    let sub = this.subsByHash.get(hash);
+    let sub = this.store.byHash.get(hash);
     if (!sub) {
       const queryId = this.nextQueryId++;
-      sub = { queryId, path, args: argsJson, hash, value: undefined, listeners: new Set() };
-      this.subsByHash.set(hash, sub);
-      this.subsById.set(queryId, sub);
+      sub = this.store.create(queryId, path, argsJson, hash);
       this.transport.send({ type: "ModifyQuerySet", add: [{ queryId, udfPath: path, args: argsJson }], remove: [] });
     }
     const listener: Listener = { onUpdate, onError };
     sub.listeners.add(listener);
-    if (sub.value !== undefined) onUpdate(sub.value);
+    // Cached first delivery serves the COMPOSED view (server base + any optimistic layer).
+    if (sub.composedValue !== undefined) onUpdate(sub.composedValue);
 
     return () => {
-      const s = this.subsByHash.get(hash);
+      const s = this.store.byHash.get(hash);
       if (!s) return;
       s.listeners.delete(listener);
       if (s.listeners.size === 0) {
         this.transport.send({ type: "ModifyQuerySet", add: [], remove: [s.queryId] });
-        this.subsByHash.delete(hash);
-        this.subsById.delete(s.queryId);
+        this.store.remove(hash);
       }
     };
   }
 
-  /** One-shot read: subscribe, resolve with the first value (or reject if the query throws), unsubscribe. */
+  /** One-shot read: resolves with the first **composed** value (D15) — a one-shot read can return
+   *  speculative data — or rejects if the query throws; then unsubscribes. */
   query(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
     return new Promise((resolve, reject) => {
       const unsubscribe = this.subscribe(
@@ -94,22 +97,54 @@ export class StackbaseClient {
         args,
         (value) => {
           resolve(value);
-          queueMicrotask(unsubscribe);
+          // Defer the reference: a cached first delivery fires this synchronously inside
+          // `subscribe()`, before `unsubscribe` is assigned (TDZ) — an arrow reads it later.
+          queueMicrotask(() => unsubscribe());
         },
         (error) => {
           reject(new Error(error));
-          queueMicrotask(unsubscribe);
+          queueMicrotask(() => unsubscribe());
         },
       );
     });
   }
 
-  /** Run a mutation; resolves with its return value (or rejects with its error). */
-  mutation(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
+  /**
+   * Run a mutation; resolves with its return value at `MutationResponse` (D3), or rejects with its
+   * error. With `{ optimisticUpdate }`, the closure runs synchronously against a writeable composed
+   * view before the mutation is sent (instant UI); if it throws, `mutation` throws **synchronously**
+   * and nothing is sent. The optimistic layer is dropped on observed inclusion, never on the ack.
+   */
+  mutation(
+    ref: FunctionReference | string,
+    args: Record<string, Value> = {},
+    opts: { optimisticUpdate?: OptimisticUpdate } = {},
+  ): Promise<Value> {
     const requestId = String(this.nextRequestId++);
+    const path = getFunctionPath(ref);
+    const argsJson = convexToJson(args as Value);
+    const entry: PendingMutation = {
+      requestId,
+      udfPath: path,
+      args: argsJson,
+      update: opts.optimisticUpdate,
+      seed: { entropy: makeEntropy(), now: Date.now() },
+      touched: new Set(),
+      status: { type: "unsent" },
+    };
+    // Event 1 — apply at initiation. A throwing updater rethrows here, synchronously, before any
+    // promise is created or anything is sent.
+    this.reconciler.initiate(entry);
+
     return new Promise<Value>((resolve, reject) => {
       this.pendingMutations.set(requestId, { resolve, reject });
-      this.transport.send({ type: "Mutation", requestId, udfPath: getFunctionPath(ref), args: convexToJson(args as Value) });
+      if (this.closed) {
+        // Offline: retain as `unsent` for a reconnect flush (T6). The promise stays pending.
+        entry.status = { type: "unsent" };
+      } else {
+        entry.status = { type: "inflight" };
+        this.transport.send({ type: "Mutation", requestId, udfPath: path, args: argsJson });
+      }
     });
   }
 
@@ -145,33 +180,47 @@ export class StackbaseClient {
     this.onTransportClosed();
   }
 
+  /** @internal test/debug only — the observed-inclusion frontier (resets to 0 at close). */
+  get __maxObservedTs(): number {
+    return this.reconciler.maxObservedTs;
+  }
+
+  /** @internal test/debug only — the live pending-mutation log, in requestId order. */
+  get __pending(): readonly PendingMutation[] {
+    return this.reconciler.entries();
+  }
+
   private onServerMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case "Transition": {
-        // While resyncing, adopt the next transition as the new baseline (its modifications are
-        // the full re-subscribed results) regardless of its start version.
+        // While resyncing, adopt the next transition as the new baseline (its modifications are the
+        // full re-subscribed results) regardless of its start version. Layers are NOT blanket-dropped
+        // (same session, ts still monotone) — the gate still drops any covered `completed` layer.
         if (this.resyncing) {
-          this.applyModifications(msg.modifications);
+          this.reconciler.ingestTransition(msg.modifications, msg.endVersion.ts);
           this.version = msg.endVersion;
           this.resyncing = false;
           return;
         }
-        // Version-bracket guard: a non-contiguous start means a frame was dropped. Do NOT
-        // deliver the (post-gap) values — resync from scratch instead, preserving correctness.
+        // Version-bracket guard: a non-contiguous start means a frame was dropped. Do NOT deliver the
+        // (post-gap) values — resync from scratch instead, preserving correctness.
         if (!versionsEqual(msg.startVersion, this.version)) {
           this.resync();
           return;
         }
-        this.applyModifications(msg.modifications);
+        this.reconciler.ingestTransition(msg.modifications, msg.endVersion.ts);
         this.version = msg.endVersion;
         return;
       }
       case "MutationResponse": {
         const pending = this.pendingMutations.get(msg.requestId);
-        if (pending) {
-          this.pendingMutations.delete(msg.requestId);
-          if (msg.success) pending.resolve(jsonToConvex(msg.value));
-          else pending.reject(new Error(msg.error));
+        this.pendingMutations.delete(msg.requestId);
+        if (msg.success) {
+          pending?.resolve(jsonToConvex(msg.value)); // D3: resolve now
+          this.reconciler.onMutationSuccess(msg.requestId, msg.ts);
+        } else {
+          pending?.reject(new Error(msg.error));
+          this.reconciler.onMutationFailure(msg.requestId);
         }
         return;
       }
@@ -194,33 +243,11 @@ export class StackbaseClient {
     }
   }
 
-  private applyModifications(modifications: StateModification[]): void {
-    for (const mod of modifications) {
-      if (mod.type === "QueryUpdated") {
-        const sub = this.subsById.get(mod.queryId);
-        if (sub) {
-          sub.value = jsonToConvex(mod.value);
-          for (const l of sub.listeners) l.onUpdate(sub.value);
-        }
-      } else if (mod.type === "QueryFailed") {
-        // A subscribed query's handler threw server-side. Surface it to any `onError` listeners
-        // (and always log) so a failing subscription isn't silently swallowed — leaving the last
-        // known value in place for consumers that don't handle errors.
-        const sub = this.subsById.get(mod.queryId);
-        if (sub) {
-          console.error(`[stackbase] query "${sub.path}" failed: ${mod.error}`);
-          for (const l of sub.listeners) l.onError?.(mod.error);
-        }
-      }
-      // QueryRemoved: keep the last known value.
-    }
-  }
-
   /** A frame was missed: reset and re-subscribe all live queries; adopt the server's next state. */
   private resync(): void {
     this.resyncing = true;
     this.version = { ...INITIAL_VERSION };
-    const subs = [...this.subsById.values()];
+    const subs = [...this.store.byId.values()];
     if (subs.length === 0) {
       this.resyncing = false;
       return;
@@ -233,9 +260,15 @@ export class StackbaseClient {
   }
 
   private onTransportClosed(): void {
-    // Never leave a mutation/action promise hanging when the connection drops.
-    for (const [, pending] of this.pendingMutations) pending.reject(new Error("connection closed"));
-    this.pendingMutations.clear();
+    this.closed = true;
+    // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets.
+    const { rejectedInflight } = this.reconciler.closeSession();
+    for (const rid of rejectedInflight) {
+      const pending = this.pendingMutations.get(rid);
+      this.pendingMutations.delete(rid);
+      pending?.reject(new MutationUndeliveredError());
+    }
+    // Actions have no layer — their outcome is simply unknown on a dropped socket.
     for (const [, pending] of this.pendingActions) pending.reject(new Error("connection closed"));
     this.pendingActions.clear();
   }
