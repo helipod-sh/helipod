@@ -15,6 +15,7 @@ import type { StateModification } from "@stackbase/sync";
 import type { LayeredQueryStore, OptimisticStoreView } from "./layered-store";
 import { MutationLog, type PendingMutation } from "./mutation-log";
 import { closeDisposition } from "./delivery-policy";
+import { createOptimisticLocalStore } from "./optimistic-store";
 
 /**
  * The gate predicate (v1). A `completed` layer is safe to drop once this client's own reactive feed
@@ -56,8 +57,15 @@ export class Reconciler {
   }
 
   private invokeUpdate = (entry: PendingMutation, view: OptimisticStoreView): void => {
-    // T5: extend the view here with placeholderId()/now() derived from `entry.seed` before invoking.
-    entry.update!(view, jsonToConvex(entry.args));
+    // T5: enrich the raw view into the typed OptimisticLocalStore (placeholderId()/now()/dev-freeze,
+    // derived from `entry.seed`) before invoking. `entry.update`'s declared param type is the
+    // internal `OptimisticStoreView` (a subset of `OptimisticLocalStore`'s surface); a real
+    // `PendingMutation.update` created via `useMutation(...).withOptimisticUpdate(...)` is actually
+    // typed against `OptimisticLocalStore` and cast down at that boundary (react.tsx) — this is the
+    // runtime guarantee that makes that cast sound: every invocation, from every entry point,
+    // always receives the fully-enriched store.
+    const store = createOptimisticLocalStore(view, entry.seed);
+    entry.update!(store, jsonToConvex(entry.args));
   };
 
   /** Rebuild composed values; drop + warn any entry whose updater threw during replay. */

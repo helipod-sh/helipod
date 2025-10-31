@@ -14,12 +14,14 @@
  */
 import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateVersion } from "@stackbase/sync";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
-import { getFunctionPath, type FunctionReference } from "./api";
+import { getFunctionPath, type AnyFunctionRef, type FunctionReference } from "./api";
+import type { AnyFunctionReference, FunctionArgs, FunctionReturnType } from "./function-types";
 import type { ClientTransport } from "./transport";
 import { LayeredQueryStore, queryHash, type Listener, type OptimisticUpdate, type QueryErrorListener, type QueryListener } from "./layered-store";
 import { Reconciler } from "./reconcile";
 import { MutationUndeliveredError } from "./delivery-policy";
 import type { PendingMutation } from "./mutation-log";
+import type { OptimisticLocalStore } from "./optimistic-store";
 
 export type { QueryListener, QueryErrorListener };
 
@@ -55,9 +57,26 @@ export class StackbaseClient {
    * Subscribe to a reactive query. `onUpdate` fires with the latest **composed** value (immediately
    * if cached). `onError` (optional) fires if the query's handler throws server-side — otherwise a
    * failing query is logged and leaves the last known value in place.
+   *
+   * Two overloads bridge T3/T5's type reconciliation (`api.ts`'s `AnyFunctionRef` doc): a
+   * codegen-generated ref types `args`/`onUpdate`'s value from its declared `__args`/`__returns`;
+   * this package's own untyped `{ __path }` ref or a raw string path fall back to the pre-existing
+   * `Record<string, Value>`/`Value` shape (an explicit `T` still overrides, as before).
    */
+  subscribe<Q extends AnyFunctionReference<any, any>>(
+    ref: Q,
+    args: FunctionArgs<Q>,
+    onUpdate: (value: FunctionReturnType<Q>) => void,
+    onError?: QueryErrorListener,
+  ): () => void;
   subscribe(
     ref: FunctionReference | string,
+    args: Record<string, Value> | undefined,
+    onUpdate: QueryListener,
+    onError?: QueryErrorListener,
+  ): () => void;
+  subscribe(
+    ref: AnyFunctionRef,
     args: Record<string, Value> = {},
     onUpdate: QueryListener,
     onError?: QueryErrorListener,
@@ -90,10 +109,14 @@ export class StackbaseClient {
 
   /** One-shot read: resolves with the first **composed** value (D15) — a one-shot read can return
    *  speculative data — or rejects if the query throws; then unsubscribes. */
-  query(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
+  query<Q extends AnyFunctionReference<any, any>>(ref: Q, args?: FunctionArgs<Q>): Promise<FunctionReturnType<Q>>;
+  query(ref: FunctionReference | string, args?: Record<string, Value>): Promise<Value>;
+  query(ref: AnyFunctionRef, args: Record<string, Value> = {}): Promise<Value> {
     return new Promise((resolve, reject) => {
+      // Overload dispatch needs a concrete match; `ref`/`args` are already the resolved runtime
+      // shape here (the outer overloads did the caller-facing type-checking).
       const unsubscribe = this.subscribe(
-        ref,
+        ref as FunctionReference | string,
         args,
         (value) => {
           resolve(value);
@@ -114,9 +137,25 @@ export class StackbaseClient {
    * error. With `{ optimisticUpdate }`, the closure runs synchronously against a writeable composed
    * view before the mutation is sent (instant UI); if it throws, `mutation` throws **synchronously**
    * and nothing is sent. The optimistic layer is dropped on observed inclusion, never on the ack.
+   *
+   * The typed overload's `optimisticUpdate` is typed against the public `OptimisticLocalStore`
+   * (`Q`'s declared `__args`) — sound because `Reconciler.invokeUpdate` (`reconcile.ts`) ALWAYS
+   * enriches the raw internal view into an `OptimisticLocalStore` before calling `entry.update`,
+   * regardless of entry point; the cast to the internal `OptimisticUpdate` shape below is safe for
+   * exactly that reason.
    */
+  mutation<Q extends AnyFunctionReference<any, any>>(
+    ref: Q,
+    args?: FunctionArgs<Q>,
+    opts?: { optimisticUpdate?: (store: OptimisticLocalStore, args: FunctionArgs<Q>) => void },
+  ): Promise<FunctionReturnType<Q>>;
   mutation(
     ref: FunctionReference | string,
+    args?: Record<string, Value>,
+    opts?: { optimisticUpdate?: OptimisticUpdate },
+  ): Promise<Value>;
+  mutation(
+    ref: AnyFunctionRef,
     args: Record<string, Value> = {},
     opts: { optimisticUpdate?: OptimisticUpdate } = {},
   ): Promise<Value> {
@@ -149,7 +188,9 @@ export class StackbaseClient {
   }
 
   /** Run an action; resolves with its return value (or rejects with its error). Not reactive — an action has no subscription. */
-  action(ref: FunctionReference | string, args: Record<string, Value> = {}): Promise<Value> {
+  action<Q extends AnyFunctionReference<any, any>>(ref: Q, args?: FunctionArgs<Q>): Promise<FunctionReturnType<Q>>;
+  action(ref: FunctionReference | string, args?: Record<string, Value>): Promise<Value>;
+  action(ref: AnyFunctionRef, args: Record<string, Value> = {}): Promise<Value> {
     const requestId = String(this.nextRequestId++);
     return new Promise<Value>((resolve, reject) => {
       this.pendingActions.set(requestId, { resolve, reject });

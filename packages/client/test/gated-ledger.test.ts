@@ -425,4 +425,26 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
     client.close();
     expect(client.__maxObservedTs).toBe(0);
   });
+
+  it("T5: the optimisticUpdate closure runs BEFORE the Mutation frame hits the wire (order proof)", () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    baseSubscribe(t, client, ["seed"]);
+    const order: string[] = [];
+    const sendSpy = vi.spyOn(t, "send");
+    sendSpy.mockImplementation((m) => {
+      if (m.type === "Mutation") order.push("send");
+      MockTransport.prototype.send.call(t, m);
+    });
+
+    void client.mutation(api.messages.send, { conversationId: "c1", body: "opt" }, {
+      optimisticUpdate: (store, args) => {
+        order.push("update");
+        appendUpdate("temp-1")(store, args);
+      },
+    });
+
+    expect(order).toEqual(["update", "send"]); // the closure ran, and completed, before any send
+    expect(t.sent.some((m) => m.type === "Mutation")).toBe(true);
+  });
 });
