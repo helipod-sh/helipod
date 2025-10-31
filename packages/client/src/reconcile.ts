@@ -56,6 +56,11 @@ export class Reconciler {
     return this.log.entriesInOrder();
   }
 
+  /** T6: `unsent` entries in FIFO (requestId/insertion) order — flushed on transport reopen. */
+  unsentInOrder(): PendingMutation[] {
+    return this.log.entriesInOrder().filter((e) => e.status.type === "unsent");
+  }
+
   private invokeUpdate = (entry: PendingMutation, view: OptimisticStoreView): void => {
     // T5: enrich the raw view into the typed OptimisticLocalStore (placeholderId()/now()/dev-freeze,
     // derived from `entry.seed`) before invoking. `entry.update`'s declared param type is the

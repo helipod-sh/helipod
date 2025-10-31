@@ -43,14 +43,20 @@ export class StackbaseClient {
   private readonly broadcastListeners = new Set<(topic: string, event: Value) => void>();
   private readonly disposeTransport: () => void;
   private readonly disposeClose: () => void;
+  private readonly disposeReopen?: () => void;
   private nextQueryId = 1;
   private nextRequestId = 1;
+  /** The last token passed to `setAuth` (T6: replayed on reconnect). Unset until `setAuth` is
+   *  first called — a transport that never had auth set never sends a spurious `SetAuth` on reopen. */
+  private hasSetAuth = false;
+  private lastAuthToken: string | null = null;
 
   constructor(transport: ClientTransport, opts: { gateTimeoutMs?: number } = {}) {
     this.transport = transport;
     this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs });
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
+    this.disposeReopen = transport.onReopen?.(() => this.onTransportReopened());
   }
 
   /**
@@ -200,6 +206,8 @@ export class StackbaseClient {
 
   /** Set (or clear) the session identity for this connection; the server re-runs subscriptions under it. */
   setAuth(token: string | null): void {
+    this.hasSetAuth = true;
+    this.lastAuthToken = token;
     this.transport.send({ type: "SetAuth", token });
   }
 
@@ -217,6 +225,7 @@ export class StackbaseClient {
   close(): void {
     this.disposeTransport();
     this.disposeClose();
+    this.disposeReopen?.();
     this.transport.close();
     this.onTransportClosed();
   }
@@ -312,5 +321,24 @@ export class StackbaseClient {
     // Actions have no layer — their outcome is simply unknown on a dropped socket.
     for (const [, pending] of this.pendingActions) pending.reject(new Error("connection closed"));
     this.pendingActions.clear();
+  }
+
+  /**
+   * T6: the transport reconnected (a fresh session — the server has no state for it). Order is
+   * load-bearing (verdict §(c) event 6): `SetAuth` replay first (the server re-runs subscriptions
+   * under the right identity), THEN resubscribe every live query (the existing resync path — it
+   * adopts the reply as a fresh baseline regardless of its start version), THEN flush every
+   * `unsent` mutation FIFO — each transitions `unsent` -> `inflight` reusing its ORIGINAL
+   * `requestId` (never re-minted), so the promise created at `mutation()` call time stays the one
+   * that resolves when the new session's `MutationResponse` arrives.
+   */
+  private onTransportReopened(): void {
+    this.closed = false;
+    if (this.hasSetAuth) this.transport.send({ type: "SetAuth", token: this.lastAuthToken });
+    this.resync();
+    for (const entry of this.reconciler.unsentInOrder()) {
+      entry.status = { type: "inflight" };
+      this.transport.send({ type: "Mutation", requestId: entry.requestId, udfPath: entry.udfPath, args: entry.args });
+    }
   }
 }

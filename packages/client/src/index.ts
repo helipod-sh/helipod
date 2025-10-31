@@ -7,8 +7,8 @@ export { anyApi, getFunctionPath } from "./api";
 
 export type { AnyFunctionReference, FunctionArgs, FunctionReturnType } from "./function-types";
 
-export type { ClientTransport, LoopbackLike } from "./transport";
-export { loopbackTransport, webSocketTransport } from "./transport";
+export type { ClientTransport, LoopbackLike, WebSocketTransportOptions } from "./transport";
+export { loopbackTransport, webSocketTransport, reconnectDelayMs } from "./transport";
 
 export type { QueryListener, QueryErrorListener } from "./client";
 export { StackbaseClient } from "./client";
