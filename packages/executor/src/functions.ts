@@ -13,12 +13,17 @@ import {
   type ValidatorJSON,
   type ObjectType,
   type Validator,
-  type OptionalProperty,
 } from "@stackbase/values";
 
-/** A validator over an arbitrary return type `T` (any optionality — a return value isn't itself
- * an object field, but reuses the same `Validator` carrier as `args`). */
-type ReturnsValidator<T> = Validator<T, OptionalProperty>;
+/**
+ * A validator over an arbitrary return type `T`. Deliberately constrained to `"required"` —
+ * `OptionalValidator.toJSON()` delegates to its inner validator (values/validator.ts), so a
+ * top-level `v.optional(...)` here would silently lose its optionality in the codegen'd JSON
+ * (`Returns` would come out as `T`, not `T | undefined`). Express "may be undefined" with
+ * `v.union(v.string(), v.null())` (or make the value itself nullable) instead — `v.optional`
+ * is only meaningful as an *object field* modifier, not as a return-type wrapper.
+ */
+type ReturnsValidator<T> = Validator<T, "required">;
 
 /** A mutation's shard selector: a validated arg NAME (common case) or a resolver over the args. */
 export type ShardBy = string | ((args: any) => unknown);

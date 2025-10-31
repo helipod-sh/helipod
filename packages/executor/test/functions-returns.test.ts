@@ -59,4 +59,22 @@ describe("functions.ts — returns validator surface", () => {
     expect(fn.shardBy).toBe("id");
     expect(fn.returnsJson).toMatchObject({ type: "null" });
   });
+
+  it("a top-level `returns: v.optional(...)` is a type error (caught by typecheck, not this runtime assertion)", () => {
+    // `OptionalValidator.toJSON()` delegates to its inner validator, so an optional wrapper at
+    // the top level of `returns` would silently vanish from the codegen'd `Returns` JSON. The
+    // `ReturnsValidator<T>` type is narrowed to `Validator<T, "required">` to make this a
+    // compile-time error instead — express "may be undefined" via `v.union(..., v.null())`.
+    query({
+      // @ts-expect-error — `returns` must be a required validator; v.optional is object-field-only
+      returns: v.optional(v.string()),
+      handler: () => undefined,
+    });
+    // Runtime-valid alternative for the same "maybe absent" intent:
+    const fn = query({
+      returns: v.union(v.string(), v.null()),
+      handler: () => null,
+    });
+    expect(fn.returnsJson).toMatchObject({ type: "union" });
+  });
 });
