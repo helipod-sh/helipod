@@ -151,6 +151,57 @@ describe("webSocketTransport — reconnect state machine", () => {
     expect(() => t.send({ type: "SetAuth", token: null })).not.toThrow();
   });
 
+  it("frames sent while down (post-disconnect, pre-reconnect) are dropped, not buffered onto the next socket — reopen listeners see the wire first", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0); // delay = 150ms for attempt 0
+    const createWebSocket = freshFakeFactory();
+    const t = webSocketTransport("ws://x", { createWebSocket });
+
+    FakeSocket.instances[0]!.emit("open"); // initial connect
+    FakeSocket.instances[0]!.emit("close"); // disconnect — now in backoff
+
+    // Raw frames sent while down (mirrors what a bare subscribe/unsubscribe/setAuth/publishEphemeral
+    // call does at the transport level): must NOT survive to the next socket.
+    t.send({ type: "SetAuth", token: "stale" });
+    t.send({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "messages:list", args: {} }], remove: [] });
+    t.send({ type: "EphemeralPublish", topic: "typing", event: null });
+
+    vi.advanceTimersByTime(150); // backoff elapses — new socket created
+    expect(FakeSocket.instances.length).toBe(2);
+    expect(FakeSocket.instances[1]!.sent).toEqual([]); // nothing flushed ahead of the reopen sequence
+
+    let reopens = 0;
+    t.onReopen!(() => reopens++);
+    FakeSocket.instances[1]!.emit("open");
+    expect(reopens).toBe(1);
+    expect(FakeSocket.instances[1]!.sent).toEqual([]); // still nothing — those frames are gone for good
+
+    // The wire only ever sees whatever the reopen listener itself sends, in its own order.
+    t.send({ type: "SetAuth", token: "fresh" });
+    expect(FakeSocket.instances[1]!.sent).toEqual([JSON.stringify({ type: "SetAuth", token: "fresh" })]);
+  });
+
+  it("pre-first-open buffering is untouched: frames sent before the transport's very first socket opens still flush on that first open", () => {
+    vi.useFakeTimers();
+    const createWebSocket = freshFakeFactory();
+    const t = webSocketTransport("ws://x", { createWebSocket });
+
+    t.send({ type: "SetAuth", token: "initial" }); // sent before the first socket is even open
+    expect(FakeSocket.instances[0]!.sent).toEqual([]); // still queued, not dropped
+
+    FakeSocket.instances[0]!.emit("open");
+    expect(FakeSocket.instances[0]!.sent).toEqual([JSON.stringify({ type: "SetAuth", token: "initial" })]);
+  });
+
+  it("{ reconnect: false }: frames sent before the terminal close still buffer and flush on a manual first open (unchanged)", () => {
+    const createWebSocket = freshFakeFactory();
+    const t = webSocketTransport("ws://x", { createWebSocket, reconnect: false });
+
+    t.send({ type: "SetAuth", token: "initial" }); // pre-open, queued as before
+    FakeSocket.instances[0]!.emit("open");
+    expect(FakeSocket.instances[0]!.sent).toEqual([JSON.stringify({ type: "SetAuth", token: "initial" })]);
+  });
+
   it("explicit close() during a pending backoff cancels the scheduled reconnect", () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0);

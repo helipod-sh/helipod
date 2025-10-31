@@ -91,7 +91,11 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
   const listeners = new Set<(msg: ServerMessage) => void>();
   const closeListeners = new Set<() => void>();
   const reopenListeners = new Set<() => void>();
-  const queue: ClientMessage[] = []; // only buffers while the CURRENT socket isn't open
+  // Only buffers frames sent before the transport's very FIRST socket has ever opened (normal
+  // connection-establishment latency), or — with `{reconnect: false}` — a terminal transport's
+  // manual-first-open window. It must NEVER accumulate frames sent during a down period AFTER a
+  // socket has already opened once: see the `send()` guard below for why.
+  const queue: ClientMessage[] = [];
 
   let ws: WebSocket;
   let open = false;
@@ -111,6 +115,10 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
   const announceClose = (): void => {
     if (announced) return;
     announced = true;
+    // Belt-and-suspenders: `send()` below already refuses to enqueue once `everOpened && reconnect`,
+    // so this is normally a no-op by the time it runs. It stays as the backstop for the one case
+    // where the queue can legitimately hold something at this point — the very first connection
+    // attempt closing/erroring before ever opening — so nothing stale lingers into a later cycle.
     queue.length = 0;
     for (const l of closeListeners) l();
   };
@@ -162,8 +170,22 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
   return {
     send(message) {
       if (terminated) return; // never throw after a terminal close
-      if (open) ws.send(JSON.stringify(message));
-      else queue.push(message);
+      if (open) {
+        ws.send(JSON.stringify(message));
+        return;
+      }
+      // THE RULE: once a socket has opened at least once and reconnect is enabled, a NEW session is
+      // reconstructed ENTIRELY from client state by the reopen sequence (SetAuth replay,
+      // resubscribe-from-live-queries, unsent-mutation flush) — see `client.ts#onTransportReopened`.
+      // A frame sent here, while down between sessions, is stale by definition: whatever it
+      // represents (a subscribe/unsubscribe against the live-query map, a SetAuth token, an
+      // ephemeral publish) is either re-derived by that sequence or is correctly lossy (ephemeral).
+      // Queueing it would let it land on the fresh session ahead of — and duplicating/pre-empting —
+      // the reopen sequence, so it's dropped instead of buffered. Pre-first-open buffering (normal
+      // connection latency) and `{reconnect: false}`'s terminal buffering are untouched: this branch
+      // only applies once `everOpened && reconnect`.
+      if (everOpened && reconnect) return;
+      queue.push(message);
     },
     onMessage(listener) {
       listeners.add(listener);
