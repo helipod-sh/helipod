@@ -8,6 +8,7 @@ import { SimpleIndexCatalog, query, mutation, action, type RegisteredFunction } 
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { StackbaseClient, loopbackTransport, anyApi } from "../src/index";
+import type { OptimisticLocalStore } from "../src/optimistic-store";
 import { StackbaseProvider, useQuery, useMutation, useAction } from "../src/react";
 
 const MESSAGES = 10001;
@@ -57,6 +58,31 @@ function Chat() {
   );
 }
 
+// T5: `useMutation(ref).withOptimisticUpdate(fn)` — a module-level updater (stable identity across
+// renders, so the stability probe below can prove the chained callable doesn't churn).
+function appendOptimistic(store: OptimisticLocalStore, args: Record<string, unknown>): void {
+  const { conversationId, body } = args as { conversationId: string; body: string };
+  const list = (store.getQuery(api.messages.list, { conversationId }) as Array<{ _id: string; body: string }> | undefined) ?? [];
+  store.setQuery(api.messages.list, { conversationId }, [...list, { _id: store.placeholderId("messages"), body }]);
+}
+
+function OptimisticChat() {
+  const messages = useQuery<Array<{ _id: string; body: string }>>(api.messages.list, { conversationId: "c1" });
+  const send = useMutation(api.messages.send).withOptimisticUpdate(appendOptimistic);
+  return (
+    <div>
+      <ul aria-label="messages">{(messages ?? []).map((m) => <li key={m._id}>{m.body}</li>)}</ul>
+      <button onClick={() => void send({ conversationId: "c1", body: "hello" })}>send</button>
+    </div>
+  );
+}
+
+function StabilityProbe({ tick, onCapture }: { tick: number; onCapture: (fn: unknown) => void }) {
+  const send = useMutation(api.messages.send).withOptimisticUpdate(appendOptimistic);
+  onCapture(send);
+  return <div aria-label="tick">{tick}</div>;
+}
+
 describe("React useQuery / useMutation", () => {
   it("renders a reactive list that updates after a mutation", async () => {
     const client = new StackbaseClient(loopbackTransport(runtime.connect("react")));
@@ -84,5 +110,43 @@ describe("React useQuery / useMutation", () => {
     );
     fireEvent.click(screen.getByText("shout"));
     await waitFor(() => expect(screen.getByLabelText("shouted").textContent).toBe("HI"));
+  });
+
+  it("useMutation(...).withOptimisticUpdate(...): renders the optimistic row instantly, before the server round trip settles", async () => {
+    const client = new StackbaseClient(loopbackTransport(runtime.connect("react-optimistic")));
+    render(
+      <StackbaseProvider client={client}>
+        <OptimisticChat />
+      </StackbaseProvider>,
+    );
+    await waitFor(() => expect(screen.getByLabelText("messages").children.length).toBe(0));
+
+    fireEvent.click(screen.getByText("send"));
+    // No `waitFor` — the updater ran synchronously inside the click handler (before any network
+    // round trip), and React (via RTL's `act`-wrapped `fireEvent`) has already flushed that render.
+    expect(screen.getByText("hello")).toBeTruthy();
+    expect(screen.getByLabelText("messages").children.length).toBe(1);
+
+    // Let the real commit settle (the temp id swaps for the authoritative one, same one row).
+    await waitFor(() => expect(screen.getByLabelText("messages").children.length).toBe(1));
+    expect(screen.getByText("hello")).toBeTruthy();
+  });
+
+  it("useMutation(...).withOptimisticUpdate(...): the returned callable is stable across re-renders", () => {
+    const client = new StackbaseClient(loopbackTransport(runtime.connect("react-stability")));
+    const captured: unknown[] = [];
+    const { rerender } = render(
+      <StackbaseProvider client={client}>
+        <StabilityProbe tick={0} onCapture={(fn) => captured.push(fn)} />
+      </StackbaseProvider>,
+    );
+    rerender(
+      <StackbaseProvider client={client}>
+        <StabilityProbe tick={1} onCapture={(fn) => captured.push(fn)} />
+      </StackbaseProvider>,
+    );
+    expect(screen.getByLabelText("tick").textContent).toBe("1");
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toBe(captured[1]); // same client + path + updater reference -> no churn
   });
 });

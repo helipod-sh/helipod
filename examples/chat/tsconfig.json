@@ -2,7 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "jsx": "react-jsx"
   },
-  "include": ["convex", "stackbase.config.ts", "test", "scripts"]
+  "include": ["convex", "stackbase.config.ts", "test", "scripts", "web"]
 }

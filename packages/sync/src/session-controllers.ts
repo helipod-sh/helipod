@@ -7,7 +7,22 @@
  *    outbound chokepoint for a session, sending straight through when the socket has room, queueing
  *    (up to a frame cap) when it doesn't, and DROPPING frames once the queue is full or the client
  *    has been backpressured for too long. Dropped frames are safe — the client resyncs from its last
- *    acknowledged version — so we favour dropping over stalling the whole node.
+ *    acknowledged version — so we favour dropping over stalling the whole node. `MutationResponse`/
+ *    `ActionResponse` frames are the one exception: they carry `undroppable: true` and are never
+ *    dropped by cap or timeout (they only queue behind the cap; the queue's timeout-abandon path
+ *    also spares them) — a dropped response has no version bracket and no retransmit, so losing one
+ *    would strand a client-side mutation as permanently "inflight" instead of self-healing.
+ *    But "never dropped" cannot mean "never bounded" — a client that floods mutations into its own
+ *    deliberately-slow-reading socket would otherwise grow the undroppable queue without limit and
+ *    exhaust server memory, the exact resource-exhaustion hole the droppable cap exists to close.
+ *    So undroppable frames get their OWN cap (`maxUndroppableQueuedFrames`, counted separately from
+ *    `maxQueuedFrames` — a session's droppable-Transition backlog never affects how much undroppable-
+ *    response headroom it has, and vice versa). Crucially, exceeding that cap must NOT silently drop
+ *    the frame — that would corrupt exactly the "inflight" invariant this exemption exists to
+ *    protect. Instead it TERMINATES the session (`onOverflow`, wired by the handler to the same
+ *    reap-and-close path a dead heartbeat uses). A closed transport is protocol-safe: the client's
+ *    own close/reconnect handling turns every in-flight request into an explicit unknown-outcome
+ *    error, which is the honest outcome here — not a silent gap the client believes never happened.
  *  - **A dead-but-not-closed connection** (half-open TCP: the peer vanished, no FIN/RST). Nothing
  *    reads, nothing errors; the session lingers forever holding subscriptions. `SessionHeartbeat-
  *    Controller` reaps it via transport-level ping/pong liveness — NOT inbound-message silence (an
@@ -27,6 +42,14 @@ export interface BackpressureOptions {
   maxQueuedFrames?: number;
   /** Sustained-backpressure duration after which the queue is abandoned to drops. Default 30s. */
   slowClientTimeoutMs?: number;
+  /**
+   * Cap on queued undroppable (MutationResponse/ActionResponse) frames, counted SEPARATELY from
+   * `maxQueuedFrames` (a session's droppable backlog never eats into this budget or vice versa).
+   * Defaults to `maxQueuedFrames`'s own (effective, post-default) value — same order of magnitude
+   * headroom, no new tuning knob to reason about by default. Exceeding it does not drop the frame
+   * (see the class doc) — it terminates the session via `onOverflow`.
+   */
+  maxUndroppableQueuedFrames?: number;
 }
 
 const DEFAULT_HIGH_WATER = 1024 * 1024;
@@ -41,12 +64,24 @@ const DEFAULT_SLOW_CLIENT_MS = 30_000;
  * queue is abandoned to drops. Drops are counted and warned about exactly once per episode (an
  * episode ends when the session fully drains back to an empty queue with a below-high-water buffer).
  */
+/** One queued frame, tagged with whether it may ever be dropped. */
+interface QueuedFrame {
+  data: string;
+  /** True for MutationResponse/ActionResponse — never dropped by cap or by timeout-abandon. */
+  undroppable: boolean;
+}
+
 export class SessionBackpressureController {
   private readonly highWaterBytes: number;
   private readonly maxQueuedFrames: number;
   private readonly slowClientTimeoutMs: number;
-  private readonly queue: string[] = [];
+  private readonly maxUndroppableQueuedFrames: number;
+  private readonly queue: QueuedFrame[] = [];
   private _droppedFrames = 0;
+  /** Count of undroppable frames currently sitting in `queue` — the separate overflow budget. */
+  private undroppableQueuedCount = 0;
+  /** True once `onOverflow` has fired, so a dying session can't fire it twice. */
+  private overflowed = false;
   /** Wall-clock ms at which the current backpressure episode began, or null if not backpressured. */
   private backpressureSince: number | null = null;
   /** True once any frame has been dropped in the current episode; resets on full drain. */
@@ -56,10 +91,19 @@ export class SessionBackpressureController {
     private readonly socket: SyncWebSocket,
     opts: BackpressureOptions = {},
     private readonly now: () => number = () => Date.now(),
+    /**
+     * Fires exactly once when the undroppable queue overflows its cap. The controller only
+     * decides "this session must die" — it has no session registry to tear down itself, so it
+     * hands off to whatever the owner wires here (the handler reuses the same reap-and-close path
+     * a dead heartbeat uses). Defaults to a no-op so standalone/unit use of this class doesn't
+     * require wiring one up.
+     */
+    private readonly onOverflow: () => void = () => {},
   ) {
     this.highWaterBytes = opts.highWaterBytes ?? DEFAULT_HIGH_WATER;
     this.maxQueuedFrames = opts.maxQueuedFrames ?? DEFAULT_MAX_QUEUED;
     this.slowClientTimeoutMs = opts.slowClientTimeoutMs ?? DEFAULT_SLOW_CLIENT_MS;
+    this.maxUndroppableQueuedFrames = opts.maxUndroppableQueuedFrames ?? this.maxQueuedFrames;
   }
 
   get droppedFrames(): number {
@@ -71,17 +115,36 @@ export class SessionBackpressureController {
     return this._droppedThisEpisode;
   }
 
-  /** The ONLY way frames leave a session. Sends now, queues, or drops per the class contract. */
-  send(data: string): void {
+  /**
+   * The ONLY way frames leave a session. Sends now, queues, or drops per the class contract.
+   * `undroppable` (default false) exempts a frame from BOTH drop paths below — the cap check
+   * and the sustained-backpressure abandon — so it only ever queues or sends, never vanishes.
+   */
+  send(data: string, undroppable = false): void {
     // Drain first so a recovered client immediately gets both its backlog and this frame in order.
     this.flush();
     if (this.queue.length === 0 && this.socket.bufferedAmount < this.highWaterBytes) {
       this.socket.send(data);
       return;
     }
+    if (undroppable) {
+      // The separate, hard cap: once the client is backpressured AND has this many undroppable
+      // responses already queued behind it, queuing forever is indistinguishable from the
+      // unbounded-memory hole this whole class exists to close. There is no lower-harm move here
+      // (dropping would corrupt the "never silently drop a response" invariant) — so the session
+      // dies instead, with a distinct, greppable reason.
+      if (this.undroppableQueuedCount >= this.maxUndroppableQueuedFrames) {
+        this.overflow();
+        return;
+      }
+      this.queue.push({ data, undroppable: true });
+      this.undroppableQueuedCount += 1;
+      return;
+    }
     // Backpressured: mark the episode start on first entry.
     if (this.backpressureSince === null) this.backpressureSince = this.now();
-    // Give up on a client that has been backpressured too long — abandon the whole backlog + this frame.
+    // Give up on a client that has been backpressured too long — abandon the whole backlog + this frame
+    // (undroppable frames already queued survive; see `dropQueue`).
     if (this.now() - this.backpressureSince >= this.slowClientTimeoutMs) {
       this.dropQueue();
       this.countDrop();
@@ -92,7 +155,7 @@ export class SessionBackpressureController {
       this.countDrop();
       return;
     }
-    this.queue.push(data);
+    this.queue.push({ data, undroppable: false });
   }
 
   /**
@@ -102,7 +165,9 @@ export class SessionBackpressureController {
    */
   flush(): void {
     while (this.queue.length > 0 && this.socket.bufferedAmount < this.highWaterBytes) {
-      this.socket.send(this.queue.shift() as string);
+      const frame = this.queue.shift() as QueuedFrame;
+      if (frame.undroppable) this.undroppableQueuedCount -= 1;
+      this.socket.send(frame.data);
     }
     if (this.queue.length === 0 && this.socket.bufferedAmount < this.highWaterBytes) {
       // Fully caught up — end the episode so a later re-entry warns afresh.
@@ -117,16 +182,35 @@ export class SessionBackpressureController {
     }
   }
 
+  /** Abandon the queue to drops — EXCEPT undroppable frames, which stay queued for a later flush. */
   private dropQueue(): void {
-    if (this.queue.length === 0) return;
-    this._droppedFrames += this.queue.length;
+    const survivors = this.queue.filter((f) => f.undroppable);
+    const droppedCount = this.queue.length - survivors.length;
+    if (droppedCount === 0) return;
+    this._droppedFrames += droppedCount;
     this.queue.length = 0;
+    this.queue.push(...survivors);
     this.markEpisodeDropped();
   }
 
   private countDrop(): void {
     this._droppedFrames += 1;
     this.markEpisodeDropped();
+  }
+
+  /**
+   * The undroppable queue exceeded its cap. Fires `onOverflow` exactly once (a session that's
+   * already dying doesn't need a second kill signal) with a distinct, greppable log reason —
+   * deliberately NOT reusing the backpressure-drop warning text, since this is a different failure
+   * mode (session termination, not a dropped frame) that ops needs to be able to tell apart.
+   */
+  private overflow(): void {
+    if (this.overflowed) return;
+    this.overflowed = true;
+    console.warn(
+      `[sync] undroppable-queue-overflow: terminating session (queued undroppable frames >= cap=${this.maxUndroppableQueuedFrames})`,
+    );
+    this.onOverflow();
   }
 
   private markEpisodeDropped(): void {

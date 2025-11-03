@@ -308,6 +308,70 @@ describe("ShardedTransactor — observeTimestamp fan-out", () => {
   });
 });
 
+describe("ShardedTransactor — D12 origin-frontier ordering (every shard oracle >= commitTs BEFORE fan-out is observable)", () => {
+  /** Snapshot every shard oracle's lastCommitted at the exact moment `fanout.publish` fires. */
+  type OracleShards = Map<ShardId, { oracle: { getLastCommittedTimestamp(): bigint } }>;
+  function makeCapture(getTransactor: () => Transactor) {
+    const seen: Array<{ commitTs: bigint; laggards: Array<{ shard: ShardId; ts: bigint }> }> = [];
+    const fanout = {
+      publish(delta: { commitTs: bigint; shardId: ShardId }) {
+        // INSIDE the publish callback — this is the moment the commit becomes observable to a drain.
+        // The D12 invariant: by now every shard oracle has lastCommitted >= this commit's ts.
+        const shards = (getTransactor() as unknown as { shards: OracleShards }).shards;
+        const laggards: Array<{ shard: ShardId; ts: bigint }> = [];
+        for (const [id, w] of shards) {
+          const ts = w.oracle.getLastCommittedTimestamp();
+          if (ts < delta.commitTs) laggards.push({ shard: id, ts });
+        }
+        seen.push({ commitTs: delta.commitTs, laggards });
+      },
+    };
+    return { fanout, seen };
+  }
+
+  it("single-commit path: at each shard's fan-out, EVERY shard oracle (incl. the never-committing one) has already observed the commit ts", async () => {
+    const store = await makeSetupStore();
+    let transactor!: Transactor;
+    const { fanout, seen } = makeCapture(() => transactor);
+    transactor = new ShardedTransactor(store, { fanout });
+
+    // Seed s2 so its writer+oracle EXIST before s1 ever commits — s2 is the stand-in for the
+    // shared, never-routed "default" query oracle that the D12 bug left lagging.
+    await transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { seed: true }), { shardId: "s2" });
+    // Now commit repeatedly on s1. Each s1 commit's fan-out must find s2 already >= that commitTs.
+    for (let i = 0; i < 6; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: BigInt(i) }), { shardId: "s1" });
+    }
+
+    expect(seen.length).toBeGreaterThanOrEqual(7); // 1 seed + 6
+    for (const s of seen) {
+      expect(s.laggards, `commitTs=${s.commitTs}: shard oracles behind it at fan-out: ${JSON.stringify(s.laggards.map((l) => [l.shard, l.ts.toString()]))}`).toEqual([]);
+    }
+  });
+
+  it("group-commit path: the same ordering holds PER UNIT (each unit's fan-out sees all shard oracles >= that unit's ts)", async () => {
+    const store = await makeSetupStore();
+    let transactor!: Transactor;
+    const { fanout, seen } = makeCapture(() => transactor);
+    transactor = new ShardedTransactor(store, { fanout, groupCommit: true });
+
+    await transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { seed: true }), { shardId: "s2" });
+    // Fire several s1 commits concurrently so the committer loop actually batches units together —
+    // the per-unit publish inside runCommitter must still fan each unit's ts before publishing it.
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        transactor.runInTransaction(async (ctx) => ctx.put(newDocumentId(TABLE), { i: BigInt(i) }), { shardId: "s1" }),
+      ),
+    );
+
+    expect(seen.length).toBeGreaterThanOrEqual(7);
+    for (const s of seen) {
+      expect(s.laggards, `commitTs=${s.commitTs}: shard oracles behind it at fan-out: ${JSON.stringify(s.laggards.map((l) => [l.shard, l.ts.toString()]))}`).toEqual([]);
+    }
+  });
+});
+
 describe("ShardedTransactor — byte-identity with SingleWriterTransactor", () => {
   it("a default-shard-only ShardedTransactor produces the identical commit sequence and store state as SingleWriterTransactor", async () => {
     const storeSingle = await makeSetupStore();

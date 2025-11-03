@@ -56,7 +56,13 @@ export type StateModification =
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }
-  | { type: "MutationResponse"; requestId: string; success: true; value: JSONValue }
+  // `ts` (W1) carries the mutation's commitTs — the wire-level ack an optimistic-update gate
+  // consumes to know when it is safe to drop a client-side pending layer (never on the ack
+  // alone: the gate waits until the session's OWN reactive feed has observed this ts too).
+  // Optional, not because it is sometimes skippable, but because the server omits it on the
+  // one path where sending it would be a lie — see the send-site invariant check at
+  // handler.ts's `handleMutation`. Additive: old clients that don't know the field ignore it.
+  | { type: "MutationResponse"; requestId: string; success: true; value: JSONValue; ts?: number }
   | { type: "MutationResponse"; requestId: string; success: false; error: string }
   | { type: "ActionResponse"; requestId: string; success: true; value: JSONValue }
   | { type: "ActionResponse"; requestId: string; success: false; error: string }

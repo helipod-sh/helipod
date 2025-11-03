@@ -142,6 +142,26 @@ describe("subscribe → reactive push", () => {
   });
 });
 
+describe("MutationResponse.ts (W1)", () => {
+  it("carries the mutation's commitTs, matching the ts a subscriber's Transition observes", async () => {
+    await subscribe("sA", 1, "messages:list", { conversationId: "c1" });
+    socketA.clear();
+    socketB.clear();
+
+    await mutate("sB", "r1", "messages:send", { conversationId: "c1", body: "hi" });
+
+    const resp = socketB.messages.find((m) => m.type === "MutationResponse") as Extract<
+      ServerMessage,
+      { type: "MutationResponse"; success: true }
+    >;
+    expect(resp.success).toBe(true);
+    expect(resp.ts).toBeGreaterThan(0);
+
+    const transition = socketA.transitions()[0]!;
+    expect(resp.ts).toBe(transition.endVersion.ts);
+  });
+});
+
 describe("version brackets", () => {
   it("a dropped transition makes the client resync from scratch", async () => {
     await subscribe("sA", 1, "messages:list", { conversationId: "c1" });

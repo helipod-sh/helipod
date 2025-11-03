@@ -178,6 +178,9 @@ interface StagedUnit {
   readonly documents: DocumentLogEntry[];
   readonly indexUpdates: IndexWrite[];
   readonly meta?: Record<string, string>;
+  /** G4 origin-frontier tag — the originating session id, stamped per-unit onto this unit's
+   *  `OplogDelta.origin` at publish time. NEVER folded into `meta` (which reaches the store). */
+  readonly origin?: string;
   readonly writeRanges: RangeSet;
   readonly shardId: ShardId;
   readonly value: unknown;
@@ -247,6 +250,18 @@ export class ShardWriter {
      *  loop (`runInTransactionGrouped`); when false (default) it uses the byte-identical
      *  single-commit path (`runInTransactionSingle`). Structurally separate branches by design. */
     private readonly groupCommit: boolean = false,
+    /**
+     * D12 origin-frontier ordering hook — invoked SYNCHRONOUSLY with a commit's ts AFTER this
+     * shard's own `oracle.publishCommitted(ts)` but BEFORE `fanout.publish(oplog)` makes the commit
+     * observable to the drain. `ShardedTransactor` wires it to fan `ts` to EVERY shard oracle (+ its
+     * `observedHighWater` floor), so the transactor-wide "every shard oracle lastCommitted >= ts
+     * before any consumer can observe this commit" invariant holds (see the call site in `commit()`
+     * and `runCommitter()`). `SingleWriterTransactor` leaves it unset: a single oracle is already
+     * advanced by the `publishCommitted` above, so its `publishCommitted`-precedes-`publish` ordering
+     * needs nothing extra. Must not `await` — the ordering guarantee is that no microtask turn
+     * separates the fan-out from the publish.
+     */
+    private readonly onCommitted: ((ts: bigint) => void) | undefined = undefined,
   ) {}
 
   runInTransaction<T>(
@@ -305,7 +320,7 @@ export class ShardWriter {
           return { value, committed: false, commitTs: snapshotTs, shardId, oplog: null };
         }
 
-        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value, options.commitMeta));
+        return await this.mutex.runExclusive(() => this.commit(ctx, snapshotTs, shardId, value, options.commitMeta, options.origin));
       } catch (e) {
         if (e instanceof OccConflictError && attempt < maxRetries) continue; // deterministic replay
         throw e;
@@ -321,6 +336,7 @@ export class ShardWriter {
     shardId: ShardId,
     value: T,
     commitMeta?: Record<string, string>,
+    origin?: string,
   ): Promise<CommitResult<T>> {
     // Phase 1 — validate: any commit after our snapshot that touched something we (validated-ly)
     // read? Consults ONLY `validatedReads` (D4) — `recordReadUnvalidated` ranges never abort a
@@ -358,14 +374,27 @@ export class ShardWriter {
     // Advance the committed clock only now that writes are applied + recorded (still under
     // the mutex), so a concurrent snapshot can never observe this commit before it's safe.
     this.oracle.publishCommitted(commitTs);
+    // D12 INVARIANT: by the time this commit's fan-out payload is observable to ANY consumer, every
+    // shard oracle in this transactor has lastCommitted >= commitTs — so any query re-run the payload
+    // triggers reads a snapshot that includes this commit. The cross-oracle fan-out MUST complete here,
+    // synchronously, BEFORE `fanout.publish` below schedules the drain: on the shared query shard
+    // (`"default"`, never routed) a re-run otherwise reads a snapshot lagging THIS commit, so the
+    // confirming Transition carries endVersion.ts=commitTs with a stale (write-absent) QueryUpdated —
+    // and with no foreign traffic there is no later notify, so it stays stale (the cross-shard
+    // reactivity bug latent since B2a). `SingleWriterTransactor` leaves `onCommitted` unset — its one
+    // oracle was already advanced by `publishCommitted` above.
+    this.onCommitted?.(commitTs);
     this.prune();
 
     const ranges = ctx.writeRanges.toArray();
+    // G4: stamp the origin tag HERE, at oplog construction, AFTER `commitWrite` has returned — it
+    // never reached the store (see `commitWrite` above, called with `{ meta: commitMeta }` only).
     const oplog: OplogDelta = {
       commitTs,
       shardId,
       writtenRanges: ranges.map(serializeKeyRange),
       writtenTables: writtenTablesFromRanges(ranges),
+      origin,
     };
     // Fire-and-forget so a slow/failing subscriber never stalls or aborts the single writer.
     if (this.fanout) {
@@ -420,7 +449,7 @@ export class ShardWriter {
         // the stage step runs in a loop (each iteration re-takes the mutex and re-validates).
         for (;;) {
           const outcome = await this.mutex.runExclusive(() =>
-            this.stageUnit(ctx, snapshotTs, shardId, value, options.commitMeta),
+            this.stageUnit(ctx, snapshotTs, shardId, value, options.commitMeta, options.origin),
           );
           if (outcome.kind === "cut") {
             await outcome.wait; // the in-flight same-doc batch promoted; re-stage against committed state
@@ -457,6 +486,7 @@ export class ShardWriter {
     shardId: ShardId,
     value: T,
     commitMeta: Record<string, string> | undefined,
+    origin: string | undefined,
   ): Promise<StageOutcome<T>> {
     // Phase 1 — VALIDATE against `recentCommits ∪ flushingBatch ∪ pendingBatch` (D2 two-buffer
     // visibility). Every staged-but-unlanded write is logically after every current snapshot, so a
@@ -516,6 +546,7 @@ export class ShardWriter {
       documents,
       indexUpdates,
       meta: commitMeta,
+      origin,
       writeRanges: ctx.writeRanges,
       shardId,
       value,
@@ -599,12 +630,17 @@ export class ShardWriter {
             // Advance the committed clock only now that this unit's rows are applied + ring-recorded,
             // strictly in unit order, so a concurrent snapshot never observes it before it is safe.
             this.oracle.publishCommitted(ts);
+            // D12 invariant, PER UNIT: fan THIS unit's ts to every shard oracle BEFORE publishing its
+            // oplog below — the same "every shard oracle >= commitTs before observable" ordering the
+            // single-commit path enforces in `commit()`. Synchronous, no await before the publish.
+            this.onCommitted?.(ts);
             const ranges = u.writeRanges.toArray();
             const oplog: OplogDelta = {
               commitTs: ts,
               shardId: u.shardId,
               writtenRanges: ranges.map(serializeKeyRange),
               writtenTables: writtenTablesFromRanges(ranges),
+              origin: u.origin, // G4: per-unit origin — stamped at publish, never sent to the store
             };
             if (this.fanout) {
               try {

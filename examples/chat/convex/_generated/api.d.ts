@@ -17,8 +17,8 @@ export type Api = {
     _onChange: FunctionReference<"mutation", "public", any, any>;
   };
   "messages": {
-    list: FunctionReference<"query", "public", any, any>;
+    list: FunctionReference<"query", "public", { conversationId: Id<"conversations"> }, Array<{ _id: Id<"messages">; _creationTime: number; conversationId: Id<"conversations">; author: string; body: string }>>;
     listPaginated: FunctionReference<"query", "public", any, any>;
-    send: FunctionReference<"mutation", "public", { conversationId: Id<"conversations">; author: string; body: string }, any>;
+    send: FunctionReference<"mutation", "public", { conversationId: Id<"conversations">; author: string; body: string }, Id<"messages">>;
   };
 };

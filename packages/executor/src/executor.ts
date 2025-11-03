@@ -194,6 +194,16 @@ export interface RunOptions {
    */
   commitMeta?: Record<string, string>;
   /**
+   * G4 origin-frontier tag (client-sync verdict §(d) item 2). The originating sync SESSION id,
+   * threaded straight through to `Transactor.runInTransaction`'s `origin` (which stamps it onto the
+   * emitted `OplogDelta.origin`) and never interpreted by the executor. Meaningful for mutations
+   * only — a query never reaches the commit path. Set by the sync handler's `runMutation` (to the
+   * committing session's id) so the fan-out can advance that session's own `version.ts` even when
+   * the commit touched nothing it subscribes to. Unlike `commitMeta`, it is NEVER made durable.
+   * Unset → identical to before this field existed.
+   */
+  origin?: string;
+  /**
    * Force this run's reads onto the PRIMARY store even when a hybrid `queryPath` (replica) is
    * configured (Fleet B3). Set by the runtime's DRIVER path (`DriverContext.runFunction`): a
    * component driver (scheduler/cron/reaper/workflow) runs on the writer that OWNS the shard its
@@ -402,7 +412,7 @@ export class InlineUdfExecutor {
 
         const value = await fn.handler(guestCtx, args);
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
-      }, { shardId, commitMeta: options.commitMeta });
+      }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.

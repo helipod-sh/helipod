@@ -406,7 +406,7 @@ export class EmbeddedRuntime {
           readRanges: r.readRanges.map(serializeKeyRange),
         };
       },
-      async runMutation(path, args, identity) {
+      async runMutation(path, args, identity, origin) {
         const fn = resolve(path);
         // Per-shard write routing now lives at the executor chokepoint (`executor.run` forwards a
         // mutation whose resolved shard this node doesn't own — see `InlineUdfExecutor.run`). The
@@ -414,7 +414,12 @@ export class EmbeddedRuntime {
         // driver/scheduler path; it is removed as superseded. A forwarded run comes back with a null
         // oplog, so `tables`/`writeRanges` are empty — the same shape this path reported for a
         // forwarded write before.
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
+        // G4: thread the committing session's id (`origin`) into the run opts so it lands on the
+        // emitted `OplogDelta.origin` → fan-out payload → drain → `notifyWrites(inv, origin)`. It is
+        // never made durable (stamped after `commitWrite` returns; see the transactor). A FORWARDED
+        // mutation produces no local oplog, so the tag can't ride the local fan-out — the handler's
+        // response-path frontier fallback (see `forwarded` below) covers that node-crossing case.
+        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards, origin });
         return {
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
@@ -425,6 +430,11 @@ export class EmbeddedRuntime {
           // back to that instead of silently reporting 0, so a forwarded sharded write's commitTs
           // reaches this path the same way a local one's does.
           commitTs: Number(r.oplog?.commitTs ?? r.commitTs ?? 0n),
+          // G4 fleet fallback signal: a committed write with NO local oplog was forwarded to another
+          // shard's owner — its commit fanned out on the OWNER, so the origin tag (which only rides a
+          // LOCAL fan-out) can't reach this forwarding node's `doNotifyWrites`. The handler advances
+          // the origin session's frontier via the drain-gated fallback instead (see handler.ts).
+          forwarded: r.committed && r.oplog === null,
         };
       },
       async runAdminQuery(path, args) {
@@ -457,7 +467,7 @@ export class EmbeddedRuntime {
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
     const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false, verifyAdmin: options.verifyAdmin });
-    const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number }> = [];
+    const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number; origin?: string }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
       if (draining) return;
@@ -477,7 +487,9 @@ export class EmbeddedRuntime {
               console.error("[runtime] beforeNotify hook threw:", e);
             }
           }
-          await handler.notifyWrites(inv);
+          // G4: pass the origin session id through so `doNotifyWrites` can advance that session's
+          // own `version.ts` past this commit even when it touched nothing the session subscribes to.
+          await handler.notifyWrites(inv, inv.origin);
         }
       } finally {
         draining = false;
@@ -654,7 +666,7 @@ export class EmbeddedRuntime {
     const namesForCommit = (tableIds: readonly string[]): string[] => translateTableIds(tableIds, tableNumberToName);
 
     adapter.subscribe((payload) => {
-      queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs });
+      queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs, origin: payload.origin });
       void drain();
       if (commitSubs.size > 0) {
         fireCommitSubs(commitSubs, { tables: namesForCommit(payload.tables), ranges: payload.ranges, commitTs: payload.commitTs });
