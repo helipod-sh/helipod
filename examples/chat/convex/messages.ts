@@ -9,14 +9,26 @@ import { query, mutation } from "./_generated/server";
 // build time (D7) so a shardBy/args mismatch is caught before it ever reaches the kernel guards.
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
+  // `returns` (optional but recommended, docs/enduser/optimistic-updates.md#return-type-typing)
+  // is what makes `useMutation(api.messages.send).withOptimisticUpdate(...)`'s store typed below.
+  returns: v.id("messages"),
   shardBy: "conversationId",
   handler: (ctx, args) =>
     ctx.db.insert("messages", { conversationId: args.conversationId, author: args.author, body: args.body }),
 });
 
 export const list = query({
-  handler: (ctx, args: { conversationId: string }) =>
-    ctx.db.query("messages", "by_conversation").eq("conversationId", args.conversationId).collect(),
+  args: { conversationId: v.id("conversations") },
+  returns: v.array(
+    v.object({
+      _id: v.id("messages"),
+      _creationTime: v.number(),
+      conversationId: v.id("conversations"),
+      author: v.string(),
+      body: v.string(),
+    }),
+  ),
+  handler: (ctx, args) => ctx.db.query("messages", "by_conversation").eq("conversationId", args.conversationId).collect(),
 });
 
 export const listPaginated = query({
