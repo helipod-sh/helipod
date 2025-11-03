@@ -91,11 +91,16 @@ export class ShardedTransactor implements Transactor {
     // for its snapshot. Without this fan-out, `"default"`'s oracle only ever advances via ITS
     // OWN commits, so a query could sit forever behind every OTHER shard's writes (e.g. a boot
     // step that touches `"default"` before any sharded write seeds it at ts 0) — silently
-    // violating D3's "queries read everything, unaffected by sharding" contract. `result.commitTs`
-    // is always populated (a real commit ts, or — for a pure read — that shard's own snapshotTs,
-    // itself always <= the true global max), so fanning it via the SAME `observeTimestamp` the
-    // fleet-follower seam already uses is a safe, monotonic no-op when the observer is already
-    // caught up, and a correctness fix when it isn't.
+    // violating D3's "queries read everything, unaffected by sharding" contract.
+    //
+    // For a COMMITTED transaction, the `onCommitted` hook (wired in `createShard`) has ALREADY fanned
+    // `commitTs` to every shard oracle synchronously, BEFORE the writer's `fanout.publish` — that is
+    // the D12 ordering fix and the reason this call is no longer where cross-shard freshness is
+    // established. This post-resolve fan-out is retained because it still MATTERS for PURE READS
+    // (`committed: false` never reaches `commit()`/`onCommitted`, yet `result.commitTs` = that shard's
+    // snapshotTs, which the shared query oracle should still catch up to). For a committed txn it is a
+    // harmless monotonic no-op (the oracles are already >= commitTs), and it is never the drain-critical
+    // advance — that is now the hook's, ordered ahead of publish.
     this.observeTimestamp(result.commitTs);
     return result;
   }
@@ -175,6 +180,16 @@ export class ShardedTransactor implements Transactor {
       this.options.fanout,
       this.options.headroom ?? DEFAULT_HEADROOM,
       this.options.groupCommit ?? false,
+      // D12 origin-frontier ordering hook: the writer invokes this synchronously with each commit's
+      // ts AFTER its own oracle.publishCommitted but BEFORE fanout.publish makes the commit observable
+      // to the drain. Fanning `ts` to EVERY shard oracle (+ observedHighWater) here — not post-resolve
+      // as `runInTransaction` used to be the only place — is what upholds the invariant: by the time
+      // any consumer sees this commit's fan-out payload, every shard oracle (including the shared,
+      // never-routed "default" query oracle) has lastCommitted >= ts, so a triggered query re-run
+      // reads a snapshot that includes the very commit that woke it. Without this, the confirming
+      // cross-shard Transition carried a stale (write-absent) QueryUpdated and — absent foreign
+      // traffic — stayed stale forever (the reactivity bug latent since B2a; D12).
+      (ts) => this.observeTimestamp(ts),
     );
     this.shards.set(shardId, writer);
     return writer;

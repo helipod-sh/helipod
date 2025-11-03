@@ -664,37 +664,35 @@ function appendAllUpdate(tempId: string, channelId: string, body: string): (stor
 }
 
 /**
- * ⛔ SKIPPED — D12 IS FALSIFIED under the shipped 8-shard default. This test is the reproducer; it
- * is left `.skip` (per the verdict/brief: "Do NOT choose a server fix — surface NEEDS-DECISION").
- * Un-skip it to reproduce the falsification. Full write-up in `.superpowers/sdd/task-7-report.md`.
+ * D12 — the concurrent cross-shard no-flicker guarantee. FALSIFIED at first (8-shard default), then
+ * FIXED at the source (transactor origin-frontier ordering hook). Full write-up in
+ * `.superpowers/sdd/task-7-report.md`.
  *
- * FINDING (measured over the real `stackbase dev` server, 8 shards, this exact fixture):
- *   • 8 shards + concurrent foreign traffic: FLICKERS 15/15 iterations.
- *   • 1 shard  + concurrent foreign traffic: 0/15 (clean). Sharding is the sole cause.
+ * ORIGINAL FINDING (measured over the real `stackbase dev` server, 8 shards, this exact fixture):
+ *   • 8 shards + concurrent foreign traffic: FLICKERED 15/15 iterations.
+ *   • 1 shard  + concurrent foreign traffic: 0/15 (clean). Sharding was the sole cause.
  *
  * ROOT CAUSE (raw wire evidence): A commits its own write on shard X at commitTs=Ca. The
- * origin-frontier Transition that CONFIRMS that commit arrives with `endVersion.ts == Ca` but its
- * `listAll` re-run reads a snapshot that LAGS shard X — i.e. it carries `QueryUpdated: []` (A's own
- * write absent). The client advances its observed frontier to Ca (≥ Ca), drops the — now `completed`
- * — optimistic layer, and adopts the empty base → the composed view momentarily shows `[]` (the
- * write vanishes) before the NEXT (higher-ts) Transition finally re-reads `listAll` WITH the write.
- * This VIOLATES the single-node origin-frontier guarantee ("the ts advance never precedes the
- * modifications it confirms", `sync/handler.ts` doNotifyWrites) — which holds single-shard but breaks
- * across shards because the cross-shard scan's query snapshot/oracle can lag the very commit whose
- * fan-out triggered the re-run. (Even WITHOUT foreign traffic, the 8-shard case fails to converge in
- * 8s: the lone empty re-run is never followed by another commit to re-reveal the write — a
- * cross-shard read-your-own-write staleness of the same root cause.)
+ * origin-frontier Transition that CONFIRMS that commit arrived with `endVersion.ts == Ca` but its
+ * `listAll` re-run read a snapshot that LAGGED shard X — i.e. it carried `QueryUpdated: []` (A's own
+ * write absent). The client advanced its observed frontier to Ca, dropped the — now `completed` —
+ * optimistic layer, and adopted the empty base → the composed view momentarily showed `[]` (the write
+ * vanished). The cross-shard `listAll` runs on the never-routed `"default"` query oracle, which had
+ * NOT yet observed Ca because `ShardedTransactor` fanned the commit ts to the other shard oracles only
+ * AFTER `runInTransaction` resolved — i.e. AFTER `ShardWriter.commit`'s `fanout.publish` had already
+ * scheduled the drain. (Even WITHOUT foreign traffic the 8-shard case failed to converge: the lone
+ * empty re-run was never followed by another commit to re-reveal the write — stale forever.)
  *
- * DECISION REQUIRED (controller/user — verdict §(i).4): the v1 server fix is one of
- *   (a) ts-ordered drain (drain per-session invalidations in commitTs order, and/or make the
- *       cross-shard query re-run read at a snapshot ≥ the triggering commitTs), or
- *   (b) frontier-gated session ts (never stamp `endVersion.ts` ahead of the snapshot the
- *       modifications were actually read at) — build on the Fenced-Frontier "everything ≤ ts
- *       reflected" machinery; the long-term primitive is per-mutation identity confirmation on the
- *       wire (lmid-shape). This is out of scope for a client/test slice and MUST NOT be chosen here.
+ * THE FIX (option (a), at the source — `packages/transactor`): `ShardWriter` gained an `onCommitted`
+ * hook invoked SYNCHRONOUSLY with each commit's ts AFTER its own `oracle.publishCommitted` but BEFORE
+ * `fanout.publish`; `ShardedTransactor` wires it to fan the ts to EVERY shard oracle (+ observedHighWater)
+ * — so by the time the fan-out payload is observable to any drain, every shard oracle (incl. the shared
+ * `"default"` query oracle) has lastCommitted >= Ca, and the triggered re-run reads a snapshot that
+ * includes the commit that woke it. The group-commit committer loop applies the same ordering per unit.
+ * Both cases below now hold.
  */
 describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test", () => {
-  it.skip("across many iterations, the client's own write is NEVER dropped from its composed view before the server base includes it (drop-never-precedes-inclusion) — FALSIFIED, see block comment", async () => {
+  it("across many iterations, the client's own write is NEVER dropped from its composed view before the server base includes it (drop-never-precedes-inclusion)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-"));
     const loaded = await loadConvexDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "convex"));
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
@@ -753,4 +751,52 @@ describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test"
       rmSync(dataDir, { recursive: true, force: true });
     }
   }, 180_000);
+
+  // The stale-forever regression, isolated: 8 shards, NO foreign traffic. Before the fix, A's own
+  // cross-shard write never converged (the lone empty origin-frontier re-run was never followed by a
+  // later commit to re-reveal it — a permanent cross-shard read-your-own-write staleness). The
+  // onCommitted ordering hook makes the confirming Transition itself carry the write, so a single
+  // mutation converges PROMPTLY with nothing else happening on the server.
+  it("with NO foreign traffic, A's own cross-shard write converges promptly (the stale-forever regression is gone)", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-solo-"));
+    const loaded = await loadConvexDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "convex"));
+    const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
+    const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
+    const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
+    const NUM_SHARDS = 8;
+    const [chA] = distinctShardPair(NUM_SHARDS);
+
+    const clientA = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const frames: Array<Set<string>> = [];
+    let unsub: (() => void) | undefined;
+    try {
+      unsub = clientA.subscribe(api.messages.listAll, {}, (val) => {
+        frames.push(new Set((val as Array<{ body: string }>).map((d) => d.body)));
+      });
+      await waitFor(() => frames.length >= 1, 8000, "d12-solo initial");
+
+      const body = "A-solo-write";
+      const startFrame = frames.length;
+      // A single cross-shard optimistic write, then NOTHING else touches the server.
+      await clientA.mutation(api.messages.send, { channelId: chA, body }, { optimisticUpdate: appendAllUpdate("temp-solo", chA, body) });
+      // With the fix, the confirming Transition already includes the write — so this converges well
+      // inside the timeout WITHOUT any second commit to nudge the query. (Pre-fix: never.)
+      await waitFor(() => frames.at(-1)!.has(body), 8000, "d12-solo converge");
+
+      // And no drop-before-inclusion flicker on the way there.
+      let seen = false;
+      const flickers: string[] = [];
+      for (let f = startFrame; f < frames.length; f++) {
+        if (frames[f]!.has(body)) seen = true;
+        else if (seen) flickers.push(`solo: body vanished at frame ${f} before server inclusion`);
+      }
+      expect(flickers, flickers.join("\n")).toEqual([]);
+    } finally {
+      unsub?.();
+      clientA.close();
+      await server.close();
+      void store;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
