@@ -297,7 +297,15 @@ function dockerAvailable(): boolean {
 }
 
 const HAS_DOCKER = dockerAvailable();
-const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
+// Opt-in on top of the Docker gate (STACKBASE_BENCH=1): the matrix is ~4.5 minutes of DELIBERATE
+// full-throttle Postgres load. Docker-presence alone made it run inside every full `bun run test`,
+// where it resource-starved the timing-sensitive fleet-e2e container scenarios in the same parallel
+// pass — the root cause of the recurring "fleet flake" (diagnosed 2026-07-09: the simultaneous-boot
+// E2E timed out at 42s while the two bench matrices held the machine for 90s + 186s). Benchmarks
+// are load generators, not tests: they run only when explicitly asked for (T5-gate runs, perf work),
+// mirroring bench-fanout-pg's STACKBASE_BENCH_FANOUT_PG pattern.
+const RUN_BENCH = HAS_DOCKER && process.env["STACKBASE_BENCH"] === "1";
+const maybeDescribe = RUN_BENCH ? describe : describe.skip;
 
 const CONTAINER_NAME = `sb-fleet-bench-${process.pid}`;
 
