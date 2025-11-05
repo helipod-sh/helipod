@@ -585,6 +585,8 @@ export class SqliteDocStore implements DocStore {
         const identity = row.identity as string;
         const clientId = row.client_id as string;
         const seq = Number(row.seq);
+        // NUL-delimited: identity/clientId are client-supplied strings, so an unescaped join
+        // (e.g. a plain space) lets ("a","b c") and ("a b","c") collide onto the same batch key.
         const key = `${identity} ${clientId}`;
         const cur = maxByClient.get(key);
         if (!cur || seq > cur.maxSeq) maxByClient.set(key, { identity, clientId, maxSeq: seq });

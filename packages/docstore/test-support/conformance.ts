@@ -642,6 +642,28 @@ export function runDocStoreConformance(
           expect(await store.getClientVerdict("bob", "shared-id", 1)).not.toBeNull();
           expect(await store.getClientFloor("bob", "shared-id")).toBeNull();
         });
+
+        it("does not collide two (identity, clientId) pairs that share an unescaped-join delimiter", async () => {
+          // ("a","b c") and ("a b","c") both stringify to "a b c" under a naive space-joined batch
+          // key — the sweep must key its per-client floor advance so these two never merge, or one
+          // client's floor would advance while the other's swept receipts sit below no floor at all
+          // (a later resend of that client's seq would then re-run instead of classifying STALE).
+          await store.recordClientVerdict("a", "b c", 5, { verdict: "applied", commitTs: 5n });
+          await store.recordClientVerdict("a b", "c", 9, { verdict: "applied", commitTs: 9n });
+
+          const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
+          const { deletedCount } = await store.sweepExpiredClientMutations(farFuture);
+          expect(deletedCount).toBe(2);
+
+          // Each client's own floor lands at its own swept seq — never the other's.
+          expect(await store.getClientFloor("a", "b c")).toBe(5);
+          expect(await store.getClientFloor("a b", "c")).toBe(9);
+
+          // The swept records are gone, so a resend of each seq falls to the STALE boundary check
+          // (seq <= floor, no record): both floors now cover their own seq, so both classify STALE.
+          expect(await store.getClientVerdict("a", "b c", 5)).toBeNull();
+          expect(await store.getClientVerdict("a b", "c", 9)).toBeNull();
+        });
       });
     });
   });
