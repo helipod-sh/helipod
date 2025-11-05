@@ -135,6 +135,21 @@ class ZeroWatermarkDocStore implements DocStore {
   writeGlobalIfAbsent(...args: Parameters<DocStore["writeGlobalIfAbsent"]>) {
     return this.real.writeGlobalIfAbsent(...args);
   }
+  getClientVerdict(...args: Parameters<DocStore["getClientVerdict"]>) {
+    return this.real.getClientVerdict(...args);
+  }
+  getClientFloor(...args: Parameters<DocStore["getClientFloor"]>) {
+    return this.real.getClientFloor(...args);
+  }
+  recordClientVerdict(...args: Parameters<DocStore["recordClientVerdict"]>) {
+    return this.real.recordClientVerdict(...args);
+  }
+  pruneClientMutations(...args: Parameters<DocStore["pruneClientMutations"]>) {
+    return this.real.pruneClientMutations(...args);
+  }
+  sweepExpiredClientMutations(...args: Parameters<DocStore["sweepExpiredClientMutations"]>) {
+    return this.real.sweepExpiredClientMutations(...args);
+  }
   close() {
     return this.real.close();
   }

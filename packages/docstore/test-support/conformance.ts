@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { DocStore, DocumentLogEntry, InternalDocumentId, IndexWrite } from "../src/types";
-import { getPrevRevQueryKey } from "../src/types";
+import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "../src/types";
 import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
 
@@ -442,6 +442,206 @@ export function runDocStoreConformance(
         const id = newDocumentId(TABLE);
         const commitTs = await store.commitWrite([rev(id, 0n, null, "x")], []);
         expect((await store.get(id))!.ts).toBe(commitTs);
+      });
+    });
+
+    // Client mutation receipts (the Receipted Outbox, verdict §(c)): `getClientVerdict`/
+    // `getClientFloor`/`recordClientVerdict`/`pruneClientMutations`/`sweepExpiredClientMutations`.
+    // Each client is scoped to its own `identity`/`clientId` pair in every test so cases never
+    // interfere with each other regardless of execution order.
+    describe("client mutation receipts (verdict §(c))", () => {
+      // The STALE boundary matrix — the raw store primitives a caller's classification logic
+      // (`floor === null` → run; `seq <= floor` && no record → STALE; record present → replay;
+      // `seq > floor` && no record → run) is built from. T4 tests the primitives directly; the
+      // decision arithmetic itself lives in the runtime/handler (a later task).
+      describe("the STALE boundary matrix", () => {
+        it("record-hit: a recorded verdict is returned regardless of the floor", async () => {
+          await store.recordClientVerdict("u", "record-hit", 3, { verdict: "applied", commitTs: 10n });
+          const rec = await store.getClientVerdict("u", "record-hit", 3);
+          expect(rec).not.toBeNull();
+          expect(rec!.verdict).toBe("applied");
+          expect(rec!.commitTs).toBe(10n);
+        });
+
+        it("hole-below-floor: a never-recorded seq below the floor reads as no record", async () => {
+          // ackedThrough=5 with nothing recorded at seq 2 — the client's own claim covers the hole.
+          await store.pruneClientMutations("u", "hole-below", { ackedThrough: 5 });
+          expect(await store.getClientFloor("u", "hole-below")).toBe(5);
+          expect(await store.getClientVerdict("u", "hole-below", 2)).toBeNull();
+        });
+
+        it("exactly-floor: a seq AT the floor with no record reads as no record", async () => {
+          await store.recordClientVerdict("u", "exact-floor", 5, { verdict: "applied", commitTs: 5n });
+          const { prunedThroughSeq } = await store.pruneClientMutations("u", "exact-floor", { ackedThrough: 5 });
+          expect(prunedThroughSeq).toBe(5);
+          expect(await store.getClientFloor("u", "exact-floor")).toBe(5);
+          // The record at seq 5 was itself deleted by the ack-prune (seq <= ackedThrough).
+          expect(await store.getClientVerdict("u", "exact-floor", 5)).toBeNull();
+        });
+
+        it("floor+1-miss-runs: a never-recorded seq just above the floor is a genuine miss", async () => {
+          await store.pruneClientMutations("u", "floor-plus-1", { ackedThrough: 5 });
+          expect(await store.getClientFloor("u", "floor-plus-1")).toBe(5);
+          expect(await store.getClientVerdict("u", "floor-plus-1", 6)).toBeNull(); // 6 > floor → not stale
+        });
+
+        it("fresh-client-no-floor-runs: a client that was never pruned has no floor at all", async () => {
+          expect(await store.getClientFloor("u", "fresh-client")).toBeNull();
+          expect(await store.getClientVerdict("u", "fresh-client", 1)).toBeNull();
+        });
+      });
+
+      describe("recordClientVerdict", () => {
+        it("round-trips an applied verdict with its value", async () => {
+          await store.recordClientVerdict("u", "c1", 1, { verdict: "applied", commitTs: 42n, value: { ok: true } });
+          const rec = await store.getClientVerdict("u", "c1", 1);
+          expect(rec).toEqual({
+            verdict: "applied",
+            commitTs: 42n,
+            hasValue: true,
+            value: { ok: true },
+            errorCode: null,
+            createdAt: expect.any(Number),
+          });
+        });
+
+        it("round-trips a failed verdict with its error code", async () => {
+          await store.recordClientVerdict("u", "c2", 1, { verdict: "failed", commitTs: 7n, errorCode: "BOOM" });
+          const rec = await store.getClientVerdict("u", "c2", 1);
+          expect(rec!.verdict).toBe("failed");
+          expect(rec!.errorCode).toBe("BOOM");
+          expect(rec!.hasValue).toBe(false);
+          expect(rec!.value).toBeNull();
+        });
+
+        it("is idempotent — ON CONFLICT DO NOTHING: a second write for the same seq never overwrites", async () => {
+          await store.recordClientVerdict("u", "c3", 1, { verdict: "applied", commitTs: 1n, value: "first" });
+          // A concurrent resend that also lands (verdict §(c) Risk R3) — first-wins, no throw.
+          await expect(
+            store.recordClientVerdict("u", "c3", 1, { verdict: "failed", commitTs: 2n, errorCode: "SHOULD_NOT_LAND" }),
+          ).resolves.toBeUndefined();
+          const rec = await store.getClientVerdict("u", "c3", 1);
+          expect(rec!.verdict).toBe("applied");
+          expect(rec!.commitTs).toBe(1n);
+          expect(rec!.value).toBe("first");
+        });
+
+        it("drops (never truncates or rejects) a value over the cap, reading back as hasValue:false", async () => {
+          const big = "x".repeat(CLIENT_VERDICT_VALUE_CAP_BYTES + 1);
+          await expect(
+            store.recordClientVerdict("u", "c4", 1, { verdict: "applied", commitTs: 1n, value: big }),
+          ).resolves.toBeUndefined();
+          const rec = await store.getClientVerdict("u", "c4", 1);
+          expect(rec).not.toBeNull(); // the receipt itself still lands
+          expect(rec!.verdict).toBe("applied");
+          expect(rec!.hasValue).toBe(false); // -> wire valueMissing
+          expect(rec!.value).toBeNull();
+        });
+
+        it("keeps a value at or under the cap intact", async () => {
+          // Account for JSON quoting overhead so the serialized size lands at (not under) the cap.
+          const atCap = "x".repeat(CLIENT_VERDICT_VALUE_CAP_BYTES - 2);
+          await store.recordClientVerdict("u", "c5", 1, { verdict: "applied", commitTs: 1n, value: atCap });
+          const rec = await store.getClientVerdict("u", "c5", 1);
+          expect(rec!.hasValue).toBe(true);
+          expect(rec!.value).toBe(atCap);
+        });
+      });
+
+      describe("pruneClientMutations", () => {
+        it("deletes acked records and advances the floor atomically, in one call", async () => {
+          await store.recordClientVerdict("u", "p1", 1, { verdict: "applied", commitTs: 1n });
+          await store.recordClientVerdict("u", "p1", 2, { verdict: "applied", commitTs: 2n });
+          await store.recordClientVerdict("u", "p1", 3, { verdict: "applied", commitTs: 3n });
+
+          const { prunedThroughSeq } = await store.pruneClientMutations("u", "p1", { ackedThrough: 2 });
+          expect(prunedThroughSeq).toBe(2);
+          expect(await store.getClientFloor("u", "p1")).toBe(2);
+          expect(await store.getClientVerdict("u", "p1", 1)).toBeNull();
+          expect(await store.getClientVerdict("u", "p1", 2)).toBeNull();
+          expect(await store.getClientVerdict("u", "p1", 3)).not.toBeNull(); // above the ack, untouched
+        });
+
+        it("floor-covers-holes: ackedThrough advances the floor even with no matching records at all", async () => {
+          // Nothing was ever recorded for seq 1..4 (e.g. the client skipped them client-side), yet
+          // the client's own ackedThrough claim still covers them — decision 3.
+          const { prunedThroughSeq } = await store.pruneClientMutations("u", "p2", { ackedThrough: 4 });
+          expect(prunedThroughSeq).toBe(4);
+          expect(await store.getClientFloor("u", "p2")).toBe(4);
+        });
+
+        it("never regresses the floor across repeated calls", async () => {
+          await store.pruneClientMutations("u", "p3", { ackedThrough: 10 });
+          expect(await store.getClientFloor("u", "p3")).toBe(10);
+
+          const { prunedThroughSeq } = await store.pruneClientMutations("u", "p3", { ackedThrough: 3 });
+          expect(prunedThroughSeq).toBe(10); // a lower ack never moves the floor backward
+          expect(await store.getClientFloor("u", "p3")).toBe(10);
+        });
+
+        it("is a no-op when nothing is covered and no floor existed — no floor row is conjured", async () => {
+          const { prunedThroughSeq } = await store.pruneClientMutations("u", "p4", {});
+          expect(prunedThroughSeq).toBe(0);
+          expect(await store.getClientFloor("u", "p4")).toBeNull();
+        });
+
+        it("does not affect a different client's records or floor", async () => {
+          await store.recordClientVerdict("u", "p5-a", 1, { verdict: "applied", commitTs: 1n });
+          await store.recordClientVerdict("u", "p5-b", 1, { verdict: "applied", commitTs: 1n });
+          await store.pruneClientMutations("u", "p5-a", { ackedThrough: 10 });
+          expect(await store.getClientVerdict("u", "p5-b", 1)).not.toBeNull();
+          expect(await store.getClientFloor("u", "p5-b")).toBeNull();
+        });
+      });
+
+      describe("sweepExpiredClientMutations (the TTL reaper's bulk sweep)", () => {
+        it("sweeps records but never floors, advancing each affected client's floor to cover them", async () => {
+          await store.recordClientVerdict("u", "t1", 1, { verdict: "applied", commitTs: 1n });
+          await store.recordClientVerdict("u", "t1", 2, { verdict: "applied", commitTs: 2n });
+          await store.recordClientVerdict("u", "t2", 1, { verdict: "applied", commitTs: 1n });
+
+          // A cutoff far in the future sweeps every record regardless of real wall-clock createdAt.
+          const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
+          const { deletedCount } = await store.sweepExpiredClientMutations(farFuture);
+          expect(deletedCount).toBe(3);
+
+          expect(await store.getClientVerdict("u", "t1", 1)).toBeNull();
+          expect(await store.getClientVerdict("u", "t1", 2)).toBeNull();
+          expect(await store.getClientVerdict("u", "t2", 1)).toBeNull();
+          // Sweeps records, not floors: each affected client now HAS a floor covering what was swept.
+          expect(await store.getClientFloor("u", "t1")).toBe(2);
+          expect(await store.getClientFloor("u", "t2")).toBe(1);
+        });
+
+        it("a cutoff in the past sweeps nothing and touches no floor", async () => {
+          await store.recordClientVerdict("u", "t3", 1, { verdict: "applied", commitTs: 1n });
+          const { deletedCount } = await store.sweepExpiredClientMutations(0);
+          expect(deletedCount).toBe(0);
+          expect(await store.getClientVerdict("u", "t3", 1)).not.toBeNull();
+          expect(await store.getClientFloor("u", "t3")).toBeNull();
+        });
+
+        it("never deletes an existing client_floors row, even when sweeping that client's records", async () => {
+          await store.recordClientVerdict("u", "t4", 1, { verdict: "applied", commitTs: 1n });
+          await store.pruneClientMutations("u", "t4", { ackedThrough: 1 }); // seeds a floor at 1, deletes the record
+          expect(await store.getClientFloor("u", "t4")).toBe(1);
+
+          await store.recordClientVerdict("u", "t4", 2, { verdict: "applied", commitTs: 2n });
+          const farFuture = Date.now() + 365 * 24 * 60 * 60 * 1000;
+          await store.sweepExpiredClientMutations(farFuture);
+
+          // The floor row is untouched by deletion — it still exists, now advanced to cover seq 2.
+          expect(await store.getClientFloor("u", "t4")).toBe(2);
+        });
+
+        it("scopes identity — the same clientId under a different identity is untouched", async () => {
+          await store.recordClientVerdict("alice", "shared-id", 1, { verdict: "applied", commitTs: 1n });
+          await store.recordClientVerdict("bob", "shared-id", 1, { verdict: "applied", commitTs: 1n });
+          await store.pruneClientMutations("alice", "shared-id", { ackedThrough: 1 });
+          expect(await store.getClientVerdict("alice", "shared-id", 1)).toBeNull();
+          expect(await store.getClientVerdict("bob", "shared-id", 1)).not.toBeNull();
+          expect(await store.getClientFloor("bob", "shared-id")).toBeNull();
+        });
       });
     });
   });

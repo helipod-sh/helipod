@@ -11,6 +11,8 @@
  */
 import type {
   CommitGuardUnit,
+  ClientVerdictRecord,
+  ClientVerdictWrite,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -27,7 +29,7 @@ import type {
   TimestampRange,
   InternalDocumentId,
 } from "@stackbase/docstore";
-import { getPrevRevQueryKey } from "@stackbase/docstore";
+import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "@stackbase/docstore";
 import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DatabaseAdapter, PreparedStatement, SqlRow, SqlValue } from "./adapter";
@@ -57,6 +59,27 @@ CREATE TABLE IF NOT EXISTS persistence_globals (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS client_mutations (
+  identity   TEXT NOT NULL,
+  client_id  TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  verdict    TEXT NOT NULL,
+  commit_ts  INTEGER NOT NULL,
+  value_json TEXT,
+  error_code TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (identity, client_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS client_mutations_by_created_at ON client_mutations (created_at);
+
+CREATE TABLE IF NOT EXISTS client_floors (
+  identity           TEXT NOT NULL,
+  client_id          TEXT NOT NULL,
+  pruned_through_seq INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  PRIMARY KEY (identity, client_id)
+) WITHOUT ROWID;
 `;
 
 function asBigInt(v: SqlValue | undefined): bigint {
@@ -83,6 +106,56 @@ export type SqliteCommitGuard = (
   units: readonly CommitGuardUnit[],
   shardId: ShardId,
 ) => void;
+// ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — pure helpers ──────────────────
+
+/** Build the WHERE fragment (and its bound params, in order) for `pruneClientMutations`'s DELETE —
+ *  the `seq <= ackedThrough OR createdAt < ttlBeforeMs` union (verdict §(c)). `{clause: null}` when
+ *  neither bound is set (nothing to delete this call — a legal no-op). */
+function clientMutationsDeleteClause(opts: {
+  ackedThrough?: number;
+  ttlBeforeMs?: number;
+}): { clause: string | null; params: number[] } {
+  const parts: string[] = [];
+  const params: number[] = [];
+  if (opts.ackedThrough !== undefined) {
+    parts.push(`seq <= ?`);
+    params.push(opts.ackedThrough);
+  }
+  if (opts.ttlBeforeMs !== undefined) {
+    parts.push(`created_at < ?`);
+    params.push(opts.ttlBeforeMs);
+  }
+  return parts.length === 0 ? { clause: null, params: [] } : { clause: parts.join(" OR "), params };
+}
+
+/** The floor candidate a prune call covers: the client's own `ackedThrough` claim (which covers any
+ *  never-recorded holes below it — floor-covers-holes, verdict decision 3) and/or the highest seq
+ *  actually deleted this pass — whichever is higher. `null` when neither applies. */
+function maxCandidate(ackedThrough: number | null, deletedMaxSeq: number | null): number | null {
+  if (ackedThrough === null) return deletedMaxSeq;
+  if (deletedMaxSeq === null) return ackedThrough;
+  return Math.max(ackedThrough, deletedMaxSeq);
+}
+
+/** Serialize + cap-check a receipt's optional value. Over-cap values are silently DROPPED (never
+ *  truncated, never rejected) — the receipt must still land (verdict §(c)); a dropped value reads
+ *  back as `hasValue: false`, mapping to the wire's `valueMissing`. */
+function cappedValueJson(value: JSONValue | undefined): string | null {
+  if (value === undefined) return null;
+  const json = JSON.stringify(value);
+  return Buffer.byteLength(json, "utf8") > CLIENT_VERDICT_VALUE_CAP_BYTES ? null : json;
+}
+
+function clientVerdictRecordFromRow(row: SqlRow): ClientVerdictRecord {
+  return {
+    verdict: row.verdict as "applied" | "failed",
+    commitTs: asBigInt(row.commit_ts),
+    hasValue: row.value_json !== null,
+    value: row.value_json === null ? null : (JSON.parse(row.value_json as string) as JSONValue),
+    errorCode: (row.error_code as string | null | undefined) ?? null,
+    createdAt: Number(row.created_at),
+  };
+}
 
 export class SqliteDocStore implements DocStore {
   private readonly stmtCache = new Map<string, PreparedStatement>();
@@ -424,6 +497,108 @@ export class SqliteDocStore implements DocStore {
       JSON.stringify(value),
     );
     return r.changes > 0;
+  }
+
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) ─────────────────────────────
+
+  async getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null> {
+    const row = this.prep(
+      `SELECT verdict, commit_ts, value_json, error_code, created_at FROM client_mutations
+       WHERE identity = ? AND client_id = ? AND seq = ?`,
+    ).get(identity, clientId, seq);
+    if (!row) return null;
+    return clientVerdictRecordFromRow(row);
+  }
+
+  async getClientFloor(identity: string, clientId: string): Promise<number | null> {
+    const row = this.prep(
+      `SELECT pruned_through_seq FROM client_floors WHERE identity = ? AND client_id = ?`,
+    ).get(identity, clientId);
+    return row ? Number(row.pruned_through_seq) : null;
+  }
+
+  async recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void> {
+    const valueJson = cappedValueJson(record.value);
+    this.prep(
+      `INSERT OR IGNORE INTO client_mutations
+         (identity, client_id, seq, verdict, commit_ts, value_json, error_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      identity,
+      clientId,
+      seq,
+      record.verdict,
+      record.commitTs,
+      valueJson,
+      record.verdict === "failed" ? record.errorCode : null,
+      Date.now(),
+    );
+  }
+
+  async pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }> {
+    return this.db.transaction(() => {
+      const currentFloorRow = this.prep(
+        `SELECT pruned_through_seq FROM client_floors WHERE identity = ? AND client_id = ?`,
+      ).get(identity, clientId);
+      const currentFloor = currentFloorRow ? Number(currentFloorRow.pruned_through_seq) : null;
+
+      let deletedMaxSeq: number | null = null;
+      const { clause, params } = clientMutationsDeleteClause(opts);
+      if (clause !== null) {
+        const rows = this.prep(
+          `DELETE FROM client_mutations WHERE identity = ? AND client_id = ? AND (${clause}) RETURNING seq`,
+        ).all(identity, clientId, ...params);
+        for (const row of rows) {
+          const s = Number(row.seq);
+          if (deletedMaxSeq === null || s > deletedMaxSeq) deletedMaxSeq = s;
+        }
+      }
+
+      const candidate = maxCandidate(opts.ackedThrough ?? null, deletedMaxSeq);
+      const base = currentFloor ?? -1;
+      if (candidate === null || candidate <= base) {
+        return { prunedThroughSeq: currentFloor ?? 0 }; // no-op: nothing to advance to
+      }
+      this.prep(
+        `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (identity, client_id) DO UPDATE SET
+           pruned_through_seq = MAX(client_floors.pruned_through_seq, excluded.pruned_through_seq),
+           updated_at = excluded.updated_at`,
+      ).run(identity, clientId, candidate, Date.now());
+      return { prunedThroughSeq: candidate };
+    });
+  }
+
+  async sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }> {
+    return this.db.transaction(() => {
+      const rows = this.prep(
+        `DELETE FROM client_mutations WHERE created_at < ? RETURNING identity, client_id, seq`,
+      ).all(beforeMs);
+      if (rows.length === 0) return { deletedCount: 0 };
+
+      const maxByClient = new Map<string, { identity: string; clientId: string; maxSeq: number }>();
+      for (const row of rows) {
+        const identity = row.identity as string;
+        const clientId = row.client_id as string;
+        const seq = Number(row.seq);
+        const key = `${identity} ${clientId}`;
+        const cur = maxByClient.get(key);
+        if (!cur || seq > cur.maxSeq) maxByClient.set(key, { identity, clientId, maxSeq: seq });
+      }
+      const now = Date.now();
+      const upsert = this.prep(
+        `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (identity, client_id) DO UPDATE SET
+           pruned_through_seq = MAX(client_floors.pruned_through_seq, excluded.pruned_through_seq),
+           updated_at = excluded.updated_at`,
+      );
+      for (const { identity, clientId, maxSeq } of maxByClient.values()) upsert.run(identity, clientId, maxSeq, now);
+      return { deletedCount: rows.length };
+    });
   }
 
   /** Close the underlying database adapter (checkpoint + release the file). Used by graceful shutdown. */

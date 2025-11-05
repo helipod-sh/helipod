@@ -240,6 +240,68 @@ export interface DocStore {
   writeGlobal(key: string, value: JSONValue): Promise<void>;
   writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean>;
 
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) ─────────────────────────────
+  // `client_mutations(identity, client_id, seq)` PK + `client_floors(identity, client_id)` PK — core
+  // internal tables, same category as `persistence_globals` (free-tier, both docstores). Identity-
+  // scoped (anonymous clients key as identity `""`, `clientId` is client-supplied/unauthenticated).
+
+  /** Classification read (verdict §(c)): the recorded verdict for `(identity, clientId, seq)`, or
+   *  null (never seen — either genuinely never run, or pruned; see `getClientFloor` for the
+   *  loud-vs-silent distinction). Anonymous clients key as identity `""`. PK point lookup (AC10.4). */
+  getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null>;
+
+  /** The `client_floors(identity, client_id).pruned_through_seq`, or null when no floor row exists
+   *  (a fresh client, never pruned). A presented `seq <= floor` with no record is `STALE_CLIENT`
+   *  (the caller's classification logic, not this store) — floor-covers-holes (verdict §(b)). */
+  getClientFloor(identity: string, clientId: string): Promise<number | null>;
+
+  /**
+   * Write (or no-op) a terminal verdict for `(identity, clientId, seq)` — its OWN standalone
+   * transaction, never atomic with a mutation's effects: a `failed` verdict has no effects to be
+   * atomic with (the transaction aborted), and an `applied` verdict for a zero-write SUCCESSFUL
+   * mutation has no document rows for a commit guard to ride (OUTBOX-A T1 controller decision — the
+   * spike's sharpest risk, R1). A mutation that DID write documents gets its `applied` receipt from
+   * the commit guard instead (registered via `addCommitGuard`), atomically in the same transaction —
+   * this method is never called for that case.
+   *
+   * Idempotent — `INSERT ... ON CONFLICT/OR IGNORE DO NOTHING` (verdict §(c) Risk R3: two concurrent
+   * resends of the same poison seq both fail and both call this; first-wins, never a hard throw). A
+   * `value` over {@link CLIENT_VERDICT_VALUE_CAP_BYTES} is silently dropped (stored as absent, not
+   * truncated or rejected) — the record still lands with `hasValue: false` on a later read, mapping
+   * to the wire's `valueMissing` (verdict §(e)).
+   */
+  recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void>;
+
+  /**
+   * Ack-prune (verdict §(c) Retention, `Connect.ackedThrough`): delete `client_mutations` rows for
+   * `(identity, clientId)` matching `seq <= opts.ackedThrough` and/or `createdAt < opts.ttlBeforeMs`
+   * (either bound may be present; both may combine in one pass), then advance
+   * `client_floors.pruned_through_seq` — in the SAME transaction — to the highest seq this call
+   * COVERS: `opts.ackedThrough` itself (the client's own claim, covering any never-recorded holes
+   * below it — decision 3, floor-covers-holes) and/or the highest seq actually deleted this pass.
+   * The floor never regresses (`GREATEST`/`MAX` against whatever is already persisted) and a call
+   * with nothing to cover (no bound produces an advance) is a no-op — no floor row is conjured from
+   * nothing. Returns the resulting floor (unchanged if nothing advanced).
+   */
+  pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }>;
+
+  /**
+   * TTL sweep (verdict §(c) Retention: 30-day record retention): delete every `client_mutations` row
+   * across EVERY `(identity, clientId)` with `createdAt < beforeMs`, in ONE bulk transaction — the
+   * reaper driver's periodic pass (unlike `pruneClientMutations`, this is NOT client-scoped, since a
+   * periodic sweep has no per-client `ackedThrough` claim to key off). For every client that had at
+   * least one row swept, `client_floors.pruned_through_seq` is advanced (never regressed) to the
+   * highest seq swept for that client — verdict.md's "advancing `pruned_through_seq` ... by TTL",
+   * matching the same floor-covers-holes contract `pruneClientMutations` uses. `client_floors` ROWS
+   * are never deleted by this sweep (floor retention is ≥ 1yr, a separate, much longer horizon) —
+   * only `client_mutations` rows are reaped. Returns the total row count deleted (observability).
+   */
+  sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }>;
+
   /** Release the backend (checkpoint/close file, or end the Postgres connection). */
   close(): void | Promise<void>;
 }
@@ -267,3 +329,35 @@ export interface TimestampOracle {
 export function getPrevRevQueryKey(id: InternalDocumentId, ts: bigint): string {
   return `${documentIdKey(id)}@${ts}`;
 }
+
+// ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — types ─────────────────────────
+
+/** A recorded return value over this size is dropped, not truncated or rejected — the write still
+ *  lands (a receipt always exists), just with `hasValue: false` (wire: `valueMissing`). */
+export const CLIENT_VERDICT_VALUE_CAP_BYTES = 64 * 1024;
+
+/** A per-seq verdict record — `client_mutations(identity, client_id, seq)` PK (verdict §(c)). */
+export interface ClientVerdictRecord {
+  verdict: "applied" | "failed";
+  commitTs: bigint;
+  /** `false` for `failed`, or an `applied` record whose value was never recorded (the crash-window
+   *  residual instability the verdict documents) or exceeded {@link CLIENT_VERDICT_VALUE_CAP_BYTES}. */
+  hasValue: boolean;
+  /** The recorded return value when `hasValue`; else `null`. */
+  value: JSONValue | null;
+  /** The terminal error code for a `failed` record; `null` for `applied`. */
+  errorCode: string | null;
+  /** Wall-clock write time (ms since epoch) — the TTL sweep's horizon, NOT the logical `commitTs`. */
+  createdAt: number;
+}
+
+/**
+ * The write shape `recordClientVerdict` accepts — one call handles both an `applied` receipt (the
+ * zero-write-successful-mutation case, OUTBOX-A T1 controller decision) and a `failed` terminal
+ * receipt; `errorCode` is required for `failed` (mirrored into `ClientVerdictRecord.errorCode`) and
+ * absent for `applied` (`errorCode` reads back `null`). `value`, when present, is subject to the
+ * {@link CLIENT_VERDICT_VALUE_CAP_BYTES} cap on write.
+ */
+export type ClientVerdictWrite =
+  | { verdict: "applied"; commitTs: bigint; value?: JSONValue }
+  | { verdict: "failed"; commitTs: bigint; errorCode: string; value?: JSONValue };

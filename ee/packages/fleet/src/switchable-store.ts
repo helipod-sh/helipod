@@ -1,6 +1,8 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type {
   CommitGuardUnit,
+  ClientVerdictRecord,
+  ClientVerdictWrite,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -161,6 +163,37 @@ export class SwitchableDocStore implements DocStore {
   async writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean> {
     const d = this.delegate;
     return d.writeGlobalIfAbsent(key, value);
+  }
+
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — pass-through ──────────────
+
+  async getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null> {
+    const d = this.delegate;
+    return d.getClientVerdict(identity, clientId, seq);
+  }
+
+  async getClientFloor(identity: string, clientId: string): Promise<number | null> {
+    const d = this.delegate;
+    return d.getClientFloor(identity, clientId);
+  }
+
+  async recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void> {
+    const d = this.delegate;
+    return d.recordClientVerdict(identity, clientId, seq, record);
+  }
+
+  async pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }> {
+    const d = this.delegate;
+    return d.pruneClientMutations(identity, clientId, opts);
+  }
+
+  async sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }> {
+    const d = this.delegate;
+    return d.sweepExpiredClientMutations(beforeMs);
   }
 
   close(): void | Promise<void> {
