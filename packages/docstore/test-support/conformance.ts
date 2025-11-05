@@ -380,5 +380,69 @@ export function runDocStoreConformance(
         expect((await store.get(y, ty0!))!.value.value.body).toBe("y0");
       });
     });
+
+    // The commit-guard chain (Receipted Outbox decision 2 — `addCommitGuard(guard): () => void`,
+    // generalizing the old single-slot `setCommitGuard`). This slice of the guard contract is
+    // store-agnostic (never touches the store-specific `q` querier), so it belongs here rather
+    // than duplicated per-store; each store's OWN test file covers what it does with `q` (the
+    // async `PgQuerier` for Postgres, the synchronous `SqliteGuardQuerier` — incl. SQLite's
+    // thenable dev-throw — for SQLite).
+    describe("commit guard chain (addCommitGuard)", () => {
+      it("runs guards in REGISTRATION order", async () => {
+        const order: string[] = [];
+        store.addCommitGuard(() => {
+          order.push("first");
+        });
+        store.addCommitGuard(() => {
+          order.push("second");
+        });
+
+        const id = newDocumentId(TABLE);
+        await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect(order).toEqual(["first", "second"]);
+      });
+
+      it("ANY guard throwing aborts the WHOLE commit — zero rows land, later guards never run", async () => {
+        const ran: string[] = [];
+        store.addCommitGuard(() => {
+          ran.push("first");
+        });
+        store.addCommitGuard(() => {
+          ran.push("second");
+          throw new Error("guard rejects");
+        });
+        store.addCommitGuard(() => {
+          ran.push("third"); // must never run
+        });
+
+        const id = newDocumentId(TABLE);
+        await expect(store.commitWrite([rev(id, 0n, null, "x")], [])).rejects.toThrow("guard rejects");
+        expect(ran).toEqual(["first", "second"]);
+        expect(await store.get(id)).toBeNull(); // nothing landed
+      });
+
+      it("the returned unregister function removes exactly that guard — a no-op if called again", async () => {
+        const order: string[] = [];
+        const unregisterA = store.addCommitGuard(() => {
+          order.push("A");
+        });
+        store.addCommitGuard(() => {
+          order.push("B");
+        });
+
+        unregisterA();
+        unregisterA(); // second call — a no-op, not a throw
+
+        const id = newDocumentId(TABLE);
+        await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect(order).toEqual(["B"]);
+      });
+
+      it("commits normally when no guard is registered (Tier 0 — the common case)", async () => {
+        const id = newDocumentId(TABLE);
+        const commitTs = await store.commitWrite([rev(id, 0n, null, "x")], []);
+        expect((await store.get(id))!.ts).toBe(commitTs);
+      });
+    });
   });
 }

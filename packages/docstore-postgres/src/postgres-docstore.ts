@@ -63,18 +63,25 @@ export interface PostgresDocStoreOptions {
   readOnly?: boolean;
 }
 
+/** A Postgres commit guard — see `PostgresDocStore.addCommitGuard`'s doc comment (which this type
+ *  exists to be referenced from) for the full contract: batch-shaped, runs inside the commit
+ *  transaction after all units' row inserts and before COMMIT, throwing aborts the whole batch. */
+export type PgCommitGuard = (
+  q: PgQuerier,
+  units: readonly CommitGuardUnit[],
+  shardId: ShardId,
+) => Promise<void>;
+
 export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
-  /** Fleet-installed epoch fence (D3/D5, batch-shaped since Fleet B4). Runs ONCE inside every
-   * `commitWriteBatch` transaction, after ALL units' row inserts and before COMMIT; throwing aborts
-   * the whole commit (every unit). Never set at Tier 0. The `shardId` is passed so a per-shard fleet
-   * fence can check THAT shard's epoch row (B2a per-shard guards). `units` is the batch's per-unit
-   * `{ts, meta}` in unit/ts order (Fleet B4, D1): the guard fences once, advances the frontier once at
-   * the last unit's ts, and loops the per-unit `meta` effects (idempotency INSERT at each unit's own
-   * ts). The single-commit `commitWrite` path passes a one-unit array, so there is ONE guard contract. */
-  private commitGuard:
-    | ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>)
-    | null = null;
+  /** The commit-guard CHAIN (Receipted Outbox decision 2 — the old single `commitGuard` slot
+   * generalized to composition). Guards run in REGISTRATION ORDER, once per `commitWriteBatch`
+   * transaction, after ALL units' row inserts and before COMMIT; ANY guard throwing aborts the
+   * whole commit (every unit) — the whole chain shares the fence's original all-or-nothing
+   * contract. Empty at Tier 0 (no guard ever runs). `units` is the batch's per-unit `{ts, meta}`
+   * in unit/ts order (Fleet B4, D1) — each guard fences/effects once per batch over the whole
+   * array, not once per unit. The single-commit `commitWrite` path passes a one-unit array. */
+  private guards: PgCommitGuard[] = [];
 
   constructor(
     private readonly db: PgClient,
@@ -83,17 +90,24 @@ export class PostgresDocStore implements DocStore {
     this.readOnly = options?.readOnly ?? false;
   }
 
-  /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
-   * (the epoch fence); at Tier 0 no guard is ever set and the commit path never calls one.
-   *
-   * BREAKING (Fleet B4): the guard is BATCH-SHAPED — `(q, units: readonly CommitGuardUnit[], shardId)`,
-   * invoked ONCE per `commitWriteBatch` transaction over all units. The prior single-commit shape
-   * `(q, commitTs, shardId, meta)` is gone; fleet's `installCommitGuard` and every direct installer
-   * were updated in lockstep. A single `commitWrite` reaches the guard as a one-unit array. */
-  setCommitGuard(
-    guard: ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>) | null,
-  ): void {
-    this.commitGuard = guard;
+  /** Append `guard` to the commit-guard chain — see `guards`'s doc comment for the full contract.
+   * Returns an unregister function that removes exactly this guard (a no-op if called again, or
+   * if the guard was never/no-longer registered). Registration order = invocation order. */
+  addCommitGuard(guard: PgCommitGuard): () => void {
+    this.guards.push(guard);
+    return () => {
+      const i = this.guards.indexOf(guard);
+      if (i >= 0) this.guards.splice(i, 1);
+    };
+  }
+
+  /** @deprecated Use `addCommitGuard` — kept only for callers not yet migrated. Semantics: CLEARS
+   * the whole chain, then (if `guard` is non-null) adds `guard` as the chain's sole member. This
+   * is NOT a simple compat shim for a multi-guard chain (it wipes out any other registered guard),
+   * so mixing `setCommitGuard` with `addCommitGuard` on the same store is almost certainly a bug —
+   * new code should call `addCommitGuard` directly. */
+  setCommitGuard(guard: PgCommitGuard | null): void {
+    this.guards = guard ? [guard] : [];
   }
 
   /** The underlying `PgClient` — exposed so fleet code (leader election, LISTEN/NOTIFY signaling)
@@ -298,9 +312,14 @@ export class PostgresDocStore implements DocStore {
         commitTsList.push(commitTs);
         guardUnits.push({ ts: commitTs, meta: unit.meta });
       }
-      // ONE guard invocation over the whole batch (epoch fence once, frontier once at ts_N, per-unit
-      // idempotency INSERT). Skipped for an empty batch — nothing to commit, nothing to fence.
-      if (this.commitGuard && guardUnits.length > 0) await this.commitGuard(tx, guardUnits, shard);
+      // The WHOLE chain, in registration order, ONE invocation each over the whole batch (epoch
+      // fence once, frontier once at ts_N, per-unit idempotency INSERT). Skipped for an empty
+      // batch — nothing to commit, nothing to fence. ANY guard throwing aborts the whole batch —
+      // the `for` loop's exception propagates straight out of `runCommit`, so a later guard never
+      // runs and the transaction (including every earlier guard's writes) rolls back.
+      if (guardUnits.length > 0) {
+        for (const g of this.guards) await g(tx, guardUnits, shard);
+      }
       return commitTsList;
     };
     // Pool mode (D1): route the whole batch onto THIS shard's dedicated commit connection, so
