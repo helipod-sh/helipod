@@ -170,6 +170,33 @@ export interface DocStore {
    */
   commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]>;
 
+  /**
+   * Register a commit guard onto the chain (Receipted Outbox decision 2 — the old single-slot
+   * `setCommitGuard` generalized to composition). Guards run in REGISTRATION ORDER, inside the
+   * store's own commit transaction, ONCE per `commitWriteBatch`/`commitWrite` call over the WHOLE
+   * unit array (`readonly CommitGuardUnit[]`, in unit/ts order) — never once per unit. ANY guard
+   * throwing aborts the WHOLE transaction (no unit lands), the same all-or-nothing contract
+   * `commitWriteBatch` already documents for its own errors.
+   *
+   * The querier type `q` a guard receives is store-specific — an async `PgQuerier`
+   * (`@stackbase/docstore-postgres`) or a synchronous `SqliteGuardQuerier`
+   * (`@stackbase/docstore-sqlite`) — so this one interface member is deliberately typed loosely
+   * here rather than forcing a generic parameter through every `DocStore` consumer; each store
+   * package exports its own precisely-typed `PgCommitGuard`/`SqliteCommitGuard` alias for callers
+   * to write guards against. SQLite guards MUST be synchronous — SQLite's commit runs inside one
+   * synchronous transaction and cannot await a guard; returning a thenable there is a documented
+   * dev-time error (see `SqliteDocStore`). Postgres guards are always awaited.
+   *
+   * Returns an unregister function: calling it removes exactly this guard from the chain (a no-op
+   * if called again, or if the guard was already removed). A caller that re-registers on every
+   * re-arm (e.g. fleet's `armWriter` on every writer promotion) MUST capture and call the prior
+   * unregister handle first — appending without unregistering stacks duplicate guards.
+   */
+  addCommitGuard(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- store-specific querier type, see above
+    guard: (q: any, units: readonly CommitGuardUnit[], shardId: ShardId) => void | Promise<void>,
+  ): () => void;
+
   /** The newest visible revision of a document at `readTimestamp` (or latest), or null. */
   get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null>;
 

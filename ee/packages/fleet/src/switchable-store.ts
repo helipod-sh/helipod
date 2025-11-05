@@ -1,5 +1,6 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type {
+  CommitGuardUnit,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -82,6 +83,21 @@ export class SwitchableDocStore implements DocStore {
   async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
     const d = this.delegate;
     return d.commitWriteBatch(units, shardId);
+  }
+
+  /** Forwards to the CURRENT delegate at call entry, same atomicity contract as every other
+   * method here — but note the resulting registration is NOT itself re-forwarded on a later
+   * `swapTo()`: the guard lands on whichever concrete store was `this.delegate` at the moment
+   * `addCommitGuard` was called, and stays registered there even after the switchable repoints
+   * elsewhere. In practice fleet code (`node.ts`) always calls `addCommitGuard` on the concrete
+   * `PostgresDocStore` directly (never through this wrapper), so this pass-through exists purely
+   * for `DocStore` interface conformance. */
+  addCommitGuard(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirrors DocStore.addCommitGuard
+    guard: (q: any, units: readonly CommitGuardUnit[], shardId: ShardId) => void | Promise<void>,
+  ): () => void {
+    const d = this.delegate;
+    return d.addCommitGuard(guard);
   }
 
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {

@@ -10,6 +10,7 @@
  * and resolve the pointed document at the same timestamp.
  */
 import type {
+  CommitGuardUnit,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -65,10 +66,60 @@ function asBigIntOrNull(v: SqlValue | undefined): bigint | null {
   return v === null || v === undefined ? null : asBigInt(v);
 }
 
+/** The narrow SYNCHRONOUS querier a SQLite commit guard writes receipts through — the sync mirror
+ *  of `docstore-postgres`'s async `PgQuerier`. SQLite's commit runs inside one synchronous
+ *  `db.transaction(() => {...})`, so a guard can only ever be handed synchronous primitives. */
+export interface SqliteGuardQuerier {
+  run(sql: string, ...params: unknown[]): void;
+  get(sql: string, ...params: unknown[]): Record<string, unknown> | undefined;
+}
+
+/** A SQLite commit guard — see `SqliteDocStore.addCommitGuard`'s doc comment for the full
+ *  contract. Unlike `PgCommitGuard`, this MUST be synchronous: it runs inside the one-transaction
+ *  synchronous commit, which cannot await anything. Returning a thenable is a documented dev-time
+ *  error — see `commitWriteBatch`'s thenable check. */
+export type SqliteCommitGuard = (
+  q: SqliteGuardQuerier,
+  units: readonly CommitGuardUnit[],
+  shardId: ShardId,
+) => void;
+
 export class SqliteDocStore implements DocStore {
   private readonly stmtCache = new Map<string, PreparedStatement>();
+  /** The commit-guard CHAIN (Receipted Outbox decision 2), the SQLite counterpart of
+   *  `PostgresDocStore.guards` — see `addCommitGuard`'s doc comment for the full contract. Empty
+   *  at Tier 0 and in every non-fleet/non-receipts deployment (no guard ever runs — SQLite pays
+   *  nothing for a feature it doesn't use). */
+  private guards: SqliteCommitGuard[] = [];
 
   constructor(private readonly db: DatabaseAdapter) {}
+
+  /** Append `guard` to the commit-guard chain — see `guards`'s doc comment. Guards run in
+   * REGISTRATION ORDER, SYNCHRONOUSLY, inside `commitWriteBatch`'s one `db.transaction(() => …)`,
+   * once per commit over the WHOLE unit array (never once per unit); ANY guard throwing aborts the
+   * whole synchronous transaction (no unit lands) — SQLite's transaction wrapper already rolls
+   * back on any thrown error, so this needs no special-casing here. A guard that returns a
+   * thenable (i.e. is `async`) is a dev-time bug — see the check in `commitWriteBatch`. Returns an
+   * unregister function that removes exactly this guard (a no-op if called again). */
+  addCommitGuard(guard: SqliteCommitGuard): () => void {
+    this.guards.push(guard);
+    return () => {
+      const i = this.guards.indexOf(guard);
+      if (i >= 0) this.guards.splice(i, 1);
+    };
+  }
+
+  /** The synchronous querier handed to every SQLite commit guard — routes through the same
+   * prepared-statement cache (`this.prep`) every other method uses, so a guard's writes share
+   * SQLite's statement caching for free. */
+  private guardQuerier(): SqliteGuardQuerier {
+    return {
+      run: (sql, ...params) => {
+        this.prep(sql).run(...(params as SqlValue[]));
+      },
+      get: (sql, ...params) => this.prep(sql).get(...(params as SqlValue[])),
+    };
+  }
 
   private prep(sql: string): PreparedStatement {
     let stmt = this.stmtCache.get(sql);
@@ -156,13 +207,15 @@ export class SqliteDocStore implements DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
-    // Opaque commit metadata (Fleet B3, D3): SQLite has no commit guard to hand it to, so it is
-    // accepted (interface conformance) and ignored — non-fleet / single-node SQLite pays nothing.
-    _opts?: { meta?: Record<string, string> },
+    // Opaque commit metadata (Fleet B3, D3): threaded through to `commitWriteBatch`'s per-unit
+    // `meta`, same as Postgres — SQLite now has a commit-guard chain too (Receipted Outbox
+    // decision 2), so this is no longer inert. When no guard is registered (Tier 0, most
+    // deployments) it costs nothing: the chain is empty and never runs.
+    opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
-    // Single commit = a one-unit batch (Fleet B4, D1) — one implementation. `meta` is threaded
-    // through for interface parity but SQLite (no guard) ignores it, exactly as before.
-    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: _opts?.meta }], shardId);
+    // Single commit = a one-unit batch (Fleet B4, D1) — one implementation, so `meta` reaches the
+    // guard chain identically whether one or many units commit.
+    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: opts?.meta }], shardId);
     return ts!;
   }
 
@@ -171,11 +224,11 @@ export class SqliteDocStore implements DocStore {
     // the single-writer invariant, `MAX(ts) + 1` computed inside the transaction is race-free: no other
     // writer can interleave a higher ts. Each unit re-reads MAX(ts), which now includes the prior
     // units' just-inserted rows, so the batch stamps CONSECUTIVE, strictly-increasing ts's in unit
-    // order. SQLite has no commit guard, so per-unit `meta` is ignored (matches `commitWrite`). Note:
-    // SQLite's flush is synchronous — nothing accumulates during it — so real batching is opportunistic
-    // (typically batch-of-1) on Tier 0; the shared path is correct-but-inert here.
+    // order. Note: SQLite's flush is synchronous — nothing accumulates during it — so real batching
+    // is opportunistic (typically batch-of-1) on Tier 0; the shared path is correct-but-inert here.
     return this.db.transaction(() => {
       const out: bigint[] = [];
+      const guardUnits: CommitGuardUnit[] = [];
       const shard = shardId ?? DEFAULT_SHARD;
       for (const unit of units) {
         const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
@@ -185,6 +238,23 @@ export class SqliteDocStore implements DocStore {
         const stampedIdx = unit.indexUpdates.map((w) => ({ ...w, ts: commitTs }));
         this.insertRows(stampedDocs, stampedIdx, "Error", shard);
         out.push(commitTs);
+        guardUnits.push({ ts: commitTs, meta: unit.meta });
+      }
+      // The WHOLE chain, in registration order, ONE SYNCHRONOUS invocation each over the whole
+      // batch — the sync mirror of Postgres's chain loop. Skipped for an empty batch. ANY guard
+      // throwing propagates straight out of this `db.transaction(() => …)` callback, which rolls
+      // the whole synchronous transaction back — no unit lands, exactly like an insert failing.
+      if (guardUnits.length > 0) {
+        const q = this.guardQuerier();
+        for (const g of this.guards) {
+          const ret = g(q, guardUnits, shard) as unknown;
+          if (ret && typeof (ret as { then?: unknown }).then === "function") {
+            throw new Error(
+              "[docstore-sqlite] a commit guard returned a Promise; SQLite guards must be " +
+                "synchronous — its writes cannot be awaited inside the single-transaction commit",
+            );
+          }
+        }
       }
       return out;
     });

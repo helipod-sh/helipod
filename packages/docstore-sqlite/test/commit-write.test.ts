@@ -35,10 +35,12 @@ describe("SqliteDocStore commitWrite shard_id", () => {
     store.close();
   });
 
-  // Fleet B3, D3: SQLite has no commit guard to hand `opts.meta` to — the opts param exists only
-  // for interface conformance with `DocStore.commitWrite` and is silently ignored (non-fleet /
-  // single-node SQLite pays nothing).
-  it("accepts commitWrite's 4th `opts` param and ignores it", async () => {
+  // Fleet B3, D3 (Receipted Outbox decision 2: SQLite has a commit-guard chain too now, but with
+  // no guard REGISTERED — the common case — `opts.meta` still reaches no guard and is a pure
+  // pass-through): the opts param exists for interface conformance with `DocStore.commitWrite`;
+  // when the guard chain is empty (non-fleet / single-node SQLite, most deployments) it costs
+  // nothing. See `commit-guard.test.ts` for the chain itself actually receiving this meta.
+  it("accepts commitWrite's 4th `opts` param and is a no-op with no guard registered", async () => {
     const adapter = new NodeSqliteAdapter();
     const store = new SqliteDocStore(adapter);
     await store.setupSchema();

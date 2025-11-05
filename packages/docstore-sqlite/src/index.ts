@@ -6,3 +6,4 @@ export type { DatabaseAdapter, PreparedStatement, RunResult, SqlValue, SqlRow } 
 export { NodeSqliteAdapter, type NodeSqliteOptions } from "./node-adapter";
 export { BunSqliteAdapter, type BunSqliteOptions } from "./bun-adapter";
 export { SqliteDocStore } from "./sqlite-docstore";
+export type { SqliteGuardQuerier, SqliteCommitGuard } from "./sqlite-docstore";

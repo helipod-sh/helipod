@@ -907,13 +907,20 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  * JUST this shard, keep serving everything else — never to a whole-node exit; see `relinquish` below
  * for why `LeaseMonitor.fenced()`/`onExit` are NOT reached from here anymore). Called at writer boot
  * AND on promotion success — see the two call sites below.
+ *
+ * Returns the `addCommitGuard` unregister handle (Receipted Outbox decision 2 — the guard
+ * slot→chain migration). `armWriter` re-arms on EVERY promotion; a caller that calls
+ * `installCommitGuard` again WITHOUT first calling the PRIOR returned unregister function stacks a
+ * duplicate epoch-fence guard on the chain — duplicate frontier bumps + duplicate
+ * `fleet_idempotency` INSERTs at the same ts, so every subsequent forwarded commit self-PK-collides
+ * and aborts. See `armWriter`'s `unregisterCommitGuard` handling below for the required pattern.
  */
 export function installCommitGuard(
   pgStore: PostgresDocStore,
   lease: LeaseManager,
   onFenced: (shardId: ShardId, reason: string) => void,
-): void {
-  pgStore.setCommitGuard(async (q, units, shardId) => {
+): () => void {
+  return pgStore.addCommitGuard(async (q, units, shardId) => {
     // Fleet B4 (batch-shaped guard): `commitWriteBatch` invokes this ONCE per transaction over ALL its
     // units (`{ts, meta}` in unit/ts order); a single `commitWrite` reaches here as a one-unit array.
     // We fence ONCE, advance the frontier ONCE to the batch's last ts, and loop the per-unit idempotency
@@ -1124,6 +1131,13 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // /api/health can report the fleet frontier; arming as writer replaces it with an idle-closing one.
   let frontierMonitor: FrontierMonitor | null = null;
   let unsubscribeCommits: (() => void) | null = null;
+  // The commit-guard chain's unregister handle for the CURRENT `armWriter` arm (Receipted Outbox
+  // decision 2 — the guard slot→chain migration). `armWriter` re-arms on EVERY promotion; with
+  // append-only `addCommitGuard` semantics a naive re-add on each arm would STACK a duplicate
+  // epoch-fence guard → duplicate frontier bumps + duplicate `fleet_idempotency` INSERTs at the
+  // same ts → self-PK-collision → every forwarded commit aborts. Captured here so `armWriter`
+  // releases the PRIOR registration before installing the new one (see `armWriter` below).
+  let unregisterCommitGuard: (() => void) | null = null;
 
   // Group-commit health counters (Fleet B4, T4): `flushesPerSec` is a rolling delta between
   // successive `groupCommitStats()` calls — the simplest honest throughput signal without a
@@ -1427,7 +1441,14 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // B2b, D2: a guard-discovered fence relinquishes JUST that shard — never routes to
     // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
     // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
-    installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
+    //
+    // Receipted Outbox decision 2 (the spec-review-flagged hazard): `armWriter` re-arms on EVERY
+    // promotion, and `addCommitGuard` is append-only — release the PRIOR arm's guard registration
+    // BEFORE installing the new one, or every re-arm stacks a duplicate epoch-fence guard (dup
+    // frontier bumps + dup `fleet_idempotency` INSERTs at the same ts → self-PK-collision → every
+    // forwarded commit aborts).
+    unregisterCommitGuard?.();
+    unregisterCommitGuard = installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
       relinquish(relinquishDeps, fencedShardId, reason),
     );
     // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
@@ -1496,6 +1517,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         balancer.stop();
         frontierMonitor?.stop();
         unsubscribeCommits?.();
+        unregisterCommitGuard?.();
         lease.stop();
         await hybridTailer?.stop();
         // Hybrid writer boot: this node owns the replica (queryStore) lifecycle — serve closes the
@@ -1693,6 +1715,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       balancer.stop();
       frontierMonitor?.stop();
       unsubscribeCommits?.();
+      unregisterCommitGuard?.();
       lease.stop();
       await tailer.stop();
       // Fleet B3: a HYBRID sync node's runtime WRITE store is `pgStore` (serve closes THAT on
