@@ -29,7 +29,7 @@
  * package) keep seeing the union, so a caller that never calls `recordReadUnvalidated` sees
  * identical behavior to before this split existed.
  */
-import { OccConflictError } from "@stackbase/errors";
+import { CommitGuardRejection, OccConflictError } from "@stackbase/errors";
 import { documentIdKey, encodeStorageTableId, type ShardId } from "@stackbase/id-codec";
 import {
   RangeSet,
@@ -213,6 +213,12 @@ type StageOutcome<T> =
  *  shared `@stackbase/errors` type — a transactor-only concern that must not leak into the FSL surface. */
 const CONFLICT_WAIT = Symbol("groupCommitConflictWait");
 type TaggedConflict = OccConflictError & { [CONFLICT_WAIT]?: Promise<void> };
+
+/** Split-retry bound (Receipted Outbox, decision 2): how many times the committer will split a
+ *  guard-rejected unit out and re-flush the remainder before it gives up and rejects the surviving
+ *  chunk retryably. A pathological guard that rejects a different unit on every flush must not let the
+ *  committer re-flush unboundedly. */
+const MAX_SPLIT_RETRIES = 3;
 
 /** One shard's writer state — `SingleWriterTransactor`'s pre-sharding machinery, extracted
  *  so `ShardedTransactor` can hold one of these per shard (see the module doc above). */
@@ -578,12 +584,22 @@ export class ShardWriter {
 
   /**
    * The single per-shard committer loop (D2). Each iteration: detach the ENTIRE pending batch as the
-   * new flushing batch (under the mutex), `commitWriteBatch` it OFF the mutex (the amortized I/O),
-   * then under the mutex publish each unit IN ORDER (ring push → oracle → oplog → fan-out → resolve)
-   * and clear the flushing slot. Loops while pending is non-empty; when it is empty it resets
-   * `committerRunning` UNDER THE MUTEX and exits, so the next stager restarts it. A flush error
-   * rejects every unit of the batch and discards it — the ring/oracle never see the failed ts's and
-   * the loop survives to flush whatever came next (a poisoned unit cannot wedge the shard).
+   * new flushing batch (under the mutex), flush it OFF the mutex (the amortized I/O), then under the
+   * mutex publish each landed unit IN ORDER (ring push → oracle → oplog → fan-out → resolve) and
+   * clear the flushing slot. Loops while pending is non-empty; when it is empty it resets
+   * `committerRunning` UNDER THE MUTEX and exits, so the next stager restarts it.
+   *
+   * Split-retry on a typed guard rejection (Receipted Outbox, decision 2 — the batch-collateral fix).
+   * A commit guard (fleet idempotency / client-mutation receipts) can reject ONE unit of a batch
+   * with a {@link CommitGuardRejection} carrying that unit's index; the store rolls the WHOLE txn
+   * back, so nothing landed. Pre-fix, that threw out of the flush and rejected EVERY co-batched unit
+   * as collateral. Now `flushWithSplit` catches it, rejects ONLY the offending unit with its code,
+   * and re-flushes the remainder (fresh ts — the rolled-back txn allocated nothing durable), bounded
+   * at {@link MAX_SPLIT_RETRIES} so a pathological always-rejecting guard can't re-flush forever;
+   * past the bound the remaining chunk rejects retryably. Any OTHER flush error (incl. `FencedError`)
+   * stays whole-batch — every unit rejects, never split. The ring/oracle never see a failed unit's
+   * ts, and the loop survives to flush whatever came next (a poisoned unit cannot wedge the shard).
+   * Publish order is strict unit order across splits (the surviving units keep their relative order).
    */
   private async runCommitter(): Promise<void> {
     for (;;) {
@@ -605,59 +621,104 @@ export class ShardWriter {
       });
       if (!batch) return;
 
-      let tss: bigint[] | null = null;
-      let flushErr: unknown = null;
-      try {
-        tss = await this.docStore.commitWriteBatch(
-          batch.units.map((u) => ({ documents: u.documents, indexUpdates: u.indexUpdates, meta: u.meta })),
-          this.shardId,
-        );
-      } catch (e) {
-        flushErr = e;
-      }
+      // Flush OFF the mutex, splitting out per-unit guard rejections. Produces the units that landed
+      // (each with its fresh ts, in unit order), the units a guard rejected (each with its coded
+      // error), and — if the whole remainder failed — the surviving chunk plus its error.
+      const outcome = await this.flushWithSplit(batch.units);
 
       await this.mutex.runExclusive(async () => {
-        if (flushErr !== null || tss === null) {
-          // Failure contract: reject EVERY unit verbatim; the whole batch is discarded; the ring and
-          // oracle are never touched (the store guarantees no unit landed). The loop then re-enters
-          // below and flushes whatever accumulated meanwhile, or resets the flag and exits.
-          for (const u of batch.units) u.reject(flushErr);
-        } else {
-          for (let i = 0; i < batch.units.length; i++) {
-            const u = batch.units[i]!;
-            const ts = tss[i]!;
-            this.recentCommits.push({ ts, writes: u.writeRanges });
-            // Advance the committed clock only now that this unit's rows are applied + ring-recorded,
-            // strictly in unit order, so a concurrent snapshot never observes it before it is safe.
-            this.oracle.publishCommitted(ts);
-            // D12 invariant, PER UNIT: fan THIS unit's ts to every shard oracle BEFORE publishing its
-            // oplog below — the same "every shard oracle >= commitTs before observable" ordering the
-            // single-commit path enforces in `commit()`. Synchronous, no await before the publish.
-            this.onCommitted?.(ts);
-            const ranges = u.writeRanges.toArray();
-            const oplog: OplogDelta = {
-              commitTs: ts,
-              shardId: u.shardId,
-              writtenRanges: ranges.map(serializeKeyRange),
-              writtenTables: writtenTablesFromRanges(ranges),
-              origin: u.origin, // G4: per-unit origin — stamped at publish, never sent to the store
-            };
-            if (this.fanout) {
-              try {
-                void this.fanout.publish(oplog);
-              } catch {
-                /* a fan-out failure must not fail the commit */
-              }
+        // Publish the landed units strictly in unit order (ring → oracle → cross-oracle fan → oplog
+        // → fan-out → resolve). A split only ever drops units from the middle; the survivors keep
+        // their relative order, so this stays strict-unit-order across splits.
+        for (const { unit: u, ts } of outcome.landed) {
+          this.recentCommits.push({ ts, writes: u.writeRanges });
+          // Advance the committed clock only now that this unit's rows are applied + ring-recorded,
+          // strictly in unit order, so a concurrent snapshot never observes it before it is safe.
+          this.oracle.publishCommitted(ts);
+          // D12 invariant, PER UNIT: fan THIS unit's ts to every shard oracle BEFORE publishing its
+          // oplog below — the same "every shard oracle >= commitTs before observable" ordering the
+          // single-commit path enforces in `commit()`. Synchronous, no await before the publish.
+          this.onCommitted?.(ts);
+          const ranges = u.writeRanges.toArray();
+          const oplog: OplogDelta = {
+            commitTs: ts,
+            shardId: u.shardId,
+            writtenRanges: ranges.map(serializeKeyRange),
+            writtenTables: writtenTablesFromRanges(ranges),
+            origin: u.origin, // G4: per-unit origin — stamped at publish, never sent to the store
+          };
+          if (this.fanout) {
+            try {
+              void this.fanout.publish(oplog);
+            } catch {
+              /* a fan-out failure must not fail the commit */
             }
-            u.resolve({ value: u.value, committed: true, commitTs: ts, shardId: u.shardId, oplog });
           }
-          this.prune(); // once per flush
+          u.resolve({ value: u.value, committed: true, commitTs: ts, shardId: u.shardId, oplog });
         }
+        if (outcome.landed.length > 0) this.prune(); // once per flush cycle, only if anything landed
+
+        // Reject the guard-split units with their OWN coded rejection, then the failed remaining chunk
+        // (a non-guard error, or the split-budget-exhausted retryable remainder) verbatim. None of
+        // these touched the ring/oracle — the store guarantees no rejected unit landed.
+        for (const { unit: u, error } of outcome.guardRejected) u.reject(error);
+        for (const u of outcome.chunkUnits) u.reject(outcome.chunkErr);
+
         this.flushingBatch = null;
         // Wake batch-cut / tagged-conflict awaiters: the batch has left the in-flight state (whether
         // it landed in the ring or failed), so a re-stage/replay now reads committed state correctly.
         batch.resolvePromoted();
       });
+    }
+  }
+
+  /**
+   * Flush a batch's units OFF the mutex, splitting out per-unit {@link CommitGuardRejection}s. On a
+   * rejection the store rolled the whole txn back (nothing landed), so the surviving units are safe
+   * to re-flush with fresh ts. Bounded at {@link MAX_SPLIT_RETRIES}; any non-guard error (incl.
+   * `FencedError`) or an out-of-range index fails the whole remaining chunk (never split).
+   */
+  private async flushWithSplit(units: readonly StagedUnit[]): Promise<{
+    landed: { unit: StagedUnit; ts: bigint }[];
+    guardRejected: { unit: StagedUnit; error: CommitGuardRejection }[];
+    chunkUnits: StagedUnit[];
+    chunkErr: unknown;
+  }> {
+    let remaining = units.slice(); // preserves unit order across splices
+    const landed: { unit: StagedUnit; ts: bigint }[] = [];
+    const guardRejected: { unit: StagedUnit; error: CommitGuardRejection }[] = [];
+    let splits = 0;
+
+    for (;;) {
+      let tss: bigint[] | null = null;
+      let err: unknown = null;
+      try {
+        tss = await this.docStore.commitWriteBatch(
+          remaining.map((u) => ({ documents: u.documents, indexUpdates: u.indexUpdates, meta: u.meta })),
+          this.shardId,
+        );
+      } catch (e) {
+        err = e;
+      }
+      if (tss !== null) {
+        for (let i = 0; i < remaining.length; i++) landed.push({ unit: remaining[i]!, ts: tss[i]! });
+        return { landed, guardRejected, chunkUnits: [], chunkErr: null };
+      }
+      if (
+        err instanceof CommitGuardRejection &&
+        err.unitIndex >= 0 &&
+        err.unitIndex < remaining.length &&
+        splits < MAX_SPLIT_RETRIES
+      ) {
+        const [rejected] = remaining.splice(err.unitIndex, 1); // drop the ONE offending unit
+        guardRejected.push({ unit: rejected!, error: err });
+        splits++;
+        if (remaining.length === 0) return { landed, guardRejected, chunkUnits: [], chunkErr: null };
+        continue; // re-flush the remainder with fresh ts
+      }
+      // Whole-batch failure: a non-guard error (FencedError, flush I/O), an out-of-range guard index,
+      // or the split budget is spent — reject the surviving chunk retryably/verbatim, never split.
+      return { landed, guardRejected, chunkUnits: remaining, chunkErr: err };
     }
   }
 

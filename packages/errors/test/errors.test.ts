@@ -6,6 +6,8 @@ import {
   TransientError,
   ConflictError,
   OccConflictError,
+  CommitGuardRejection,
+  COMMIT_GUARD_REJECTION_CODE,
   ArgumentValidationError,
   DocumentNotFoundError,
   ForbiddenOperationError,
@@ -60,6 +62,30 @@ describe("StackbaseError hierarchy", () => {
     const root = new Error("io failed");
     const e = new InternalError("wrapped", { cause: root });
     expect(e.cause).toBe(root);
+  });
+});
+
+describe("CommitGuardRejection (Receipted Outbox, decision 2)", () => {
+  it("is a retryable 409 ConflictError carrying unitIndex/rejectionCode/detail", () => {
+    const e = new CommitGuardRejection(2, "FLEET_IDEMPOTENCY_CONFLICT", "key=abc");
+    expect(e).toBeInstanceOf(ConflictError);
+    expect(e).toBeInstanceOf(StackbaseError);
+    expect(e.name).toBe("CommitGuardRejection");
+    expect(e.code).toBe(COMMIT_GUARD_REJECTION_CODE);
+    expect(e.httpStatus).toBe(409);
+    expect(e.retryable).toBe(true);
+    expect(e.unitIndex).toBe(2);
+    expect(e.rejectionCode).toBe("FLEET_IDEMPOTENCY_CONFLICT");
+    expect(e.detail).toBe("key=abc");
+    expect(isRetryableError(e)).toBe(true);
+  });
+
+  it("round-trips the extra fields through toJSON's data payload", () => {
+    const e = new CommitGuardRejection(1, "CLIENT_MUTATION_DUP", "seq=7");
+    const json = e.toJSON();
+    expect(json.code).toBe(COMMIT_GUARD_REJECTION_CODE);
+    expect(json.retryable).toBe(true);
+    expect(json.data).toMatchObject({ unitIndex: 1, rejectionCode: "CLIENT_MUTATION_DUP", detail: "seq=7" });
   });
 });
 

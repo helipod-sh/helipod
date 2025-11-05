@@ -32,6 +32,7 @@ import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/
 import type { DatabaseAdapter } from "@stackbase/docstore-sqlite";
 import type { DocStore } from "@stackbase/docstore";
 import type { JSONValue } from "@stackbase/values";
+import { CommitGuardRejection } from "@stackbase/errors";
 import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
 import {
   InMemoryWriteFanoutAdapter,
@@ -962,18 +963,32 @@ export function installCommitGuard(
     // row at THAT unit's own ts, in the SAME transaction — atomic by construction. Looping per unit is
     // what makes the batch-shaped guard correct: a single last-ts guard call would drop units 1..N-1's
     // rows and stamp the wrong ts. A `key` PK collision (the concurrent-duplicate race's loser: another
-    // commit already claimed this key) throws a raw `unique_violation`, aborting the WHOLE batch (nothing
-    // above has committed — Postgres rolls back every unit's frontier bump and rows together with this
-    // INSERT). `packages/cli`'s `/_fleet/run` handler catches that specific shape (code 23505 on THIS
-    // table/constraint — never an app-schema unique violation) and re-SELECTs the winner's commitTs as a
-    // replay. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
+    // commit already claimed this key) surfaces as a Postgres `unique_violation` (23505). We convert it
+    // to a typed `CommitGuardRejection` carrying THIS unit's index (Receipted Outbox, decision 2): under
+    // group commit the transactor's committer splits out ONLY this offending unit and re-flushes the
+    // innocent co-batched remainder, instead of the pre-fix behavior where the raw throw aborted the
+    // whole batch and every co-batched unit was rejected as collateral. On the single-commit path
+    // (a one-unit batch) it propagates as that mutation's own rejection. Either way `packages/cli`'s
+    // `/_fleet/run` handler detects `rejectionCode === "FLEET_IDEMPOTENCY_CONFLICT"` (never an app-schema
+    // unique violation) and re-SELECTs the winner's commitTs as a replay. Any OTHER error propagates
+    // raw. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
     // idempotency machinery costs nothing outside a forwarded write.
-    for (const unit of units) {
+    for (let i = 0; i < units.length; i++) {
+      const unit = units[i]!;
       if (unit.meta?.idempotencyKey) {
-        await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
-          unit.meta.idempotencyKey,
-          unit.ts,
-        ]);
+        try {
+          await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
+            unit.meta.idempotencyKey,
+            unit.ts,
+          ]);
+        } catch (e) {
+          if ((e as { code?: unknown }).code === "23505") {
+            throw new CommitGuardRejection(i, "FLEET_IDEMPOTENCY_CONFLICT", `key=${unit.meta.idempotencyKey}`, {
+              cause: e,
+            });
+          }
+          throw e;
+        }
       }
     }
   });

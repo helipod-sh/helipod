@@ -15,6 +15,7 @@ import { describe, it, expect, vi } from "vitest";
 import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
 import type { DocumentLogEntry } from "@stackbase/docstore";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import { CommitGuardRejection } from "@stackbase/errors";
 import { LeaseManager, IDEMPOTENCY_VALUE_CAP_BYTES } from "../src/lease";
 import { installCommitGuard } from "../src/node";
 import { FencedError } from "../src/fenced-error";
@@ -102,9 +103,11 @@ describe("Fleet B3, D3: fleet_idempotency + the commit guard's atomic INSERT", (
     } catch (e) {
       caught = e;
     }
-    expect(caught).toBeTruthy();
-    expect((caught as { code?: unknown }).code).toBe("23505");
-    expect((caught as { table?: unknown }).table).toBe("fleet_idempotency");
+    // Receipted Outbox (decision 2): the guard converts the raw 23505 into a typed CommitGuardRejection
+    // carrying the offending unit's index + code, so the group committer can split just that unit out.
+    expect(caught).toBeInstanceOf(CommitGuardRejection);
+    expect((caught as CommitGuardRejection).rejectionCode).toBe("FLEET_IDEMPOTENCY_CONFLICT");
+    expect((caught as CommitGuardRejection).unitIndex).toBe(0); // the single unit of this one-unit commit
 
     // The loser's OWN document row never landed — the whole transaction rolled back.
     const docs = await client.query(`SELECT COUNT(*)::int AS n FROM documents`);

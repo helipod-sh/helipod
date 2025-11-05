@@ -22,6 +22,7 @@ import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@stackbase/execut
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import { LeaseManager, installCommitGuard, type IdempotencyReplay } from "@stackbase/fleet";
+import { CommitGuardRejection } from "@stackbase/errors";
 import type { JSONValue } from "@stackbase/values";
 import { handleHttpRequest, type FleetHandles } from "../src/http-handler";
 import { PgliteClient } from "./pglite-client";
@@ -210,14 +211,12 @@ describe("/_fleet/run — SELECT-first replay (Fleet B3, Task 3)", () => {
 });
 
 describe("/_fleet/run — catch unique_violation-shaped commit failure → re-SELECT → replay (Fleet B3, Task 3)", () => {
-  it("a synthetic pg 23505 on fleet_idempotency during the run is caught and replayed, NOT surfaced as an error", async () => {
-    const pgErr = Object.assign(new Error("duplicate key value violates unique constraint \"fleet_idempotency_pkey\""), {
-      code: "23505",
-      table: "fleet_idempotency",
-      constraint: "fleet_idempotency_pkey",
-    });
+  it("a synthetic fleet-idempotency CommitGuardRejection during the run is caught and replayed, NOT surfaced as an error", async () => {
+    // Receipted Outbox (decision 2): the real fleet guard now converts the raw 23505 into a typed
+    // CommitGuardRejection(FLEET_IDEMPOTENCY_CONFLICT); the handler detects it via `instanceof`.
+    const guardErr = new CommitGuardRejection(0, "FLEET_IDEMPOTENCY_CONFLICT", "key=race-key");
     const handlerSpy = vi.fn((_a: { title: string }) => {
-      throw pgErr;
+      throw guardErr;
     });
     const dbStore = new SqliteDocStore(new NodeSqliteAdapter());
     const catalog = new SimpleIndexCatalog();

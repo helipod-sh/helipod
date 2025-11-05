@@ -4,7 +4,7 @@
  * function invocation, and `/_admin/*` for the admin API (behind an admin key).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { getHttpStatus, toStackbaseError, NotShardOwnerError } from "@stackbase/errors";
+import { getHttpStatus, toStackbaseError, NotShardOwnerError, CommitGuardRejection } from "@stackbase/errors";
 import { matchRoute } from "@stackbase/executor";
 import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
@@ -70,23 +70,18 @@ export interface FleetHandles {
 }
 
 /**
- * True iff `e` is a Postgres `unique_violation` (23505) on the `fleet_idempotency` table
- * specifically (Fleet B3, D3 spec-review requirement) — the concurrent-duplicate race's loser: its
- * own commit guard INSERT collided with a sibling attempt that committed first, aborting its ENTIRE
- * commit transaction. This must be narrow: a 23505 from an APP-schema unique index (a genuine
- * uniqueness-constraint mutation failure) is a completely different, real error and must NEVER be
- * silently turned into a replay. Checked on the RAW thrown error — `DocStore.commitWrite`/
- * `ShardWriter.commit`/`InlineUdfExecutor.run` all rethrow a guard's failure unchanged (no
- * wrapping), so the underlying `pg`/PGlite driver error's `code`/`table`/`constraint` fields survive
- * unmodified all the way up to this catch.
+ * True iff `e` is the fleet idempotency guard's rejection (Fleet B3, D3) — the concurrent-duplicate
+ * race's loser: its own commit guard INSERT collided with a sibling attempt that committed first,
+ * aborting its ENTIRE commit transaction. Since the Receipted Outbox split-retry (decision 2) the
+ * guard converts the raw Postgres `unique_violation` into a typed `CommitGuardRejection` carrying
+ * `rejectionCode === "FLEET_IDEMPOTENCY_CONFLICT"`, so this detection is now a typed `instanceof`
+ * rather than a raw-23505 sniff. This is caught on the OWNER (a local throw, before the fleet-hop
+ * serialization at the bottom of `/_fleet/run`), so the raw `instanceof` holds. It must stay narrow:
+ * an app-schema unique violation surfaces as a raw driver error (NOT a `CommitGuardRejection`) and
+ * must NEVER be turned into a replay — the typed guard makes that distinction structural.
  */
 function isFleetIdempotencyConflict(e: unknown): boolean {
-  if (!e || typeof e !== "object") return false;
-  if ((e as { code?: unknown }).code !== "23505") return false;
-  const table = (e as { table?: unknown }).table;
-  if (table === "fleet_idempotency") return true;
-  const constraint = (e as { constraint?: unknown }).constraint;
-  return typeof constraint === "string" && constraint.startsWith("fleet_idempotency");
+  return e instanceof CommitGuardRejection && e.rejectionCode === "FLEET_IDEMPOTENCY_CONFLICT";
 }
 
 /** The `/_fleet/run` replay response body (Fleet B3, D3) — additive: `replayed: true` alongside
