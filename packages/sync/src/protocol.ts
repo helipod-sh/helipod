@@ -40,10 +40,54 @@ export interface QueryRequest {
   args: JSONValue;
 }
 
+/**
+ * The durable per-tab client identity for a resend-safe mutation (Receipted Outbox, verdict §(b)/(e)).
+ * `clientId` is minted once per tab-session; `seq` is a per-tab monotone counter. The `(identity,
+ * clientId, seq)` triple is the write-once dedup key; `identity` is the session's ambient token,
+ * supplied server-side (never trusted from the client). Both fields absent → today's unconditional
+ * path, bit-for-bit — a mutation with no `clientId` writes no receipt and reads no classification.
+ */
+export interface ClientMutationRef {
+  clientId: string;
+  seq: number;
+}
+
+/** One entry of a {@link MutationBatch} — the same shape a standalone `Mutation` carries. */
+export interface MutationBatchEntry {
+  requestId: string;
+  udfPath: string;
+  args: JSONValue;
+  clientId?: string;
+  seq?: number;
+}
+
+/**
+ * A per-seq verdict as it travels on the wire (`ConnectAck.results`, verdict §(e)). `verdict`
+ * distinguishes a replayed success (`applied`), a replayed terminal failure (`failed`), a
+ * loudly-disowned pruned/holed seq (`stale`), and a never-seen seq the client must (re)send
+ * (`unknown`). `commitTs`/`value`/`valueMissing`/`code` mirror {@link MutationResponse}'s replay shape.
+ */
+export interface ClientMutationVerdict {
+  clientId: string;
+  seq: number;
+  verdict: "applied" | "failed" | "stale" | "unknown";
+  commitTs?: number;
+  value?: JSONValue;
+  valueMissing?: true;
+  code?: string;
+}
+
 export type ClientMessage =
-  | { type: "Connect"; sessionId: string }
+  // `Connect` activates from the reserved no-op (verdict §(e)): `clientId`/`held`/`ackedThrough` are
+  // the resume handshake — the server classifies `held` into `ConnectAck.results` and prunes
+  // `ackedThrough` (the contiguous settled-prefix). Absent → today's no-op Connect, bit-for-bit.
+  | { type: "Connect"; sessionId: string; clientId?: string; held?: ClientMutationRef[]; ackedThrough?: ClientMutationRef[] }
   | { type: "ModifyQuerySet"; add: QueryRequest[]; remove: number[] }
-  | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue }
+  | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue; clientId?: string; seq?: number }
+  // `MutationBatch` (verdict §(e)): the offline drain's chunk shape — the server applies `entries`
+  // SEQUENTIALLY and replies with one `MutationResponse` per entry (chunk semantics; a mid-batch
+  // terminal failure records + responds and CONTINUES to the next entry).
+  | { type: "MutationBatch"; entries: MutationBatchEntry[] }
   | { type: "Action"; requestId: string; udfPath: string; args: JSONValue }
   | { type: "EphemeralPublish"; topic: string; event: JSONValue }
   | { type: "SetAuth"; token: string | null }
@@ -62,10 +106,22 @@ export type ServerMessage =
   // Optional, not because it is sometimes skippable, but because the server omits it on the
   // one path where sending it would be a lie — see the send-site invariant check at
   // handler.ts's `handleMutation`. Additive: old clients that don't know the field ignore it.
-  | { type: "MutationResponse"; requestId: string; success: true; value: JSONValue; ts?: number }
-  | { type: "MutationResponse"; requestId: string; success: false; error: string }
+  // `replayed`/`valueMissing` (Receipted Outbox, verdict §(e)): a replay-ack for a resent mutation
+  // whose verdict was already recorded — NO commit happened on this call; `ts` is the ORIGINAL
+  // commitTs (keeps the client optimistic gate sound). `value` is omitted (not sent) when the
+  // recorded verdict had no value (the crash-window or 64KB-cap case) — then `valueMissing: true`.
+  | { type: "MutationResponse"; requestId: string; success: true; value?: JSONValue; ts?: number; replayed?: true; valueMissing?: true }
+  // `code` (verdict §(e)): the terminal verdict code (a recorded `failed` verdict's error code, or
+  // `"STALE_CLIENT"`) — the client's coded-vs-codeless retry policy keys off its presence.
+  | { type: "MutationResponse"; requestId: string; success: false; error: string; code?: string }
   | { type: "ActionResponse"; requestId: string; success: true; value: JSONValue }
   | { type: "ActionResponse"; requestId: string; success: false; error: string }
+  // `ConnectAck` (verdict §(e)): the resume-handshake reply — the capability proof that arms the
+  // client's park-and-resend. `known: false` → the server has neither records nor a floor for the
+  // presented history (a swept/foreign timeline) → the client resets (`onClientReset`). `deploymentId`
+  // hardens the same-timeline proof (verdict §(g) hazard 15). `results` classifies each presented
+  // `held` seq. NO `tableNumbers` (rejected — couples client caches to the interim registry).
+  | { type: "ConnectAck"; known: boolean; results: ClientMutationVerdict[]; deploymentId: string }
   | { type: "Broadcast"; topic: string; event: JSONValue }
   | { type: "FatalError"; message: string }
   | { type: "Ping" };

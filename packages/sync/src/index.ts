@@ -10,6 +10,9 @@ export type {
   ClientMessage,
   StateModification,
   ServerMessage,
+  ClientMutationRef,
+  MutationBatchEntry,
+  ClientMutationVerdict,
 } from "./protocol";
 export {
   INITIAL_VERSION,
@@ -28,6 +31,9 @@ export type {
   SyncUdfExecutor,
   WriteInvalidation,
   SyncProtocolHandlerOptions,
+  MutationRan,
+  MutationReplay,
+  RunMutationResult,
 } from "./handler";
 export { SyncProtocolHandler } from "./handler";
 

@@ -3,7 +3,7 @@
  * process, exposes in-memory loopback connections, and drives the swappable write-fan-out
  * seam. The single-binary core.
  */
-export type { EmbeddedRuntimeOptions, WriteRouter } from "./runtime";
+export type { EmbeddedRuntimeOptions, WriteRouter, ClientReplay } from "./runtime";
 export { EmbeddedRuntime, createEmbeddedRuntime } from "./runtime";
 
 export type { LoopbackConnection, ServerMessageListener, LoopbackHandler } from "./loopback";

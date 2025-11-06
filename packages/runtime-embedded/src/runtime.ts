@@ -17,13 +17,32 @@ import { MonotonicTimestampOracle } from "@stackbase/docstore";
 import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
 import { QueryRuntime } from "@stackbase/query-engine";
 import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry, type WriteRouter } from "@stackbase/executor";
-import { SyncProtocolHandler, type SyncUdfExecutor } from "@stackbase/sync";
+import { SyncProtocolHandler, type SyncUdfExecutor, type RunMutationResult, type MutationReplay, type ClientMutationVerdict } from "@stackbase/sync";
 import {
   EmbeddedWriteFanout,
   InMemoryWriteFanoutAdapter,
   type EmbeddedWriteFanoutAdapter,
 } from "./write-fanout";
 import { createLoopbackConnection, type LoopbackConnection } from "./loopback";
+import {
+  classifyDedup,
+  classifyForConnect,
+  clientReceiptsGuard,
+  dedupCommitMeta,
+  handleDedupError,
+  recordZeroWriteApplied,
+  type DedupKey,
+} from "./client-dedup";
+import type { ClientReplay } from "@stackbase/executor";
+
+/**
+ * The `persistence_globals` key the deployment id is stamped under — reused verbatim from
+ * `@stackbase/fleet`'s `FLEET_DEPLOYMENT_ID_KEY` (core has no static dep on the enterprise package,
+ * so the literal is duplicated, not imported). Both stamp with `writeGlobalIfAbsent` (first-wins), so
+ * a fleet + non-fleet boot against the same store agree on one id. Powers `ConnectAck.deploymentId`
+ * (the same-timeline proof, verdict §(g) hazard 15).
+ */
+const DEPLOYMENT_ID_GLOBAL_KEY = "fleet:deploymentId";
 
 /**
  * Public-gate check: a path is internal (client-forbidden) if ANY colon-delimited segment
@@ -48,6 +67,18 @@ function isInternalPath(path: string): boolean {
 function rebuildTableNumberToName(map: Map<number, string>, tableNumbers: Record<string, number>): void {
   map.clear();
   for (const [name, num] of Object.entries(tableNumbers)) map.set(num, name);
+}
+
+/** Map a JSON-friendly {@link ClientReplay} (from the classification pre-read or a forwarded owner's
+ *  replay) to the sync tier's `Value`-typed `MutationReplay` — the only conversion point where the
+ *  recorded `JSONValue` becomes a runtime `Value`. */
+function replayToRunResult(replay: ClientReplay): RunMutationResult {
+  const out: MutationReplay = { replayed: true, verdict: replay.verdict };
+  if (replay.commitTs !== undefined) out.commitTs = replay.commitTs;
+  if (replay.value !== undefined) out.value = jsonToConvex(replay.value) as Value;
+  if (replay.valueMissing) out.valueMissing = true;
+  if (replay.code !== undefined) out.code = replay.code;
+  return out;
 }
 
 /** The payload shape `DriverContext.onCommit` callbacks receive (same shape as
@@ -98,7 +129,7 @@ function fireCommitSubs(commitSubs: ReadonlySet<(inv: CommitEvent) => void>, inv
  * an action's INNER mutations then route per-shard from wherever the action runs. See
  * `InlineUdfExecutor.run`'s routing hook.
  */
-export type { WriteRouter } from "@stackbase/executor";
+export type { WriteRouter, ClientReplay } from "@stackbase/executor";
 
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
@@ -282,6 +313,24 @@ export class EmbeddedRuntime {
 
   static async create(options: EmbeddedRuntimeOptions): Promise<EmbeddedRuntime> {
     await options.store.setupSchema();
+    // Register the client-mutation receipts guard ONCE, here at construction — BEFORE any fleet epoch
+    // fence (which arms later, on writer promotion), so receipts run first in the guard chain (verdict
+    // §(c) Risk R6). Unconditional and free until used: the guard is a no-op for any commit whose units
+    // carry no dedup key (every ordinary mutation), so this costs a non-outbox deployment nothing.
+    options.store.addCommitGuard(clientReceiptsGuard());
+    // Resolve (or first-stamp) the deployment id for `ConnectAck` (same-timeline proof). A fleet sync
+    // node's replica may be read-only — tolerate a failed stamp (it reads the primary's replicated id;
+    // worst case an empty id, still a stable per-boot value the client compares against itself).
+    let deploymentId = (await options.store.getGlobal(DEPLOYMENT_ID_GLOBAL_KEY)) as string | null;
+    if (deploymentId === null) {
+      try {
+        await options.store.writeGlobalIfAbsent(DEPLOYMENT_ID_GLOBAL_KEY, crypto.randomUUID());
+        deploymentId = (await options.store.getGlobal(DEPLOYMENT_ID_GLOBAL_KEY)) as string | null;
+      } catch {
+        deploymentId = null;
+      }
+    }
+    const resolvedDeploymentId = deploymentId ?? "";
     // Mirror the primary store's schema setup for `queryStore` (Fleet B3, D1) — idempotent on both
     // backends (SQLite `CREATE TABLE IF NOT EXISTS`; Postgres swallows the duplicate-object race),
     // so a caller handing in an already-initialized replica pays nothing extra, while a fresh store
@@ -406,34 +455,65 @@ export class EmbeddedRuntime {
           readRanges: r.readRanges.map(serializeKeyRange),
         };
       },
-      async runMutation(path, args, identity, origin) {
+      async runMutation(path, args, identity, origin, dedup): Promise<RunMutationResult> {
         const fn = resolve(path);
-        // Per-shard write routing now lives at the executor chokepoint (`executor.run` forwards a
-        // mutation whose resolved shard this node doesn't own — see `InlineUdfExecutor.run`). The
-        // old runtime-level `writeRouter` check here was BEFORE shard resolution and so bypassed the
-        // driver/scheduler path; it is removed as superseded. A forwarded run comes back with a null
-        // oplog, so `tables`/`writeRanges` are empty — the same shape this path reported for a
-        // forwarded write before.
-        // G4: thread the committing session's id (`origin`) into the run opts so it lands on the
-        // emitted `OplogDelta.origin` → fan-out payload → drain → `notifyWrites(inv, origin)`. It is
-        // never made durable (stamped after `commitWrite` returns; see the transactor). A FORWARDED
-        // mutation produces no local oplog, so the tag can't ride the local fan-out — the handler's
-        // response-path frontier fallback (see `forwarded` below) covers that node-crossing case.
-        const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards, origin });
+        // Owner-placement (Receipted Outbox, verdict §(c) repair 3): the classification read must run
+        // WHERE THE COMMIT RUNS. On a node that will FORWARD (a fleet non-writer for the default
+        // shard), don't classify against this node's replica — thread the dedup key into the forward
+        // so the OWNER classifies. On the owner / single-node, classify locally.
+        const willForward = dedup !== undefined && !!options.writeRouter && !options.writeRouter.isLocalWriter(DEFAULT_SHARD);
+        const classifyLocally = dedup !== undefined && !willForward;
+
+        if (classifyLocally) {
+          const pre = await classifyDedup(options.store, identity ?? null, dedup as DedupKey);
+          if (pre) return replayToRunResult(pre);
+        }
+
+        // G4: thread the committing session's id (`origin`) so the commit's fan-out advances its own
+        // frontier. `dedup` rides the forward (owner classifies); `commitMeta` carries the dedup key
+        // to the LOCAL receipts guard (which writes the `applied` receipt atomically at commit).
+        const runOpts = {
+          path,
+          namespace: namespaceForPath(path, componentNames),
+          contextProviders,
+          policyRegistry,
+          policyProviders,
+          relationRegistry,
+          functionKind,
+          identity: identity ?? null,
+          numShards,
+          origin,
+          dedup,
+          commitMeta: classifyLocally ? dedupCommitMeta(identity ?? null, dedup as DedupKey) : undefined,
+        };
+        let r;
+        try {
+          r = await executor.run(fn, jsonToConvex(args), runOpts);
+        } catch (e) {
+          if (classifyLocally) {
+            const replay = await handleDedupError(options.store, identity ?? null, dedup as DedupKey, e);
+            if (replay) return replayToRunResult(replay);
+          }
+          throw e;
+        }
+        // The owner replayed a recorded verdict for a forwarded dedup write (no commit here).
+        if (r.clientReplay) return replayToRunResult(r.clientReplay);
+        // Zero-write successful mutation (no doc rows → the guard never ran): write its `applied`
+        // receipt (WITH the return value) standalone, post-run (verdict §(c) Risk R1).
+        if (classifyLocally && !r.committed) {
+          await recordZeroWriteApplied(options.store, identity ?? null, dedup as DedupKey, r.commitTs, r.value as Value);
+        }
         return {
+          replayed: false,
           value: r.value as Value,
           tables: r.oplog?.writtenTables ?? [],
           writeRanges: r.oplog?.writtenRanges ?? [],
           // `commitTs` (B2b, T2): a LOCAL commit reports it via `r.oplog.commitTs`; a FORWARDED
           // mutation has no local oplog (null), but the executor's forward branch already threads
-          // the owner's real commitTs onto `r.commitTs` itself (see `InlineUdfExecutor.run`) — fall
-          // back to that instead of silently reporting 0, so a forwarded sharded write's commitTs
-          // reaches this path the same way a local one's does.
+          // the owner's real commitTs onto `r.commitTs` itself — fall back to that.
           commitTs: Number(r.oplog?.commitTs ?? r.commitTs ?? 0n),
           // G4 fleet fallback signal: a committed write with NO local oplog was forwarded to another
-          // shard's owner — its commit fanned out on the OWNER, so the origin tag (which only rides a
-          // LOCAL fan-out) can't reach this forwarding node's `doNotifyWrites`. The handler advances
-          // the origin session's frontier via the drain-gated fallback instead (see handler.ts).
+          // shard's owner — its origin tag can't reach this node's `doNotifyWrites`.
           forwarded: r.committed && r.oplog === null,
         };
       },
@@ -459,6 +539,16 @@ export class EmbeddedRuntime {
         }
         const r = await executor.run(fn, jsonToConvex(args), { path, namespace: namespaceForPath(path, componentNames), contextProviders, policyRegistry, policyProviders, relationRegistry, functionKind, identity: identity ?? null, numShards });
         return { value: r.value as Value };
+      },
+      // ── Receipted Outbox resume-handshake support (verdict §(e)) ──────────────────────────────
+      async classifyClientMutation(identity, clientId, seq): Promise<ClientMutationVerdict> {
+        return classifyForConnect(options.store, identity ?? null, clientId, seq);
+      },
+      async pruneClientMutations(identity, clientId, ackedThrough): Promise<void> {
+        await options.store.pruneClientMutations(identity ?? "", clientId, { ackedThrough });
+      },
+      deploymentId(): string {
+        return resolvedDeploymentId;
       },
     };
 
@@ -786,7 +876,7 @@ export class EmbeddedRuntime {
   async run<T = unknown>(
     path: string,
     args: JSONValue,
-    opts?: { identity?: string | null; commitMeta?: Record<string, string> },
+    opts?: { identity?: string | null; commitMeta?: Record<string, string>; dedup?: DedupKey },
   ): Promise<UdfResult<T>> {
     if (isInternalPath(path)) throw new FunctionNotFoundError(`unknown function: ${path}`);
     const fn = this.modules[path];
@@ -794,6 +884,14 @@ export class EmbeddedRuntime {
     if (fn.type === "action" && this.writeRouter && !this.writeRouter.isLocalWriter(DEFAULT_SHARD)) {
       const res = await this.writeRouter.forward("action", path, args, opts?.identity ?? null, DEFAULT_SHARD);
       return this.forwardedResult<T>(res.value);
+    }
+    // Receipted Outbox (verdict §(c)): a dedup-keyed MUTATION reaching this OWNER (the fleet
+    // `/_fleet/run` path, or a local caller) classifies here — the same code path single-node and
+    // fleet share (repair 3). A recorded/floored verdict short-circuits to a replay UdfResult
+    // (`clientReplay` set, `committed: false`); a miss runs with the dedup key on the commit meta so
+    // the receipts guard writes the `applied` receipt atomically, and a guard PK collision replays.
+    if (fn.type === "mutation" && opts?.dedup) {
+      return this.runMutationClassified<T>(fn, path, args, opts.identity ?? null, opts.dedup, opts.commitMeta);
     }
     return this.executor.run<T>(fn, jsonToConvex(args), {
       path,
@@ -811,6 +909,62 @@ export class EmbeddedRuntime {
       // handler is the one caller that sets this, carrying a forwarded write's idempotency key.
       commitMeta: opts?.commitMeta,
     });
+  }
+
+  /**
+   * The OWNER-side dedup classification for a mutation reaching `run()` with a dedup key (the fleet
+   * `/_fleet/run` forward path). Shares the exact classify → run-with-guard → replay-on-collision
+   * logic the sync `runMutation` uses; a replay is surfaced as a `UdfResult` with `clientReplay` set
+   * (the `/_fleet/run` handler serializes it to a replay body). `base` is any pre-existing commit
+   * meta (e.g. fleet's `idempotencyKey`) — the dedup keys merge onto it (disjoint keys).
+   */
+  private async runMutationClassified<T>(
+    fn: RegisteredFunction,
+    path: string,
+    args: JSONValue,
+    identity: string | null,
+    dedup: DedupKey,
+    base?: Record<string, string>,
+  ): Promise<UdfResult<T>> {
+    const pre = await classifyDedup(this.store, identity, dedup);
+    if (pre) return this.replayResult<T>(pre);
+    const commitMeta = dedupCommitMeta(identity, dedup, base);
+    let r: UdfResult<T>;
+    try {
+      r = await this.executor.run<T>(fn, jsonToConvex(args), {
+        path,
+        namespace: namespaceForPath(path, this.componentNames),
+        contextProviders: this.contextProviders,
+        policyRegistry: this.policyRegistry,
+        policyProviders: this.policyProviders,
+        relationRegistry: this.relationRegistry,
+        functionKind: this.functionKind,
+        identity,
+        numShards: this.numShards,
+        commitMeta,
+      });
+    } catch (e) {
+      const replay = await handleDedupError(this.store, identity, dedup, e);
+      if (replay) return this.replayResult<T>(replay);
+      throw e;
+    }
+    if (!r.committed) {
+      await recordZeroWriteApplied(this.store, identity, dedup, r.commitTs, r.value as Value);
+    }
+    return r;
+  }
+
+  /** Wrap a {@link ClientReplay} as a `UdfResult` carrying `clientReplay` — no commit happened. */
+  private replayResult<T>(replay: ClientReplay): UdfResult<T> {
+    return {
+      value: jsonToConvex(replay.value ?? null) as T,
+      logs: [],
+      committed: false,
+      commitTs: replay.commitTs !== undefined ? BigInt(replay.commitTs) : 0n,
+      readRanges: [],
+      oplog: null,
+      clientReplay: replay,
+    };
   }
 
   /** Directly invoke an action (for HTTP routes / the CLI `run` command). Public gate: blocks

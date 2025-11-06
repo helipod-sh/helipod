@@ -266,7 +266,9 @@ export class StackbaseClient {
         const pending = this.pendingMutations.get(msg.requestId);
         this.pendingMutations.delete(msg.requestId);
         if (msg.success) {
-          pending?.resolve(jsonToConvex(msg.value)); // D3: resolve now
+          // `value` is optional on the wire (a Receipted Outbox replay-ack with `valueMissing`
+          // omits it); coalesce to null. Full replay handling is Plan B — this keeps today's shape.
+          pending?.resolve(jsonToConvex(msg.value ?? null)); // D3: resolve now
           this.reconciler.onMutationSuccess(msg.requestId, msg.ts);
         } else {
           pending?.reject(new Error(msg.error));

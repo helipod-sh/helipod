@@ -31,6 +31,7 @@ import {
   type StorageRoute,
   type StorageRouteDeps,
 } from "@stackbase/storage";
+import { receiptsReaper } from "@stackbase/receipts";
 import { makeBlobStore, isS3Config, resolveStorageConfig, type StorageConfig } from "./blobstore-select";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
@@ -316,6 +317,10 @@ export async function bootLoaded(opts: {
     bootSteps: project.bootSteps,
     drivers: [
       storageReaper(blobStore, opts.storageReaperSweepMs !== undefined ? { sweepMs: opts.storageReaperSweepMs } : undefined),
+      // Receipted Outbox TTL reaper (verdict §(c) Retention): a timer-only bulk sweep of expired
+      // `client_mutations` rows. Always on (every deployment has the receipts tables); no-op work when
+      // no client ever wrote a receipt. Reads the SAME `store` the runtime commits to.
+      receiptsReaper(store),
       ...project.drivers,
     ],
     // Fleet (Tier 2): route writes to the lease-holder when not the writer, defer drivers until

@@ -304,6 +304,7 @@
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/query-engine": "workspace:*",
+        "@stackbase/receipts": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@stackbase/storage": "workspace:*",
         "@stackbase/sync": "workspace:*",

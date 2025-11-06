@@ -171,10 +171,15 @@ export async function handleHttpRequest(
          *  non-forwarded call (e.g. a fleet-internal system forward from an older node, or any
          *  direct non-fleet caller), which carries no idempotency tracking at all. */
         idempotencyKey?: string;
+        /** Receipted Outbox: the durable client dedup key (verdict §(c)). Present → this OWNER
+         *  classifies the write (the placement rule — repair 3); a recorded verdict replays here. */
+        clientId?: string;
+        seq?: number;
       };
       if (!p.path) return json(400, { error: "missing function path" });
       const identity = p.identity ?? null;
       const shardId = (p.shardId ?? DEFAULT_SHARD) as ShardId;
+      const dedup = p.clientId !== undefined && p.seq !== undefined ? { clientId: p.clientId, seq: p.seq } : undefined;
       // Single-hop guard (B2b, D1 spec-review edit): a forward that lands on a node which is ALSO
       // not `shardId`'s owner (a point-in-time race during rebalance/failover convergence) must
       // NEVER re-forward — that would let a forward chase a moving target unboundedly. Reject with
@@ -194,7 +199,15 @@ export async function handleHttpRequest(
       // without ever touching the runtime — no re-execution, no double side effects. `idempotencyLookup`
       // is optional (older/stub `FleetHandles`) — absent, this whole path is skipped and behavior is
       // byte-identical to before this feature existed.
-      if (idempotencyKey && fleet.idempotencyLookup) {
+      //
+      // Receipted Outbox precedence (verdict Risk R2): when a DURABLE client dedup key is present, the
+      // client-verdict classification (run inside `runtime.run` below) is authoritative and runs
+      // BEFORE any fleet-idempotency decision — so skip the per-hop fleet pre-select here. The client
+      // verdict outlives the fleet key's TTL and catches BOTH the cross-reconnect resend and the
+      // same-hop retry-once (each mints a fresh `idempotencyKey`, so the fleet pre-select would miss
+      // a resend anyway). The fleet `idempotencyKey` still rides `commitMeta` as a belt-and-suspenders
+      // guard, but the client receipts guard is the real barrier.
+      if (idempotencyKey && fleet.idempotencyLookup && !dedup) {
         const hit = await fleet.idempotencyLookup(idempotencyKey);
         if (hit) return json(200, idempotencyReplayBody(hit));
       }
@@ -221,7 +234,7 @@ export async function handleHttpRequest(
             ? await runtime.runAction(p.path, p.args ?? {}, { identity })
             : isInternalForwardPath
               ? await runtime.runSystem(p.path, p.args ?? {}, { shardId, commitMeta })
-              : await runtime.run(p.path, p.args ?? {}, { identity, commitMeta });
+              : await runtime.run(p.path, p.args ?? {}, { identity, commitMeta, dedup });
       } catch (runErr) {
         // The concurrent-duplicate race's loser (Fleet B3, D3 spec-review requirement): this
         // attempt ALSO passed the SELECT-miss above, then its own commit guard's `fleet_idempotency`
@@ -235,6 +248,14 @@ export async function handleHttpRequest(
           if (hit) return json(200, idempotencyReplayBody(hit));
         }
         throw runErr;
+      }
+
+      // Receipted Outbox: the owner classified this dedup forward as a REPLAY of a recorded verdict
+      // (no commit happened) — surface it in its own `clientReplay` body (distinct from the fleet
+      // per-hop `replayed` body). The sync node's `WriteForwarder` reads `clientReplay` and builds a
+      // `MutationReplay`. Skips the fleet value-recording below (there is no fresh value).
+      if (result.clientReplay) {
+        return json(200, { clientReplay: result.clientReplay });
       }
 
       // Post-run best-effort value recording (Fleet B3, D3): the guard only ever saw `commitTs` (the

@@ -97,7 +97,11 @@ describe("commit-guard restack — armWriter's re-arm pattern (Receipted Outbox 
       caught = e;
     }
     expect(caught).toBeTruthy();
-    expect((caught as { code?: unknown }).code).toBe("23505"); // unique_violation — self-collision
+    // The second stacked guard's `fleet_idempotency` INSERT self-collides — a raw `23505` the fence
+    // guard now converts to the typed `CommitGuardRejection` (Receipted Outbox decision 2 / T3's
+    // migrated contract), so the caller sees the typed rejection, not the raw driver code.
+    expect((caught as { code?: unknown }).code).toBe("COMMIT_GUARD_REJECTION");
+    expect((caught as { rejectionCode?: unknown }).rejectionCode).toBe("FLEET_IDEMPOTENCY_CONFLICT");
 
     // The whole transaction rolled back — the "should have succeeded" commit landed NOTHING.
     const docRows = await client.query(`SELECT COUNT(*)::int AS n FROM documents`);
