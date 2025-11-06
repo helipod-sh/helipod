@@ -234,6 +234,46 @@ version/timestamp metadata enables. Note `updateOriginatingSession` / the `exclu
 because it already gets the authoritative result through its own `MutationResponse` + its own query
 re-run, avoiding a double update / flicker.
 
+### Receipted Outbox — resend-safe exactly-once (Plan A)
+
+The optimistic-update story above tolerates a lost `MutationResponse` by resending the mutation on
+reconnect — but a naive resend re-executes and double-writes. Plan A makes a resend **exactly-once**
+with a small set of **purely additive** wire fields (an old client that never sends them gets today's
+behavior bit-for-bit — the `packages/sync/src/protocol.ts` field docs are the source of truth):
+
+- **`Mutation.clientId` / `Mutation.seq`** (both optional) — a durable per-tab identity + a per-tab
+  monotone counter. The `(identity, clientId, seq)` triple is the write-once dedup key (`identity` is
+  the session's ambient token, supplied server-side, never trusted from the client). Absent → the
+  unconditional path (no receipt written, no classification read).
+- **`MutationResponse.replayed` / `valueMissing`** — a resend whose verdict was already recorded
+  replies `replayed: true` carrying the **original** `ts` (so the optimistic gate stays sound) and the
+  recorded return value; `valueMissing: true` when the value was never recorded (the crash window) or
+  exceeded the 64 KB cap. `MutationResponse.code` (on failure) carries the terminal verdict code
+  (a recorded `failed`'s error code, or `"STALE_CLIENT"`).
+- **`MutationBatch`** `{ entries[] }` — the offline drain's chunk shape. Entries apply **sequentially**
+  with one `MutationResponse` per settled entry; a mid-batch **terminal** (non-retryable) failure
+  records its verdict and the drain **continues**, while a **transient** (retryable) failure responds
+  that entry and **stops** the remainder (the FIFO drain obligation — a causally-dependent later unit
+  never applies out of order).
+- **`Connect.clientId` / `held[]` / `ackedThrough[]`** and **`ConnectAck`** `{ known, results[],
+  deploymentId }` — the resume handshake. The server classifies each presented `held` seq into
+  `results` (`applied` / `failed` / `stale` / `unknown`), ack-prunes the contiguous settled prefix
+  `seq ≤ ackedThrough` (advancing a per-client floor — a seq at/below the floor with no record is the
+  loudly-disowned `STALE_CLIENT`), and stamps a `deploymentId` (same-timeline proof). `known: false`
+  means the server recognizes none of the presented history (a swept/foreign timeline → the client
+  resets).
+
+**Classification runs where the commit runs** (single-node locally, or the owning writer on a fleet
+forward — never in the sync handler, never against a follower replica). The barrier is a commit guard
+that `INSERT`s the `applied` receipt inside the mutation's own commit transaction — a PK collision IS
+the dedup signal, thrown as a typed `CommitGuardRejection` whose loser re-reads the winner and
+replay-acks. Under group commit the committer's split-retry rejects only the colliding unit and
+re-flushes the innocent co-batched remainder, so a duplicate-key abort never takes down other clients'
+writes. The full raw-wire proof of every path — kill-after-commit resend, concurrent same-seq
+duplicates, the `STALE_CLIENT` boundary, 50-entry batches, the group-commit collateral fix, and a
+fleet resend classifying at the owner across an 8-shard Docker cluster — is
+`packages/cli/test/outbox-server-e2e.test.ts`.
+
 ### End-to-end: a write becomes a client update
 
 1. Client sends `Mutation`. Handler (`handleMutation`) runs it through `executeMutation`, getting
