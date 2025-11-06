@@ -149,6 +149,33 @@ export async function recordZeroWriteApplied(
 }
 
 /**
+ * Best-effort post-run value fill for a COMMITTED WRITE mutation's guard-inserted `applied` receipt
+ * (the B3 pattern — `LeaseManager.recordIdempotencyValue`'s sibling for client receipts; T5-review
+ * recommendation). `clientReceiptsGuard` only ever sees `commitTs` when it INSERTs the receipt inside
+ * the commit transaction (the return VALUE isn't known there) — this fills it in AFTER the run
+ * returns, via `DocStore.updateClientVerdictValue`, so a later `applied` replay carries the real value
+ * instead of `valueMissing`. Errors are swallowed here (never rethrown): a failure must NOT fail an
+ * otherwise-successful mutation response — a replay for this seq then reports `valueMissing: true`
+ * forever, the SAME outcome as the pre-existing crash-window gap (the value UPDATE never having run at
+ * all), which Plan B's client already tolerates via the wire's `valueMissing` field. Call ONLY when
+ * this node's OWN commit ran the guard (a fresh commit with dedup — never for a replay, and never for
+ * a forwarded write whose guard ran on a DIFFERENT node's store).
+ */
+export async function fillWriteMutationValue(
+  store: DocStore,
+  identity: string | null,
+  dedup: DedupKey,
+  value: Value,
+): Promise<void> {
+  try {
+    await store.updateClientVerdictValue(identityKey(identity), dedup.clientId, dedup.seq, convexToJson(value));
+  } catch {
+    // Best-effort — see the doc comment above. A later replay for this seq simply reports
+    // `valueMissing: true`, same as the pre-existing crash-window gap.
+  }
+}
+
+/**
  * The `applied`-receipt commit guard (registered ONCE at runtime construction, BEFORE fleet's epoch
  * fence — verdict §(c) Risk R6). For every unit whose `meta` carries a dedup key, INSERTs the
  * `client_mutations` receipt at that unit's own `ts`, inside the mutation's commit transaction. The

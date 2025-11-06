@@ -548,6 +548,35 @@ export function runDocStoreConformance(
         });
       });
 
+      describe("updateClientVerdictValue", () => {
+        it("fills value_json onto an already-recorded (guard-inserted-shaped) applied receipt", async () => {
+          // No `value` — mirrors the guard's INSERT, which never sees the return value at commit time.
+          await store.recordClientVerdict("u", "uv1", 1, { verdict: "applied", commitTs: 5n });
+          expect((await store.getClientVerdict("u", "uv1", 1))!.hasValue).toBe(false);
+
+          await store.updateClientVerdictValue("u", "uv1", 1, { filled: true });
+          const rec = await store.getClientVerdict("u", "uv1", 1);
+          expect(rec!.hasValue).toBe(true);
+          expect(rec!.value).toEqual({ filled: true });
+          expect(rec!.verdict).toBe("applied"); // verdict/commitTs untouched
+          expect(rec!.commitTs).toBe(5n);
+        });
+
+        it("drops (never truncates or rejects) a value over the cap — same shape as recordClientVerdict", async () => {
+          await store.recordClientVerdict("u", "uv2", 1, { verdict: "applied", commitTs: 1n });
+          const big = "x".repeat(CLIENT_VERDICT_VALUE_CAP_BYTES + 1);
+          await expect(store.updateClientVerdictValue("u", "uv2", 1, big)).resolves.toBeUndefined();
+          const rec = await store.getClientVerdict("u", "uv2", 1);
+          expect(rec!.hasValue).toBe(false); // -> wire valueMissing
+          expect(rec!.value).toBeNull();
+        });
+
+        it("is a silent no-op when no matching row exists (the crash-window / never-guard-written case)", async () => {
+          await expect(store.updateClientVerdictValue("u", "uv-missing", 1, "value")).resolves.toBeUndefined();
+          expect(await store.getClientVerdict("u", "uv-missing", 1)).toBeNull();
+        });
+      });
+
       describe("pruneClientMutations", () => {
         it("deletes acked records and advances the floor atomically, in one call", async () => {
           await store.recordClientVerdict("u", "p1", 1, { verdict: "applied", commitTs: 1n });

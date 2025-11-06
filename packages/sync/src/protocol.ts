@@ -85,8 +85,12 @@ export type ClientMessage =
   | { type: "ModifyQuerySet"; add: QueryRequest[]; remove: number[] }
   | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue; clientId?: string; seq?: number }
   // `MutationBatch` (verdict §(e)): the offline drain's chunk shape — the server applies `entries`
-  // SEQUENTIALLY and replies with one `MutationResponse` per entry (chunk semantics; a mid-batch
-  // terminal failure records + responds and CONTINUES to the next entry).
+  // SEQUENTIALLY and replies with one `MutationResponse` per entry it settles (chunk semantics). A
+  // mid-batch TERMINAL failure (deterministic app error, coded verdict) records + responds and
+  // CONTINUES to the next entry; a TRANSIENT failure (retryable/infra) responds that entry's
+  // failure and STOPS the drain — later entries get no response, so a causally-dependent unit can
+  // never apply after an earlier transient failure (the FIFO drain obligation). See
+  // `SyncProtocolHandler.processMutation`'s doc comment for the full classification rule.
   | { type: "MutationBatch"; entries: MutationBatchEntry[] }
   | { type: "Action"; requestId: string; udfPath: string; args: JSONValue }
   | { type: "EphemeralPublish"; topic: string; event: JSONValue }

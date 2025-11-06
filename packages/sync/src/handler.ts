@@ -7,6 +7,7 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import { isRetryableError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import {
   encodeServerMessage,
@@ -325,25 +326,32 @@ export class SyncProtocolHandler {
     this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
   }
 
-  private handleMutation(
+  private async handleMutation(
     session: Session,
     msg: Extract<ClientMessage, { type: "Mutation" }>,
   ): Promise<void> {
-    return this.processMutation(session, msg);
+    await this.processMutation(session, msg);
   }
 
   /**
    * A drained-outbox chunk (verdict §(e)): ONE inbound message carrying N entries. Applied
    * SEQUENTIALLY (`await` each in order) — the client sends only one unacked chunk at a time and
-   * relies on per-client FIFO, so units MUST commit in order — with one `MutationResponse` emitted
-   * per entry as it settles. A mid-batch terminal failure records its verdict + responds (inside
-   * `processMutation`) and the loop CONTINUES: a poison unit never blocks the rest of the drain.
+   * relies on per-client FIFO, so units MUST commit in order. One `MutationResponse` is emitted per
+   * entry as it settles, EXCEPT when a unit fails TRANSIENTLY (see `processMutation`'s doc comment):
+   * that unit still gets its failure response, but the loop then STOPS — the remaining entries get
+   * NO response at all, preserving the FIFO drain obligation (a causally-dependent later unit must
+   * never apply after an earlier transient/infra failure). The client's one-unacked-chunk-at-a-time
+   * protocol resends the whole chunk on the next attempt; per-seq receipts make that resend safe
+   * (an already-applied unit replay-acks instead of re-running).
    */
   private async handleMutationBatch(
     session: Session,
     msg: Extract<ClientMessage, { type: "MutationBatch" }>,
   ): Promise<void> {
-    for (const entry of msg.entries) await this.processMutation(session, entry);
+    for (const entry of msg.entries) {
+      const outcome = await this.processMutation(session, entry);
+      if (outcome === "stop") break;
+    }
   }
 
   /**
@@ -352,11 +360,22 @@ export class SyncProtocolHandler {
    * (for a fresh commit only) fans out. A `MutationReplay` return skips `notifyWrites` AND the G4
    * pending-frontier entirely (nothing was written this call — Risk R7): its `commitTs` is the
    * ORIGINAL, long past the current frontier, so arming a frontier or fanning out would be a lie.
+   *
+   * Returns `"continue" | "stop"` — meaningful only to `handleMutationBatch`'s drain loop (a
+   * standalone `Mutation` ignores it). A thrown error is classified via the executor's retryable
+   * discipline (`isRetryableError`, `@stackbase/errors` — the same classification
+   * `handleDedupError`'s dedup path already applies when deciding whether to record a verdict):
+   *  - TERMINAL (not retryable — a deterministic app error, a coded verdict failure/replay) means the
+   *    executor already recorded whatever verdict applies; the batch drain CONTINUES past it (a
+   *    poison unit never blocks the rest — matches the spec's documented mid-batch-continue case).
+   *  - TRANSIENT (retryable — infra/conflict) means nothing durable happened for this unit; the batch
+   *    drain STOPS here so a later, causally-dependent unit can never apply out of order relative to
+   *    it. The remaining units get no response and the client's FIFO resend picks them back up.
    */
   private async processMutation(
     session: Session,
     unit: { requestId: string; udfPath: string; args: JSONValue; clientId?: string; seq?: number },
-  ): Promise<void> {
+  ): Promise<"continue" | "stop"> {
     const dedup: ClientMutationRef | undefined =
       unit.clientId !== undefined && unit.seq !== undefined ? { clientId: unit.clientId, seq: unit.seq } : undefined;
     try {
@@ -383,7 +402,7 @@ export class SyncProtocolHandler {
             code: r.code ?? (r.verdict === "stale" ? "STALE_CLIENT" : undefined),
           });
         }
-        return;
+        return "continue";
       }
       const { value, tables, writeRanges, commitTs, forwarded } = r;
       this.send(session, {
@@ -403,8 +422,11 @@ export class SyncProtocolHandler {
       if (this.options.autoNotifyOnMutation !== false) {
         await this.notifyWrites({ tables, ranges: writeRanges, commitTs }, session.sessionId);
       }
+      return "continue";
     } catch (e) {
       this.send(session, { type: "MutationResponse", requestId: unit.requestId, success: false, error: errMessage(e) });
+      // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
+      return isRetryableError(e) ? "stop" : "continue";
     }
   }
 

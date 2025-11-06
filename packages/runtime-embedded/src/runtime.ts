@@ -29,6 +29,7 @@ import {
   classifyForConnect,
   clientReceiptsGuard,
   dedupCommitMeta,
+  fillWriteMutationValue,
   handleDedupError,
   recordZeroWriteApplied,
   type DedupKey,
@@ -502,6 +503,11 @@ export class EmbeddedRuntime {
         // receipt (WITH the return value) standalone, post-run (verdict §(c) Risk R1).
         if (classifyLocally && !r.committed) {
           await recordZeroWriteApplied(options.store, identity ?? null, dedup as DedupKey, r.commitTs, r.value as Value);
+        } else if (classifyLocally && r.oplog !== null) {
+          // A committed WRITE mutation whose guard ran on THIS node's store (a real local oplog, not
+          // a forwarded write another node's guard handled) — best-effort fill the value the guard
+          // couldn't see at commit time (T5-review recommendation, the B3 pattern).
+          await fillWriteMutationValue(options.store, identity ?? null, dedup as DedupKey, r.value as Value);
         }
         return {
           replayed: false,
@@ -950,6 +956,11 @@ export class EmbeddedRuntime {
     }
     if (!r.committed) {
       await recordZeroWriteApplied(this.store, identity, dedup, r.commitTs, r.value as Value);
+    } else if (r.oplog !== null) {
+      // A committed WRITE mutation whose guard ran on THIS node's store (a real local oplog — the
+      // executor's own per-shard forward, if any, would have left this null). Best-effort fill the
+      // value the guard couldn't see at commit time (T5-review recommendation, the B3 pattern).
+      await fillWriteMutationValue(this.store, identity, dedup, r.value as Value);
     }
     return r;
   }

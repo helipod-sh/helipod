@@ -570,6 +570,7 @@
       "name": "@stackbase/sync",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/errors": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {

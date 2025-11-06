@@ -535,6 +535,13 @@ export class SqliteDocStore implements DocStore {
     );
   }
 
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const valueJson = cappedValueJson(value);
+    this.prep(
+      `UPDATE client_mutations SET value_json = ? WHERE identity = ? AND client_id = ? AND seq = ?`,
+    ).run(valueJson, identity, clientId, seq);
+  }
+
   async pruneClientMutations(
     identity: string,
     clientId: string,

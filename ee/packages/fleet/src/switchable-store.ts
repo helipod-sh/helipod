@@ -182,6 +182,11 @@ export class SwitchableDocStore implements DocStore {
     return d.recordClientVerdict(identity, clientId, seq, record);
   }
 
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const d = this.delegate;
+    return d.updateClientVerdictValue(identity, clientId, seq, value);
+  }
+
   async pruneClientMutations(
     identity: string,
     clientId: string,

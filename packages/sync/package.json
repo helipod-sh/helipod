@@ -21,6 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@stackbase/errors": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {

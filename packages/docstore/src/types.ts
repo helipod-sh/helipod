@@ -273,6 +273,23 @@ export interface DocStore {
   recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void>;
 
   /**
+   * Best-effort post-run value fill for an ALREADY-COMMITTED `applied` receipt (the B3 pattern —
+   * `LeaseManager.recordIdempotencyValue`'s sibling for client receipts, T5-review recommendation).
+   * The `clientReceiptsGuard` commit guard only ever sees `commitTs` when it INSERTs a write
+   * mutation's receipt (the return VALUE isn't known inside the commit transaction) — this UPDATEs
+   * `value_json` in AFTER the run returns, so a later `applied` replay carries the real value instead
+   * of `valueMissing`. Subject to the same {@link CLIENT_VERDICT_VALUE_CAP_BYTES} cap as
+   * `recordClientVerdict` (an over-cap value is dropped, never truncated or rejected — `value_json`
+   * stays/goes NULL, reading back as `hasValue: false`). A missing row (the crash window between
+   * commit and this call, or a row already reaped/never guard-written) silently affects 0 rows — the
+   * caller doesn't need to check. Its OWN standalone transaction, deliberately racing the commit it
+   * follows: a failure here (crash, transient store hiccup) must NEVER fail an otherwise-successful
+   * mutation response, so callers wrap this best-effort (catch and discard) — a replay for this seq
+   * then reports `valueMissing: true` forever, same as if this call never ran at all.
+   */
+  updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void>;
+
+  /**
    * Ack-prune (verdict §(c) Retention, `Connect.ackedThrough`): delete `client_mutations` rows for
    * `(identity, clientId)` matching `seq <= opts.ackedThrough` and/or `createdAt < opts.ttlBeforeMs`
    * (either bound may be present; both may combine in one pass), then advance

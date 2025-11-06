@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import { TimeoutError } from "@stackbase/errors";
 import {
   SyncProtocolHandler,
   type SyncUdfExecutor,
@@ -17,8 +18,12 @@ class MockExecutor implements SyncUdfExecutor {
   readonly classifyCalls: Array<{ clientId: string; seq: number }> = [];
   readonly pruneCalls: Array<{ clientId: string; ackedThrough: number }> = [];
   private verdicts = new Map<string, ClientMutationVerdict>();
-  /** seq → forced behavior for the NEXT fresh run of that seq. */
+  /** seq → forced behavior for the NEXT fresh run of that seq: a TERMINAL (deterministic, non-
+   *  retryable) throw — mirrors a handler-thrown app error the owner already recorded a verdict for. */
   poison = new Set<number>();
+  /** seq → forced behavior for the NEXT fresh run of that seq: a TRANSIENT (retryable) throw —
+   *  mirrors an infra hiccup the owner recorded NOTHING for (`handleDedupError`'s retryable branch). */
+  transientPoison = new Set<number>();
   private tsCounter = 100;
 
   key(clientId: string, seq: number): string {
@@ -66,6 +71,11 @@ class MockExecutor implements SyncUdfExecutor {
           code: "BOOM",
         });
         throw new Error("boom");
+      }
+      if (this.transientPoison.has(dedup.seq)) {
+        // Transient/infra: nothing recorded (mirrors `handleDedupError`'s retryable branch) — a
+        // resend of this exact seq would run fresh again, unlike the terminal case above.
+        throw new TimeoutError("infra hiccup");
       }
     }
     const commitTs = ++this.tsCounter;
@@ -195,6 +205,25 @@ describe("Receipted Outbox wire — MutationBatch", () => {
     expect(rs[0]!.success).toBe(true);
     expect(rs[1]!.success).toBe(false); // the poison unit
     expect(rs[2]!.success).toBe(true); // the drain continued
+  });
+
+  it("a mid-batch TRANSIENT failure responds that unit's failure and STOPS the drain — the FIFO obligation (T5-review FIX 1)", async () => {
+    exec.transientPoison.add(2);
+    await send({
+      type: "MutationBatch",
+      entries: [
+        { requestId: "b1", udfPath: "m:x", args: {}, clientId: "c1", seq: 1 },
+        { requestId: "b2", udfPath: "m:x", args: {}, clientId: "c1", seq: 2 },
+        { requestId: "b3", udfPath: "m:x", args: {}, clientId: "c1", seq: 3 },
+      ],
+    });
+    const rs = socket.responses();
+    // Unit 3 gets NO response at all — the drain stopped after unit 2's transient failure.
+    expect(rs.map((r) => r.requestId)).toEqual(["b1", "b2"]);
+    expect(rs[0]!.success).toBe(true);
+    expect(rs[1]!.success).toBe(false);
+    // Unit 3 was never even attempted (not just unresponded — NOT applied).
+    expect(exec.runCalls.map((c) => c.dedup?.seq)).toEqual([1, 2]);
   });
 });
 

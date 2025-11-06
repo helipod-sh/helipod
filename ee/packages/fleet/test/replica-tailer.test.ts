@@ -144,6 +144,9 @@ class ZeroWatermarkDocStore implements DocStore {
   recordClientVerdict(...args: Parameters<DocStore["recordClientVerdict"]>) {
     return this.real.recordClientVerdict(...args);
   }
+  updateClientVerdictValue(...args: Parameters<DocStore["updateClientVerdictValue"]>) {
+    return this.real.updateClientVerdictValue(...args);
+  }
   pruneClientMutations(...args: Parameters<DocStore["pruneClientMutations"]>) {
     return this.real.pruneClientMutations(...args);
   }

@@ -5,10 +5,13 @@
 import { describe, it, expect } from "vitest";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v, convexToJson, type Value } from "@stackbase/values";
 import { mutation, query } from "@stackbase/executor";
 import { EmbeddedRuntime } from "../src/index";
 import type { ServerMessage } from "@stackbase/sync";
+
+// Over `CLIENT_VERDICT_VALUE_CAP_BYTES` (64KB) once JSON-quoted — the fill's oversized-drop case.
+const OVERSIZED_VALUE = "x".repeat(70_000);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function makeRuntime(): Promise<EmbeddedRuntime> {
@@ -18,6 +21,11 @@ async function makeRuntime(): Promise<EmbeddedRuntime> {
     "app:noop": mutation(async (_ctx: any, a: { n: number }) => ({ echoed: a.n })), // writes nothing
     "app:boom": mutation(async () => {
       throw new Error("deterministic boom");
+    }),
+    // A real write (so the guard runs) whose RETURN value is oversized — distinct from the doc body.
+    "app:bigReturn": mutation(async (ctx: any, a: { body: string }) => {
+      await ctx.db.insert("notes", { body: a.body });
+      return OVERSIZED_VALUE;
     }),
     "app:list": query(async (ctx: any) => (await ctx.db.query("notes", "by_creation").collect()).map((d: any) => d.body)),
   };
@@ -40,19 +48,32 @@ async function makeRuntime(): Promise<EmbeddedRuntime> {
 const dedup = (clientId: string, seq: number) => ({ dedup: { clientId, seq } });
 
 describe("client-dedup classification (runtime.run at the owner)", () => {
-  it("a write-mutation runs once; a resend replays `applied` (valueMissing — the guard receipt has no value) and does NOT re-run", async () => {
+  it("a write-mutation runs once; a resend replays `applied` WITH the real value (the post-run guard-receipt fill, T5-review FIX 2) and does NOT re-run", async () => {
     const r = await makeRuntime();
     const first = await r.run("app:add", { body: "hello" }, dedup("c1", 1));
     expect(first.committed).toBe(true);
     expect(first.clientReplay).toBeUndefined();
 
     const second = await r.run("app:add", { body: "hello" }, dedup("c1", 1));
-    expect(second.clientReplay).toMatchObject({ verdict: "applied", valueMissing: true });
+    expect(second.clientReplay).toMatchObject({ verdict: "applied" });
+    expect(second.clientReplay!.valueMissing).toBeUndefined();
+    expect(second.clientReplay!.value).toEqual(convexToJson(first.value as Value));
     expect(second.committed).toBe(false);
 
     // Exactly-once effect: the note table has ONE row, not two.
     const list = await r.run("app:list", {});
     expect(list.value).toEqual(["hello"]);
+  });
+
+  it("an oversized write-mutation return value is dropped by the fill (replay stays valueMissing, same cap `recordClientVerdict` uses)", async () => {
+    const r = await makeRuntime();
+    const first = await r.run("app:bigReturn", { body: "big" }, dedup("c1b", 1));
+    expect(first.committed).toBe(true);
+    expect(first.value).toBe(OVERSIZED_VALUE);
+
+    const second = await r.run("app:bigReturn", { body: "big" }, dedup("c1b", 1));
+    expect(second.clientReplay).toMatchObject({ verdict: "applied", valueMissing: true });
+    expect(second.clientReplay!.value).toBeUndefined();
   });
 
   it("a ZERO-WRITE successful mutation records its receipt standalone (WITH the return value), and replays it", async () => {

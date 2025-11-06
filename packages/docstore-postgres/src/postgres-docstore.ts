@@ -640,6 +640,14 @@ export class PostgresDocStore implements DocStore {
     );
   }
 
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const valueJson = cappedValueJson(value);
+    await this.db.query(
+      `UPDATE client_mutations SET value_json = $1 WHERE identity = $2 AND client_id = $3 AND seq = $4`,
+      [valueJson, identity, clientId, BigInt(seq)],
+    );
+  }
+
   async pruneClientMutations(
     identity: string,
     clientId: string,
