@@ -420,7 +420,7 @@ describe("outbox server E2E (4) — MutationBatch: sequential, in-order, mid-bat
 /* -------------------------------------------------------------------------- */
 
 describe("outbox server E2E (5) — group-commit collateral fix: innocents survive a duplicate-key abort", () => {
-  it("co-batched innocents from OTHER clients all commit while duplicate copies collide down to one receipt", async () => {
+  it("across repeated concurrent bursts, co-batched innocents always survive while the duplicate pair collapses to one commit", async () => {
     // The env flag the brief names — resolved by `createEmbeddedRuntime`'s `groupCommit` here; we set
     // it too so the deployment truly runs under STACKBASE_GROUP_COMMIT=1 semantics.
     const prev = process.env.STACKBASE_GROUP_COMMIT;
@@ -428,43 +428,80 @@ describe("outbox server E2E (5) — group-commit collateral fix: innocents survi
     const s = await startServer(new SqliteDocStore(new NodeSqliteAdapter()), { groupCommit: true });
     const w = await RawWire.open(s.wsUrl);
     try {
-      const INNOCENTS = 24;
-      // Exactly TWO copies of one colliding key → at most ONE duplicate-key abort per flush (a SINGLE
-      // guard rejection). This is deliberately within the committer's 3-split-retry bound: more than
+      // T6-review fix: a single round's `maxBatchSize > 1` is a lifetime high-water mark — it can be
+      // satisfied by innocents batching among THEMSELVES while the duplicate pair happens to land in a
+      // separate flush, never exercising the split path at all. Loop the burst so the duplicate pair
+      // gets many independent chances to actually co-batch with fresh innocents.
+      const ROUNDS = 10;
+      const INNOCENTS_PER_ROUND = 8;
+      // Exactly TWO copies of one colliding key per round → at most ONE duplicate-key abort per flush
+      // (a SINGLE guard rejection). This stays within the committer's 3-split-retry bound: more than
       // three collisions co-batched in one flush would exceed the bound and reject the remaining chunk
       // retryably (the documented cap — proven in transactor/commit-guard-split.test.ts), which is a
       // different, non-collateral behavior. The collateral fix's guarantee is precisely that co-batched
       // INNOCENTS survive a duplicate-key abort — that is what this asserts.
       const DUP_COPIES = 2;
-      // Fire everything at once on one socket (the server dispatches each frame without awaiting, so
-      // they contend for the SAME group-commit flush): INNOCENTS distinct clients + the colliding pair.
-      for (let i = 0; i < INNOCENTS; i++) {
-        w.send({ type: "Mutation", requestId: `inn${i}`, udfPath: "notes:add", args: { box: "inn", text: `inn${i}` }, clientId: `D${i}`, seq: 1 });
+      let expectedRows = 0;
+
+      for (let round = 0; round < ROUNDS; round++) {
+        const innocentIds = Array.from({ length: INNOCENTS_PER_ROUND }, (_, i) => `r${round}-inn${i}`);
+        const dupClientId = `r${round}-dup`;
+
+        // Fire the duplicate pair CONCURRENTLY with a fresh set of innocents in the SAME tick (the
+        // server dispatches each frame without awaiting the last, so everything sent in this loop
+        // contends for the same group-commit flush window) — maximizing co-batch probability across
+        // rounds. Fresh clientIds/keys each round so no round's receipts collide with another's.
+        for (const cid of innocentIds) {
+          w.send({ type: "Mutation", requestId: `${cid}-req`, udfPath: "notes:add", args: { box: "inn", text: cid }, clientId: cid, seq: 1 });
+        }
+        for (let k = 0; k < DUP_COPIES; k++) {
+          w.send({ type: "Mutation", requestId: `${dupClientId}-${k}`, udfPath: "notes:add", args: { box: "dup", text: dupClientId }, clientId: dupClientId, seq: 1 });
+        }
+
+        await waitFor(
+          () =>
+            innocentIds.every((cid) => w.responseFor(`${cid}-req`) !== undefined) &&
+            Array.from({ length: DUP_COPIES }, (_, k) => w.responseFor(`${dupClientId}-${k}`)).every((r) => r !== undefined),
+          10_000,
+          `round ${round} responses`,
+        );
+
+        // Every innocent in THIS round committed successfully — NONE collaterally aborted by the
+        // duplicate's rejection. (This is the load-bearing assertion: pre-T3, a guard abort on the
+        // co-batched duplicate rolled the WHOLE batch back and rejected every innocent as collateral.)
+        for (const cid of innocentIds) {
+          expect(w.responseFor(`${cid}-req`)!.success, `round ${round} innocent ${cid} must commit`).toBe(true);
+        }
+
+        // Exactly-once for THIS round's duplicate key: the colliding pair collapsed to ONE applied
+        // commit, and the loser replay-acks the winner (same-commitTs, one marked `replayed`).
+        const dupResponses = Array.from({ length: DUP_COPIES }, (_, k) => w.responseFor(`${dupClientId}-${k}`)!);
+        for (const r of dupResponses) expect(r.success, `round ${round} dup copy must succeed`).toBe(true);
+        const replayedCount = dupResponses.filter((r) => r.success && r.replayed).length;
+        expect(replayedCount, `round ${round} exactly one dup copy must replay-ack the winner`).toBe(1);
+        const tss = new Set(dupResponses.map((r) => (r.success ? r.ts : undefined)));
+        expect(tss.size, `round ${round} both dup copies must carry the SAME commitTs`).toBe(1);
+
+        const dupRec = await s.store.getClientVerdict("", dupClientId, 1);
+        expect(dupRec?.verdict, `round ${round} dup receipt must be applied`).toBe("applied");
+
+        expectedRows += INNOCENTS_PER_ROUND + 1; // this round's innocents + exactly one dup row
       }
-      for (let k = 0; k < DUP_COPIES; k++) {
-        w.send({ type: "Mutation", requestId: `dup${k}`, udfPath: "notes:add", args: { box: "dup", text: "dup" }, clientId: "C", seq: 1 });
-      }
 
-      await waitFor(() => w.responses().length >= INNOCENTS + DUP_COPIES, 20_000, "all responses");
+      // Across the whole burst: every innocent ever sent landed exactly once, and every round's
+      // duplicate pair collapsed to exactly one row — the row count is the cumulative exactly-once
+      // proof spanning all 10 rounds.
+      expect(await listCount(w)).toBe(expectedRows);
 
-      // Every innocent committed successfully — NONE collaterally aborted by the duplicate's rejection.
-      // (This is the load-bearing assertion: pre-T3, a guard abort on the co-batched duplicate rolled
-      // the WHOLE batch back and rejected every innocent as collateral.)
-      for (let i = 0; i < INNOCENTS; i++) {
-        const r = w.responseFor(`inn${i}`)!;
-        expect(r.success, `innocent inn${i} must commit`).toBe(true);
-      }
-
-      // Exactly-once for the duplicate key: the colliding pair collapsed to ONE applied receipt (the
-      // loser either replay-acked a visible winner or got a retryable rejection to resend — either way
-      // exactly one commit landed).
-      const dupRec = await s.store.getClientVerdict("", "C", 1);
-      expect(dupRec?.verdict).toBe("applied");
-
-      // The store holds all innocents + exactly one dup row.
-      expect(await listCount(w)).toBe(INNOCENTS + 1);
-
-      // Group commit actually engaged (otherwise the collateral proof would be vacuous).
+      // Batching-engaged sanity ONLY (a lifetime high-water mark) — NOT proof the split path itself
+      // was exercised, since it's satisfiable by innocents co-batching among themselves while the
+      // duplicate pair lands in its own flush. Co-batching the duplicate collision with innocents is
+      // probabilistic through the wire (unlike the unit test below, this harness has no `hold` lever
+      // to force a specific flush composition) — but across 10 independent same-tick rounds it is
+      // overwhelmingly likely that at least one flush actually co-batched the colliding pair with
+      // innocents, exercising the split-retry path end-to-end. The DETERMINISTIC proof that a
+      // co-batched guard rejection splits cleanly — innocents commit with fresh ts, only the rejected
+      // unit fails, bounded at 3 retries — lives in `packages/transactor/test/commit-guard-split.test.ts`.
       expect(s.runtime.groupCommitStats().maxBatchSize).toBeGreaterThan(1);
     } finally {
       w.close();
