@@ -22,6 +22,7 @@ import { Reconciler } from "./reconcile";
 import { MutationUndeliveredError } from "./delivery-policy";
 import type { PendingMutation } from "./mutation-log";
 import type { OptimisticLocalStore } from "./optimistic-store";
+import { mintIdentity, type OutboxStorage } from "./outbox-storage";
 
 export type { QueryListener, QueryErrorListener };
 
@@ -50,13 +51,31 @@ export class StackbaseClient {
    *  first called — a transport that never had auth set never sends a spurious `SetAuth` on reopen. */
   private hasSetAuth = false;
   private lastAuthToken: string | null = null;
+  /** Absent unless `opts.outbox` is configured — a client constructed without it behaves exactly
+   *  as before this seam existed (`outbox-storage.ts`'s file doc: "never touches this file's
+   *  runtime branches that matter"). */
+  private readonly outbox?: OutboxStorage;
+  /** Resolves once this tab-session's clientId is minted and durable (`mintIdentity`,
+   *  `outbox-storage.ts`) — ALWAYS a fresh clientId, never one reused from a prior session. A
+   *  later task consumes this to gate enqueue/park/drain; kept `@internal` until then. */
+  private readonly outboxIdentity?: Promise<{ clientId: string; nextSeq: number }>;
 
-  constructor(transport: ClientTransport, opts: { gateTimeoutMs?: number } = {}) {
+  constructor(transport: ClientTransport, opts: { gateTimeoutMs?: number; outbox?: OutboxStorage } = {}) {
     this.transport = transport;
     this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs });
+    this.outbox = opts.outbox;
+    this.outboxIdentity = opts.outbox ? mintIdentity(opts.outbox) : undefined;
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
     this.disposeReopen = transport.onReopen?.(() => this.onTransportReopened());
+  }
+
+  /** @internal This tab-session's durable outbox identity, or `undefined` when no `outbox` was
+   *  configured. Exposed for a later task's enqueue/park wiring and for direct testing of the
+   *  identity-mint behavior — not yet consumed by `mutation()` itself (that wiring is a later
+   *  task's scope; see `outbox-storage.ts`'s file doc for the identity model this implements). */
+  getOutboxIdentity(): Promise<{ clientId: string; nextSeq: number }> | undefined {
+    return this.outboxIdentity;
   }
 
   /**

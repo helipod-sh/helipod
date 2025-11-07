@@ -21,3 +21,10 @@ export { MutationUndeliveredError } from "./delivery-policy";
 // T5 — the public, typed optimistic-update store (verdict §(b)'s v1 API surface).
 export type { OptimisticLocalStore, RefArgs, RefReturn } from "./optimistic-store";
 export { createOptimisticLocalStore } from "./optimistic-store";
+
+// The durable-offline `OutboxStorage` seam (verdict §(d)): the interface, the in-memory default,
+// and the probe-and-fallback IndexedDB adapter. `mintIdentity` is exported mainly for direct
+// testing of the identity model — app code configures `outbox` at client construction and never
+// calls it itself.
+export type { HydrateResult, IndexedDBOutboxOptions, OutboxEntry, OutboxEntryStatus, OutboxMeta, OutboxStorage } from "./outbox-storage";
+export { OUTBOX_VERSION, indexedDBOutbox, memoryOutbox, mintIdentity } from "./outbox-storage";
