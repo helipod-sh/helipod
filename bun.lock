@@ -304,6 +304,7 @@
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/query-engine": "workspace:*",
+        "@stackbase/receipts": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@stackbase/storage": "workspace:*",
         "@stackbase/sync": "workspace:*",
@@ -507,6 +508,22 @@
         "vitest": "catalog:",
       },
     },
+    "packages/receipts": {
+      "name": "@stackbase/receipts",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/component": "workspace:*",
+        "@stackbase/docstore": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/docstore-postgres": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/runtime-embedded": {
       "name": "@stackbase/runtime-embedded",
       "version": "0.0.0",
@@ -553,6 +570,7 @@
       "name": "@stackbase/sync",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/errors": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
@@ -909,6 +927,8 @@
     "@stackbase/index-key-codec": ["@stackbase/index-key-codec@workspace:packages/index-key-codec"],
 
     "@stackbase/query-engine": ["@stackbase/query-engine@workspace:packages/query-engine"],
+
+    "@stackbase/receipts": ["@stackbase/receipts@workspace:packages/receipts"],
 
     "@stackbase/runtime-embedded": ["@stackbase/runtime-embedded@workspace:packages/runtime-embedded"],
 

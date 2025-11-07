@@ -31,7 +31,7 @@
  * hasn't caught up yet. `promote()` also releases any pending wait: once this node becomes the
  * writer, replica catch-up is no longer the right thing to block on.
  */
-import type { WriteRouter } from "@stackbase/runtime-embedded";
+import type { WriteRouter, ClientReplay } from "@stackbase/runtime-embedded";
 import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import type { JSONValue } from "@stackbase/values";
 import { isStackbaseError, stackbaseErrorFromJSON, NOT_SHARD_OWNER_CODE, type StackbaseErrorJSON } from "@stackbase/errors";
@@ -133,7 +133,8 @@ export class WriteForwarder implements WriteRouter {
     args: JSONValue,
     identity: string | null,
     shardId: ShardId = DEFAULT_SHARD,
-  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string }> {
+    dedup?: { clientId: string; seq: number },
+  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string; replay?: ClientReplay }> {
     // `forwarded: true` (B2b, D1 spec-review edit — the single-hop guard): tells the receiver this
     // is a fleet-internal hop, so IT must check ownership itself rather than trust the caller and
     // potentially re-forward unboundedly. `shardId` is what the receiver resolves the current owner
@@ -146,9 +147,22 @@ export class WriteForwarder implements WriteRouter {
     // that both carry this SAME key can only ever land ONE durable write (see node.ts's commit guard
     // + packages/cli's http-handler catch-and-replay). A fresh UUID per `forward()` CALL (not
     // per-POST) is what makes this "one key per logical write" rather than "one key per HTTP hop".
-    const body = { path, args, identity, kind, shardId, forwarded: true, idempotencyKey: crypto.randomUUID() };
+    // `clientId`/`seq` (Receipted Outbox): the durable client dedup key rides the forward so the
+    // OWNER classifies it (verdict §(c) repair 3) — coexists with the per-hop `idempotencyKey` (the
+    // two are disjoint dedup mechanisms; the owner's classification runs BEFORE the fleet pre-select,
+    // Risk R2). Absent for a non-outbox mutation, bit-for-bit today's body.
+    const body = {
+      path,
+      args,
+      identity,
+      kind,
+      shardId,
+      forwarded: true,
+      idempotencyKey: crypto.randomUUID(),
+      ...(dedup ? { clientId: dedup.clientId, seq: dedup.seq } : {}),
+    };
     const first = await this.writerUrlFor(shardId);
-    let result: { value: JSONValue; commitTs?: string; shardId?: string };
+    let result: { value: JSONValue; commitTs?: string; shardId?: string; clientReplay?: ClientReplay };
     try {
       result = await this.post(first, body);
     } catch (firstErr) {
@@ -170,6 +184,12 @@ export class WriteForwarder implements WriteRouter {
         throw firstErr;
       }
       result = await this.post(second, body);
+    }
+    // Owner-side client-dedup replay (Receipted Outbox): the owner classified this dedup forward as a
+    // replay of a recorded verdict — surface it up so the sync node builds a `MutationReplay` instead
+    // of a fresh ack. No replica RYOW wait: a replay committed nothing this call.
+    if (result.clientReplay) {
+      return { value: result.clientReplay.value ?? null, replay: result.clientReplay };
     }
     await this.waitForReplicaCatchUp(path, result.commitTs);
     return {
@@ -210,8 +230,10 @@ export class WriteForwarder implements WriteRouter {
       shardId: ShardId;
       forwarded: boolean;
       idempotencyKey: string;
+      clientId?: string;
+      seq?: number;
     },
-  ): Promise<{ value: JSONValue; commitTs?: string; shardId?: string }> {
+  ): Promise<{ value: JSONValue; commitTs?: string; shardId?: string; clientReplay?: ClientReplay }> {
     const res = await fetch(`${trimTrailingSlash(writerUrl)}/_fleet/run`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.adminKey}` },
@@ -231,6 +253,9 @@ export class WriteForwarder implements WriteRouter {
       /** Set instead of `value` when the replayed row's value wasn't recorded (the crash-window or
        *  oversized-cap case) — `parsed.value ?? null` below already surfaces this as `value: null`. */
       valueMissing?: boolean;
+      /** Receipted Outbox: the owner classified this dedup forward as a client-verdict replay — a
+       *  distinct field from the fleet `replayed`/`valueMissing` per-hop idempotency replay above. */
+      clientReplay?: ClientReplay;
     };
     try {
       parsed = text ? (JSON.parse(text) as typeof parsed) : {};
@@ -246,7 +271,7 @@ export class WriteForwarder implements WriteRouter {
       if (parsed.errorJson) throw stackbaseErrorFromJSON(parsed.errorJson);
       throw new Error(parsed.error ?? `fleet: writer /_fleet/run returned HTTP ${res.status}`);
     }
-    return { value: parsed.value ?? null, commitTs: parsed.commitTs, shardId: parsed.shardId };
+    return { value: parsed.value ?? null, commitTs: parsed.commitTs, shardId: parsed.shardId, clientReplay: parsed.clientReplay };
   }
 
   /** Waits for the local replica to observe `commitTsStr`, when a tailer is attached. No-op on a

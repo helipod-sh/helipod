@@ -102,6 +102,9 @@ class ZeroWatermarkDocStore implements DocStore {
   commitWriteBatch(...args: Parameters<DocStore["commitWriteBatch"]>) {
     return this.real.commitWriteBatch(...args);
   }
+  addCommitGuard(...args: Parameters<DocStore["addCommitGuard"]>) {
+    return this.real.addCommitGuard(...args);
+  }
   get(...args: Parameters<DocStore["get"]>) {
     return this.real.get(...args);
   }
@@ -131,6 +134,24 @@ class ZeroWatermarkDocStore implements DocStore {
   }
   writeGlobalIfAbsent(...args: Parameters<DocStore["writeGlobalIfAbsent"]>) {
     return this.real.writeGlobalIfAbsent(...args);
+  }
+  getClientVerdict(...args: Parameters<DocStore["getClientVerdict"]>) {
+    return this.real.getClientVerdict(...args);
+  }
+  getClientFloor(...args: Parameters<DocStore["getClientFloor"]>) {
+    return this.real.getClientFloor(...args);
+  }
+  recordClientVerdict(...args: Parameters<DocStore["recordClientVerdict"]>) {
+    return this.real.recordClientVerdict(...args);
+  }
+  updateClientVerdictValue(...args: Parameters<DocStore["updateClientVerdictValue"]>) {
+    return this.real.updateClientVerdictValue(...args);
+  }
+  pruneClientMutations(...args: Parameters<DocStore["pruneClientMutations"]>) {
+    return this.real.pruneClientMutations(...args);
+  }
+  sweepExpiredClientMutations(...args: Parameters<DocStore["sweepExpiredClientMutations"]>) {
+    return this.real.sweepExpiredClientMutations(...args);
   }
   close() {
     return this.real.close();

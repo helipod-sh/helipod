@@ -10,6 +10,9 @@
  * and resolve the pointed document at the same timestamp.
  */
 import type {
+  CommitGuardUnit,
+  ClientVerdictRecord,
+  ClientVerdictWrite,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -26,7 +29,7 @@ import type {
   TimestampRange,
   InternalDocumentId,
 } from "@stackbase/docstore";
-import { getPrevRevQueryKey } from "@stackbase/docstore";
+import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "@stackbase/docstore";
 import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DatabaseAdapter, PreparedStatement, SqlRow, SqlValue } from "./adapter";
@@ -56,6 +59,27 @@ CREATE TABLE IF NOT EXISTS persistence_globals (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS client_mutations (
+  identity   TEXT NOT NULL,
+  client_id  TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  verdict    TEXT NOT NULL,
+  commit_ts  INTEGER NOT NULL,
+  value_json TEXT,
+  error_code TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (identity, client_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS client_mutations_by_created_at ON client_mutations (created_at);
+
+CREATE TABLE IF NOT EXISTS client_floors (
+  identity           TEXT NOT NULL,
+  client_id          TEXT NOT NULL,
+  pruned_through_seq INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  PRIMARY KEY (identity, client_id)
+) WITHOUT ROWID;
 `;
 
 function asBigInt(v: SqlValue | undefined): bigint {
@@ -65,10 +89,110 @@ function asBigIntOrNull(v: SqlValue | undefined): bigint | null {
   return v === null || v === undefined ? null : asBigInt(v);
 }
 
+/** The narrow SYNCHRONOUS querier a SQLite commit guard writes receipts through — the sync mirror
+ *  of `docstore-postgres`'s async `PgQuerier`. SQLite's commit runs inside one synchronous
+ *  `db.transaction(() => {...})`, so a guard can only ever be handed synchronous primitives. */
+export interface SqliteGuardQuerier {
+  run(sql: string, ...params: unknown[]): void;
+  get(sql: string, ...params: unknown[]): Record<string, unknown> | undefined;
+}
+
+/** A SQLite commit guard — see `SqliteDocStore.addCommitGuard`'s doc comment for the full
+ *  contract. Unlike `PgCommitGuard`, this MUST be synchronous: it runs inside the one-transaction
+ *  synchronous commit, which cannot await anything. Returning a thenable is a documented dev-time
+ *  error — see `commitWriteBatch`'s thenable check. */
+export type SqliteCommitGuard = (
+  q: SqliteGuardQuerier,
+  units: readonly CommitGuardUnit[],
+  shardId: ShardId,
+) => void;
+// ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — pure helpers ──────────────────
+
+/** Build the WHERE fragment (and its bound params, in order) for `pruneClientMutations`'s DELETE —
+ *  the `seq <= ackedThrough OR createdAt < ttlBeforeMs` union (verdict §(c)). `{clause: null}` when
+ *  neither bound is set (nothing to delete this call — a legal no-op). */
+function clientMutationsDeleteClause(opts: {
+  ackedThrough?: number;
+  ttlBeforeMs?: number;
+}): { clause: string | null; params: number[] } {
+  const parts: string[] = [];
+  const params: number[] = [];
+  if (opts.ackedThrough !== undefined) {
+    parts.push(`seq <= ?`);
+    params.push(opts.ackedThrough);
+  }
+  if (opts.ttlBeforeMs !== undefined) {
+    parts.push(`created_at < ?`);
+    params.push(opts.ttlBeforeMs);
+  }
+  return parts.length === 0 ? { clause: null, params: [] } : { clause: parts.join(" OR "), params };
+}
+
+/** The floor candidate a prune call covers: the client's own `ackedThrough` claim (which covers any
+ *  never-recorded holes below it — floor-covers-holes, verdict decision 3) and/or the highest seq
+ *  actually deleted this pass — whichever is higher. `null` when neither applies. */
+function maxCandidate(ackedThrough: number | null, deletedMaxSeq: number | null): number | null {
+  if (ackedThrough === null) return deletedMaxSeq;
+  if (deletedMaxSeq === null) return ackedThrough;
+  return Math.max(ackedThrough, deletedMaxSeq);
+}
+
+/** Serialize + cap-check a receipt's optional value. Over-cap values are silently DROPPED (never
+ *  truncated, never rejected) — the receipt must still land (verdict §(c)); a dropped value reads
+ *  back as `hasValue: false`, mapping to the wire's `valueMissing`. */
+function cappedValueJson(value: JSONValue | undefined): string | null {
+  if (value === undefined) return null;
+  const json = JSON.stringify(value);
+  return Buffer.byteLength(json, "utf8") > CLIENT_VERDICT_VALUE_CAP_BYTES ? null : json;
+}
+
+function clientVerdictRecordFromRow(row: SqlRow): ClientVerdictRecord {
+  return {
+    verdict: row.verdict as "applied" | "failed",
+    commitTs: asBigInt(row.commit_ts),
+    hasValue: row.value_json !== null,
+    value: row.value_json === null ? null : (JSON.parse(row.value_json as string) as JSONValue),
+    errorCode: (row.error_code as string | null | undefined) ?? null,
+    createdAt: Number(row.created_at),
+  };
+}
+
 export class SqliteDocStore implements DocStore {
   private readonly stmtCache = new Map<string, PreparedStatement>();
+  /** The commit-guard CHAIN (Receipted Outbox decision 2), the SQLite counterpart of
+   *  `PostgresDocStore.guards` — see `addCommitGuard`'s doc comment for the full contract. Empty
+   *  at Tier 0 and in every non-fleet/non-receipts deployment (no guard ever runs — SQLite pays
+   *  nothing for a feature it doesn't use). */
+  private guards: SqliteCommitGuard[] = [];
 
   constructor(private readonly db: DatabaseAdapter) {}
+
+  /** Append `guard` to the commit-guard chain — see `guards`'s doc comment. Guards run in
+   * REGISTRATION ORDER, SYNCHRONOUSLY, inside `commitWriteBatch`'s one `db.transaction(() => …)`,
+   * once per commit over the WHOLE unit array (never once per unit); ANY guard throwing aborts the
+   * whole synchronous transaction (no unit lands) — SQLite's transaction wrapper already rolls
+   * back on any thrown error, so this needs no special-casing here. A guard that returns a
+   * thenable (i.e. is `async`) is a dev-time bug — see the check in `commitWriteBatch`. Returns an
+   * unregister function that removes exactly this guard (a no-op if called again). */
+  addCommitGuard(guard: SqliteCommitGuard): () => void {
+    this.guards.push(guard);
+    return () => {
+      const i = this.guards.indexOf(guard);
+      if (i >= 0) this.guards.splice(i, 1);
+    };
+  }
+
+  /** The synchronous querier handed to every SQLite commit guard — routes through the same
+   * prepared-statement cache (`this.prep`) every other method uses, so a guard's writes share
+   * SQLite's statement caching for free. */
+  private guardQuerier(): SqliteGuardQuerier {
+    return {
+      run: (sql, ...params) => {
+        this.prep(sql).run(...(params as SqlValue[]));
+      },
+      get: (sql, ...params) => this.prep(sql).get(...(params as SqlValue[])),
+    };
+  }
 
   private prep(sql: string): PreparedStatement {
     let stmt = this.stmtCache.get(sql);
@@ -156,13 +280,15 @@ export class SqliteDocStore implements DocStore {
     documents: readonly DocumentLogEntry[],
     indexUpdates: readonly IndexWrite[],
     shardId?: ShardId,
-    // Opaque commit metadata (Fleet B3, D3): SQLite has no commit guard to hand it to, so it is
-    // accepted (interface conformance) and ignored — non-fleet / single-node SQLite pays nothing.
-    _opts?: { meta?: Record<string, string> },
+    // Opaque commit metadata (Fleet B3, D3): threaded through to `commitWriteBatch`'s per-unit
+    // `meta`, same as Postgres — SQLite now has a commit-guard chain too (Receipted Outbox
+    // decision 2), so this is no longer inert. When no guard is registered (Tier 0, most
+    // deployments) it costs nothing: the chain is empty and never runs.
+    opts?: { meta?: Record<string, string> },
   ): Promise<bigint> {
-    // Single commit = a one-unit batch (Fleet B4, D1) — one implementation. `meta` is threaded
-    // through for interface parity but SQLite (no guard) ignores it, exactly as before.
-    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: _opts?.meta }], shardId);
+    // Single commit = a one-unit batch (Fleet B4, D1) — one implementation, so `meta` reaches the
+    // guard chain identically whether one or many units commit.
+    const [ts] = await this.commitWriteBatch([{ documents, indexUpdates, meta: opts?.meta }], shardId);
     return ts!;
   }
 
@@ -171,11 +297,11 @@ export class SqliteDocStore implements DocStore {
     // the single-writer invariant, `MAX(ts) + 1` computed inside the transaction is race-free: no other
     // writer can interleave a higher ts. Each unit re-reads MAX(ts), which now includes the prior
     // units' just-inserted rows, so the batch stamps CONSECUTIVE, strictly-increasing ts's in unit
-    // order. SQLite has no commit guard, so per-unit `meta` is ignored (matches `commitWrite`). Note:
-    // SQLite's flush is synchronous — nothing accumulates during it — so real batching is opportunistic
-    // (typically batch-of-1) on Tier 0; the shared path is correct-but-inert here.
+    // order. Note: SQLite's flush is synchronous — nothing accumulates during it — so real batching
+    // is opportunistic (typically batch-of-1) on Tier 0; the shared path is correct-but-inert here.
     return this.db.transaction(() => {
       const out: bigint[] = [];
+      const guardUnits: CommitGuardUnit[] = [];
       const shard = shardId ?? DEFAULT_SHARD;
       for (const unit of units) {
         const row = this.prep(`SELECT MAX(ts) AS m FROM documents`).get();
@@ -185,6 +311,23 @@ export class SqliteDocStore implements DocStore {
         const stampedIdx = unit.indexUpdates.map((w) => ({ ...w, ts: commitTs }));
         this.insertRows(stampedDocs, stampedIdx, "Error", shard);
         out.push(commitTs);
+        guardUnits.push({ ts: commitTs, meta: unit.meta });
+      }
+      // The WHOLE chain, in registration order, ONE SYNCHRONOUS invocation each over the whole
+      // batch — the sync mirror of Postgres's chain loop. Skipped for an empty batch. ANY guard
+      // throwing propagates straight out of this `db.transaction(() => …)` callback, which rolls
+      // the whole synchronous transaction back — no unit lands, exactly like an insert failing.
+      if (guardUnits.length > 0) {
+        const q = this.guardQuerier();
+        for (const g of this.guards) {
+          const ret = g(q, guardUnits, shard) as unknown;
+          if (ret && typeof (ret as { then?: unknown }).then === "function") {
+            throw new Error(
+              "[docstore-sqlite] a commit guard returned a Promise; SQLite guards must be " +
+                "synchronous — its writes cannot be awaited inside the single-transaction commit",
+            );
+          }
+        }
       }
       return out;
     });
@@ -354,6 +497,117 @@ export class SqliteDocStore implements DocStore {
       JSON.stringify(value),
     );
     return r.changes > 0;
+  }
+
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) ─────────────────────────────
+
+  async getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null> {
+    const row = this.prep(
+      `SELECT verdict, commit_ts, value_json, error_code, created_at FROM client_mutations
+       WHERE identity = ? AND client_id = ? AND seq = ?`,
+    ).get(identity, clientId, seq);
+    if (!row) return null;
+    return clientVerdictRecordFromRow(row);
+  }
+
+  async getClientFloor(identity: string, clientId: string): Promise<number | null> {
+    const row = this.prep(
+      `SELECT pruned_through_seq FROM client_floors WHERE identity = ? AND client_id = ?`,
+    ).get(identity, clientId);
+    return row ? Number(row.pruned_through_seq) : null;
+  }
+
+  async recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void> {
+    const valueJson = cappedValueJson(record.value);
+    this.prep(
+      `INSERT OR IGNORE INTO client_mutations
+         (identity, client_id, seq, verdict, commit_ts, value_json, error_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      identity,
+      clientId,
+      seq,
+      record.verdict,
+      record.commitTs,
+      valueJson,
+      record.verdict === "failed" ? record.errorCode : null,
+      Date.now(),
+    );
+  }
+
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const valueJson = cappedValueJson(value);
+    this.prep(
+      `UPDATE client_mutations SET value_json = ? WHERE identity = ? AND client_id = ? AND seq = ?`,
+    ).run(valueJson, identity, clientId, seq);
+  }
+
+  async pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }> {
+    return this.db.transaction(() => {
+      const currentFloorRow = this.prep(
+        `SELECT pruned_through_seq FROM client_floors WHERE identity = ? AND client_id = ?`,
+      ).get(identity, clientId);
+      const currentFloor = currentFloorRow ? Number(currentFloorRow.pruned_through_seq) : null;
+
+      let deletedMaxSeq: number | null = null;
+      const { clause, params } = clientMutationsDeleteClause(opts);
+      if (clause !== null) {
+        const rows = this.prep(
+          `DELETE FROM client_mutations WHERE identity = ? AND client_id = ? AND (${clause}) RETURNING seq`,
+        ).all(identity, clientId, ...params);
+        for (const row of rows) {
+          const s = Number(row.seq);
+          if (deletedMaxSeq === null || s > deletedMaxSeq) deletedMaxSeq = s;
+        }
+      }
+
+      const candidate = maxCandidate(opts.ackedThrough ?? null, deletedMaxSeq);
+      const base = currentFloor ?? -1;
+      if (candidate === null || candidate <= base) {
+        return { prunedThroughSeq: currentFloor ?? 0 }; // no-op: nothing to advance to
+      }
+      this.prep(
+        `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (identity, client_id) DO UPDATE SET
+           pruned_through_seq = MAX(client_floors.pruned_through_seq, excluded.pruned_through_seq),
+           updated_at = excluded.updated_at`,
+      ).run(identity, clientId, candidate, Date.now());
+      return { prunedThroughSeq: candidate };
+    });
+  }
+
+  async sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }> {
+    return this.db.transaction(() => {
+      const rows = this.prep(
+        `DELETE FROM client_mutations WHERE created_at < ? RETURNING identity, client_id, seq`,
+      ).all(beforeMs);
+      if (rows.length === 0) return { deletedCount: 0 };
+
+      const maxByClient = new Map<string, { identity: string; clientId: string; maxSeq: number }>();
+      for (const row of rows) {
+        const identity = row.identity as string;
+        const clientId = row.client_id as string;
+        const seq = Number(row.seq);
+        // NUL-delimited: identity/clientId are client-supplied strings, so an unescaped join
+        // (e.g. a plain space) lets ("a","b c") and ("a b","c") collide onto the same batch key.
+        const key = `${identity} ${clientId}`;
+        const cur = maxByClient.get(key);
+        if (!cur || seq > cur.maxSeq) maxByClient.set(key, { identity, clientId, maxSeq: seq });
+      }
+      const now = Date.now();
+      const upsert = this.prep(
+        `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (identity, client_id) DO UPDATE SET
+           pruned_through_seq = MAX(client_floors.pruned_through_seq, excluded.pruned_through_seq),
+           updated_at = excluded.updated_at`,
+      );
+      for (const { identity, clientId, maxSeq } of maxByClient.values()) upsert.run(identity, clientId, maxSeq, now);
+      return { deletedCount: rows.length };
+    });
   }
 
   /** Close the underlying database adapter (checkpoint + release the file). Used by graceful shutdown. */

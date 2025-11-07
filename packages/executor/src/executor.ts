@@ -37,18 +37,38 @@ function resolveRef(ref: FunctionReference | string): string {
  * the driver hazard this move fixes). Queries are never routed. `isLocalWriter` is consulted per
  * call (never cached), so a per-shard role flip takes effect on the very next mutation.
  */
+/**
+ * A replay of a prior client-mutation verdict (the Receipted Outbox, verdict §(c)) surfaced through
+ * the executor/forward boundary — see {@link UdfResult.clientReplay}. JSON-friendly (`value` is a
+ * `JSONValue`) so it survives the fleet forward hop; the sync tier maps it to its own `Value`-typed
+ * replay. Distinct from a fleet `idempotency` replay (per-hop, `ee/`): this is the DURABLE client
+ * dedup verdict.
+ */
+export interface ClientReplay {
+  verdict: "applied" | "failed" | "stale";
+  commitTs?: number;
+  value?: JSONValue;
+  valueMissing?: true;
+  code?: string;
+}
+
 export interface WriteRouter {
   /** true → this node owns `shardId`; commit locally. false → forward to the owner. Per call. */
   isLocalWriter(shardId: ShardId): boolean;
   /** Forward a write to the shard's owner; resolves with the function's JSON result (plus, when the
-   *  owner reports them, the commit's `commitTs`/`shardId`) or throws the owner's typed error. */
+   *  owner reports them, the commit's `commitTs`/`shardId`) or throws the owner's typed error.
+   *  `dedup` (Receipted Outbox): the durable `(clientId, seq)` rides the forward so the OWNER — never
+   *  a follower's replica — does the classification (verdict §(c) repair 3). When the owner replays a
+   *  recorded verdict instead of running, it comes back as `replay` (and `value` is that replay's
+   *  value, or absent). */
   forward(
     kind: "mutation" | "action",
     path: string,
     args: JSONValue,
     identity: string | null,
     shardId: ShardId,
-  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string }>;
+    dedup?: { clientId: string; seq: number },
+  ): Promise<{ value: JSONValue; commitTs?: number; shardId?: string; replay?: ClientReplay }>;
 }
 
 export interface ExecutorDeps {
@@ -204,6 +224,14 @@ export interface RunOptions {
    */
   origin?: string;
   /**
+   * The durable client-mutation dedup key (Receipted Outbox, verdict §(c)). Meaningful for a
+   * mutation that FORWARDS: the executor threads it to `WriteRouter.forward` so the owner classifies
+   * it. The LOCAL-commit classification (pre-read + `applied`-receipt guard) is driven by the runtime
+   * (which owns the `DocStore`), not here — for a local commit the runtime instead passes the dedup
+   * key via `commitMeta`, which the receipts guard reads. Unset → identical to before this field.
+   */
+  dedup?: { clientId: string; seq: number };
+  /**
    * Force this run's reads onto the PRIMARY store even when a hybrid `queryPath` (replica) is
    * configured (Fleet B3). Set by the runtime's DRIVER path (`DriverContext.runFunction`): a
    * component driver (scheduler/cron/reaper/workflow) runs on the writer that OWNS the shard its
@@ -225,6 +253,13 @@ export interface UdfResult<T = unknown> {
   readRanges: KeyRange[];
   /** Write delta (for mutations); null for pure reads. */
   oplog: OplogDelta | null;
+  /**
+   * Set instead of a fresh commit when a dedup-keyed mutation forwarded to an owner that REPLAYED a
+   * recorded verdict (the Receipted Outbox, verdict §(c)). No commit happened this call; `committed`
+   * is false and `oplog` is null. The runtime/sync tier surfaces this as a `MutationReplay` rather
+   * than a fresh `MutationResponse`. Absent on every non-dedup / freshly-committed run.
+   */
+  clientReplay?: ClientReplay;
 }
 
 /**
@@ -319,14 +354,25 @@ export class InlineUdfExecutor {
     const router = this.deps.writeRouter;
     if (fn.type === "mutation" && router && !options.localOnly && !router.isLocalWriter(shardId)) {
       try {
-        const fwd = await router.forward(
-          "mutation",
-          options.path ?? "<anonymous>",
-          convexToJson(args as Value),
-          options.identity ?? null,
-          shardId,
-        );
+        // Pass `dedup` only when set, so a non-outbox forward keeps its exact 5-arg call shape
+        // (the shipped `WriteRouter` contract + its tests) — the owner classifies only dedup writes.
+        const fwd = options.dedup !== undefined
+          ? await router.forward("mutation", options.path ?? "<anonymous>", convexToJson(args as Value), options.identity ?? null, shardId, options.dedup)
+          : await router.forward("mutation", options.path ?? "<anonymous>", convexToJson(args as Value), options.identity ?? null, shardId);
         logEntry("ok");
+        if (fwd.replay) {
+          // The owner classified this dedup-keyed forward as a REPLAY (a recorded verdict) — no
+          // commit happened. Surface it so the sync tier builds a `MutationReplay`, not a fresh ack.
+          return {
+            value: jsonToConvex(fwd.replay.value ?? null) as T,
+            logs: [],
+            committed: false,
+            commitTs: fwd.replay.commitTs !== undefined ? BigInt(fwd.replay.commitTs) : 0n,
+            readRanges: [],
+            oplog: null,
+            clientReplay: fwd.replay,
+          };
+        }
         return {
           value: jsonToConvex(fwd.value) as T,
           logs: [],

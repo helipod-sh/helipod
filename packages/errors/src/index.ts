@@ -132,6 +132,44 @@ export class NotShardOwnerError extends ConflictError {
   override readonly code = NOT_SHARD_OWNER_CODE;
 }
 
+/**
+ * Receipted Outbox (Plan A, decision 2): a commit guard's rejection of ONE unit of a (possibly
+ * group-committed) commit. Carries the offending unit's `unitIndex` so the group committer can
+ * reject ONLY that unit and re-flush the remainder (the store rolled the whole txn back — nothing
+ * landed — so a fresh re-flush of the surviving units is safe), instead of the pre-fix behavior
+ * where a raw guard throw aborted the batch and rejected every innocent co-batched unit (the live
+ * batch-collateral bug).
+ *
+ * Distinct from {@link FencedError} (an epoch abort of the WHOLE batch — never per-unit, never
+ * split). `rejectionCode` names the guard that rejected (`"FLEET_IDEMPOTENCY_CONFLICT"` |
+ * `"CLIENT_MUTATION_DUP"`); `detail` is a human-readable hint. On the single-commit path the guard
+ * throw propagates raw to the caller — a one-unit rejection is that mutation's own rejection.
+ *
+ * Extends {@link ConflictError} (409, retryable): a rejection means "this write already landed under
+ * another attempt" — a replay signal, not a 5xx. The extra fields also travel in `data` so they
+ * survive a {@link toJSON}/rehydration round-trip across a wire boundary (the owner-local
+ * `instanceof` check is what the http-handler replay path relies on).
+ */
+export const COMMIT_GUARD_REJECTION_CODE = "COMMIT_GUARD_REJECTION";
+export class CommitGuardRejection extends ConflictError {
+  override readonly code = COMMIT_GUARD_REJECTION_CODE;
+  constructor(
+    readonly unitIndex: number,
+    readonly rejectionCode: string,
+    readonly detail: string,
+    options?: StackbaseErrorOptions,
+  ) {
+    super(`commit guard rejected unit ${unitIndex}: ${rejectionCode} (${detail})`, {
+      ...options,
+      data: { unitIndex, rejectionCode, detail, ...(isRecord(options?.data) ? options.data : {}) },
+    });
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* System errors — 5xx, not retryable                                         */
 /* -------------------------------------------------------------------------- */

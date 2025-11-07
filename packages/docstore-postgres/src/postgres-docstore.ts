@@ -14,6 +14,8 @@
  * previous-revisions lookup) are all implemented over the async `PgClient` seam.
  */
 import type {
+  ClientVerdictRecord,
+  ClientVerdictWrite,
   CommitGuardUnit,
   CommitUnit,
   ConflictStrategy,
@@ -31,7 +33,7 @@ import type {
   TimestampRange,
   InternalDocumentId,
 } from "@stackbase/docstore";
-import { getPrevRevQueryKey } from "@stackbase/docstore";
+import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "@stackbase/docstore";
 import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "./pg-client";
@@ -43,6 +45,60 @@ function asBigInt(v: PgValue | undefined): bigint {
 }
 function asBigIntOrNull(v: PgValue | undefined): bigint | null {
   return v === null || v === undefined ? null : asBigInt(v);
+}
+
+// ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — pure helpers ──────────────────
+// Mirror `docstore-sqlite/src/sqlite-docstore.ts`'s helpers of the same names — kept in lockstep
+// (Risk R9: the two stores are independent implementations of one behavioral contract).
+
+/** Build the WHERE fragment (and its bound params, in order, starting at `$3` — `$1`/`$2` are
+ *  always `identity`/`client_id`) for `pruneClientMutations`'s DELETE — the
+ *  `seq <= ackedThrough OR createdAt < ttlBeforeMs` union (verdict §(c)). `{clause: null}` when
+ *  neither bound is set (nothing to delete this call — a legal no-op). */
+function clientMutationsDeleteClause(opts: {
+  ackedThrough?: number;
+  ttlBeforeMs?: number;
+}): { clause: string | null; params: bigint[] } {
+  const parts: string[] = [];
+  const params: bigint[] = [];
+  if (opts.ackedThrough !== undefined) {
+    parts.push(`seq <= $${3 + params.length}`);
+    params.push(BigInt(opts.ackedThrough));
+  }
+  if (opts.ttlBeforeMs !== undefined) {
+    parts.push(`created_at < $${3 + params.length}`);
+    params.push(BigInt(opts.ttlBeforeMs));
+  }
+  return parts.length === 0 ? { clause: null, params: [] } : { clause: parts.join(" OR "), params };
+}
+
+/** The floor candidate a prune call covers: the client's own `ackedThrough` claim (which covers any
+ *  never-recorded holes below it — floor-covers-holes, verdict decision 3) and/or the highest seq
+ *  actually deleted this pass — whichever is higher. `null` when neither applies. */
+function maxCandidate(ackedThrough: number | null, deletedMaxSeq: number | null): number | null {
+  if (ackedThrough === null) return deletedMaxSeq;
+  if (deletedMaxSeq === null) return ackedThrough;
+  return Math.max(ackedThrough, deletedMaxSeq);
+}
+
+/** Serialize + cap-check a receipt's optional value. Over-cap values are silently DROPPED (never
+ *  truncated, never rejected) — the receipt must still land (verdict §(c)); a dropped value reads
+ *  back as `hasValue: false`, mapping to the wire's `valueMissing`. */
+function cappedValueJson(value: JSONValue | undefined): string | null {
+  if (value === undefined) return null;
+  const json = JSON.stringify(value);
+  return Buffer.byteLength(json, "utf8") > CLIENT_VERDICT_VALUE_CAP_BYTES ? null : json;
+}
+
+function clientVerdictRecordFromRow(row: PgRow): ClientVerdictRecord {
+  return {
+    verdict: row.verdict as "applied" | "failed",
+    commitTs: asBigInt(row.commit_ts),
+    hasValue: row.value_json !== null,
+    value: row.value_json === null ? null : (JSON.parse(row.value_json as string) as JSONValue),
+    errorCode: (row.error_code as string | null | undefined) ?? null,
+    createdAt: Number(row.created_at),
+  };
 }
 
 /** Thrown by `write()` while the store is in read-only mode (see `PostgresDocStore`'s
@@ -63,18 +119,25 @@ export interface PostgresDocStoreOptions {
   readOnly?: boolean;
 }
 
+/** A Postgres commit guard — see `PostgresDocStore.addCommitGuard`'s doc comment (which this type
+ *  exists to be referenced from) for the full contract: batch-shaped, runs inside the commit
+ *  transaction after all units' row inserts and before COMMIT, throwing aborts the whole batch. */
+export type PgCommitGuard = (
+  q: PgQuerier,
+  units: readonly CommitGuardUnit[],
+  shardId: ShardId,
+) => Promise<void>;
+
 export class PostgresDocStore implements DocStore {
   private readOnly: boolean;
-  /** Fleet-installed epoch fence (D3/D5, batch-shaped since Fleet B4). Runs ONCE inside every
-   * `commitWriteBatch` transaction, after ALL units' row inserts and before COMMIT; throwing aborts
-   * the whole commit (every unit). Never set at Tier 0. The `shardId` is passed so a per-shard fleet
-   * fence can check THAT shard's epoch row (B2a per-shard guards). `units` is the batch's per-unit
-   * `{ts, meta}` in unit/ts order (Fleet B4, D1): the guard fences once, advances the frontier once at
-   * the last unit's ts, and loops the per-unit `meta` effects (idempotency INSERT at each unit's own
-   * ts). The single-commit `commitWrite` path passes a one-unit array, so there is ONE guard contract. */
-  private commitGuard:
-    | ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>)
-    | null = null;
+  /** The commit-guard CHAIN (Receipted Outbox decision 2 — the old single `commitGuard` slot
+   * generalized to composition). Guards run in REGISTRATION ORDER, once per `commitWriteBatch`
+   * transaction, after ALL units' row inserts and before COMMIT; ANY guard throwing aborts the
+   * whole commit (every unit) — the whole chain shares the fence's original all-or-nothing
+   * contract. Empty at Tier 0 (no guard ever runs). `units` is the batch's per-unit `{ts, meta}`
+   * in unit/ts order (Fleet B4, D1) — each guard fences/effects once per batch over the whole
+   * array, not once per unit. The single-commit `commitWrite` path passes a one-unit array. */
+  private guards: PgCommitGuard[] = [];
 
   constructor(
     private readonly db: PgClient,
@@ -83,17 +146,24 @@ export class PostgresDocStore implements DocStore {
     this.readOnly = options?.readOnly ?? false;
   }
 
-  /** Install (or, with `null`, clear) the commit guard — see `commitGuard`. Installed by fleet code
-   * (the epoch fence); at Tier 0 no guard is ever set and the commit path never calls one.
-   *
-   * BREAKING (Fleet B4): the guard is BATCH-SHAPED — `(q, units: readonly CommitGuardUnit[], shardId)`,
-   * invoked ONCE per `commitWriteBatch` transaction over all units. The prior single-commit shape
-   * `(q, commitTs, shardId, meta)` is gone; fleet's `installCommitGuard` and every direct installer
-   * were updated in lockstep. A single `commitWrite` reaches the guard as a one-unit array. */
-  setCommitGuard(
-    guard: ((q: PgQuerier, units: readonly CommitGuardUnit[], shardId: ShardId) => Promise<void>) | null,
-  ): void {
-    this.commitGuard = guard;
+  /** Append `guard` to the commit-guard chain — see `guards`'s doc comment for the full contract.
+   * Returns an unregister function that removes exactly this guard (a no-op if called again, or
+   * if the guard was never/no-longer registered). Registration order = invocation order. */
+  addCommitGuard(guard: PgCommitGuard): () => void {
+    this.guards.push(guard);
+    return () => {
+      const i = this.guards.indexOf(guard);
+      if (i >= 0) this.guards.splice(i, 1);
+    };
+  }
+
+  /** @deprecated Use `addCommitGuard` — kept only for callers not yet migrated. Semantics: CLEARS
+   * the whole chain, then (if `guard` is non-null) adds `guard` as the chain's sole member. This
+   * is NOT a simple compat shim for a multi-guard chain (it wipes out any other registered guard),
+   * so mixing `setCommitGuard` with `addCommitGuard` on the same store is almost certainly a bug —
+   * new code should call `addCommitGuard` directly. */
+  setCommitGuard(guard: PgCommitGuard | null): void {
+    this.guards = guard ? [guard] : [];
   }
 
   /** The underlying `PgClient` — exposed so fleet code (leader election, LISTEN/NOTIFY signaling)
@@ -298,9 +368,14 @@ export class PostgresDocStore implements DocStore {
         commitTsList.push(commitTs);
         guardUnits.push({ ts: commitTs, meta: unit.meta });
       }
-      // ONE guard invocation over the whole batch (epoch fence once, frontier once at ts_N, per-unit
-      // idempotency INSERT). Skipped for an empty batch — nothing to commit, nothing to fence.
-      if (this.commitGuard && guardUnits.length > 0) await this.commitGuard(tx, guardUnits, shard);
+      // The WHOLE chain, in registration order, ONE invocation each over the whole batch (epoch
+      // fence once, frontier once at ts_N, per-unit idempotency INSERT). Skipped for an empty
+      // batch — nothing to commit, nothing to fence. ANY guard throwing aborts the whole batch —
+      // the `for` loop's exception propagates straight out of `runCommit`, so a later guard never
+      // runs and the transaction (including every earlier guard's writes) rolls back.
+      if (guardUnits.length > 0) {
+        for (const g of this.guards) await g(tx, guardUnits, shard);
+      }
       return commitTsList;
     };
     // Pool mode (D1): route the whole batch onto THIS shard's dedicated commit connection, so
@@ -524,6 +599,127 @@ export class PostgresDocStore implements DocStore {
       [key, JSON.stringify(value)],
     );
     return rows.length > 0; // a row is RETURNED only when the insert actually happened
+  }
+
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) ─────────────────────────────
+
+  async getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null> {
+    const rows = await this.db.query(
+      `SELECT verdict, commit_ts, value_json, error_code, created_at FROM client_mutations
+       WHERE identity = $1 AND client_id = $2 AND seq = $3`,
+      [identity, clientId, BigInt(seq)],
+    );
+    return rows[0] ? clientVerdictRecordFromRow(rows[0]) : null;
+  }
+
+  async getClientFloor(identity: string, clientId: string): Promise<number | null> {
+    const rows = await this.db.query(
+      `SELECT pruned_through_seq FROM client_floors WHERE identity = $1 AND client_id = $2`,
+      [identity, clientId],
+    );
+    return rows[0] ? Number(rows[0].pruned_through_seq) : null;
+  }
+
+  async recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void> {
+    const valueJson = cappedValueJson(record.value);
+    await this.db.query(
+      `INSERT INTO client_mutations
+         (identity, client_id, seq, verdict, commit_ts, value_json, error_code, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (identity, client_id, seq) DO NOTHING`,
+      [
+        identity,
+        clientId,
+        BigInt(seq),
+        record.verdict,
+        record.commitTs,
+        valueJson,
+        record.verdict === "failed" ? record.errorCode : null,
+        BigInt(Date.now()),
+      ],
+    );
+  }
+
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const valueJson = cappedValueJson(value);
+    await this.db.query(
+      `UPDATE client_mutations SET value_json = $1 WHERE identity = $2 AND client_id = $3 AND seq = $4`,
+      [valueJson, identity, clientId, BigInt(seq)],
+    );
+  }
+
+  async pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }> {
+    return this.db.transaction(async (tx) => {
+      const floorRows = await tx.query(
+        `SELECT pruned_through_seq FROM client_floors WHERE identity = $1 AND client_id = $2`,
+        [identity, clientId],
+      );
+      const currentFloor = floorRows[0] ? Number(floorRows[0].pruned_through_seq) : null;
+
+      let deletedMaxSeq: number | null = null;
+      const { clause, params } = clientMutationsDeleteClause(opts);
+      if (clause !== null) {
+        const rows = await tx.query(
+          `DELETE FROM client_mutations WHERE identity = $1 AND client_id = $2 AND (${clause}) RETURNING seq`,
+          [identity, clientId, ...params],
+        );
+        for (const row of rows) {
+          const s = Number(row.seq);
+          if (deletedMaxSeq === null || s > deletedMaxSeq) deletedMaxSeq = s;
+        }
+      }
+
+      const candidate = maxCandidate(opts.ackedThrough ?? null, deletedMaxSeq);
+      const base = currentFloor ?? -1;
+      if (candidate === null || candidate <= base) {
+        return { prunedThroughSeq: currentFloor ?? 0 }; // no-op: nothing to advance to
+      }
+      await tx.query(
+        `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (identity, client_id) DO UPDATE SET
+           pruned_through_seq = GREATEST(client_floors.pruned_through_seq, EXCLUDED.pruned_through_seq),
+           updated_at = EXCLUDED.updated_at`,
+        [identity, clientId, BigInt(candidate), BigInt(Date.now())],
+      );
+      return { prunedThroughSeq: candidate };
+    });
+  }
+
+  async sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }> {
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.query(
+        `DELETE FROM client_mutations WHERE created_at < $1 RETURNING identity, client_id, seq`,
+        [BigInt(beforeMs)],
+      );
+      if (rows.length === 0) return { deletedCount: 0 };
+
+      const maxByClient = new Map<string, { identity: string; clientId: string; maxSeq: number }>();
+      for (const row of rows) {
+        const identity = row.identity as string;
+        const clientId = row.client_id as string;
+        const seq = Number(row.seq);
+        // NUL-delimited: identity/clientId are client-supplied strings, so an unescaped join
+        // (e.g. a plain space) lets ("a","b c") and ("a b","c") collide onto the same batch key.
+        const key = `${identity}\x00${clientId}`;
+        const cur = maxByClient.get(key);
+        if (!cur || seq > cur.maxSeq) maxByClient.set(key, { identity, clientId, maxSeq: seq });
+      }
+      const now = BigInt(Date.now());
+      for (const { identity, clientId, maxSeq } of maxByClient.values()) {
+        await tx.query(
+          `INSERT INTO client_floors (identity, client_id, pruned_through_seq, updated_at) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (identity, client_id) DO UPDATE SET
+             pruned_through_seq = GREATEST(client_floors.pruned_through_seq, EXCLUDED.pruned_through_seq),
+             updated_at = EXCLUDED.updated_at`,
+          [identity, clientId, BigInt(maxSeq), now],
+        );
+      }
+      return { deletedCount: rows.length };
+    });
   }
 
   async close(): Promise<void> {

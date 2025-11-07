@@ -196,3 +196,119 @@ describe("PostgresDocStore commit guard", () => {
     await client.close();
   });
 });
+
+// Receipted Outbox decision 2: the single-slot `commitGuard` generalized to a chain via
+// `addCommitGuard(guard): () => void`. `setCommitGuard` (above) is retained only as a deprecated
+// alias — see its own describe block below for the clear-then-add semantics that makes it distinct
+// from `addCommitGuard`.
+describe("PostgresDocStore addCommitGuard (the chain)", () => {
+  it("runs guards in REGISTRATION order", async () => {
+    const { store, client } = await makeStore();
+    const order: string[] = [];
+    store.addCommitGuard(async () => {
+      order.push("first");
+    });
+    store.addCommitGuard(async () => {
+      order.push("second");
+    });
+    store.addCommitGuard(async () => {
+      order.push("third");
+    });
+
+    await store.commitWrite([doc(newDocumentId(TABLE), "x")], []);
+    expect(order).toEqual(["first", "second", "third"]);
+    await client.close();
+  });
+
+  it("ANY guard throwing aborts the WHOLE transaction — zero rows land, and later guards never run", async () => {
+    const { store, client } = await makeStore();
+    const ran: string[] = [];
+    store.addCommitGuard(async () => {
+      ran.push("first");
+    });
+    store.addCommitGuard(async () => {
+      ran.push("second");
+      throw new Error("second rejects");
+    });
+    store.addCommitGuard(async () => {
+      ran.push("third"); // must never run — the chain aborts at "second"
+    });
+
+    const id = newDocumentId(TABLE);
+    await expect(store.commitWrite([doc(id, "x")], [])).rejects.toThrow("second rejects");
+    expect(ran).toEqual(["first", "second"]);
+
+    const docs = await client.query(`SELECT COUNT(*)::int AS n FROM documents`);
+    expect(Number(docs[0]!.n)).toBe(0); // nothing landed, including "first"'s prior-ok state
+    await client.close();
+  });
+
+  it("the returned unregister function removes exactly that guard — a no-op if called again", async () => {
+    const { store, client } = await makeStore();
+    const order: string[] = [];
+    const unregisterA = store.addCommitGuard(async () => {
+      order.push("A");
+    });
+    store.addCommitGuard(async () => {
+      order.push("B");
+    });
+
+    unregisterA();
+    unregisterA(); // second call — a no-op, not a throw
+
+    await store.commitWrite([doc(newDocumentId(TABLE), "x")], []);
+    expect(order).toEqual(["B"]); // A never ran — only B remains on the chain
+    await client.close();
+  });
+
+  it("each guard sees the SAME (querier, units, shardId) triple already documented for a single guard", async () => {
+    const { store, client } = await makeStore();
+    const seenA: bigint[] = [];
+    const seenB: bigint[] = [];
+    store.addCommitGuard(async (_q, units) => {
+      seenA.push(...units.map((u) => u.ts));
+    });
+    store.addCommitGuard(async (_q, units) => {
+      seenB.push(...units.map((u) => u.ts));
+    });
+
+    const commitTs = await store.commitWrite([doc(newDocumentId(TABLE), "x")], []);
+    expect(seenA).toEqual([commitTs]);
+    expect(seenB).toEqual([commitTs]);
+    await client.close();
+  });
+});
+
+// `setCommitGuard` is a DEPRECATED alias, not a second independent registration mechanism — its
+// contract is "clear the whole chain, then add this guard as its sole member". Mixing it with
+// `addCommitGuard` on the same store therefore wipes out any other registered guard; these tests
+// pin exactly that (surprising, documented) behavior so a future refactor can't silently change it.
+describe("PostgresDocStore setCommitGuard (deprecated alias)", () => {
+  it("CLEARS the whole chain before adding — an addCommitGuard registration does not survive it", async () => {
+    const { store, client } = await makeStore();
+    const order: string[] = [];
+    store.addCommitGuard(async () => {
+      order.push("chain-guard");
+    });
+    store.setCommitGuard(async () => {
+      order.push("alias-guard");
+    });
+
+    await store.commitWrite([doc(newDocumentId(TABLE), "x")], []);
+    expect(order).toEqual(["alias-guard"]); // "chain-guard" was wiped by setCommitGuard
+    await client.close();
+  });
+
+  it("setCommitGuard(null) clears the chain entirely, including guards added via addCommitGuard", async () => {
+    const { store, client } = await makeStore();
+    const ran = { value: false };
+    store.addCommitGuard(async () => {
+      ran.value = true;
+    });
+    store.setCommitGuard(null);
+
+    await store.commitWrite([doc(newDocumentId(TABLE), "x")], []);
+    expect(ran.value).toBe(false);
+    await client.close();
+  });
+});

@@ -4,4 +4,4 @@ export { ADVISORY_LOCK_KEY } from "./pg-client";
 export { NodePgClient, pgSessionTimeoutStatements } from "./node-pg-client";
 export type { PgSessionTimeouts } from "./node-pg-client";
 export { PostgresDocStore, ReadOnlyStoreError } from "./postgres-docstore";
-export type { PostgresDocStoreOptions } from "./postgres-docstore";
+export type { PostgresDocStoreOptions, PgCommitGuard } from "./postgres-docstore";

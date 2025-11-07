@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/sync",
+  "name": "@stackbase/receipts",
   "version": "0.0.0",
   "type": "module",
   "license": "MIT",
@@ -21,17 +21,13 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/errors": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@stackbase/component": "workspace:*",
+    "@stackbase/docstore": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-postgres": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/transactor": "workspace:*",
+    "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

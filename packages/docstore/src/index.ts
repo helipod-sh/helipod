@@ -23,7 +23,9 @@ export type {
   SchemaSetupOptions,
   DocStore,
   TimestampOracle,
+  ClientVerdictRecord,
+  ClientVerdictWrite,
 } from "./types";
-export { getPrevRevQueryKey } from "./types";
+export { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "./types";
 
 export { MonotonicTimestampOracle } from "./timestamp-oracle";

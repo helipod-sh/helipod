@@ -7,6 +7,7 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
+import { isRetryableError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import {
   encodeServerMessage,
@@ -16,6 +17,9 @@ import {
   type ServerMessage,
   type StateModification,
   type StateVersion,
+  type ClientMutationRef,
+  type ClientMutationVerdict,
+  type MutationBatchEntry,
 } from "./protocol";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
 import {
@@ -41,6 +45,39 @@ export interface SyncWebSocket {
   ping?(onPong: () => void): void;
 }
 
+/** Today's fresh-run mutation result (a real commit happened), tagged so the handler discriminates
+ *  it from a {@link MutationReplay}. */
+export interface MutationRan {
+  replayed?: false;
+  value: Value;
+  tables: string[];
+  writeRanges: readonly SerializedKeyRange[];
+  commitTs: number;
+  forwarded?: boolean;
+}
+
+/**
+ * A replay of a prior verdict (Receipted Outbox, verdict §(c)) — NO commit happened on this call.
+ * The classification at the OWNER (`runMutation`'s `dedup` path) hit a recorded verdict (or the
+ * floor), so the mutation is NOT re-run. The handler must therefore skip `notifyWrites` AND the G4
+ * pending-frontier (nothing was written this call — verdict §(c) Risk R7).
+ */
+export interface MutationReplay {
+  replayed: true;
+  verdict: "applied" | "failed" | "stale";
+  /** The ORIGINAL commitTs for an `applied`/`failed` record (keeps the client gate sound); absent
+   *  for `stale` (no commit ever happened). */
+  commitTs?: number;
+  /** Present only for `applied` with a recorded return value. */
+  value?: Value;
+  /** `applied` whose value was never recorded (crash-window) or exceeded the 64KB cap. */
+  valueMissing?: true;
+  /** The terminal verdict code for `failed` (the recorded error code) or `"STALE_CLIENT"` for `stale`. */
+  code?: string;
+}
+
+export type RunMutationResult = MutationRan | MutationReplay;
+
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
   runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
@@ -50,11 +87,32 @@ export interface SyncUdfExecutor {
    * commit even when it touched nothing the session subscribes to. `forwarded` (fleet): true when
    * the mutation committed on ANOTHER node (no local oplog) — its origin tag couldn't ride this
    * node's local fan-out, so the handler advances the origin frontier via a drain-gated fallback.
+   *
+   * `dedup` (Receipted Outbox, verdict §(c)): the durable `(clientId, seq)` — absent = today's
+   * unconditional path, bit-for-bit (no classification read, no receipt write). Present → the OWNER's
+   * `runMutation` impl classifies: a recorded/floored verdict short-circuits to a {@link MutationReplay}
+   * (no commit); a miss runs the mutation with the dedup key rideng the commit meta (the receipts
+   * guard writes the `applied` receipt atomically). The handler only threads `dedup` down and
+   * interprets the discriminated return — it NEVER reads the classification store itself (it runs on
+   * any node, incl. a fleet follower; the read must run where the commit runs — verdict §(c) repair 3).
    */
-  runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string): Promise<{ value: Value; tables: string[]; writeRanges: readonly SerializedKeyRange[]; commitTs: number; forwarded?: boolean }>;
+  runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string, dedup?: ClientMutationRef): Promise<RunMutationResult>;
   runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
+  /**
+   * Classify a presented `(identity, clientId, seq)` for the `Connect` resume handshake (verdict
+   * §(e)) — the read-only sibling of `runMutation`'s dedup path. Returns the recorded verdict, or
+   * `"stale"` (below the floor, no record), or `"unknown"` (never seen — the client should resend).
+   * Optional: an executor without receipts support (or an old one) omits it → `Connect` degrades to
+   * `known: false` with empty results.
+   */
+  classifyClientMutation?(identity: string | null, clientId: string, seq: number): Promise<ClientMutationVerdict>;
+  /** Ack-prune the contiguous settled prefix `seq <= ackedThrough` for `(identity, clientId)` on a
+   *  `Connect` (verdict §(c) Retention). Optional (same reason as `classifyClientMutation`). */
+  pruneClientMutations?(identity: string | null, clientId: string, ackedThrough: number): Promise<void>;
+  /** The deployment-id stamp for `ConnectAck` (verdict §(g) hazard 15 — same-timeline proof). */
+  deploymentId?(): string;
 }
 
 /** A committed write's invalidation — the transactor→sync fan-out payload (Tier 2: from a stream). */
@@ -195,11 +253,13 @@ export class SyncProtocolHandler {
     const msg: ClientMessage = parseClientMessage(raw);
     switch (msg.type) {
       case "Connect":
-        return;
+        return this.handleConnect(session, msg);
       case "ModifyQuerySet":
         return this.handleModifyQuerySet(session, msg);
       case "Mutation":
         return this.handleMutation(session, msg);
+      case "MutationBatch":
+        return this.handleMutationBatch(session, msg);
       case "Action":
         return this.handleAction(session, msg);
       case "EphemeralPublish":
@@ -270,17 +330,84 @@ export class SyncProtocolHandler {
     session: Session,
     msg: Extract<ClientMessage, { type: "Mutation" }>,
   ): Promise<void> {
+    await this.processMutation(session, msg);
+  }
+
+  /**
+   * A drained-outbox chunk (verdict §(e)): ONE inbound message carrying N entries. Applied
+   * SEQUENTIALLY (`await` each in order) — the client sends only one unacked chunk at a time and
+   * relies on per-client FIFO, so units MUST commit in order. One `MutationResponse` is emitted per
+   * entry as it settles, EXCEPT when a unit fails TRANSIENTLY (see `processMutation`'s doc comment):
+   * that unit still gets its failure response, but the loop then STOPS — the remaining entries get
+   * NO response at all, preserving the FIFO drain obligation (a causally-dependent later unit must
+   * never apply after an earlier transient/infra failure). The client's one-unacked-chunk-at-a-time
+   * protocol resends the whole chunk on the next attempt; per-seq receipts make that resend safe
+   * (an already-applied unit replay-acks instead of re-running).
+   */
+  private async handleMutationBatch(
+    session: Session,
+    msg: Extract<ClientMessage, { type: "MutationBatch" }>,
+  ): Promise<void> {
+    for (const entry of msg.entries) {
+      const outcome = await this.processMutation(session, entry);
+      if (outcome === "stop") break;
+    }
+  }
+
+  /**
+   * The per-unit mutation core shared by `Mutation` and `MutationBatch` — threads the durable
+   * `(clientId, seq)` down to the OWNER's classification (verdict §(c)), sends the response, and
+   * (for a fresh commit only) fans out. A `MutationReplay` return skips `notifyWrites` AND the G4
+   * pending-frontier entirely (nothing was written this call — Risk R7): its `commitTs` is the
+   * ORIGINAL, long past the current frontier, so arming a frontier or fanning out would be a lie.
+   *
+   * Returns `"continue" | "stop"` — meaningful only to `handleMutationBatch`'s drain loop (a
+   * standalone `Mutation` ignores it). A thrown error is classified via the executor's retryable
+   * discipline (`isRetryableError`, `@stackbase/errors` — the same classification
+   * `handleDedupError`'s dedup path already applies when deciding whether to record a verdict):
+   *  - TERMINAL (not retryable — a deterministic app error, a coded verdict failure/replay) means the
+   *    executor already recorded whatever verdict applies; the batch drain CONTINUES past it (a
+   *    poison unit never blocks the rest — matches the spec's documented mid-batch-continue case).
+   *  - TRANSIENT (retryable — infra/conflict) means nothing durable happened for this unit; the batch
+   *    drain STOPS here so a later, causally-dependent unit can never apply out of order relative to
+   *    it. The remaining units get no response and the client's FIFO resend picks them back up.
+   */
+  private async processMutation(
+    session: Session,
+    unit: { requestId: string; udfPath: string; args: JSONValue; clientId?: string; seq?: number },
+  ): Promise<"continue" | "stop"> {
+    const dedup: ClientMutationRef | undefined =
+      unit.clientId !== undefined && unit.seq !== undefined ? { clientId: unit.clientId, seq: unit.seq } : undefined;
     try {
       // G4: pass this session's id as `origin` so the commit's fan-out advances its own frontier.
-      const { value, tables, writeRanges, commitTs, forwarded } = await this.executor.runMutation(
-        msg.udfPath,
-        msg.args,
-        session.identity,
-        session.sessionId,
-      );
+      const r = await this.executor.runMutation(unit.udfPath, unit.args, session.identity, session.sessionId, dedup);
+      if (r.replayed) {
+        // A replay commits nothing — no fan-out, no frontier. `applied`/`stale`/`failed` map to the
+        // wire: `applied` → success+ts (+value|valueMissing); `failed`/`stale` → failure+code.
+        if (r.verdict === "applied") {
+          this.send(session, {
+            type: "MutationResponse",
+            requestId: unit.requestId,
+            success: true,
+            replayed: true,
+            ts: r.commitTs !== undefined ? this.mutationResponseTs(r.commitTs) : undefined,
+            ...(r.valueMissing ? { valueMissing: true } : { value: convexToJson(r.value as Value) }),
+          });
+        } else {
+          this.send(session, {
+            type: "MutationResponse",
+            requestId: unit.requestId,
+            success: false,
+            error: r.code ?? (r.verdict === "stale" ? "STALE_CLIENT" : "mutation failed"),
+            code: r.code ?? (r.verdict === "stale" ? "STALE_CLIENT" : undefined),
+          });
+        }
+        return "continue";
+      }
+      const { value, tables, writeRanges, commitTs, forwarded } = r;
       this.send(session, {
         type: "MutationResponse",
-        requestId: msg.requestId,
+        requestId: unit.requestId,
         success: true,
         value: convexToJson(value),
         ts: this.mutationResponseTs(commitTs),
@@ -295,9 +422,55 @@ export class SyncProtocolHandler {
       if (this.options.autoNotifyOnMutation !== false) {
         await this.notifyWrites({ tables, ranges: writeRanges, commitTs }, session.sessionId);
       }
+      return "continue";
     } catch (e) {
-      this.send(session, { type: "MutationResponse", requestId: msg.requestId, success: false, error: errMessage(e) });
+      this.send(session, { type: "MutationResponse", requestId: unit.requestId, success: false, error: errMessage(e) });
+      // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
+      return isRetryableError(e) ? "stop" : "continue";
     }
+  }
+
+  /**
+   * The `Connect` resume handshake (verdict §(e)): activated from the reserved no-op. Classifies each
+   * presented `held` seq into `ConnectAck.results`, ack-prunes the `ackedThrough` contiguous
+   * settled-prefix, and stamps the `deploymentId` (same-timeline proof, §(g) hazard 15). `known`
+   * is false when the client presents history the server recognizes NONE of (a swept/foreign timeline
+   * → the client resets). A bare `Connect` (no `clientId`/`held`/`ackedThrough`, or an executor with
+   * no receipts support) stays the pre-Outbox no-op: no ConnectAck is sent, bit-for-bit.
+   */
+  private async handleConnect(
+    session: Session,
+    msg: Extract<ClientMessage, { type: "Connect" }>,
+  ): Promise<void> {
+    // Old-client / no-receipts path: a Connect with no resume fields is the reserved no-op.
+    if (msg.clientId === undefined && msg.held === undefined && msg.ackedThrough === undefined) return;
+    if (!this.executor.classifyClientMutation || !this.executor.deploymentId) return;
+
+    const results: ClientMutationVerdict[] = [];
+    let recognizedAny = false;
+    let presentedAny = false;
+    for (const ref of msg.held ?? []) {
+      presentedAny = true;
+      const v = await this.executor.classifyClientMutation(session.identity, ref.clientId, ref.seq);
+      if (v.verdict !== "unknown") recognizedAny = true;
+      results.push(v);
+    }
+    for (const ref of msg.ackedThrough ?? []) {
+      presentedAny = true;
+      // A floor exists (or gets created) for an acked client, so the server "knows" it even with no
+      // held records left — classify at the acked seq to detect a recognized floor before pruning.
+      if (this.executor.classifyClientMutation) {
+        const v = await this.executor.classifyClientMutation(session.identity, ref.clientId, ref.seq);
+        if (v.verdict !== "unknown") recognizedAny = true;
+      }
+      await this.executor.pruneClientMutations?.(session.identity, ref.clientId, ref.seq);
+    }
+    this.send(session, {
+      type: "ConnectAck",
+      known: presentedAny ? recognizedAny : true,
+      results,
+      deploymentId: this.executor.deploymentId(),
+    });
   }
 
   /**

@@ -32,9 +32,11 @@ import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/
 import type { DatabaseAdapter } from "@stackbase/docstore-sqlite";
 import type { DocStore } from "@stackbase/docstore";
 import type { JSONValue } from "@stackbase/values";
+import { CommitGuardRejection } from "@stackbase/errors";
 import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
 import {
   InMemoryWriteFanoutAdapter,
+  clientReceiptsGuard,
   type EmbeddedRuntime,
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
@@ -474,6 +476,16 @@ export interface FleetRuntimeOptions {
    * driver runs (post-promotion on a sync node), by which point `store` points at the primary.
    */
   stablePrefix?: () => Promise<bigint | null>;
+  /**
+   * Receipted Outbox — receipts-guard ownership handoff. Always `true` for a fleet node: fleet owns
+   * installing the `clientReceiptsGuard()` exactly-once barrier on the CONCRETE Postgres store in
+   * `armWriter` (before the epoch fence, release-on-re-arm), NOT on `store` — which for a sync node is
+   * a `SwitchableDocStore` the runtime would register the guard on, only for it to silently vanish on
+   * the promotion swapTo (leaving a promoted single-writer node's client mutations un-receipted → a
+   * resent (clientId, seq) re-executes). Threaded to `createEmbeddedRuntime` so its `create()` skips
+   * its own registration. See `EmbeddedRuntimeOptions.externalReceiptsGuard` and `armWriter`.
+   */
+  externalReceiptsGuard?: boolean;
 }
 
 export interface FleetPrep {
@@ -748,7 +760,7 @@ export async function prepareFleetNode(deps: {
         client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "writer", numShards,
         runtimeOptions: {
           store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards,
-          queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
+          queryStore: switchable, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
         },
       };
     }
@@ -756,7 +768,7 @@ export async function prepareFleetNode(deps: {
     // switchable, no query-path split (it reads the primary, as shipped).
     return {
       client, pgStore, lease, forwarder, role: "writer", numShards,
-      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit, stablePrefix },
+      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit, stablePrefix, externalReceiptsGuard: true },
     };
   }
 
@@ -780,7 +792,7 @@ export async function prepareFleetNode(deps: {
       client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
       runtimeOptions: {
         store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
-        queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
+        queryStore: switchable, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
       },
     };
   }
@@ -788,7 +800,7 @@ export async function prepareFleetNode(deps: {
   // read-only Postgres store is the tail source + promotion swap target only.
   return {
     client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix },
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix, externalReceiptsGuard: true },
   };
 }
 
@@ -907,13 +919,20 @@ export async function promoteFleetNode(deps: PromotionDeps): Promise<void> {
  * JUST this shard, keep serving everything else — never to a whole-node exit; see `relinquish` below
  * for why `LeaseMonitor.fenced()`/`onExit` are NOT reached from here anymore). Called at writer boot
  * AND on promotion success — see the two call sites below.
+ *
+ * Returns the `addCommitGuard` unregister handle (Receipted Outbox decision 2 — the guard
+ * slot→chain migration). `armWriter` re-arms on EVERY promotion; a caller that calls
+ * `installCommitGuard` again WITHOUT first calling the PRIOR returned unregister function stacks a
+ * duplicate epoch-fence guard on the chain — duplicate frontier bumps + duplicate
+ * `fleet_idempotency` INSERTs at the same ts, so every subsequent forwarded commit self-PK-collides
+ * and aborts. See `armWriter`'s `unregisterCommitGuard` handling below for the required pattern.
  */
 export function installCommitGuard(
   pgStore: PostgresDocStore,
   lease: LeaseManager,
   onFenced: (shardId: ShardId, reason: string) => void,
-): void {
-  pgStore.setCommitGuard(async (q, units, shardId) => {
+): () => void {
+  return pgStore.addCommitGuard(async (q, units, shardId) => {
     // Fleet B4 (batch-shaped guard): `commitWriteBatch` invokes this ONCE per transaction over ALL its
     // units (`{ts, meta}` in unit/ts order); a single `commitWrite` reaches here as a one-unit array.
     // We fence ONCE, advance the frontier ONCE to the batch's last ts, and loop the per-unit idempotency
@@ -955,18 +974,32 @@ export function installCommitGuard(
     // row at THAT unit's own ts, in the SAME transaction — atomic by construction. Looping per unit is
     // what makes the batch-shaped guard correct: a single last-ts guard call would drop units 1..N-1's
     // rows and stamp the wrong ts. A `key` PK collision (the concurrent-duplicate race's loser: another
-    // commit already claimed this key) throws a raw `unique_violation`, aborting the WHOLE batch (nothing
-    // above has committed — Postgres rolls back every unit's frontier bump and rows together with this
-    // INSERT). `packages/cli`'s `/_fleet/run` handler catches that specific shape (code 23505 on THIS
-    // table/constraint — never an app-schema unique violation) and re-SELECTs the winner's commitTs as a
-    // replay. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
+    // commit already claimed this key) surfaces as a Postgres `unique_violation` (23505). We convert it
+    // to a typed `CommitGuardRejection` carrying THIS unit's index (Receipted Outbox, decision 2): under
+    // group commit the transactor's committer splits out ONLY this offending unit and re-flushes the
+    // innocent co-batched remainder, instead of the pre-fix behavior where the raw throw aborted the
+    // whole batch and every co-batched unit was rejected as collateral. On the single-commit path
+    // (a one-unit batch) it propagates as that mutation's own rejection. Either way `packages/cli`'s
+    // `/_fleet/run` handler detects `rejectionCode === "FLEET_IDEMPOTENCY_CONFLICT"` (never an app-schema
+    // unique violation) and re-SELECTs the winner's commitTs as a replay. Any OTHER error propagates
+    // raw. Non-forwarded / non-fleet commits carry no meta, so this is a silent no-op — the whole
     // idempotency machinery costs nothing outside a forwarded write.
-    for (const unit of units) {
+    for (let i = 0; i < units.length; i++) {
+      const unit = units[i]!;
       if (unit.meta?.idempotencyKey) {
-        await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
-          unit.meta.idempotencyKey,
-          unit.ts,
-        ]);
+        try {
+          await q.query(`INSERT INTO fleet_idempotency (key, commit_ts) VALUES ($1, $2)`, [
+            unit.meta.idempotencyKey,
+            unit.ts,
+          ]);
+        } catch (e) {
+          if ((e as { code?: unknown }).code === "23505") {
+            throw new CommitGuardRejection(i, "FLEET_IDEMPOTENCY_CONFLICT", `key=${unit.meta.idempotencyKey}`, {
+              cause: e,
+            });
+          }
+          throw e;
+        }
       }
     }
   });
@@ -1124,6 +1157,24 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // /api/health can report the fleet frontier; arming as writer replaces it with an idle-closing one.
   let frontierMonitor: FrontierMonitor | null = null;
   let unsubscribeCommits: (() => void) | null = null;
+  // The commit-guard chain's unregister handle for the CURRENT `armWriter` arm (Receipted Outbox
+  // decision 2 — the guard slot→chain migration). `armWriter` re-arms on EVERY promotion; with
+  // append-only `addCommitGuard` semantics a naive re-add on each arm would STACK a duplicate
+  // epoch-fence guard → duplicate frontier bumps + duplicate `fleet_idempotency` INSERTs at the
+  // same ts → self-PK-collision → every forwarded commit aborts. Captured here so `armWriter`
+  // releases the PRIOR registration before installing the new one (see `armWriter` below).
+  let unregisterCommitGuard: (() => void) | null = null;
+  // The client-receipts guard's unregister handle for the CURRENT `armWriter` arm (Receipted Outbox —
+  // the promotion-barrier hole). Fleet OWNS this guard on the CONCRETE `pgStore`, because the runtime
+  // was booted with `externalReceiptsGuard` (`prepareFleetNode`'s runtimeOptions) so it registered
+  // NOTHING itself: a sync node's runtime store is a `SwitchableDocStore` over the replica, and
+  // `swapTo(pgStore)` does NOT re-forward registered guards — a runtime-registered receipts guard would
+  // silently vanish on promotion, leaving a promoted single-writer node's client mutations un-receipted
+  // (dedup miss → a resent (clientId, seq) re-executes). `armWriter` installs it here, on `pgStore`,
+  // BEFORE the epoch fence (receipts-before-fence ordering, verdict §(c) R6) and with the SAME
+  // release-on-re-arm discipline the fence uses (a naive re-add on each promotion would stack a
+  // duplicate → self-PK-collision on `client_mutations` → every subsequent keyed commit aborts).
+  let unregisterReceiptsGuard: (() => void) | null = null;
 
   // Group-commit health counters (Fleet B4, T4): `flushesPerSec` is a rolling delta between
   // successive `groupCommitStats()` calls — the simplest honest throughput signal without a
@@ -1427,7 +1478,32 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // B2b, D2: a guard-discovered fence relinquishes JUST that shard — never routes to
     // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
     // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
-    installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
+    //
+    // Receipted Outbox (the promotion-barrier hole): install the client-receipts guard FIRST — on the
+    // CONCRETE `pgStore`, ahead of the epoch fence — so it survives promotion (a runtime-registered one
+    // would sit on the sync node's `SwitchableDocStore` and vanish on `swapTo(pgStore)`). Same
+    // release-on-re-arm discipline as the fence (below): release the prior arm before re-adding, or a
+    // double-promotion stacks a duplicate → `client_mutations` self-PK-collision on every keyed commit.
+    // Ordering matters: `addCommitGuard` is append-only, so registering receipts BEFORE the fence keeps
+    // receipts first in the guard chain on the promoted node too (verdict §(c) R6). Non-fleet
+    // deployments never reach here — the runtime owns their receipts guard (`externalReceiptsGuard`
+    // unset), registered on their concrete `options.store` at construction.
+    unregisterReceiptsGuard?.();
+    // `clientReceiptsGuard()` is store-agnostic (`void | Promise<void>` — its SQLite branch is
+    // synchronous), but `PostgresDocStore.addCommitGuard` expects the async `PgCommitGuard` shape.
+    // `pgStore` is always Postgres, so the guard's Postgres branch always returns a Promise; wrap it in
+    // an `async` adapter to satisfy the `Promise<void>` return without a cast.
+    const receiptsGuard = clientReceiptsGuard();
+    unregisterReceiptsGuard = pgStore.addCommitGuard(async (q, units, shardId) => {
+      await receiptsGuard(q, units, shardId);
+    });
+    // Receipted Outbox decision 2 (the spec-review-flagged hazard): `armWriter` re-arms on EVERY
+    // promotion, and `addCommitGuard` is append-only — release the PRIOR arm's guard registration
+    // BEFORE installing the new one, or every re-arm stacks a duplicate epoch-fence guard (dup
+    // frontier bumps + dup `fleet_idempotency` INSERTs at the same ts → self-PK-collision → every
+    // forwarded commit aborts).
+    unregisterCommitGuard?.();
+    unregisterCommitGuard = installCommitGuard(pgStore, lease, (fencedShardId, reason) =>
       relinquish(relinquishDeps, fencedShardId, reason),
     );
     // Idle-shard closing only matters when N>1 (with a single shard nothing else can pin F, and the
@@ -1496,6 +1572,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
         balancer.stop();
         frontierMonitor?.stop();
         unsubscribeCommits?.();
+        unregisterCommitGuard?.();
         lease.stop();
         await hybridTailer?.stop();
         // Hybrid writer boot: this node owns the replica (queryStore) lifecycle — serve closes the
@@ -1693,6 +1770,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       balancer.stop();
       frontierMonitor?.stop();
       unsubscribeCommits?.();
+      unregisterCommitGuard?.();
       lease.stop();
       await tailer.stop();
       // Fleet B3: a HYBRID sync node's runtime WRITE store is `pgStore` (serve closes THAT on

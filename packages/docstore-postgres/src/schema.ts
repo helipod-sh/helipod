@@ -32,4 +32,25 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   // Existing deployments upgrade in place; pre-existing rows read as 'default' via the DEFAULT.
   `ALTER TABLE documents ADD COLUMN IF NOT EXISTS shard_id TEXT NOT NULL DEFAULT 'default'`,
   `ALTER TABLE indexes   ADD COLUMN IF NOT EXISTS shard_id TEXT NOT NULL DEFAULT 'default'`,
+  // Client mutation receipts (the Receipted Outbox, verdict §(c)) — core, free-tier, same category
+  // as `persistence_globals` above. Identity-scoped: anonymous clients key as identity `""`.
+  `CREATE TABLE IF NOT EXISTS client_mutations (
+     identity   TEXT   NOT NULL,
+     client_id  TEXT   NOT NULL,
+     seq        BIGINT NOT NULL,
+     verdict    TEXT   NOT NULL,
+     commit_ts  BIGINT NOT NULL,
+     value_json TEXT,
+     error_code TEXT,
+     created_at BIGINT NOT NULL,
+     PRIMARY KEY (identity, client_id, seq)
+   )`,
+  `CREATE INDEX IF NOT EXISTS client_mutations_by_created_at ON client_mutations (created_at)`,
+  `CREATE TABLE IF NOT EXISTS client_floors (
+     identity           TEXT   NOT NULL,
+     client_id          TEXT   NOT NULL,
+     pruned_through_seq BIGINT NOT NULL,
+     updated_at         BIGINT NOT NULL,
+     PRIMARY KEY (identity, client_id)
+   )`,
 ];

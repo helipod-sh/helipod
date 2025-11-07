@@ -1,5 +1,8 @@
 /* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
 import type {
+  CommitGuardUnit,
+  ClientVerdictRecord,
+  ClientVerdictWrite,
   CommitUnit,
   ConflictStrategy,
   DocStore,
@@ -84,6 +87,21 @@ export class SwitchableDocStore implements DocStore {
     return d.commitWriteBatch(units, shardId);
   }
 
+  /** Forwards to the CURRENT delegate at call entry, same atomicity contract as every other
+   * method here — but note the resulting registration is NOT itself re-forwarded on a later
+   * `swapTo()`: the guard lands on whichever concrete store was `this.delegate` at the moment
+   * `addCommitGuard` was called, and stays registered there even after the switchable repoints
+   * elsewhere. In practice fleet code (`node.ts`) always calls `addCommitGuard` on the concrete
+   * `PostgresDocStore` directly (never through this wrapper), so this pass-through exists purely
+   * for `DocStore` interface conformance. */
+  addCommitGuard(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirrors DocStore.addCommitGuard
+    guard: (q: any, units: readonly CommitGuardUnit[], shardId: ShardId) => void | Promise<void>,
+  ): () => void {
+    const d = this.delegate;
+    return d.addCommitGuard(guard);
+  }
+
   async get(id: InternalDocumentId, readTimestamp?: bigint): Promise<LatestDocument | null> {
     const d = this.delegate;
     return d.get(id, readTimestamp);
@@ -145,6 +163,42 @@ export class SwitchableDocStore implements DocStore {
   async writeGlobalIfAbsent(key: string, value: JSONValue): Promise<boolean> {
     const d = this.delegate;
     return d.writeGlobalIfAbsent(key, value);
+  }
+
+  // ── Client mutation receipts (the Receipted Outbox, verdict §(c)) — pass-through ──────────────
+
+  async getClientVerdict(identity: string, clientId: string, seq: number): Promise<ClientVerdictRecord | null> {
+    const d = this.delegate;
+    return d.getClientVerdict(identity, clientId, seq);
+  }
+
+  async getClientFloor(identity: string, clientId: string): Promise<number | null> {
+    const d = this.delegate;
+    return d.getClientFloor(identity, clientId);
+  }
+
+  async recordClientVerdict(identity: string, clientId: string, seq: number, record: ClientVerdictWrite): Promise<void> {
+    const d = this.delegate;
+    return d.recordClientVerdict(identity, clientId, seq, record);
+  }
+
+  async updateClientVerdictValue(identity: string, clientId: string, seq: number, value: JSONValue): Promise<void> {
+    const d = this.delegate;
+    return d.updateClientVerdictValue(identity, clientId, seq, value);
+  }
+
+  async pruneClientMutations(
+    identity: string,
+    clientId: string,
+    opts: { ackedThrough?: number; ttlBeforeMs?: number },
+  ): Promise<{ prunedThroughSeq: number }> {
+    const d = this.delegate;
+    return d.pruneClientMutations(identity, clientId, opts);
+  }
+
+  async sweepExpiredClientMutations(beforeMs: number): Promise<{ deletedCount: number }> {
+    const d = this.delegate;
+    return d.sweepExpiredClientMutations(beforeMs);
   }
 
   close(): void | Promise<void> {
