@@ -6,6 +6,12 @@
 export type { EmbeddedRuntimeOptions, WriteRouter, ClientReplay } from "./runtime";
 export { EmbeddedRuntime, createEmbeddedRuntime } from "./runtime";
 
+// The exactly-once client-mutation receipts guard. Exported so a fleet node (`ee/fleet`) that boots
+// with `externalReceiptsGuard` can install it on the CONCRETE write store in `armWriter` (before the
+// epoch fence), rather than on the promotion-swapped `SwitchableDocStore` the runtime would register it
+// on. See `EmbeddedRuntimeOptions.externalReceiptsGuard`.
+export { clientReceiptsGuard } from "./client-dedup";
+
 export type { LoopbackConnection, ServerMessageListener, LoopbackHandler } from "./loopback";
 export { createLoopbackConnection } from "./loopback";
 

@@ -36,6 +36,7 @@ import { CommitGuardRejection } from "@stackbase/errors";
 import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
 import {
   InMemoryWriteFanoutAdapter,
+  clientReceiptsGuard,
   type EmbeddedRuntime,
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
@@ -475,6 +476,16 @@ export interface FleetRuntimeOptions {
    * driver runs (post-promotion on a sync node), by which point `store` points at the primary.
    */
   stablePrefix?: () => Promise<bigint | null>;
+  /**
+   * Receipted Outbox — receipts-guard ownership handoff. Always `true` for a fleet node: fleet owns
+   * installing the `clientReceiptsGuard()` exactly-once barrier on the CONCRETE Postgres store in
+   * `armWriter` (before the epoch fence, release-on-re-arm), NOT on `store` — which for a sync node is
+   * a `SwitchableDocStore` the runtime would register the guard on, only for it to silently vanish on
+   * the promotion swapTo (leaving a promoted single-writer node's client mutations un-receipted → a
+   * resent (clientId, seq) re-executes). Threaded to `createEmbeddedRuntime` so its `create()` skips
+   * its own registration. See `EmbeddedRuntimeOptions.externalReceiptsGuard` and `armWriter`.
+   */
+  externalReceiptsGuard?: boolean;
 }
 
 export interface FleetPrep {
@@ -749,7 +760,7 @@ export async function prepareFleetNode(deps: {
         client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "writer", numShards,
         runtimeOptions: {
           store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards,
-          queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
+          queryStore: switchable, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
         },
       };
     }
@@ -757,7 +768,7 @@ export async function prepareFleetNode(deps: {
     // switchable, no query-path split (it reads the primary, as shipped).
     return {
       client, pgStore, lease, forwarder, role: "writer", numShards,
-      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit, stablePrefix },
+      runtimeOptions: { store: pgStore, writeRouter: forwarder, deferDrivers: false, fanoutAdapter, numShards, groupCommit, stablePrefix, externalReceiptsGuard: true },
     };
   }
 
@@ -781,7 +792,7 @@ export async function prepareFleetNode(deps: {
       client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
       runtimeOptions: {
         store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
-        queryStore: switchable, beforeNotify, groupCommit, stablePrefix,
+        queryStore: switchable, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
       },
     };
   }
@@ -789,7 +800,7 @@ export async function prepareFleetNode(deps: {
   // read-only Postgres store is the tail source + promotion swap target only.
   return {
     client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix },
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix, externalReceiptsGuard: true },
   };
 }
 
@@ -1153,6 +1164,17 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // same ts → self-PK-collision → every forwarded commit aborts. Captured here so `armWriter`
   // releases the PRIOR registration before installing the new one (see `armWriter` below).
   let unregisterCommitGuard: (() => void) | null = null;
+  // The client-receipts guard's unregister handle for the CURRENT `armWriter` arm (Receipted Outbox —
+  // the promotion-barrier hole). Fleet OWNS this guard on the CONCRETE `pgStore`, because the runtime
+  // was booted with `externalReceiptsGuard` (`prepareFleetNode`'s runtimeOptions) so it registered
+  // NOTHING itself: a sync node's runtime store is a `SwitchableDocStore` over the replica, and
+  // `swapTo(pgStore)` does NOT re-forward registered guards — a runtime-registered receipts guard would
+  // silently vanish on promotion, leaving a promoted single-writer node's client mutations un-receipted
+  // (dedup miss → a resent (clientId, seq) re-executes). `armWriter` installs it here, on `pgStore`,
+  // BEFORE the epoch fence (receipts-before-fence ordering, verdict §(c) R6) and with the SAME
+  // release-on-re-arm discipline the fence uses (a naive re-add on each promotion would stack a
+  // duplicate → self-PK-collision on `client_mutations` → every subsequent keyed commit aborts).
+  let unregisterReceiptsGuard: (() => void) | null = null;
 
   // Group-commit health counters (Fleet B4, T4): `flushesPerSec` is a rolling delta between
   // successive `groupCommitStats()` calls — the simplest honest throughput signal without a
@@ -1457,6 +1479,24 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
     // `monitor`/`onExit`. The aborting commit's own `FencedError` still propagates to its caller
     // (OCC-retryable) regardless; relinquish is the side effect, not a swallow.
     //
+    // Receipted Outbox (the promotion-barrier hole): install the client-receipts guard FIRST — on the
+    // CONCRETE `pgStore`, ahead of the epoch fence — so it survives promotion (a runtime-registered one
+    // would sit on the sync node's `SwitchableDocStore` and vanish on `swapTo(pgStore)`). Same
+    // release-on-re-arm discipline as the fence (below): release the prior arm before re-adding, or a
+    // double-promotion stacks a duplicate → `client_mutations` self-PK-collision on every keyed commit.
+    // Ordering matters: `addCommitGuard` is append-only, so registering receipts BEFORE the fence keeps
+    // receipts first in the guard chain on the promoted node too (verdict §(c) R6). Non-fleet
+    // deployments never reach here — the runtime owns their receipts guard (`externalReceiptsGuard`
+    // unset), registered on their concrete `options.store` at construction.
+    unregisterReceiptsGuard?.();
+    // `clientReceiptsGuard()` is store-agnostic (`void | Promise<void>` — its SQLite branch is
+    // synchronous), but `PostgresDocStore.addCommitGuard` expects the async `PgCommitGuard` shape.
+    // `pgStore` is always Postgres, so the guard's Postgres branch always returns a Promise; wrap it in
+    // an `async` adapter to satisfy the `Promise<void>` return without a cast.
+    const receiptsGuard = clientReceiptsGuard();
+    unregisterReceiptsGuard = pgStore.addCommitGuard(async (q, units, shardId) => {
+      await receiptsGuard(q, units, shardId);
+    });
     // Receipted Outbox decision 2 (the spec-review-flagged hazard): `armWriter` re-arms on EVERY
     // promotion, and `addCommitGuard` is append-only — release the PRIOR arm's guard registration
     // BEFORE installing the new one, or every re-arm stacks a duplicate epoch-fence guard (dup

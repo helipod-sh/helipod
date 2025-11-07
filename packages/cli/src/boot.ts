@@ -254,6 +254,11 @@ export async function bootLoaded(opts: {
     /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
      *  in a fleet). Threaded straight into `createEmbeddedRuntime`; absent outside a fleet. */
     stablePrefix?: () => Promise<bigint | null>;
+    /** Receipted Outbox: fleet owns the `clientReceiptsGuard()` registration on the concrete Postgres
+     *  store (in `armWriter`, before the fence) — so `createEmbeddedRuntime` must SKIP its own, which
+     *  would land on a sync node's `SwitchableDocStore` and vanish on the promotion swapTo. Threaded
+     *  straight into `createEmbeddedRuntime`; absent outside a fleet (the runtime owns it there). */
+    externalReceiptsGuard?: boolean;
   };
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
@@ -333,6 +338,10 @@ export async function bootLoaded(opts: {
     ...(opts.fleet?.beforeNotify ? { beforeNotify: opts.fleet.beforeNotify } : {}),
     // Triggers D1: the fleet stable-prefix bound for `readLog` (`min(shard_leases.frontier_ts)`).
     ...(opts.fleet?.stablePrefix ? { stablePrefix: opts.fleet.stablePrefix } : {}),
+    // Receipted Outbox: fleet owns the receipts guard on the concrete Postgres store (armWriter,
+    // before the fence) — the runtime skips its own registration so it never lands on a sync node's
+    // SwitchableDocStore only to vanish on the promotion swapTo. Non-fleet → the runtime owns it.
+    ...(opts.fleet?.externalReceiptsGuard ? { externalReceiptsGuard: true } : {}),
     // Shards B2a: >1 → a ShardedTransactor (per-shard parallel commits) over the store — resolved
     // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
     numShards,
@@ -410,6 +419,11 @@ export async function bootProject(opts: {
     /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
      *  in a fleet). Threaded straight into `createEmbeddedRuntime`; absent outside a fleet. */
     stablePrefix?: () => Promise<bigint | null>;
+    /** Receipted Outbox: fleet owns the `clientReceiptsGuard()` registration on the concrete Postgres
+     *  store (in `armWriter`, before the fence) — so `createEmbeddedRuntime` must SKIP its own, which
+     *  would land on a sync node's `SwitchableDocStore` and vanish on the promotion swapTo. Threaded
+     *  straight into `createEmbeddedRuntime`; absent outside a fleet (the runtime owns it there). */
+    externalReceiptsGuard?: boolean;
   };
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);

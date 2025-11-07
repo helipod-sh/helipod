@@ -185,6 +185,22 @@ export interface EmbeddedRuntimeOptions {
    */
   deferDrivers?: boolean;
   /**
+   * Receipted Outbox — receipts-guard ownership handoff (the promotion-barrier hole). Normally
+   * `create()` registers the `clientReceiptsGuard()` exactly-once barrier on `options.store` here at
+   * construction, because for every non-fleet deployment `options.store` IS the concrete store its
+   * commits land on. A fleet SYNC node is the exception: `options.store` is a `SwitchableDocStore`
+   * over the read-only replica, and on writer promotion the runtime store is swapped to the concrete
+   * Postgres store WITHOUT re-forwarding registered commit guards (by `SwitchableDocStore`'s
+   * documented design) — so a guard registered here would silently vanish on promotion, and a
+   * promoted single-writer node's client mutations would commit with NO receipt (dedup miss → a
+   * resent (clientId, seq) re-executes). When this is set, `create()` SKIPS its own registration and
+   * the caller (fleet's `armWriter`) owns installing the receipts guard on the CONCRETE write store —
+   * BEFORE the epoch fence, with the same release-on-re-arm discipline the fence uses. Ownership rule:
+   * whoever owns the concrete store owns the receipts guard. Unset → the runtime owns it (today's
+   * behavior, byte-identical for every non-fleet deployment). See `ee/fleet`'s `armWriter`.
+   */
+  externalReceiptsGuard?: boolean;
+  /**
    * Number of shards to run (Shards B2a). When `> 1`, the runtime builds ONE `ShardedTransactor`
    * (N independent per-shard mutexes + OCC rings + oracles) over the store instead of the
    * single-shard `SingleWriterTransactor`, so mutations routed to different shards commit in
@@ -316,9 +332,13 @@ export class EmbeddedRuntime {
     await options.store.setupSchema();
     // Register the client-mutation receipts guard ONCE, here at construction — BEFORE any fleet epoch
     // fence (which arms later, on writer promotion), so receipts run first in the guard chain (verdict
-    // §(c) Risk R6). Unconditional and free until used: the guard is a no-op for any commit whose units
-    // carry no dedup key (every ordinary mutation), so this costs a non-outbox deployment nothing.
-    options.store.addCommitGuard(clientReceiptsGuard());
+    // §(c) Risk R6). Free until used: the guard is a no-op for any commit whose units carry no dedup key
+    // (every ordinary mutation), so this costs a non-outbox deployment nothing. SKIPPED when the caller
+    // owns receipts-guard registration on the concrete write store (`externalReceiptsGuard` — a fleet
+    // sync node, whose `options.store` is a `SwitchableDocStore` over the replica that a guard would
+    // silently NOT follow across the promotion swapTo; fleet's `armWriter` installs it on the concrete
+    // Postgres store instead, before the fence). See `externalReceiptsGuard`'s doc comment.
+    if (!options.externalReceiptsGuard) options.store.addCommitGuard(clientReceiptsGuard());
     // Resolve (or first-stamp) the deployment id for `ConnectAck` (same-timeline proof). A fleet sync
     // node's replica may be read-only — tolerate a failed stamp (it reads the primary's replicated id;
     // worst case an empty id, still a stable per-boot value the client compares against itself).

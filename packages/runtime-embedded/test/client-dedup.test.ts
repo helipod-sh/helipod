@@ -14,7 +14,7 @@ import type { ServerMessage } from "@stackbase/sync";
 const OVERSIZED_VALUE = "x".repeat(70_000);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function makeRuntime(): Promise<EmbeddedRuntime> {
+async function makeRuntime(opts?: { externalReceiptsGuard?: boolean }): Promise<EmbeddedRuntime> {
   const schema = defineSchema({ notes: defineTable({ body: v.string() }) });
   const modules = {
     "app:add": mutation(async (ctx: any, a: { body: string }) => ctx.db.insert("notes", { body: a.body })),
@@ -42,6 +42,7 @@ async function makeRuntime(): Promise<EmbeddedRuntime> {
     bootSteps: c.bootSteps,
     drivers: c.drivers,
     tableNumbers: c.tableNumbers,
+    ...(opts?.externalReceiptsGuard ? { externalReceiptsGuard: true } : {}),
   });
 }
 
@@ -114,6 +115,32 @@ describe("client-dedup classification (runtime.run at the owner)", () => {
     await r.run("app:add", { body: "z" });
     expect(await r.store.getClientVerdict("", "anyClient", 1)).toBeNull();
     expect(await r.store.getClientFloor("", "anyClient")).toBeNull();
+  });
+
+  it("`externalReceiptsGuard` makes `create()` register NO receipts guard — the caller (fleet's armWriter) owns it on the concrete store", async () => {
+    // The ownership-handoff flag: a fleet node boots with this so the runtime never registers a guard
+    // on a sync node's SwitchableDocStore (where it would vanish on the promotion swapTo). With it set
+    // and NO caller-installed guard, a keyed write records NO receipt and a resend RE-EXECUTES — the
+    // direct proof that `create()` skipped its own registration. (Fleet's `armWriter` then installs the
+    // guard on the concrete `pgStore`; that survival path is covered in
+    // `ee/packages/fleet/test/receipts-guard-promotion.test.ts`.)
+    const r = await makeRuntime({ externalReceiptsGuard: true });
+    const first = await r.run("app:add", { body: "ext" }, dedup("cext", 1));
+    expect(first.committed).toBe(true);
+    expect(await r.store.getClientVerdict("", "cext", 1)).toBeNull(); // no guard ran → no receipt
+
+    const second = await r.run("app:add", { body: "ext" }, dedup("cext", 1));
+    expect(second.clientReplay).toBeUndefined(); // nothing to replay — it re-ran
+    expect(second.committed).toBe(true);
+    const list = await r.run("app:list", {});
+    expect(list.value).toEqual(["ext", "ext"]); // TWO rows — re-executed, as expected with no barrier
+
+    // Control: the DEFAULT (flag unset) runtime DOES register the guard — one row, a replay on resend.
+    const g = await makeRuntime();
+    await g.run("app:add", { body: "def" }, dedup("cdef", 1));
+    const gSecond = await g.run("app:add", { body: "def" }, dedup("cdef", 1));
+    expect(gSecond.clientReplay).toMatchObject({ verdict: "applied" });
+    expect((await g.run("app:list", {})).value).toEqual(["def"]); // ONE row — the barrier held
   });
 
   it("concurrent duplicate resends land exactly ONE effect (the guard is the barrier; the loser replays)", async () => {
