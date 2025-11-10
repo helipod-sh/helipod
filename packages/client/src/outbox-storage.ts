@@ -94,6 +94,27 @@ export interface OutboxStorage {
   persist(): void;
 }
 
+/** Default cap on how many outbox-tracked entries (`unsent`/`inflight`/`parked` — not yet fully
+ *  settled) may sit in `client.ts`'s live log at once, per verdict §(d) "Enqueue": "bounded
+ *  (default 1000)". Overridable via `new StackbaseClient(transport, { outboxMaxQueueSize })`. */
+export const DEFAULT_OUTBOX_MAX_QUEUE_SIZE = 1000;
+
+/** Thrown (as a rejected `mutation()` promise, never a synchronous throw) when the durable outbox
+ *  is at capacity. Verdict §(d): the NEW enqueue is rejected, not the oldest queued one — "the new
+ *  write has a live awaiter [this very call]; the oldest durable promise may not [e.g. it survived
+ *  a reload, where there is no live JS promise for it at all until the registry rebuilds a layer]."
+ *  A coded error (`.code`) so callers can distinguish this from every other mutation failure. */
+export class OutboxOverflowError extends Error {
+  readonly code = "OUTBOX_OVERFLOW";
+  constructor(
+    message = "the durable outbox is full — this mutation was rejected so an already-queued promise, " +
+      "which may have no live awaiter across a reload, is never silently evicted",
+  ) {
+    super(message);
+    this.name = "OutboxOverflowError";
+  }
+}
+
 /** The in-memory default — what a client gets when it passes no `outbox` at all. Nothing here
  *  survives past this `StackbaseClient` instance's lifetime, which is exactly today's (pre-outbox)
  *  behavior: a reload has no durable queue to hydrate, because there never was one. */
@@ -184,8 +205,14 @@ export function indexedDBOutbox(opts: IndexedDBOutboxOptions = {}): OutboxStorag
 let identityEntropyCounter = 0;
 /** Not `crypto.randomUUID()` unconditionally — some test/SSR runtimes lack it. Collision odds are
  *  irrelevant either way: `mintIdentity` re-reads `getMeta` for whatever id comes out, so even a
- *  freak collision resumes from a recorded `nextSeq` rather than silently reusing a seq. */
-function defaultMintClientId(): string {
+ *  freak collision resumes from a recorded `nextSeq` rather than silently reusing a seq.
+ *
+ *  Exported (beyond `mintIdentity`'s internal default) so `client.ts` can mint a clientId
+ *  SYNCHRONOUSLY at construction — `mutation()` must stay fully synchronous (T1's open concern),
+ *  so the clientId every entry stamps cannot wait on `mintIdentity`'s async `getMeta`/`setMeta`
+ *  round-trip. `client.ts` mints with this directly, then feeds the SAME id into `mintIdentity` via
+ *  `opts.mintClientId` so the durable meta row it persists names the id actually in use. */
+export function defaultMintClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return `c-${Date.now().toString(36)}-${(identityEntropyCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

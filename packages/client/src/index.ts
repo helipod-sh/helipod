@@ -27,4 +27,4 @@ export { createOptimisticLocalStore } from "./optimistic-store";
 // testing of the identity model — app code configures `outbox` at client construction and never
 // calls it itself.
 export type { HydrateResult, IndexedDBOutboxOptions, OutboxEntry, OutboxEntryStatus, OutboxMeta, OutboxStorage } from "./outbox-storage";
-export { OUTBOX_VERSION, indexedDBOutbox, memoryOutbox, mintIdentity } from "./outbox-storage";
+export { DEFAULT_OUTBOX_MAX_QUEUE_SIZE, OUTBOX_VERSION, OutboxOverflowError, defaultMintClientId, indexedDBOutbox, memoryOutbox, mintIdentity } from "./outbox-storage";

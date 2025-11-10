@@ -12,7 +12,7 @@
  * Promise resolution is at `MutationResponse` (D3) — today's timing, an explicit divergence from
  * convex-js's gate-time resolution. A one-shot `query()` returns the **composed** view (D15).
  */
-import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateVersion } from "@stackbase/sync";
+import { versionsEqual, INITIAL_VERSION, type ClientMessage, type ServerMessage, type StateVersion } from "@stackbase/sync";
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { getFunctionPath, type AnyFunctionRef, type FunctionReference } from "./api";
 import type { AnyFunctionReference, FunctionArgs, FunctionReturnType } from "./function-types";
@@ -22,13 +22,32 @@ import { Reconciler } from "./reconcile";
 import { MutationUndeliveredError } from "./delivery-policy";
 import type { PendingMutation } from "./mutation-log";
 import type { OptimisticLocalStore } from "./optimistic-store";
-import { mintIdentity, type OutboxStorage } from "./outbox-storage";
+import {
+  DEFAULT_OUTBOX_MAX_QUEUE_SIZE,
+  OUTBOX_VERSION,
+  OutboxOverflowError,
+  defaultMintClientId,
+  mintIdentity,
+  type OutboxEntry,
+  type OutboxStorage,
+} from "./outbox-storage";
 
 export type { QueryListener, QueryErrorListener };
 
 let entropyCounter = 0;
 function makeEntropy(): string {
   return `${Date.now().toString(36)}-${(entropyCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** SHA-256 hex digest of `input` — the durable outbox's `identityFingerprint` (verdict §(d) hazard
+ *  9 / spec §(k)7). Async (`SubtleCrypto`), so `setAuth` computes-and-caches it; `mutation()` (which
+ *  must stay synchronous) only ever reads the cache. */
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 export class StackbaseClient {
@@ -55,27 +74,74 @@ export class StackbaseClient {
    *  as before this seam existed (`outbox-storage.ts`'s file doc: "never touches this file's
    *  runtime branches that matter"). */
   private readonly outbox?: OutboxStorage;
-  /** Resolves once this tab-session's clientId is minted and durable (`mintIdentity`,
-   *  `outbox-storage.ts`) — ALWAYS a fresh clientId, never one reused from a prior session. A
-   *  later task consumes this to gate enqueue/park/drain; kept `@internal` until then. */
+  /** Resolves once this tab-session's clientId is durably persisted (`mintIdentity`,
+   *  `outbox-storage.ts`) — ALWAYS a fresh clientId, never one reused from a prior session. Public
+   *  contract for tests/direct inspection; `mutation()` itself never awaits this (see
+   *  `outboxClientId`/`outboxNextSeq` below — the synchronous counterparts it actually reads). */
   private readonly outboxIdentity?: Promise<{ clientId: string; nextSeq: number }>;
+  /** This tab-session's clientId, minted SYNCHRONOUSLY at construction (Task 2) — `mutation()` must
+   *  stay fully synchronous (T1's open concern), so it cannot await `outboxIdentity`'s async
+   *  `getMeta`/`setMeta` round-trip. Fed into `mintIdentity` via `opts.mintClientId` below so the
+   *  durable meta row names this SAME id. Set once, iff `opts.outbox` is configured; never reused
+   *  across a reload (a fresh `StackbaseClient` always mints again). */
+  private outboxClientId?: string;
+  /** In-memory serial `seq` counter for `outboxClientId` (verdict §(d): "seqs minted serially
+   *  in-memory per tab"). Starts at 0 synchronously; `outboxIdentity`'s resolution only ever
+   *  reconciles it UPWARD (never re-hands-out a seq already allocated locally) for the
+   *  astronomically-unlikely colliding-clientId case `mintIdentity` itself guards against. */
+  private outboxNextSeq = 0;
+  /** Monotonic per-tab counter for `OutboxEntry.order` — the drain's (T4) FIFO key across the
+   *  WHOLE shared queue (every clientId/tab). Seeded from wall-clock time so multiple tabs sharing
+   *  one outbox interleave in roughly chronological order; strictly increasing per call within
+   *  this tab regardless of clock resolution. Cross-tab total ordering is a best-effort aid to the
+   *  drain's efficiency, NOT a correctness requirement — "locks are efficiency; correctness is the
+   *  records" (verdict §(d) "Drain"). */
+  private outboxOrderCounter = 0;
+  /** Cache of `identityFingerprint` (SHA-256 hex of the last `SetAuth` token, or `"anon"` for
+   *  none/empty) — see `setAuth()` below and spec §(k)7. Stamped synchronously onto every entry;
+   *  computed asynchronously (SubtleCrypto) whenever `setAuth` is called with a real token. */
+  private outboxFingerprint = "anon";
+  /** The S4 swap's capability flag (verdict §(d) "S4 swap, feature-detected") — flipped by
+   *  `setOutboxArmed()`, which T3's Connect handshake calls once a `ConnectAck` proves server-side
+   *  receipt dedup exists for this session. Defaults `false`: today's fail-fast, byte-for-byte,
+   *  whether or not an outbox is configured. */
+  private outboxArmed = false;
+  private readonly outboxMaxQueueSize: number;
 
-  constructor(transport: ClientTransport, opts: { gateTimeoutMs?: number; outbox?: OutboxStorage } = {}) {
+  constructor(
+    transport: ClientTransport,
+    opts: { gateTimeoutMs?: number; outbox?: OutboxStorage; outboxMaxQueueSize?: number } = {},
+  ) {
     this.transport = transport;
     this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs });
     this.outbox = opts.outbox;
-    this.outboxIdentity = opts.outbox ? mintIdentity(opts.outbox) : undefined;
+    this.outboxMaxQueueSize = opts.outboxMaxQueueSize ?? DEFAULT_OUTBOX_MAX_QUEUE_SIZE;
+    if (opts.outbox) {
+      this.outboxClientId = defaultMintClientId();
+      this.outboxIdentity = mintIdentity(opts.outbox, { mintClientId: () => this.outboxClientId! }).then((id) => {
+        this.outboxNextSeq = Math.max(this.outboxNextSeq, id.nextSeq);
+        return id;
+      });
+    }
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
     this.disposeReopen = transport.onReopen?.(() => this.onTransportReopened());
   }
 
   /** @internal This tab-session's durable outbox identity, or `undefined` when no `outbox` was
-   *  configured. Exposed for a later task's enqueue/park wiring and for direct testing of the
-   *  identity-mint behavior — not yet consumed by `mutation()` itself (that wiring is a later
-   *  task's scope; see `outbox-storage.ts`'s file doc for the identity model this implements). */
+   *  configured. Exposed for direct testing of the identity-mint behavior; `mutation()` itself
+   *  reads the synchronous `outboxClientId`/`outboxNextSeq` counterparts, never this promise
+   *  (see the field doc above `outboxClientId`). */
   getOutboxIdentity(): Promise<{ clientId: string; nextSeq: number }> | undefined {
     return this.outboxIdentity;
+  }
+
+  /** @internal T3's Connect handshake calls this once a `ConnectAck` proves server-side receipt
+   *  dedup exists for this session — see verdict §(d) "S4 swap, feature-detected". Before that (no
+   *  outbox configured, a fresh/pre-handshake session, or an old server that never sends
+   *  `ConnectAck`), `close()` behaves exactly as it always has: today's fail-fast, byte-for-byte. */
+  setOutboxArmed(armed: boolean): void {
+    this.outboxArmed = armed;
   }
 
   /**
@@ -184,9 +250,19 @@ export class StackbaseClient {
     args: Record<string, Value> = {},
     opts: { optimisticUpdate?: OptimisticUpdate } = {},
   ): Promise<Value> {
-    const requestId = String(this.nextRequestId++);
     const path = getFunctionPath(ref);
+    // Encodability triage (verdict §(d) "Drain", applied at enqueue time too): an unencodable
+    // `args` throws HERE, synchronously — before any requestId/seq/entry exists — so a bad call
+    // never occupies a durable outbox slot (a seq, once minted, is never reused).
     const argsJson = convexToJson(args as Value);
+
+    if (this.outbox && this.outboxQueueDepth() >= this.outboxMaxQueueSize) {
+      // Overflow: reject the NEW enqueue, coded (verdict §(d) "Enqueue") — nothing was created,
+      // no seq was consumed, no optimistic layer was touched.
+      return Promise.reject(new OutboxOverflowError());
+    }
+
+    const requestId = String(this.nextRequestId++);
     const entry: PendingMutation = {
       requestId,
       udfPath: path,
@@ -196,20 +272,102 @@ export class StackbaseClient {
       touched: new Set(),
       status: { type: "unsent" },
     };
+    if (this.outbox) {
+      // Stamped synchronously — the durable-outbox identity (verdict §(d) "Identity"/"Enqueue").
+      // Carried on the wire whenever an outbox is configured, not only once the S4 swap is armed
+      // (see `mutationMessage` below) — "for park-safety... exactly as today otherwise".
+      entry.clientId = this.outboxClientId;
+      entry.seq = this.outboxNextSeq++;
+      entry.order = this.nextOutboxOrder();
+      entry.identityFingerprint = this.outboxFingerprint;
+      entry.enqueuedAt = Date.now();
+    }
+    // "While the queue is non-empty, new mutations enqueue behind it; when empty, live sends go
+    // direct" (verdict §(d) "Enqueue") — computed BEFORE `initiate()` adds this entry to the log,
+    // so it only ever sees OTHER entries' backlog.
+    const queueBusy = this.outbox !== undefined && this.hasOutboxBacklog();
+
     // Event 1 — apply at initiation. A throwing updater rethrows here, synchronously, before any
     // promise is created or anything is sent.
     this.reconciler.initiate(entry);
 
     return new Promise<Value>((resolve, reject) => {
       this.pendingMutations.set(requestId, { resolve, reject });
-      if (this.closed) {
-        // Offline: retain as `unsent` for a reconnect flush (T6). The promise stays pending.
+      if (this.closed || queueBusy) {
+        // Offline, or FIFO behind an already-queued backlog: retain as `unsent` for a flush. The
+        // promise stays pending.
         entry.status = { type: "unsent" };
       } else {
         entry.status = { type: "inflight" };
-        this.transport.send({ type: "Mutation", requestId, udfPath: path, args: argsJson });
+        this.transport.send(this.mutationMessage(entry));
+      }
+      if (this.outbox) {
+        // Write-behind: durably append WITHOUT awaiting — "the send never waits for it" (verdict
+        // §(d) "Enqueue"). `entry.durable` flips once this resolves; `delivery-policy.ts`'s
+        // `closeDisposition` reads it at close ("park eligibility requires durability").
+        void this.outbox.append(this.toOutboxEntry(entry)).then(() => {
+          entry.durable = true;
+        });
       }
     });
+  }
+
+  /** The wire `Mutation` message for `entry` — carries `(clientId, seq)` whenever an outbox is
+   *  configured (park-safety, verdict §(d)), and OMITS the fields entirely (not merely `undefined`)
+   *  when it isn't, so a client with no `outbox` sends exactly today's shape, byte-for-byte. */
+  private mutationMessage(entry: PendingMutation): ClientMessage {
+    return {
+      type: "Mutation",
+      requestId: entry.requestId,
+      udfPath: entry.udfPath,
+      args: entry.args,
+      ...(entry.clientId !== undefined ? { clientId: entry.clientId, seq: entry.seq! } : {}),
+    };
+  }
+
+  /** The persisted `OutboxStorage` twin of `entry` — only ever called when `this.outbox` (and thus
+   *  `entry.clientId`/`seq`/`order`/`enqueuedAt`) is set. */
+  private toOutboxEntry(entry: PendingMutation): OutboxEntry {
+    return {
+      clientId: entry.clientId!,
+      seq: entry.seq!,
+      requestId: entry.requestId,
+      udfPath: entry.udfPath,
+      args: entry.args,
+      seed: entry.seed,
+      order: entry.order!,
+      status: entry.status.type === "unsent" ? "unsent" : "inflight",
+      identityFingerprint: entry.identityFingerprint,
+      outboxVersion: OUTBOX_VERSION,
+      enqueuedAt: entry.enqueuedAt!,
+    };
+  }
+
+  /** True while any OTHER entry is `unsent` (queued for a flush) or `parked` (queued for a future
+   *  drain) — the FIFO-preserving gate a new mutation enqueues behind (verdict §(d) "Enqueue"). */
+  private hasOutboxBacklog(): boolean {
+    for (const e of this.reconciler.entries()) {
+      if (e.status.type === "unsent" || e.status.type === "parked") return true;
+    }
+    return false;
+  }
+
+  /** Count of outbox-tracked entries not yet fully settled (excludes `completed` — already acked,
+   *  held only for the ts-gate) — the overflow cap's occupancy (verdict §(d) "Enqueue": "bounded,
+   *  default 1000"). */
+  private outboxQueueDepth(): number {
+    let n = 0;
+    for (const e of this.reconciler.entries()) {
+      if (e.clientId !== undefined && e.status.type !== "completed") n++;
+    }
+    return n;
+  }
+
+  /** Monotonic `OutboxEntry.order` allocator — see the `outboxOrderCounter` field doc. */
+  private nextOutboxOrder(): number {
+    const now = Date.now();
+    this.outboxOrderCounter = this.outboxOrderCounter >= now ? this.outboxOrderCounter + 1 : now;
+    return this.outboxOrderCounter;
   }
 
   /** Run an action; resolves with its return value (or rejects with its error). Not reactive — an action has no subscription. */
@@ -228,6 +386,19 @@ export class StackbaseClient {
     this.hasSetAuth = true;
     this.lastAuthToken = token;
     this.transport.send({ type: "SetAuth", token });
+    if (this.outbox) {
+      // `identityFingerprint` cache (verdict §(d) hazard 9 / spec §(k)7): SHA-256 of the token, or
+      // "anon" for none/empty — computed here (async, SubtleCrypto) so `mutation()` can stamp the
+      // cached value synchronously. Guarded against a stale resolution racing a LATER setAuth call.
+      if (!token) {
+        this.outboxFingerprint = "anon";
+      } else {
+        const forToken = token;
+        void sha256Hex(forToken).then((hex) => {
+          if (this.lastAuthToken === forToken) this.outboxFingerprint = hex;
+        });
+      }
+    }
   }
 
   /** Publish an ephemeral event (presence/typing) — bypasses the engine. */
@@ -257,6 +428,13 @@ export class StackbaseClient {
   /** @internal test/debug only — the live pending-mutation log, in requestId order. */
   get __pending(): readonly PendingMutation[] {
     return this.reconciler.entries();
+  }
+
+  /** @internal test/debug only — the current `identityFingerprint` cache (see `setAuth`); polling
+   *  this (rather than calling `mutation()` repeatedly, which consumes seqs) is how a test waits
+   *  out the async SHA-256 digest without depending on a fixed tick count. */
+  get __outboxFingerprint(): string {
+    return this.outboxFingerprint;
   }
 
   private onServerMessage(msg: ServerMessage): void {
@@ -332,8 +510,11 @@ export class StackbaseClient {
 
   private onTransportClosed(): void {
     this.closed = true;
-    // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets.
-    const { rejectedInflight } = this.reconciler.closeSession();
+    // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets. Task 2's
+    // park swap (armed + durable) is folded in here via `this.outboxArmed` — `rejectedInflight`
+    // already excludes anything that parked instead; a parked entry's promise stays pending in
+    // `pendingMutations`, untouched, ready for a future drain (T4) to settle.
+    const { rejectedInflight } = this.reconciler.closeSession(this.outboxArmed);
     for (const rid of rejectedInflight) {
       const pending = this.pendingMutations.get(rid);
       this.pendingMutations.delete(rid);
@@ -359,7 +540,7 @@ export class StackbaseClient {
     this.resync();
     for (const entry of this.reconciler.unsentInOrder()) {
       entry.status = { type: "inflight" };
-      this.transport.send({ type: "Mutation", requestId: entry.requestId, udfPath: entry.udfPath, args: entry.args });
+      this.transport.send(this.mutationMessage(entry));
     }
   }
 }

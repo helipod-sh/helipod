@@ -30,6 +30,9 @@ export function versionCoversCommit(maxObservedTs: number, commitTs: number): bo
 export interface CloseResult {
   /** `inflight` request ids whose promises the client must reject with `MutationUndeliveredError`. */
   rejectedInflight: string[];
+  /** `inflight` request ids that PARKED instead (Task 2's S4 swap, armed + durable) — their
+   *  promise stays pending; the client must NOT reject (or resolve) them here. */
+  parked: string[];
 }
 
 const DEFAULT_GATE_TIMEOUT_MS = 10_000;
@@ -179,16 +182,34 @@ export class Reconciler {
    * Event 6 — transport close (S4). `unsent` retained; `inflight`/`completed` layers drop; the
    * frontier resets; composed rebuilds over the retained set. Returns the `inflight` ids the client
    * must reject with `MutationUndeliveredError`. NO layer crosses a session.
+   *
+   * Task 2 extends this with the S4 park swap: when `armed` (a `ConnectAck` has proven server-side
+   * dedup — T3 sets it via `client.ts#setOutboxArmed`) AND an `inflight` entry's durable append has
+   * already committed (`entry.durable`), it PARKS instead of rejecting — its `status` flips to
+   * `"parked"` and its `update` closure is cleared (the layer still drops, via the normal
+   * `rebuild()` below: `recompose` skips any entry with no `update`, the same mechanism a plain
+   * non-optimistic mutation already relies on) but the entry itself STAYS in the log, ready for a
+   * future drain (T4) to resend under its recorded `(clientId, seq)`. Every other `drop`ped id
+   * (rejected-inflight, completed) is still fully removed from the log, exactly as before.
    */
-  closeSession(): CloseResult {
-    const disp = closeDisposition(this.log.entriesInOrder());
+  closeSession(armed = false): CloseResult {
+    const disp = closeDisposition(this.log.entriesInOrder(), { armed });
+    const parkedIds = new Set(disp.park);
+    for (const rid of disp.park) {
+      const entry = this.log.get(rid);
+      if (entry) {
+        entry.status = { type: "parked" };
+        entry.update = undefined; // layer drops — unchanged rule (verdict §(d)); entry itself stays
+      }
+    }
     for (const rid of disp.drop) {
+      if (parkedIds.has(rid)) continue; // parked entries are NOT removed from the log
       this.log.delete(rid);
       this.clearTimer(rid);
     }
     this.observedTs = 0; // reset with the session — the ts-gate is only sound over one monotone feed
     this.rebuild();
-    return { rejectedInflight: disp.reject };
+    return { rejectedInflight: disp.reject, parked: disp.park };
   }
 
   private armGateTimer(requestId: string): void {
