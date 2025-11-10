@@ -29,3 +29,7 @@ export { createOptimisticLocalStore } from "./optimistic-store";
 export type { HydrateResult, IndexedDBOutboxOptions, OutboxEntry, OutboxEntryStatus, OutboxMeta, OutboxStorage } from "./outbox-storage";
 export { DEFAULT_OUTBOX_MAX_QUEUE_SIZE, OUTBOX_VERSION, OfflineClientResetError, OutboxOverflowError, defaultMintClientId, indexedDBOutbox, memoryOutbox, mintIdentity } from "./outbox-storage";
 export type { ClientResetInfo } from "./client";
+
+// Task 4 — the drain: the poison policy, the Web Locks seam (fake-able), and the backoff mirror.
+export type { DrainHost, OutboxDrainOptions, OutboxLockManager, PoisonPolicy } from "./outbox-drain";
+export { DEFAULT_DRAIN_CHUNK_SIZE, DEFAULT_DRAIN_INTERVAL_MS, OFFLINE_IDENTITY_CHANGED, OutboxDrain, computeDrainBackoff } from "./outbox-drain";

@@ -88,6 +88,14 @@ export interface OutboxStorage {
   loadAll(): Promise<HydrateResult>;
   getMeta(clientId: string): Promise<OutboxMeta | undefined>;
   setMeta(clientId: string, meta: OutboxMeta): Promise<void>;
+  /** OPTIONAL (verdict §(g) hazard 1 / Task 4's dead-meta prune): every clientId with a meta row.
+   *  The drain uses it at hydrate to reclaim rows for clientIds that are neither the current session
+   *  nor have any live queue entries — one such tiny row otherwise accrues per prior tab-session and
+   *  every `onClientReset`. Optional so a minimal `OutboxStorage` double (which never prunes) stays
+   *  valid; both shipped backends implement it. */
+  listMetaClientIds?(): Promise<string[]>;
+  /** OPTIONAL companion to {@link listMetaClientIds} — delete one dead meta row. */
+  deleteMeta?(clientId: string): Promise<void>;
   /** Advisory `navigator.storage.persist()` request — fire-and-forget, no return value, and no
    *  behavior anywhere ever branches on whether the grant is honored (verdict §(g) hazard 3: "zero
    *  behavior branches on the grant"). A no-op for the memory backend. */
@@ -167,6 +175,12 @@ export function memoryOutbox(): OutboxStorage {
     async setMeta(clientId, m) {
       meta.set(clientId, { ...m });
     },
+    async listMetaClientIds() {
+      return [...meta.keys()];
+    },
+    async deleteMeta(clientId) {
+      meta.delete(clientId);
+    },
     persist() {
       // No-op: nothing here survives a reload anyway, so there is nothing worth asking the
       // browser to protect from eviction.
@@ -215,6 +229,8 @@ export function indexedDBOutbox(opts: IndexedDBOutboxOptions = {}): OutboxStorag
     loadAll: async () => (await impl()).loadAll(),
     getMeta: async (clientId) => (await impl()).getMeta(clientId),
     setMeta: async (clientId, meta) => (await impl()).setMeta(clientId, meta),
+    listMetaClientIds: async () => (await impl()).listMetaClientIds?.() ?? [],
+    deleteMeta: async (clientId) => (await impl()).deleteMeta?.(clientId),
     persist: () => {
       // Advisory-only — fire-and-forget even the routing to the resolved implementation.
       void impl().then((i) => i.persist());

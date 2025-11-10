@@ -40,6 +40,8 @@ import {
   type OutboxEntry,
   type OutboxStorage,
 } from "./outbox-storage";
+import { OutboxDrain, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
+import type { MutationBatchEntry } from "@stackbase/sync";
 
 export type { QueryListener, QueryErrorListener };
 
@@ -145,6 +147,13 @@ export class StackbaseClient {
   /** Resolvers for in-flight `whenBaselineAdopted()` promises — settled together when the baseline
    *  Transition adopts (or immediately, when a reopen had no live subscriptions to re-baseline). */
   private outboxBaselineResolvers: Array<() => void> = [];
+  /** Whether a `Connect` handshake has already gone out on the CURRENT connection (reset at close).
+   *  Guards against a double-handshake when both the reopen path and the drain's first-connect path
+   *  could fire — the drain's `ensureInitialHandshake()` is a no-op once a reopen already sent one. */
+  private outboxConnectSent = false;
+  /** The drain (Task 4) — the Web Locks leader that turns the durable queue into exactly-once server
+   *  effects. Present iff `opts.outbox` is configured; started at construction. */
+  private readonly outboxDrain?: OutboxDrain;
 
   constructor(
     transport: ClientTransport,
@@ -153,6 +162,23 @@ export class StackbaseClient {
       outbox?: OutboxStorage;
       outboxMaxQueueSize?: number;
       onClientReset?: (info: ClientResetInfo) => void;
+      /** How a coded (terminal, server-recorded) mutation failure is handled during the drain
+       *  (verdict §(c) R5) — `"skip"` (default: skip-and-record + continue) or `"pause"` (halt). */
+      poisonPolicy?: PoisonPolicy;
+      /** The Web Locks manager for the drain leader — `undefined` probes `navigator.locks`, `null`
+       *  forces single-tab, an object is used directly (tests inject a fake). */
+      outboxLocks?: OutboxLockManager | null;
+      /** Distinguishes the drain's lock name per deployment (`stackbase:outbox:<origin>:<deployment>`);
+       *  defaults to `"default"`. */
+      outboxDeployment?: string;
+      /** The drain's interval-nudge period (verdict §(d): never `navigator.onLine`). */
+      outboxDrainIntervalMs?: number;
+      /** The drain's `MutationBatch` chunk size (default 50). */
+      outboxChunkSize?: number;
+      /** Injectable backoff for the drain's codeless-retry path (tests drive it deterministically). */
+      outboxBackoffMs?: (attempts: number) => number;
+      /** Fired once when `poisonPolicy: "pause"` halts the drain (surfacing). */
+      onOutboxPause?: (info: { requestId: string; udfPath: string; code: string }) => void;
     } = {},
   ) {
     this.transport = transport;
@@ -166,10 +192,28 @@ export class StackbaseClient {
         this.outboxNextSeq = Math.max(this.outboxNextSeq, id.nextSeq);
         return id;
       });
+      this.outboxDrain = new OutboxDrain(this.makeDrainHost(), {
+        lockName: `stackbase:outbox:${this.originTag()}:${opts.outboxDeployment ?? "default"}`,
+        locks: opts.outboxLocks,
+        poisonPolicy: opts.poisonPolicy,
+        chunkSize: opts.outboxChunkSize,
+        intervalMs: opts.outboxDrainIntervalMs,
+        backoffMs: opts.outboxBackoffMs,
+        onPause: opts.onOutboxPause,
+      });
     }
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
     this.disposeReopen = transport.onReopen?.(() => this.onTransportReopened());
+    // Start the drain AFTER the message/close hooks are wired (it may hydrate + handshake at once).
+    this.outboxDrain?.start();
+  }
+
+  /** The origin component of the drain's Web Locks name — `location.origin` in a browser, a stable
+   *  fallback elsewhere (Node/SSR share one origin; correctness is the records, not the lock). */
+  private originTag(): string {
+    const loc = (globalThis as { location?: { origin?: string } }).location;
+    return loc?.origin ?? "app";
   }
 
   /** @internal This tab-session's durable outbox identity, or `undefined` when no `outbox` was
@@ -351,6 +395,8 @@ export class StackbaseClient {
         // `closeDisposition` reads it at close ("park eligibility requires durability").
         void this.outbox.append(this.toOutboxEntry(entry)).then(() => {
           entry.durable = true;
+          // Now durable → drain-eligible: wake the drain (wake on enqueue, verdict §(d)).
+          this.outboxDrain?.nudge();
         });
       }
     });
@@ -457,6 +503,7 @@ export class StackbaseClient {
   }
 
   close(): void {
+    this.outboxDrain?.stop();
     this.disposeTransport();
     this.disposeClose();
     this.disposeReopen?.();
@@ -504,9 +551,20 @@ export class StackbaseClient {
         }
         this.reconciler.ingestTransition(msg.modifications, msg.endVersion.ts);
         this.version = msg.endVersion;
+        // First-connect baseline adoption (Task 4): unlike a reopen (whose baseline adopts in the
+        // `resyncing` branch above), a fresh first connect's baseline is just its first contiguous
+        // Transition — so release the drain's `whenBaselineAdopted()` gate + fire deferred drops
+        // here. Only ever true while a first-connect handshake is in flight; a no-op otherwise.
+        if (this.outboxAwaitingBaseline) this.markBaselineAdopted();
         return;
       }
       case "MutationResponse": {
+        // A response for a unit the drain (Task 4) is awaiting routes to the drain's state machine
+        // (per-unit resolution, transient-stop, backoff) — NOT the direct-send path below.
+        if (this.outboxDrain?.handles(msg.requestId)) {
+          this.outboxDrain.onResponse(msg);
+          return;
+        }
         // Capture the outbox identity BEFORE the settling event removes the entry from the log —
         // dequeue-on-success/settle needs its recorded `(clientId, seq)` (T3, verdict §(f) AC1.2).
         const entry = this.reconciler.getEntry(msg.requestId);
@@ -567,6 +625,7 @@ export class StackbaseClient {
 
   private onTransportClosed(): void {
     this.closed = true;
+    this.outboxConnectSent = false; // a fresh connection needs a fresh Connect handshake.
     // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets. Task 2's
     // park swap (armed + durable) is folded in here via `this.outboxArmed` — `rejectedInflight`
     // already excludes anything that parked instead; a parked entry's promise stays pending in
@@ -601,14 +660,25 @@ export class StackbaseClient {
       // the server classify every held `(clientId, seq)`; the actual FIFO resend of `unknown`/parked
       // entries is T4's drain, which awaits `whenBaselineAdopted()` before sending. Held entries are
       // NOT flushed directly here — that would bypass the dedup handshake and re-order the FIFO.
-      this.beginBaselineAwait();
-      this.sendConnect();
+      this.initiateHandshake(this.resyncing);
+      this.outboxDrain?.nudge(); // wake on reconnect-after-baseline.
       return;
     }
     for (const entry of this.reconciler.unsentInOrder()) {
       entry.status = { type: "inflight" };
       this.transport.send(this.mutationMessage(entry));
     }
+  }
+
+  /** Send the `Connect` resume handshake once per connection (idempotent via `outboxConnectSent`),
+   *  arming the baseline await. Shared by the reopen path and the drain's first-connect path (Task 4
+   *  / T3 handoff #1: a fresh-client-first-connect after reload has no reopen event, so the drain
+   *  triggers the same handshake on becoming leader with a durable backlog). */
+  private initiateHandshake(expectTransition: boolean): void {
+    if (this.outboxConnectSent || this.closed || !this.outbox) return;
+    this.outboxConnectSent = true;
+    this.beginBaselineAwait(expectTransition);
+    this.sendConnect();
   }
 
   /* ---------------------------------------------------------------------------------------------
@@ -634,22 +704,24 @@ export class StackbaseClient {
     return this.outboxArmed;
   }
 
-  /** Begin awaiting the post-`Connect` baseline. `resync()` (called just before) has already set
-   *  `this.resyncing` iff it actually re-subscribed live queries — so we await a Transition exactly
-   *  when one is coming; with no live subscriptions there is no baseline frame, and adoption is
-   *  immediate. */
-  private beginBaselineAwait(): void {
-    this.outboxAwaitingBaseline = this.resyncing;
-    if (!this.outboxAwaitingBaseline) this.markBaselineAdopted();
+  /** Begin awaiting the post-`Connect` baseline. `expectTransition` is true iff a baseline Transition
+   *  is actually coming — for a reopen, `this.resyncing` (set iff `resync()` re-subscribed live
+   *  queries); for a first connect, whether any live subscription exists. With none, there is no
+   *  baseline frame and adoption is immediate. */
+  private beginBaselineAwait(expectTransition: boolean): void {
+    this.outboxAwaitingBaseline = expectTransition;
+    if (!expectTransition) this.markBaselineAdopted();
   }
 
   /** The baseline Transition adopted (or there was none to await): fire every deferred `applied`
-   *  layer drop (each flicker-free now — the baseline renders the effect) and release the drain gate. */
+   *  layer drop (each flicker-free now — the baseline renders the effect), release the drain gate,
+   *  and wake the drain (reconnect-after-baseline). */
   private markBaselineAdopted(): void {
     this.outboxAwaitingBaseline = false;
     for (const rid of this.outboxPendingDrops.splice(0)) this.reconciler.onVerdictAfterBaseline(rid);
     const resolvers = this.outboxBaselineResolvers.splice(0);
     for (const resolve of resolvers) resolve();
+    this.outboxDrain?.nudge();
   }
 
   /** Send the `Connect` resume handshake: this tab-session's clientId, the `held` durable entries
@@ -713,10 +785,12 @@ export class StackbaseClient {
       void this.outbox.setMeta(this.outboxClientId, { nextSeq: this.outboxNextSeq, deployment: msg.deploymentId });
     }
     if (!msg.known) {
-      void this.onClientReset();
+      void this.onClientReset().then(() => this.outboxDrain?.nudge());
       return;
     }
     for (const v of msg.results) this.settleVerdict(v);
+    // The handshake proved dedup + classified `held`; wake the drain to (re)send any `unknown` seqs.
+    this.outboxDrain?.nudge();
   }
 
   /** Settle one classified `held` seq from a `ConnectAck` (or, later, a drain replay-ack). */
@@ -832,5 +906,109 @@ export class StackbaseClient {
     const err = new Error(message);
     if (code !== undefined) (err as Error & { code?: string }).code = code;
     return err;
+  }
+
+  /* ---------------------------------------------------------------------------------------------
+   * Task 4 — the drain host. These bind the drain's `DrainHost` seam to the client's private state
+   * so the T3 settlement primitives (`resolvePending`/`rejectPending`, `dequeue`, the drop rule) are
+   * REUSED by the drain, not forked (verdict §(d) "Drain").
+   * ------------------------------------------------------------------------------------------- */
+
+  /** @internal test/debug — the live drain (Task 4), or `undefined` without an outbox. */
+  get __outboxDrain(): OutboxDrain | undefined {
+    return this.outboxDrain;
+  }
+
+  private makeDrainHost(): DrainHost {
+    return {
+      outbox: this.outbox!,
+      currentClientId: () => this.outboxClientId,
+      currentFingerprint: () => this.outboxFingerprint,
+      transportOpen: () => !this.closed,
+      isArmed: () => this.outboxArmed,
+      drainable: () => this.drainableEntries(),
+      addHydrated: (entry) => this.addHydratedEntry(entry),
+      ensureInitialHandshake: () => this.initiateHandshake(this.store.byId.size > 0),
+      setStatus: (entry, status) => {
+        entry.status = { type: status };
+      },
+      batchEntry: (entry) => this.drainBatchEntry(entry),
+      sendBatch: (entries) => this.transport.send({ type: "MutationBatch", entries }),
+      settleApplied: (requestId, value) => this.drainSettleApplied(requestId, value),
+      settleTerminal: (requestId, code, message) => this.drainSettleTerminal(requestId, code, message),
+      whenBaselineAdopted: () => this.whenBaselineAdopted(),
+    };
+  }
+
+  /** Drain-eligible entries: durable, recorded `(clientId, seq)`, still `unsent`/`parked`, FIFO by
+   *  the persisted `order`. Excludes `inflight` (a live direct-send or an in-flight chunk unit) and
+   *  `completed`. */
+  private drainableEntries(): PendingMutation[] {
+    return this.reconciler
+      .entries()
+      .filter(
+        (e) =>
+          e.clientId !== undefined &&
+          e.seq !== undefined &&
+          e.durable === true &&
+          (e.status.type === "unsent" || e.status.type === "parked"),
+      )
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }
+
+  /** Add a hydrated durable entry into the log under a FRESH requestId (the persisted requestId was
+   *  session-correlation only; a fresh one avoids colliding with this session's requestId counter).
+   *  Idempotent by `(clientId, seq)` — a direct-send this session already tracks is not re-added.
+   *  Layerless (no `update`): T5's registry rebuilds cross-reload optimistic layers; T4 leaves them
+   *  bare, which is a clean drop under the baseline-gated drop rule. */
+  private addHydratedEntry(e: OutboxEntry): void {
+    for (const existing of this.reconciler.entries()) {
+      if (existing.clientId === e.clientId && existing.seq === e.seq) return;
+    }
+    // Keep the order counter ahead of every hydrated (past-session) order so new mutations this
+    // session sort strictly AFTER the hydrated backlog — FIFO across the reload boundary.
+    this.outboxOrderCounter = Math.max(this.outboxOrderCounter, e.order);
+    const entry: PendingMutation = {
+      requestId: String(this.nextRequestId++),
+      udfPath: e.udfPath,
+      args: e.args,
+      seed: e.seed,
+      touched: new Set(),
+      status: { type: "unsent" },
+      clientId: e.clientId,
+      seq: e.seq,
+      order: e.order,
+      identityFingerprint: e.identityFingerprint,
+      enqueuedAt: e.enqueuedAt,
+      durable: true,
+    };
+    this.reconciler.log.add(entry);
+  }
+
+  private drainBatchEntry(entry: PendingMutation): MutationBatchEntry {
+    return { requestId: entry.requestId, udfPath: entry.udfPath, args: entry.args, clientId: entry.clientId, seq: entry.seq };
+  }
+
+  /** applied/replayed settlement for a drained unit — the same primitives `settleVerdict`'s
+   *  `applied` case uses (resolve the awaiting promise if any, dequeue the durable record, drop the
+   *  layer after baseline). Drop-soundness (T3 watch item): a drain replay-ack carries the ORIGINAL
+   *  historical commitTs, but the drop is gated on baseline adoption, not on that commitTs — the
+   *  entry's commit necessarily predates this session's `Connect`, so it predates the baseline's
+   *  read snapshot and the baseline already renders the effect. Historical-ts-vs-current-base is
+   *  therefore still covered; the drop is flicker-free by the same one-pass rule as T3's handshake. */
+  private drainSettleApplied(requestId: string, value: Value | null): void {
+    const entry = this.reconciler.getEntry(requestId);
+    this.resolvePending(requestId, value);
+    if (entry?.clientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(entry.clientId, entry.seq);
+    if (entry) this.dropAfterBaseline(requestId);
+  }
+
+  /** Terminal settlement for a drained unit (a coded server verdict, or the identity gate) — reject
+   *  the awaiting promise (coded), dequeue the durable record, drop the layer. */
+  private drainSettleTerminal(requestId: string, code: string | undefined, message: string): void {
+    const entry = this.reconciler.getEntry(requestId);
+    this.rejectPending(requestId, this.mutationError(message, code));
+    if (entry?.clientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(entry.clientId, entry.seq);
+    if (entry) this.reconciler.onMutationFailure(requestId);
   }
 }

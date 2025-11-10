@@ -194,6 +194,18 @@ export class IndexedDBOutboxStorage implements OutboxStorage {
     return meta;
   }
 
+  async listMetaClientIds(): Promise<string[]> {
+    const tx = this.db.transaction(META_STORE, "readonly");
+    const keys = (await promisifyRequest(tx.objectStore(META_STORE).getAllKeys())) as IDBValidKey[];
+    return keys.map((k) => String(k));
+  }
+
+  async deleteMeta(clientId: string): Promise<void> {
+    const tx = this.db.transaction(META_STORE, "readwrite");
+    tx.objectStore(META_STORE).delete(clientId);
+    await promisifyTransaction(tx);
+  }
+
   async loadAll(): Promise<HydrateResult> {
     const tx = this.db.transaction(ENTRIES_STORE, "readonly");
     const all = (await promisifyRequest(tx.objectStore(ENTRIES_STORE).getAll())) as OutboxEntry[];
