@@ -434,8 +434,14 @@ export class StackbaseClient {
   }
 
   /** True while any OTHER entry is `unsent` (queued for a flush) or `parked` (queued for a future
-   *  drain) — the FIFO-preserving gate a new mutation enqueues behind (verdict §(d) "Enqueue"). */
+   *  drain) — the FIFO-preserving gate a new mutation enqueues behind (verdict §(d) "Enqueue").
+   *  A drain chunk in flight also counts (its units are `inflight`, which the scan alone would miss
+   *  when the chunk consumed the whole backlog) — otherwise a mutation issued mid-chunk would
+   *  direct-send AHEAD of a still-unsettled older unit, breaking the FIFO promise if the chunk
+   *  transient-stops and re-sends. Plain live in-flight direct-sends deliberately do NOT count:
+   *  "when empty, live sends go direct and concurrent" (T2's scoping, unchanged). */
   private hasOutboxBacklog(): boolean {
+    if (this.outboxDrain?.hasActiveChunk) return true;
     for (const e of this.reconciler.entries()) {
       if (e.status.type === "unsent" || e.status.type === "parked") return true;
     }
@@ -626,6 +632,12 @@ export class StackbaseClient {
   private onTransportClosed(): void {
     this.closed = true;
     this.outboxConnectSent = false; // a fresh connection needs a fresh Connect handshake.
+    // BEFORE the S4 close rules: revert the drain's in-flight chunk (its unresponded units will
+    // never get a response on the new server session) so `closeSession` below sees them as plain
+    // `unsent` retained entries, and the drain's one-unacked invariant (`active === null`) can't
+    // wedge the rest of this tab session (see `OutboxDrain#onTransportClosed`). Leadership and the
+    // interval nudge survive a reconnect-class close; only `close()` stops the drain.
+    this.outboxDrain?.onTransportClosed();
     // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets. Task 2's
     // park swap (armed + durable) is folded in here via `this.outboxArmed` — `rejectedInflight`
     // already excludes anything that parked instead; a parked entry's promise stays pending in
@@ -801,6 +813,10 @@ export class StackbaseClient {
         // Resolve the awaiting promise (a parked entry from THIS session still has one; a hydrated
         // cross-reload entry has none — `valueMissing` is tolerated everywhere) with the recorded
         // value, dequeue the durable record, and drop its layer once the baseline is adopted.
+        // Unconditional is sound HERE (unlike a drain response, see `drainSettleApplied`): a
+        // ConnectAck verdict is always classifying a seq from a PRIOR connect — by construction its
+        // commit predates this session's `Connect`, hence the baseline — never a fresh same-session
+        // apply, so there is no flicker risk to gate against.
         const value = v.valueMissing ? null : jsonToConvex(v.value ?? null);
         if (entry) this.resolvePending(entry.requestId, value);
         void this.outbox?.dequeue(v.clientId, v.seq);
@@ -934,7 +950,7 @@ export class StackbaseClient {
       },
       batchEntry: (entry) => this.drainBatchEntry(entry),
       sendBatch: (entries) => this.transport.send({ type: "MutationBatch", entries }),
-      settleApplied: (requestId, value) => this.drainSettleApplied(requestId, value),
+      settleApplied: (requestId, value, replayed, ts) => this.drainSettleApplied(requestId, value, replayed, ts),
       settleTerminal: (requestId, code, message) => this.drainSettleTerminal(requestId, code, message),
       whenBaselineAdopted: () => this.whenBaselineAdopted(),
     };
@@ -989,18 +1005,31 @@ export class StackbaseClient {
     return { requestId: entry.requestId, udfPath: entry.udfPath, args: entry.args, clientId: entry.clientId, seq: entry.seq };
   }
 
-  /** applied/replayed settlement for a drained unit — the same primitives `settleVerdict`'s
-   *  `applied` case uses (resolve the awaiting promise if any, dequeue the durable record, drop the
-   *  layer after baseline). Drop-soundness (T3 watch item): a drain replay-ack carries the ORIGINAL
-   *  historical commitTs, but the drop is gated on baseline adoption, not on that commitTs — the
-   *  entry's commit necessarily predates this session's `Connect`, so it predates the baseline's
-   *  read snapshot and the baseline already renders the effect. Historical-ts-vs-current-base is
-   *  therefore still covered; the drop is flicker-free by the same one-pass rule as T3's handshake. */
-  private drainSettleApplied(requestId: string, value: Value | null): void {
+  /** applied settlement for a drained unit — resolve the awaiting promise (if any) and dequeue the
+   *  durable record ALWAYS; then route the layer drop by `replayed` (T4 review fix — the ungated
+   *  fresh-apply drop):
+   *   - `replayed: true` — a resend whose commit predates this session's `Connect`, reusing the same
+   *     primitive `settleVerdict`'s `applied` case uses (T3's unconditional baseline-gated drop).
+   *     Drop-soundness (T3 watch item, scoped to replays ONLY): the drop is gated on baseline
+   *     adoption, not on the replay's carried commitTs — the entry's commit necessarily predates this
+   *     session's `Connect`, so it predates the baseline's read snapshot and the baseline already
+   *     renders the effect. Historical-ts-vs-current-base is therefore still covered; the drop is
+   *     flicker-free by the same one-pass rule as T3's handshake.
+   *   - a FRESH apply (`replayed` absent/false — this session's OWN first execution, a genuinely new
+   *     `ts`) — the argument above does NOT apply: nothing proves this commit predates the baseline,
+   *     so an unconditional drop here would remove a still-rendered layer before its authoritative row
+   *     ever appears (a flicker). Instead this routes through the normal same-session gate,
+   *     `onMutationSuccess` (the response `ts`) — the exact same shipped no-flicker discipline the
+   *     direct-send path uses at `MutationResponse` (see the `case "MutationResponse"` handler above):
+   *     hold the layer `completed` until this client's own reactive feed observes `ts`.
+   */
+  private drainSettleApplied(requestId: string, value: Value | null, replayed: boolean, ts: number | undefined): void {
     const entry = this.reconciler.getEntry(requestId);
     this.resolvePending(requestId, value);
     if (entry?.clientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(entry.clientId, entry.seq);
-    if (entry) this.dropAfterBaseline(requestId);
+    if (!entry) return;
+    if (replayed) this.dropAfterBaseline(requestId);
+    else this.reconciler.onMutationSuccess(requestId, ts);
   }
 
   /** Terminal settlement for a drained unit (a coded server verdict, or the identity gate) — reject

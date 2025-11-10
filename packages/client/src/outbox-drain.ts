@@ -13,8 +13,10 @@
  *  - **FIFO by persisted `order`**, sent as `MutationBatch` chunks (default 50 — repair 4, the
  *    500-drain arithmetic in verdict §(a)/(h)); ONE unacked chunk in flight at a time.
  *  - **Per-unit resolution** of each chunk's per-entry `MutationResponse`:
- *      - `applied`/replayed → settle (resolve + dequeue + the baseline-gated drop rule via T3) and
- *        advance.
+ *      - `applied` → settle (resolve + dequeue) and advance; the layer drop is routed by `replayed` —
+ *        a replay (historical, predates this session's baseline) uses T3's unconditional
+ *        baseline-gated drop, a fresh first-ever apply (this session) uses the same-session
+ *        `onMutationSuccess` gate a direct-send gets, to stay flicker-free (review-caught, T4).
  *      - coded (terminal) failure → default **skip-and-record**: the SERVER recorded the terminal
  *        verdict, so the client settles the promise terminally and CONTINUES past it; the
  *        `poisonPolicy: "pause"` option instead HALTS the drain and surfaces (verdict §(c) R5).
@@ -137,8 +139,14 @@ export interface DrainHost {
   /** Send one `MutationBatch` chunk. */
   sendBatch(entries: MutationBatchEntry[]): void;
   /** applied/replayed settlement (verdict §(d) drop rule, T3's `settleVerdict` primitives): resolve
-   *  the awaiting promise (if any), dequeue the durable record, drop the layer after baseline. */
-  settleApplied(requestId: string, value: Value | null): void;
+   *  the awaiting promise (if any), dequeue the durable record, then drop the layer — routed by
+   *  `replayed`. A REPLAY (`replayed: true`, a resend whose commit predates this session's `Connect`)
+   *  drops unconditionally once the baseline is adopted (T3's rule — sound because the baseline
+   *  snapshot already renders it). A FRESH first-ever apply (`replayed` absent/false — the server
+   *  executed it for the first time, THIS session, `ts` genuinely after the baseline) must NOT drop
+   *  early: it needs the same same-session gated hold `onMutationSuccess` gives a direct-send, or the
+   *  layer disappears a frame before the row it represents actually renders (a flicker). */
+  settleApplied(requestId: string, value: Value | null, replayed: boolean, ts: number | undefined): void;
   /** Terminal settlement: reject the awaiting promise (coded), dequeue, drop the layer. */
   settleTerminal(requestId: string, code: string | undefined, message: string): void;
   /** Resolves once the first post-`Connect` baseline Transition has been adopted (verdict §(d) —
@@ -255,6 +263,34 @@ export class OutboxDrain {
    *  `MutationResponse` here instead of down the direct-send path. */
   handles(requestId: string): boolean {
     return this.active?.has(requestId) ?? false;
+  }
+
+  /** The transport dropped (a reconnect-class close, NOT the client's `close()` — leadership and
+   *  the interval survive). The in-flight chunk's unresponded units will never get a response on
+   *  the new server session, so revert them to re-sendable and clear the chunk NOW — otherwise
+   *  `canDrain()`'s one-unacked invariant (`active === null`) would wedge the drain for the rest of
+   *  this tab session (no chunk would ever flush again, and every new mutation would queue behind
+   *  the stuck backlog until overflow). Called by `client.ts#onTransportClosed` BEFORE the
+   *  reconciler's S4 close rules run, so the reverted (`unsent`) units are simply retained by the
+   *  close disposition, promises pending, ready for the reconnect handshake + re-drain. A pending
+   *  transient-backoff timer is also cleared — the reconnect handshake re-drives the drain, and
+   *  `canDrain()` would no-op a stale timer against a closed transport anyway. */
+  onTransportClosed(): void {
+    this.revertActive();
+    this.transientAttempts = 0;
+    if (this.backoffTimer !== undefined) {
+      clearTimeout(this.backoffTimer);
+      this.backoffTimer = undefined;
+    }
+  }
+
+  /** True while an unacked chunk is in flight — `client.ts#hasOutboxBacklog` counts it so a new
+   *  `mutation()` enqueues BEHIND the chunk instead of direct-sending ahead of it (the FIFO rule:
+   *  "while the queue is non-empty, new mutations enqueue behind it"). A chunk's units are
+   *  `inflight`, which the unsent/parked backlog scan alone would miss when the chunk consumed the
+   *  entire backlog. */
+  get hasActiveChunk(): boolean {
+    return this.active !== null;
   }
 
   /** @internal test/debug — the drain halted on a coded failure under `poisonPolicy: "pause"`. */
@@ -407,7 +443,9 @@ export class OutboxDrain {
     if (msg.success) {
       active.delete(msg.requestId);
       const value = this.resolveResponseValue(msg);
-      this.host.settleApplied(msg.requestId, value);
+      // `msg.replayed` distinguishes a historical resend (predates this session's baseline) from a
+      // genuine first-ever apply THIS session (fresh `ts`) — the host routes the layer-drop by it.
+      this.host.settleApplied(msg.requestId, value, msg.replayed === true, msg.ts);
       this.onForwardProgress();
       return;
     }

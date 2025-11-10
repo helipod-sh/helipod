@@ -302,6 +302,172 @@ describe("OutboxDrain — the transient-stop chunk contract (T4)", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Mid-chunk transport drop → reconnect → re-drain (the wedge regression)       */
+/* -------------------------------------------------------------------------- */
+
+describe("OutboxDrain — a transport drop mid-chunk never wedges the drain (T4, review-caught)", () => {
+  it("a reconnect-class close while a chunk is unacked reverts the silent units; the reconnect re-drains them", async () => {
+    const outbox = memoryOutbox();
+    await seedOutbox(outbox, "old", [
+      { seq: 0, order: 1 },
+      { seq: 1, order: 2 },
+    ]);
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    client.setOutboxArmed(true);
+
+    await waitFor(() => t.batches().length === 1);
+    const first = t.batches()[0]!;
+    // seq0 acked; then the socket DROPS before seq1's response (a reconnect, NOT client.close()).
+    t.emit({ type: "MutationResponse", requestId: first.entries[0]!.requestId, success: true, value: "ok0", ts: 5 });
+    t.close(); // fires onClose only — the transport will reopen (webSocketTransport's default)
+    await tick();
+
+    // seq1's promise is still pending (it reverted to a retained `unsent`, not a rejection) and the
+    // durable record survives.
+    expect((await outbox.loadAll()).entries.map((e) => e.seq)).toEqual([1]);
+
+    // Reconnect: handshake (no live subs → baseline immediate) then the drain re-sends seq1 —
+    // WITHOUT this, the stale one-unacked chunk would block every future flush forever.
+    t.emitReopen();
+    t.emit({ type: "ConnectAck", known: true, results: [{ clientId: "old", seq: 1, verdict: "unknown" }], deploymentId: "d" });
+    await waitFor(() => t.batches().length === 2, 3000);
+    expect(t.batches()[1]!.entries.map((e) => e.seq)).toEqual([1]);
+
+    applyBatch(t, t.batches()[1]!);
+    await tick();
+    expect((await outbox.loadAll()).entries).toHaveLength(0);
+    client.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The applied-drop routes by `replayed` (T4, review-caught)                    */
+/* -------------------------------------------------------------------------- */
+
+describe("OutboxDrain — the applied-drop routes by `replayed`: fresh vs replay (T4, review-caught)", () => {
+  it("a FRESH (non-replayed) drain apply holds its layer until the covering Transition — no flicker", async () => {
+    const outbox = memoryOutbox();
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    client.setOutboxArmed(true);
+    const cid = (await client.getOutboxIdentity())!.clientId;
+
+    const frames: unknown[][] = [];
+    client.subscribe("messages:list", {}, (v) => frames.push(v as unknown[]));
+    // The live session baseline: [].
+    t.emit({ type: "Transition", startVersion: { querySet: 0, ts: 0 }, endVersion: { querySet: 1, ts: 1 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }] });
+
+    // Go offline, then enqueue an optimistic mutation — it durably queues `unsent`, its layer live
+    // (never sent this session, so the server has genuinely never seen it).
+    t.close();
+    void client.mutation(
+      "messages:send",
+      { body: "hello" },
+      {
+        optimisticUpdate: (store) => {
+          const list = (store.getQuery("messages:list", {}) as unknown[] | undefined) ?? [];
+          store.setQuery("messages:list", {}, [...list, { _id: "temp", body: "hello" }] as never);
+        },
+      },
+    );
+    await tick();
+
+    // Reconnect: resync re-baselines the live sub, ConnectAck classifies the held seq `unknown`
+    // (the server has no record) — the DRAIN sends it, fresh.
+    t.emitReopen();
+    t.emit({ type: "Transition", startVersion: { querySet: 1, ts: 1 }, endVersion: { querySet: 2, ts: 2 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }] });
+    t.emit({ type: "ConnectAck", known: true, results: [{ clientId: cid, seq: 0, verdict: "unknown" }], deploymentId: "d" });
+    await waitFor(() => t.batches().length === 1, 3000);
+
+    const batch = t.batches()[0]!;
+    // The server executes it for the FIRST time this session — a fresh apply, `replayed` absent.
+    t.emit({ type: "MutationResponse", requestId: batch.entries[0]!.requestId, success: true, value: "real", ts: 5 });
+    await tick();
+
+    // No Transition with ts>=5 has arrived yet — the layer must still be held (not dropped early).
+    // Every frame from the optimistic apply onward still shows "hello".
+    const withRow = frames.filter((f) => f.some((r) => (r as { body?: string }).body === "hello"));
+    expect(withRow.length).toBeGreaterThan(0);
+    expect(client.__pending).toHaveLength(1); // held `completed`, gated on this client's own feed
+
+    // The covering Transition arrives — NOW it drops, in the SAME frame the authoritative row shows.
+    t.emit({
+      type: "Transition",
+      startVersion: { querySet: 2, ts: 2 },
+      endVersion: { querySet: 2, ts: 5 },
+      modifications: [{ type: "QueryUpdated", queryId: 1, value: [{ _id: "real-id", body: "hello" }] }],
+    });
+    await tick();
+    expect(client.__pending).toHaveLength(0);
+    expect(frames.at(-1)).toEqual([{ _id: "real-id", body: "hello" }]);
+    client.close();
+  });
+
+  it("a REPLAY (`replayed: true`) drops immediately once the baseline is adopted — no further Transition needed", async () => {
+    const outbox = memoryOutbox();
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    client.setOutboxArmed(true);
+    const cid = (await client.getOutboxIdentity())!.clientId;
+
+    client.subscribe("messages:list", {}, () => {});
+    t.emit({ type: "Transition", startVersion: { querySet: 0, ts: 0 }, endVersion: { querySet: 1, ts: 1 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }] });
+
+    t.close();
+    void client.mutation("messages:send", { body: "hello" });
+    await tick();
+
+    t.emitReopen();
+    t.emit({ type: "Transition", startVersion: { querySet: 1, ts: 1 }, endVersion: { querySet: 2, ts: 2 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [{ _id: "real-id", body: "hello" }] }] });
+    t.emit({ type: "ConnectAck", known: true, results: [{ clientId: cid, seq: 0, verdict: "unknown" }], deploymentId: "d" });
+    await waitFor(() => t.batches().length === 1, 3000);
+
+    // A resend the server reports as a REPLAY — its commit (ts:1) predates the just-adopted
+    // baseline (ts:2) — no further Transition arrives before the assertion below.
+    const batch = t.batches()[0]!;
+    t.emit({ type: "MutationResponse", requestId: batch.entries[0]!.requestId, success: true, value: "real-id", ts: 1, replayed: true });
+    await tick();
+
+    expect(client.__pending).toHaveLength(0); // dropped immediately — the T3 unconditional drop rule
+    client.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A new mutation enqueues BEHIND an in-flight chunk (FIFO, review-caught)      */
+/* -------------------------------------------------------------------------- */
+
+describe("OutboxDrain — a mutation issued mid-chunk queues behind it, never direct-sends ahead (T4, review-caught)", () => {
+  it("counts the in-flight chunk as backlog: the new mutation waits and drains in the NEXT chunk", async () => {
+    const outbox = memoryOutbox();
+    await seedOutbox(outbox, "old", [{ seq: 0, order: 1 }]); // the chunk will consume the WHOLE backlog
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    client.setOutboxArmed(true);
+
+    await waitFor(() => t.batches().length === 1); // the chunk is in flight (its unit is `inflight`)
+
+    // A new mutation NOW: the unsent/parked scan alone would see no backlog (the chunk took it all)
+    // and direct-send ahead of the still-unsettled older unit — it must queue behind instead.
+    void client.mutation("messages:send", { body: "newer" });
+    await tick();
+    expect(t.sent.filter((m) => m.type === "Mutation")).toHaveLength(0); // no direct-send
+    const newer = client.__pending.find((e) => (e.args as { body?: string }).body === "newer")!;
+    expect(newer.status.type).toBe("unsent");
+
+    // The chunk settles → the drain picks the new mutation up in the NEXT chunk, in order.
+    applyBatch(t, t.batches()[0]!);
+    await waitFor(() => t.batches().length === 2, 3000);
+    const second = t.batches()[1]!;
+    expect(second.entries).toHaveLength(1);
+    expect((second.entries[0]!.args as { body: string }).body).toBe("newer");
+    expect(second.entries[0]!.clientId).toBe((await client.getOutboxIdentity())!.clientId);
+    client.close();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* The flush-time identity gate                                                 */
 /* -------------------------------------------------------------------------- */
 
