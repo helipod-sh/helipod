@@ -115,6 +115,26 @@ export class OutboxOverflowError extends Error {
   }
 }
 
+/** Rejection for a parked mutation the server disowned on `ConnectAck{known: false}` — the client's
+ *  presented history matched neither a record nor a floor (a swept/foreign/reset timeline), so the
+ *  client re-mints its identity (`onClientReset`). A parked entry was in-flight when the socket
+ *  dropped: its outcome is genuinely unknowable and, since the server has no dedup record for it,
+ *  a blind resend under a fresh clientId could double-apply — so it rejects LOUDLY (verdict §(d)
+ *  Retention: "parked entries reject loudly"). Coded so apps can distinguish it from every other
+ *  failure. `unsent` entries (never hit the wire) are safe to re-enqueue instead and are NOT
+ *  rejected. */
+export class OfflineClientResetError extends Error {
+  readonly code = "OFFLINE_CLIENT_RESET";
+  constructor(
+    message = "the server disowned this client's mutation history (swept/foreign timeline); its " +
+      "identity was reset and this in-flight-at-disconnect mutation, whose outcome is unknowable, " +
+      "was rejected rather than blindly resent",
+  ) {
+    super(message);
+    this.name = "OfflineClientResetError";
+  }
+}
+
 /** The in-memory default — what a client gets when it passes no `outbox` at all. Nothing here
  *  survives past this `StackbaseClient` instance's lifetime, which is exactly today's (pre-outbox)
  *  behavior: a reload has no durable queue to hydrate, because there never was one. */

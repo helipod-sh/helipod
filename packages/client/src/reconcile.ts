@@ -64,6 +64,36 @@ export class Reconciler {
     return this.log.entriesInOrder().filter((e) => e.status.type === "unsent");
   }
 
+  /** T3: the log entry for `requestId` (or `undefined`). Lets `client.ts` read an outbox entry's
+   *  recorded `(clientId, seq)` for dequeue-on-success BEFORE a settling event removes it from the
+   *  log. Read-only — all mutation still flows through the events below. */
+  getEntry(requestId: string): PendingMutation | undefined {
+    return this.log.get(requestId);
+  }
+
+  /**
+   * The drop-on-verdict-after-baseline rule (T3, verdict §(d) "Reload and rendering — the fork,
+   * decided"). A CROSS-SESSION entry whose recorded verdict is `applied` (learned via the `Connect`
+   * handshake's `ConnectAck` or a drain replay-ack) drops its optimistic layer once the reconnect
+   * baseline Transition has been ADOPTED. Sound because the entry's commit necessarily predates
+   * this session's `Connect`, hence predates the baseline's read snapshot — so the baseline already
+   * renders the effect; removing the (registry-rebuilt, T5) layer in the SAME one-pass `rebuild()`
+   * is flicker-free (the authoritative rows are already in the base, so the composed view never
+   * blinks the row away). The rule is deliberately **layer-agnostic**: the entry may hold no layer
+   * at all — a parked entry (its `update` was cleared at close), a plain non-optimistic mutation,
+   * or (until T5 ships the registry) any hydrated entry — in which case this is a clean removal.
+   *
+   * The CALLER (`client.ts`) is responsible for gating the call on baseline adoption; this method
+   * assumes that gate has already passed. `versionCoversCommit` (the same-session gate predicate)
+   * is intentionally untouched — same-session entries still drop on observed inclusion, never here.
+   */
+  onVerdictAfterBaseline(requestId: string): void {
+    if (!this.log.get(requestId)) return;
+    this.log.delete(requestId);
+    this.clearTimer(requestId);
+    this.rebuild();
+  }
+
   private invokeUpdate = (entry: PendingMutation, view: OptimisticStoreView): void => {
     // T5: enrich the raw view into the typed OptimisticLocalStore (placeholderId()/now()/dev-freeze,
     // derived from `entry.seed`) before invoking. `entry.update`'s declared param type is the
