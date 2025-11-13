@@ -18,3 +18,9 @@ export type Api = {
     list: FunctionReference<"query", "public", any, any>;
   };
 };
+
+export type UdfPathOf<A> = {
+  [M in keyof A & string]: {
+    [F in keyof A[M] & string]: `${M}:${F}`;
+  }[keyof A[M] & string];
+}[keyof A & string];

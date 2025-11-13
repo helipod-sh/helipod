@@ -12,7 +12,7 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { convexToJson, type Value } from "@stackbase/values";
-import { StackbaseClient } from "./client";
+import { StackbaseClient, type PendingMutationEntry } from "./client";
 import { getFunctionPath, type AnyFunctionRef, type FunctionReference } from "./api";
 import type { AnyFunctionReference, FunctionArgs, FunctionReturnType } from "./function-types";
 import type { OptimisticLocalStore } from "./optimistic-store";
@@ -115,4 +115,35 @@ export function useAction(ref: AnyFunctionRef): (args?: Record<string, Value>) =
   const client = useStackbaseClient();
   const path = getFunctionPath(ref);
   return useCallback((args: Record<string, Value> = {}) => client.action(path, args), [client, path]);
+}
+
+/**
+ * T5 (R9) — a live snapshot of the durable outbox: `[]` until the first read resolves (and forever,
+ * without an `outbox` configured — `StackbaseClient.pendingMutations()`'s own no-outbox behavior).
+ * Re-reads on every `client.onOutboxChange` notification — every local outbox-mutating op AND, when
+ * a `BroadcastChannel` is available, an incoming cross-tab nudge from ANOTHER tab sharing the same
+ * durable store (verdict §(d) "Observability": "usePendingMutations() reactive... a BroadcastChannel
+ * nudge cross-tab"). See `docs/enduser/offline.md`'s pending-tray recipe for the documented pattern
+ * (`packages/client/test/pending-tray-recipe.test.tsx` is its compiling fixture).
+ */
+export function usePendingMutations(): PendingMutationEntry[] {
+  const client = useStackbaseClient();
+  const [entries, setEntries] = useState<PendingMutationEntry[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      void client.pendingMutations().then((next) => {
+        if (!cancelled) setEntries(next);
+      });
+    };
+    refresh();
+    const unsubscribe = client.onOutboxChange(refresh);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [client]);
+
+  return entries;
 }

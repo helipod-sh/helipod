@@ -29,7 +29,7 @@ import { LayeredQueryStore, queryHash, type Listener, type OptimisticUpdate, typ
 import { Reconciler } from "./reconcile";
 import { MutationUndeliveredError } from "./delivery-policy";
 import type { PendingMutation } from "./mutation-log";
-import type { OptimisticLocalStore } from "./optimistic-store";
+import { isDevMode, type OptimisticLocalStore, type OptimisticUpdateFn } from "./optimistic-store";
 import {
   DEFAULT_OUTBOX_MAX_QUEUE_SIZE,
   OUTBOX_VERSION,
@@ -38,6 +38,8 @@ import {
   defaultMintClientId,
   mintIdentity,
   type OutboxEntry,
+  type OutboxEntryError,
+  type OutboxEntryStatus,
   type OutboxStorage,
 } from "./outbox-storage";
 import { OutboxDrain, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
@@ -54,6 +56,84 @@ export interface ClientResetInfo {
   newClientId: string;
   unsentReEnqueued: number;
   parkedRejected: number;
+}
+
+/** T5 (R9): the `onMutationFailed` callback's payload — a terminal, server-recorded verdict for a
+ *  durable outbox entry the CURRENT session may have no live promise awaiter for (a hydrated
+ *  cross-reload entry, a retried one, or one discovered already-failed at construction — "resume"). */
+export interface MutationFailedInfo {
+  clientId: string;
+  seq: number;
+  udfPath: string;
+  error: OutboxEntryError;
+}
+
+/** T5 (R9): one row of `client.pendingMutations()`/`usePendingMutations()` — a snapshot from the
+ *  DURABLE store (verdict §(d) "Observability"), not the in-memory reconciler log; `retry()`/
+ *  `dismiss()` are meaningful only when `status === "failed"` (a terminal, server-recorded verdict —
+ *  every other status is still in flight and simply isn't a `retry()`/`dismiss()` candidate) and are
+ *  harmless no-ops otherwise. */
+export interface PendingMutationEntry {
+  readonly clientId: string;
+  readonly seq: number;
+  readonly udfPath: string;
+  readonly status: OutboxEntryStatus;
+  readonly enqueuedAt: number;
+  readonly error?: OutboxEntryError;
+  /** Re-enqueue this FAILED entry under a fresh `(clientId, seq)` — "never reuse a seq for a new
+   *  attempt" (verdict §(b)): the old seq's durable record IS its terminal verdict. No-op unless
+   *  `status === "failed"`. */
+  retry(): Promise<void>;
+  /** Permanently remove this FAILED entry from the durable store without retrying. No-op unless
+   *  `status === "failed"`. */
+  dismiss(): Promise<void>;
+}
+
+/** T5 (R9, hazard 2's client half): the queue-age/size advisory — cheap enough to poll before
+ *  surfacing a "you have offline changes that may be lost soon" banner ahead of Safari's 7-day
+ *  eviction cliff. `oldestEnqueuedAt`/`oldestAgeMs` are `undefined` for an empty (or unconfigured)
+ *  outbox. */
+export interface PendingSummary {
+  count: number;
+  oldestEnqueuedAt: number | undefined;
+  oldestAgeMs: number | undefined;
+}
+
+/** T5 (R9): the one method `usePendingMutations()`'s cross-tab nudge needs from `BroadcastChannel` —
+ *  a minimal, structurally-fakeable seam (the same probe-and-fallback discipline as
+ *  `OutboxLockManager`, `./outbox-drain`). Real `BroadcastChannel`s satisfy this structurally. */
+export interface OutboxBroadcastLike {
+  postMessage(message: unknown): void;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  close(): void;
+}
+
+/** Probe the ambient `BroadcastChannel` global — absent in most Node/vitest runtimes and in
+ *  private-mode Safari without a same-origin partition; returns `undefined` there, in which case
+ *  cross-tab observability degrades to same-instance-only (still fully reactive within one tab).
+ *  Wraps (rather than returns) the real channel: the DOM `BroadcastChannel.onmessage` setter's
+ *  parameter type is the full `MessageEvent`, which isn't structurally assignable to this seam's
+ *  minimal `{ data: unknown }` shape — the wrapper is the adapter, not a cast. */
+function probeBroadcastChannel(name: string): OutboxBroadcastLike | undefined {
+  if (typeof BroadcastChannel === "undefined") return undefined;
+  const channel = new BroadcastChannel(name);
+  let closed = false;
+  const wrapper: OutboxBroadcastLike = {
+    // A `postMessage` racing an in-flight write-behind `.then()` against `close()` (e.g. a client
+    // torn down mid-test, or an app unmounting while an append is still resolving) must NEVER throw
+    // out from under `notifyOutboxChange()` — `closed` makes this a harmless no-op instead of the
+    // DOM's `InvalidStateError`.
+    postMessage: (message) => {
+      if (!closed) channel.postMessage(message);
+    },
+    onmessage: null,
+    close: () => {
+      closed = true;
+      channel.close();
+    },
+  };
+  channel.onmessage = (ev) => wrapper.onmessage?.({ data: ev.data });
+  return wrapper;
 }
 
 let entropyCounter = 0;
@@ -80,7 +160,7 @@ export class StackbaseClient {
   private readonly store = new LayeredQueryStore();
   private readonly reconciler: Reconciler;
   /** Mutation promise callbacks, keyed by requestId — resolved/rejected here; layers live in the log. */
-  private readonly pendingMutations = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
+  private readonly pendingMutationCallbacks = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly pendingActions = new Map<string, { resolve: (v: Value) => void; reject: (e: Error) => void }>();
   private readonly broadcastListeners = new Set<(topic: string, event: Value) => void>();
   private readonly disposeTransport: () => void;
@@ -155,6 +235,31 @@ export class StackbaseClient {
    *  effects. Present iff `opts.outbox` is configured; started at construction. */
   private readonly outboxDrain?: OutboxDrain;
 
+  /* -------------------------------------------------------------------------------------------
+   * T5 — the `optimisticUpdates` registry, R9 observability.
+   * ------------------------------------------------------------------------------------------- */
+
+  /** T5: the registry `mutation()` NEVER consults — only `addHydratedEntry` does, at hydrate time
+   *  (verdict §(d): "call-site closure wins for the live call; the registry is consulted only at
+   *  hydrate"). Plain string-keyed: a generated `UdfPathOf<Api>` union (`@stackbase/codegen`) narrows
+   *  the caller's OWN object-literal keys; this package never imports that generated type. */
+  private readonly optimisticUpdates: Partial<Record<string, OptimisticUpdateFn>>;
+  /** udfPaths already warned for a registry miss at hydrate — "one warn per udfPath" (spec §(k)6),
+   *  not once per missed ENTRY (a stale backlog of the same unregistered udfPath warns exactly once). */
+  private readonly optimisticUpdateMissWarned = new Set<string>();
+  /** T5 (R9): fired for a terminal durable failure with no live promise awaiter THIS session (a
+   *  hydrated/retried entry, or one discovered already-failed at construction — "resume"). Never
+   *  fired for a failure a live `mutation()` caller's own rejected promise already delivered
+   *  (Lunora's `hadAwaiter` — no double notification for one failure). */
+  private readonly onMutationFailedCallback?: (info: MutationFailedInfo) => void;
+  /** T5 (R9): same-instance listeners for "the durable outbox changed" — `usePendingMutations()`'s
+   *  re-read trigger. Fired locally on every outbox-mutating op AND on an incoming cross-tab
+   *  `outboxBroadcast` message (unified into one path — a listener never needs to know which). */
+  private readonly outboxChangeListeners = new Set<() => void>();
+  /** T5 (R9): the cross-tab nudge — `undefined` when no outbox is configured or the probe/injected
+   *  option resolved to nothing (single-tab observability still works via `outboxChangeListeners`). */
+  private readonly outboxBroadcast?: OutboxBroadcastLike;
+
   constructor(
     transport: ClientTransport,
     opts: {
@@ -179,6 +284,16 @@ export class StackbaseClient {
       outboxBackoffMs?: (attempts: number) => number;
       /** Fired once when `poisonPolicy: "pause"` halts the drain (surfacing). */
       onOutboxPause?: (info: { requestId: string; udfPath: string; code: string }) => void;
+      /** T5: the durable-outbox registry — consulted ONLY when a durable entry is hydrated after a
+       *  reload (never for a live call). Plain string-keyed here; a generated `UdfPathOf<Api>`
+       *  (`@stackbase/codegen`) narrows an app's own object literal at the call site. */
+      optimisticUpdates?: Partial<Record<string, OptimisticUpdateFn>>;
+      /** T5 (R9): fired for a terminal durable failure with no live promise awaiter this session. */
+      onMutationFailed?: (info: MutationFailedInfo) => void;
+      /** T5 (R9): the cross-tab nudge for `usePendingMutations()` — `undefined` probes the ambient
+       *  `BroadcastChannel`, `null` disables it (single-tab observability only), an object is used
+       *  directly (tests inject a fake). */
+      outboxBroadcast?: OutboxBroadcastLike | null;
     } = {},
   ) {
     this.transport = transport;
@@ -186,6 +301,8 @@ export class StackbaseClient {
     this.outbox = opts.outbox;
     this.onClientResetCallback = opts.onClientReset;
     this.outboxMaxQueueSize = opts.outboxMaxQueueSize ?? DEFAULT_OUTBOX_MAX_QUEUE_SIZE;
+    this.optimisticUpdates = opts.optimisticUpdates ?? {};
+    this.onMutationFailedCallback = opts.onMutationFailed;
     if (opts.outbox) {
       this.outboxClientId = defaultMintClientId();
       this.outboxIdentity = mintIdentity(opts.outbox, { mintClientId: () => this.outboxClientId! }).then((id) => {
@@ -201,6 +318,17 @@ export class StackbaseClient {
         backoffMs: opts.outboxBackoffMs,
         onPause: opts.onOutboxPause,
       });
+      this.outboxBroadcast =
+        opts.outboxBroadcast === null ? undefined : (opts.outboxBroadcast ?? probeBroadcastChannel(`stackbase:outbox:${this.originTag()}:${opts.outboxDeployment ?? "default"}:pending`));
+      if (this.outboxBroadcast) {
+        this.outboxBroadcast.onmessage = () => {
+          for (const l of this.outboxChangeListeners) l();
+        };
+      }
+      // R9 "resume" refire: scan the durable store for ALREADY-failed entries left behind (a prior
+      // session that ended before the app ever surfaced them) — trivially "no awaiter" (nothing has
+      // called `mutation()` yet this session), so every one refires unconditionally.
+      void this.refireDurableFailures();
     }
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());
@@ -380,7 +508,7 @@ export class StackbaseClient {
     this.reconciler.initiate(entry);
 
     return new Promise<Value>((resolve, reject) => {
-      this.pendingMutations.set(requestId, { resolve, reject });
+      this.pendingMutationCallbacks.set(requestId, { resolve, reject });
       if (this.closed || queueBusy) {
         // Offline, or FIFO behind an already-queued backlog: retain as `unsent` for a flush. The
         // promise stays pending.
@@ -397,6 +525,7 @@ export class StackbaseClient {
           entry.durable = true;
           // Now durable → drain-eligible: wake the drain (wake on enqueue, verdict §(d)).
           this.outboxDrain?.nudge();
+          this.notifyOutboxChange(); // T5 (R9): usePendingMutations()'s re-read trigger.
         });
       }
     });
@@ -510,6 +639,7 @@ export class StackbaseClient {
 
   close(): void {
     this.outboxDrain?.stop();
+    this.outboxBroadcast?.close();
     this.disposeTransport();
     this.disposeClose();
     this.disposeReopen?.();
@@ -574,21 +704,30 @@ export class StackbaseClient {
         // Capture the outbox identity BEFORE the settling event removes the entry from the log —
         // dequeue-on-success/settle needs its recorded `(clientId, seq)` (T3, verdict §(f) AC1.2).
         const entry = this.reconciler.getEntry(msg.requestId);
-        const pending = this.pendingMutations.get(msg.requestId);
-        this.pendingMutations.delete(msg.requestId);
+        const pending = this.pendingMutationCallbacks.get(msg.requestId);
+        const hadAwaiter = pending !== undefined;
+        this.pendingMutationCallbacks.delete(msg.requestId);
         if (msg.success) {
           // `value` is optional on the wire (a Receipted Outbox replay-ack with `valueMissing`
           // omits it); coalesce to null. Full replay handling is Plan B — this keeps today's shape.
           pending?.resolve(jsonToConvex(msg.value ?? null)); // D3: resolve now
           this.reconciler.onMutationSuccess(msg.requestId, msg.ts);
+          // A successful response means this durable entry's fate is known — dequeue it so it never
+          // resends. (No-op when no outbox is configured.)
+          this.dequeueOutboxEntry(entry);
         } else {
           pending?.reject(this.mutationError(msg.error, msg.code));
           this.reconciler.onMutationFailure(msg.requestId);
+          // R9: MARK failed (persist for the tray) instead of dequeuing — a retryable follow-up is a
+          // FRESH seq (verdict §(d) `retry()`), never a resurrection of this record. `hadAwaiter` is
+          // essentially always true on this direct-send path (the caller's own promise already
+          // learned of the failure via `pending.reject` above) — the refire/dev-loud path exists for
+          // the rare case a caller's promise had no live handler by the time this settles.
+          if (entry?.clientId !== undefined && entry.seq !== undefined) {
+            this.outboxMarkFailed(entry.clientId, entry.seq, msg.error, msg.code);
+          }
+          if (!hadAwaiter) this.notifyMutationFailed(entry?.clientId, entry?.seq, entry?.udfPath ?? "unknown", { message: msg.error, code: msg.code });
         }
-        // A settled response (either outcome) means this durable entry's fate is known — dequeue it
-        // so it never resends. A retryable follow-up is a FRESH seq (verdict §(d) retry()), never a
-        // resurrection of this record. (No-op when no outbox is configured.)
-        this.dequeueOutboxEntry(entry);
         return;
       }
       case "ConnectAck":
@@ -641,12 +780,18 @@ export class StackbaseClient {
     // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets. Task 2's
     // park swap (armed + durable) is folded in here via `this.outboxArmed` — `rejectedInflight`
     // already excludes anything that parked instead; a parked entry's promise stays pending in
-    // `pendingMutations`, untouched, ready for a future drain (T4) to settle.
-    const { rejectedInflight } = this.reconciler.closeSession(this.outboxArmed);
+    // `pendingMutationCallbacks`, untouched, ready for a future drain (T4) to settle.
+    const { rejectedInflight, parked } = this.reconciler.closeSession(this.outboxArmed);
     for (const rid of rejectedInflight) {
-      const pending = this.pendingMutations.get(rid);
-      this.pendingMutations.delete(rid);
+      const pending = this.pendingMutationCallbacks.get(rid);
+      this.pendingMutationCallbacks.delete(rid);
       pending?.reject(new MutationUndeliveredError());
+    }
+    // T5 (R9): persist the park transition too — otherwise a parked entry's durable `status` stays
+    // frozen at whatever it was appended/last flushed as, misleading `pendingMutations()`'s tray.
+    for (const rid of parked) {
+      const entry = this.reconciler.getEntry(rid);
+      if (entry?.clientId !== undefined && entry.seq !== undefined) this.outboxUpdateStatus(entry.clientId, entry.seq, "parked");
     }
     // Actions have no layer — their outcome is simply unknown on a dropped socket.
     for (const [, pending] of this.pendingActions) pending.reject(new Error("connection closed"));
@@ -819,20 +964,30 @@ export class StackbaseClient {
         // apply, so there is no flicker risk to gate against.
         const value = v.valueMissing ? null : jsonToConvex(v.value ?? null);
         if (entry) this.resolvePending(entry.requestId, value);
-        void this.outbox?.dequeue(v.clientId, v.seq);
+        this.outboxDequeue(v.clientId, v.seq);
         if (entry) this.dropAfterBaseline(entry.requestId);
         break;
       }
       case "failed": {
-        if (entry) this.rejectPending(entry.requestId, this.mutationError(`mutation "${entry.udfPath}" failed`, v.code));
-        void this.outbox?.dequeue(v.clientId, v.seq);
+        // R9: MARK failed (persist, don't dequeue) instead of removing — "failed entries persist
+        // until dismissed/retried". `hadAwaiter` gates the `onMutationFailed` refire (never a double
+        // notification for a failure the entry's own live promise already delivered THIS session).
+        const hadAwaiter = entry ? this.pendingMutationCallbacks.has(entry.requestId) : false;
+        const message = `mutation "${entry?.udfPath ?? "unknown"}" failed`;
+        if (entry) this.rejectPending(entry.requestId, this.mutationError(message, v.code));
+        this.outboxMarkFailed(v.clientId, v.seq, message, v.code);
         if (entry) this.reconciler.onMutationFailure(entry.requestId);
+        if (!hadAwaiter) this.notifyMutationFailed(v.clientId, v.seq, entry?.udfPath ?? "unknown", { message, code: v.code });
         break;
       }
       case "stale": {
-        if (entry) this.rejectPending(entry.requestId, this.mutationError("mutation disowned (STALE_CLIENT)", v.code ?? "STALE_CLIENT"));
-        void this.outbox?.dequeue(v.clientId, v.seq);
+        const hadAwaiter = entry ? this.pendingMutationCallbacks.has(entry.requestId) : false;
+        const message = "mutation disowned (STALE_CLIENT)";
+        const code = v.code ?? "STALE_CLIENT";
+        if (entry) this.rejectPending(entry.requestId, this.mutationError(message, code));
+        this.outboxMarkFailed(v.clientId, v.seq, message, code);
         if (entry) this.reconciler.onMutationFailure(entry.requestId);
+        if (!hadAwaiter) this.notifyMutationFailed(v.clientId, v.seq, entry?.udfPath ?? "unknown", { message, code });
         break;
       }
       case "unknown":
@@ -856,17 +1011,25 @@ export class StackbaseClient {
     // Snapshot first — the loop rejects (mutates promise maps) and re-stamps entries.
     for (const entry of [...this.reconciler.entries()]) {
       if (entry.status.type === "parked") {
-        if (oldClientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(oldClientId, entry.seq);
+        // R9: MARK failed (persist for the tray) rather than dequeue — a deliberate user-initiated
+        // `retry()` under a FRESH `(clientId, seq)` is safe even though a blind auto-resend under the
+        // OLD identity would not be (the reason it rejects loudly in the first place).
+        const hadAwaiter = this.pendingMutationCallbacks.has(entry.requestId);
+        const resetMessage = "the server disowned this client's mutation history (swept/foreign timeline)";
+        if (oldClientId !== undefined && entry.seq !== undefined) {
+          this.outboxMarkFailed(oldClientId, entry.seq, resetMessage, "OFFLINE_CLIENT_RESET");
+        }
         this.rejectPending(entry.requestId, new OfflineClientResetError());
         this.reconciler.onMutationFailure(entry.requestId); // remove from the log (no layer to roll back)
+        if (!hadAwaiter) this.notifyMutationFailed(oldClientId, entry.seq, entry.udfPath, { message: resetMessage, code: "OFFLINE_CLIENT_RESET" });
         parkedRejected++;
       } else if (entry.status.type === "unsent") {
         // Re-key onto the fresh identity under a brand-new seq; the old durable record is dropped.
-        if (oldClientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(oldClientId, entry.seq);
+        if (oldClientId !== undefined && entry.seq !== undefined) this.outboxDequeue(oldClientId, entry.seq);
         entry.clientId = fresh;
         entry.seq = this.outboxNextSeq++;
         entry.order = this.nextOutboxOrder();
-        void this.outbox?.append(this.toOutboxEntry(entry));
+        this.outboxAppend(entry);
         unsentReEnqueued++;
       }
     }
@@ -890,15 +1053,15 @@ export class StackbaseClient {
 
   /** Resolve a pending mutation promise by requestId (no-op if it already settled / has no awaiter). */
   private resolvePending(requestId: string, value: Value): void {
-    const pending = this.pendingMutations.get(requestId);
-    this.pendingMutations.delete(requestId);
+    const pending = this.pendingMutationCallbacks.get(requestId);
+    this.pendingMutationCallbacks.delete(requestId);
     pending?.resolve(value);
   }
 
   /** Reject a pending mutation promise by requestId (no-op if it already settled / has no awaiter). */
   private rejectPending(requestId: string, error: Error): void {
-    const pending = this.pendingMutations.get(requestId);
-    this.pendingMutations.delete(requestId);
+    const pending = this.pendingMutationCallbacks.get(requestId);
+    this.pendingMutationCallbacks.delete(requestId);
     pending?.reject(error);
   }
 
@@ -911,9 +1074,7 @@ export class StackbaseClient {
 
   /** Dequeue a settled durable entry from the outbox store (no-op without an outbox / clientId). */
   private dequeueOutboxEntry(entry: PendingMutation | undefined): void {
-    if (this.outbox && entry?.clientId !== undefined && entry.seq !== undefined) {
-      void this.outbox.dequeue(entry.clientId, entry.seq);
-    }
+    if (entry?.clientId !== undefined && entry.seq !== undefined) this.outboxDequeue(entry.clientId, entry.seq);
   }
 
   /** An `Error` carrying the server's terminal verdict `code` (STALE_CLIENT, an app error code) so
@@ -947,6 +1108,9 @@ export class StackbaseClient {
       ensureInitialHandshake: () => this.initiateHandshake(this.store.byId.size > 0),
       setStatus: (entry, status) => {
         entry.status = { type: status };
+        // T5 (R9): persist the transition too — `pendingMutations()` reads the DURABLE record, so
+        // without this its `status` would stay frozen at whatever `append()` first wrote.
+        if (entry.clientId !== undefined && entry.seq !== undefined) this.outboxUpdateStatus(entry.clientId, entry.seq, status);
       },
       batchEntry: (entry) => this.drainBatchEntry(entry),
       sendBatch: (entries) => this.transport.send({ type: "MutationBatch", entries }),
@@ -975,8 +1139,10 @@ export class StackbaseClient {
   /** Add a hydrated durable entry into the log under a FRESH requestId (the persisted requestId was
    *  session-correlation only; a fresh one avoids colliding with this session's requestId counter).
    *  Idempotent by `(clientId, seq)` — a direct-send this session already tracks is not re-added.
-   *  Layerless (no `update`): T5's registry rebuilds cross-reload optimistic layers; T4 leaves them
-   *  bare, which is a clean drop under the baseline-gated drop rule. */
+   *  T5: `entry.update` is populated from the `optimisticUpdates` registry (hydrate-only lookup — a
+   *  live call-site closure is never in play here, there IS no live call site for a cross-reload
+   *  entry); a registry miss is layerless (no `update` at all), a clean drop under the baseline-gated
+   *  drop rule exactly as T4 shipped it. */
   private addHydratedEntry(e: OutboxEntry): void {
     for (const existing of this.reconciler.entries()) {
       if (existing.clientId === e.clientId && existing.seq === e.seq) return;
@@ -997,8 +1163,29 @@ export class StackbaseClient {
       identityFingerprint: e.identityFingerprint,
       enqueuedAt: e.enqueuedAt,
       durable: true,
+      update: this.lookupHydratedUpdate(e.udfPath),
     };
-    this.reconciler.log.add(entry);
+    // `addHydrated` (not `initiate`): a throwing registered updater here is ordinary replay-drop
+    // collateral (warned + dropped), never rethrown — there is no synchronous caller on the hydrate
+    // path to propagate it to (see `reconcile.ts#addHydrated`'s doc).
+    this.reconciler.addHydrated(entry);
+  }
+
+  /** T5: the registry lookup `addHydratedEntry` makes — hydrate-time ONLY (verdict §(d): "the
+   *  registry is consulted at hydrate only"). A miss warns ONCE per udfPath (not per entry — a
+   *  backlog of many unregistered entries for the same udfPath warns once) and returns `undefined`:
+   *  the entry still drains fine, only its optimistic rendering is skipped (spec §(k)6). */
+  private lookupHydratedUpdate(udfPath: string): OptimisticUpdate | undefined {
+    const fn = this.optimisticUpdates[udfPath];
+    if (fn) return fn as unknown as OptimisticUpdate;
+    if (!this.optimisticUpdateMissWarned.has(udfPath)) {
+      this.optimisticUpdateMissWarned.add(udfPath);
+      console.warn(
+        `[stackbase] outbox: no optimisticUpdates registered for "${udfPath}" — a hydrated cross-reload ` +
+          `mutation for it will drain without an optimistic layer (rendering only; the mutation itself is unaffected)`,
+      );
+    }
+    return undefined;
   }
 
   private drainBatchEntry(entry: PendingMutation): MutationBatchEntry {
@@ -1026,18 +1213,173 @@ export class StackbaseClient {
   private drainSettleApplied(requestId: string, value: Value | null, replayed: boolean, ts: number | undefined): void {
     const entry = this.reconciler.getEntry(requestId);
     this.resolvePending(requestId, value);
-    if (entry?.clientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(entry.clientId, entry.seq);
+    if (entry?.clientId !== undefined && entry.seq !== undefined) this.outboxDequeue(entry.clientId, entry.seq);
     if (!entry) return;
     if (replayed) this.dropAfterBaseline(requestId);
     else this.reconciler.onMutationSuccess(requestId, ts);
   }
 
   /** Terminal settlement for a drained unit (a coded server verdict, or the identity gate) — reject
-   *  the awaiting promise (coded), dequeue the durable record, drop the layer. */
+   *  the awaiting promise (coded), MARK the durable record `"failed"` (R9: never dequeue a terminal
+   *  failure — it persists until dismissed/retried), drop the layer, and (T5) refire `onMutationFailed`
+   *  / the dev-loud default when nothing awaited this failure this session. */
   private drainSettleTerminal(requestId: string, code: string | undefined, message: string): void {
     const entry = this.reconciler.getEntry(requestId);
+    const hadAwaiter = this.pendingMutationCallbacks.has(requestId);
     this.rejectPending(requestId, this.mutationError(message, code));
-    if (entry?.clientId !== undefined && entry.seq !== undefined) void this.outbox?.dequeue(entry.clientId, entry.seq);
+    if (entry?.clientId !== undefined && entry.seq !== undefined) this.outboxMarkFailed(entry.clientId, entry.seq, message, code);
     if (entry) this.reconciler.onMutationFailure(requestId);
+    if (!hadAwaiter) this.notifyMutationFailed(entry?.clientId, entry?.seq, entry?.udfPath ?? "unknown", { message, code });
+  }
+
+  /* ---------------------------------------------------------------------------------------------
+   * T5 — R9 observability: `pendingMutations()`/`usePendingMutations()`, `pendingSummary()`,
+   * `onMutationFailed` refire, the dev-mode loud default, and the outbox-change notification bus
+   * every durable-mutating operation above funnels through.
+   * ------------------------------------------------------------------------------------------- */
+
+  /** A snapshot of the durable outbox — `usePendingMutations()`'s underlying read. `[]` without an
+   *  outbox configured (verdict §(d) R9). Each row's `retry()`/`dismiss()` close over the entry as
+   *  read HERE (no extra storage round-trip — `retry()` needs `args`/`seed`/`identityFingerprint`,
+   *  all captured already). */
+  async pendingMutations(): Promise<PendingMutationEntry[]> {
+    if (!this.outbox) return [];
+    const { entries } = await this.outbox.loadAll();
+    return entries.map((e) => this.toPendingMutationEntry(e));
+  }
+
+  /** T5 (R9, hazard 2's client half): count + oldest-age advisory over the durable queue — cheap
+   *  enough to poll for a "your offline changes may be lost soon" banner ahead of a storage cliff
+   *  (Safari's 7-day eviction). `{count: 0, oldestEnqueuedAt: undefined, oldestAgeMs: undefined}`
+   *  without an outbox configured, or with an empty one. */
+  async pendingSummary(): Promise<PendingSummary> {
+    if (!this.outbox) return { count: 0, oldestEnqueuedAt: undefined, oldestAgeMs: undefined };
+    const { entries } = await this.outbox.loadAll();
+    if (entries.length === 0) return { count: 0, oldestEnqueuedAt: undefined, oldestAgeMs: undefined };
+    let oldest = entries[0]!.enqueuedAt;
+    for (const e of entries) if (e.enqueuedAt < oldest) oldest = e.enqueuedAt;
+    return { count: entries.length, oldestEnqueuedAt: oldest, oldestAgeMs: Date.now() - oldest };
+  }
+
+  private toPendingMutationEntry(e: OutboxEntry): PendingMutationEntry {
+    return {
+      clientId: e.clientId,
+      seq: e.seq,
+      udfPath: e.udfPath,
+      status: e.status,
+      enqueuedAt: e.enqueuedAt,
+      error: e.error,
+      retry: () => this.retryOutboxEntry(e),
+      dismiss: () => this.dismissOutboxEntry(e),
+    };
+  }
+
+  /** `entry.retry()` (R9): a FAILED entry only — everything else is a harmless no-op (verdict §(b):
+   *  "never reuse a seq for a new attempt"). Dequeues the OLD (failed-verdict) durable record and
+   *  builds a brand-new `PendingMutation` — fresh requestId/seq/order, the CURRENT session's identity
+   *  fingerprint (a fair shot even if identity rotated since the original failure), reconstructed
+   *  exactly like a hydrated entry (same udfPath/args/seed; the registry is consulted — there is no
+   *  live call-site closure for a retry either). No live promise is registered: like a hydrated
+   *  entry, its eventual outcome surfaces via `usePendingMutations()`/`onMutationFailed`, never a
+   *  returned `Promise<Value>` (the durable record outlives any promise). */
+  private async retryOutboxEntry(e: OutboxEntry): Promise<void> {
+    if (!this.outbox || e.status !== "failed" || this.outboxClientId === undefined) return;
+    const requestId = String(this.nextRequestId++);
+    const entry: PendingMutation = {
+      requestId,
+      udfPath: e.udfPath,
+      args: e.args,
+      seed: e.seed,
+      touched: new Set(),
+      status: { type: "unsent" },
+      clientId: this.outboxClientId,
+      seq: this.outboxNextSeq++,
+      order: this.nextOutboxOrder(),
+      identityFingerprint: this.outboxFingerprint,
+      enqueuedAt: Date.now(),
+      durable: false,
+      update: this.lookupHydratedUpdate(e.udfPath),
+    };
+    this.reconciler.addHydrated(entry);
+    this.outboxAppend(entry);
+    this.outboxDequeue(e.clientId, e.seq);
+    this.outboxDrain?.nudge();
+  }
+
+  /** `entry.dismiss()` (R9): a FAILED entry only — permanently forget it without retrying. */
+  private async dismissOutboxEntry(e: OutboxEntry): Promise<void> {
+    if (!this.outbox || e.status !== "failed") return;
+    this.outboxDequeue(e.clientId, e.seq);
+  }
+
+  /** T5 (R9): subscribe to "the durable outbox changed" — `usePendingMutations()`'s re-read trigger.
+   *  Fires on every local outbox-mutating op AND on an incoming cross-tab `outboxBroadcast` message. */
+  onOutboxChange(listener: () => void): () => void {
+    this.outboxChangeListeners.add(listener);
+    return () => this.outboxChangeListeners.delete(listener);
+  }
+
+  private notifyOutboxChange(): void {
+    for (const l of this.outboxChangeListeners) l();
+    this.outboxBroadcast?.postMessage(1); // the payload is irrelevant — the message IS the nudge.
+  }
+
+  /** Every durable-mutating outbox call site funnels through these three wrappers (instead of a bare
+   *  `this.outbox?.xxx(...)`) so `notifyOutboxChange()` is never missed at a new call site. */
+  private outboxAppend(entry: PendingMutation): void {
+    if (!this.outbox) return;
+    void this.outbox.append(this.toOutboxEntry(entry)).then(() => {
+      entry.durable = true; // write-behind confirmed — mirrors `mutation()`'s own append `.then()`.
+      this.outboxDrain?.nudge();
+      this.notifyOutboxChange();
+    });
+  }
+
+  private outboxDequeue(clientId: string, seq: number): void {
+    if (!this.outbox) return;
+    void this.outbox.dequeue(clientId, seq).then(() => this.notifyOutboxChange());
+  }
+
+  private outboxUpdateStatus(clientId: string, seq: number, status: OutboxEntryStatus): void {
+    if (!this.outbox) return;
+    void this.outbox.updateStatus(clientId, seq, status).then(() => this.notifyOutboxChange());
+  }
+
+  /** Record a terminal failure DURABLY (`status: "failed"` + the error) instead of dequeuing — R9:
+   *  "failed entries persist until dismissed/retried". */
+  private outboxMarkFailed(clientId: string, seq: number, message: string, code: string | undefined): void {
+    if (!this.outbox) return;
+    void this.outbox.updateStatus(clientId, seq, "failed", { message, code }).then(() => this.notifyOutboxChange());
+  }
+
+  /** T5 (R9): fire `onMutationFailed` for a terminal durable failure with NO live promise awaiter
+   *  this session (`hadAwaiter` already checked by every call site) — or, absent a registered
+   *  handler, the dev-mode loud `console.error` default (spec-review: "the five-line courtesy" no
+   *  position shipped). A no-op for a non-outbox-tracked entry (`clientId`/`seq` undefined) — R9 is
+   *  entirely a durable-outbox concern. */
+  private notifyMutationFailed(clientId: string | undefined, seq: number | undefined, udfPath: string, error: OutboxEntryError): void {
+    if (clientId === undefined || seq === undefined) return;
+    if (this.onMutationFailedCallback) {
+      this.onMutationFailedCallback({ clientId, seq, udfPath, error });
+    } else if (isDevMode()) {
+      console.error(
+        `[stackbase] outbox: mutation "${udfPath}" (clientId=${clientId}, seq=${seq}) failed terminally` +
+          `${error.code ? ` (${error.code})` : ""} with no onMutationFailed handler registered: ${error.message}`,
+      );
+    }
+  }
+
+  /** R9 "resume" refire (constructor-only, verdict §(d) Observability: "`onMutationFailed` refires
+   *  from durable records on resume"): a fresh `StackbaseClient` instance has made zero `mutation()`
+   *  calls yet, so EVERY already-`"failed"` durable record found here is trivially "no live awaiter" —
+   *  Lunora's `hadAwaiter` check is unconditionally false at this point, no gating needed. */
+  private async refireDurableFailures(): Promise<void> {
+    if (!this.outbox) return;
+    const { entries } = await this.outbox.loadAll();
+    for (const e of entries) {
+      if (e.status === "failed") {
+        this.notifyMutationFailed(e.clientId, e.seq, e.udfPath, e.error ?? { message: `mutation "${e.udfPath}" failed` });
+      }
+    }
   }
 }

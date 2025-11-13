@@ -22,3 +22,9 @@ export type Api = {
     send: FunctionReference<"mutation", "public", { conversationId: Id<"conversations">; author: string; body: string }, Id<"messages">>;
   };
 };
+
+export type UdfPathOf<A> = {
+  [M in keyof A & string]: {
+    [F in keyof A[M] & string]: `${M}:${F}`;
+  }[keyof A[M] & string];
+}[keyof A & string];

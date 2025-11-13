@@ -219,8 +219,11 @@ describe("OutboxDrain — coded failure is skip-and-record: settle terminal + CO
     t.emit({ type: "MutationResponse", requestId: batch.entries[2]!.requestId, success: true, value: "ok2", ts: 6 });
     await tick();
 
-    // All three left the durable store (the coded one was server-recorded → dequeued too).
-    expect((await outbox.loadAll()).entries).toHaveLength(0);
+    // The two APPLIED units left the durable store; the CODED one persists as `"failed"` — T5 (R9):
+    // "failed entries persist until dismissed/retried" (verdict §(d) Observability), not dequeued.
+    const remaining = (await outbox.loadAll()).entries;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({ seq: 1, status: "failed", error: { message: 'mutation "messages:send" failed', code: "APP_ERR" } });
     expect(client.__pending).toHaveLength(0);
     // The drain did NOT stop on the coded failure — it is not paused, and nothing lingers.
     expect(client.__outboxDrain!.isPaused).toBe(false);
@@ -489,10 +492,16 @@ describe("OutboxDrain — the flush-time identity gate (T4, hazard 9)", () => {
     // Only the matching entry is on the wire; the foreign one was dropped before flush.
     expect(batch.entries.map((e) => e.seq)).toEqual([0]);
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining(OFFLINE_IDENTITY_CHANGED));
-    // The foreign entry was dequeued (terminal), the matching one still pending its response.
+    // The foreign entry persists as `"failed"` (T5 R9: never dequeued on a terminal failure), the
+    // matching one still pending its response.
     await tick();
-    const remaining = (await outbox.loadAll()).entries.map((e) => e.seq);
-    expect(remaining).toEqual([0]); // seq1 gone (identity-failed), seq0 still in flight
+    const all = (await outbox.loadAll()).entries;
+    expect(all.map((e) => e.seq).sort()).toEqual([0, 1]);
+    const foreign = all.find((e) => e.seq === 1)!;
+    expect(foreign.status).toBe("failed");
+    expect(foreign.error?.code).toBe(OFFLINE_IDENTITY_CHANGED);
+    const inflight = all.find((e) => e.seq === 0)!;
+    expect(inflight.status).not.toBe("failed"); // seq0 still in flight, awaiting its response
     errSpy.mockRestore();
   });
 });

@@ -202,7 +202,7 @@ describe("StackbaseClient — ConnectAck verdict settlement (T3)", () => {
     await expect(p).resolves.toBeNull();
   });
 
-  it("failed → the promise rejects with the terminal code; stale → STALE_CLIENT; both dequeue", async () => {
+  it("failed → the promise rejects with the terminal code; stale → STALE_CLIENT; both persist `\"failed\"` durably (T5 R9)", async () => {
     const outbox = memoryOutbox();
     const { t, client } = armedClient(outbox);
     client.setOutboxArmed(true);
@@ -226,7 +226,14 @@ describe("StackbaseClient — ConnectAck verdict settlement (T3)", () => {
     await expect(failP).rejects.toMatchObject({ code: "APP_ERROR" });
     await expect(staleP).rejects.toMatchObject({ code: "STALE_CLIENT" });
     await flushMicrotasks();
-    expect((await outbox.loadAll()).entries).toHaveLength(0);
+    // T5 (R9): a `failed`/`stale` ConnectAck verdict MARKS the durable record `"failed"` instead of
+    // dequeuing it — "failed entries persist until dismissed/retried" (verdict §(d) Observability).
+    const remaining = (await outbox.loadAll()).entries;
+    expect(remaining).toHaveLength(2);
+    expect(remaining.every((e) => e.status === "failed")).toBe(true);
+    const bySeq = new Map(remaining.map((e) => [e.seq, e]));
+    expect(bySeq.get(0)?.error).toMatchObject({ code: "APP_ERROR" });
+    expect(bySeq.get(1)?.error).toMatchObject({ code: "STALE_CLIENT" });
     expect(client.__pending).toHaveLength(0);
   });
 

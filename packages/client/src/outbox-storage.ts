@@ -33,6 +33,13 @@ export { OUTBOX_VERSION };
 
 export type OutboxEntryStatus = "unsent" | "inflight" | "parked" | "completed" | "failed";
 
+/** T5 (R9): the terminal verdict recorded alongside a `"failed"` durable entry — surfaced through
+ *  `client.pendingMutations()`/`usePendingMutations()` and `onMutationFailed`. */
+export interface OutboxEntryError {
+  message: string;
+  code?: string;
+}
+
 /** One durable outbox record — the persisted twin of `PendingMutation` (`./mutation-log`), plus
  *  the fields only a durable queue needs (`clientId`, `seq`, `order`, `identityFingerprint`,
  *  `outboxVersion`, `enqueuedAt`). `args`/`seed` are the fields whose omission would make a
@@ -54,6 +61,10 @@ export interface OutboxEntry {
   identityFingerprint?: string;
   outboxVersion: number;
   enqueuedAt: number;
+  /** T5 (R9): set (via `updateStatus`'s optional 4th argument) when `status` transitions to
+   *  `"failed"` — a terminal, server-recorded verdict a live `mutation()` promise may have no
+   *  awaiter for (a hydrated cross-reload entry, or a retried one). Absent for every other status. */
+  error?: OutboxEntryError;
 }
 
 export interface OutboxMeta {
@@ -81,7 +92,11 @@ export interface OutboxStorage {
    *  wire — "the send never waits for the append" (verdict §(d)); this promise exists so a caller
    *  CAN confirm durability later (e.g. park-eligibility at transport close). */
   append(entry: OutboxEntry): Promise<void>;
-  updateStatus(clientId: string, seq: number, status: OutboxEntryStatus): Promise<void>;
+  /** Mutate only `status` (and, when given, `error` — T5's R9 terminal-failure record; every other
+   *  field is preserved verbatim). Called with `status: "failed"` INSTEAD OF `dequeue()` on a
+   *  terminal failure (verdict §(d) R9: "failed entries persist until dismissed/retried") — every
+   *  other status transition (`"inflight"`/`"unsent"`/`"parked"`) omits `error`. */
+  updateStatus(clientId: string, seq: number, status: OutboxEntryStatus, error?: OutboxEntryError): Promise<void>;
   /** Remove a fully-settled entry. */
   dequeue(clientId: string, seq: number): Promise<void>;
   /** Hydrate the whole shared queue, across every clientId, in persisted `order`. */
@@ -155,9 +170,9 @@ export function memoryOutbox(): OutboxStorage {
     async append(entry) {
       entries.set(key(entry.clientId, entry.seq), { ...entry });
     },
-    async updateStatus(clientId, seq, status) {
+    async updateStatus(clientId, seq, status, error) {
       const existing = entries.get(key(clientId, seq));
-      if (existing) entries.set(key(clientId, seq), { ...existing, status });
+      if (existing) entries.set(key(clientId, seq), { ...existing, status, ...(error !== undefined ? { error } : {}) });
     },
     async dequeue(clientId, seq) {
       entries.delete(key(clientId, seq));
@@ -224,7 +239,7 @@ export function indexedDBOutbox(opts: IndexedDBOutboxOptions = {}): OutboxStorag
 
   return {
     append: async (entry) => (await impl()).append(entry),
-    updateStatus: async (clientId, seq, status) => (await impl()).updateStatus(clientId, seq, status),
+    updateStatus: async (clientId, seq, status, error) => (await impl()).updateStatus(clientId, seq, status, error),
     dequeue: async (clientId, seq) => (await impl()).dequeue(clientId, seq),
     loadAll: async () => (await impl()).loadAll(),
     getMeta: async (clientId) => (await impl()).getMeta(clientId),

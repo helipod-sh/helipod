@@ -137,6 +137,23 @@ function emitApiModules(manifest: AnalyzedFunctionManifest, visibility: Visibili
     .join("\n");
 }
 
+/**
+ * `UdfPathOf<A>` — every callable public udfPath (`"module:function"`, matching the runtime
+ * `api.messages.send.__path` format exactly — see `@stackbase/client`'s `api.ts#getFunctionPath`)
+ * reachable from a generated `Api`-shaped type. Spec §(k) decision 6: the durable outbox's
+ * `optimisticUpdates` registry (`StackbaseClient`'s constructor option, `@stackbase/client`) is
+ * typed `Partial<Record<UdfPathOf<Api>, OptimisticUpdateFn>>` in app code — the KEYS are narrowed
+ * to real udfPaths via this codegen-emitted union; the VALUE type stays one generic function shape
+ * (no per-key Args inference), so `@stackbase/client` itself only needs a plain string-keyed
+ * `Partial<Record<string, OptimisticUpdateFn>>` — `UdfPathOf<Api>` narrows structurally at the call
+ * site, nothing in the client package needs to import it.
+ */
+const UDF_PATH_OF_TYPE = `export type UdfPathOf<A> = {
+  [M in keyof A & string]: {
+    [F in keyof A[M] & string]: \`\${M}:\${F}\`;
+  }[keyof A[M] & string];
+}[keyof A & string];`;
+
 export function generateApi(manifest: AnalyzedFunctionManifest, options: CodegenOptions = {}): GeneratedFile {
   const content = `${options.header ?? DEFAULT_HEADER}
 ${FUNCTION_REFERENCE_TYPE}
@@ -144,6 +161,8 @@ ${FUNCTION_REFERENCE_TYPE}
 export type Api = {
 ${emitApiModules(manifest, "public")}
 };
+
+${UDF_PATH_OF_TYPE}
 `;
   return { path: "api.d.ts", content };
 }

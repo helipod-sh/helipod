@@ -19,7 +19,7 @@
  * both stores and applies every op queued since the last flush, in call order. Callers that fire
  * several appends synchronously in the same microtask turn get ONE transaction, not N.
  */
-import type { HydrateResult, OutboxEntry, OutboxEntryStatus, OutboxMeta, OutboxStorage } from "./outbox-storage";
+import type { HydrateResult, OutboxEntry, OutboxEntryError, OutboxEntryStatus, OutboxMeta, OutboxStorage } from "./outbox-storage";
 
 /** Bump when the persisted entry shape changes incompatibly. A hydrate that finds an entry
  *  stamped with a different version DROPS it (verdict §(g) hazard 10) — never runs it, never
@@ -92,6 +92,7 @@ type PendingOp =
       clientId: string;
       seq: number;
       status: OutboxEntryStatus;
+      error?: OutboxEntryError;
       resolve: () => void;
       reject: (e: unknown) => void;
     }
@@ -124,8 +125,8 @@ export class IndexedDBOutboxStorage implements OutboxStorage {
     return this.schedule((resolve, reject) => ({ kind: "append", entry, resolve, reject }));
   }
 
-  updateStatus(clientId: string, seq: number, status: OutboxEntryStatus): Promise<void> {
-    return this.schedule((resolve, reject) => ({ kind: "updateStatus", clientId, seq, status, resolve, reject }));
+  updateStatus(clientId: string, seq: number, status: OutboxEntryStatus, error?: OutboxEntryError): Promise<void> {
+    return this.schedule((resolve, reject) => ({ kind: "updateStatus", clientId, seq, status, error, resolve, reject }));
   }
 
   dequeue(clientId: string, seq: number): Promise<void> {
@@ -162,7 +163,7 @@ export class IndexedDBOutboxStorage implements OutboxStorage {
           const getReq = entriesStore.get([op.clientId, op.seq]);
           getReq.onsuccess = () => {
             const existing = getReq.result as OutboxEntry | undefined;
-            if (existing) entriesStore.put({ ...existing, status: op.status });
+            if (existing) entriesStore.put({ ...existing, status: op.status, ...(op.error !== undefined ? { error: op.error } : {}) });
           };
           break;
         }

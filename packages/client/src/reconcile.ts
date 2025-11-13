@@ -94,6 +94,22 @@ export class Reconciler {
     this.rebuild();
   }
 
+  /**
+   * T5: add a HYDRATED (cross-reload) durable entry to the log — `client.ts#addHydratedEntry`'s
+   * counterpart to `initiate()` for a live call-site mutation. `entry.update` may already be set
+   * (a registry hit — `client.ts` looks it up BEFORE calling this). Unlike `initiate()`, where the
+   * OWN entry's throw is rethrown synchronously to the `mutation()` caller, a REGISTERED updater
+   * that throws here is ordinary replay-drop collateral — warned and dropped via the normal
+   * `rebuild()` path, never rethrown (there is no synchronous caller on the hydrate path to
+   * propagate to; the entry still drains fine, only its rendering is lost). An entry with no
+   * `update` (no registry hit, or the registry simply wasn't configured) is added without a
+   * recompose pass at all — a plain layerless entry, exactly T4's pre-registry behavior.
+   */
+  addHydrated(entry: PendingMutation): void {
+    this.log.add(entry);
+    if (entry.update) this.rebuild();
+  }
+
   private invokeUpdate = (entry: PendingMutation, view: OptimisticStoreView): void => {
     // T5: enrich the raw view into the typed OptimisticLocalStore (placeholderId()/now()/dev-freeze,
     // derived from `entry.seed`) before invoking. `entry.update`'s declared param type is the
