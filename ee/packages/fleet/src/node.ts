@@ -455,6 +455,15 @@ export interface FleetRuntimeOptions {
    */
   queryStore?: DocStore;
   /**
+   * Receipted Outbox (verdict §(c) placement) — the AUTHORITATIVE receipts store the Connect
+   * handshake classifies/prunes against. Set to the PRIMARY (`pgStore`) on a SYNC node so the
+   * handshake never reads the local replica (which carries no `client_mutations`/`client_floors`
+   * receipts → spurious `known:false` resets / false kill-after-commit failures). Threaded straight
+   * into `createEmbeddedRuntime`. Absent → the runtime uses `store` (writer boots, where `store` IS
+   * the primary; and every non-fleet deployment). See `EmbeddedRuntimeOptions.receiptsStore`.
+   */
+  receiptsStore?: DocStore;
+  /**
    * Fleet B3 hybrid RYOW (D2) — awaited in the runtime's serial fan-out `drain()` before a local
    * commit's subscription re-runs, so those re-runs (reading the replica) don't observe the commit's
    * absence on a replica that hasn't applied it yet. Wired to `forwarder.waitForReplica`. Set only on
@@ -791,16 +800,23 @@ export async function prepareFleetNode(deps: {
     return {
       client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
       runtimeOptions: {
+        // `receiptsStore: pgStore` — the Connect handshake classifies/prunes against the PRIMARY, not
+        // the replica (which carries no receipts). Redundant here (`store` IS `pgStore` for a hybrid),
+        // but set explicitly so the sync-node invariant is uniform across both sync shapes.
         store: pgStore, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards,
-        queryStore: switchable, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
+        queryStore: switchable, receiptsStore: pgStore, beforeNotify, groupCommit, stablePrefix, externalReceiptsGuard: true,
       },
     };
   }
   // Single-writer sync boot: the runtime store is the replica behind the SwitchableDocStore; the
-  // read-only Postgres store is the tail source + promotion swap target only.
+  // read-only Postgres store is the tail source + promotion swap target only. `receiptsStore: pgStore`
+  // routes the Connect handshake's outbox classification/ack-prune to the authoritative PRIMARY —
+  // without it, the handshake reads the replica (no receipts) and spuriously resets the client
+  // (verdict §(c) placement; the mutation-path dedup already forwards its own classification to the
+  // owner via `forwarder`, so only the handshake needed this seam). See `receiptsStore`'s doc comment.
   return {
     client, pgStore, replica, switchable, replicaPath, lease, forwarder, role: "sync", numShards,
-    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, groupCommit, stablePrefix, externalReceiptsGuard: true },
+    runtimeOptions: { store: switchable, writeRouter: forwarder, deferDrivers: true, fanoutAdapter, numShards, receiptsStore: pgStore, groupCommit, stablePrefix, externalReceiptsGuard: true },
   };
 }
 

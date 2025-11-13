@@ -35,6 +35,10 @@ export interface FleetRuntimeOptions {
   /** Fleet B3 hybrid (multi-writer): the replica-backed query store — queries route here while
    *  mutations commit to `store` (the primary). Threaded straight into `createEmbeddedRuntime`. */
   queryStore?: DocStore;
+  /** Receipted Outbox (verdict §(c) placement): the authoritative receipts store the Connect handshake
+   *  classifies/prunes against — the PRIMARY on a sync node (whose `store` is the receipt-less replica).
+   *  Threaded straight into `createEmbeddedRuntime`; absent outside a fleet / on a writer boot. */
+  receiptsStore?: DocStore;
   /** Fleet B3 hybrid RYOW: awaited in the runtime's fan-out drain before a local commit's
    *  subscription re-runs (wired to the fleet forwarder's replica-catch-up wait). */
   beforeNotify?: (commitTs: bigint) => Promise<void>;

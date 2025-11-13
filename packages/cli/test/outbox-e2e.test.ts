@@ -1023,6 +1023,102 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
 });
 
 /* -------------------------------------------------------------------------- */
+/* Scenario (8) — fleet SYNC-NODE Connect classification hits the PRIMARY        */
+/* (T6 finding #2 fix): the receipts tables live only on the authoritative       */
+/* primary, NOT the replica — so a reload via a sync node must classify against  */
+/* the primary or it spuriously resets a client (verdict §(c) placement).        */
+/* -------------------------------------------------------------------------- */
+
+maybeDescribe("outbox client E2E (8) — a reload via the fleet SYNC node classifies receipts against the PRIMARY (no spurious reset, no double-apply)", () => {
+  it("seeds K offline via the writer, reloads THROUGH the sync node with a mid-drain socket kill: the sync node routes Connect classification to the primary → known:true, no reset, and the committed-but-resent entries settle exactly-once (pre-fix: the replica has no receipts → known:false → the client resets, and a committed seq falsely fails)", async () => {
+    const K = 6;
+    const { url: databaseUrl } = await startPgContainer();
+    const portA = await freePort();
+    const portB = await freePort();
+    const dataDirA = mkdtempSync(join(tmpdir(), "sb-oc-syncA-"));
+    const dataDirB = mkdtempSync(join(tmpdir(), "sb-oc-syncB-"));
+    const idb = new IDBFactory();
+
+    let nodeA: ServeProc | undefined;
+    let nodeB: ServeProc | undefined;
+    let proxyA: Awaited<ReturnType<typeof makeProxy>> | undefined;
+    let proxyB: Awaited<ReturnType<typeof makeProxy>> | undefined;
+    let reload: StackbaseClient | undefined;
+    const pg = new NodePgClient({ connectionString: databaseUrl });
+    try {
+      // A → writer (owns all 8 shards); B → sync replica. The reload client talks to the SYNC node B,
+      // whose local replica carries NONE of the `client_mutations`/`client_floors` receipts (they are
+      // not in the replicated MVCC log). The fix routes B's Connect classification to the PRIMARY.
+      nodeA = spawnFleetServe(databaseUrl, portA, dataDirA);
+      expect((await waitForReady(nodeA)).role).toBe("writer");
+      nodeB = spawnFleetServe(databaseUrl, portB, dataDirB);
+      expect((await waitForReady(nodeB)).role).toBe("sync");
+
+      // Seed the offline backlog via the WRITER (its own arm handshake classifies correctly): a
+      // committed prime (→ a recognized primary receipt) + K offline held entries under one clientId.
+      proxyA = await makeProxy(portA);
+      const wsA = `ws://127.0.0.1:${proxyA.port}/api/sync`;
+      const { clientId } = await seedOfflineBacklog({ idb, wsUrl: wsA, proxy: proxyA, box: "syncnode", K });
+
+      // ── RELOAD VIA THE SYNC NODE (the code path under test) ──────────────────────────────────────
+      // A fresh client over the same durable IDB, drained THROUGH a proxy in front of node B (so a
+      // mid-drain kill forces a genuine resend of a committed-but-unacked entry). On its Connect the
+      // client presents `ackedThrough` covering the committed prime + `held` for the K offline seqs.
+      // PRE-FIX: node B classifies the prime's ackedThrough against its receipt-less replica → unknown
+      // → `known:false` → `onClientReset` re-mints the clientId (draining under a FRESH id → ZERO
+      // applied receipts under the ORIGINAL clientId), AND a committed-but-resent seq is falsely
+      // disowned. POST-FIX: node B classifies against the PRIMARY → the prime is recognized →
+      // `known:true`, no reset, and the resent committed entries replay-ack exactly-once.
+      proxyB = await makeProxy(portB);
+      const wsB = `ws://127.0.0.1:${proxyB.port}/api/sync`;
+      let resetInfo: ClientResetInfo | undefined;
+      const failures: MutationFailedInfo[] = [];
+      reload = new StackbaseClient(nodeWsTransport(wsB), {
+        outbox: indexedDBOutbox({ indexedDB: idb }),
+        outboxLocks: null,
+        outboxChunkSize: 1,
+        outboxDrainIntervalMs: 0,
+        onClientReset: (info) => { resetInfo = info; },
+        onMutationFailed: (info) => failures.push(info),
+      });
+      proxyB.setLatencyMs(80);
+
+      // Kill the socket once the drain is underway → a committed-but-unacked entry is resent; the
+      // sync node re-classifies it against the primary (applied) rather than falsely disowning it.
+      const seqCond = `client_id = '${clientId}' AND seq >= 1 AND seq <= ${K}`;
+      let killed = false;
+      await waitFor(async () => {
+        const rows = await pg.query(`SELECT count(*)::int AS n FROM client_mutations WHERE ${seqCond} AND verdict = 'applied'`);
+        const n = (rows[0] as { n: number }).n;
+        if (!killed && n >= 1 && n < K) { killed = true; proxyB!.killLive(); }
+        return n === K;
+      }, 90_000, "sync-node reload drains K under the ORIGINAL clientId");
+      expect(killed).toBe(true); // the resend really happened mid-drain, through the sync node
+
+      // No spurious reset, and no committed entry falsely failed: the sync node recognized the
+      // client's committed timeline off the PRIMARY, not its receipt-less replica.
+      expect(resetInfo).toBeUndefined();
+      expect(failures.filter((f) => f.error.code === "OFFLINE_CLIENT_RESET" || f.error.code === "STALE_CLIENT")).toHaveLength(0);
+      // EXACTLY-ONCE under the ORIGINAL clientId (a reset would have committed them under a fresh id;
+      // a double-apply would exceed K — the primary receipt guard collapses the resend to one row).
+      const rc = await pg.query(`SELECT count(*)::int AS n FROM client_mutations WHERE ${seqCond} AND verdict = 'applied'`);
+      expect((rc[0] as { n: number }).n).toBe(K);
+      await waitFor(async () => (await reload!.pendingMutations()).length === 0, 20_000, "pending K→0 (sync node)");
+    } finally {
+      reload?.close();
+      await proxyA?.close();
+      await proxyB?.close();
+      await pg.close().catch(() => {});
+      await stopServe(nodeA);
+      await stopServe(nodeB);
+      runDocker(["rm", "-f", PG_CONTAINER]);
+      rmSync(dataDirA, { recursive: true, force: true });
+      rmSync(dataDirB, { recursive: true, force: true });
+    }
+  }, 180_000);
+});
+
+/* -------------------------------------------------------------------------- */
 /* THE FOUR-AXIS BENCHMARK (verdict §(h)) → docs/dev/research/offline-outbox/   */
 /* benchmark.md                                                                 */
 /* -------------------------------------------------------------------------- */
