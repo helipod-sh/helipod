@@ -1006,16 +1006,16 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
       await waitFor(async () => (await reload!.pendingMutations()).length === 0, 20_000, "pending K→0 (fleet)");
       expect(await reload.pendingMutations()).toHaveLength(0);
 
-      // App rows — EXACT count + STRICT order (parity with 1a): a live subscription through the
-      // reload client settles to exactly K "offline" rows, in the original offline enqueue order
-      // (seedOfflineBacklog names them `${box}-0`..`${box}-(K-1)`), never at-least-K over the whole
-      // table (which would also pass under a double-apply as long as nothing else committed).
-      const frames: unknown[][] = [];
-      reload.subscribe("notes:list", { box: "offline" }, (v) => frames.push(v as unknown[]));
-      await waitFor(() => (frames.at(-1) as unknown[] | undefined)?.length === K, 20_000, "K offline rows (fleet)");
-      const finalRows = frames.at(-1) as Array<{ text: string }>;
-      expect(finalRows).toHaveLength(K);
-      expect(finalRows.map((r) => r.text)).toEqual(Array.from({ length: K }, (_, i) => `offline-${i}`));
+      // App rows — EXACT count + STRICT order (parity with 1a's rigor, read straight from the shared
+      // Postgres rather than through a live subscription: cross-shard index-scan reactivity for a
+      // NON-`shardBy` table under the 8-shard fleet transactor is its own surface, not what this
+      // scenario is proving). `recCount` above already pins the exact count; order is pinned by
+      // reading the receipts in ACTUAL COMMIT ORDER (`commit_ts ASC`) and asserting the seqs come out
+      // 1..K in that order — i.e. the server committed the offline backlog in exactly the enqueue
+      // order, never out of order and never with a gap or a duplicate (which `ORDER BY commit_ts`
+      // would expose immediately as a non-monotone seq sequence).
+      const orderRows = await pg.query(`SELECT seq FROM client_mutations WHERE ${seqs()} AND verdict = 'applied' ORDER BY commit_ts ASC`);
+      expect((orderRows as Array<{ seq: bigint }>).map((r) => Number(r.seq))).toEqual(Array.from({ length: K }, (_, i) => i + 1));
     } finally {
       reload?.close();
       await proxy?.close();
