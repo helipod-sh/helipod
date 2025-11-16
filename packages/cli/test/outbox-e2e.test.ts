@@ -1006,9 +1006,16 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
       await waitFor(async () => (await reload!.pendingMutations()).length === 0, 20_000, "pending K→0 (fleet)");
       expect(await reload.pendingMutations()).toHaveLength(0);
 
-      // App rows: at least K notes committed (the K offline + the prime).
-      const noteRows = await pg.query("SELECT count(*)::int AS n FROM documents WHERE value IS NOT NULL");
-      expect((noteRows[0] as { n: number }).n).toBeGreaterThanOrEqual(K);
+      // App rows — EXACT count + STRICT order (parity with 1a): a live subscription through the
+      // reload client settles to exactly K "offline" rows, in the original offline enqueue order
+      // (seedOfflineBacklog names them `${box}-0`..`${box}-(K-1)`), never at-least-K over the whole
+      // table (which would also pass under a double-apply as long as nothing else committed).
+      const frames: unknown[][] = [];
+      reload.subscribe("notes:list", { box: "offline" }, (v) => frames.push(v as unknown[]));
+      await waitFor(() => (frames.at(-1) as unknown[] | undefined)?.length === K, 20_000, "K offline rows (fleet)");
+      const finalRows = frames.at(-1) as Array<{ text: string }>;
+      expect(finalRows).toHaveLength(K);
+      expect(finalRows.map((r) => r.text)).toEqual(Array.from({ length: K }, (_, i) => `offline-${i}`));
     } finally {
       reload?.close();
       await proxy?.close();
