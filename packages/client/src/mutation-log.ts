@@ -29,7 +29,32 @@ export interface PendingMutation {
   status:
     | { type: "unsent" } // queued, never hit the wire — safe to (re)send
     | { type: "inflight" } // sent, no response — outcome unknowable on disconnect
-    | { type: "completed"; commitTs: number; completedAt: number }; // acked; layer held for the gate
+    | { type: "completed"; commitTs: number; completedAt: number } // acked; layer held for the gate
+    | { type: "parked" }; // T2: closed with a durable append + the S4 swap armed — awaits a future drain
+  /**
+   * Durable-outbox identity (verdict §(d), Task 2) — present ONLY when this `StackbaseClient` was
+   * constructed with a durable `outbox`; a client without one never sets any of the fields below,
+   * so `entriesInOrder()` and the wire `Mutation` shape stay byte-identical to before this task for
+   * that path. `clientId`/`seq` ride the wire `Mutation`/`MutationBatchEntry` (`clientId`/`seq`,
+   * `@stackbase/sync`'s `protocol.ts`) whenever an outbox is configured — carried for park-safety
+   * on every send, not just once the S4 swap is armed (see `client.ts#mutationMessage`).
+   */
+  clientId?: string;
+  seq?: number;
+  /** Global position across the WHOLE shared durable queue (every clientId sharing one outbox) —
+   *  the drain's FIFO key (T4 consumes it; T2 only assigns it). */
+  order?: number;
+  /** SHA-256 of the last `SetAuth` token ("anon" for none/empty) — stamped synchronously from a
+   *  cache `client.ts#setAuth` computes asynchronously (spec §(k)7: SubtleCrypto is async, enqueue
+   *  is sync, so the digest is computed ahead of time and merely read here). */
+  identityFingerprint?: string;
+  enqueuedAt?: number;
+  /** Flips `true` once this entry's `OutboxStorage.append()` has resolved. "Park eligibility
+   *  requires durability" (verdict §(d)): `delivery-policy.ts#closeDisposition` only parks an
+   *  `inflight` entry when this is `true` — a still-in-flight (unconfirmed) append rejects with
+   *  `MutationUndeliveredError` exactly as before this task existed. Always left falsy when no
+   *  outbox is configured. */
+  durable?: boolean;
 }
 
 /** The ordered set of unconfirmed mutations. Insertion order == requestId order (see file doc). */

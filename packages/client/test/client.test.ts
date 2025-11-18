@@ -4,7 +4,7 @@ import { encodeStorageIndexId } from "@stackbase/id-codec";
 import { SimpleIndexCatalog, query, mutation, action, type RegisteredFunction } from "@stackbase/executor";
 import type { IndexSpec } from "@stackbase/query-engine";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi, type ClientTransport } from "../src/index";
+import { StackbaseClient, loopbackTransport, anyApi, memoryOutbox, type ClientTransport } from "../src/index";
 import type { Value } from "@stackbase/values";
 import type { ClientMessage, ServerMessage } from "@stackbase/sync";
 
@@ -209,5 +209,38 @@ describe("StackbaseClient — query failure surfacing (no silent QueryFailed dro
   it("query() rejects when the one-shot query throws, instead of hanging forever", async () => {
     const client = newClient("sErr2");
     await expect(client.query("messages:boom", {})).rejects.toThrow(/kaboom/);
+  });
+});
+
+describe("StackbaseClient — the OutboxStorage seam (Task 1: identity only)", () => {
+  it("no-outbox-config byte-identity: a client constructed without `outbox` has no durable identity", () => {
+    const client = newClient("sNoOutbox");
+    expect(client.getOutboxIdentity()).toBeUndefined();
+  });
+
+  it("mints a durable clientId when constructed with an `outbox`", async () => {
+    const client = new StackbaseClient(loopbackTransport(runtime.connect("sOutbox1")), { outbox: memoryOutbox() });
+    const identity = await client.getOutboxIdentity();
+    expect(identity).toBeDefined();
+    expect(typeof identity?.clientId).toBe("string");
+    expect(identity?.clientId.length).toBeGreaterThan(0);
+    expect(identity?.nextSeq).toBe(0);
+  });
+
+  it("two client instances sharing the same outbox mint DIFFERENT clientIds — never reused across a reload", async () => {
+    const outbox = memoryOutbox();
+    const a = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxA")), { outbox });
+    const b = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxB")), { outbox });
+    const [idA, idB] = await Promise.all([a.getOutboxIdentity(), b.getOutboxIdentity()]);
+    expect(idA?.clientId).not.toBe(idB?.clientId);
+  });
+
+  it("the minted clientId's meta row is durable in the outbox itself", async () => {
+    const outbox = memoryOutbox();
+    const client = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxMeta")), { outbox });
+    const identity = await client.getOutboxIdentity();
+    expect(identity).toBeDefined();
+    const meta = await outbox.getMeta(identity!.clientId);
+    expect(meta).toEqual({ nextSeq: 0 });
   });
 });

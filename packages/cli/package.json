@@ -56,6 +56,7 @@
     "@stackbase/workflow": "workspace:*",
     "@types/node": "catalog:",
     "@types/ws": "^8.5.13",
+    "fake-indexeddb": "^6.0.0",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

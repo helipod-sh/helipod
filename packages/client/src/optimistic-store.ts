@@ -47,9 +47,26 @@ export interface OptimisticLocalStore {
   now(): number;
 }
 
+/**
+ * T5 — the `optimisticUpdates` registry's updater shape (verdict §(d) "Reload and rendering",
+ * spec §(k)6). The SAME `(store, args) => void` contract `useMutation(...).withOptimisticUpdate`
+ * accepts, but with `args` untyped (`Value`): the registry maps ONE function type across every
+ * udfPath key (`Partial<Record<UdfPathOf<Api>, OptimisticUpdateFn>>` — codegen emits the `UdfPathOf`
+ * union of KEYS; there is no per-key Args inference threaded through a `Record` at this level, so
+ * the VALUE type stays single and generic). Consulted ONLY when a durable entry is hydrated after a
+ * reload (never for a live call — "call-site closure wins for the live call, the registry is
+ * consulted only at hydrate"). An updater here should tolerate `store.getQuery(...)` returning
+ * `undefined` (no persisted query baseline exists pre-reconnect — the documented
+ * `if (list === undefined) return` recipe, `docs/enduser/offline.md`).
+ */
+export type OptimisticUpdateFn = (store: OptimisticLocalStore, args: Value) => void;
+
 /** Reads `process.env.NODE_ENV` via `globalThis` (no ambient `process` type — this package's
- *  tsconfig disables Node's global types, and browser bundles may not define `process` at all). */
-function isDevMode(): boolean {
+ *  tsconfig disables Node's global types, and browser bundles may not define `process` at all).
+ *  Exported (T5) so `client.ts`'s R9 "dev-mode loud `console.error` default" (a durable terminal
+ *  failure with no `onMutationFailed` registered) shares this ONE dev/prod convention rather than
+ *  re-deriving it. */
+export function isDevMode(): boolean {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
   return env?.NODE_ENV !== "production";
 }

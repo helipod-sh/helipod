@@ -93,7 +93,47 @@ describe("generateApi", () => {
     expect(api.content).toContain('send: FunctionReference<"mutation", "public", { conversationId: string; body: string }, string>;');
     expect(api.content).not.toContain("purge"); // internal
   });
+
+  it("emits the UdfPathOf<A> union (spec §(k)6 — the outbox's optimisticUpdates registry key type), REAL type-checked", () => {
+    const api = generateApi(manifest);
+    expect(api.content).toContain("export type UdfPathOf<A> =");
+    const diagnostics = typeCheckVirtualFile(
+      `${api.content}
+declare const path: UdfPathOf<Api>;
+// Exactly the two public udfPaths ("messages:list", "messages:send") — "messages:purge" (internal)
+// is excluded, matching the runtime __path format ("module:function") exactly.
+const ok: "messages:list" | "messages:send" = path;
+// @ts-expect-error — not a real udfPath of this Api.
+const bad: UdfPathOf<Api> = "messages:nonexistent";
+void ok;
+void bad;
+`,
+    );
+    expect(diagnostics).toEqual([]);
+  });
 });
+
+/** A REAL `tsc` type-check (not `transpileModule`'s syntax-only strip) against an in-memory virtual
+ *  file — proves `UdfPathOf<Api>` actually narrows, not merely that it parses. Delegates every other
+ *  file (the standard lib) to the real installed `typescript` package via `ts.createCompilerHost`. */
+function typeCheckVirtualFile(source: string): string[] {
+  const vpath = "/virtual-codegen-fixture.ts";
+  const options: ts.CompilerOptions = {
+    strict: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    skipLibCheck: true,
+    noEmit: true,
+  };
+  const host = ts.createCompilerHost(options);
+  const realGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, ...rest) =>
+    fileName === vpath ? ts.createSourceFile(fileName, source, languageVersion, true) : realGetSourceFile(fileName, languageVersion, ...rest);
+  const program = ts.createProgram([vpath], options, host);
+  const diagnostics = [...program.getSemanticDiagnostics(), ...program.getSyntacticDiagnostics()];
+  return diagnostics.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+}
 
 describe("generateInternalApi", () => {
   it("emits FunctionReferences for internal functions and excludes public ones", () => {

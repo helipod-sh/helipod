@@ -100,6 +100,15 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
   let ws: WebSocket;
   let open = false;
   let everOpened = false; // true once ANY socket has opened — makes the next open a "reopen"
+  // A connection ATTEMPT died before ever opening (e.g. the client was constructed offline, or the
+  // first connect raced a network blip). Its pre-first-open buffered frames were dropped by
+  // `announceClose`, so when a socket finally DOES open, the client must run its full reconnect
+  // sequence (SetAuth replay, resubscribe, the outbox `Connect` handshake) to rebuild the session
+  // from client state — exactly as it would after a mid-session drop. Without this, a reload client
+  // whose initial connect failed would open silently, never re-send its subscriptions or `Connect`,
+  // and (for a durable outbox) never arm or drain. So the first open after a failed attempt fires
+  // `onReopen` too, even though `everOpened` is still false.
+  let hadFailedConnect = false;
   let announced = false; // a close was already told to listeners since the last open
   let terminated = false; // `.close()` was called, or reconnect is disabled and the socket died
   let attempt = 0;
@@ -125,6 +134,10 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
 
   const handleDisconnect = (): void => {
     open = false;
+    // A socket that dies without ever having opened is a failed connection attempt — the next open
+    // must be treated as a reopen (see `hadFailedConnect`). Guarded by `!open`-at-this-point isn't
+    // enough; key off `everOpened` (no socket has EVER opened yet).
+    if (!everOpened) hadFailedConnect = true;
     announceClose();
     if (terminated || !reconnect) {
       terminated = true;
@@ -150,9 +163,10 @@ export function webSocketTransport(url: string, opts: WebSocketTransportOptions 
       attempt = 0;
       for (const m of queue) socket.send(JSON.stringify(m));
       queue.length = 0;
-      if (everOpened) {
+      if (everOpened || hadFailedConnect) {
         for (const l of reopenListeners) l();
       }
+      hadFailedConnect = false;
       everOpened = true;
     });
     socket.addEventListener("message", (ev: MessageEvent) => {

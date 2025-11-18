@@ -111,6 +111,45 @@ describe("webSocketTransport — reconnect state machine", () => {
     expect(closes).toBe(1); // onClose did not re-fire for the reconnect
   });
 
+  it("a FAILED first-connect attempt (socket dies before ever opening) makes the NEXT open fire onReopen too — the 8ff4dda fix, isolated", () => {
+    // Companion to the first test above, which proves the OTHER half of the same contract (a
+    // never-failed first open does NOT fire onReopen). Together they pin both branches of
+    // `hadFailedConnect` directly at the transport, without going through `StackbaseClient` — this
+    // is the isolated proof the 8ff4dda fix commit shipped without (it was caught only by the real-
+    // WebSocket flagship E2E's authed-reload scenario, per that commit's message).
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0); // delay = 150ms for attempt 0
+    const createWebSocket = freshFakeFactory();
+    const t = webSocketTransport("ws://x", { createWebSocket });
+
+    let reopens = 0;
+    t.onReopen!(() => reopens++);
+
+    // The FIRST connection attempt dies before ever opening (no "open" event ever fired for it) —
+    // a client constructed offline, or whose initial connect races a network blip.
+    FakeSocket.instances[0]!.emit("close");
+    expect(reopens).toBe(0); // the failed attempt itself is not a reopen — there was nothing to reopen FROM
+
+    vi.advanceTimersByTime(150); // backoff elapses — a second attempt is made
+    expect(FakeSocket.instances.length).toBe(2);
+
+    // This second attempt is the transport's FIRST-EVER successful open (`everOpened` was still
+    // false going in) — but because the PRIOR attempt failed, it must fire onReopen anyway: the
+    // client needs to run its full reconnect sequence (SetAuth replay, resubscribe, the durable-
+    // outbox Connect handshake) to rebuild the session from client state, exactly as it would after
+    // a genuine mid-session drop.
+    FakeSocket.instances[1]!.emit("open");
+    expect(reopens).toBe(1);
+
+    // A THIRD open (an ordinary reconnect after a normal disconnect, no failed attempt involved)
+    // still fires exactly once more — the `hadFailedConnect` flag was consumed, not stuck on.
+    FakeSocket.instances[1]!.emit("close");
+    vi.advanceTimersByTime(300);
+    expect(FakeSocket.instances.length).toBe(3);
+    FakeSocket.instances[2]!.emit("open");
+    expect(reopens).toBe(2);
+  });
+
   it("backoff grows across repeated disconnects (attempt increments)", () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0); // always the floor: delay = exp/2

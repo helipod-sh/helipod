@@ -245,6 +245,10 @@ export async function bootLoaded(opts: {
     /** Fleet B3 hybrid (multi-writer): the replica-backed query store (queries route here; mutations
      *  commit to `store`). Threaded straight into `createEmbeddedRuntime`. */
     queryStore?: DocStore;
+    /** Receipted Outbox (verdict §(c) placement): the authoritative receipts store the Connect handshake
+     *  classifies/prunes against — the PRIMARY on a sync node (whose `store` is the receipt-less replica),
+     *  so the handshake never spuriously resets. Threaded straight into `createEmbeddedRuntime`. */
+    receiptsStore?: DocStore;
     /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
     beforeNotify?: (commitTs: bigint) => Promise<void>;
     /** Fleet B4: group commit — resolved by `@stackbase/fleet`'s `node.ts` from its OWN
@@ -335,6 +339,10 @@ export async function bootLoaded(opts: {
     ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
     // Fleet B3 hybrid (multi-writer): the replica-backed query path + the own-commit RYOW drain gate.
     ...(opts.fleet?.queryStore ? { queryStore: opts.fleet.queryStore } : {}),
+    // Receipted Outbox (verdict §(c) placement): route the Connect handshake's classification/ack-prune
+    // to the authoritative PRIMARY receipts store on a sync node (whose `store` is the receipt-less
+    // replica) — without this the handshake spuriously resets a client. Absent → the runtime uses `store`.
+    ...(opts.fleet?.receiptsStore ? { receiptsStore: opts.fleet.receiptsStore } : {}),
     ...(opts.fleet?.beforeNotify ? { beforeNotify: opts.fleet.beforeNotify } : {}),
     // Triggers D1: the fleet stable-prefix bound for `readLog` (`min(shard_leases.frontier_ts)`).
     ...(opts.fleet?.stablePrefix ? { stablePrefix: opts.fleet.stablePrefix } : {}),
@@ -412,6 +420,10 @@ export async function bootProject(opts: {
     /** Fleet B3 hybrid (multi-writer): the replica-backed query store (queries route here; mutations
      *  commit to `store`). Threaded straight into `createEmbeddedRuntime`. */
     queryStore?: DocStore;
+    /** Receipted Outbox (verdict §(c) placement): the authoritative receipts store the Connect handshake
+     *  classifies/prunes against — the PRIMARY on a sync node (whose `store` is the receipt-less replica),
+     *  so the handshake never spuriously resets. Threaded straight into `createEmbeddedRuntime`. */
+    receiptsStore?: DocStore;
     /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
     beforeNotify?: (commitTs: bigint) => Promise<void>;
     /** Fleet B4: group commit — resolved fleet-side, threaded straight into `createEmbeddedRuntime`. */

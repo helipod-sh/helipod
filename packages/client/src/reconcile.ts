@@ -30,6 +30,9 @@ export function versionCoversCommit(maxObservedTs: number, commitTs: number): bo
 export interface CloseResult {
   /** `inflight` request ids whose promises the client must reject with `MutationUndeliveredError`. */
   rejectedInflight: string[];
+  /** `inflight` request ids that PARKED instead (Task 2's S4 swap, armed + durable) — their
+   *  promise stays pending; the client must NOT reject (or resolve) them here. */
+  parked: string[];
 }
 
 const DEFAULT_GATE_TIMEOUT_MS = 10_000;
@@ -59,6 +62,52 @@ export class Reconciler {
   /** T6: `unsent` entries in FIFO (requestId/insertion) order — flushed on transport reopen. */
   unsentInOrder(): PendingMutation[] {
     return this.log.entriesInOrder().filter((e) => e.status.type === "unsent");
+  }
+
+  /** T3: the log entry for `requestId` (or `undefined`). Lets `client.ts` read an outbox entry's
+   *  recorded `(clientId, seq)` for dequeue-on-success BEFORE a settling event removes it from the
+   *  log. Read-only — all mutation still flows through the events below. */
+  getEntry(requestId: string): PendingMutation | undefined {
+    return this.log.get(requestId);
+  }
+
+  /**
+   * The drop-on-verdict-after-baseline rule (T3, verdict §(d) "Reload and rendering — the fork,
+   * decided"). A CROSS-SESSION entry whose recorded verdict is `applied` (learned via the `Connect`
+   * handshake's `ConnectAck` or a drain replay-ack) drops its optimistic layer once the reconnect
+   * baseline Transition has been ADOPTED. Sound because the entry's commit necessarily predates
+   * this session's `Connect`, hence predates the baseline's read snapshot — so the baseline already
+   * renders the effect; removing the (registry-rebuilt, T5) layer in the SAME one-pass `rebuild()`
+   * is flicker-free (the authoritative rows are already in the base, so the composed view never
+   * blinks the row away). The rule is deliberately **layer-agnostic**: the entry may hold no layer
+   * at all — a parked entry (its `update` was cleared at close), a plain non-optimistic mutation,
+   * or (until T5 ships the registry) any hydrated entry — in which case this is a clean removal.
+   *
+   * The CALLER (`client.ts`) is responsible for gating the call on baseline adoption; this method
+   * assumes that gate has already passed. `versionCoversCommit` (the same-session gate predicate)
+   * is intentionally untouched — same-session entries still drop on observed inclusion, never here.
+   */
+  onVerdictAfterBaseline(requestId: string): void {
+    if (!this.log.get(requestId)) return;
+    this.log.delete(requestId);
+    this.clearTimer(requestId);
+    this.rebuild();
+  }
+
+  /**
+   * T5: add a HYDRATED (cross-reload) durable entry to the log — `client.ts#addHydratedEntry`'s
+   * counterpart to `initiate()` for a live call-site mutation. `entry.update` may already be set
+   * (a registry hit — `client.ts` looks it up BEFORE calling this). Unlike `initiate()`, where the
+   * OWN entry's throw is rethrown synchronously to the `mutation()` caller, a REGISTERED updater
+   * that throws here is ordinary replay-drop collateral — warned and dropped via the normal
+   * `rebuild()` path, never rethrown (there is no synchronous caller on the hydrate path to
+   * propagate to; the entry still drains fine, only its rendering is lost). An entry with no
+   * `update` (no registry hit, or the registry simply wasn't configured) is added without a
+   * recompose pass at all — a plain layerless entry, exactly T4's pre-registry behavior.
+   */
+  addHydrated(entry: PendingMutation): void {
+    this.log.add(entry);
+    if (entry.update) this.rebuild();
   }
 
   private invokeUpdate = (entry: PendingMutation, view: OptimisticStoreView): void => {
@@ -179,16 +228,34 @@ export class Reconciler {
    * Event 6 — transport close (S4). `unsent` retained; `inflight`/`completed` layers drop; the
    * frontier resets; composed rebuilds over the retained set. Returns the `inflight` ids the client
    * must reject with `MutationUndeliveredError`. NO layer crosses a session.
+   *
+   * Task 2 extends this with the S4 park swap: when `armed` (a `ConnectAck` has proven server-side
+   * dedup — T3 sets it via `client.ts#setOutboxArmed`) AND an `inflight` entry's durable append has
+   * already committed (`entry.durable`), it PARKS instead of rejecting — its `status` flips to
+   * `"parked"` and its `update` closure is cleared (the layer still drops, via the normal
+   * `rebuild()` below: `recompose` skips any entry with no `update`, the same mechanism a plain
+   * non-optimistic mutation already relies on) but the entry itself STAYS in the log, ready for a
+   * future drain (T4) to resend under its recorded `(clientId, seq)`. Every other `drop`ped id
+   * (rejected-inflight, completed) is still fully removed from the log, exactly as before.
    */
-  closeSession(): CloseResult {
-    const disp = closeDisposition(this.log.entriesInOrder());
+  closeSession(armed = false): CloseResult {
+    const disp = closeDisposition(this.log.entriesInOrder(), { armed });
+    const parkedIds = new Set(disp.park);
+    for (const rid of disp.park) {
+      const entry = this.log.get(rid);
+      if (entry) {
+        entry.status = { type: "parked" };
+        entry.update = undefined; // layer drops — unchanged rule (verdict §(d)); entry itself stays
+      }
+    }
     for (const rid of disp.drop) {
+      if (parkedIds.has(rid)) continue; // parked entries are NOT removed from the log
       this.log.delete(rid);
       this.clearTimer(rid);
     }
     this.observedTs = 0; // reset with the session — the ts-gate is only sound over one monotone feed
     this.rebuild();
-    return { rejectedInflight: disp.reject };
+    return { rejectedInflight: disp.reject, parked: disp.park };
   }
 
   private armGateTimer(requestId: string): void {

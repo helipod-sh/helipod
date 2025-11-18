@@ -232,6 +232,26 @@ export interface EmbeddedRuntimeOptions {
    */
   queryStore?: DocStore;
   /**
+   * The AUTHORITATIVE receipts store for the `Connect` resume handshake — where the outbox verdict
+   * classification (`classifyClientMutation`) and ack-prune (`pruneClientMutations`) reads/writes
+   * land (verdict §(c): "the classification read runs where the commit runs... never against a
+   * follower's embedded replica"). The `client_mutations`/`client_floors` receipts tables are NOT
+   * part of the replicated MVCC document log — they live ONLY on the authoritative primary. On a
+   * fleet SYNC node, `options.store` is a `SwitchableDocStore` over the read-only replica, which
+   * carries NONE of those receipts: classifying a committed seq there returns `unknown` for every
+   * lookup, so the handshake spuriously reports `known:false` (a reset that re-mints the clientId)
+   * and — worse — a kill-after-commit reload via a sync node reports a FALSE failure for a mutation
+   * that actually committed. Set this to the primary Postgres store so the handshake reads/prunes the
+   * real receipts. Safe from a read-only-until-promoted primary: `getClientVerdict` is a pure read
+   * and `pruneClientMutations` is a monotonic (`GREATEST`-floored) direct query on standalone,
+   * unsharded receipt tables — architecturally identical to what the WRITER's own handshake does
+   * outside the OCC transactor, needing no advisory lock or write-forward hop. Unset → the handshake
+   * uses `options.store` (byte-identical for every non-fleet/writer deployment, whose `store` IS the
+   * primary; the mutation-path dedup already places its own classification on the owner via
+   * `writeRouter`, so only the Connect handshake needed this seam). See `ee/fleet`'s sync boot.
+   */
+  receiptsStore?: DocStore;
+  /**
    * Hybrid-node RYOW gate (Fleet B3, D2). Awaited in the runtime's serial fan-out `drain()`
    * BEFORE each queued invalidation's `handler.notifyWrites` — e.g. a hybrid node's
    * `tailer.waitFor(commitTs)`, so a locally-committed mutation's subscription re-runs don't fire
@@ -567,11 +587,14 @@ export class EmbeddedRuntime {
         return { value: r.value as Value };
       },
       // ── Receipted Outbox resume-handshake support (verdict §(e)) ──────────────────────────────
+      // Both reads/writes go to the AUTHORITATIVE receipts store (the primary), NOT `options.store`:
+      // on a fleet sync node the latter is the replica, which carries no receipts (see
+      // `receiptsStore`'s doc comment). Unset → `options.store`, byte-identical off the fleet.
       async classifyClientMutation(identity, clientId, seq): Promise<ClientMutationVerdict> {
-        return classifyForConnect(options.store, identity ?? null, clientId, seq);
+        return classifyForConnect(options.receiptsStore ?? options.store, identity ?? null, clientId, seq);
       },
       async pruneClientMutations(identity, clientId, ackedThrough): Promise<void> {
-        await options.store.pruneClientMutations(identity ?? "", clientId, { ackedThrough });
+        await (options.receiptsStore ?? options.store).pruneClientMutations(identity ?? "", clientId, { ackedThrough });
       },
       deploymentId(): string {
         return resolvedDeploymentId;
