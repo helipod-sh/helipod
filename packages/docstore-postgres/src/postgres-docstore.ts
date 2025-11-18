@@ -202,7 +202,10 @@ export class PostgresDocStore implements DocStore {
         await this.db.query(stmt);
       } catch (e) {
         const code = (e as { code?: unknown } | null)?.code;
-        if (code !== "23505" /* unique_violation */ && code !== "42P07" /* duplicate_table */) throw e;
+        // 42710 (duplicate_object) is the third face of the same race: two concurrent
+        // CREATE TABLE IF NOT EXISTS can both pass the existence check, and the loser
+        // surfaces as "type <table> already exists" (the table's composite rowtype).
+        if (code !== "23505" /* unique_violation */ && code !== "42P07" /* duplicate_table */ && code !== "42710" /* duplicate_object */) throw e;
       }
     }
     // Single-writer invariant — fail fast if another engine already holds the advisory lock.

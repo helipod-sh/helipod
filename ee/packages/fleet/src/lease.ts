@@ -212,8 +212,24 @@ export class LeaseManager {
    * `prepareFleetNode` for the `documentsTableExists` probe + call site, and `replica-tailer.ts`'s
    * `readFrontier` for the count gate.
    */
+  /** Run one DDL statement, swallowing the concurrent-boot duplicate-object race family
+   *  (23505 unique_violation / 42P07 duplicate_table / 42710 duplicate_object — the third face
+   *  is "type <table> already exists", the table's composite rowtype, which is what two nodes
+   *  racing CREATE TABLE IF NOT EXISTS actually surface). The statement's objective — the
+   *  object exists — is achieved when any of these fires; anything else propagates. Mirrors
+   *  docstore-postgres setupSchema's discipline; added when the SIMULTANEOUS multi-writer boot
+   *  E2E caught the unguarded race here (Plan A's extra boot DDL widened the window). */
+  private async ddl(stmt: string): Promise<void> {
+    try {
+      await this.client.query(stmt);
+    } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code !== "23505" && code !== "42P07" && code !== "42710") throw e;
+    }
+  }
+
   async setup(shardIds: readonly ShardId[] = [], documentsExist = false): Promise<void> {
-    await this.client.query(`
+    await this.ddl(`
       CREATE TABLE IF NOT EXISTS shard_leases (
         shard_id        TEXT PRIMARY KEY,
         epoch           BIGINT NOT NULL,
@@ -230,7 +246,7 @@ export class LeaseManager {
     // shardless node is invisible → never assigned a shard → never holds one → scale-out never
     // happens (and the incumbent, not seeing the newcomer, releases nothing). Run as its own statement
     // (single-statement drivers like PGlite), mirroring the schema discipline in `docstore-postgres`.
-    await this.client.query(`
+    await this.ddl(`
       CREATE TABLE IF NOT EXISTS fleet_nodes (
         advertise_url TEXT PRIMARY KEY,
         epoch         BIGINT NOT NULL,
@@ -246,7 +262,7 @@ export class LeaseManager {
     // distinguishes "too big to cache" from "not recorded yet", though both replay as
     // `valueMissing: true` (see `IdempotencyReplay`). `created_at` drives the 1h sweep
     // (`sweepIdempotency`), run on the balancer beat.
-    await this.client.query(`
+    await this.ddl(`
       CREATE TABLE IF NOT EXISTS fleet_idempotency (
         key        TEXT PRIMARY KEY,
         commit_ts  BIGINT NOT NULL,
