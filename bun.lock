@@ -422,6 +422,7 @@
         "@stackbase/test": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
+        "embedded-postgres": "16.14.0-beta.17",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
