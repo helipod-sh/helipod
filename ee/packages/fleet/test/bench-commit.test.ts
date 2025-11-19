@@ -14,17 +14,17 @@
  *    path is non-zero-throughput and error-free. NOT a throughput signal (single in-process WASM
  *    connection, no real network/fsync) — see `docs/dev/research/write-sharding/b4-benchmark.md`'s
  *    machine-context caveats.
- *  - Real Postgres (Docker-gated, mirrors `fleet-e2e.test.ts`'s `dockerAvailable()` pattern): the
- *    FULL matrix — 1/8/64 clients × 1/8 shards × insert/rmw80 mixes — against a real `postgres:16`
- *    container, wired the way `prepareFleetNode` wires a real writer (`NodePgClient` with a
- *    per-shard `commitPool`, see `../src/node.ts`). This is the run whose numbers are transcribed
- *    into `b4-benchmark.md`'s baseline table (a real run on this machine, recorded once — the test
- *    itself only asserts sanity; it does not auto-write the doc, so the recorded baseline can't be
- *    silently overwritten by a routine local `docker`-gated CI run).
+ *  - Real Postgres (embedded-postgres-gated, mirrors `fleet-e2e.test.ts`'s `embeddedPgAvailable()`
+ *    pattern): the FULL matrix — 1/8/64 clients × 1/8 shards × insert/rmw80 mixes — against a real
+ *    native PostgreSQL 16 postmaster, wired the way `prepareFleetNode` wires a real writer
+ *    (`NodePgClient` with a per-shard `commitPool`, see `../src/node.ts`). This is the run whose
+ *    numbers are transcribed into `b4-benchmark.md`'s baseline table (a real run on this machine,
+ *    recorded once — the test itself only asserts sanity; it does not auto-write the doc, so the
+ *    recorded baseline can't be silently overwritten by a routine local benchmark-gated CI run).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { spawnSync } from "node:child_process";
 import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import type { DocStore } from "@stackbase/docstore";
 import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
@@ -285,62 +285,30 @@ describe("Fleet B4, Task 1 — commit-throughput benchmark harness (PGlite smoke
 });
 
 /* -------------------------------------------------------------------------- */
-/* Real-Postgres full matrix (Docker-gated — mirrors fleet-e2e.test.ts)         */
+/* Real-Postgres full matrix (embedded-postgres-gated — mirrors fleet-e2e.test.ts) */
 /* -------------------------------------------------------------------------- */
 
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-
-const HAS_DOCKER = dockerAvailable();
-// Opt-in on top of the Docker gate (STACKBASE_BENCH=1): the matrix is ~4.5 minutes of DELIBERATE
-// full-throttle Postgres load. Docker-presence alone made it run inside every full `bun run test`,
-// where it resource-starved the timing-sensitive fleet-e2e container scenarios in the same parallel
-// pass — the root cause of the recurring "fleet flake" (diagnosed 2026-07-09: the simultaneous-boot
-// E2E timed out at 42s while the two bench matrices held the machine for 90s + 186s). Benchmarks
-// are load generators, not tests: they run only when explicitly asked for (T5-gate runs, perf work),
-// mirroring bench-fanout-pg's STACKBASE_BENCH_FANOUT_PG pattern.
-const RUN_BENCH = HAS_DOCKER && process.env["STACKBASE_BENCH"] === "1";
+const HAS_EMBEDDED_PG = embeddedPgAvailable();
+// Opt-in on top of the embedded-postgres gate (STACKBASE_BENCH=1): the matrix is ~4.5 minutes of
+// DELIBERATE full-throttle Postgres load. Platform-availability alone made it run inside every full
+// `bun run test`, where it resource-starved the timing-sensitive fleet-e2e scenarios in the same
+// parallel pass — the root cause of the recurring "fleet flake" (diagnosed 2026-07-09: the
+// simultaneous-boot E2E timed out at 42s while the two bench matrices held the machine for 90s +
+// 186s). Benchmarks are load generators, not tests: they run only when explicitly asked for
+// (T5-gate runs, perf work), mirroring bench-fanout-pg's STACKBASE_BENCH_FANOUT_PG pattern.
+const RUN_BENCH = HAS_EMBEDDED_PG && process.env["STACKBASE_BENCH"] === "1";
 const maybeDescribe = RUN_BENCH ? describe : describe.skip;
 
-const CONTAINER_NAME = `sb-fleet-bench-${process.pid}`;
-
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
+let pgServer: EmbeddedPg | undefined;
 
 async function startPostgresContainer(): Promise<{ port: number }> {
-  runDocker(["rm", "-f", CONTAINER_NAME]); // in case a previous run leaked it
-  const run = runDocker([
-    "run", "-d", "--name", CONTAINER_NAME,
-    "-e", "POSTGRES_PASSWORD=postgres",
-    "-p", "127.0.0.1::5432",
-    "postgres:16",
-  ]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-
-  const portRes = runDocker(["port", CONTAINER_NAME, "5432/tcp"]);
-  const line = portRes.stdout.trim().split("\n")[0] ?? "";
-  const m = line.match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse \`docker port\` output: ${JSON.stringify(portRes.stdout)}`);
-  const port = Number(m[1]);
-
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", CONTAINER_NAME, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container did not become ready within 60s");
-    await sleep(500);
-  }
-  return { port };
+  pgServer = await startEmbeddedPg();
+  return { port: pgServer.port };
 }
 
-function stopPostgresContainer(): void {
-  runDocker(["rm", "-f", CONTAINER_NAME]);
+async function stopPostgresContainer(): Promise<void> {
+  await pgServer?.stop();
+  pgServer = undefined;
 }
 
 /** Build a store wired the way `prepareFleetNode` wires a real writer (`../src/node.ts`): a
@@ -366,8 +334,8 @@ interface MatrixCell {
 }
 
 maybeDescribe("Fleet B4, Task 1 — commit-throughput benchmark (real Postgres, full matrix)", () => {
-  afterAll(() => {
-    stopPostgresContainer();
+  afterAll(async () => {
+    await stopPostgresContainer();
   });
 
   it(
@@ -427,32 +395,14 @@ maybeDescribe("Fleet B4, Task 1 — commit-throughput benchmark (real Postgres, 
  * combined before/after table with the per-cell speedup. The decisive insert-heavy 64-client cells
  * (1-shard and 8-shard) are additionally re-run a SECOND time with the flag ON so the report can
  * quote both if they differ materially (the brief's anti-massage rule). This test only prints; the
- * numbers are transcribed by hand into `b4-benchmark.md` — a routine docker-gated CI run cannot
+ * numbers are transcribed by hand into `b4-benchmark.md` — a routine benchmark-gated CI run cannot
  * silently overwrite the recorded gate result.
  */
-const T5_CONTAINER_NAME = `sb-fleet-bench-t5-${process.pid}`;
+let t5PgServer: EmbeddedPg | undefined;
 
 async function startT5Postgres(): Promise<{ port: number }> {
-  runDocker(["rm", "-f", T5_CONTAINER_NAME]);
-  const run = runDocker([
-    "run", "-d", "--name", T5_CONTAINER_NAME,
-    "-e", "POSTGRES_PASSWORD=postgres",
-    "-p", "127.0.0.1::5432",
-    "postgres:16",
-  ]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  const portRes = runDocker(["port", T5_CONTAINER_NAME, "5432/tcp"]);
-  const line = portRes.stdout.trim().split("\n")[0] ?? "";
-  const m = line.match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse \`docker port\` output: ${JSON.stringify(portRes.stdout)}`);
-  const port = Number(m[1]);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", T5_CONTAINER_NAME, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container did not become ready within 60s");
-    await sleep(500);
-  }
-  return { port };
+  t5PgServer = await startEmbeddedPg();
+  return { port: t5PgServer.port };
 }
 
 interface BeforeAfterCell {
@@ -464,8 +414,9 @@ interface BeforeAfterCell {
 }
 
 maybeDescribe("Fleet B4, Task 5 — group commit ON vs OFF (real Postgres, gate run)", () => {
-  afterAll(() => {
-    runDocker(["rm", "-f", T5_CONTAINER_NAME]);
+  afterAll(async () => {
+    await t5PgServer?.stop();
+    t5PgServer = undefined;
   });
 
   it(

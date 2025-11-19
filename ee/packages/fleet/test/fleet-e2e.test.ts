@@ -2,9 +2,10 @@
 /**
  * Fleet slice ship gate: proves the EXACT production Tier-2 path — multiple REAL `stackbase serve
  * --fleet` processes (spawned under `bun`, the primary runtime, driving `packages/cli/dist/bin.js`)
- * over a REAL `postgres:16` Docker container. Nothing in-process: writer/sync roles, write
- * forwarding, cross-process reactive fan-out, and live failover are all exercised through the shipped
- * CLI entrypoint + real HTTP/WebSocket, mirroring `packages/cli/test/postgres-e2e.test.ts`.
+ * over a REAL native PostgreSQL 16 postmaster (embedded-postgres — no Docker). Nothing in-process:
+ * writer/sync roles, write forwarding, cross-process reactive fan-out, and live failover are all
+ * exercised through the shipped CLI entrypoint + real HTTP/WebSocket, mirroring
+ * `packages/cli/test/postgres-e2e.test.ts`.
  *
  * Proves, end to end:
  *   1. Symmetric boot elects one writer: node A (booted first) → `role: "writer"`, node B →
@@ -19,10 +20,11 @@
  *   4. Node join: a fresh node C boots as sync against the unchanged lease; a mutation to C forwards
  *      to the writer (B), and a query on C reads back the full row set (C serves reads locally).
  *
- * Skips the whole suite when `docker` isn't on PATH (so it doesn't hard-fail in a Docker-less CI).
+ * Skips the whole suite when the platform's embedded-postgres binaries aren't installed (so it
+ * doesn't hard-fail on an unsupported platform or a `--no-optional` install).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,6 +32,7 @@ import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
 import { Client } from "pg";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 // Pure helper — reconstructs a node's `application_name` from its advertise URL, the exact
 // discriminator `prepareFleetNode` stamps on that node's Postgres backends. Imported from `src`
 // (not `dist`) only to compute the string in-test; the spawned `serve` children run the BUILT fleet
@@ -42,58 +45,28 @@ import { fleetApplicationName } from "../src/node";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
 
 /* -------------------------------------------------------------------------- */
-/* Docker availability + Postgres container lifecycle                          */
+/* Embedded-Postgres availability + cluster lifecycle                          */
 /* -------------------------------------------------------------------------- */
 
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-
-const HAS_DOCKER = dockerAvailable();
-const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
-
-const CONTAINER_NAME = `sb-fleet-e2e-${process.pid}`;
+const HAS_EMBEDDED_PG = embeddedPgAvailable();
+const maybeDescribe = HAS_EMBEDDED_PG ? describe : describe.skip;
 
 /** Module-level tracker for all spawned fleet serve processes — used by afterAll fallback to ensure
  *  cleanup even if a test hangs or errors out. Each process is pushed immediately on spawn. */
 const allSpawnedProcesses: ServeProcess[] = [];
 
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
+/** The currently-running embedded cluster for the in-flight test — reassigned per `it`, reachable
+ *  by the suite's `afterAll` belt-and-braces cleanup. */
+let pgServer: EmbeddedPg | undefined;
 
 async function startPostgresContainer(): Promise<{ port: number }> {
-  runDocker(["rm", "-f", CONTAINER_NAME]); // in case a previous run leaked it
-  const run = runDocker([
-    "run", "-d", "--name", CONTAINER_NAME,
-    "-e", "POSTGRES_PASSWORD=postgres",
-    "-p", "127.0.0.1::5432",
-    "postgres:16",
-  ]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-
-  const portRes = runDocker(["port", CONTAINER_NAME, "5432/tcp"]);
-  const line = portRes.stdout.trim().split("\n")[0] ?? "";
-  const m = line.match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse \`docker port\` output: ${JSON.stringify(portRes.stdout)}`);
-  const port = Number(m[1]);
-
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", CONTAINER_NAME, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container did not become ready within 60s");
-    await new Promise<void>((r) => setTimeout(r, 500));
-  }
-  return { port };
+  pgServer = await startEmbeddedPg();
+  return { port: pgServer.port };
 }
 
-function stopPostgresContainer(): void {
-  runDocker(["rm", "-f", CONTAINER_NAME]);
+async function stopPostgresContainer(): Promise<void> {
+  await pgServer?.stop();
+  pgServer = undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -610,9 +583,9 @@ function startCommitLoop(
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
-maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, real processes, failover)", () => {
-  afterAll(() => {
-    // Belt-and-braces: kill any still-alive spawned processes BEFORE stopping the container.
+maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postgres, real processes, failover)", () => {
+  afterAll(async () => {
+    // Belt-and-braces: kill any still-alive spawned processes BEFORE stopping the cluster.
     // This ensures cleanup even if the test hangs or errors out, bypassing the try/finally.
     for (const proc of allSpawnedProcesses) {
       if (proc.exitCode === null && proc.signalCode === null) {
@@ -623,7 +596,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         }
       }
     }
-    stopPostgresContainer();
+    await stopPostgresContainer();
     for (const dir of spawnedDataDirs) rmSync(dir, { recursive: true, force: true });
   });
 
@@ -783,7 +756,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeC);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -858,7 +831,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         /* path), while a WRITE fails visibly (the writer's commit hangs on the  */
         /* frozen connection) — not a silent success, not an unbounded hang.    */
         /* ---------------------------------------------------------------- */
-        expect(runDocker(["pause", CONTAINER_NAME]).status).toBe(0);
+        pgServer!.pause();
         paused = true;
 
         // Read still answers 200 with correct data — served entirely from the local replica.
@@ -883,7 +856,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         expect(committedDuringPause).toBe(false);
 
         // Unpause and reconverge: a fresh mutation commits and the subscription receives it.
-        expect(runDocker(["unpause", CONTAINER_NAME]).status).toBe(0);
+        pgServer!.unpause();
         paused = false;
 
         const reconverge = await (async () => {
@@ -950,11 +923,11 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       } finally {
         wsB?.close();
         await pg.end().catch(() => {});
-        if (paused) runDocker(["unpause", CONTAINER_NAME]); // never leave a paused container behind
+        if (paused) pgServer?.unpause(); // never leave a paused cluster behind (stop() also self-heals)
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeBRestart);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -1098,7 +1071,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -1327,7 +1300,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodeA);
         await stopServe(nodeB);
         await stopServe(nodeC);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -1508,7 +1481,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -1841,7 +1814,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await stopServe(nodes[advA]?.proc);
         await stopServe(nodes[advB]?.proc);
         await stopServe(nodeD);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 300_000 },
@@ -1936,7 +1909,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         /* flowing (NO Postgres round-trip on the read path); a WRITE fails    */
         /* visibly; and A must NOT self-exit within the <=10s pause window.    */
         /* -------------------------------------------------------------- */
-        expect(runDocker(["pause", CONTAINER_NAME]).status).toBe(0);
+        pgServer!.pause();
         paused = true;
         const pauseStart = Date.now();
 
@@ -1963,7 +1936,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         expect(nodeA.signalCode).toBeNull();
 
         // Unpause -> writes resume, subscription converges on a fresh commit.
-        expect(runDocker(["unpause", CONTAINER_NAME]).status).toBe(0);
+        pgServer!.unpause();
         paused = false;
 
         const reconverge = await (async () => {
@@ -1986,10 +1959,10 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       } finally {
         wsA?.close();
         await pg.end().catch(() => {});
-        if (paused) runDocker(["unpause", CONTAINER_NAME]); // never leave a paused container behind
+        if (paused) pgServer?.unpause(); // never leave a paused cluster behind (stop() also self-heals)
         await stopServe(nodeA);
         await stopServe(nodeB);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -2074,7 +2047,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
       } finally {
         await pg.end().catch(() => {});
         await stopServe(nodeA);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 180_000 },
@@ -2144,7 +2117,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
@@ -2337,7 +2310,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real containers, re
         await pg.end().catch(() => {});
         await stopServe(nodeA);
         await stopServe(nodeB);
-        stopPostgresContainer();
+        await stopPostgresContainer();
       }
     },
     { timeout: 240_000 },
