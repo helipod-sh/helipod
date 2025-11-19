@@ -17,7 +17,8 @@
  *       Transition flood forces real server-side droppable-frame drops, yet the undroppable
  *       MutationResponse still arrives and the client resyncs to convergence;
  *   (4) THE G4 adapter-timing proof on BOTH stores — SQLite (dev default) AND `docstore-postgres`
- *       (a real `postgres:16` container): a commit touching NOTHING the session subscribes to still
+ *       (a real embedded-postgres server, the same PG 16 postmaster `postgres:16` runs, no Docker):
+ *       a commit touching NOTHING the session subscribes to still
  *       delivers an empty ts-advancing Transition whose `endVersion.ts >= commitTs`, arriving
  *       after-or-with any modifications the commit implies (the touching case is constructed too);
  *   (5) THE D12 concurrent cross-shard no-flicker test (8 shards): a client subscribed to a
@@ -32,7 +33,6 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import net from "node:net";
-import { spawnSync } from "node:child_process";
 import { rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,6 +42,7 @@ import type { Value } from "@stackbase/values";
 import { query, mutation } from "@stackbase/executor";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
 import {
@@ -526,35 +527,8 @@ describe("optimistic E2E (3) — backpressure: Transitions drop, the MutationRes
 /* Scenario 4 — G4 adapter-timing proof on BOTH stores                          */
 /* -------------------------------------------------------------------------- */
 
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-const HAS_DOCKER = dockerAvailable();
-const PG_CONTAINER = `sb-opt-g4-${process.pid}`;
-
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-async function startPgContainer(): Promise<{ url: string }> {
-  runDocker(["rm", "-f", PG_CONTAINER]);
-  const run = runDocker(["run", "-d", "--name", PG_CONTAINER, "-e", "POSTGRES_PASSWORD=postgres", "-p", "127.0.0.1::5432", "postgres:16"]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  const portRes = runDocker(["port", PG_CONTAINER, "5432/tcp"]);
-  const m = (portRes.stdout.trim().split("\n")[0] ?? "").match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse docker port: ${portRes.stdout}`);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", PG_CONTAINER, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container not ready in 60s");
-    await new Promise<void>((r) => setTimeout(r, 500));
-  }
-  return { url: `postgres://postgres:postgres@127.0.0.1:${m[1]}/postgres` };
-}
+const HAS_EMBEDDED_PG = embeddedPgAvailable();
+let g4PgServer: EmbeddedPg | undefined;
 
 /**
  * The shared G4 body: subscribe A to `messages:list(c1)`, then commit a mutation that touches
@@ -616,25 +590,25 @@ describe("optimistic E2E (4) — G4 adapter-timing proof (both stores)", () => {
     await runG4(new SqliteDocStore(new NodeSqliteAdapter()));
   }, 30_000);
 
-  (HAS_DOCKER ? it : it.skip)(
-    "docstore-postgres (real postgres:16 container): same G4 guarantee",
+  (HAS_EMBEDDED_PG ? it : it.skip)(
+    "docstore-postgres (real embedded-postgres server): same G4 guarantee",
     async () => {
-      const { url } = await startPgContainer();
-      const store = new PostgresDocStore(new NodePgClient({ connectionString: url }));
+      g4PgServer = await startEmbeddedPg();
+      const store = new PostgresDocStore(new NodePgClient({ connectionString: g4PgServer.url }));
       await store.setupSchema();
       try {
         await runG4(store);
       } finally {
         await store.close();
-        runDocker(["rm", "-f", PG_CONTAINER]);
+        await g4PgServer.stop();
       }
     },
     120_000,
   );
 });
 
-afterAll(() => {
-  if (HAS_DOCKER) runDocker(["rm", "-f", PG_CONTAINER]);
+afterAll(async () => {
+  await g4PgServer?.stop();
 });
 
 /* -------------------------------------------------------------------------- */
