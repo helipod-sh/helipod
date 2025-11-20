@@ -51,6 +51,9 @@ export interface EmbeddedPg {
  * Suites gate on this the way they used to gate on `docker` being on PATH.
  */
 export function embeddedPgAvailable(): boolean {
+  // pause()/unpause() need POSIX signals (SIGSTOP/pkill) and the suites spawn POSIX-path
+  // processes — on Windows, skip (as the docker gate effectively did) rather than run-and-fail.
+  if (process.platform === "win32") return false;
   const platformPkg = `@embedded-postgres/${process.platform}-${process.arch}`;
   try {
     // The platform binaries are optionalDependencies of embedded-postgres, so under an isolating
@@ -91,7 +94,12 @@ function postmasterPid(dataDir: string): number | undefined {
   }
 }
 
-/** SIGSTOP/SIGCONT the postmaster and its direct children (the session backends). */
+/**
+ * SIGSTOP/SIGCONT the postmaster and its direct children (the session backends).
+ * Unlike `docker pause` (which froze the whole cgroup atomically), a connection arriving in the
+ * window between freezing the children and freezing the postmaster can fork one unfrozen backend
+ * — a rare, loud, rerun-clears flake in pause-scenario tests, accepted for a test harness.
+ */
 function signalTree(pid: number, signal: "SIGSTOP" | "SIGCONT"): void {
   if (signal === "SIGSTOP") {
     // children first so no backend makes progress while the postmaster is already frozen
@@ -101,6 +109,16 @@ function signalTree(pid: number, signal: "SIGSTOP" | "SIGCONT"): void {
     process.kill(pid, signal);
     spawnSync("pkill", [`-${signal}`, "-P", String(pid)]);
   }
+}
+
+/**
+ * A stale postmaster.pid's PID may have been recycled by the OS to an innocent process (the
+ * leaked postmaster died on its own — reboot, crash). Never SIGKILL a PID we haven't verified
+ * is actually running postgres.
+ */
+function pidIsPostgres(pid: number): boolean {
+  const r = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+  return r.status === 0 && /postgres/.test(r.stdout);
 }
 
 /** Remove clusters leaked by crashed runs: kill the postmaster, delete the data dir. */
@@ -118,7 +136,7 @@ function sweepStaleClusters(): void {
     try {
       if (statSync(dir).mtimeMs > cutoff) continue;
       const pid = postmasterPid(dir);
-      if (pid !== undefined) {
+      if (pid !== undefined && pidIsPostgres(pid)) {
         try {
           process.kill(pid, "SIGKILL");
         } catch {
