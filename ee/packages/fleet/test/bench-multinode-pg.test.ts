@@ -9,10 +9,11 @@
  * drives 4 shards. The question the numbers answer: does adding a NODE add aggregate write capacity
  * (engine/event-loop was the bottleneck), or is the shared Postgres the ceiling (flat)? Either is an
  * honest result. Reuses the fleet-e2e spawn/converge pattern (self-contained here, per the benchmark
- * house style — bench-commit et al.). Docker-gated + opt-in (STACKBASE_BENCH_MULTINODE=1).
+ * house style — bench-commit et al.). embedded-postgres-gated + opt-in
+ * (STACKBASE_BENCH_MULTINODE=1).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { performance } from "node:perf_hooks";
 import { resolve } from "node:path";
@@ -21,6 +22,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "pg";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 
 const SHARDS_PER_NODE = 4;
 const NODE_COUNTS = [1, 2, 3];
@@ -31,37 +33,16 @@ function fixtureConvexDir() {
   return resolve(new URL(".", import.meta.url).pathname, "fixtures", "app", "convex");
 }
 
-/* --- docker / postgres --- */
-function dockerAvailable() {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-function runDocker(args: string[]) {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-// One FRESH container per cell — the fleet persists its shard count at first boot (immutable), and
-// stale leases would block the next cell's convergence, so cells must not share a database.
-const containers: string[] = [];
+/* --- embedded postgres --- */
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-async function startPostgresContainer(name: string): Promise<{ port: number }> {
-  runDocker(["rm", "-f", name]);
-  const run = runDocker(["run", "-d", "--name", name, "-e", "POSTGRES_PASSWORD=postgres", "-p", "127.0.0.1::5432", "postgres:16"]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  containers.push(name);
-  const m = (runDocker(["port", name, "5432/tcp"]).stdout.trim().split("\n")[0] ?? "").match(/:(\d+)$/);
-  if (!m) throw new Error("could not parse docker port");
-  const port = Number(m[1]);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", name, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres not ready in 60s");
-    await sleep(500);
-  }
-  return { port };
+// One FRESH cluster per cell — the fleet persists its shard count at first boot (immutable), and
+// stale leases would block the next cell's convergence, so cells must not share a database.
+// Tracked so afterAll can belt-and-braces-clean anything a hung/errored cell left running.
+const servers: EmbeddedPg[] = [];
+async function startPostgresContainer(): Promise<{ port: number; server: EmbeddedPg }> {
+  const server = await startEmbeddedPg();
+  servers.push(server);
+  return { port: server.port, server };
 }
 
 /* --- fleet serve node lifecycle --- */
@@ -172,19 +153,18 @@ interface CellResult {
   errors: number;
 }
 
-const RUN = dockerAvailable() && process.env["STACKBASE_BENCH_MULTINODE"] === "1";
+const RUN = embeddedPgAvailable() && process.env["STACKBASE_BENCH_MULTINODE"] === "1";
 const maybe = RUN ? describe : describe.skip;
 
-maybe("bench-multinode — distributed write throughput (opt-in: STACKBASE_BENCH_MULTINODE=1 + Docker)", () => {
-  afterAll(() => {
+maybe("bench-multinode — distributed write throughput (opt-in: STACKBASE_BENCH_MULTINODE=1 + embedded-postgres)", () => {
+  afterAll(async () => {
     for (const p of allProcs) p.kill("SIGKILL");
-    for (const c of containers) runDocker(["rm", "-f", c]);
+    for (const s of servers) await s.stop();
   });
 
   async function runCell(nodeCount: number): Promise<CellResult> {
     const numShards = SHARDS_PER_NODE * nodeCount;
-    const name = `sb-multinode-bench-${process.pid}-n${nodeCount}`;
-    const { port } = await startPostgresContainer(name);
+    const { port, server } = await startPostgresContainer();
     const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
     const pg = new Client({ connectionString: databaseUrl });
     await pg.connect();
@@ -247,7 +227,8 @@ maybe("bench-multinode — distributed write throughput (opt-in: STACKBASE_BENCH
 
     for (const n of nodes) await stopServe(n.proc);
     await pg.end();
-    runDocker(["rm", "-f", name]); // fresh DB per cell
+    await server.stop(); // fresh cluster per cell
+    servers.splice(servers.indexOf(server), 1);
 
     lat.sort((a, b) => a - b);
     return {

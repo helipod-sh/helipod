@@ -20,13 +20,14 @@
  * explodes flags a hidden inefficiency. Pairs with the reactivity fan-out finding that the engine is
  * I/O-bound on PG (low CPU) — this ladder shows where the I/O goes.
  *
- * Docker-gated + opt-in (STACKBASE_BENCH_OVERHEAD=1). Single-client sequential (clients=1) — the ladder
- * isolates PER-OP overhead, not concurrency. See docs/dev/research/overhead-ladder.md.
+ * embedded-postgres-gated + opt-in (STACKBASE_BENCH_OVERHEAD=1). Single-client sequential
+ * (clients=1) — the ladder isolates PER-OP overhead, not concurrency. See
+ * docs/dev/research/overhead-ladder.md.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import type { DocumentValue } from "@stackbase/docstore";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
@@ -47,42 +48,11 @@ function benchModules(): Record<string, RegisteredFunction> {
   };
 }
 
-/* --- Docker container helpers (mirror bench-commit.test.ts) --- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-const CONTAINER = `sb-overhead-bench-${process.pid}`;
+/* --- embedded-postgres helpers (mirror bench-commit.test.ts) --- */
+let pgServer: EmbeddedPg | undefined;
 async function startPgContainer(): Promise<{ port: number }> {
-  runDocker(["rm", "-f", CONTAINER]);
-  const run = runDocker([
-    "run", "-d", "--name", CONTAINER,
-    "-e", "POSTGRES_PASSWORD=postgres",
-    "-p", "127.0.0.1::5432",
-    "postgres:16",
-  ]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  const portRes = runDocker(["port", CONTAINER, "5432/tcp"]);
-  const m = (portRes.stdout.trim().split("\n")[0] ?? "").match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse docker port: ${JSON.stringify(portRes.stdout)}`);
-  const port = Number(m[1]);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", CONTAINER, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container did not become ready within 60s");
-    await sleep(500);
-  }
-  return { port };
+  pgServer = await startEmbeddedPg();
+  return { port: pgServer.port };
 }
 
 /* --- measurement: single-client sequential warmup+measure loop --- */
@@ -119,12 +89,13 @@ async function measure(op: () => Promise<void>, seconds = 3, warmupMs = 1000): P
   return { opsPerSec: ops / seconds, p50Ms: percentile(lat, 0.5), p99Ms: percentile(lat, 0.99), elu: elu.utilization };
 }
 
-const RUN = dockerAvailable() && process.env["STACKBASE_BENCH_OVERHEAD"] === "1";
+const RUN = embeddedPgAvailable() && process.env["STACKBASE_BENCH_OVERHEAD"] === "1";
 const maybe = RUN ? describe : describe.skip;
 
 maybe("bench-overhead — raw PG vs store commit vs full mutation (opt-in: STACKBASE_BENCH_OVERHEAD=1)", () => {
-  afterAll(() => {
-    runDocker(["rm", "-f", CONTAINER]);
+  afterAll(async () => {
+    await pgServer?.stop();
+    pgServer = undefined;
   });
 
   it("overhead ladder — prints raw INSERT / store.commitWrite / runtime.run, same box", async () => {
