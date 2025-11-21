@@ -445,5 +445,7 @@ describe("single-connection hazard — WHY the pool exists (PGlite, real Postgre
     const ids = rows.map((r) => Number(r.id));
     expect(ids).toContain(1);
     await client.close();
-  });
+    // 30s: the PGlite WASM boot dominates and routinely blows the default 5s under a loaded host
+    // (parallel full-gate runs) — the hazard being demonstrated has no timing component at all.
+  }, 30_000);
 });
