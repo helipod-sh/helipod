@@ -185,7 +185,7 @@ The **real-Postgres run resolves it decisively.** Against a real store, ELU is *
 ```bash
 # in-process matrix, in-memory SQLite (7 cells, ~1–2 min)
 STACKBASE_BENCH_FANOUT=1 bun run --filter @stackbase/test test -- bench-fanout
-# in-process matrix, real Postgres (Docker-gated, N<=1000, ~2–3 min) — lives in ee/fleet
+# in-process matrix, real Postgres (embedded-postgres, no Docker needed; N<=1000, ~2–3 min) — lives in ee/fleet
 STACKBASE_BENCH_FANOUT_PG=1 bun run --filter @stackbase/fleet test -- bench-fanout-pg
 # WebSocket end-to-end cell
 STACKBASE_BENCH_FANOUT_WS=1 bun run --filter @stackbase/cli test -- bench-fanout-ws

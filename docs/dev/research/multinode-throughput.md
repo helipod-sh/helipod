@@ -2,7 +2,7 @@
 
 **Status:** RECORDED (2025-10-16). Does Stackbase's Tier-2 write-sharding fleet actually scale write
 throughput across nodes, past the single-node single-writer ceiling? Harness:
-`ee/packages/fleet/test/bench-multinode-pg.test.ts` (Docker-gated, opt-in `STACKBASE_BENCH_MULTINODE=1`).
+`ee/packages/fleet/test/bench-multinode-pg.test.ts` (embedded-postgres — no Docker needed, opt-in `STACKBASE_BENCH_MULTINODE=1`).
 
 ## Setup
 

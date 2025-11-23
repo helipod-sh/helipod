@@ -19,8 +19,8 @@
  *       TERMINAL failure records + continues; a mid-batch TRANSIENT failure stops the remainder.
  *   (5) the collateral fix live under STACKBASE_GROUP_COMMIT=1: co-batched innocents from OTHER
  *       clients survive a duplicate-key abort (the T3 split-retry, end-to-end).
- *   (6) fleet + 8 shards (real Docker): a resend arriving via a NON-owner (sync) node classifies at
- *       the OWNER — the per-unit receipt is present exactly once.
+ *   (6) fleet + 8 shards (real embedded-postgres, no Docker): a resend arriving via a NON-owner
+ *       (sync) node classifies at the OWNER — the per-unit receipt is present exactly once.
  *   (7) old-client compat: the same flows MINUS clientId/seq are byte-identical today-behavior — no
  *       receipts written (the receipts table is asserted empty).
  *
@@ -28,7 +28,7 @@
  * and the zero-write keyed mutation records an `applied` receipt (with its value).
  */
 import { describe, it, expect } from "vitest";
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -40,6 +40,7 @@ import { query, mutation } from "@stackbase/executor";
 import { ServiceUnavailableError } from "@stackbase/errors";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { NodePgClient } from "@stackbase/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { ClientMessage, ServerMessage, MutationBatchEntry } from "@stackbase/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
@@ -635,47 +636,19 @@ describe("outbox server E2E (7) — old-client compat: no clientId/seq is byte-i
 
 /* -------------------------------------------------------------------------- */
 /* Scenario 6 — fleet + 8 shards: resend via a NON-owner node classifies at     */
-/*              the owner (real Docker: postgres:16 + two `serve --fleet` procs)  */
+/*              the owner (real embedded-postgres + two `serve --fleet` procs,  */
+/*              no Docker)                                                      */
 /* -------------------------------------------------------------------------- */
 
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-const HAS_DOCKER = dockerAvailable();
-const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
+const HAS_EMBEDDED_PG = embeddedPgAvailable();
+const maybeDescribe = HAS_EMBEDDED_PG ? describe : describe.skip;
 
-const PG_CONTAINER = `sb-outbox-fleet-${process.pid}`;
 const CLI_BIN = resolve(new URL(".", import.meta.url).pathname, "..", "dist", "bin.js");
 const FLEET_FIXTURE_CONVEX = resolve(
   new URL(".", import.meta.url).pathname,
   "..", "..", "..", "ee", "packages", "fleet", "test", "fixtures", "app", "convex",
 );
 const ADMIN_KEY = "outbox-fleet-key";
-
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
-async function startPgContainer(): Promise<{ url: string }> {
-  runDocker(["rm", "-f", PG_CONTAINER]);
-  const run = runDocker(["run", "-d", "--name", PG_CONTAINER, "-e", "POSTGRES_PASSWORD=postgres", "-p", "127.0.0.1::5432", "postgres:16"]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  const portRes = runDocker(["port", PG_CONTAINER, "5432/tcp"]);
-  const m = (portRes.stdout.trim().split("\n")[0] ?? "").match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse docker port: ${portRes.stdout}`);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", PG_CONTAINER, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container not ready in 60s");
-    await sleep(500);
-  }
-  return { url: `postgres://postgres:postgres@127.0.0.1:${m[1]}/postgres` };
-}
 
 type ServeProc = ChildProcessByStdio<null, Readable, Readable>;
 interface ReadyLine {
@@ -757,7 +730,8 @@ async function stopServe(proc: ServeProc | undefined): Promise<void> {
 
 maybeDescribe("outbox server E2E (6) — fleet + 8 shards: a resend via a non-owner node classifies at the owner", () => {
   it("forwards a (clientId, seq) mutation from the SYNC node to the writer; the resend replays and exactly one receipt exists", async () => {
-    const { url: databaseUrl } = await startPgContainer();
+    const pgServer = await startEmbeddedPg();
+    const databaseUrl = pgServer.url;
     const portA = await freePort();
     const portB = await freePort();
     const dataDirA = mkdtempSync(join(tmpdir(), "sb-outbox-fleetA-"));
@@ -807,7 +781,7 @@ maybeDescribe("outbox server E2E (6) — fleet + 8 shards: a resend via a non-ow
       await pg.close().catch(() => {});
       await stopServe(nodeA);
       await stopServe(nodeB);
-      runDocker(["rm", "-f", PG_CONTAINER]);
+      await pgServer.stop();
       rmSync(dataDirA, { recursive: true, force: true });
       rmSync(dataDirB, { recursive: true, force: true });
     }

@@ -6,20 +6,38 @@
  * a single shared connection (there, B's work would either queue behind A or interleave into A's txn
  * and corrupt atomicity; see the PGlite hazard test in `commit-pool.test.ts`). It requires TWO real
  * Postgres connections, which PGlite cannot provide (single in-process instance, no cross-instance DB
- * sharing), so it is GATED on `STACKBASE_TEST_DATABASE_URL` — the same gate the docstore conformance
- * suite uses for its real-Postgres runs — and is otherwise skipped. The T6 fleet E2E exercises the
- * same property end-to-end through the real server.
+ * sharing), so it runs against a real server: `STACKBASE_TEST_DATABASE_URL` when provided, else an
+ * embedded native Postgres booted by the harness (`test-support/embedded-pg.ts`) — so it runs in
+ * every gate rather than lying dormant behind the env var. The T6 fleet E2E exercises the same
+ * property end-to-end through the real server.
  *
- * Run locally with e.g.:
+ * To point it at your own server instead:
  *   STACKBASE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
  *     bun run --filter @stackbase/docstore-postgres test
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { NodePgClient } from "../src/node-pg-client";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "../test-support/embedded-pg";
 
-const DATABASE_URL = process.env.STACKBASE_TEST_DATABASE_URL;
+// Prefer an explicitly-provided server; otherwise boot an embedded one (real native Postgres, no
+// Docker) so this proof runs in every gate instead of lying dormant behind an env var.
+const ENV_URL = process.env.STACKBASE_TEST_DATABASE_URL;
 
-describe.skipIf(!DATABASE_URL)("commit pool — genuine cross-shard concurrency (real Postgres)", () => {
+describe.skipIf(!ENV_URL && !embeddedPgAvailable())("commit pool — genuine cross-shard concurrency (real Postgres)", () => {
+  let DATABASE_URL = ENV_URL;
+  let embedded: EmbeddedPg | undefined;
+
+  beforeAll(async () => {
+    if (!DATABASE_URL) {
+      embedded = await startEmbeddedPg();
+      DATABASE_URL = embedded.url;
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await embedded?.stop();
+  });
+
   it("holds shard A's commit open while shard B's commit completes and is visible (two connections)", async () => {
     const client = new NodePgClient({
       connectionString: DATABASE_URL!,

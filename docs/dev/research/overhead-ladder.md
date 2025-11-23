@@ -4,8 +4,8 @@
 driver, same single-client measurement loop, three rungs of increasing work — one document write
 each. Answers "is our overhead where it should be, or is there a hidden inefficiency?".
 
-**Harness:** `ee/packages/fleet/test/bench-overhead-pg.test.ts` (Docker-gated, opt-in
-`STACKBASE_BENCH_OVERHEAD=1`). Single client, sequential — isolates PER-OP overhead, not concurrency.
+**Harness:** `ee/packages/fleet/test/bench-overhead-pg.test.ts` (embedded-postgres — no Docker needed,
+opt-in `STACKBASE_BENCH_OVERHEAD=1`). Single client, sequential — isolates PER-OP overhead, not concurrency.
 
 ## The three rungs
 

@@ -36,7 +36,15 @@
     "dev": "turbo run dev",
     "clean": "turbo run clean && rm -rf node_modules"
   },
+  "trustedDependencies": [
+    "@embedded-postgres/darwin-arm64",
+    "@embedded-postgres/darwin-x64",
+    "@embedded-postgres/linux-arm64",
+    "@embedded-postgres/linux-x64",
+    "@embedded-postgres/windows-x64"
+  ],
   "devDependencies": {
+    "embedded-postgres": "16.14.0-beta.17",
     "turbo": "^2.3.3",
     "typescript": "catalog:",
     "vitest": "catalog:"

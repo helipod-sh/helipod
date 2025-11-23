@@ -22,7 +22,8 @@
  * DOM reload is a browser-integration concern out of scope for the engine test suite.
  *
  * The scenarios (task-6-brief.md):
- *   (1) THE FLAGSHIP on (a) SQLite dev server and (b) Postgres + fleet + 8 shards (Docker).
+ *   (1) THE FLAGSHIP on (a) SQLite dev server and (b) Postgres + fleet + 8 shards (embedded-postgres,
+ *       no Docker).
  *   (2) kill-after-commit through the real client (park → replay-settle, no double).
  *   (3) mid-drain leader kill (two instances, one storage; successor drains; receipts absorb overlap).
  *   (4) multi-tab (two clientIds, one leader drains both queues' entries under their recorded ids).
@@ -34,7 +35,7 @@
  */
 import { describe, it, expect } from "vitest";
 import net from "node:net";
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -46,6 +47,7 @@ import { v, defineSchema, defineTable } from "@stackbase/values";
 import { query, mutation } from "@stackbase/executor";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { NodePgClient } from "@stackbase/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import {
   StackbaseClient,
@@ -850,47 +852,19 @@ describe("outbox client E2E (7) — old-server compat: a Plan-A-less server send
 });
 
 /* -------------------------------------------------------------------------- */
-/* Scenario (1b) — THE FLAGSHIP on Postgres + fleet + 8 shards (real Docker)     */
+/* Scenario (1b) — THE FLAGSHIP on Postgres + fleet + 8 shards                  */
+/*                  (real embedded-postgres, no Docker)                        */
 /* -------------------------------------------------------------------------- */
 
-function dockerAvailable(): boolean {
-  try {
-    return spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "ignore" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-const HAS_DOCKER = dockerAvailable();
-const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
+const HAS_EMBEDDED_PG = embeddedPgAvailable();
+const maybeDescribe = HAS_EMBEDDED_PG ? describe : describe.skip;
 
-const PG_CONTAINER = `sb-outbox-client-fleet-${process.pid}`;
 const CLI_BIN = resolve(new URL(".", import.meta.url).pathname, "..", "dist", "bin.js");
 const FLEET_FIXTURE_CONVEX = resolve(
   new URL(".", import.meta.url).pathname,
   "..", "..", "..", "ee", "packages", "fleet", "test", "fixtures", "app", "convex",
 );
 const ADMIN_KEY = "outbox-client-fleet-key";
-
-function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("docker", args, { encoding: "utf8" });
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-}
-
-async function startPgContainer(): Promise<{ url: string }> {
-  runDocker(["rm", "-f", PG_CONTAINER]);
-  const run = runDocker(["run", "-d", "--name", PG_CONTAINER, "-e", "POSTGRES_PASSWORD=postgres", "-p", "127.0.0.1::5432", "postgres:16"]);
-  if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr}`);
-  const portRes = runDocker(["port", PG_CONTAINER, "5432/tcp"]);
-  const m = (portRes.stdout.trim().split("\n")[0] ?? "").match(/:(\d+)$/);
-  if (!m) throw new Error(`could not parse docker port: ${portRes.stdout}`);
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    if (runDocker(["exec", PG_CONTAINER, "pg_isready", "-U", "postgres"]).status === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres container not ready in 60s");
-    await sleep(500);
-  }
-  return { url: `postgres://postgres:postgres@127.0.0.1:${m[1]}/postgres` };
-}
 
 type ServeProc = ChildProcessByStdio<null, Readable, Readable>;
 interface ReadyLine { url: string; role?: "sync" | "writer"; }
@@ -950,7 +924,8 @@ async function stopServe(proc: ServeProc | undefined): Promise<void> {
 maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 shards: offline → reload → drain, exactly-once", () => {
   it("an armed client on the fleet writer enqueues K offline; a reload drains through the 8-shard fleet transactor with a mid-drain resend; exactly K receipts in the shared Postgres", async () => {
     const K = 10;
-    const { url: databaseUrl } = await startPgContainer();
+    const pgServer = await startEmbeddedPg();
+    const databaseUrl = pgServer.url;
     const portA = await freePort();
     const portB = await freePort();
     const dataDirA = mkdtempSync(join(tmpdir(), "sb-oc-fleetA-"));
@@ -1022,7 +997,7 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
       await pg.close().catch(() => {});
       await stopServe(nodeA);
       await stopServe(nodeB);
-      runDocker(["rm", "-f", PG_CONTAINER]);
+      await pgServer.stop();
       rmSync(dataDirA, { recursive: true, force: true });
       rmSync(dataDirB, { recursive: true, force: true });
     }
@@ -1039,7 +1014,8 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
 maybeDescribe("outbox client E2E (8) — a reload via the fleet SYNC node classifies receipts against the PRIMARY (no spurious reset, no double-apply)", () => {
   it("seeds K offline via the writer, reloads THROUGH the sync node with a mid-drain socket kill: the sync node routes Connect classification to the primary → known:true, no reset, and the committed-but-resent entries settle exactly-once (pre-fix: the replica has no receipts → known:false → the client resets, and a committed seq falsely fails)", async () => {
     const K = 6;
-    const { url: databaseUrl } = await startPgContainer();
+    const pgServer = await startEmbeddedPg();
+    const databaseUrl = pgServer.url;
     const portA = await freePort();
     const portB = await freePort();
     const dataDirA = mkdtempSync(join(tmpdir(), "sb-oc-syncA-"));
@@ -1118,7 +1094,7 @@ maybeDescribe("outbox client E2E (8) — a reload via the fleet SYNC node classi
       await pg.close().catch(() => {});
       await stopServe(nodeA);
       await stopServe(nodeB);
-      runDocker(["rm", "-f", PG_CONTAINER]);
+      await pgServer.stop();
       rmSync(dataDirA, { recursive: true, force: true });
       rmSync(dataDirB, { recursive: true, force: true });
     }
