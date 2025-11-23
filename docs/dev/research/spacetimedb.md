@@ -6,6 +6,8 @@ status: research
 # SpacetimeDB — Architecture Research
 
 > Research date: 2025-05-15. Reflects SpacetimeDB ~1.x/2.0-era architecture as documented by Clockwork Labs plus third-party technical reviews. Where sources disagree (notably on concurrency), the disagreement is flagged inline.
+>
+> **See also: [`spacetimedb-internals.md`](spacetimedb-internals.md)** — a mechanism-level, code-verified deep dive of the OSS engine (storage, durability, reactivity/IVM, the WASM-vs-V8 multi-language split, performance), with `file:line` pointers and the direct Stackbase comparison. That companion supersedes this file on concurrency (it's a **single serial writer**, code-confirmed) and on internals detail; this file remains the best high-level positioning + published-benchmark-numbers overview.
 
 ## 1. Positioning & one-line thesis
 
