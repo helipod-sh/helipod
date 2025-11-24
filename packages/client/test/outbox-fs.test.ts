@@ -62,10 +62,15 @@ describe("fsOutbox — close() race (regression)", () => {
     const raw = existsSync(join(dir, "journal.jsonl")) ? readFileSync(join(dir, "journal.jsonl"), "utf8") : "";
     const written = raw.includes('"seq":0');
     if (result.ok) {
-      expect(written).toBe(true); // resolved => MUST be durably on disk
+      expect(written).toBe(true); // resolved => MUST be durably on disk (the load-bearing direction)
     } else {
-      expect(written).toBe(false); // rejected => MUST NOT be on disk
+      // rejected => outcome UNKNOWN by contract (close's final compaction may have snapshotted the
+      // already-applied state) — the journal just has to be hydrate-consistent, never half-written
       expect((result.err as { code?: string }).code).toBe("OUTBOX_CLOSED");
+      const b = fsOutbox({ dir });
+      const { entries } = await b.loadAll();
+      expect(entries.every((e) => e.udfPath === "messages:send")).toBe(true);
+      await b.close?.();
     }
   });
 

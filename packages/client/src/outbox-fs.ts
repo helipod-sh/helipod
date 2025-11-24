@@ -39,7 +39,11 @@ export interface FsOutboxOptions {
  *  caller racing `close()` learns its write was dropped rather than believing it durable. */
 export class OutboxClosedError extends Error {
   readonly code = "OUTBOX_CLOSED";
-  constructor(message = "fsOutbox is closed; this operation was rejected rather than silently dropped") {
+  constructor(
+    message = "fsOutbox is closed; this operation's outcome is UNKNOWN — it may or may not have " +
+      "been durably persisted (close()'s own final compaction can snapshot state an op mutated " +
+      "before its flush rejected). Treat like any in-flight-at-shutdown write: verify on next hydrate.",
+  ) {
     super(message);
     this.name = "OutboxClosedError";
   }
@@ -159,14 +163,11 @@ export class FsOutboxStorage implements OutboxStorage {
         this.opCount++;
         validBytes += Buffer.byteLength(line, "utf8") + 1;
       } catch {
-        if (isLast) {
-          // corrupt tail line that DOES have a trailing newline — physically truncate so it can
-          // never become a corrupt middle
-          await truncate(this.journalPath, validBytes);
-        } else {
-          appendFileSync(join(this.dir, "journal.quarantine"), line + "\n");
-          validBytes += Buffer.byteLength(line, "utf8") + 1;
-        }
+        // A parse-failing line here always HAS its trailing newline (an unterminated final line is
+        // intercepted pre-parse above; a file ending "\n" makes split's last element ""), so its
+        // write completed and the corruption is content-level: quarantine and continue.
+        appendFileSync(join(this.dir, "journal.quarantine"), line + "\n");
+        validBytes += Buffer.byteLength(line, "utf8") + 1;
       }
     }
     this.handle = await open(this.journalPath, "a");
@@ -313,6 +314,10 @@ export class FsOutboxStorage implements OutboxStorage {
     // No-op: no eviction advisory exists on a filesystem.
   }
 
+  /** NOTE for `finally`-block callers: under the fail-stop tail, `close()` PROPAGATES a prior
+   *  tail rejection (a racing op's flush error) rather than masking it — `await storage.close?.()`
+   *  in cleanup paths should tolerate a rejecting close (`.catch` it if the original error is
+   *  already being handled elsewhere). */
   async close(): Promise<void> {
     // The ENTIRE body runs as ONE link chained onto `this.tail` — not "await ready(), then do
     // more stuff off-tail" as before. That old shape let `this.closed = true` and the final
