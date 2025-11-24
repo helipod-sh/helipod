@@ -81,6 +81,22 @@ describe("IndexedDBOutboxStorage — durability across reopen (not covered by th
     expect((await second.loadAll()).entries).toHaveLength(1);
     expect(await second.getMeta("c1")).toEqual({ nextSeq: 3 });
   });
+
+  it("close() flushes a still-pending write-behind batch before closing — a batched op is never lost (the binding constraint)", async () => {
+    const dbName = "close-flush-check";
+    const first = await openIndexedDBOutbox(idb, dbName);
+    // Deliberately NOT awaited: the write-behind flush is scheduled on a microtask, so at the
+    // moment close() is called the append is still sitting in the in-memory queue, unflushed.
+    void first.append(makeEntry());
+    await first.close();
+    // A second close() must also be safe — IndexedDBOutboxStorage documents close() as
+    // idempotent-safe (flush() no-ops on an empty queue, and closing an already-closed
+    // IDBDatabase connection is a spec-legal no-op).
+    await first.close();
+
+    const reopened = await openIndexedDBOutbox(idb, dbName);
+    expect((await reopened.loadAll()).entries).toHaveLength(1);
+  });
 });
 
 describe("IndexedDBOutboxStorage — write-behind batching", () => {
