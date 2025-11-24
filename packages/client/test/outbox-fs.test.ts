@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsOutbox } from "../src/outbox-fs";
@@ -49,6 +49,35 @@ describe("fsOutbox — journal durability", () => {
   });
 });
 
+describe("fsOutbox — close() race (regression)", () => {
+  it("an append racing close() in the same synchronous frame never resolves unwritten", async () => {
+    const dir = freshDir();
+    const s = fsOutbox({ dir });
+    const outcome = s.append(makeEntry({ seq: 0, order: 0 })).then(
+      () => ({ ok: true as const }),
+      (err: unknown) => ({ ok: false as const, err }),
+    );
+    await s.close?.();
+    const result = await outcome;
+    const raw = existsSync(join(dir, "journal.jsonl")) ? readFileSync(join(dir, "journal.jsonl"), "utf8") : "";
+    const written = raw.includes('"seq":0');
+    if (result.ok) {
+      expect(written).toBe(true); // resolved => MUST be durably on disk
+    } else {
+      expect(written).toBe(false); // rejected => MUST NOT be on disk
+      expect((result.err as { code?: string }).code).toBe("OUTBOX_CLOSED");
+    }
+  });
+
+  it("append() after close() rejects with OUTBOX_CLOSED", async () => {
+    const dir = freshDir();
+    const s = fsOutbox({ dir });
+    await s.append(makeEntry({ seq: 0, order: 0 }));
+    await s.close?.();
+    await expect(s.append(makeEntry({ seq: 1, order: 1 }))).rejects.toMatchObject({ code: "OUTBOX_CLOSED" });
+  });
+});
+
 describe("fsOutbox — corruption", () => {
   it("a torn TAIL line is physically truncated and only that entry is lost", async () => {
     const dir = freshDir();
@@ -68,6 +97,35 @@ describe("fsOutbox — corruption", () => {
     // byte-prefix of the legitimate entry's own JSON, e.g. `"seq`/`"seed` keys the surviving valid
     // entry legitimately contains).
     expect(raw).toBe(before);
+  });
+
+  it("a valid-but-unterminated last line is truncated rather than glued onto the next session's append (regression)", async () => {
+    const dir = freshDir();
+    // Session A: append seq 0 and close cleanly.
+    const a = fsOutbox({ dir });
+    await a.append(makeEntry({ seq: 0, order: 0 }));
+    await a.close?.();
+    // Hand-strip the trailing "\n" — this simulates a crash exactly at the newline write
+    // boundary: the flush's single write() call landed everything except the final byte, so
+    // seq 0's append() promise (in that hypothetical crashed session) never actually resolved,
+    // even though what's left on disk happens to parse as valid JSON.
+    const p = join(dir, "journal.jsonl");
+    const stripped = readFileSync(p, "utf8").replace(/\n$/, "");
+    writeFileSync(p, stripped);
+    expect(stripped.endsWith("\n")).toBe(false);
+
+    // Session B: opens (must truncate the unterminated line, NOT accept it), appends seq 1,
+    // closes cleanly.
+    const b = fsOutbox({ dir });
+    await b.append(makeEntry({ seq: 1, order: 1 }));
+    await b.close?.();
+
+    // Session C: hydrate. Must see exactly [1] — never a glued double-line, never seq 0 back.
+    const c = fsOutbox({ dir });
+    const { entries } = await c.loadAll();
+    expect(entries.map((e) => e.seq)).toEqual([1]);
+    expect(existsSync(join(dir, "journal.quarantine"))).toBe(false);
+    await c.close?.();
   });
 
   it("a corrupt MIDDLE line is quarantined and skipped; later ops for other entries still apply", async () => {
