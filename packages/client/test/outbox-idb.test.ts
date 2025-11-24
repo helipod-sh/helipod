@@ -3,27 +3,10 @@ import { IDBFactory } from "fake-indexeddb";
 import {
   IndexedDBOutboxStorage,
   OUTBOX_DB_NAME,
-  OUTBOX_VERSION,
   openIndexedDBOutbox,
 } from "../src/outbox-idb";
 import { indexedDBOutbox } from "../src/outbox-storage";
-import type { OutboxEntry } from "../src/outbox-storage";
-
-function makeEntry(overrides: Partial<OutboxEntry> = {}): OutboxEntry {
-  return {
-    clientId: "client-1",
-    seq: 0,
-    requestId: "r0",
-    udfPath: "messages:send",
-    args: { body: "hi" },
-    seed: { entropy: "e0", now: 0 },
-    order: 0,
-    status: "unsent",
-    outboxVersion: OUTBOX_VERSION,
-    enqueuedAt: 0,
-    ...overrides,
-  };
-}
+import { runOutboxStorageContract, makeEntry } from "./outbox-contract";
 
 // A fresh `IDBFactory` per test — genuine isolation, no shared global state and no need to
 // delete-database between tests.
@@ -31,6 +14,11 @@ let idb: IDBFactory;
 
 beforeEach(() => {
   idb = new IDBFactory();
+});
+
+runOutboxStorageContract("indexedDBOutbox (fake-indexeddb)", async () => {
+  const factory = new IDBFactory(); // per this file's existing fake-indexeddb import style
+  return { storage: indexedDBOutbox({ indexedDB: factory }) };
 });
 
 describe("IndexedDBOutboxStorage — schema", () => {
@@ -73,36 +61,11 @@ describe("IndexedDBOutboxStorage — schema", () => {
   });
 });
 
-describe("IndexedDBOutboxStorage — CRUD + hydrate", () => {
-  it("append + loadAll round-trip, sorted by `order`", async () => {
-    const storage = await openIndexedDBOutbox(idb);
-    await storage.append(makeEntry({ seq: 1, requestId: "r1", order: 1 }));
-    await storage.append(makeEntry({ seq: 0, requestId: "r0", order: 0 }));
-    const { entries, dropped } = await storage.loadAll();
-    expect(dropped).toEqual([]);
-    expect(entries.map((e) => e.seq)).toEqual([0, 1]);
-  });
-
-  it("[clientId, seq] keys distinguish entries across clientIds sharing the queue", async () => {
-    const storage = await openIndexedDBOutbox(idb);
-    await storage.append(makeEntry({ clientId: "a", seq: 0, requestId: "a0", order: 0 }));
-    await storage.append(makeEntry({ clientId: "b", seq: 0, requestId: "b0", order: 1 }));
-    const { entries } = await storage.loadAll();
-    expect(entries).toHaveLength(2);
-  });
-
-  it("updateStatus mutates only status, preserving the rest of the record", async () => {
+describe("IndexedDBOutboxStorage — durability across reopen (not covered by the shared contract, which never reopens a backend)", () => {
+  it("dequeue removes the entry durably — survives a fresh open() against the same IDBFactory", async () => {
     const storage = await openIndexedDBOutbox(idb);
     await storage.append(makeEntry());
-    await storage.updateStatus("client-1", 0, "parked");
-    const { entries } = await storage.loadAll();
-    expect(entries[0]).toMatchObject({ status: "parked", udfPath: "messages:send", args: { body: "hi" } });
-  });
-
-  it("dequeue removes the entry durably", async () => {
-    const storage = await openIndexedDBOutbox(idb);
-    await storage.append(makeEntry());
-    await storage.dequeue("client-1", 0);
+    await storage.dequeue("c1", 0);
     expect((await storage.loadAll()).entries).toEqual([]);
     // Re-open the database from scratch to prove it's durable, not just evicted from an in-memory cache.
     const reopened = await openIndexedDBOutbox(idb);
@@ -112,24 +75,11 @@ describe("IndexedDBOutboxStorage — CRUD + hydrate", () => {
   it("survives a fresh open() against the same IDBFactory — genuine durability, not process memory", async () => {
     const first = await openIndexedDBOutbox(idb);
     await first.append(makeEntry());
-    await first.setMeta("client-1", { nextSeq: 3 });
+    await first.setMeta("c1", { nextSeq: 3 });
 
     const second = await openIndexedDBOutbox(idb);
     expect((await second.loadAll()).entries).toHaveLength(1);
-    expect(await second.getMeta("client-1")).toEqual({ nextSeq: 3 });
-  });
-
-  it("outboxVersion stamp: hydrate drops a stale-version entry and reports it (drop-with-verdict)", async () => {
-    const storage = await openIndexedDBOutbox(idb);
-    await storage.append(makeEntry({ seq: 0, requestId: "r0", order: 0, outboxVersion: OUTBOX_VERSION }));
-    await storage.append(makeEntry({ seq: 1, requestId: "r1", order: 1, outboxVersion: OUTBOX_VERSION + 1 }));
-    const { entries, dropped } = await storage.loadAll();
-    expect(entries.map((e) => e.seq)).toEqual([0]);
-    expect(dropped.map((e) => e.seq)).toEqual([1]);
-    // it's actually deleted — not just filtered in memory.
-    const again = await storage.loadAll();
-    expect(again.dropped).toEqual([]);
-    expect(again.entries.map((e) => e.seq)).toEqual([0]);
+    expect(await second.getMeta("c1")).toEqual({ nextSeq: 3 });
   });
 });
 

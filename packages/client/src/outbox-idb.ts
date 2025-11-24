@@ -228,6 +228,11 @@ export class IndexedDBOutboxStorage implements OutboxStorage {
       void navigator.storage.persist().catch(() => {});
     }
   }
+
+  async close(): Promise<void> {
+    await this.flush();
+    this.db.close();
+  }
 }
 
 /** Open (creating if needed) the one shared outbox database and return a ready `OutboxStorage`.

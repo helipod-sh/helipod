@@ -115,6 +115,12 @@ export interface OutboxStorage {
    *  behavior anywhere ever branches on whether the grant is honored (verdict §(g) hazard 3: "zero
    *  behavior branches on the grant"). A no-op for the memory backend. */
   persist(): void;
+  /** OPTIONAL: flush pending writes and release any backing resources (fs lock, IDB handle).
+   *  Additive like `listMetaClientIds` — callers guard with `?.`. Nothing in the client core
+   *  calls it; it exists for host shutdown/relaunch flows (Electron window cycling) and tests.
+   *  A client that never calls it loses nothing (backends self-heal: exit hooks, stale-lock
+   *  steal, IDB's own connection lifecycle). */
+  close?(): Promise<void>;
 }
 
 /** Default cap on how many outbox-tracked entries (`unsent`/`inflight`/`parked` — not yet fully
@@ -200,6 +206,9 @@ export function memoryOutbox(): OutboxStorage {
       // No-op: nothing here survives a reload anyway, so there is nothing worth asking the
       // browser to protect from eviction.
     },
+    async close() {
+      // No backing resource — a memory queue's lifetime IS the instance's lifetime.
+    },
   };
 }
 
@@ -250,6 +259,7 @@ export function indexedDBOutbox(opts: IndexedDBOutboxOptions = {}): OutboxStorag
       // Advisory-only — fire-and-forget even the routing to the resolved implementation.
       void impl().then((i) => i.persist());
     },
+    close: async () => (await impl()).close?.(),
   };
 }
 
