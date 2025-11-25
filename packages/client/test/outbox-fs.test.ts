@@ -169,3 +169,65 @@ describe("fsOutbox — compaction", () => {
     await b.close?.();
   }, 30_000);
 });
+
+describe("fsOutbox — one writer per dir (lock + probe-and-fallback)", () => {
+  it("a same-process double-open falls back to memory and fires onFallback once", async () => {
+    const dir = freshDir();
+    const a = fsOutbox({ dir });
+    await a.append(makeEntry());
+    const reasons: unknown[] = [];
+    const b = fsOutbox({ dir, onFallback: (r) => reasons.push(r) });
+    await b.append(makeEntry({ clientId: "other", seq: 0, order: 5 }));
+    expect(reasons).toHaveLength(1);
+    expect((reasons[0] as { code?: string }).code).toBe("OUTBOX_LOCK_HELD");
+    // b is memory-backed: its entry is NOT in the journal
+    expect(readFileSync(join(dir, "journal.jsonl"), "utf8")).not.toContain('"other"');
+    // but b still works as a queue (degraded, not broken)
+    expect((await b.loadAll()).entries.map((e) => e.clientId)).toEqual(["other"]);
+    await a.close?.();
+    await b.close?.();
+  });
+
+  it("close() releases the lock: reopen on the same dir succeeds and hydrates", async () => {
+    const dir = freshDir();
+    const a = fsOutbox({ dir });
+    await a.append(makeEntry());
+    await a.close?.();
+    expect(existsSync(join(dir, "lock"))).toBe(false);
+    const reasons: unknown[] = [];
+    const b = fsOutbox({ dir, onFallback: (r) => reasons.push(r) });
+    expect((await b.loadAll()).entries).toHaveLength(1);
+    expect(reasons).toHaveLength(0);
+    await b.close?.();
+  });
+
+  it("a DEAD-pid stale lock is stolen and the adapter opens normally", async () => {
+    const dir = freshDir();
+    writeFileSync(join(dir, "lock"), JSON.stringify({ pid: 999999999, createdAt: 1 }));
+    const reasons: unknown[] = [];
+    const s = fsOutbox({ dir, onFallback: (r) => reasons.push(r) });
+    await s.append(makeEntry());
+    expect(reasons).toHaveLength(0);
+    expect(readFileSync(join(dir, "journal.jsonl"), "utf8")).toContain('"op":"append"');
+    await s.close?.();
+  });
+
+  it("an OWN-pid lock left by a previous boot (pid recycled, dir not registered) is stolen", async () => {
+    const dir = freshDir();
+    writeFileSync(join(dir, "lock"), JSON.stringify({ pid: process.pid, createdAt: 1 }));
+    const reasons: unknown[] = [];
+    const s = fsOutbox({ dir, onFallback: (r) => reasons.push(r) });
+    await s.append(makeEntry());
+    expect(reasons).toHaveLength(0);
+    await s.close?.();
+  });
+
+  it("a GARBAGE lockfile is stolen, not fatal", async () => {
+    const dir = freshDir();
+    writeFileSync(join(dir, "lock"), "not json at all");
+    const s = fsOutbox({ dir });
+    await s.append(makeEntry());
+    expect((await s.loadAll()).entries).toHaveLength(1);
+    await s.close?.();
+  });
+});

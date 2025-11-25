@@ -10,16 +10,17 @@
  * `node:*` imports live ONLY in this file — it ships as the `./outbox-fs` subpath export so the
  * browser bundles never see them.
  */
-import { appendFileSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm, truncate, type FileHandle } from "node:fs/promises";
+import { appendFileSync, unlinkSync } from "node:fs";
+import { mkdir, open, readFile, rename, rm, truncate, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type {
-  HydrateResult,
-  OutboxEntry,
-  OutboxEntryError,
-  OutboxEntryStatus,
-  OutboxMeta,
-  OutboxStorage,
+import {
+  memoryOutbox,
+  type HydrateResult,
+  type OutboxEntry,
+  type OutboxEntryError,
+  type OutboxEntryStatus,
+  type OutboxMeta,
+  type OutboxStorage,
 } from "./outbox-storage";
 import { dropStaleVersion } from "./outbox-idb";
 
@@ -94,7 +95,10 @@ function applyOp(state: State, op: JournalOp): void {
 
 /** The direct (lock-free) open — Task 3's fsOutbox() wraps this with lock + probe-and-fallback. */
 export class FsOutboxStorage implements OutboxStorage {
-  readonly stats = { flushes: 0, fsyncs: 0 };
+  /** Accepts an injectable stats object (Task 3's lock wrapper passes its own so the object it
+   *  returns from `fsOutbox()` stays live even across a probe-and-fallback swap) — defaults to a
+   *  fresh one for direct construction (tests, this file's own Task 2 shape). */
+  readonly stats: { flushes: number; fsyncs: number };
 
   private state: State = { entries: new Map(), meta: new Map() };
   private opCount = 0;
@@ -117,7 +121,10 @@ export class FsOutboxStorage implements OutboxStorage {
   constructor(
     private readonly dir: string,
     private readonly fsync: boolean,
-  ) {}
+    stats: { flushes: number; fsyncs: number } = { flushes: 0, fsyncs: 0 },
+  ) {
+    this.stats = stats;
+  }
 
   private get journalPath() {
     return join(this.dir, "journal.jsonl");
@@ -347,8 +354,124 @@ export class FsOutboxStorage implements OutboxStorage {
   }
 }
 
-/** Task 2 shape: direct open (no lock). Task 3 replaces this body with lock + probe-and-fallback
- *  around the same FsOutboxStorage. */
+/** Dirs opened (and locked) by THIS process — makes a same-process double-open deterministic and
+ *  distinguishes a genuinely-live own-pid lock from one left by a previous boot that recycled our
+ *  pid. Keyed by resolved dir path. */
+const openDirs = new Set<string>();
+/** Lockfile paths for the best-effort exit hook (SIGKILL still leaks; the next open steals). */
+const liveLocks = new Set<string>();
+let exitHookRegistered = false;
+
+export class OutboxLockHeldError extends Error {
+  readonly code = "OUTBOX_LOCK_HELD";
+  constructor(holder: number) {
+    super(`outbox dir is locked by live pid ${holder} — one writer per dir; falling back to memory`);
+    this.name = "OutboxLockHeldError";
+  }
+}
+
+async function acquireLock(dir: string): Promise<string> {
+  const lockPath = join(dir, "lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(lockPath, JSON.stringify({ pid: process.pid, createdAt: Date.now() }), { flag: "wx" });
+      liveLocks.add(lockPath);
+      if (!exitHookRegistered) {
+        exitHookRegistered = true;
+        process.once("exit", () => {
+          for (const p of liveLocks) {
+            try {
+              unlinkSync(p);
+            } catch {
+              /* already gone */
+            }
+          }
+        });
+      }
+      return lockPath;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      let stale = false;
+      try {
+        const { pid } = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+        if (typeof pid !== "number") stale = true;
+        else if (pid === process.pid) stale = !openDirs.has(dir); // recycled pid from a prior boot
+        else {
+          try {
+            process.kill(pid, 0); // signal 0: existence probe only
+          } catch (killErr) {
+            if ((killErr as NodeJS.ErrnoException).code === "ESRCH") stale = true;
+            else throw new OutboxLockHeldError(pid); // EPERM: alive but not ours
+          }
+          if (!stale) throw new OutboxLockHeldError(pid);
+        }
+      } catch (parseOrHeld) {
+        if (parseOrHeld instanceof OutboxLockHeldError) throw parseOrHeld;
+        stale = true; // unreadable/garbage
+      }
+      if (!stale) throw new OutboxLockHeldError(-1);
+      await rm(lockPath, { force: true });
+      // loop: one retry of wx
+    }
+  }
+  throw new OutboxLockHeldError(-1);
+}
+
+/** The final shape: an async probe (lock the dir, hydrate the journal) wrapped in the same
+ *  resolved/ready delegation `indexedDBOutbox()` uses (`outbox-storage.ts`) — every call made
+ *  before the probe settles queues behind it; every call after routes directly. A same-process
+ *  double-open on the same dir, a live foreign-pid lock, or any `openOnce()` failure (a truncate
+ *  error, disk-full, etc.) all degrade to a fresh `memoryOutbox()` rather than throwing — a durable
+ *  outbox that can't get its lock still has to behave like *an* outbox (verdict-consistent
+ *  probe-and-fallback), just without cross-reload durability. `onFallback` fires exactly once for
+ *  whichever reason won. */
 export function fsOutbox(opts: FsOutboxOptions): OutboxStorage & { stats: { flushes: number; fsyncs: number } } {
-  return new FsOutboxStorage(resolve(opts.dir), opts.fsync !== false);
+  const dir = resolve(opts.dir);
+  const stats = { flushes: 0, fsyncs: 0 };
+
+  let resolved: OutboxStorage | undefined;
+  const ready: Promise<OutboxStorage> = (async (): Promise<OutboxStorage> => {
+    if (openDirs.has(dir)) throw new OutboxLockHeldError(process.pid); // same-process double-open
+    await mkdir(dir, { recursive: true });
+    const lockPath = await acquireLock(dir);
+    openDirs.add(dir);
+    const store = new FsOutboxStorage(dir, opts.fsync !== false, stats);
+    const innerClose = store.close.bind(store);
+    store.close = async () => {
+      try {
+        await innerClose();
+      } finally {
+        // Fail-stop: release the lock and deregister the dir even if the inner (tail-chained)
+        // close rejected — a poisoned journal tail must not wedge this dir locked forever. The
+        // original rejection, if any, still propagates to the caller after this finally runs.
+        openDirs.delete(dir);
+        liveLocks.delete(lockPath);
+        await unlink(lockPath).catch(() => {});
+      }
+    };
+    return store;
+  })().catch((err: unknown) => {
+    opts.onFallback?.(err);
+    return memoryOutbox();
+  });
+  void ready.then((impl) => {
+    resolved = impl;
+  });
+  const impl = async (): Promise<OutboxStorage> => resolved ?? ready;
+
+  return {
+    stats,
+    append: async (entry) => (await impl()).append(entry),
+    updateStatus: async (clientId, seq, status, error) => (await impl()).updateStatus(clientId, seq, status, error),
+    dequeue: async (clientId, seq) => (await impl()).dequeue(clientId, seq),
+    loadAll: async () => (await impl()).loadAll(),
+    getMeta: async (clientId) => (await impl()).getMeta(clientId),
+    setMeta: async (clientId, meta) => (await impl()).setMeta(clientId, meta),
+    listMetaClientIds: async () => (await impl()).listMetaClientIds?.() ?? [],
+    deleteMeta: async (clientId) => (await impl()).deleteMeta?.(clientId),
+    persist: () => {
+      void impl().then((i) => i.persist());
+    },
+    close: async () => (await impl()).close?.(),
+  };
 }
