@@ -243,6 +243,9 @@ describe("fsOutbox — one writer per dir (lock + probe-and-fallback)", () => {
     await s.append(makeEntry());
     expect((await s.loadAll()).entries.map((e) => e.udfPath)).toEqual(["messages:send"]);
     expect(reasons).toHaveLength(1);
+    // The lock FILE itself must be gone — a leftover own-pid lock would still be same-process
+    // reopenable (steal path), but would wedge a FOREIGN process until this one dies.
+    expect(existsSync(join(dir, "lock"))).toBe(false);
 
     // The lock must NOT be left wedged behind the fallback: unblock the journal path and a fresh
     // fsOutbox() on the same dir must open as a REAL fs store, not fall back itself.
