@@ -29,7 +29,8 @@ export interface FsOutboxOptions {
   dir: string;
   /** fsync appends before resolving append()'s promise. Default true. */
   fsync?: boolean;
-  /** Fired once if the adapter degrades to memoryOutbox() (Task 3: lock held, open failure). */
+  /** Fired once if the adapter degrades to memoryOutbox() (lock held by another process, or an
+   *  open/hydrate failure). */
   onFallback?: (reason: unknown) => void;
 }
 
@@ -93,11 +94,11 @@ function applyOp(state: State, op: JournalOp): void {
   }
 }
 
-/** The direct (lock-free) open — Task 3's fsOutbox() wraps this with lock + probe-and-fallback. */
+/** The direct (lock-free) open — `fsOutbox()` below wraps this with lock + probe-and-fallback. */
 export class FsOutboxStorage implements OutboxStorage {
-  /** Accepts an injectable stats object (Task 3's lock wrapper passes its own so the object it
-   *  returns from `fsOutbox()` stays live even across a probe-and-fallback swap) — defaults to a
-   *  fresh one for direct construction (tests, this file's own Task 2 shape). */
+  /** Accepts an injectable stats object (the `fsOutbox()` lock wrapper passes its own so the object
+   *  it returns from `fsOutbox()` stays live even across a probe-and-fallback swap) — defaults to a
+   *  fresh one for direct construction (tests, direct use of this class). */
   readonly stats: { flushes: number; fsyncs: number };
 
   private state: State = { entries: new Map(), meta: new Map() };
@@ -113,7 +114,7 @@ export class FsOutboxStorage implements OutboxStorage {
    *  circuits straight to that SAME rejection without ever running its own body — callers see the
    *  original failure's error, not a fresh one. This is intentional, not a bug to route around: a
    *  fsOutbox instance whose disk state may be compromised should not keep pretending to work.
-   *  Recovery (probe-and-fallback to memoryOutbox, lock steal) is Task 3's seam, not this file's. */
+   *  Recovery (probe-and-fallback to memoryOutbox, lock steal) is `fsOutbox()`'s seam, not this class's. */
   private tail: Promise<void> = Promise.resolve();
   private opened = false;
   private closed = false;
@@ -187,7 +188,7 @@ export class FsOutboxStorage implements OutboxStorage {
     return this.tail;
   }
 
-  /** Eagerly hydrate the journal. Task 3's `fsOutbox()` probe awaits this BEFORE treating the
+  /** Eagerly hydrate the journal. `fsOutbox()`'s probe awaits this BEFORE treating the
    *  instance as live, so an open/hydrate failure (corrupt journal, failed truncate, disk error)
    *  surfaces to the probe — which can then release the lock and degrade to `memoryOutbox()` — in
    *  place of the old lazy-on-first-method-call shape, where the failure only surfaced after the
@@ -464,11 +465,12 @@ export function fsOutbox(opts: FsOutboxOptions): OutboxStorage & { stats: { flus
       await mkdir(dir, { recursive: true });
       lockPath = await acquireLock(dir);
       const store = new FsOutboxStorage(dir, opts.fsync !== false, stats);
-      // Eager hydrate (Task 3 fix): openOnce() used to run lazily on the first method call, AFTER
-      // this probe had already resolved to `store` — so an open/hydrate failure fail-stopped the
-      // instance instead of degrading to memoryOutbox() as the spec's error table mandates.
-      // Hydrating here, inside this try, routes that failure through the same catch below as a
-      // lock failure: lock released, dir deregistered, then onFallback + memory fallback.
+      // Eager hydrate: openOnce() runs lazily-but-awaited here rather than being left to the first
+      // method call AFTER this probe has already resolved to `store` — that shape would fail-stop
+      // the instance on an open/hydrate error instead of degrading to memoryOutbox() as the spec's
+      // error table mandates. Hydrating here, inside this try, routes that failure through the same
+      // catch below as a lock failure: lock released, dir deregistered, then onFallback + memory
+      // fallback.
       await store.open();
       const innerClose = store.close.bind(store);
       store.close = async () => {

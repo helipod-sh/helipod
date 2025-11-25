@@ -114,6 +114,17 @@ The rules that differ from the browser backend:
 - `fsync` on every append is the default (`fsOutbox({ dir, fsync: false })` trades crash-durability
   of the very last writes for throughput), and `await outbox.close?.()` on shutdown releases the
   dir lock promptly (a SIGKILL'd process's lock is reclaimed on the next open anyway).
+- **A disk I/O error (disk full, a permissions change, a yanked network mount) fails the queue
+  stop, not silently.** Once a write to the journal fails, that `fsOutbox()` instance stops
+  accepting further writes — every subsequent mutation's durable append rejects, rather than
+  quietly falling back to in-memory-only state and pretending nothing happened. Work already
+  queued is safe on disk; the app itself keeps running; new mutations surface the failure through
+  `onMutationFailed` (or, with no handler registered, a dev-mode `console.error`) instead of ever
+  becoming an unhandled promise rejection — which several Node/Electron hosts otherwise treat as
+  fatal. Recovery is a process restart: the fresh instance re-hydrates the journal from disk, and
+  server-side receipts make any resend of an already-applied mutation safe. Hosts that use
+  `fsOutbox()` should watch `onMutationFailed` to detect and react to this case (alert, prompt a
+  restart, etc.) rather than assuming every failure is an ordinary mutation error.
 
 ### The armed-after-first-connect note
 

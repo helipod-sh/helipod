@@ -157,7 +157,7 @@ the journal is the durability record, not a per-read source).
 | lock held by live pid | same fallback path |
 | torn tail line | physically truncate; entry silently dropped (was never park-eligible) |
 | corrupt middle line | quarantine + skip; op lines referencing it become no-ops |
-| append/fsync I/O error after open | the returned promise rejects (park-eligibility correctly fails); the in-memory state still reflects the entry so the live session keeps working memory-equivalent |
+| append/fsync I/O error after open | **fail-stop** (decided at final review, superseding this row's original "memory-equivalent" draft): the instance stops accepting writes — `this.tail` becomes a permanently-rejected promise and every later op on it rejects the same way (`OutboxClosedError`-shaped or the original disk error), rather than silently continuing on in-memory state alone. `client.ts`'s fire-and-forget outbox calls route that rejection to `onMutationFailed` (or the dev-mode loud `console.error` default) instead of leaving it an unhandled promise rejection. Recovery is a process restart, which re-hydrates the journal from disk; the receipted-outbox dedup (exact-match `(clientId, seq)`) makes any resend of an already-applied entry safe either way. |
 | compaction failure | journal untouched (tmp discarded); adapter keeps appending to the old journal, retries at next threshold |
 
 ## Non-goals

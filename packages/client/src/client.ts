@@ -309,6 +309,13 @@ export class StackbaseClient {
         this.outboxNextSeq = Math.max(this.outboxNextSeq, id.nextSeq);
         return id;
       });
+      // `this.outboxIdentity` is returned verbatim to `getOutboxIdentity()` callers (who may attach
+      // their own handler, or never call it at all) — attaching a SEPARATE catch here (on the same
+      // promise; a harmless fan-out, not a value consumption) guarantees it is never left unhandled
+      // regardless of whether an external caller ever awaits it. A `mintIdentity` failure (the
+      // durable meta-row write behind a fail-stopped outbox) has no mutation record to attach to —
+      // floors to the same observability path as any other meta-only durable write.
+      this.outboxIdentity.catch((err: unknown) => this.handleOutboxWriteError("mintIdentity", this.outboxClientId, undefined, undefined, err));
       this.outboxDrain = new OutboxDrain(this.makeDrainHost(), {
         lockName: `stackbase:outbox:${this.originTag()}:${opts.outboxDeployment ?? "default"}`,
         locks: opts.outboxLocks,
@@ -520,13 +527,18 @@ export class StackbaseClient {
       if (this.outbox) {
         // Write-behind: durably append WITHOUT awaiting — "the send never waits for it" (verdict
         // §(d) "Enqueue"). `entry.durable` flips once this resolves; `delivery-policy.ts`'s
-        // `closeDisposition` reads it at close ("park eligibility requires durability").
-        void this.outbox.append(this.toOutboxEntry(entry)).then(() => {
-          entry.durable = true;
-          // Now durable → drain-eligible: wake the drain (wake on enqueue, verdict §(d)).
-          this.outboxDrain?.nudge();
-          this.notifyOutboxChange(); // T5 (R9): usePendingMutations()'s re-read trigger.
-        });
+        // `closeDisposition` reads it at close ("park eligibility requires durability"). A rejected
+        // append (e.g. a fail-stopped `fsOutbox` after a disk error) must NOT become an unhandled
+        // rejection — see `handleOutboxWriteError`.
+        void this.outbox
+          .append(this.toOutboxEntry(entry))
+          .then(() => {
+            entry.durable = true;
+            // Now durable → drain-eligible: wake the drain (wake on enqueue, verdict §(d)).
+            this.outboxDrain?.nudge();
+            this.notifyOutboxChange(); // T5 (R9): usePendingMutations()'s re-read trigger.
+          })
+          .catch((err: unknown) => this.handleOutboxWriteError("append", entry.clientId, entry.seq, entry.udfPath, err));
       }
     });
   }
@@ -938,8 +950,12 @@ export class StackbaseClient {
     this.outboxArmed = true;
     this.outboxDeploymentId = msg.deploymentId;
     if (this.outbox && this.outboxClientId !== undefined) {
-      // Stamp the timeline onto the current clientId's meta row (best-effort, fire-and-forget).
-      void this.outbox.setMeta(this.outboxClientId, { nextSeq: this.outboxNextSeq, deployment: msg.deploymentId });
+      // Stamp the timeline onto the current clientId's meta row (best-effort, fire-and-forget). No
+      // mutation record to attach a failure to (this is a meta-only write) — the dev-loud
+      // console.error floor in `handleOutboxWriteError` applies.
+      void this.outbox
+        .setMeta(this.outboxClientId, { nextSeq: this.outboxNextSeq, deployment: msg.deploymentId })
+        .catch((err: unknown) => this.handleOutboxWriteError("setMeta", this.outboxClientId, undefined, undefined, err));
     }
     if (!msg.known) {
       void this.onClientReset().then(() => this.outboxDrain?.nudge());
@@ -1330,32 +1346,64 @@ export class StackbaseClient {
     this.outboxBroadcast?.postMessage(1); // the payload is irrelevant — the message IS the nudge.
   }
 
-  /** Every durable-mutating outbox call site funnels through these three wrappers (instead of a bare
-   *  `this.outbox?.xxx(...)`) so `notifyOutboxChange()` is never missed at a new call site. */
+  /** Every durable-mutating outbox call site funnels through these four wrappers (instead of a bare
+   *  `this.outbox?.xxx(...)`) so `notifyOutboxChange()` — and a rejection's route through
+   *  `handleOutboxWriteError` — is never missed at a new call site. */
   private outboxAppend(entry: PendingMutation): void {
     if (!this.outbox) return;
-    void this.outbox.append(this.toOutboxEntry(entry)).then(() => {
-      entry.durable = true; // write-behind confirmed — mirrors `mutation()`'s own append `.then()`.
-      this.outboxDrain?.nudge();
-      this.notifyOutboxChange();
-    });
+    void this.outbox
+      .append(this.toOutboxEntry(entry))
+      .then(() => {
+        entry.durable = true; // write-behind confirmed — mirrors `mutation()`'s own append `.then()`.
+        this.outboxDrain?.nudge();
+        this.notifyOutboxChange();
+      })
+      .catch((err: unknown) => this.handleOutboxWriteError("append", entry.clientId, entry.seq, entry.udfPath, err));
   }
 
   private outboxDequeue(clientId: string, seq: number): void {
     if (!this.outbox) return;
-    void this.outbox.dequeue(clientId, seq).then(() => this.notifyOutboxChange());
+    void this.outbox
+      .dequeue(clientId, seq)
+      .then(() => this.notifyOutboxChange())
+      .catch((err: unknown) => this.handleOutboxWriteError("dequeue", clientId, seq, undefined, err));
   }
 
   private outboxUpdateStatus(clientId: string, seq: number, status: OutboxEntryStatus): void {
     if (!this.outbox) return;
-    void this.outbox.updateStatus(clientId, seq, status).then(() => this.notifyOutboxChange());
+    void this.outbox
+      .updateStatus(clientId, seq, status)
+      .then(() => this.notifyOutboxChange())
+      .catch((err: unknown) => this.handleOutboxWriteError("updateStatus", clientId, seq, undefined, err));
   }
 
   /** Record a terminal failure DURABLY (`status: "failed"` + the error) instead of dequeuing — R9:
    *  "failed entries persist until dismissed/retried". */
   private outboxMarkFailed(clientId: string, seq: number, message: string, code: string | undefined): void {
     if (!this.outbox) return;
-    void this.outbox.updateStatus(clientId, seq, "failed", { message, code }).then(() => this.notifyOutboxChange());
+    void this.outbox
+      .updateStatus(clientId, seq, "failed", { message, code })
+      .then(() => this.notifyOutboxChange())
+      .catch((err: unknown) => this.handleOutboxWriteError("updateStatus", clientId, seq, undefined, err));
+  }
+
+  /** Routes a rejected fire-and-forget durable-outbox write (append/updateStatus/dequeue/setMeta —
+   *  never awaited by its caller, per the write-behind contract) to observability instead of letting
+   *  it become an unhandled promise rejection, which several Node/Electron hosts treat as fatal by
+   *  default (a `fsOutbox` that has fail-stopped after a disk error rejects EVERY subsequent op —
+   *  see `outbox-fs.ts`'s `OutboxClosedError`). When the write carries a `(clientId, seq)` — every
+   *  case except a meta-only write — it routes through the SAME R9 channel as any other terminal
+   *  mutation failure (`onMutationFailed`, or `notifyMutationFailed`'s own dev-mode loud
+   *  `console.error` default). With no such record to attach the failure to (a meta write), a
+   *  dev-loud `console.error` is the floor — NEVER swallowed silently either way. */
+  private handleOutboxWriteError(op: string, clientId: string | undefined, seq: number | undefined, udfPath: string | undefined, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : undefined;
+    if (clientId !== undefined && seq !== undefined) {
+      this.notifyMutationFailed(clientId, seq, udfPath ?? "unknown", { message: `durable outbox ${op} failed: ${message}`, code });
+    } else if (isDevMode()) {
+      console.error(`[stackbase] durable outbox ${op} failed (clientId=${clientId ?? "unknown"}):`, err);
+    }
   }
 
   /** T5 (R9): fire `onMutationFailed` for a terminal durable failure with NO live promise awaiter

@@ -26,11 +26,12 @@ describe("fsOutbox — journal durability", () => {
     await s.close?.();
   });
 
-  it("same-microtask appends batch into ONE flush (write-behind)", async () => {
+  it("same-microtask appends batch into ONE flush (write-behind), and fsync (default on) runs at least once", async () => {
     const dir = freshDir();
-    const s = fsOutbox({ dir }) as ReturnType<typeof fsOutbox> & { stats: { flushes: number } };
+    const s = fsOutbox({ dir }) as ReturnType<typeof fsOutbox> & { stats: { flushes: number; fsyncs: number } };
     await Promise.all([s.append(makeEntry({ seq: 0, order: 0 })), s.append(makeEntry({ seq: 1, order: 1 })), s.append(makeEntry({ seq: 2, order: 2 }))]);
     expect(s.stats.flushes).toBe(1);
+    expect(s.stats.fsyncs).toBeGreaterThanOrEqual(1); // fsync defaults to true — this batch must have synced
     expect((await s.loadAll()).entries).toHaveLength(3);
     await s.close?.();
   });
