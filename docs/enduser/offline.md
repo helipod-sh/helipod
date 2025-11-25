@@ -75,8 +75,45 @@ const client = new StackbaseClient(webSocketTransport(url), {
 There's also `memoryOutbox()` — the same identity/dedup machinery (every mutation still gets a
 `(clientId, seq)`, still gets exact-once server receipts, still gets the FIFO drain-on-reconnect
 behavior) but backed by a plain in-memory Map instead of IndexedDB, so nothing survives a reload.
-Use it where persistence doesn't make sense (SSR, tests, Node) but you still want the reconnect-
-safe delivery guarantees, or as the coexistence mechanism described near the bottom of this page.
+Use it where persistence doesn't make sense (SSR, tests) but you still want the reconnect-safe
+delivery guarantees, or as the coexistence mechanism described near the bottom of this page.
+
+### Node, Electron, and Tauri hosts
+
+Outside a browser there is no IndexedDB — for Node/Bun processes, Electron main processes, and
+Tauri sidecars, use `fsOutbox()`, the filesystem-backed `OutboxStorage`. It ships as its own
+subpath export so browser bundles never see its `node:*` imports:
+
+```ts
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
+import { fsOutbox } from "@stackbase/client/outbox-fs";
+
+const client = new StackbaseClient(webSocketTransport(url), {
+  // One durable queue per directory: an append-only journal (journal.jsonl) plus a lock file,
+  // created on first use. Same OutboxStorage contract as indexedDBOutbox() — reload/crash
+  // survival, exactly-once drain via server receipts, pendingMutations() — no app-code branching.
+  outbox: fsOutbox({ dir: "./data/outbox" }),
+});
+```
+
+The rules that differ from the browser backend:
+
+- **One writer per directory.** The dir is guarded by a pid lock file; a second process (or a
+  second `fsOutbox()` in the same process) opening the same dir doesn't throw — it transparently
+  falls back to `memoryOutbox()` (no cross-restart durability, everything else identical), firing
+  the optional `onFallback: (reason) => …` callback once so you can log it. A lock left behind by
+  a crashed process is detected (dead pid) and stolen automatically on the next open; correctness
+  never rests on the lock — the server-side receipts absorb any overlap, exactly as they do for
+  multi-tab browsers.
+- **Local disk only for the lock.** The lock's semantics assume a local filesystem — on a network
+  filesystem (NFS, SMB) pid-based liveness probing and atomic-create behavior aren't reliable, so
+  point `dir` at local disk.
+- **Electron: split by process.** Renderer processes are browsers — keep `indexedDBOutbox()`
+  there. Use `fsOutbox()` in the main process or a Node sidecar (and the same for Tauri sidecars),
+  each with its own queue dir.
+- `fsync` on every append is the default (`fsOutbox({ dir, fsync: false })` trades crash-durability
+  of the very last writes for throughput), and `await outbox.close?.()` on shutdown releases the
+  dir lock promptly (a SIGKILL'd process's lock is reclaimed on the next open anyway).
 
 ### The armed-after-first-connect note
 
@@ -350,8 +387,11 @@ deferral, not a gap in the design (verdict §(i)):
 | Subscription resume token | an additive `Connect` field | Reconnect re-sends full query results rather than a diff — fine at today's scale; worth re-measuring as offline-heavy apps get more real-world traffic. |
 | Background Sync service-worker drain | a drain-trigger seam | No drain-after-tab-close on a visit; Chromium-only browser feature even if built. |
 | Cross-tab live optimistic rendering | the registry + shared store | Another tab's pending writes show up as `pendingMutations()` status, not as rendered rows in your queries, until that tab (or the drain leader) actually observes the commit. |
-| A Node/Bun filesystem `OutboxStorage` adapter | the `OutboxStorage` seam | Non-browser clients (a Node/Bun-based client, a CLI tool) keep memory-only queues — no durability outside a browser today. |
 | A persisted query baseline (a client-side replica) | **not a deferral — a declared non-goal** | Offline-after-reload rendering stays app-effort (see above) permanently, by design — a full client replica is a different, larger product bet this feature deliberately doesn't take on. |
+
+One entry has already graduated out of this table: the Node/Bun filesystem `OutboxStorage` adapter
+shipped as `fsOutbox()` — see [Node, Electron, and Tauri hosts](#node-electron-and-tauri-hosts)
+above.
 
 Nothing in this table reopens the record family, the wire contract, or the reconcile algorithm —
 these are additive follow-ons on top of a design that's already complete and shipped.

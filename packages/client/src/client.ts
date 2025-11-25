@@ -1010,22 +1010,28 @@ export class StackbaseClient {
     let unsentReEnqueued = 0;
     // Snapshot first — the loop rejects (mutates promise maps) and re-stamps entries.
     for (const entry of [...this.reconciler.entries()]) {
+      // The durable store is keyed by each entry's RECORDED `(clientId, seq)` — for an entry
+      // hydrated from a prior session that is the PRIOR session's clientId, not this session's
+      // `oldClientId`. Targeting `oldClientId` here made the dequeue/markFailed below a silent
+      // no-op for every hydrated entry (its record lingered in the store forever, so
+      // `pendingMutations()` never drained to empty after a reset) — the fsOutbox E2E found it.
+      const recordedClientId = entry.clientId ?? oldClientId;
       if (entry.status.type === "parked") {
         // R9: MARK failed (persist for the tray) rather than dequeue — a deliberate user-initiated
         // `retry()` under a FRESH `(clientId, seq)` is safe even though a blind auto-resend under the
         // OLD identity would not be (the reason it rejects loudly in the first place).
         const hadAwaiter = this.pendingMutationCallbacks.has(entry.requestId);
         const resetMessage = "the server disowned this client's mutation history (swept/foreign timeline)";
-        if (oldClientId !== undefined && entry.seq !== undefined) {
-          this.outboxMarkFailed(oldClientId, entry.seq, resetMessage, "OFFLINE_CLIENT_RESET");
+        if (recordedClientId !== undefined && entry.seq !== undefined) {
+          this.outboxMarkFailed(recordedClientId, entry.seq, resetMessage, "OFFLINE_CLIENT_RESET");
         }
         this.rejectPending(entry.requestId, new OfflineClientResetError());
         this.reconciler.onMutationFailure(entry.requestId); // remove from the log (no layer to roll back)
-        if (!hadAwaiter) this.notifyMutationFailed(oldClientId, entry.seq, entry.udfPath, { message: resetMessage, code: "OFFLINE_CLIENT_RESET" });
+        if (!hadAwaiter) this.notifyMutationFailed(recordedClientId, entry.seq, entry.udfPath, { message: resetMessage, code: "OFFLINE_CLIENT_RESET" });
         parkedRejected++;
       } else if (entry.status.type === "unsent") {
         // Re-key onto the fresh identity under a brand-new seq; the old durable record is dropped.
-        if (oldClientId !== undefined && entry.seq !== undefined) this.outboxDequeue(oldClientId, entry.seq);
+        if (recordedClientId !== undefined && entry.seq !== undefined) this.outboxDequeue(recordedClientId, entry.seq);
         entry.clientId = fresh;
         entry.seq = this.outboxNextSeq++;
         entry.order = this.nextOutboxOrder();
