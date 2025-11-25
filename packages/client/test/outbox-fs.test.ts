@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, ex
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsOutbox } from "../src/outbox-fs";
-import { makeEntry } from "./outbox-contract";
+import { makeEntry, runOutboxStorageContract } from "./outbox-contract";
 
 const dirs: string[] = [];
 function freshDir(): string {
@@ -258,4 +258,9 @@ describe("fsOutbox — one writer per dir (lock + probe-and-fallback)", () => {
     expect(raw).toContain('"c2"');
     await b.close?.();
   });
+});
+
+runOutboxStorageContract("fsOutbox (tmpdir)", async () => {
+  const dir = freshDir();
+  return { storage: fsOutbox({ dir }), cleanup: async () => rmSync(dir, { recursive: true, force: true }) };
 });

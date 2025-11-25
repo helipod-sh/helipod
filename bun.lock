@@ -342,6 +342,7 @@
         "@stackbase/query-engine": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@testing-library/react": "^16.1.0",
+        "@types/node": "catalog:",
         "@types/react": "^18.3.18",
         "fake-indexeddb": "^6.0.0",
         "jsdom": "^25.0.1",
