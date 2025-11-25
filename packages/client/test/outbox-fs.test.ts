@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsOutbox } from "../src/outbox-fs";
@@ -229,5 +229,30 @@ describe("fsOutbox — one writer per dir (lock + probe-and-fallback)", () => {
     await s.append(makeEntry());
     expect((await s.loadAll()).entries).toHaveLength(1);
     await s.close?.();
+  });
+
+  it("an unopenable journal (dir where the journal file should be) degrades to memory, fires onFallback once, and releases the lock (regression: probe used to hydrate lazily, after already resolving to the fs store)", async () => {
+    const dir = freshDir();
+    // A directory sitting at the journal's own path makes it unopenable (EISDIR on open-for-append)
+    // without tripping the readFile-catch's "fresh dir, no journal yet" path.
+    mkdirSync(join(dir, "journal.jsonl"));
+    const reasons: unknown[] = [];
+    const s = fsOutbox({ dir, onFallback: (r) => reasons.push(r) });
+
+    // Degrades to a working memory-backed queue rather than fail-stopping.
+    await s.append(makeEntry());
+    expect((await s.loadAll()).entries.map((e) => e.udfPath)).toEqual(["messages:send"]);
+    expect(reasons).toHaveLength(1);
+
+    // The lock must NOT be left wedged behind the fallback: unblock the journal path and a fresh
+    // fsOutbox() on the same dir must open as a REAL fs store, not fall back itself.
+    rmdirSync(join(dir, "journal.jsonl"));
+    const reasons2: unknown[] = [];
+    const b = fsOutbox({ dir, onFallback: (r) => reasons2.push(r) });
+    await b.append(makeEntry({ clientId: "c2", seq: 0, order: 0 }));
+    expect(reasons2).toHaveLength(0);
+    const raw = readFileSync(join(dir, "journal.jsonl"), "utf8");
+    expect(raw).toContain('"c2"');
+    await b.close?.();
   });
 });

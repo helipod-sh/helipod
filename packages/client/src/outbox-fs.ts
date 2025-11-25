@@ -187,6 +187,16 @@ export class FsOutboxStorage implements OutboxStorage {
     return this.tail;
   }
 
+  /** Eagerly hydrate the journal. Task 3's `fsOutbox()` probe awaits this BEFORE treating the
+   *  instance as live, so an open/hydrate failure (corrupt journal, failed truncate, disk error)
+   *  surfaces to the probe — which can then release the lock and degrade to `memoryOutbox()` — in
+   *  place of the old lazy-on-first-method-call shape, where the failure only surfaced after the
+   *  probe had already resolved to this fs store, fail-stopping the instance instead of falling
+   *  back per the spec's error-handling table. */
+  async open(): Promise<void> {
+    await this.ready();
+  }
+
   private write(op: JournalOp): Promise<void> {
     this.pending.push(JSON.stringify(op) + "\n");
     this.opCount++;
@@ -370,6 +380,12 @@ export class OutboxLockHeldError extends Error {
   }
 }
 
+/** Residual risk (standard for this unlink-based pidfile lock family, not a bug to fix here): a
+ *  dead-pid classification and the `rm` that steals it are two separate steps — a THIRD process
+ *  could win a fresh `wx` lock in the gap between them, and this attempt's `rm` would then delete
+ *  that third process's live lockfile out from under it (TOCTOU). The receipts (exact-match
+ *  `(identity, clientId, seq)` dedup atomic with commit) remain the actual safety net regardless;
+ *  this lock is a best-effort single-writer optimization, not the correctness boundary. */
 async function acquireLock(dir: string): Promise<string> {
   const lockPath = join(dir, "lock");
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -395,7 +411,13 @@ async function acquireLock(dir: string): Promise<string> {
       try {
         const { pid } = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
         if (typeof pid !== "number") stale = true;
-        else if (pid === process.pid) stale = !openDirs.has(dir); // recycled pid from a prior boot
+        // Recycled pid from a prior boot vs. a genuinely-live lock THIS process already holds:
+        // keyed on `liveLocks` (only ever populated by this function's own happy-path write below,
+        // i.e. a lock we actually acquired), not `openDirs` — `openDirs` is registered synchronously
+        // at the top of fsOutbox()'s probe (before this function is even called), so by the time an
+        // own-pid EEXIST lands here `openDirs` already contains `dir` for THIS very attempt and
+        // would misclassify every fresh own-pid lockfile as "live" instead of "recycled".
+        else if (pid === process.pid) stale = !liveLocks.has(lockPath);
         else {
           try {
             process.kill(pid, 0); // signal 0: existence probe only
@@ -432,24 +454,48 @@ export function fsOutbox(opts: FsOutboxOptions): OutboxStorage & { stats: { flus
   let resolved: OutboxStorage | undefined;
   const ready: Promise<OutboxStorage> = (async (): Promise<OutboxStorage> => {
     if (openDirs.has(dir)) throw new OutboxLockHeldError(process.pid); // same-process double-open
-    await mkdir(dir, { recursive: true });
-    const lockPath = await acquireLock(dir);
+    // Register synchronously, before the first await: two same-process fsOutbox() calls in the
+    // same synchronous frame would otherwise both pass the `has()` check above (neither has
+    // registered yet), racing each other for the lock instead of one deterministically falling
+    // back via the registry hit. Every failure path below deregisters on its way out.
     openDirs.add(dir);
-    const store = new FsOutboxStorage(dir, opts.fsync !== false, stats);
-    const innerClose = store.close.bind(store);
-    store.close = async () => {
-      try {
-        await innerClose();
-      } finally {
-        // Fail-stop: release the lock and deregister the dir even if the inner (tail-chained)
-        // close rejected — a poisoned journal tail must not wedge this dir locked forever. The
-        // original rejection, if any, still propagates to the caller after this finally runs.
-        openDirs.delete(dir);
+    let lockPath: string | undefined;
+    try {
+      await mkdir(dir, { recursive: true });
+      lockPath = await acquireLock(dir);
+      const store = new FsOutboxStorage(dir, opts.fsync !== false, stats);
+      // Eager hydrate (Task 3 fix): openOnce() used to run lazily on the first method call, AFTER
+      // this probe had already resolved to `store` — so an open/hydrate failure fail-stopped the
+      // instance instead of degrading to memoryOutbox() as the spec's error table mandates.
+      // Hydrating here, inside this try, routes that failure through the same catch below as a
+      // lock failure: lock released, dir deregistered, then onFallback + memory fallback.
+      await store.open();
+      const innerClose = store.close.bind(store);
+      store.close = async () => {
+        try {
+          await innerClose();
+        } finally {
+          // Fail-stop: release the lock and deregister the dir even if the inner (tail-chained)
+          // close rejected — a poisoned journal tail must not wedge this dir locked forever. The
+          // original rejection, if any, still propagates to the caller after this finally runs.
+          openDirs.delete(dir);
+          liveLocks.delete(lockPath!);
+          await unlink(lockPath!).catch(() => {});
+        }
+      };
+      return store;
+    } catch (err) {
+      // Any failure after the dir was registered (mkdir, lock acquisition, or the eager hydrate
+      // above) must not leave the dir wedged: deregister it always, and release the lock too if
+      // this attempt actually acquired one (a legitimately-held foreign lock is left untouched —
+      // acquireLock() never assigns `lockPath` when it throws OutboxLockHeldError).
+      openDirs.delete(dir);
+      if (lockPath) {
         liveLocks.delete(lockPath);
         await unlink(lockPath).catch(() => {});
       }
-    };
-    return store;
+      throw err;
+    }
   })().catch((err: unknown) => {
     opts.onFallback?.(err);
     return memoryOutbox();
