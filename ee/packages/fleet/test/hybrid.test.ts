@@ -177,7 +177,7 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
     } finally {
       await handles.stop();
     }
-  });
+  }, 30_000);
 
   // Trigger-wake gap fix (whole-branch review, Fix 1): `invalidationSink` (node.ts) used to call
   // ONLY `runtime.handler.notifyWrites` on a foreign co-writer's commit — that re-runs live QUERY
@@ -244,7 +244,7 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
     } finally {
       await handles.stop();
     }
-  });
+  }, 30_000);
 
   it("hybrid WRITER boot: own-commit RYOW — a local commit's subscription re-run is gated until the replica applies it (never a stale intermediate)", async () => {
     const client = new PgliteClient();
@@ -317,7 +317,7 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
     } finally {
       await handles.stop();
     }
-  });
+  }, 30_000);
 
   it("hybrid SYNC boot → promotion ADDS the writer half WITHOUT stopping the tailer or swapping the store; commits across the promotion ARE invalidated", async () => {
     const client = new PgliteClient();

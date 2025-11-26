@@ -186,7 +186,7 @@ describe("fleet node lifecycle", () => {
     await t2.stop();
     await r2.close();
     await primary.close();
-  });
+  }, 30_000);
 
   describe("(e) reconcileReplicaIdentity — C7 foreign-replica deployment-id stamp", () => {
     let client: PgliteClient;

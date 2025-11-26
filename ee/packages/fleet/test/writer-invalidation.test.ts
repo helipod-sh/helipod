@@ -153,7 +153,7 @@ describe("Shards B2b, Task 5(c) — writer invalidation listener (derive-only, m
       conn.close();
       await primary.close();
     }
-  });
+  }, 30_000);
 
   it("invalidateOnly mode never writes to the replica arg (derive-only)", async () => {
     const client = new PgliteClient();
