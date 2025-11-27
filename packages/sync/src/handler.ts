@@ -7,7 +7,7 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { isRetryableError } from "@stackbase/errors";
+import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import {
   encodeServerMessage,
@@ -424,7 +424,19 @@ export class SyncProtocolHandler {
       }
       return "continue";
     } catch (e) {
-      this.send(session, { type: "MutationResponse", requestId: unit.requestId, success: false, error: errMessage(e) });
+      // Thread the thrown error's typed `code` (when it's one of ours) onto the wire — a genuinely
+      // FRESH (non-replayed) failure previously sent `error` with no `code`, even though the wire
+      // shape supports one; only the dedup-replay branch above populated it. That silently starved
+      // the outbox drain's coded-vs-codeless retry policy (client.ts/outbox-drain.ts key off
+      // `.code`): a fresh terminal app error was misclassified as transient (whole-chunk revert +
+      // backoff) instead of settling immediately.
+      this.send(session, {
+        type: "MutationResponse",
+        requestId: unit.requestId,
+        success: false,
+        error: errMessage(e),
+        code: isStackbaseError(e) ? e.code : undefined,
+      });
       // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
       return isRetryableError(e) ? "stop" : "continue";
     }

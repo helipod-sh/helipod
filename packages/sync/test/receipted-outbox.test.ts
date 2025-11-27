@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { TimeoutError } from "@stackbase/errors";
+import { TimeoutError, InvalidClientIdError } from "@stackbase/errors";
 import {
   SyncProtocolHandler,
   type SyncUdfExecutor,
@@ -158,6 +158,20 @@ describe("Receipted Outbox wire — Mutation classification", () => {
     expect(rs[0]).toMatchObject({ requestId: "r1", success: false });
     // Resend: replays the recorded terminal verdict WITH its code.
     expect(rs[1]).toMatchObject({ requestId: "r2", success: false, code: "BOOM" });
+  });
+
+  it("a FRESH (non-replayed) failure carries the thrown error's typed code on the wire (Task 4 bug fix)", async () => {
+    // Unlike `exec.poison` (a plain `Error`, no code), this throws a REAL StackbaseError — the
+    // handler's fresh-failure catch (processMutation) must thread its `.code` onto the wire, not
+    // just the message. Previously only the dedup-REPLAY branch above populated `code`; a genuinely
+    // fresh failure (this one — no prior verdict recorded, no dedup key involved at all) sent
+    // `{success:false, error}` with no `code`, which misled the outbox drain's coded-vs-codeless
+    // retry classification (a terminal app error looked transient).
+    exec.runMutation = async () => {
+      throw new InvalidClientIdError('_id belongs to table "messages", not "conversations"');
+    };
+    await send({ type: "Mutation", requestId: "r1", udfPath: "app:createConversation", args: {} });
+    expect(socket.responses()[0]).toMatchObject({ requestId: "r1", success: false, code: "INVALID_CLIENT_ID" });
   });
 
   it("a stale verdict replays as a STALE_CLIENT failure", async () => {

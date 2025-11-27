@@ -297,29 +297,31 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
       server = started.server;
       client = new StackbaseClient(nodeWsTransport(wsUrlFor(started.port)));
 
-      // A minted MESSAGES-table id used as `_id` on `createConversation` — wrong table. NOTE on the
-      // assertion strength: the executor throws `InvalidClientIdError` (code `INVALID_CLIENT_ID`,
-      // proven at the unit level by `packages/executor/test/client-id-insert.test.ts`), but
-      // `packages/sync/src/handler.ts`'s `processMutation` catch block (a genuinely fresh, non-
-      // replayed failure) sends `MutationResponse{success:false, error: errMessage(e)}` WITHOUT a
-      // `code` field — only a REPLAYED dedup verdict's branch a few lines above populates `code` on
-      // the wire. So a live `client.mutation()` rejection carries the message but not `.code` today;
-      // asserting on message content is the strongest available check for this path (see the task
-      // report for the full finding — out of scope for this E2E to fix).
+      // A minted MESSAGES-table id used as `_id` on `createConversation` — wrong table. The executor
+      // throws `InvalidClientIdError` (code `INVALID_CLIENT_ID`, proven at the unit level by
+      // `packages/executor/test/client-id-insert.test.ts`); `packages/sync/src/handler.ts`'s
+      // `processMutation` catch block (a genuinely fresh, non-replayed failure) now threads the
+      // thrown error's typed `.code` onto the wire (fixed alongside this test — previously only a
+      // REPLAYED dedup verdict's branch populated `code`, so a live `client.mutation()` rejection
+      // carried the message but not `.code`; see `packages/sync/test/receipted-outbox.test.ts`'s
+      // "FRESH (non-replayed) failure carries the thrown error's typed code" unit test). Assert on
+      // BOTH — `.code` is now the strongest available check, message stays as a defense-in-depth.
       const wrongTableId = mintDocumentId(started.messagesTableNumber);
-      await expect(client.mutation("app:createConversation", { _id: wrongTableId, name: "bad" })).rejects.toThrow(
-        /_id belongs to table "messages", not "conversations"/,
-      );
+      await expect(client.mutation("app:createConversation", { _id: wrongTableId, name: "bad" })).rejects.toMatchObject({
+        code: "INVALID_CLIENT_ID",
+        message: expect.stringMatching(/_id belongs to table "messages", not "conversations"/),
+      });
 
       // A fresh, valid id commits once...
       const cid = mintDocumentId(started.conversationsTableNumber);
       const created = await client.mutation("app:createConversation", { _id: cid, name: "first" });
       expect(created).toBe(cid);
 
-      // ...and re-using it rejects with ID_ALREADY_IN_USE (message substring — see the note above).
-      await expect(client.mutation("app:createConversation", { _id: cid, name: "second" })).rejects.toThrow(
-        /already exists/,
-      );
+      // ...and re-using it rejects with ID_ALREADY_IN_USE (now carried as a typed `.code` too).
+      await expect(client.mutation("app:createConversation", { _id: cid, name: "second" })).rejects.toMatchObject({
+        code: "ID_ALREADY_IN_USE",
+        message: expect.stringMatching(/already exists/),
+      });
 
       // Exactly one row landed under `cid`.
       const listing = (await client.query("app:listAll", {})) as unknown as { conversations: ConvoDoc[] };
@@ -404,9 +406,10 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
       expect(rejected).toHaveLength(1);
       expect(fulfilled[0]!.value).toBe(cid);
       // The unsharded-table + default-ring OCC gate (9c466b8) makes this deterministic — a genuine
-      // race loses loudly at OCC rather than forking a duplicate identity. Message substring, not
-      // `.code` — see the rejection-matrix test above for why `.code` doesn't cross the wire for a
-      // live (non-replayed) mutation failure today.
+      // race loses loudly at OCC rather than forking a duplicate identity. The typed `.code` now
+      // crosses the wire for a live (non-replayed) mutation failure too (see the rejection-matrix
+      // test above), so assert on it alongside the message.
+      expect((rejected[0]!.reason as Error & { code?: string }).code).toBe("ID_ALREADY_IN_USE");
       expect((rejected[0]!.reason as Error).message).toMatch(/already exists/);
 
       // Exactly one row exists under the shared id.
