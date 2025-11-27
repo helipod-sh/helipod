@@ -233,17 +233,19 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
           outboxDrainIntervalMs: 0,
         });
 
-        // Connect/ConnectAck arms the S4 swap before the drain can flush anything. Subscribing only
-        // AFTER arm (not before) avoids racing a live query's own initial Transition ahead of the
-        // durable-backlog `Connect` handshake's baseline-await arming — a query created before the
-        // first-connect handshake fires can have its one-shot Transition consumed before
-        // `beginBaselineAwait` is even armed, permanently starving `whenBaselineAdopted()` (the
-        // drain's send gate) since no later Transition will ever satisfy it. Subscribing post-arm
-        // sidesteps that ordering hazard entirely.
-        await waitFor(() => client2!.__outboxArmed, 15_000, "session-2 arm");
-
+        // NATURAL ordering: subscribe on mount, immediately after construction — before the drain's
+        // first-connect handshake even arms. This used to deadlock the drain (a bug this branch
+        // fixed): the subscription's own initial Transition could be ingested before the drain's
+        // async hydrate finished and armed the baseline await, which — pre-fix — computed
+        // `expectTransition` from "does a live subscription exist" rather than "is one still
+        // awaiting delivery", permanently starving `whenBaselineAdopted()` (the drain's send gate)
+        // on a quiet deployment. See `packages/client/src/client.ts#hasUndeliveredSubscription` and
+        // its red-first repro in `packages/client/test/outbox-handshake.test.ts`. This E2E is now
+        // the integration regression test for that fix.
         const frames: Array<{ conversations: ConvoDoc[]; messages: MessageDoc[] }> = [];
         client2.subscribe("app:listAll", {}, (v) => frames.push(v as unknown as { conversations: ConvoDoc[]; messages: MessageDoc[] }));
+
+        await waitFor(() => client2!.__outboxArmed, 15_000, "session-2 arm");
 
         // Drain: both mutations flush FIFO once the transport connects.
         await waitFor(async () => (await client2!.pendingMutations()).length === 0, 20_000, "pending -> 0");

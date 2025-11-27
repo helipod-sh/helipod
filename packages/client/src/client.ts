@@ -850,6 +850,21 @@ export class StackbaseClient {
     this.sendConnect();
   }
 
+  /** True iff at least one live subscription has NOT yet received its first server delivery
+   *  (`sub.serverValue === undefined` — the `LayeredQueryStore.create` sentinel, only ever cleared
+   *  by `ingestTransition`'s `QueryUpdated`). The drain's first-connect `ensureInitialHandshake` gate
+   *  (T4 bug fix): a subscription created (and answered) BEFORE the drain's async hydrate finishes
+   *  has already consumed its one-shot Transition by the time the handshake arms — waiting for
+   *  ANOTHER one that will never come on a quiet deployment would starve `whenBaselineAdopted()`
+   *  (and so the drain) forever. Only a subscription still awaiting its first reply guarantees a
+   *  future Transition is actually coming — that's the one worth waiting for. */
+  private hasUndeliveredSubscription(): boolean {
+    for (const sub of this.store.byId.values()) {
+      if (sub.serverValue === undefined) return true;
+    }
+    return false;
+  }
+
   /* ---------------------------------------------------------------------------------------------
    * T3 — the Connect resume handshake, verdict settlement, the baseline-gated drop rule, and reset.
    * ------------------------------------------------------------------------------------------- */
@@ -875,8 +890,10 @@ export class StackbaseClient {
 
   /** Begin awaiting the post-`Connect` baseline. `expectTransition` is true iff a baseline Transition
    *  is actually coming — for a reopen, `this.resyncing` (set iff `resync()` re-subscribed live
-   *  queries); for a first connect, whether any live subscription exists. With none, there is no
-   *  baseline frame and adoption is immediate. */
+   *  queries); for a first connect, whether any live subscription is still awaiting its first
+   *  delivery (`hasUndeliveredSubscription()` — NOT merely whether one exists: a subscription
+   *  created and already answered before the handshake armed has nothing left to wait for). With
+   *  nothing pending, there is no baseline frame coming and adoption is immediate. */
   private beginBaselineAwait(expectTransition: boolean): void {
     this.outboxAwaitingBaseline = expectTransition;
     if (!expectTransition) this.markBaselineAdopted();
@@ -1127,7 +1144,7 @@ export class StackbaseClient {
       isArmed: () => this.outboxArmed,
       drainable: () => this.drainableEntries(),
       addHydrated: (entry) => this.addHydratedEntry(entry),
-      ensureInitialHandshake: () => this.initiateHandshake(this.store.byId.size > 0),
+      ensureInitialHandshake: () => this.initiateHandshake(this.hasUndeliveredSubscription()),
       setStatus: (entry, status) => {
         entry.status = { type: status };
         // T5 (R9): persist the transition too — `pendingMutations()` reads the DURABLE record, so
