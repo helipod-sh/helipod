@@ -353,6 +353,30 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
         `_id belongs to table ${other ? `"${other.name}"` : `#${decoded.tableNumber}`}, not "${table}"`,
       );
     }
+    // v1 shard-safety gate (BEFORE the existence read — fail fast, and never register a
+    // cross-ring-meaningless read): the supplied-_id existence check below is a snapshot read on
+    // THIS transaction's own ring only. On the default `ShardedTransactor` each shard is an
+    // independently-mutexed OCC domain with its own snapshot/recent-commits ring, so two
+    // concurrent inserts of the SAME id on DIFFERENT rings would each see "not found" and both
+    // commit — a silent duplicate identity. Restricting client-supplied ids to UNSHARDED tables
+    // inserted from the DEFAULT ring makes the existence check + OCC read-set globally sound for
+    // that table: every write of it lands on the one ring, so a true race loses at OCC there.
+    // Sharded-table support (binding the id to the shard-key value) is deferred, not built.
+    if (meta?.shardKey) {
+      throw new InvalidClientIdError(
+        `table "${table}" is sharded by '${meta.shardKey}'; a client-supplied _id is not supported ` +
+          `on sharded tables in v1 (the id can't bind the shard-key value, and per-shard existence ` +
+          `checks can't see across rings). Omit _id and let the server mint one.`,
+      );
+    }
+    if (ctx.shardId !== DEFAULT_SHARD) {
+      throw new InvalidClientIdError(
+        `a client-supplied _id may only be inserted from a mutation running on the default shard ` +
+          `(this mutation runs on shard ${ctx.shardId}, i.e. it declares shardBy). The existence ` +
+          `check for a supplied _id is only globally sound on the default ring — insert "${table}" ` +
+          `from a mutation without shardBy, or omit _id and let the server mint one.`,
+      );
+    }
     if ((await ctx.txn.get(decoded)) !== null) {
       throw new IdAlreadyInUseError(`a document with _id ${suppliedId} already exists in "${table}"`);
     }

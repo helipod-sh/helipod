@@ -72,13 +72,24 @@ describe("insert with a client-supplied _id", () => {
 
   it("stores the CANONICAL encoding (a re-encoded id, not the caller's raw string)", async () => {
     const minted = mintEncodedDocumentId(CONVOS);
-    // lowercase base32 of the same bytes decodes identically but is not canonical
-    const alternate = minted.toLowerCase();
+    // Crockford base32 is case-insensitive to DECODE but the canonical encoding is lowercase
+    // (CROCKFORD_ALPHABET is "0123456789abc..."), so `minted` is already lowercase — a
+    // `.toLowerCase()` probe here would be a no-op. Uppercase the same bytes' encoding instead:
+    // it decodes identically (base32Decode uppercases every char via the DECODE map) but is not
+    // the canonical form, genuinely exercising the re-encode-before-storage path.
+    const alternate = minted.toUpperCase();
     if (alternate !== minted) {
       const returned = (await exec.run<string>(createConvo, { _id: alternate, name: "a" })).value;
-      expect(returned).toBe(minted); // canonicalized
+      expect(returned).toBe(minted); // canonicalized to lowercase, not stored as the caller's uppercase string
+
+      // The uppercase alias of an id that now exists (under its canonical lowercase form) must
+      // also collide — existence is checked on the DECODED id, not the raw string.
+      await expect(exec.run(createConvo, { _id: alternate, name: "b" })).rejects.toMatchObject({
+        code: "ID_ALREADY_IN_USE",
+      });
     } else {
-      // encoding is already caseless in this alphabet — decode/encode roundtrip must be identity
+      // encoding is already caseless in this alphabet (all-digit id) — decode/encode roundtrip
+      // must be identity; fall back to a pure roundtrip assertion.
       const rt = decodeDocumentId(minted);
       expect(rt.tableNumber).toBe(CONVOS);
     }
