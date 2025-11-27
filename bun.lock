@@ -190,6 +190,7 @@
         "@stackbase/cli": "workspace:*",
         "@stackbase/client": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",

@@ -17,7 +17,7 @@ export type {
   CodegenOptions,
   CodegenInput,
 } from "./generate";
-export { generateDataModel, generateApi, generateInternalApi, generateServer, generateAll } from "./generate";
+export { generateDataModel, generateApi, generateInternalApi, generateServer, generateIds, generateAll } from "./generate";
 
 export type { WriteResult } from "./write";
 export { writeGenerated } from "./write";
