@@ -4,7 +4,14 @@
  * that touch the transaction, query engine, and index maintenance. Because the boundary is
  * pure JSON strings, the exact same handlers work when the guest is a real V8 isolate.
  */
-import { DocumentNotFoundError, DocumentValidationError, ForbiddenOperationError, FunctionNotFoundError } from "@stackbase/errors";
+import {
+  DocumentNotFoundError,
+  DocumentValidationError,
+  ForbiddenOperationError,
+  FunctionNotFoundError,
+  IdAlreadyInUseError,
+  InvalidClientIdError,
+} from "@stackbase/errors";
 import {
   decodeDocumentId,
   encodeInternalDocumentId,
@@ -14,6 +21,7 @@ import {
   parseFullTableName,
   shardIdForKeyValue,
   DEFAULT_SHARD,
+  type InternalDocumentId,
   type ShardId,
 } from "@stackbase/id-codec";
 import { indexKeyspaceId, keySuccessor, encodeIndexKey, indexKeysEqual, type IndexableValue, type KeyRange } from "@stackbase/index-key-codec";
@@ -324,11 +332,37 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   const { tableNumber, fullName } = requireTable(ctx, table);
   const meta = ctx.catalog.getTable(fullName);
   const converted = jsonToConvex(value) as DocumentValue;
-  validateDocumentForWrite(meta, fullName, converted);
-  const id = newDocumentId(tableNumber);
-  const docId = encodeInternalDocumentId(id);
+
+  // Client-supplied _id (spec: client-supplied ids): extracted BEFORE validation, same system-field
+  // discipline handleDbReplace applies. _creationTime in an insert value stays rejected as today.
+  const { _id: suppliedId, ...userValue } = converted as DocumentValue & { _id?: unknown };
+  validateDocumentForWrite(meta, fullName, userValue as DocumentValue);
+
+  let id: InternalDocumentId;
+  if (suppliedId !== undefined) {
+    if (typeof suppliedId !== "string") throw new InvalidClientIdError(`_id must be a string`);
+    let decoded: InternalDocumentId;
+    try {
+      decoded = decodeDocumentId(suppliedId);
+    } catch (e) {
+      throw new InvalidClientIdError(`_id is not a valid document id: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (decoded.tableNumber !== tableNumber) {
+      const other = ctx.catalog.getTableByNumber(decoded.tableNumber);
+      throw new InvalidClientIdError(
+        `_id belongs to table ${other ? `"${other.name}"` : `#${decoded.tableNumber}`}, not "${table}"`,
+      );
+    }
+    if ((await ctx.txn.get(decoded)) !== null) {
+      throw new IdAlreadyInUseError(`a document with _id ${suppliedId} already exists in "${table}"`);
+    }
+    id = decoded; // deterministic: no randomness consulted on this path
+  } else {
+    id = newDocumentId(tableNumber);
+  }
+  const docId = encodeInternalDocumentId(id); // canonical re-encoding either way
   const doc: DocumentValue = {
-    ...converted,
+    ...(userValue as DocumentValue),
     _id: docId,
     _creationTime: Number(ctx.snapshotTs),
   };

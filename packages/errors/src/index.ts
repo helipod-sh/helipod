@@ -101,6 +101,17 @@ export class ForbiddenOperationError extends UserError {
   override readonly httpStatus = 403;
 }
 
+/** A client-supplied `_id` on `db.insert` that isn't a valid document id for the target table
+ *  (undecodable, or minted for a different table). See the client-supplied-ids design. */
+export class InvalidClientIdError extends UserError {
+  override readonly code = "INVALID_CLIENT_ID";
+}
+/** A client-supplied `_id` on `db.insert` that already names a document — either a previously
+ *  committed row, or another insert earlier in the same transaction (pending-overlay read). */
+export class IdAlreadyInUseError extends UserError {
+  override readonly code = "ID_ALREADY_IN_USE";
+}
+
 /* -------------------------------------------------------------------------- */
 /* Conflict errors — 409, retryable (the OCC family)                          */
 /* -------------------------------------------------------------------------- */
