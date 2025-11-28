@@ -850,17 +850,20 @@ export class StackbaseClient {
     this.sendConnect();
   }
 
-  /** True iff at least one live subscription has NOT yet received its first server delivery
-   *  (`sub.serverValue === undefined` — the `LayeredQueryStore.create` sentinel, only ever cleared
-   *  by `ingestTransition`'s `QueryUpdated`). The drain's first-connect `ensureInitialHandshake` gate
-   *  (T4 bug fix): a subscription created (and answered) BEFORE the drain's async hydrate finishes
-   *  has already consumed its one-shot Transition by the time the handshake arms — waiting for
-   *  ANOTHER one that will never come on a quiet deployment would starve `whenBaselineAdopted()`
-   *  (and so the drain) forever. Only a subscription still awaiting its first reply guarantees a
-   *  future Transition is actually coming — that's the one worth waiting for. */
+  /** True iff at least one live subscription has NOT yet received its first server reply
+   *  (`!sub.answered` — set by `ingestTransition` on EITHER outcome, `QueryUpdated` or `QueryFailed`).
+   *  The drain's first-connect `ensureInitialHandshake` gate (T4 bug fix, later widened to cover the
+   *  failed-query shape too — re-review FIX 2): a subscription created (and answered) BEFORE the
+   *  drain's async hydrate finishes has already consumed its one-shot Transition by the time the
+   *  handshake arms — waiting for ANOTHER one that will never come on a quiet deployment would starve
+   *  `whenBaselineAdopted()` (and so the drain) forever. Only a subscription still awaiting its first
+   *  reply guarantees a future Transition is actually coming — that's the one worth waiting for.
+   *  (Deliberately NOT `sub.serverValue === undefined`: a `QueryFailed` reply never sets `serverValue`
+   *  — there's no base to render — so that check misclassified an already-answered failed query as
+   *  still-undelivered and reproduced the same deadlock via the failed-query path.) */
   private hasUndeliveredSubscription(): boolean {
     for (const sub of this.store.byId.values()) {
-      if (sub.serverValue === undefined) return true;
+      if (!sub.answered) return true;
     }
     return false;
   }

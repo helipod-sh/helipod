@@ -57,6 +57,13 @@ export interface Subscription {
   serverValue: Value | undefined;
   /** `serverValue` with surviving optimistic updates replayed on top (=== `serverValue` when none). */
   composedValue: Value | undefined;
+  /** Has this subscription received ITS FIRST server reply yet — either outcome, `QueryUpdated` OR
+   *  `QueryFailed`. Distinct from `serverValue !== undefined`: a `QueryFailed` answer never sets
+   *  `serverValue` (there is no base to render), but it IS a delivered reply — nothing further is
+   *  coming for it on a quiet deployment. `hasUndeliveredSubscription()` (client.ts) keys off this,
+   *  not `serverValue`, so a failed-but-answered subscription doesn't wedge the outbox drain's
+   *  baseline await waiting for a Transition that will never arrive (re-review FIX 2). */
+  answered: boolean;
   listeners: Set<Listener>;
 }
 
@@ -78,6 +85,7 @@ export class LayeredQueryStore {
       hash,
       serverValue: undefined,
       composedValue: undefined,
+      answered: false,
       listeners: new Set(),
     };
     this.byHash.set(hash, sub);
@@ -96,6 +104,14 @@ export class LayeredQueryStore {
    *  `recompose` owns all listener firing so the base+drop+rebuild happen as one atomic frame. */
   setServerValue(sub: Subscription, value: Value | undefined): void {
     sub.serverValue = value;
+    sub.answered = true;
+  }
+
+  /** Mark a subscription as having received its first reply WITHOUT a base value (from a
+   *  `QueryFailed` modification — there is no server row to render, only an error). See the
+   *  `answered` field doc for why this is distinct from `setServerValue`. */
+  markAnswered(sub: Subscription): void {
+    sub.answered = true;
   }
 
   private serverValueOf(hash: string): Value | undefined {

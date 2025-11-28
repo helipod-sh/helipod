@@ -172,6 +172,7 @@ export class Reconciler {
       } else if (mod.type === "QueryFailed") {
         const sub = this.store.byId.get(mod.queryId);
         if (sub) {
+          this.store.markAnswered(sub);
           console.error(`[stackbase] query "${sub.path}" failed: ${mod.error}`);
           for (const l of sub.listeners) l.onError?.(mod.error);
         }

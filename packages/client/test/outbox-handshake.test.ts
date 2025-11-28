@@ -406,6 +406,57 @@ describe("StackbaseClient — first-connect handshake vs. a subscription deliver
     expect((await real.loadAll()).entries).toHaveLength(0);
     client.close();
   });
+
+  it("a subscription answered with QueryFailed (not QueryUpdated) BEFORE hydrate completes does not starve whenBaselineAdopted() forever (re-review FIX 2)", async () => {
+    // Same T4 shape as the test above, but the pre-arm answer is a FAILURE. `hasUndeliveredSubscription()`
+    // used to key off `sub.serverValue === undefined` — a QueryFailed answer never sets `serverValue`
+    // (reconcile.ts's QueryFailed branch only fires `onError`), so a failed-but-answered subscription
+    // still counted as "undelivered" → `expectTransition=true` → the awaited Transition never comes on
+    // a quiet deployment → the same drain deadlock as the T4 bug, just via the failed-query shape.
+    const real = memoryOutbox();
+    const seeded: OutboxEntry = {
+      clientId: "old-tab",
+      seq: 0,
+      requestId: "old-0",
+      udfPath: "messages:send",
+      args: { body: "queued" },
+      seed: { entropy: "e0", now: 1000 },
+      order: 1,
+      status: "unsent",
+      outboxVersion: OUTBOX_VERSION,
+      enqueuedAt: 1000,
+    };
+    await real.append(seeded);
+    const { outbox: delayed, release: releaseLoad } = delayedLoadAllOutbox(real);
+
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
+
+    // Natural app-code ordering: subscribe immediately, well before the drain's hydrate resolves.
+    // The server answers with a QueryFailed WHILE hydrate is still pending — this subscription has
+    // already been "answered" (with a failure) by the time the drain gets around to arming.
+    client.subscribe("messages:list", {}, () => {}, () => {});
+    t.emit({ type: "Transition", startVersion: { querySet: 0, ts: 0 }, endVersion: { querySet: 1, ts: 1 }, modifications: [{ type: "QueryFailed", queryId: 1, error: "bad args" }] });
+    await flushMicrotasks();
+
+    releaseLoad();
+    await waitFor(() => t.connects().length === 1, 3000);
+    t.emit({ type: "ConnectAck", known: true, results: [{ clientId: "old-tab", seq: 0, verdict: "unknown" }], deploymentId: "dep-1" });
+    await waitFor(() => client.__outboxArmed, 3000);
+
+    // Pre-fix: the failed-but-answered subscription still reported "undelivered" (serverValue never
+    // set on QueryFailed) → no further Transition ever arrives on this quiet deployment →
+    // `whenBaselineAdopted()` never resolves → the drain deadlocks. Post-fix: an `answered` flag set
+    // on BOTH QueryUpdated and QueryFailed correctly reports nothing is still awaiting delivery, so
+    // the baseline adopts immediately and the drain flushes.
+    await waitFor(() => t.batches().length === 1, 3000);
+    expect(t.batches()[0]!.entries.map((e) => e.seq)).toEqual([0]);
+
+    t.emit({ type: "MutationResponse", requestId: t.batches()[0]!.entries[0]!.requestId, success: true, value: "srv-0", ts: 5 });
+    await flushMicrotasks();
+    expect((await real.loadAll()).entries).toHaveLength(0);
+    client.close();
+  });
 });
 
 /* -------------------------------------------------------------------------- */
