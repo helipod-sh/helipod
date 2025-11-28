@@ -190,6 +190,7 @@
         "@stackbase/cli": "workspace:*",
         "@stackbase/client": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
@@ -332,13 +333,13 @@
       "name": "@stackbase/client",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/id-codec": "workspace:*",
         "@stackbase/sync": "workspace:*",
         "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
         "@stackbase/query-engine": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@testing-library/react": "^16.1.0",

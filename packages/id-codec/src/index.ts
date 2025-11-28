@@ -16,6 +16,7 @@ export {
   newDocumentId,
   encodeDocumentId,
   encodeInternalDocumentId,
+  mintEncodedDocumentId,
   decodeDocumentId,
   tryDecodeDocumentId,
   isValidDocumentId,

@@ -37,3 +37,7 @@ export type { ClientResetInfo } from "./client";
 // Task 4 — the drain: the poison policy, the Web Locks seam (fake-able), and the backoff mirror.
 export type { DrainHost, OutboxDrainOptions, OutboxLockManager, PoisonPolicy } from "./outbox-drain";
 export { DEFAULT_DRAIN_CHUNK_SIZE, DEFAULT_DRAIN_INTERVAL_MS, OFFLINE_IDENTITY_CHANGED, OutboxDrain, computeDrainBackoff } from "./outbox-drain";
+
+/** Untyped core of client-side id minting — prefer the codegen-typed `mintId` from your app's
+ *  `_generated/ids`. Exists for hosts without codegen output at hand. */
+export { mintEncodedDocumentId as mintDocumentId } from "@stackbase/id-codec";

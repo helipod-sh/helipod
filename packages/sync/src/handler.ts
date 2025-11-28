@@ -7,7 +7,7 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { isRetryableError } from "@stackbase/errors";
+import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import {
   encodeServerMessage,
@@ -424,7 +424,27 @@ export class SyncProtocolHandler {
       }
       return "continue";
     } catch (e) {
-      this.send(session, { type: "MutationResponse", requestId: unit.requestId, success: false, error: errMessage(e) });
+      // Thread the thrown error's typed `code` (when it's one of ours) onto the wire — a genuinely
+      // FRESH (non-replayed) failure previously sent `error` with no `code`, even though the wire
+      // shape supports one; only the dedup-replay branch above populated it. That silently starved
+      // the outbox drain's coded-vs-codeless retry policy (client.ts/outbox-drain.ts key off
+      // `.code`): a fresh terminal app error was misclassified as transient (whole-chunk revert +
+      // backoff) instead of settling immediately.
+      //
+      // But only a TERMINAL error gets a code: the wire invariant is "coded ⇒ terminal, server-
+      // recorded verdict" (mirrors `handleDedupError`'s own `!isRetryableError(e)` gate — only a
+      // non-retryable failure ever gets a recorded verdict). A retryable `StackbaseError` (OCC
+      // conflict, timeout, rate limit, service-unavailable) still HAS a `.code`, but threading it
+      // through here would make the drain settle a transient failure as terminal — durable mutation
+      // lost, or on a `MutationBatch` "stop", the coded path skips `revertActive` and wedges the
+      // chunk (re-review FIX 1).
+      this.send(session, {
+        type: "MutationResponse",
+        requestId: unit.requestId,
+        success: false,
+        error: errMessage(e),
+        code: isStackbaseError(e) && !isRetryableError(e) ? e.code : undefined,
+      });
       // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
       return isRetryableError(e) ? "stop" : "continue";
     }

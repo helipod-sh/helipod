@@ -80,6 +80,12 @@ export function encodeInternalDocumentId(id: InternalDocumentId): DocumentId {
   return encodeDocumentId(id.tableNumber, id.internalId);
 }
 
+/** Mint a full encoded document id CLIENT-SIDE (same shape and entropy as the engine's own
+ *  minting — 16 random bytes). The engine validates at insert; see client-supplied ids spec. */
+export function mintEncodedDocumentId(tableNumber: number): DocumentId {
+  return encodeInternalDocumentId(newDocumentId(tableNumber));
+}
+
 export function decodeDocumentId(encoded: string): InternalDocumentId {
   let bytes: Uint8Array;
   try {

@@ -139,13 +139,27 @@ unspecified and never parse it). Two things follow:
   `_id` to key a React list on until the real row arrives and replaces it in the same atomic swap
   described above.
 - **Never pass a `placeholderId()` value as an argument to a mutation.** It isn't a real id the
-  server can resolve, and there is no v1 mechanism to rewrite a placeholder reference into the
-  real id once the create it names has committed. If you need to create a row and then
-  immediately reference it (e.g. create a conversation, then send the first message into it),
-  **`await` the create mutation and use the real, server-returned id for the follow-up mutation** —
-  don't try to chain two optimistic mutations through a placeholder. (A durable offline outbox,
-  described below, is the planned home for placeholder-argument rewriting — it needs a persisted
-  log to make that safe across a reload, which this slice doesn't have.)
+  server can resolve, and there is no mechanism to rewrite a placeholder reference into the real
+  id once the create it names has committed — nor will there ever be; that's not the fix. The
+  resolution is: **mint a real id instead.** If you need to create a row and then immediately
+  reference it (e.g. create a conversation, then send the first message into it), use
+  `mintId` (from your app's generated `_generated/ids.ts` — see
+  [Client-supplied ids](/offline#client-supplied-ids-create-then-reference-chains) in the offline
+  guide) to mint a real `Id<"table">` *before* either mutation is sent, pass it as `_id` on the
+  create's args, and reference that same id in the follow-up mutation's args. Both calls can then
+  be issued back-to-back — or even queued offline — without ever awaiting the first one to learn
+  its id. `await`-then-use-the-server-returned-id still works too, and is the simpler choice when
+  you're online anyway and don't need offline support for the pair.
+
+  The same purity rule that governs `placeholderId()`/`now()` applies to minting: **mint OUTSIDE
+  the updater**, at args-construction time (minting consults randomness) — and **inside the
+  updater, read the id FROM args**, never call `mintId` there. Placeholders and minted ids stay
+  cleanly separated by concern: `placeholderId()` remains purely a *rendering* concern (a stable
+  React key for a row that doesn't have a real id yet, when you're not client-minting one), while
+  a minted id is an *args* concern (a real id, fixed before enqueue, that a later mutation can
+  reference). An updater that renders a row created with a minted id should use that real id as
+  the row's `_id` — reading it from `args`, exactly like any other field — rather than calling
+  `placeholderId()` for it.
 
 ## Return-type typing: add `returns` to get a typed store
 
@@ -280,12 +294,10 @@ you're using `withOptimisticUpdate` anywhere) and is explicitly out of scope for
 
 ## What's next: the durable offline outbox
 
-Everything above holds for a live, connected — or briefly reconnecting — session. It does **not**
-persist across a page reload or app relaunch: reload while a mutation is `unsent` or `inflight`
-and it's gone, same as before this feature existed. A durable offline outbox (mutations queued to
-IndexedDB, survivable and resendable across a reload, with server-side per-client dedup so a
-resend can't double-apply) is the committed next slice, not a maybe — see
-`docs/dev/research/client-sync/verdict.md` §(g) for the receiving seams this slice was built to
-leave open (S1's serializable triple, S4's policy split, the opaque `requestId`), and
-`docs/dev/research/lunora.md` §5 for the `clientId + monotone clientSeq` watermark research
-already banked as an input to that slice's server-side dedup design.
+Everything above holds for a live, connected — or briefly reconnecting — session. By itself it
+does **not** persist across a page reload or app relaunch — but the durable offline outbox (opt-in
+`outbox: indexedDBOutbox()` in the browser, `fsOutbox()` on Node/Electron hosts) has since
+shipped and closes exactly that gap: mutations queued durably, survivable and resendable across a
+reload, with server-side per-client receipts so a resend can't double-apply. See the
+[offline guide](./offline.md) for the full model, including client-supplied ids for offline
+create-then-reference chains.

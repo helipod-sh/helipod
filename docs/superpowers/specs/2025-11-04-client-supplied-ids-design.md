@@ -81,6 +81,8 @@ same strip discipline `handleDbReplace` already applies to `_id`/`_creationTime`
 | `_id` is a string that decodes (`decodeDocumentId` — base32 + varint + checksum) | typed error: malformed id |
 | decoded `tableNumber` === the insert target's table number | typed error: id belongs to a different table |
 | target is a USER table (client-suppliable ids are for user tables; decoded number ≤ 9999 / `_`-prefix targets are already unreachable via `db.insert`'s own table check, but the matrix states it explicitly) | typed error |
+| target table is UNSHARDED (no `shardKey`) | typed error: sharded tables don't support client-supplied ids in v1 |
+| the executing mutation runs on the DEFAULT ring (no `shardBy`, or a privileged run not routed off-default) | typed error: this mutation must not be shard-routed |
 | no existing document with this id (`ctx.txn.get(internalId)` — the read-your-own-writes overlay makes this correct within a transaction too) | typed error: id already in use |
 
 All errors are loud, typed, coded (exact classes per `@stackbase/errors` conventions, decided in
@@ -93,8 +95,33 @@ verdict), so an id collision reaching the engine is an app bug (a non-outbox cal
 id) and errors. No insert-if-absent, no aliasing, ever.
 
 **Read/write sets & reactivity:** the existence check is a point read the invalidation machinery
-already handles; the insert's write set is unchanged. Sharding: routing keys on the shard-key
-field, not the id — unaffected. Fleet: no changes.
+already handles; the insert's write set is unchanged. Fleet: no changes beyond the sharding gate
+below.
+
+**Sharding (v1 restriction, amended post-review 2025-11-04):** a client-supplied `_id` is accepted
+only when BOTH hold: (1) the target table is UNSHARDED (no `.shardKey`), and (2) the executing
+mutation runs on the DEFAULT ring (no `shardBy`, or a privileged run not routed off-default via
+`RunOptions.shardId`). Either violation is a typed `InvalidClientIdError`, checked in
+`handleDbInsert` BEFORE the existence read (fail fast, and the read is never registered — it would
+be meaningless across rings anyway).
+
+Why: the supplied-`_id` existence check (`ctx.txn.get(decoded)`) is a snapshot read on the
+*executing transaction's own ring*. On the default 8-shard `ShardedTransactor`
+(`packages/transactor/src/shard-writer.ts`), each shard is an independently-mutexed OCC domain
+with its own snapshot and `recentCommits` ring. Without this gate, two concurrent inserts of the
+SAME client-minted id running on DIFFERENT rings (e.g. one unsharded-table insert on the default
+ring plus one `shardBy`-routed insert of the same table — `enforceShardWrite` exempts inserts into
+unsharded tables from ring ownership, since inserts are normally fork-free) would each see "not
+found" and both commit: a silent duplicate identity with a forked `prev_ts` chain, violating the
+no-silent-duplicate invariant this feature promises. Restricting the feature to the default ring
+makes the existence check + the OCC validated-read-set (`ctx.db.insert`'s `ctx.txn.get` already
+registers a validated read, `shard-writer.ts` `TransactionContextImpl.get`) globally sound for that
+table: every write of it lands on the ONE ring, so a true concurrent duplicate now loses at OCC
+there instead — the executor's built-in OCC-conflict retry loop (`runInTransactionSingle`) replays
+the loser's handler deterministically, its fresh read finds the winner's row, and it fails loudly
+with `ID_ALREADY_IN_USE` rather than silently forking. Sharded-table support (binding a
+client-supplied id to the row's shard-key value, so the existence check can be routed to the
+correct ring) is deferred — see Non-goals.
 
 ## What explicitly does NOT change
 
@@ -124,7 +151,8 @@ field, not the id — unaffected. Fleet: no changes.
    row under the minted id, the message's reference resolves, reactive subscription sees both;
    plus the rejection matrix over the wire (wrong-table id and already-in-use id → typed error
    surfaces through `onMutationFailed`/mutation rejection); plus an engine-minted-path regression
-   (insert without `_id` byte-identical to today).
+   (insert without `_id` byte-identical to today); plus the concurrent same-id duplicate race
+   through the real 8-shard server (exactly one row, loser gets `ID_ALREADY_IN_USE`).
 
 ## Error handling
 
@@ -144,4 +172,7 @@ purity rule. Codegen docs mention `_generated/ids`. CLAUDE.md updated at merge.
 
 No CRDT/merge; no client-side replica; no collision aliasing/renaming; no `_creationTime`
 acceptance; no server-delivered table-number sync (revisit only if map-staleness proves painful
-in practice); no changes to placeholder semantics.
+in practice); no changes to placeholder semantics; no sharded-table support for client-supplied
+ids (binding an id to its shard-key value so the existence check can be routed to the correct
+ring) — deferred, not planned; v1 is unsharded-tables-on-the-default-ring only (see Sharding
+above).

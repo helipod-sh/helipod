@@ -54,7 +54,7 @@ describe("push (load → codegen)", () => {
     const { generated } = push(loaded);
     expect(generated.dataModel.content).toContain('messages: { document: { _id: Id<"messages">; _creationTime: number; conversationId: Id<"conversations">; body: string } };');
     expect(generated.api.content).toContain('send: FunctionReference<"mutation"');
-    expect(generated.files).toHaveLength(4); // dataModel, api, internal, server
+    expect(generated.files).toHaveLength(5); // dataModel, api, internal, server, ids
   });
 });
 

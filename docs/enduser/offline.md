@@ -141,6 +141,139 @@ after that first successful handshake is covered. Pointed at an older server tha
 feature, the client simply never arms — the same `MutationUndeliveredError` fail-fast behavior,
 forever, with no error and no special handling required on your end.
 
+## Client-supplied ids: create-then-reference chains
+
+The outbox above gets you exactly-once delivery of a *single* queued mutation. The next question
+is what happens when two queued mutations depend on each other — the classic case is "create a
+conversation, then send the first message into it," both issued while offline, where the second
+mutation needs to reference a row the first one hasn't committed yet. Client-supplied ids close
+that gap: you mint a **real** `Id<"table">` on the client, before either mutation is sent, and pass
+it as `_id` on the insert. The engine accepts it (subject to the restrictions below) instead of
+minting its own, so the id is valid — and referenceable — the instant it's minted, not the instant
+it lands.
+
+This is the **primary** pattern for offline create-then-reference chains. Reach for it whenever a
+queued mutation needs to hand a row's identity to a later queued mutation before the first one has
+actually run.
+
+### Worked example
+
+`stackbase codegen` (and `stackbase dev`'s regeneration on every push) emits `_generated/ids.ts`: a
+`tableNumbers` map for your app's own tables plus a typed `mintId`:
+
+```ts
+import { mintId } from "../convex/_generated/ids";
+
+const conversationId = mintId("conversations");            // a REAL Id<"conversations">, minted now
+
+await client.mutation(api.conversations.create, { _id: conversationId, name });   // queued offline
+await client.mutation(api.messages.send, { conversationId, body });               // references it, also offline
+```
+
+Both calls enqueue into the durable outbox exactly like any other mutation — no special-casing
+needed for the fact that the second one references a row the first one hasn't committed yet. On
+drain, `conversations.create` runs first (the outbox is FIFO), inserts under the minted id, and by
+the time `messages.send` runs, the reference resolves against a real row. The receiving mutation
+just accepts the id as a normal `v.id("conversations")` argument — from the handler's point of
+view, nothing about this is different from an id it received any other way.
+
+On the write side, your mutation passes the supplied `_id` straight through to `ctx.db.insert`:
+
+```ts
+export const create = mutation({
+  args: { _id: v.optional(v.string()), name: v.string() },
+  handler: (ctx, args) => ctx.db.insert("conversations", args),
+});
+```
+
+`_id` is optional — a caller that omits it gets an engine-minted id exactly as before. Nothing
+about ordinary (non-client-minted) inserts changes.
+
+### The purity rule
+
+Mint at **args-construction time**, outside any `withOptimisticUpdate` updater. Minting consults
+randomness (the same 128-bit entropy the engine itself uses); an updater must stay pure and
+replay-safe, so it reads the id **from args**, never mints one itself:
+
+```ts
+const conversationId = mintId("conversations"); // minted OUTSIDE the updater, once
+
+const send = useMutation(api.conversations.create).withOptimisticUpdate((store, args) => {
+  // inside the updater: read the id FROM args — never call mintId() here
+  const list = store.getQuery(api.conversations.list, {});
+  if (list === undefined) return;
+  store.setQuery(api.conversations.list, {}, [...list, { _id: args._id, name: args.name }]);
+});
+
+await send({ _id: conversationId, name });
+```
+
+This mirrors the existing `placeholderId()`/`now()` purity rule from
+[Optimistic Updates](/optimistic-updates) — minting is a one-shot, args-construction-time concern;
+replaying an updater must never re-mint. `placeholderId()` itself is untouched by any of this: it
+remains a rendering-only concern for a row your updater displays before *any* id — minted or
+server-assigned — is known to have committed.
+
+### v1 restrictions (read before you rely on this)
+
+- **Unsharded tables on the default ring only.** A client-supplied `_id` is accepted only when the
+  target table has no `shardKey` **and** the mutation is executing on the default ring (i.e. it
+  wasn't routed elsewhere via `shardBy`). Both conditions are checked before the id is even looked
+  up. Concretely: **don't shard-route a mutation that inserts with a client-supplied `_id`.** If you
+  do, it doesn't fail outright — a `shardBy`-routed mutation's client-id insert succeeds only when
+  its shard key happens to hash onto the default ring (roughly a 1-in-*N* chance on an *N*-shard
+  fleet), and silently gets a typed rejection the rest of the time. Treat that as "unsupported,"
+  not "flaky" — keep client-id-minting mutations un-routed (no `shardBy`) and targeting unsharded
+  tables. Sharded-table support (binding a client-supplied id to its row's shard-key value) is a
+  deferred follow-on, not built.
+- **`mintId` covers your app's own tables, not everything `Id<>` can name.** Its type parameter is
+  `TableNames`, so it type-checks against any table name your schema knows about — including
+  system tables like `"_storage"` — but the emitted map only contains your app's own tables;
+  component and system tables are excluded by construction. Calling `mintId("_storage")` compiles
+  and throws at runtime ("unknown table … — regenerate `_generated/`"). `mintId` is for minting ids
+  of rows your own mutations insert — not a general-purpose id constructor.
+- **The map can go stale.** `_generated/ids.ts` bakes in table numbers from whatever composition
+  codegen last saw. A deployment that's evolved through many additive schema changes can, in
+  principle, drift from a freshly-generated map's assumed numbering. The engine never trusts the
+  client's map — every minted id is validated server-side at insert regardless of where it came
+  from, so a stale map produces a loud, typed rejection, never a wrong-table write. If you hit one,
+  regenerate against a `stackbase dev` session attached to the live deployment's lineage (its
+  regeneration path threads the live composition's actual numbers).
+
+### Error codes
+
+A rejected client-supplied id surfaces as one of two stable, matchable error codes — safe to branch
+on in `onMutationFailed`/`pendingMutations()` (outbox) or a rejected promise (online):
+
+- **`INVALID_CLIENT_ID`** — the `_id` is malformed, targets the wrong table, targets a sharded
+  table, or was inserted by a mutation running off the default ring (see the restrictions above).
+- **`ID_ALREADY_IN_USE`** — a document with that id already exists. There's no upsert semantics
+  here: an outbox resend never re-executes a committed mutation (receipts replay the recorded
+  verdict instead), so this means either a genuine 2^-128-scale collision or an app bug (reusing an
+  id outside the outbox's own replay machinery). Either way it's a loud error, not a silent merge.
+
+### Fallback: composite intent
+
+If you can't regenerate `_generated/ids.ts` against your live deployment right now (see the
+staleness note above) — or you're on an older client that predates this feature — the previous
+workaround still works: fold the create and the reference into **one** mutation call instead of
+two. Since a single mutation is one transaction, there's no cross-mutation reference to resolve:
+
+```ts
+export const createConversationWithFirstMessage = mutation({
+  args: { name: v.string(), body: v.string() },
+  handler: async (ctx, { name, body }) => {
+    const conversationId = await ctx.db.insert("conversations", { name });
+    await ctx.db.insert("messages", { conversationId, body });
+    return conversationId;
+  },
+});
+```
+
+This still works today and always will — it's just no longer the primary recommendation once
+`mintId` is available, since it forces you to design your mutation API around what needs to be
+created together rather than what's logically separate.
+
 ## The conflict taxonomy (AC8.1)
 
 Stackbase has **no merge and no CRDT layer**. There is no automatic conflict resolution, offline or
@@ -394,15 +527,15 @@ deferral, not a gap in the design (verdict §(i)):
 
 | Deferred | Where it lands when built | Honest cost today |
 |---|---|---|
-| Client-supplied ids (full offline "create-then-reference" chains) | ids travel inside `args`; its own id-codec spec (forgery, table validation) | Offline cross-mutation create-then-edit (e.g. create a conversation, then immediately send into it, both offline) isn't possible in v1 — the documented workaround is a **composite intent**: do both as one mutation call. The create-then-await-then-reference pattern from Optimistic Updates still requires being online for the awaited step. |
 | Subscription resume token | an additive `Connect` field | Reconnect re-sends full query results rather than a diff — fine at today's scale; worth re-measuring as offline-heavy apps get more real-world traffic. |
 | Background Sync service-worker drain | a drain-trigger seam | No drain-after-tab-close on a visit; Chromium-only browser feature even if built. |
 | Cross-tab live optimistic rendering | the registry + shared store | Another tab's pending writes show up as `pendingMutations()` status, not as rendered rows in your queries, until that tab (or the drain leader) actually observes the commit. |
 | A persisted query baseline (a client-side replica) | **not a deferral — a declared non-goal** | Offline-after-reload rendering stays app-effort (see above) permanently, by design — a full client replica is a different, larger product bet this feature deliberately doesn't take on. |
 
-One entry has already graduated out of this table: the Node/Bun filesystem `OutboxStorage` adapter
-shipped as `fsOutbox()` — see [Node, Electron, and Tauri hosts](#node-electron-and-tauri-hosts)
-above.
+Two entries have already graduated out of this table: the Node/Bun filesystem `OutboxStorage`
+adapter shipped as `fsOutbox()` (see [Node, Electron, and Tauri hosts](#node-electron-and-tauri-hosts)
+above), and client-supplied ids for offline create-then-reference chains, shipped as `mintId` (see
+[Client-supplied ids](#client-supplied-ids-create-then-reference-chains) above).
 
 Nothing in this table reopens the record family, the wire contract, or the reconcile algorithm —
 these are additive follow-ons on top of a design that's already complete and shipped.

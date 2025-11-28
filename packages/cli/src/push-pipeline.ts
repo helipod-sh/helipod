@@ -21,6 +21,7 @@ export function push(
   const generated = generateAll({
     schema: project.schemaJson,
     manifest: project.manifest,
+    tableNumbers: project.tableNumbers,
     components: components.map((c) => ({ name: c.name, contextType: c.contextType, serverExports: c.serverExports })),
   });
   return { project, generated };
