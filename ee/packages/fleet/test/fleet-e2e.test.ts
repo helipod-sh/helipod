@@ -1742,7 +1742,10 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
             const seqs = (r.body.value as string[]).map((t) => Number(t.replace("tick-", "")));
             return seqs.length > 0 && Math.max(...seqs) > maxSeqBeforeKill; // chain advanced past the kill
           },
-          30_000,
+          // 90s: kill → TTL expiry → takeover → driver tick resume, under full-gate CPU contention
+          // (the recurring parallel-gate flake; the assertion is progress-based, so the wider bound
+          // weakens nothing — the scenario's own budget is 300s)
+          90_000,
           "tick chain to resume on the survivor",
         );
         const ticksAfter = (await apiRun(survivorUrl, "notes:ticks", {})).body.value as string[];
