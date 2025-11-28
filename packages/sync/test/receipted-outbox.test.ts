@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { TimeoutError, InvalidClientIdError } from "@stackbase/errors";
+import { TimeoutError, InvalidClientIdError, OccConflictError } from "@stackbase/errors";
 import {
   SyncProtocolHandler,
   type SyncUdfExecutor,
@@ -172,6 +172,21 @@ describe("Receipted Outbox wire — Mutation classification", () => {
     };
     await send({ type: "Mutation", requestId: "r1", udfPath: "app:createConversation", args: {} });
     expect(socket.responses()[0]).toMatchObject({ requestId: "r1", success: false, code: "INVALID_CLIENT_ID" });
+  });
+
+  it("a FRESH RETRYABLE failure carries NO code on the wire — only terminal errors get a code (re-review FIX 1)", async () => {
+    // The wire invariant is "coded ⇒ terminal, server-recorded verdict" (the outbox drain's
+    // coded-vs-codeless classification and `handleDedupError`'s own retryable check both depend on
+    // it). A fresh (non-replayed) TRANSIENT error — here a real `OccConflictError` — must NOT carry
+    // a `.code`, even though it IS a `StackbaseError` with one: threading it through would make the
+    // drain settle a transient failure as terminal (durable mutation lost / poison-pause).
+    exec.runMutation = async () => {
+      throw new OccConflictError("write conflict, retry");
+    };
+    await send({ type: "Mutation", requestId: "r1", udfPath: "app:createConversation", args: {} });
+    const r = socket.responses()[0]!;
+    expect(r).toMatchObject({ requestId: "r1", success: false });
+    expect(r.code).toBeUndefined();
   });
 
   it("a stale verdict replays as a STALE_CLIENT failure", async () => {
