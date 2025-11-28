@@ -294,12 +294,10 @@ you're using `withOptimisticUpdate` anywhere) and is explicitly out of scope for
 
 ## What's next: the durable offline outbox
 
-Everything above holds for a live, connected — or briefly reconnecting — session. It does **not**
-persist across a page reload or app relaunch: reload while a mutation is `unsent` or `inflight`
-and it's gone, same as before this feature existed. A durable offline outbox (mutations queued to
-IndexedDB, survivable and resendable across a reload, with server-side per-client dedup so a
-resend can't double-apply) is the committed next slice, not a maybe — see
-`docs/dev/research/client-sync/verdict.md` §(g) for the receiving seams this slice was built to
-leave open (S1's serializable triple, S4's policy split, the opaque `requestId`), and
-`docs/dev/research/lunora.md` §5 for the `clientId + monotone clientSeq` watermark research
-already banked as an input to that slice's server-side dedup design.
+Everything above holds for a live, connected — or briefly reconnecting — session. By itself it
+does **not** persist across a page reload or app relaunch — but the durable offline outbox (opt-in
+`outbox: indexedDBOutbox()` in the browser, `fsOutbox()` on Node/Electron hosts) has since
+shipped and closes exactly that gap: mutations queued durably, survivable and resendable across a
+reload, with server-side per-client receipts so a resend can't double-apply. See the
+[offline guide](./offline.md) for the full model, including client-supplied ids for offline
+create-then-reference chains.
