@@ -289,7 +289,46 @@ The answer to "language-agnostic user functions via WASM," from a system that sh
   monolith. So edge remains viable for Stackbase, but you'd borrow the *reactivity/subscription-indexing*
   ideas from SpacetimeDB, not its deployment shape.
 
-## 11. The single highest-leverage takeaway
+## 11. The full adoption ledger (adopt now / adopt later / validated / skip)
+
+The pattern across everything below: every **transferable** item is a software/algorithm technique;
+everything **not** transferable is an architectural bet (in-memory, fused, monolithic) that conflicts with
+Stackbase's locked pluggable-store / deploy-anywhere identity. You can borrow SpacetimeDB's engineering
+without adopting its architecture.
+
+### 11.1 Adopt now — new, high-value, store-agnostic
+
+| Idea | What SpacetimeDB does | Where it lands in Stackbase |
+|---|---|---|
+| **Indexed subscription matching** | Index subscriptions by `(table_id, col_id, value)` + join-edge + table-catch-all; a write *looks up* the affected subs (`module_subscription_manager.rs`, `SearchArguments`/`JoinEdges`). 1000 subs + 1-row write → ~1 query evaluated. | `packages/sync` — fixes the O(N) `findAffectedByRanges` scan (perf-backlog #1). |
+| **Off-thread fan-out (`SendWorker`)** | Compute deltas *under the commit lock* (fast), then hand serialization + push-to-N-sockets to a **separate worker** so the next transaction isn't starved (`module_subscription_manager.rs:527-537,1710-1885`). | `packages/sync` — decouple commit latency from fan-out width. Pairs with the indexed matcher; together they are the reactive-path rework. |
+| **IVM + diff pushes** | Compile each subscription into incremental delta-plans once; on commit run only the *changed rows* through them and push `{inserts, deletes}`, never a re-run result (`subscription/src/lib.rs`, `delta.rs`, `tx.rs`). | Evolve the re-run model toward incremental maintenance + row-level diffs. |
+| **Queue-depth-batched durability** | Commit to memory synchronously; fsync async, batched **by queue depth** (self-tuning group commit, no fixed window) (`durability/src/imp/local.rs:250-335`). | Fleet-B4 group commit — adopt the queue-depth batch shape over a fixed flush interval. |
+| **Log the *call*, not just the *effect*** | The commit log records the reducer **name + BSATN args** alongside the row diff, so the log doubles as a replayable call/audit log (`commitlog/src/commit.rs`). | The MVCC log — also record the mutation call. Unlocks audit trails, deterministic **replay-debugging** (deferred for workflows), and easier debugging. |
+| **Perf-budget CI gates** | `crates/index-scan-gate` *fails the build* if a hot path's median exceeds 100µs over 31 runs. | Wire the critical benchmarks (propagation p99, commit throughput) as build-failing thresholds so regressions can't merge. Builds on `benchmarks/`. |
+
+### 11.2 Adopt when you build the isolate / multi-language boundary
+
+| Idea | SpacetimeDB | Relevance |
+|---|---|---|
+| **Additive ABI versioning** | Host↔module syscalls are additive import-namespaces (`spacetime_10.0`, `10.1`… — `bindings-sys`); old modules keep working against newer hosts. | The exact discipline for the isolate/WASM seam `CLAUDE.md` reserves. |
+| **Describe/dispatch split** | `__describe_module__` (schema discovery) populates static tables consumed by hot-path `__call_reducer__` (`bindings/src/rt.rs`). | Clean separation to copy when building a real module boundary. |
+| **Resource / "energy" metering** | A compute budget metered per reducer call, baked into the execution path (`crates/core/src/energy.rs`). | Runaway-function protection once true isolate sandboxing ships; foundation for quotas/billing. Stackbase has none today. |
+| **Structural determinism** | The physical-expression *type* has no clock/RNG/IO node, so queries are deterministic by construction (`physical-plan/src/plan.rs`). | Make the executor *structurally* prevent non-determinism in queries, not just document "don't call `Date.now()`." |
+
+### 11.3 Already-validated (SpacetimeDB confirms a Stackbase direction)
+
+- **Content-addressed, hard-linked snapshots** (BLAKE3 pages/blobs, cheap on-disk deltas; `crates/snapshot`) = the **B5 object-storage / CAS-manifest** direction — a working proof it scales.
+- **Epoch / leader-term in the log format from day one** (`commitlog/src/commit.rs`) = fleet epoch-fencing (B1).
+- **Single serial writer, no OCC** (`todo!("...retries my man, T-dawg")`) = per-shard single writer. The fastest system in the space made the same call.
+
+### 11.4 Deliberately skip (architectural mismatch — the source of their headline speed)
+
+- **Fused logic-in-DB + all-state-in-memory** — *the* speed win, but incompatible with pluggable-store / deploy-anywhere / large-dataset. Their honest costs (RAM-bounded datasets, no cold tiering, compute+data as one deploy unit, no multi-tenant sharing) are exactly what a BaaS shape needs to avoid.
+- **WASM-for-everything** — they proved you shouldn't; embed V8 for JS/TS (§7).
+- **BFLATN/BSATN in-memory row layout** — a real serialization-cost lever, but bounded by the pluggable on-disk store (rows are Postgres/SQLite rows, not in-memory pages). Note it as a *cached-representation* idea, not a storage change.
+
+## 12. The single highest-leverage takeaway
 
 If you adopt one thing from SpacetimeDB, make it the **reactivity design**: **index subscriptions by
 `(table, filter-value)`/join-edge (kills the O(N) matcher — already your #1 backlog item), compile each
