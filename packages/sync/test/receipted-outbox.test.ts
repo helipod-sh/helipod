@@ -186,6 +186,7 @@ describe("Receipted Outbox wire — Mutation classification", () => {
     await send({ type: "Mutation", requestId: "r1", udfPath: "app:createConversation", args: {} });
     const r = socket.responses()[0]!;
     expect(r).toMatchObject({ requestId: "r1", success: false });
+    if (r.success !== false) throw new Error("unreachable — asserted above");
     expect(r.code).toBeUndefined();
   });
 
