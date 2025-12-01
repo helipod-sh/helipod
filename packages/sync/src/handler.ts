@@ -6,6 +6,7 @@
  * path that never touches the engine. It talks only to abstract `SyncWebSocket` /
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
+import { createHash } from "node:crypto";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
@@ -154,6 +155,16 @@ interface Session {
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Server-minted result fingerprint (subscription resume, design 2025-11-28). Hashes THIS server's
+ * own serialization of the value — the client stores and echoes it opaquely, so attach-site and
+ * compare-site using this SAME helper is the entire contract; a cross-version server simply
+ * mismatches (falls through to a full send), never crashes or lies.
+ */
+function hashValue(value: JSONValue): string {
+  return "sha256:" + createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 export class SyncProtocolHandler {
@@ -309,8 +320,16 @@ export class SyncProtocolHandler {
     for (const q of msg.add) {
       try {
         const { value, tables, readRanges } = await this.execSub(session, q.udfPath, q.args);
+        // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
+        // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges });
-        modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: convexToJson(value) });
+        const json = convexToJson(value);
+        const hash = hashValue(json);
+        if (q.resultHash !== undefined && q.resultHash === hash) {
+          modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+        } else {
+          modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: json, hash });
+        }
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: q.queryId, error: errMessage(e) });
       }
@@ -541,7 +560,8 @@ export class SyncProtocolHandler {
         try {
           const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
           this.subscriptions.add({ ...sub, tables, readRanges }); // refresh the read set
-          modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
+          const json = convexToJson(value);
+          modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
         } catch (e) {
           modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
         }
@@ -621,7 +641,8 @@ export class SyncProtocolHandler {
       try {
         const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
         this.subscriptions.add({ ...sub, tables, readRanges });
-        modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: convexToJson(value) });
+        const json = convexToJson(value);
+        modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
       }
