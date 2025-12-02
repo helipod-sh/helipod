@@ -34,10 +34,17 @@ export function isContiguous(prevEnd: StateVersion, nextStart: StateVersion): bo
   return versionsEqual(prevEnd, nextStart);
 }
 
+/**
+ * `resultHash` (subscription resume, design 2025-11-28): the client's last-known server-minted
+ * fingerprint for this query, echoed back on resubscribe. Present only when the subscription was
+ * previously `answered` with a defined value; absent on a first subscribe, a prior `QueryFailed`,
+ * or an old client that predates this field — all of which fall through to today's full send.
+ */
 export interface QueryRequest {
   queryId: number;
   udfPath: string;
   args: JSONValue;
+  resultHash?: string;
 }
 
 /**
@@ -98,9 +105,18 @@ export type ClientMessage =
   | { type: "SetAdminAuth"; key: string };
 
 export type StateModification =
-  | { type: "QueryUpdated"; queryId: number; value: JSONValue }
+  // `hash` (subscription resume): the server's own fingerprint of `value` — see `hashValue` in
+  // handler.ts. Attached at every construction site (subscribe answer AND reactive re-run pushes)
+  // so the client's stored hash is always current at disconnect time. Optional only for wire
+  // compatibility with a hand-constructed message; the server never omits it.
+  | { type: "QueryUpdated"; queryId: number; value: JSONValue; hash?: string }
   | { type: "QueryFailed"; queryId: number; error: string }
-  | { type: "QueryRemoved"; queryId: number };
+  | { type: "QueryRemoved"; queryId: number }
+  // Subscription resume: the fresh re-run's hash matched the client-echoed `resultHash` — no
+  // `value` to send. Sent ONLY from the subscribe-answer path (`doModifyQuerySet`), never from a
+  // reactive re-run push (a push only happens because the read-set was intersected; sending
+  // `QueryUnchanged` there is out of scope — see the design doc's Non-goals).
+  | { type: "QueryUnchanged"; queryId: number };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }

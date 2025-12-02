@@ -141,6 +141,22 @@ after that first successful handshake is covered. Pointed at an older server tha
 feature, the client simply never arms — the same `MutationUndeliveredError` fail-fast behavior,
 forever, with no error and no special handling required on your end.
 
+### What a reconnect costs
+
+Reconnecting doesn't mean re-downloading everything you were subscribed to. Every server-pushed
+query result now carries a content fingerprint; on reconnect, the client echoes back the
+fingerprint it last saw for each still-live subscription, and if the server's fresh re-run hashes
+the same, it answers with a tiny `QueryUnchanged` marker instead of resending the value —
+typically **>90% less reconnect traffic** for data that didn't change while you were offline (a
+same-substrate benchmark measured a 99.3% byte reduction in the all-unchanged ceiling case; see
+`docs/dev/research/reconnect-resume-benchmark.md`). Whatever *did* change arrives in full, exactly
+as before. This is entirely automatic — no configuration, nothing to opt into — and degrades
+gracefully: an older server that predates fingerprinting simply never receives an echoed hash and
+falls back to sending full results, byte-for-byte the same as before this shipped. One honest
+caveat: this saves *bandwidth*, not *compute* — every subscribed query still fully re-executes on
+reconnect either way, fingerprint or not. Skipping the re-run itself (a retained-read-set resume)
+is the deferred v2 seam, not this.
+
 ## Client-supplied ids: create-then-reference chains
 
 The outbox above gets you exactly-once delivery of a *single* queued mutation. The next question
@@ -527,15 +543,18 @@ deferral, not a gap in the design (verdict §(i)):
 
 | Deferred | Where it lands when built | Honest cost today |
 |---|---|---|
-| Subscription resume token | an additive `Connect` field | Reconnect re-sends full query results rather than a diff — fine at today's scale; worth re-measuring as offline-heavy apps get more real-world traffic. |
 | Background Sync service-worker drain | a drain-trigger seam | No drain-after-tab-close on a visit; Chromium-only browser feature even if built. |
 | Cross-tab live optimistic rendering | the registry + shared store | Another tab's pending writes show up as `pendingMutations()` status, not as rendered rows in your queries, until that tab (or the drain leader) actually observes the commit. |
 | A persisted query baseline (a client-side replica) | **not a deferral — a declared non-goal** | Offline-after-reload rendering stays app-effort (see above) permanently, by design — a full client replica is a different, larger product bet this feature deliberately doesn't take on. |
 
-Two entries have already graduated out of this table: the Node/Bun filesystem `OutboxStorage`
+Three entries have already graduated out of this table: the Node/Bun filesystem `OutboxStorage`
 adapter shipped as `fsOutbox()` (see [Node, Electron, and Tauri hosts](#node-electron-and-tauri-hosts)
-above), and client-supplied ids for offline create-then-reference chains, shipped as `mintId` (see
-[Client-supplied ids](#client-supplied-ids-create-then-reference-chains) above).
+above), client-supplied ids for offline create-then-reference chains, shipped as `mintId` (see
+[Client-supplied ids](#client-supplied-ids-create-then-reference-chains) above), and the
+subscription resume token, shipped as server-minted per-query result fingerprints
+(`resultHash`/`QueryUnchanged` — see [What a reconnect costs](#what-a-reconnect-costs) above). Only
+the *compute*-saving half of resume (retained read-sets, so an unchanged query skips its re-run
+rather than just its resend) remains deferred — see CLAUDE.md's "Honestly deferred" list.
 
 Nothing in this table reopens the record family, the wire contract, or the reconcile algorithm —
 these are additive follow-ons on top of a design that's already complete and shipped.

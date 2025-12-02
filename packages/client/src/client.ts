@@ -775,7 +775,23 @@ export class StackbaseClient {
     }
     this.transport.send({
       type: "ModifyQuerySet",
-      add: subs.map((s) => ({ queryId: s.queryId, udfPath: s.path, args: s.args })),
+      // `resultHash` (subscription resume): echoed ONLY for a sub that was actually delivered a
+      // base value and still has its fingerprint on hand — a failed sub (`serverValue` never set),
+      // a never-answered sub, or one whose last `QueryUpdated` had no `hash` (old server) echoes
+      // nothing, falling through to today's full-send byte-for-byte. Note this condition doesn't
+      // check "currently failed" — a sub that failed AFTER a prior success still has a retained
+      // `serverValue`/`lastHash` from that success and still echoes it here. That's sound: the
+      // server only replies `QueryUnchanged` if the FRESH re-run (against live, current state)
+      // hashes equal to the echoed base — i.e. the query has recovered back to that exact value —
+      // in which case `QueryUnchanged` renders exactly what a full `QueryUpdated` send would have
+      // delivered. Any other outcome (still failing, or recovered to a different value) arrives as
+      // a normal `QueryFailed`/`QueryUpdated` modification, not `QueryUnchanged`.
+      add: subs.map((s) => ({
+        queryId: s.queryId,
+        udfPath: s.path,
+        args: s.args,
+        ...(s.answered && s.serverValue !== undefined && s.lastHash !== undefined ? { resultHash: s.lastHash } : {}),
+      })),
       remove: [],
     });
   }

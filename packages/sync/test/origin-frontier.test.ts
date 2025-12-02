@@ -121,7 +121,11 @@ describe("G4 (b) — ordering: when the commit modifies the session's subs, the 
     const ts = s.transitions();
     expect(ts).toHaveLength(1); // exactly one — not an empty advance + a modification frame
     expect(ts[0]!.endVersion.ts).toBe(9);
-    expect(ts[0]!.modifications).toEqual([{ type: "QueryUpdated", queryId: 1, value: "v1" }]);
+    // `hash` is additive (subscription resume, design 2026-07-11) — every QueryUpdated carries the
+    // server's own fingerprint of `value` now, including this reactive re-run push.
+    expect(ts[0]!.modifications).toEqual([
+      { type: "QueryUpdated", queryId: 1, value: "v1", hash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) },
+    ]);
   });
 });
 
