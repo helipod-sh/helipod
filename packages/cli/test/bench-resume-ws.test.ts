@@ -171,6 +171,11 @@ interface CellResult {
   totalBytes: number;
   elapsedMs: number;
   frameCount: number;
+  /** Direct mechanism proof (review hardening): counts of resume-window modification types, so the
+   *  cells self-verify (OFF must see zero QueryUnchanged; ON must see exactly N) rather than the
+   *  magnitude comparison alone inferring the mechanism. */
+  unchangedCount: number;
+  updatedCount: number;
 }
 
 async function runCell(
@@ -181,6 +186,8 @@ async function runCell(
   let counting = false;
   let totalBytes = 0;
   let frameCount = 0;
+  let unchangedCount = 0;
+  let updatedCount = 0;
   const answered = new Set<number>();
   let resolveAllAnswered: (() => void) | undefined;
   const allAnswered = new Promise<void>((resolve) => {
@@ -196,6 +203,8 @@ async function runCell(
       if (msg.type === "Transition") {
         for (const m of msg.modifications) {
           if (m.type === "QueryUpdated" || m.type === "QueryUnchanged") answered.add(m.queryId);
+          if (m.type === "QueryUnchanged") unchangedCount += 1;
+          else if (m.type === "QueryUpdated") updatedCount += 1;
         }
         if (answered.size >= N) resolveAllAnswered?.();
       }
@@ -227,6 +236,8 @@ async function runCell(
     // 50 live subs (each echoing its `resultHash` unless stripped), answered by one `Transition`.
     totalBytes = 0;
     frameCount = 0;
+    unchangedCount = 0;
+    updatedCount = 0;
     answered.clear();
     counting = true;
     const start = performance.now();
@@ -234,7 +245,7 @@ async function runCell(
     await allAnswered;
     const elapsedMs = performance.now() - start;
 
-    return { totalBytes, elapsedMs, frameCount };
+    return { totalBytes, elapsedMs, frameCount, unchangedCount, updatedCount };
   } finally {
     client.close();
   }
@@ -266,6 +277,12 @@ benchDescribe("bench-resume-ws — reconnect resume: bytes + time-to-answered, f
 
       expect(on.totalBytes).toBeGreaterThan(0);
       expect(off.totalBytes).toBeGreaterThan(0);
+      // Direct mechanism proof: the strip genuinely disabled fingerprints (zero Unchanged) and the
+      // ON cell resumed every sub via fingerprint match (exactly N Unchanged, zero full re-sends).
+      expect(off.unchangedCount).toBe(0);
+      expect(off.updatedCount).toBe(N);
+      expect(on.unchangedCount).toBe(N);
+      expect(on.updatedCount).toBe(0);
       // The whole point: fingerprints ON must ship substantially fewer bytes on an unchanged resume.
       expect(on.totalBytes).toBeLessThan(off.totalBytes);
 
