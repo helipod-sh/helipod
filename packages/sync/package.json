@@ -13,7 +13,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -32,6 +34,7 @@
     "@stackbase/index-key-codec": "workspace:*",
     "@stackbase/query-engine": "workspace:*",
     "@stackbase/transactor": "workspace:*",
+    "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
