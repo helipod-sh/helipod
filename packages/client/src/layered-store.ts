@@ -162,7 +162,14 @@ export class LayeredQueryStore {
    *                     fires for a content-identical `QueryUpdated` today (verified in
    *                     `test/resume-client.test.ts`'s Step-1 comment). `forceNotify` reproduces
    *                     that same always-fires behavior for `QueryUnchanged`, so it introduces no new
-   *                     observable difference for app code.
+   *                     observable difference for app code. One nuance worth flagging: a
+   *                     `QueryUnchanged` notify hands listeners the RETAINED `serverValue` reference
+   *                     (nothing new was decoded), whereas a value-equal `QueryUpdated` today mints a
+   *                     fresh object every time — so a reference-equality consumer (e.g. React's
+   *                     `useState`, which bails out of a re-render when the new state === the old
+   *                     state) may legitimately skip one redundant re-render on this path that it
+   *                     wouldn't skip on an equivalent full send. Content identity is hash-proven
+   *                     either way; only the object identity differs.
    */
   recompose(
     entries: Iterable<PendingMutation>,
