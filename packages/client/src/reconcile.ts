@@ -122,9 +122,10 @@ export class Reconciler {
     entry.update!(store, jsonToConvex(entry.args));
   };
 
-  /** Rebuild composed values; drop + warn any entry whose updater threw during replay. */
-  private rebuild(): void {
-    const dropped = this.store.recompose(this.log.entriesInOrder(), this.invokeUpdate);
+  /** Rebuild composed values; drop + warn any entry whose updater threw during replay.
+   *  `forceNotify` (subscription resume) forwards straight to `store.recompose` — see its doc. */
+  private rebuild(forceNotify?: ReadonlySet<string>): void {
+    const dropped = this.store.recompose(this.log.entriesInOrder(), this.invokeUpdate, forceNotify);
     for (const d of dropped) {
       const path = this.log.get(d.requestId)?.udfPath ?? d.requestId;
       this.log.delete(d.requestId);
@@ -165,16 +166,26 @@ export class Reconciler {
    */
   ingestTransition(modifications: StateModification[], endTs: number): void {
     this.observedTs = Math.max(this.observedTs, endTs);
+    // Subscription resume: `hash`es of subs answered via `QueryUnchanged` this pass — forwarded to
+    // `rebuild`/`recompose` so they still fire listeners despite no reference change (see
+    // `LayeredQueryStore.recompose`'s `forceNotify` doc).
+    let unchanged: Set<string> | undefined;
     for (const mod of modifications) {
       if (mod.type === "QueryUpdated") {
         const sub = this.store.byId.get(mod.queryId);
-        if (sub) this.store.setServerValue(sub, jsonToConvex(mod.value));
+        if (sub) this.store.setServerValue(sub, jsonToConvex(mod.value), mod.hash);
       } else if (mod.type === "QueryFailed") {
         const sub = this.store.byId.get(mod.queryId);
         if (sub) {
           this.store.markAnswered(sub);
           console.error(`[stackbase] query "${sub.path}" failed: ${mod.error}`);
           for (const l of sub.listeners) l.onError?.(mod.error);
+        }
+      } else if (mod.type === "QueryUnchanged") {
+        const sub = this.store.byId.get(mod.queryId);
+        if (sub) {
+          this.store.markUnchanged(sub);
+          (unchanged ??= new Set()).add(sub.hash);
         }
       }
       // QueryRemoved: keep the last known base.
@@ -185,7 +196,7 @@ export class Reconciler {
         this.clearTimer(entry.requestId);
       }
     }
-    this.rebuild();
+    this.rebuild(unchanged);
   }
 
   /**

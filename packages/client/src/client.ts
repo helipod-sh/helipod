@@ -775,7 +775,16 @@ export class StackbaseClient {
     }
     this.transport.send({
       type: "ModifyQuerySet",
-      add: subs.map((s) => ({ queryId: s.queryId, udfPath: s.path, args: s.args })),
+      // `resultHash` (subscription resume): echoed ONLY for a sub that was actually delivered a
+      // base value and still has its fingerprint on hand — a failed sub (`serverValue` never set),
+      // a never-answered sub, or one whose last `QueryUpdated` had no `hash` (old server) echoes
+      // nothing, falling through to today's full-send byte-for-byte.
+      add: subs.map((s) => ({
+        queryId: s.queryId,
+        udfPath: s.path,
+        args: s.args,
+        ...(s.answered && s.serverValue !== undefined && s.lastHash !== undefined ? { resultHash: s.lastHash } : {}),
+      })),
       remove: [],
     });
   }

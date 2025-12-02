@@ -62,8 +62,19 @@ export interface Subscription {
    *  `serverValue` (there is no base to render), but it IS a delivered reply — nothing further is
    *  coming for it on a quiet deployment. `hasUndeliveredSubscription()` (client.ts) keys off this,
    *  not `serverValue`, so a failed-but-answered subscription doesn't wedge the outbox drain's
-   *  baseline await waiting for a Transition that will never arrive (re-review FIX 2). */
+   *  baseline await waiting for a Transition that will never arrive (re-review FIX 2).
+   *  `QueryUnchanged` (subscription resume) also sets this — it IS a delivered reply too, see
+   *  `markUnchanged`. */
   answered: boolean;
+  /** Subscription resume (2025-11-28): the server-minted fingerprint of `serverValue` — a
+   *  `"sha256:" + hex` string stored verbatim from the most recent `QueryUpdated.hash`. Echoed
+   *  back as `resultHash` on resubscribe (`client.ts#resync`) so the server can reply
+   *  `QueryUnchanged` instead of resending the full value. A hash-less `QueryUpdated` (old server,
+   *  or wire-compat hand-construction) CLEARS this — an old-server session must never echo a stale
+   *  hash. Distinct from the query-identity `hash` field above (`path + args` — never changes for
+   *  a given subscription); this one is a RESULT fingerprint that changes every time the value does.
+   */
+  lastHash?: string;
   listeners: Set<Listener>;
 }
 
@@ -86,6 +97,7 @@ export class LayeredQueryStore {
       serverValue: undefined,
       composedValue: undefined,
       answered: false,
+      lastHash: undefined,
       listeners: new Set(),
     };
     this.byHash.set(hash, sub);
@@ -101,9 +113,12 @@ export class LayeredQueryStore {
   }
 
   /** Set a subscription's authoritative base (from a `QueryUpdated` modification). Does NOT fire —
-   *  `recompose` owns all listener firing so the base+drop+rebuild happen as one atomic frame. */
-  setServerValue(sub: Subscription, value: Value | undefined): void {
+   *  `recompose` owns all listener firing so the base+drop+rebuild happen as one atomic frame.
+   *  `hash` is the server-minted result fingerprint carried on the same modification — stored
+   *  verbatim (undefined clears `lastHash`, e.g. an old server that never sends `hash`). */
+  setServerValue(sub: Subscription, value: Value | undefined, hash?: string): void {
     sub.serverValue = value;
+    sub.lastHash = hash;
     sub.answered = true;
   }
 
@@ -111,6 +126,17 @@ export class LayeredQueryStore {
    *  `QueryFailed` modification — there is no server row to render, only an error). See the
    *  `answered` field doc for why this is distinct from `setServerValue`. */
   markAnswered(sub: Subscription): void {
+    sub.answered = true;
+  }
+
+  /** Ingest a `QueryUnchanged` modification (subscription resume, design 2025-11-28): the fresh
+   *  server-side re-run's hash matched what this session echoed, so there is no new value on the
+   *  wire — `serverValue`/`lastHash`/`composedValue` all stay exactly as they were. It still counts
+   *  as a delivered reply (`answered = true`, same as `setServerValue`/`markAnswered`) — see the
+   *  `answered` field doc. The caller (`reconcile.ts`) is responsible for passing this sub's `hash`
+   *  into `recompose`'s `forceNotify` set — see that method's doc for why a `QueryUnchanged` must
+   *  still fire listeners to introduce no new observable difference for app code. */
+  markUnchanged(sub: Subscription): void {
     sub.answered = true;
   }
 
@@ -127,10 +153,21 @@ export class LayeredQueryStore {
    * @param entries    surviving pending mutations, in replay order
    * @param invokeUpdate runs one entry's updater against the view (kept in the reconciler so the
    *                     entry `seed` can feed `placeholderId()`/`now()` when T5 wires them)
+   * @param forceNotify  subscription `hash`es (subscription resume) to fire listeners for even when
+   *                     the composed reference didn't change — a `QueryUnchanged` ingest has no new
+   *                     value to swap in (`serverValue` is retained as-is), yet this store has NEVER
+   *                     done content-based dedup for a plain `QueryUpdated` either: `setServerValue`
+   *                     unconditionally overwrites `serverValue`, and — because `jsonToConvex` mints
+   *                     a fresh object on every decode — the reference-inequality check below ALWAYS
+   *                     fires for a content-identical `QueryUpdated` today (verified in
+   *                     `test/resume-client.test.ts`'s Step-1 comment). `forceNotify` reproduces
+   *                     that same always-fires behavior for `QueryUnchanged`, so it introduces no new
+   *                     observable difference for app code.
    */
   recompose(
     entries: Iterable<PendingMutation>,
     invokeUpdate: (entry: PendingMutation, view: OptimisticStoreView) => void,
+    forceNotify?: ReadonlySet<string>,
   ): ReplayDrop[] {
     // Committed overlay: hash -> value, accumulated across updaters in order. Absent hash === base.
     const overlay = new Map<string, Value | undefined>();
@@ -169,10 +206,11 @@ export class LayeredQueryStore {
     }
 
     // Apply composed values + fire on reference change. Untouched subs get the SAME serverValue
-    // reference (byte-identity invariant), so they never spuriously fire.
+    // reference (byte-identity invariant), so they never spuriously fire — UNLESS `forceNotify`
+    // names them (a `QueryUnchanged` resume, matching today's always-fires `QueryUpdated` behavior).
     for (const sub of this.byHash.values()) {
       const next = overlay.has(sub.hash) ? overlay.get(sub.hash) : sub.serverValue;
-      if (next !== sub.composedValue) {
+      if (next !== sub.composedValue || forceNotify?.has(sub.hash)) {
         sub.composedValue = next;
         if (next !== undefined) {
           for (const l of sub.listeners) l.onUpdate(next);
