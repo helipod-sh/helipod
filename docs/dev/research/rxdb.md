@@ -7,7 +7,12 @@ status: research
 
 > Research date: 2025-11-28. Source: the official RxDB docs (rxdb.info — replication, rx-query,
 > rx-storage, transactions-conflicts-revisions) plus the `event-reduce` and `rxdb` repos referenced
-> therein. RxDB is a JS library, not a server; no local clone.
+> therein.
+>
+> **See also: [`rxdb-internals.md`](rxdb-internals.md)** — a source-verified deep dive (RxDB is now cloned
+> to `.reference/rxdb`) of the two backlog-critical subsystems: the **replication protocol** (loops,
+> checkpoints, meta-instance, optimistic-CAS conflicts) and **EventReduce / reactive queries**, each with
+> `file:line` pointers and a concrete "how to build it on Stackbase's MVCC log / client SDK" mapping.
 
 ## 1. Positioning — the *opposite tier* from Stackbase
 
