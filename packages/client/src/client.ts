@@ -16,7 +16,6 @@ import {
   versionsEqual,
   INITIAL_VERSION,
   type ClientMessage,
-  type ClientMutationRef,
   type ClientMutationVerdict,
   type ServerMessage,
   type StateVersion,
@@ -43,6 +42,7 @@ import {
   type OutboxStorage,
 } from "./outbox-storage";
 import { OutboxDrain, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
+import { buildConnectMessage, outboxHeldFromLog } from "./connect-handshake";
 import type { MutationBatchEntry } from "@stackbase/sync";
 
 export type { QueryListener, QueryErrorListener };
@@ -977,48 +977,11 @@ export class StackbaseClient {
   /** Send the `Connect` resume handshake: this tab-session's clientId, the `held` durable entries
    *  (every not-yet-settled `(clientId, seq)` in the log — the server classifies each into
    *  `ConnectAck.results`), and `ackedThrough` (the contiguous settled-prefix per clientId, for
-   *  server-side retention pruning). `sessionId` is a fresh per-connect id; the server routes the
-   *  handshake by the transport-level session, so this field is only informational. */
+   *  server-side retention pruning). Delegates the pure computation to `./connect-handshake` — the
+   *  SAME shared module the headless drain (`headless-drain.ts`) builds its own `Connect` from. */
   private sendConnect(): void {
-    const held = this.outboxHeld();
-    this.transport.send({
-      type: "Connect",
-      sessionId: makeEntropy(),
-      clientId: this.outboxClientId!,
-      held,
-      ackedThrough: this.outboxAckedThrough(held),
-    });
-  }
-
-  /** Every durable entry still awaiting a verdict — `unsent`/`inflight`/`parked` with a recorded
-   *  `(clientId, seq)`. A parked entry's fate is the genuinely-unknown one the handshake resolves;
-   *  presenting `unsent`/`inflight` too is harmless (they classify `unknown` and re-drain). */
-  private outboxHeld(): ClientMutationRef[] {
-    const refs: ClientMutationRef[] = [];
-    for (const e of this.reconciler.entries()) {
-      const st = e.status.type;
-      if (e.clientId !== undefined && e.seq !== undefined && (st === "unsent" || st === "inflight" || st === "parked")) {
-        refs.push({ clientId: e.clientId, seq: e.seq });
-      }
-    }
-    return refs;
-  }
-
-  /** The highest CONTIGUOUS settled-prefix seq per clientId (verdict §(c) Retention / spec
-   *  decision 3). Under the FIFO one-unacked-chunk drain a seq can never settle past an unsettled
-   *  earlier one, so for each clientId the settled prefix is exactly `(lowest still-held seq) - 1`;
-   *  a clientId whose lowest held seq is 0 has acked nothing and is omitted. */
-  private outboxAckedThrough(held: ClientMutationRef[]): ClientMutationRef[] {
-    const lowestHeld = new Map<string, number>();
-    for (const ref of held) {
-      const cur = lowestHeld.get(ref.clientId);
-      if (cur === undefined || ref.seq < cur) lowestHeld.set(ref.clientId, ref.seq);
-    }
-    const acked: ClientMutationRef[] = [];
-    for (const [clientId, minSeq] of lowestHeld) {
-      if (minSeq > 0) acked.push({ clientId, seq: minSeq - 1 });
-    }
-    return acked;
+    const held = outboxHeldFromLog(this.reconciler.entries());
+    this.transport.send(buildConnectMessage(makeEntropy(), this.outboxClientId!, held));
   }
 
   /** Process a `ConnectAck` (verdict §(e)): the capability proof arms the S4 park swap; the
