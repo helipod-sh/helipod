@@ -104,6 +104,12 @@ async function driveHydratedCodedFailure(opts: {
     outboxLocks: null,
     outboxDrainIntervalMs: 0,
     onMutationFailed: opts.onMutationFailed,
+    // This suite is single-instance R9 observability, not cross-tab behavior (that's its own
+    // describe block below, using an isolated FakeBroadcastChannel bus) — every `it()` here reuses
+    // the literal `"old-client"`/`seq 0` fixture and never closes its client, so left at the default
+    // real ambient `BroadcastChannel` probe, T-crosstab's now-MEANINGFUL `settled`/`failed` payloads
+    // would cross-talk between unrelated test cases that merely happen to share that fixture name.
+    outboxBroadcast: null,
   });
   client.setOutboxArmed(true);
   await waitFor(() => t.batches().length > 0);
@@ -130,7 +136,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
       { seq: 0, order: 0, body: "a" },
       { seq: 1, order: 1, body: "b" },
     ]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const entries = await client.pendingMutations();
     expect(entries).toHaveLength(2);
@@ -149,7 +155,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
       { seq: 0, order: 0 }, // enqueuedAt 1000 — the oldest
       { seq: 1, order: 1 }, // enqueuedAt 1001
     ]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const summary = await client.pendingSummary();
     expect(summary.count).toBe(2);
@@ -196,7 +202,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
   it("retry()/dismiss() on a non-failed entry are harmless no-ops", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "c", [{ seq: 0, order: 0 }]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const [unsent] = await client.pendingMutations();
     expect(unsent!.status).not.toBe("failed");
@@ -221,7 +227,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const onMutationFailed = vi.fn();
     const outbox = memoryOutbox();
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed });
+    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     client.setOutboxArmed(true);
 
     const p = client.mutation("messages:send", { body: "hi" });
@@ -257,7 +263,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old-client", [{ seq: 0, order: 0, status: "failed", error: { message: "left over", code: "APP_ERR" } }]);
     const onMutationFailed = vi.fn();
-    new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed });
+    new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     await tick();
 
     expect(onMutationFailed).toHaveBeenCalledTimes(1);
@@ -268,7 +274,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old-client", [{ seq: 0, order: 0, status: "failed", error: { message: "left over", code: "APP_ERR" } }]);
     const onMutationFailed = vi.fn();
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed });
+    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     await tick();
     expect(onMutationFailed).toHaveBeenCalledTimes(1);
 

@@ -108,6 +108,36 @@ export interface OutboxBroadcastLike {
   close(): void;
 }
 
+/** T-crosstab (browser-ux spec Part A): the broadcast channel's payload becomes ADDITIVELY typed.
+ *  Today's bare `1` ("the message IS the nudge", see `notifyOutboxChange` below) stays a valid,
+ *  forward-compatible message forever — every listener still fires its `outboxChangeListeners` fan-out
+ *  on ANY payload shape first (`onmessage` below), unconditionally. These three shapes let a receiver
+ *  additionally MIRROR another tab's durable entries live, instead of merely re-reading on next poll:
+ *   - `enqueued` — posted after any durable-outbox-mutating write (append/dequeue/status change);
+ *     the receiver re-reads `loadAll()` and reconciles its mirrored set against it (the backstop).
+ *   - `settled` — posted by the drain leader right after an `applied` verdict; a mirroring tab holds
+ *     its layer `completed` and drops it only once ITS OWN feed observes `commitTs` (flicker-free).
+ *   - `failed` — posted by the drain leader right after a terminal verdict; a mirroring tab drops the
+ *     layer and fires its own R9 `onMutationFailed`/dev-loud default (no promise exists to reject).
+ *  A payload that isn't one of these three (including the legacy bare `1`, or anything malformed) is
+ *  simply not recognized by `isOutboxBroadcastMessage` below — nudge-only, mirrors nothing, throws
+ *  nothing. */
+export type OutboxBroadcastMessage =
+  | { kind: "enqueued" }
+  | { kind: "settled"; clientId: string; seq: number; commitTs: number }
+  | { kind: "failed"; clientId: string; seq: number; code?: string; message: string };
+
+/** Structural guard for `OutboxBroadcastMessage` — deliberately shallow (only `kind` is checked):
+ *  the caller (`onCrossTabSettle`) already tolerates a missing/wrong-typed `clientId`/`seq` by
+ *  simply finding no matching entry (a strict field-by-field validator would just be more code for
+ *  the same outcome), and the whole typed-dispatch call is wrapped in try/catch regardless (hazard
+ *  (d): "a malformed typed payload must never break the nudge contract"). */
+function isOutboxBroadcastMessage(data: unknown): data is OutboxBroadcastMessage {
+  if (typeof data !== "object" || data === null || !("kind" in data)) return false;
+  const kind = (data as { kind: unknown }).kind;
+  return kind === "enqueued" || kind === "settled" || kind === "failed";
+}
+
 /** Probe the ambient `BroadcastChannel` global — absent in most Node/vitest runtimes and in
  *  private-mode Safari without a same-origin partition; returns `undefined` there, in which case
  *  cross-tab observability degrades to same-instance-only (still fully reactive within one tab).
@@ -259,6 +289,12 @@ export class StackbaseClient {
   /** T5 (R9): the cross-tab nudge — `undefined` when no outbox is configured or the probe/injected
    *  option resolved to nothing (single-tab observability still works via `outboxChangeListeners`). */
   private readonly outboxBroadcast?: OutboxBroadcastLike;
+  /** T-crosstab: serializes `mirrorFromStore()` — a second call arriving while one is already
+   *  in-flight (a rapid burst of `enqueued` broadcasts) sets this bit instead of racing a second
+   *  `loadAll()`; the in-flight run loops once more on completion so the caller's freshest read is
+   *  never dropped. */
+  private mirrorInFlight = false;
+  private mirrorRerun = false;
 
   constructor(
     transport: ClientTransport,
@@ -328,8 +364,17 @@ export class StackbaseClient {
       this.outboxBroadcast =
         opts.outboxBroadcast === null ? undefined : (opts.outboxBroadcast ?? probeBroadcastChannel(`stackbase:outbox:${this.originTag()}:${opts.outboxDeployment ?? "default"}:pending`));
       if (this.outboxBroadcast) {
-        this.outboxBroadcast.onmessage = () => {
+        this.outboxBroadcast.onmessage = (event) => {
+          // Keep the unconditional accessor fan-out FIRST — every existing/legacy listener nudges
+          // on ANY message, exactly as before this typed dispatch existed.
           for (const l of this.outboxChangeListeners) l();
+          // The typed path is IN ADDITION, and must never break the nudge contract above: a
+          // malformed/foreign payload floors to console, never throws out of `onmessage`.
+          try {
+            this.handleOutboxBroadcastMessage(event.data);
+          } catch (err) {
+            if (isDevMode()) console.error("[stackbase] outbox: error handling a cross-tab broadcast message", err);
+          }
         };
       }
       // R9 "resume" refire: scan the durable store for ALREADY-failed entries left behind (a prior
@@ -1246,6 +1291,98 @@ export class StackbaseClient {
     return undefined;
   }
 
+  /* ---------------------------------------------------------------------------------------------
+   * T-crosstab (browser-ux spec Part A) — live cross-tab rendering. Extends the hydrate machinery
+   * above (`addHydratedEntry`/`lookupHydratedUpdate`) with live callers driven by the broadcast
+   * channel, instead of its one construction-time caller (`OutboxDrain#hydrateOnce`).
+   * ------------------------------------------------------------------------------------------- */
+
+  /** The one predicate distinguishing a MIRRORED entry (another tab-session's durable append, or
+   *  this tab's own past-session hydrate — either way, no live promise) from an entry THIS instance
+   *  itself initiated live (hazard (a), "own-tab discrimination"): durable AND no
+   *  `pendingMutationCallbacks` registered for its `requestId`. A live `mutation()` caller always
+   *  has a callback registered until its OWN wire response settles it — broadcast messages about
+   *  such an entry are therefore always ignored here; its wire responses drive it, never a
+   *  broadcast. Used both by the dispatch methods below and the doc comment on `mirrorFromStore`'s
+   *  backstop pass — a single documented helper, never inlined twice (brief hazard (a)). */
+  private isMirroredEntry(entry: PendingMutation): boolean {
+    return entry.durable === true && !this.pendingMutationCallbacks.has(entry.requestId);
+  }
+
+  /** Handle an incoming (already-fan-out'd) broadcast payload — the typed half of `onmessage`. A
+   *  payload that doesn't match `OutboxBroadcastMessage` (the legacy bare `1`, or anything else) is
+   *  simply not recognized: the accessor nudge already fired in the caller, nothing else happens. */
+  private handleOutboxBroadcastMessage(data: unknown): void {
+    if (!this.outbox || !isOutboxBroadcastMessage(data)) return;
+    if (data.kind === "enqueued") {
+      void this.mirrorFromStore();
+    } else {
+      this.onCrossTabSettle(data);
+    }
+  }
+
+  /** Re-read the durable store and reconcile this tab's mirrored set against it — the `enqueued`
+   *  broadcast's handler, and the missed-message backstop (spec Part A "Rules"): a mirrored entry
+   *  absent from the fresh snapshot (settled/failed elsewhere, whose OWN targeted broadcast this tab
+   *  never received) drops via the same `dropAfterBaseline` one-pass rule the verdict-after-baseline
+   *  path uses. Serialized on `mirrorInFlight` — a second call arriving mid-read sets `mirrorRerun`
+   *  and is folded into one more pass after the current read finishes, rather than racing a second
+   *  `loadAll()` against it.
+   *
+   *  Only STILL-ACTIVE entries (`unsent`/`inflight`/`parked`) are (re-)hydrated — a `failed` (or a
+   *  stray `completed`) entry is a terminal, accessor-only record (`pendingMutations()` already
+   *  surfaces it) and must never be resurrected as a fresh `unsent` optimistic layer. Without this
+   *  guard, a tab that itself once owned a now-terminally-failed entry would keep reviving its OWN
+   *  dead record on every subsequent `enqueued` broadcast (this store never dequeues a `failed`
+   *  entry — R9 "persists until dismissed/retried") — and, being `durable` with no live callback,
+   *  that revived entry would then match `isMirroredEntry`, making the tab react to an UNRELATED
+   *  later `settled`/`failed` broadcast that merely happens to name the same `(clientId, seq)`. */
+  private async mirrorFromStore(): Promise<void> {
+    if (!this.outbox) return;
+    if (this.mirrorInFlight) {
+      this.mirrorRerun = true;
+      return;
+    }
+    this.mirrorInFlight = true;
+    try {
+      do {
+        this.mirrorRerun = false;
+        const { entries } = await this.outbox.loadAll();
+        for (const e of entries) {
+          // idempotent — addHydratedEntry's own (clientId, seq) dedup.
+          if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") this.addHydratedEntry(e);
+        }
+        const live = new Set(entries.map((e) => `${e.clientId}:${e.seq}`));
+        for (const entry of this.reconciler.entries()) {
+          if (!this.isMirroredEntry(entry)) continue; // never touch an own-live entry here.
+          if (entry.clientId === undefined || entry.seq === undefined) continue;
+          if (!live.has(`${entry.clientId}:${entry.seq}`)) this.dropAfterBaseline(entry.requestId);
+        }
+      } while (this.mirrorRerun);
+    } finally {
+      this.mirrorInFlight = false;
+    }
+  }
+
+  /** Handle a targeted `settled`/`failed` broadcast — the leader's flicker-free fast path (Part A's
+   *  normal route; `mirrorFromStore`'s backstop above is the fallback for a missed message). Ignored
+   *  entirely for an entry this tab doesn't know about, or one it initiated live itself (hazard (a)).
+   *  Never touches the durable store — the leader (whichever tab settled it) already wrote that;
+   *  this only updates THIS tab's in-memory reconciler layer + R9 observability. */
+  private onCrossTabSettle(msg: Extract<OutboxBroadcastMessage, { kind: "settled" | "failed" }>): void {
+    const entry = this.findOutboxEntry(msg.clientId, msg.seq);
+    if (!entry || !this.isMirroredEntry(entry)) return;
+    if (msg.kind === "settled") {
+      // The exact same same-session gate `drainSettleApplied`'s fresh-apply branch uses — hold
+      // `completed` until THIS tab's own feed observes `commitTs` (flicker-free, never drop-on-ack).
+      this.reconciler.onMutationSuccess(entry.requestId, msg.commitTs);
+    } else {
+      // The terminal-settle shape minus the promise reject — no promise exists for a mirror.
+      this.reconciler.onMutationFailure(entry.requestId);
+      this.notifyMutationFailed(entry.clientId, entry.seq, entry.udfPath, { message: msg.message, code: msg.code });
+    }
+  }
+
   private drainBatchEntry(entry: PendingMutation): MutationBatchEntry {
     return { requestId: entry.requestId, udfPath: entry.udfPath, args: entry.args, clientId: entry.clientId, seq: entry.seq };
   }
@@ -1267,6 +1404,12 @@ export class StackbaseClient {
    *     `onMutationSuccess` (the response `ts`) — the exact same shipped no-flicker discipline the
    *     direct-send path uses at `MutationResponse` (see the `case "MutationResponse"` handler above):
    *     hold the layer `completed` until this client's own reactive feed observes `ts`.
+   *
+   *  T-crosstab: AFTER the local settle above, the leader (this tab, if it holds the drain lock)
+   *  also posts a targeted `settled` broadcast so a tab MIRRORING this same `(clientId, seq)` gets
+   *  the flicker-free fast path instead of waiting for its own next `enqueued`-triggered backstop
+   *  read. Posted only when the entry carries a durable `(clientId, seq)` — a plain non-outbox
+   *  mutation has nothing for another tab to have mirrored in the first place.
    */
   private drainSettleApplied(requestId: string, value: Value | null, replayed: boolean, ts: number | undefined): void {
     const entry = this.reconciler.getEntry(requestId);
@@ -1275,12 +1418,18 @@ export class StackbaseClient {
     if (!entry) return;
     if (replayed) this.dropAfterBaseline(requestId);
     else this.reconciler.onMutationSuccess(requestId, ts);
+    if (entry.clientId !== undefined && entry.seq !== undefined) {
+      this.outboxBroadcast?.postMessage({ kind: "settled", clientId: entry.clientId, seq: entry.seq, commitTs: ts ?? 0 } satisfies OutboxBroadcastMessage);
+    }
   }
 
   /** Terminal settlement for a drained unit (a coded server verdict, or the identity gate) — reject
    *  the awaiting promise (coded), MARK the durable record `"failed"` (R9: never dequeue a terminal
    *  failure — it persists until dismissed/retried), drop the layer, and (T5) refire `onMutationFailed`
-   *  / the dev-loud default when nothing awaited this failure this session. */
+   *  / the dev-loud default when nothing awaited this failure this session. T-crosstab: AFTER all of
+   *  the above, also posts a targeted `failed` broadcast (same durability gate as `drainSettleApplied`
+   *  above) — a mirroring tab's own `onCrossTabSettle` fires ITS OWN `onMutationFailed`/dev-loud
+   *  default; it never double-delivers THIS tab's own notification above. */
   private drainSettleTerminal(requestId: string, code: string | undefined, message: string): void {
     const entry = this.reconciler.getEntry(requestId);
     const hadAwaiter = this.pendingMutationCallbacks.has(requestId);
@@ -1288,6 +1437,9 @@ export class StackbaseClient {
     if (entry?.clientId !== undefined && entry.seq !== undefined) this.outboxMarkFailed(entry.clientId, entry.seq, message, code);
     if (entry) this.reconciler.onMutationFailure(requestId);
     if (!hadAwaiter) this.notifyMutationFailed(entry?.clientId, entry?.seq, entry?.udfPath ?? "unknown", { message, code });
+    if (entry?.clientId !== undefined && entry.seq !== undefined) {
+      this.outboxBroadcast?.postMessage({ kind: "failed", clientId: entry.clientId, seq: entry.seq, code, message } satisfies OutboxBroadcastMessage);
+    }
   }
 
   /* ---------------------------------------------------------------------------------------------
@@ -1379,7 +1531,10 @@ export class StackbaseClient {
 
   private notifyOutboxChange(): void {
     for (const l of this.outboxChangeListeners) l();
-    this.outboxBroadcast?.postMessage(1); // the payload is irrelevant — the message IS the nudge.
+    // T-crosstab: was the payload-irrelevant bare `1` ("the message IS the nudge"); now additively
+    // typed as `{kind: "enqueued"}` — every OTHER tab's receiver re-reads `loadAll()` and reconciles
+    // its mirrored set against it (both the live-render path and the missed-message backstop).
+    this.outboxBroadcast?.postMessage({ kind: "enqueued" } satisfies OutboxBroadcastMessage);
   }
 
   /** Every durable-mutating outbox call site funnels through these four wrappers (instead of a bare

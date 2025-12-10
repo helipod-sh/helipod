@@ -14,7 +14,7 @@ export type { QueryListener, QueryErrorListener } from "./client";
 export { StackbaseClient } from "./client";
 
 // T5 — the durable-outbox registry, R9 observability (verdict §(d) "Observability").
-export type { MutationFailedInfo, OutboxBroadcastLike, PendingMutationEntry, PendingSummary } from "./client";
+export type { MutationFailedInfo, OutboxBroadcastLike, OutboxBroadcastMessage, PendingMutationEntry, PendingSummary } from "./client";
 
 // The Gated Ledger (optimistic updates): the writeable store-view contract T5's typed
 // `OptimisticLocalStore` extends, the update-closure type, and the typed undelivered rejection.
