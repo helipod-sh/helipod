@@ -38,6 +38,14 @@ export type { ClientResetInfo } from "./client";
 export type { DrainHost, OutboxDrainOptions, OutboxLockManager, PoisonPolicy } from "./outbox-drain";
 export { DEFAULT_DRAIN_CHUNK_SIZE, DEFAULT_DRAIN_INTERVAL_MS, OFFLINE_IDENTITY_CHANGED, OutboxDrain, computeDrainBackoff } from "./outbox-drain";
 
+// The Connect-handshake helpers shared between `StackbaseClient` and the headless drain below.
+export { buildConnectMessage, outboxAckedThrough, outboxHeldFromLog, outboxHeldFromStore } from "./connect-handshake";
+
+// The browser-ux pair, Part B — the headless one-shot outbox drain (the Background Sync seam): a
+// Service Worker (or any UI-less context) can drain the durable queue with no `StackbaseClient`.
+export type { HeadlessDrainOptions } from "./headless-drain";
+export { drainOutboxOnce } from "./headless-drain";
+
 /** Untyped core of client-side id minting — prefer the codegen-typed `mintId` from your app's
  *  `_generated/ids`. Exists for hosts without codegen output at hand. */
 export { mintEncodedDocumentId as mintDocumentId } from "@stackbase/id-codec";
