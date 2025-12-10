@@ -334,12 +334,23 @@ export class OutboxDrain {
     (this.intervalTimer as { unref?: () => void }).unref?.();
   }
 
-  /** Load the durable queue into the log (once), under recorded ids, then prune dead meta rows. */
+  /** Load the durable queue into the log (once), under recorded ids, then prune dead meta rows.
+   *  Only STILL-ACTIVE entries (`unsent`/`inflight`/`parked`) are hydrated into the log — a `failed`
+   *  entry left behind by a prior session is a terminal, accessor-only record (surfaced via
+   *  `pendingMutations()`/the constructor's `refireDurableFailures` R9 scan) and must never be
+   *  resurrected here as a fresh `unsent` log entry: `host.addHydrated` unconditionally stamps
+   *  `status: "unsent"` regardless of the persisted status, so hydrating a `failed` row verbatim
+   *  would render a phantom optimistic row for an already-dead mutation AND make it drainable again
+   *  (a resend of something the server/R9 already settled), on top of double-firing R9 alongside the
+   *  constructor's unconditional resume scan. Mirrors the same filter `mirrorFromStore`'s cross-tab
+   *  backstop applies (`client.ts`). */
   private async hydrateOnce(): Promise<void> {
     if (this.hydrated) return;
     this.hydrated = true;
     const { entries } = await this.host.outbox.loadAll();
-    for (const e of entries) this.host.addHydrated(e);
+    for (const e of entries) {
+      if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") this.host.addHydrated(e);
+    }
     await this.pruneDeadMeta();
   }
 

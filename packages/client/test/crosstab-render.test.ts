@@ -261,16 +261,28 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const [entry] = await clientA.pendingMutations();
     const { clientId, seq } = entry!;
 
+    // A positive synchronization point (finding 6): count A's unconditional accessor nudge, which
+    // fires SYNCHRONOUSLY inside `onmessage` for every broadcast (before any typed dispatch) — a
+    // real `BroadcastChannel` delivers same-channel messages in FIFO order, so once the SECOND
+    // (sentinel) message's nudge has been observed, the FIRST message's (synchronous) handling —
+    // including whatever `onCrossTabSettle` would have done to A's own entry — is GUARANTEED to have
+    // already run to completion. This replaces a blind `setTimeout` negative-assertion window with
+    // an actual round-trip proof.
+    let nudges = 0;
+    const unsubscribe = clientA.onOutboxChange(() => nudges++);
+
     const leader = new BroadcastChannel(CHANNEL_NAME);
     try {
       // A settled broadcast for A's OWN (clientId, seq) — must be ignored: A's own wire response
       // drives it, never a broadcast.
       leader.postMessage({ kind: "settled", clientId, seq, commitTs: 999 });
-      await new Promise((r) => setTimeout(r, 20));
+      leader.postMessage({ kind: "enqueued" }); // sentinel round-trip
+      await waitFor(() => nudges >= 2);
 
       expect(clientA.__pending).toHaveLength(1);
       expect(clientA.__pending[0]!.status.type).toBe("inflight"); // untouched by the broadcast
     } finally {
+      unsubscribe();
       leader.close();
       clientA.close();
     }
@@ -376,5 +388,189 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
 
     clientA.close();
     clientC.close();
+  });
+
+  /* ------------------------------------------------------------------------------------------
+   * Task 1 review findings — the backstop must respect the gate, not the store.
+   * ---------------------------------------------------------------------------------------- */
+
+  it("9. [CRITICAL] the missed-settle backstop must NOT force-drop a COMPLETED-gated layer: the real drainSettleApplied ordering is settled -> dequeue -> enqueued", async () => {
+    const idb = new IDBFactory();
+    const registryFn = makeUpdater("mine");
+
+    const outboxA = indexedDBOutbox({ indexedDB: idb });
+    const tA = new MockTransport();
+    const clientA = new StackbaseClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    baseSubscribe(tA, clientA);
+
+    const tB = new MockTransport();
+    const clientB = new StackbaseClient(tB, {
+      outbox: indexedDBOutbox({ indexedDB: idb }),
+      outboxLocks: null,
+      outboxDrainIntervalMs: 0,
+      optimisticUpdates: { "messages:send": registryFn },
+    });
+    const framesB = baseSubscribe(tB, clientB);
+
+    void clientA.mutation("messages:send", { body: "hi" }).catch(() => {});
+    await waitFor(() => rows(framesB.at(-1)).length === 1);
+
+    const [entry] = await clientA.pendingMutations();
+    const { clientId, seq } = entry!;
+
+    const leader = new BroadcastChannel(CHANNEL_NAME);
+    try {
+      // Step 1 (drainSettleApplied's first act, modulo resolvePending): the targeted `settled`
+      // broadcast. B gates the layer `completed`, holding it until ITS OWN feed observes commitTs.
+      leader.postMessage({ kind: "settled", clientId, seq, commitTs: 42 });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(rows(framesB.at(-1))).toHaveLength(1); // still gated — no Transition covering 42 yet.
+
+      // Step 2: the leader's OWN drainSettleApplied dequeues the durable record right after
+      // broadcasting `settled` (`client.ts`'s `drainSettleApplied`).
+      await outboxA.dequeue(clientId, seq);
+
+      // Step 3: that dequeue's own write-behind `.then()` ALWAYS posts `{kind: "enqueued"}`
+      // (`notifyOutboxChange`) moments later — B's backstop re-read sees the entry store-absent.
+      leader.postMessage({ kind: "enqueued" });
+      leader.postMessage({ kind: "enqueued" }); // sentinel round-trip — a real sync point, not a sleep guess
+      await new Promise((r) => setTimeout(r, 30));
+
+      // THE CRITICAL ASSERTION: the backstop must skip a `completed` layer — it is gate-owned, not
+      // store-owned. Pre-fix this drops to 0 here (dropAfterBaseline'd before commitTs was observed).
+      expect(rows(framesB.at(-1))).toHaveLength(1);
+
+      // A Transition covering commitTs=42 is what actually drops it — flicker-free, exactly once.
+      tB.emit({ type: "Transition", startVersion: { querySet: 1, ts: 0 }, endVersion: { querySet: 1, ts: 42 }, modifications: [] });
+      expect(rows(framesB.at(-1))).toHaveLength(0);
+    } finally {
+      leader.close();
+      clientA.close();
+      clientB.close();
+    }
+  });
+
+  it("10. own-tab regression: a foreign `enqueued` broadcast must not backstop-drop THIS tab's own post-ack gated layer", async () => {
+    const idb = new IDBFactory();
+    const registryFn = makeUpdater("mine");
+
+    const tA = new MockTransport();
+    const clientA = new StackbaseClient(tA, {
+      outbox: indexedDBOutbox({ indexedDB: idb }),
+      outboxLocks: null,
+      outboxDrainIntervalMs: 0,
+      optimisticUpdates: { "messages:send": registryFn },
+    });
+    const framesA = baseSubscribe(tA, clientA);
+
+    // A's own LIVE mutation, direct-send (not through the drain) — acked by the mock server with a
+    // ts, exactly like `gated-ledger.test.ts`'s "completed, not yet gated" fixtures.
+    void clientA.mutation("messages:send", { body: "hi" }, { optimisticUpdate: registryFn as unknown as OptimisticUpdate }).catch(() => {});
+    await waitFor(() => rows(framesA.at(-1)).length === 1);
+    const sent = tA.sent.find((m) => m.type === "Mutation") as Extract<ClientMessage, { type: "Mutation" }>;
+    tA.emit({ type: "MutationResponse", requestId: sent.requestId, success: true, value: "id", ts: 42 }); // ack -> completed, gated
+
+    // The MutationResponse handler deletes `pendingMutationCallbacks` for this requestId immediately
+    // on ack — this is EXACTLY the window (finding 2) where `isMirroredEntry` can no longer tell A's
+    // own gated layer apart from a true cross-tab mirror.
+    await waitFor(() => rows(framesA.at(-1)).length === 1); // still rendered — gated, not yet observed.
+
+    // A foreign `enqueued` broadcast (as if some OTHER tab enqueued something unrelated) must not
+    // touch A's own gated layer.
+    const foreign = new BroadcastChannel(CHANNEL_NAME);
+    try {
+      foreign.postMessage({ kind: "enqueued" });
+      foreign.postMessage({ kind: "enqueued" }); // sentinel round-trip
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(rows(framesA.at(-1))).toHaveLength(1); // survives — gate-owned, not store-owned.
+
+      // Only A's own feed observing ts=42 drops it.
+      tA.emit({ type: "Transition", startVersion: { querySet: 1, ts: 0 }, endVersion: { querySet: 1, ts: 42 }, modifications: [] });
+      expect(rows(framesA.at(-1))).toHaveLength(0);
+    } finally {
+      foreign.close();
+      clientA.close();
+    }
+  });
+
+  it("11. a mirror whose backing record flipped to FAILED (a missed `failed` broadcast) is backstop-settled failed, not left as a permanent phantom row", async () => {
+    const idb = new IDBFactory();
+    const registryFn = makeUpdater("mine");
+
+    const outboxA = indexedDBOutbox({ indexedDB: idb });
+    const tA = new MockTransport();
+    const clientA = new StackbaseClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    baseSubscribe(tA, clientA);
+
+    const failures: Array<{ clientId?: string; seq?: number; udfPath: string; error: { message: string; code?: string } }> = [];
+    const tB = new MockTransport();
+    const clientB = new StackbaseClient(tB, {
+      outbox: indexedDBOutbox({ indexedDB: idb }),
+      outboxLocks: null,
+      outboxDrainIntervalMs: 0,
+      optimisticUpdates: { "messages:send": registryFn },
+      onMutationFailed: (info) => failures.push(info),
+    });
+    const framesB = baseSubscribe(tB, clientB);
+
+    void clientA.mutation("messages:send", { body: "hi" }).catch(() => {});
+    await waitFor(() => rows(framesB.at(-1)).length === 1);
+
+    const [entry] = await clientA.pendingMutations();
+    const { clientId, seq } = entry!;
+
+    // Simulate a MISSED `failed` broadcast: the record itself flips to `failed` directly (R9 — never
+    // dequeued on a terminal failure) with no targeted broadcast ever reaching B.
+    await outboxA.updateStatus(clientId, seq, "failed", { message: "send rejected", code: "BOOM" });
+
+    const leader = new BroadcastChannel(CHANNEL_NAME);
+    try {
+      leader.postMessage({ kind: "enqueued" }); // the only broadcast B ever gets for this record
+      await waitFor(() => rows(framesB.at(-1)).length === 0);
+
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ clientId, seq, udfPath: "messages:send", error: { message: "send rejected", code: "BOOM" } });
+    } finally {
+      leader.close();
+      clientA.close();
+      clientB.close();
+    }
+  });
+
+  it("12. a mirrorFromStore rejection (fail-stopped outbox) routes to the console floor, never an unhandled promise rejection", async () => {
+    const idb = new IDBFactory();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (err: unknown) => unhandled.push(err);
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      const outbox = indexedDBOutbox({ indexedDB: idb });
+      const tB = new MockTransport();
+      const clientB = new StackbaseClient(tB, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+      baseSubscribe(tB, clientB);
+      // Let construction-time work (identity mint, the R9 resume scan) settle on the REAL outbox
+      // before breaking it — this test targets `mirrorFromStore`'s rejection specifically, not those.
+      await new Promise((r) => setTimeout(r, 20));
+
+      const boom = new Error("disk gone");
+      outbox.loadAll = () => Promise.reject(boom);
+
+      const chan = new BroadcastChannel(CHANNEL_NAME);
+      try {
+        chan.postMessage({ kind: "enqueued" });
+        await waitFor(() => errSpy.mock.calls.some((c) => String(c[0]).includes("durable outbox mirrorFromStore failed")));
+      } finally {
+        chan.close();
+      }
+      // Give a genuine unhandled rejection a real chance to surface before asserting its absence.
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(unhandled).toHaveLength(0);
+      clientB.close();
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      errSpy.mockRestore();
+    }
   });
 });

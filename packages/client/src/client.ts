@@ -1300,11 +1300,16 @@ export class StackbaseClient {
   /** The one predicate distinguishing a MIRRORED entry (another tab-session's durable append, or
    *  this tab's own past-session hydrate — either way, no live promise) from an entry THIS instance
    *  itself initiated live (hazard (a), "own-tab discrimination"): durable AND no
-   *  `pendingMutationCallbacks` registered for its `requestId`. A live `mutation()` caller always
-   *  has a callback registered until its OWN wire response settles it — broadcast messages about
-   *  such an entry are therefore always ignored here; its wire responses drive it, never a
-   *  broadcast. Used both by the dispatch methods below and the doc comment on `mirrorFromStore`'s
-   *  backstop pass — a single documented helper, never inlined twice (brief hazard (a)). */
+   *  `pendingMutationCallbacks` registered for its `requestId`. A live `mutation()` caller has a
+   *  callback registered only UNTIL its own wire response settles it — resolved/rejected callbacks
+   *  are deleted immediately (`resolvePending`/`rejectPending`), well before a `completed` layer's
+   *  gate gets a chance to drop it. So a live caller's entry looks exactly like a true mirror
+   *  (`isMirroredEntry` returns `true`) for the whole post-ack, still-gated window — this predicate
+   *  alone does NOT distinguish "own tab, post-ack" from "another tab's mirror"; it is the
+   *  `status.type === "completed"` skip in `mirrorFromStore`'s backstop pass that closes that gap
+   *  (a `completed` layer is owned by its gate, never force-settled by this predicate or the store).
+   *  Used both by the dispatch methods below and the doc comment on `mirrorFromStore`'s backstop pass
+   *  — a single documented helper, never inlined twice (brief hazard (a)). */
   private isMirroredEntry(entry: PendingMutation): boolean {
     return entry.durable === true && !this.pendingMutationCallbacks.has(entry.requestId);
   }
@@ -1315,7 +1320,13 @@ export class StackbaseClient {
   private handleOutboxBroadcastMessage(data: unknown): void {
     if (!this.outbox || !isOutboxBroadcastMessage(data)) return;
     if (data.kind === "enqueued") {
-      void this.mirrorFromStore();
+      // `mirrorFromStore` is fire-and-forget (never awaited by this synchronous handler) — a
+      // rejection (e.g. a fail-stopped `fsOutbox`'s `OutboxClosedError` after a disk error) must
+      // route to the SAME observability floor every other durable-outbox write rejection uses,
+      // rather than becoming an unhandled promise rejection on every subsequent broadcast (several
+      // Node/Electron hosts treat that as fatal by default — see `handleOutboxWriteError`'s doc).
+      // Meta-only (no `(clientId, seq)` to attach to): floors straight to the dev-loud console.
+      void this.mirrorFromStore().catch((err: unknown) => this.handleOutboxWriteError("mirrorFromStore", undefined, undefined, undefined, err));
     } else {
       this.onCrossTabSettle(data);
     }
@@ -1336,7 +1347,30 @@ export class StackbaseClient {
    *  dead record on every subsequent `enqueued` broadcast (this store never dequeues a `failed`
    *  entry — R9 "persists until dismissed/retried") — and, being `durable` with no live callback,
    *  that revived entry would then match `isMirroredEntry`, making the tab react to an UNRELATED
-   *  later `settled`/`failed` broadcast that merely happens to name the same `(clientId, seq)`. */
+   *  later `settled`/`failed` broadcast that merely happens to name the same `(clientId, seq)`.
+   *
+   *  Two review-fixed hazards in the reconcile loop below (both stem from the SAME root cause: the
+   *  store's presence/absence is not always the authority for a mirrored layer's fate):
+   *   - a `completed` mirrored layer (this tab already got a targeted `settled` broadcast and is
+   *     holding it gated until ITS OWN feed observes `commitTs`, per `onCrossTabSettle`) is SKIPPED
+   *     entirely here, never force-dropped merely because the store record is absent. The leader's
+   *     own `drainSettleApplied` dequeues the record right after posting `settled`, and THAT
+   *     dequeue's `{kind:"enqueued"}` follow-up broadcast is exactly what drives this backstop pass —
+   *     so a `completed` entry being store-absent is the ordinary, expected case, not a missed
+   *     message. Force-dropping it here would race ahead of this tab's own gate (a flicker the gate
+   *     exists to prevent) — CRITICAL. The same skip also protects THIS tab's own just-acked live
+   *     mutation: its `pendingMutationCallbacks` entry is deleted the moment its wire response
+   *     settles it (see `isMirroredEntry`'s doc — the callback does NOT survive the whole gated
+   *     window, only until the response arrives), so during that gated window it is
+   *     indistinguishable from a true mirror to `isMirroredEntry` and would otherwise be dropped by a
+   *     totally unrelated tab's `enqueued` broadcast.
+   *   - the "is this mirror still active" check now reads from ACTIVE-status (`unsent`/`inflight`/
+   *     `parked`) entries only, not "any entry present in the store" — a mirror whose backing record
+   *     flipped to `failed` (R9 never dequeues a failure) is present-in-store but no longer active;
+   *     treating presence alone as "still live" would leave a permanent phantom optimistic row behind
+   *     a missed `failed` broadcast. Such an entry is instead settled failed right here (same effect
+   *     as `onCrossTabSettle`'s `failed` branch — mark failed + fire R9), using the terminal verdict
+   *     already recorded on the store row itself. */
   private async mirrorFromStore(): Promise<void> {
     if (!this.outbox) return;
     if (this.mirrorInFlight) {
@@ -1348,15 +1382,30 @@ export class StackbaseClient {
       do {
         this.mirrorRerun = false;
         const { entries } = await this.outbox.loadAll();
+        const activeLive = new Set<string>();
+        const byKey = new Map<string, OutboxEntry>();
         for (const e of entries) {
-          // idempotent — addHydratedEntry's own (clientId, seq) dedup.
-          if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") this.addHydratedEntry(e);
+          const key = `${e.clientId}:${e.seq}`;
+          byKey.set(key, e);
+          if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") {
+            activeLive.add(key);
+            // idempotent — addHydratedEntry's own (clientId, seq) dedup.
+            this.addHydratedEntry(e);
+          }
         }
-        const live = new Set(entries.map((e) => `${e.clientId}:${e.seq}`));
         for (const entry of this.reconciler.entries()) {
           if (!this.isMirroredEntry(entry)) continue; // never touch an own-live entry here.
           if (entry.clientId === undefined || entry.seq === undefined) continue;
-          if (!live.has(`${entry.clientId}:${entry.seq}`)) this.dropAfterBaseline(entry.requestId);
+          if (entry.status.type === "completed") continue; // gate-owned — see doc above.
+          const key = `${entry.clientId}:${entry.seq}`;
+          if (activeLive.has(key)) continue; // still active in the store — nothing to reconcile.
+          const stored = byKey.get(key);
+          if (stored?.status === "failed") {
+            this.reconciler.onMutationFailure(entry.requestId);
+            this.notifyMutationFailed(entry.clientId, entry.seq, entry.udfPath, stored.error ?? { message: `mutation "${entry.udfPath}" failed` });
+          } else {
+            this.dropAfterBaseline(entry.requestId); // genuinely absent — the original missed-settle drop.
+          }
         }
       } while (this.mirrorRerun);
     } finally {
