@@ -306,7 +306,10 @@ it was when you were offline), and one of exactly three things happens:
   logic runs exactly as written — the outbox has no opinion about what counts as a duplicate or a
   conflict at the data level. This is the idiom for anything you'd otherwise reach for a CRDT for.
 - **It's terminal.** Your handler throws, or a validation/authorization check rejects the call. See
-  [Poison handling](#poison-handling-poisonpolicy) below for exactly what happens next.
+  [Poison handling](#poison-handling-poisonpolicy) below for exactly what happens next. If your
+  handler needs a queued entry to terminal-fail (rather than retry), throw a **typed, coded** error
+  (a `UserError` subclass) — a plain `Error` carries no code on the wire, so the drain can't tell it
+  apart from an infrastructure hiccup and treats it as transient, retrying it, by design.
 
 There's no fourth branch where the outbox tries to reconcile your write against someone else's —
 that's a deliberate scope line, not a gap. If your app needs true conflict merging, that's app-level
@@ -495,6 +498,102 @@ with no Web Locks support at all still drains correctly, just without the "exact
 drainer" coordination (falls back to running the drain locally in every tab that has one; the
 receipts still absorb any resulting overlap so nothing double-applies).
 
+### Cross-tab live optimistic rendering
+
+Another tab's durable pending mutations **render live in your queries**, not just as a
+`pendingMutations()` status entry — as long as you've configured an `optimisticUpdates` registry (the
+same registry that already powers offline-after-reload rendering above; a registry consenting to
+render a durable entry's layer does so whether that entry was hydrated at construction or arrives
+live over the shared `BroadcastChannel` while you're already running). Only that tab's **active**
+durable entries mirror — the tab that actually called `mutation()` drives its own entry from its own
+wire responses, never from the broadcast. Apps with no registry configured keep today's status-only
+behavior: you'll see the entry in `usePendingMutations()`, but nothing renders into your query
+results until you subscribe a registry updater for that path.
+
+**The one honest residual: a single, self-healing doubled frame.** When another tab (A) drains a
+mutation you (tab B) are also live-subscribed to, B's own subscription can observe the committed row
+via its normal server push **before** A's settle broadcast has had time to reach B — A's settle path
+is a full round trip (A → server → A) plus a `BroadcastChannel` hop, while B's own live push is a
+single server → B hop off the very same commit. In that ordering you'll see one transient frame with
+both the committed row and the still-active mirrored placeholder, which **self-corrects on the very
+next push** — it never lingers, never grows, and the row is never *absent* at any point. This is a
+structural property of the two paths' relative latency, not a bug, and it's proven end-to-end in
+`packages/cli/test/crosstab-e2e.test.ts`.
+
+If your UI genuinely cannot tolerate even that one transient frame, write the registry updater as
+**idempotent**, keyed on a client-supplied id ([`mintId`](#client-supplied-ids-create-then-reference-chains)):
+mint the id before the mutation is sent, use it as the placeholder row's `_id`, and have the updater
+check whether a row with that id is already present in the query result before inserting:
+
+```ts
+const messageId = mintId("messages"); // minted once, before either mutation call
+
+const registry = {
+  "messages:send": (store, args) => {
+    const list = store.getQuery("messages:list", {}) as Array<{ _id: string }> | undefined;
+    if (list === undefined) return;
+    if (list.some((row) => row._id === args._id)) return; // already present — no duplicate insert
+    store.setQuery("messages:list", {}, [...list, { _id: args._id, body: args.body }]);
+  },
+};
+
+await client.mutation("messages:send", { _id: messageId, body });
+```
+
+Because the placeholder and the eventual committed row share the same id, an updater written this way
+collapses the transient double to a single row on every replay, including the frame where the raw
+mechanism would otherwise show both.
+
+**Missed-broadcast backstop.** `BroadcastChannel` delivery isn't guaranteed against every possible
+teardown timing. If a settle message is missed, the next `enqueued` re-read (any tab's next durable
+append triggers one) reconciles a mirrored entry that's gone missing from the store against reality
+and drops it unconditionally — the rare cost is the same one-frame residual described above, not a
+stuck row.
+
+### Draining after the tab closes (Chromium)
+
+Everything above assumes at least one tab is open. If every tab closes with entries still queued,
+nothing drains until you reopen the app — the durable queue is unaffected (nothing is lost), it just
+sits until the next visit. Chromium's one-shot [Background
+Sync](https://developer.chrome.com/docs/capabilities/periodic-background-sync) API lets a Service
+Worker drain in the background even after every tab is gone, using the same headless
+`drainOutboxOnce` export the rest of this feature is built on:
+
+```ts
+// sw.ts — inside your Service Worker
+import { drainOutboxOnce } from "@stackbase/client";
+
+self.addEventListener("sync", (event) => {
+  if (event.tag === "stackbase-outbox-drain") {
+    event.waitUntil(
+      drainOutboxOnce({
+        url: "wss://your-deployment.example.com",
+        // The SW has no access to your app's in-memory auth state — it must read from
+        // somewhere the SW itself can reach (IndexedDB, a Cache entry, etc). Providing and
+        // keeping that store fresh is your app's job; this is the constraint, not a recipe.
+        getAuthToken: async () => await readAuthTokenFromSwReadableStore(),
+      }),
+    );
+  }
+});
+
+// In your page, after registering the SW:
+const registration = await navigator.serviceWorker.ready;
+await registration.sync.register("stackbase-outbox-drain");
+```
+
+`drainOutboxOnce` is the same queue → drain → receipts model described above, minus everything
+UI-shaped — no `StackbaseClient`, no queries, no optimistic layers, just
+`{ drained, failed, remaining }` counts. If a live tab already holds the Web Locks leadership, a
+concurrent `drainOutboxOnce` call is a safe no-op (`{drained: 0, ...}`) — the tab is already doing the
+job.
+
+**The honest limits.** One-shot Background Sync is a **Chromium-only** browser feature — Firefox and
+Safari have never shipped it (roughly 76% of global browser share has it at all, and that number
+moves). Treat this as strictly additive: it changes *when* a drain can run (potentially while no tab
+is open), never the durability story itself — the portable baseline, on every browser, remains "queue
+survives, drains on your next visit," which is true with or without this recipe wired up.
+
 ## Coexisting with an external mutation/retry layer
 
 If your app already has its own offline-mutation machinery (a different queue/retry library) and you
@@ -543,18 +642,22 @@ deferral, not a gap in the design (verdict §(i)):
 
 | Deferred | Where it lands when built | Honest cost today |
 |---|---|---|
-| Background Sync service-worker drain | a drain-trigger seam | No drain-after-tab-close on a visit; Chromium-only browser feature even if built. |
-| Cross-tab live optimistic rendering | the registry + shared store | Another tab's pending writes show up as `pendingMutations()` status, not as rendered rows in your queries, until that tab (or the drain leader) actually observes the commit. |
 | A persisted query baseline (a client-side replica) | **not a deferral — a declared non-goal** | Offline-after-reload rendering stays app-effort (see above) permanently, by design — a full client replica is a different, larger product bet this feature deliberately doesn't take on. |
 
-Three entries have already graduated out of this table: the Node/Bun filesystem `OutboxStorage`
-adapter shipped as `fsOutbox()` (see [Node, Electron, and Tauri hosts](#node-electron-and-tauri-hosts)
-above), client-supplied ids for offline create-then-reference chains, shipped as `mintId` (see
-[Client-supplied ids](#client-supplied-ids-create-then-reference-chains) above), and the
-subscription resume token, shipped as server-minted per-query result fingerprints
-(`resultHash`/`QueryUnchanged` — see [What a reconnect costs](#what-a-reconnect-costs) above). Only
-the *compute*-saving half of resume (retained read-sets, so an unchanged query skips its re-run
-rather than just its resend) remains deferred — see CLAUDE.md's "Honestly deferred" list.
+Every other entry that ever sat in this table has now graduated: the Node/Bun filesystem
+`OutboxStorage` adapter shipped as `fsOutbox()` (see [Node, Electron, and Tauri
+hosts](#node-electron-and-tauri-hosts) above), client-supplied ids for offline create-then-reference
+chains, shipped as `mintId` (see [Client-supplied
+ids](#client-supplied-ids-create-then-reference-chains) above), the subscription resume token,
+shipped as server-minted per-query result fingerprints (`resultHash`/`QueryUnchanged` — see [What a
+reconnect costs](#what-a-reconnect-costs) above), and — most recently — the browser UX pair:
+**cross-tab live optimistic rendering** (see [Cross-tab live optimistic
+rendering](#cross-tab-live-optimistic-rendering) above, including the one honestly-documented
+doubled-frame residual and the idempotent-updater recipe for callers who need zero tolerance) and the
+**Background Sync service-worker drain** (see [Draining after the tab closes
+(Chromium)](#draining-after-the-tab-closes-chromium) above, `drainOutboxOnce`). Only the *compute*-
+saving half of subscription resume (retained read-sets, so an unchanged query skips its re-run rather
+than just its resend) remains deferred — see CLAUDE.md's "Honestly deferred" list.
 
 Nothing in this table reopens the record family, the wire contract, or the reconcile algorithm —
 these are additive follow-ons on top of a design that's already complete and shipped.

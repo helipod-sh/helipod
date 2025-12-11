@@ -56,6 +56,43 @@ persisted `order` across tabs). Replay purity holds by the same argument as hydr
 `args` + `seed`, registry updater, deterministic placeholders. `touched`-based recompose and the
 byte-identity invariant (`layered-store.ts:218-226`) are unchanged.
 
+### Correction (amended post-E2E 2025-11-28): the flicker-free claim, precisely
+
+The design above states the settled-broadcast path drops flicker-free. That's true for the **DROP**
+side (the mirrored layer never lingers once it's told to go), but Task 2's E2E
+(`packages/cli/test/crosstab-e2e.test.ts`) against the real shipped mechanism found a genuine,
+deterministic gap in the **APPEAR** side, reproduced 5/5 local runs — not a flaky race, and not
+fixable without a `packages/client` change out of that task's scope:
+
+- Tab B's own live `Transition` is a single server → B hop, fired by the *same* commit that produces
+  tab A's applied verdict.
+- Tab A's `settled` broadcast needs a full round trip (A → server → A) **plus** a local
+  `BroadcastChannel` hop (A → B) before B's mirrored layer can be told to drop.
+- Structurally, B's one-hop path beats A's round-trip-plus-broadcast path in essentially any real
+  deployment, not just this test's localhost topology. So in the scenario Part A is built for — B
+  already has a live subscription over the write A is draining — B's authoritative base value picks
+  up the committed row **one frame before** either the `settled` broadcast or the
+  `mirrorFromStore` backstop has run, producing exactly **one transient doubled frame** (committed
+  row + still-active placeholder).
+
+This doubled frame **self-heals** on the very next push — never permanent, never grows, never
+oscillates — and the row is never *absent* at any point (no neither-pending-nor-committed gap).
+That's the honest, verified guarantee Part A actually ships: flicker-**bounded**, not flicker-free,
+for a cross-tab live observer.
+
+For callers who need the **strict** no-double guarantee (zero tolerance, not "at most one transient
+frame"), the fix is at the application layer, not the transport: write the registry's optimistic
+updater as **idempotent**, keyed on a client-supplied id (`mintId`, see
+`docs/enduser/offline.md#client-supplied-ids-create-then-reference-chains`) — the updater checks
+whether a row with that id already exists in the query result and skips inserting a duplicate. The
+placeholder row and the eventual committed row share the same id under `mintId` (minted client-side
+before either mutation is sent, accepted verbatim by the engine), so an updater that recognizes an
+already-present id and no-ops instead of re-inserting collapses the transient double to a single row
+on every frame, including the one where both would otherwise be present. This isn't automatic — it's
+an opt-in authoring discipline for apps that can't tolerate even one transient frame — but it's
+sufficient, and it's the only sound fix that doesn't require changing the wire protocol or the
+reconcile algorithm.
+
 ## Part B — `drainOutboxOnce`: the headless drain (the Background Sync seam)
 
 ### Goal
@@ -125,8 +162,12 @@ model.
 2. **Cross-tab E2E** (`packages/cli/test/crosstab-e2e.test.ts`): two real clients over one real
    server + shared fake-IDB + real BroadcastChannel; tab A enqueues offline → tab B renders the
    pending row live; tab A's leader drains on reconnect → tab B's layer drops exactly when B's own
-   subscription shows the committed row (assert no frame where both/neither are visible — the
-   no-flicker contract), `pendingMutations()` empties in both.
+   subscription shows the committed row. The literal, zero-tolerance "no frame shows both/neither"
+   wording does NOT survive contact with the real mechanism (see the Correction above) — the
+   assertion that actually holds, and is what this test enforces: the row is never *absent* once
+   first rendered (no neither-pending-nor-committed gap), at most **one** transient doubled frame
+   occurs and it self-corrects on the very next push (never permanent, never grows, never
+   oscillates), and settlement is exact and stable thereafter; `pendingMutations()` empties in both.
 3. **Headless drain units**: the store-only host's settle mapping; lock-held early return;
    known:false handling at the store level.
 4. **Headless E2E** (`packages/cli/test/sw-drain-e2e.test.ts`): seed a queue via a normal client
