@@ -381,6 +381,18 @@ export class StackbaseClient {
       // session that ended before the app ever surfaced them) — trivially "no awaiter" (nothing has
       // called `mutation()` yet this session), so every one refires unconditionally.
       void this.refireDurableFailures();
+      // I-1 (browser-ux whole-branch review): a tab constructed AFTER another tab already durably
+      // enqueued has NO path to those existing entries otherwise — `mirrorFromStore` is normally only
+      // driven by an incoming `enqueued` broadcast (see `handleOutboxBroadcastMessage` above), and
+      // `hydrateOnce` only runs inside `OutboxDrain#becomeLeader` (a live first tab holds the Web
+      // Locks lock for its whole lifetime, so a second tab may never become leader while it's alive).
+      // Run it once, unconditionally, at construction — idempotent by design, the same composition
+      // `mirrorFromStore`'s doc above already relies on: `addHydratedEntry`'s (clientId, seq) dedup,
+      // the active-status filter, and the `completed`-status skip all make a redundant/early call a
+      // no-op rather than a hazard. Tolerates running before `ConnectAck`/baseline — like the
+      // broadcast-triggered call, it only touches the reconciler log, never the wire. Same
+      // fire-and-forget + observability-floor catch as the broadcast path.
+      void this.mirrorFromStore().catch((err: unknown) => this.handleOutboxWriteError("mirrorFromStore", undefined, undefined, undefined, err));
     }
     this.disposeTransport = transport.onMessage((msg) => this.onServerMessage(msg));
     this.disposeClose = transport.onClose(() => this.onTransportClosed());

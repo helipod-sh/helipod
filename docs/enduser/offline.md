@@ -547,15 +547,18 @@ mechanism would otherwise show both.
 **Missed-broadcast backstop.** `BroadcastChannel` delivery isn't guaranteed against every possible
 teardown timing. If a settle message is missed, the next `enqueued` re-read (any tab's next durable
 append triggers one) reconciles a mirrored entry that's gone missing from the store against reality
-and drops it unconditionally — the rare cost is the same one-frame residual described above, not a
-stuck row.
+and drops it unconditionally. That unconditional drop can land on either side of this tab's own feed:
+the one-frame *doubled* residual described above (this tab's feed already shows the committed row —
+dropping the optimistic layer a beat late briefly doubles it), or the opposite — a brief row-*absent*
+gap, when this tab's feed hasn't yet shown the committed row at drop time. Either way it self-heals on
+the next Transition; the rare cost is a one-frame glitch, not a stuck row.
 
 ### Draining after the tab closes (Chromium)
 
 Everything above assumes at least one tab is open. If every tab closes with entries still queued,
 nothing drains until you reopen the app — the durable queue is unaffected (nothing is lost), it just
-sits until the next visit. Chromium's one-shot [Background
-Sync](https://developer.chrome.com/docs/capabilities/periodic-background-sync) API lets a Service
+sits until the next visit. Chromium's one-shot [Background Synchronization
+API](https://developer.mozilla.org/en-US/docs/Web/API/Background_Synchronization_API) lets a Service
 Worker drain in the background even after every tab is gone, using the same headless
 `drainOutboxOnce` export the rest of this feature is built on:
 
@@ -567,7 +570,7 @@ self.addEventListener("sync", (event) => {
   if (event.tag === "stackbase-outbox-drain") {
     event.waitUntil(
       drainOutboxOnce({
-        url: "wss://your-deployment.example.com",
+        url: "wss://your-deployment.example.com/api/sync",
         // The SW has no access to your app's in-memory auth state — it must read from
         // somewhere the SW itself can reach (IndexedDB, a Cache entry, etc). Providing and
         // keeping that store fresh is your app's job; this is the constraint, not a recipe.
@@ -586,7 +589,10 @@ await registration.sync.register("stackbase-outbox-drain");
 UI-shaped — no `StackbaseClient`, no queries, no optimistic layers, just
 `{ drained, failed, remaining }` counts. If a live tab already holds the Web Locks leadership, a
 concurrent `drainOutboxOnce` call is a safe no-op (`{drained: 0, ...}`) — the tab is already doing the
-job.
+job. `drainOutboxOnce` itself is covered end-to-end by the automated suite (`packages/cli/test/outbox-e2e.test.ts`)
+— the `self.addEventListener("sync", ...)`/`registration.sync.register(...)` Service Worker wiring
+shown above is not: it has no headless-CI-friendly harness (no browser test runner drives a real SW
+`sync` event today), so it is verified manually in a real Chromium browser, not by CI.
 
 **The honest limits.** One-shot Background Sync is a **Chromium-only** browser feature — Firefox and
 Safari have never shipped it (roughly 76% of global browser share has it at all, and that number

@@ -19,8 +19,30 @@ import {
   type OptimisticLocalStore,
   type OptimisticUpdate,
   type OptimisticUpdateFn,
+  type OutboxLockManager,
 } from "../src/index";
 import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+
+/** A serialized single-holder lock manager (the `outbox-drain.test.ts` "leader handoff" precedent):
+ *  a second `request` for the same name waits until the first callback's promise resolves — the
+ *  real Web Locks guarantee a live first tab relies on to hold leadership for its whole lifetime.
+ *  `outboxLocks: null` (used by every OTHER test in this file) instead makes EVERY client its own
+ *  immediate leader — a faithful single-tab model, but it can't reproduce I-1 (a genuinely
+ *  second-in-line tab that never becomes leader while the first is alive), which needs this. */
+class FakeLockManager implements OutboxLockManager {
+  private held = false;
+  private readonly waiters: Array<() => void> = [];
+  async request(_name: string, _options: unknown, callback: () => Promise<unknown>): Promise<unknown> {
+    while (this.held) await new Promise<void>((r) => this.waiters.push(r));
+    this.held = true;
+    try {
+      return await callback();
+    } finally {
+      this.held = false;
+      this.waiters.shift()?.();
+    }
+  }
+}
 
 /* -------------------------------------------------------------------------------------------- */
 /* MockTransport (the gated-ledger.test.ts / outbox-registry.test.ts pattern)                     */
@@ -571,6 +593,64 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
       errSpy.mockRestore();
+    }
+  });
+
+  /* ------------------------------------------------------------------------------------------
+   * Whole-branch review finding I-1 — a tab constructed AFTER another tab already durably
+   * enqueued has NO path to that pre-existing entry via the broadcast-only wiring above:
+   * `hydrateOnce` runs only inside `OutboxDrain#becomeLeader`, and a live first tab (A) holds the
+   * Web Locks lock for its whole lifetime, so a late-constructed B may never become leader while A
+   * is alive; meanwhile the ONE broadcast A's own enqueue fired went out before B ever opened its
+   * channel, so B never hears it either. Pre-fix: B renders nothing, forever, until some UNRELATED
+   * future broadcast happens to arrive. Fixed by a construction-time `mirrorFromStore()` call.
+   * ---------------------------------------------------------------------------------------- */
+
+  it("13. [I-1] a tab constructed AFTER another tab's durable enqueue renders the pending row at construction, with no broadcast required", async () => {
+    const idb = new IDBFactory();
+    const registryFn = makeUpdater("mine");
+    const locks = new FakeLockManager(); // ONE shared lock manager — real Web Locks semantics
+
+    const tA = new MockTransport();
+    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks, outboxDrainIntervalMs: 0 });
+    baseSubscribe(tA, clientA);
+
+    // A becomes leader and holds the lock for its whole lifetime (never closed until after B is
+    // asserted) — the exact I-1 scenario: B can never become leader while A lives, so B's ONLY path
+    // to A's pre-existing durable entry is a construction-time re-read, never `hydrateOnce`.
+    await waitFor(() => clientA.__outboxDrain!.isLeader);
+    void clientA.mutation("messages:send", { body: "hi" }).catch(() => {});
+    // Wait for the durable append to fully settle BEFORE B exists at all: whatever transient
+    // `enqueued` broadcast A's own write fired went out to no listeners, and is gone forever by the
+    // time B opens its channel — B cannot lean on it.
+    await waitFor(async () => (await clientA.pendingMutations()).length === 1);
+
+    // Prove the fix doesn't route through the broadcast channel at all: spy (not mock — let calls
+    // through) on every `BroadcastChannel.postMessage` from this point forward.
+    const postSpy = vi.spyOn(BroadcastChannel.prototype, "postMessage");
+    try {
+      const tB = new MockTransport();
+      const clientB = new StackbaseClient(tB, {
+        outbox: indexedDBOutbox({ indexedDB: idb }),
+        outboxLocks: locks, // SAME shared manager — B genuinely cannot win leadership from A
+        outboxDrainIntervalMs: 0,
+        optimisticUpdates: { "messages:send": registryFn },
+      });
+      const framesB = baseSubscribe(tB, clientB);
+
+      await waitFor(() => rows(framesB.at(-1)).length === 1);
+      const row = rows(framesB.at(-1))[0]!;
+      expect(row.marker).toBe("mine");
+      expect(row.body).toBe("hi");
+
+      expect((await clientB.pendingMutations())).toHaveLength(1);
+      expect(clientB.__outboxDrain!.isLeader).toBe(false); // never won leadership — proves the path
+      expect(postSpy).not.toHaveBeenCalled();
+
+      clientA.close();
+      clientB.close();
+    } finally {
+      postSpy.mockRestore();
     }
   });
 });
