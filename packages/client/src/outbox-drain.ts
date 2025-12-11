@@ -82,12 +82,16 @@ export const DEFAULT_DRAIN_INTERVAL_MS = 5_000;
 
 /** The one method the drain needs from `navigator.locks` — a minimal, structurally-fakeable seam.
  *  `request(name, options, cb)` holds the named lock for the lifetime of `cb`'s returned promise
- *  (exactly the real `LockManager.request` 3-arg contract). */
+ *  (exactly the real `LockManager.request` 3-arg contract). The callback's `lock` parameter mirrors
+ *  the real `LockGrantedCallback` shape (`null` under `{ifAvailable: true}` when the lock could not
+ *  be granted immediately) — declared optional so every existing zero-arg callback (`async () =>
+ *  {...}`) stays assignable unchanged; callers that DO need the availability signal (e.g.
+ *  `headless-drain.ts#isLockAvailable`) can read it with no cast. */
 export interface OutboxLockManager {
   request(
     name: string,
     options: { signal?: AbortSignal; mode?: "exclusive" | "shared"; ifAvailable?: boolean },
-    callback: () => Promise<unknown>,
+    callback: (lock?: unknown) => Promise<unknown> | unknown,
   ): Promise<unknown>;
 }
 

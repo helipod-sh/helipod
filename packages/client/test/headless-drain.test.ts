@@ -259,6 +259,68 @@ describe("drainOutboxOnce — getAuthToken", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* getAuthToken rejects -> no socket leak                                       */
+/* -------------------------------------------------------------------------- */
+
+describe("drainOutboxOnce — a rejecting getAuthToken", () => {
+  it("closes the injected transport exactly once and rejects, instead of leaking an open socket", async () => {
+    const outbox = memoryOutbox();
+    await seedOutbox(outbox, "old", [{ seq: 0, order: 1 }]);
+    const t = new MockTransport();
+    const authError = new Error("token fetch failed");
+
+    await expect(
+      drainOutboxOnce({
+        url: "ws://ignored",
+        outbox,
+        locks: null,
+        _transport: t,
+        getAuthToken: async () => {
+          throw authError;
+        },
+      }),
+    ).rejects.toBe(authError);
+
+    expect(t.closedCount).toBe(1);
+    // Never got far enough to send anything on the wire.
+    expect(t.sent).toHaveLength(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* transport closes mid-drain -> prompt exit, well under timeoutMs              */
+/* -------------------------------------------------------------------------- */
+
+describe("drainOutboxOnce — the transport closes mid-drain", () => {
+  it("resolves promptly with current counts instead of waiting out the full timeout", async () => {
+    const outbox = memoryOutbox();
+    await seedOutbox(outbox, "old", [
+      { seq: 0, order: 1 },
+      { seq: 1, order: 2 },
+    ]);
+    const t = new MockTransport();
+    const start = Date.now();
+    const resultPromise = drainOutboxOnce({ url: "ws://ignored", outbox, locks: null, _transport: t, timeoutMs: 10_000 });
+
+    await waitFor(() => t.connects().length === 1);
+    t.emit({ type: "ConnectAck", known: true, results: [], deploymentId: "dep-1" });
+    await waitFor(() => t.batches().length > 0);
+    // Settle only one of the two entries, then drop the transport entirely — no further progress is
+    // possible (reconnect: false), so the drain must give up promptly rather than wait out the 10s
+    // timeout budget.
+    const batch = t.batches()[0]!;
+    t.emit({ type: "MutationResponse", requestId: batch.entries[0]!.requestId, success: true, value: "ok0", ts: 5 });
+    t.close();
+
+    const result = await resultPromise;
+    const elapsedMs = Date.now() - start;
+    expect(result.drained).toBe(1);
+    expect(result.remaining).toBe(1);
+    expect(elapsedMs).toBeLessThan(2000); // well under the 10s timeoutMs budget
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* timeoutMs -> clean close + counts                                            */
 /* -------------------------------------------------------------------------- */
 

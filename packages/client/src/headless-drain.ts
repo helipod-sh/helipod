@@ -56,7 +56,16 @@ export interface HeadlessDrainOptions {
    *  reconnecting `StackbaseClient` replays its last-set token. */
   getAuthToken?: () => Promise<string | null>;
   /** How a coded (terminal, server-recorded) failure is handled — `"skip"` (default: settle
-   *  terminally and continue) or `"pause"` (halt the whole drain and surface via `onPause`). */
+   *  terminally and continue) or `"pause"` (halt the whole drain and surface via `onPause`).
+   *
+   *  Prefer the default `"skip"` in headless contexts (a Service Worker's `sync` handler, a cron-like
+   *  invocation, etc.) — there is no live UI here to observe an `onPause` callback and call `resume()`
+   *  on the drain's behalf, so a paused drain just sits paused until some LATER invocation happens to
+   *  clear it. Worse, `"pause"` combined with a below-floor `STALE_CLIENT` verdict can livelock: the
+   *  reset path re-queues the stale entry (`revertActive`), the next invocation re-flushes it, the
+   *  server replies `STALE_CLIENT` again, and the drain re-pauses on the SAME entry every single run
+   *  — with nothing headless to break the cycle. `"skip"` settles it terminally (once) instead and
+   *  moves on. */
   poisonPolicy?: PoisonPolicy;
   /** The whole-drain wall-clock budget — after this the socket is closed and the current counts are
    *  returned, whatever state the drain is in. Default 30 000ms. */
@@ -105,17 +114,15 @@ function probeLockManager(): OutboxLockManager | undefined {
 }
 
 /** A non-blocking availability check: `{ifAvailable: true}` per the real Web Locks contract invokes
- *  the callback with `null` (never queues) when the lock is currently held elsewhere. Our own
- *  `OutboxLockManager.request`'s declared callback type (`() => Promise<unknown>`) omits that
- *  parameter — structurally still assignable here (a function that reads an EXTRA optional param a
- *  caller doesn't have to pass still satisfies a narrower declared type), so this is the one place
- *  that reads the real lock object. A callback invoked with no argument at all (a fake that doesn't
- *  implement `ifAvailable` semantics) is treated as "available" — the permissive default. */
+ *  the callback with `null` (never queues) when the lock is currently held elsewhere.
+ *  `OutboxLockManager.request`'s callback type carries the optional `lock` parameter directly (no
+ *  cast needed). A callback invoked with no argument at all (a fake that doesn't implement
+ *  `ifAvailable` semantics) is treated as "available" — the permissive default. */
 async function isLockAvailable(locks: OutboxLockManager, name: string): Promise<boolean> {
   let available = false;
-  await locks.request(name, { ifAvailable: true }, (async (lock?: unknown) => {
+  await locks.request(name, { ifAvailable: true }, async (lock?: unknown) => {
     available = lock !== null;
-  }) as () => Promise<unknown>);
+  });
   return available;
 }
 
@@ -170,20 +177,51 @@ export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ dra
     }
   }
 
-  const transport = opts._transport ?? webSocketTransport(opts.url, { reconnect: false });
-
-  // Auth BEFORE Connect (mirrors `client.ts#onTransportReopened`'s "SetAuth replay first"):
-  // resolved here, synchronously ahead of `drain.start()`, so `currentFingerprint()` below is
-  // already correct by the time the flush-time identity gate ever reads it — no race to gate on.
-  let fingerprint = "anon";
-  if (opts.getAuthToken) {
-    const token = await opts.getAuthToken();
-    if (token) {
-      transport.send({ type: "SetAuth", token });
-      fingerprint = await sha256Hex(token);
+  // An injected test double (`_transport`) is held onto immediately — it's already a plain object,
+  // not a real socket, so grabbing a reference costs nothing and lets a `finally` below close it on
+  // EVERY exit, even one that happens before a real transport would ever be built. The REAL
+  // `webSocketTransport(opts.url, ...)` is deliberately deferred until AFTER auth resolves: token
+  // resolution needs no socket, so a rejecting `getAuthToken` should never cause a real connection to
+  // be opened just to immediately throw it away (the socket-leak fix — previously the transport was
+  // constructed unconditionally BEFORE `await opts.getAuthToken()`, so a rejection left an opened,
+  // never-closed socket behind; probe-proven `closedCount === 0`).
+  let transport: ClientTransport | undefined = opts._transport;
+  try {
+    let fingerprint = "anon";
+    let authToken: string | null = null;
+    if (opts.getAuthToken) {
+      // May reject — `transport` (if the caller injected one) is still closed below via `finally`
+      // regardless of whether this throws.
+      authToken = await opts.getAuthToken();
+      if (authToken) fingerprint = await sha256Hex(authToken);
     }
-  }
 
+    transport = transport ?? webSocketTransport(opts.url, { reconnect: false });
+    // SetAuth BEFORE Connect (mirrors `client.ts#onTransportReopened`'s "SetAuth replay first"):
+    // `fingerprint` is already correct by the time the flush-time identity gate ever reads it.
+    if (authToken) transport.send({ type: "SetAuth", token: authToken });
+
+    return await runDrain(transport, opts, outbox, initial.entries, deployment, lockName, timeoutMs, fingerprint);
+  } finally {
+    // Every exit path — normal completion, timeout, or a thrown error anywhere above (including a
+    // rejecting `getAuthToken`) — closes whatever transport reference exists exactly once here.
+    // `runDrain` itself never calls `transport.close()`. `undefined` only when no `_transport` was
+    // injected AND `getAuthToken` rejected before the real transport was ever constructed — nothing
+    // to close, nothing leaked.
+    transport?.close();
+  }
+}
+
+async function runDrain(
+  transport: ClientTransport,
+  opts: HeadlessDrainOptions,
+  outbox: OutboxStorage,
+  initialEntries: OutboxEntry[],
+  deployment: string,
+  lockName: string,
+  timeoutMs: number,
+  fingerprint: string,
+): Promise<{ drained: number; failed: number; remaining: number }> {
   let drained = 0;
   let failed = 0;
   let armed = false;
@@ -193,7 +231,7 @@ export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ dra
   const log = new Map<string, PendingMutation>();
   let nextRequestId = 1;
 
-  const heldAtConnect = outboxHeldFromStore(initial.entries);
+  const heldAtConnect = outboxHeldFromStore(initialEntries);
 
   function addHydrated(e: OutboxEntry): void {
     for (const existing of log.values()) {
@@ -232,7 +270,11 @@ export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ dra
 
   let doneResolve: (() => void) | undefined;
   function checkDone(): void {
-    if (log.size === 0 || drain.isPaused) doneResolve?.();
+    // `closed` (the transport dropped, e.g. mid-drain) is included: with `reconnect: false` a closed
+    // transport can never make further progress, so waiting out the rest of `timeoutMs` would just
+    // hold the caller (a Service Worker's `event.waitUntil`) for no reason — exit now with whatever
+    // counts the drain reached.
+    if (log.size === 0 || drain.isPaused || closed) doneResolve?.();
   }
 
   const host: DrainHost = {
@@ -330,28 +372,47 @@ export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ dra
       if (msg.known) {
         drain.nudge();
       } else {
-        void handleClientReset().then(() => {
-          drain.nudge();
-          checkDone();
-        });
+        void handleClientReset()
+          .then(() => {
+            drain.nudge();
+            checkDone();
+          })
+          .catch((err) => {
+            // `setMeta`/`dequeue`/`append` failures inside `handleClientReset` must not become an
+            // unhandled rejection (there is no promise chain here for a caller to attach a `.catch`
+            // to) — floor it to console and still let the drain settle with whatever counts it has.
+            console.error("[stackbase] outbox: handleClientReset failed", err);
+            checkDone();
+          });
       }
     }
   });
   const disposeClose = transport.onClose(() => {
     closed = true;
     drain.onTransportClosed();
+    // A closed transport (reconnect:false) can never progress further — resolve `donePromise`
+    // promptly instead of waiting out the rest of `timeoutMs`.
+    checkDone();
   });
 
   const donePromise = new Promise<void>((resolve) => {
     doneResolve = resolve;
   });
   drain.start();
-  await Promise.race([donePromise, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))]);
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timeoutTimer = setTimeout(resolve, timeoutMs);
+    (timeoutTimer as { unref?: () => void }).unref?.();
+  });
+  await Promise.race([donePromise, timeoutPromise]);
+  // Clear the race's loser timer either way: a drain that quiesces in milliseconds must not hold a
+  // Node/SW process alive for the rest of `timeoutMs` (a real 30s default) just because this timer
+  // is still pending — `.unref?.()` above is belt-and-suspenders for the same reason.
+  if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
 
   drain.stop();
   disposeMessage();
   disposeClose();
-  transport.close();
 
   return { drained, failed, remaining: log.size };
 }
