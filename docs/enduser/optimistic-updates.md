@@ -78,7 +78,10 @@ mutations were issued). Calling a mutation with `withOptimisticUpdate`:
    this "no-flicker": the guessed row and the real row are never both absent, and are never shown
    as two different frames in sequence. Convex's `removeCompleted(ts)`, Electric's `write_id`,
    TanStack DB's txid match, and PowerSync's write checkpoints all converge on the same rule —
-   drop on **observed inclusion**, never on ack.
+   drop on **observed inclusion**, never on ack. (Layers themselves are per-tab — a durable outbox
+   entry initiated in another tab mirrors into yours via the `optimisticUpdates` registry instead;
+   see [Cross-tab live optimistic rendering](/offline#cross-tab-live-optimistic-rendering) in the
+   offline guide for that path's own, slightly weaker, no-flicker guarantee.)
 4. If the mutation fails server-side, or the connection drops before its outcome is known, your
    layer is dropped and every affected query is recomputed as if it had never run — "rollback" is
    simply "stop replaying this layer," never an inverse operation, so there is nothing to get

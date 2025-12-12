@@ -82,12 +82,16 @@ export const DEFAULT_DRAIN_INTERVAL_MS = 5_000;
 
 /** The one method the drain needs from `navigator.locks` — a minimal, structurally-fakeable seam.
  *  `request(name, options, cb)` holds the named lock for the lifetime of `cb`'s returned promise
- *  (exactly the real `LockManager.request` 3-arg contract). */
+ *  (exactly the real `LockManager.request` 3-arg contract). The callback's `lock` parameter mirrors
+ *  the real `LockGrantedCallback` shape (`null` under `{ifAvailable: true}` when the lock could not
+ *  be granted immediately) — declared optional so every existing zero-arg callback (`async () =>
+ *  {...}`) stays assignable unchanged; callers that DO need the availability signal (e.g.
+ *  `headless-drain.ts#isLockAvailable`) can read it with no cast. */
 export interface OutboxLockManager {
   request(
     name: string,
     options: { signal?: AbortSignal; mode?: "exclusive" | "shared"; ifAvailable?: boolean },
-    callback: () => Promise<unknown>,
+    callback: (lock?: unknown) => Promise<unknown> | unknown,
   ): Promise<unknown>;
 }
 
@@ -334,12 +338,23 @@ export class OutboxDrain {
     (this.intervalTimer as { unref?: () => void }).unref?.();
   }
 
-  /** Load the durable queue into the log (once), under recorded ids, then prune dead meta rows. */
+  /** Load the durable queue into the log (once), under recorded ids, then prune dead meta rows.
+   *  Only STILL-ACTIVE entries (`unsent`/`inflight`/`parked`) are hydrated into the log — a `failed`
+   *  entry left behind by a prior session is a terminal, accessor-only record (surfaced via
+   *  `pendingMutations()`/the constructor's `refireDurableFailures` R9 scan) and must never be
+   *  resurrected here as a fresh `unsent` log entry: `host.addHydrated` unconditionally stamps
+   *  `status: "unsent"` regardless of the persisted status, so hydrating a `failed` row verbatim
+   *  would render a phantom optimistic row for an already-dead mutation AND make it drainable again
+   *  (a resend of something the server/R9 already settled), on top of double-firing R9 alongside the
+   *  constructor's unconditional resume scan. Mirrors the same filter `mirrorFromStore`'s cross-tab
+   *  backstop applies (`client.ts`). */
   private async hydrateOnce(): Promise<void> {
     if (this.hydrated) return;
     this.hydrated = true;
     const { entries } = await this.host.outbox.loadAll();
-    for (const e of entries) this.host.addHydrated(e);
+    for (const e of entries) {
+      if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") this.host.addHydrated(e);
+    }
     await this.pruneDeadMeta();
   }
 
