@@ -226,6 +226,30 @@
         "vitest": "catalog:",
       },
     },
+    "examples/offline-demo": {
+      "name": "stackbase-example-offline-demo",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/errors": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/cli": "workspace:*",
+        "@stackbase/client": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/query-engine": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "@types/react": "^18.3.18",
+        "@types/react-dom": "^18.3.5",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/admin": {
       "name": "@stackbase/admin",
       "version": "0.0.0",
@@ -1401,6 +1425,8 @@
     "stackback": ["stackback@0.0.2", "", {}, "sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw=="],
 
     "stackbase-example-chat": ["stackbase-example-chat@workspace:examples/chat"],
+
+    "stackbase-example-offline-demo": ["stackbase-example-offline-demo@workspace:examples/offline-demo"],
 
     "std-env": ["std-env@3.10.0", "", {}, "sha512-5GS12FdOZNliM5mAOxFRg7Ir0pWz8MdpYm6AY6VPkGpbA7ZzmbzNcBJQ0GPvvyWgcY7QAhCgf9Uy89I03faLkg=="],
 
