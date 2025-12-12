@@ -32,7 +32,7 @@ side-by-side:
 examples/offline-demo/
   package.json            # scripts: dev, codegen, web:build, typecheck, test
   tsconfig.json
-  stackbase.config.ts     # no components — plain project
+  # (no stackbase.config.ts — the file is optional and this project composes no components)
   convex/
     schema.ts             # lists, items (both UNSHARDED — see mintId restriction below)
     lists.ts              # list, create, lock
@@ -105,10 +105,10 @@ Implements the public `ClientTransport` interface; holds a real `webSocketTransp
   before a reload render optimistically after it. Updaters read minted ids **from args** (the
   purity rule: never call `mintId()` inside an updater) and tolerate an `undefined` query baseline
   (offline-after-reload renders nothing until a baseline exists — the documented boundary).
-- Header: app title, **connection badge** (online / offline / connecting), the **Go
-  offline/online toggle**. The badge is driven by the wrapper transport's own state (the offline
-  flag plus whether the inner socket is currently open), exposed via a tiny
-  `onStateChange(listener)` on the wrapper — no client-package introspection needed.
+- Header: app title and the **Go offline/online toggle**, which doubles as the connection badge
+  (two states — offline/online, driven by the wrapper's own flag via a tiny
+  `onStateChange(listener)`; `ClientTransport` deliberately has no socket-open introspection, and
+  adding one is not this example's job).
 - Layout: lists sidebar (create form + list rows with a lock button) and items panel for the
   selected list (add form, checkbox rows). Optimistic/pending rows get the same dimmed-row
   treatment as chat (`.pending`), using the documented pending-row type-widening recipe.
