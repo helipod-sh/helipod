@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Packlist — Stackbase offline demo</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.5 system-ui, sans-serif;
+        background: #0b0c10;
+        color: #e6e7eb;
+        display: flex;
+        justify-content: center;
+      }
+      .app { width: 100%; max-width: 860px; height: 100dvh; display: flex; flex-direction: column; padding: 1rem; gap: 0.75rem; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+      h1 { font-size: 1.25rem; margin: 0; }
+      .toggle { padding: 0.45rem 0.9rem; border: 1px solid #2a2f3d; border-radius: 999px; font: inherit; cursor: pointer; color: inherit; }
+      .toggle.on { background: #10321c; border-color: #1f6f3d; }
+      .toggle.off { background: #3a1620; border-color: #7f2d3f; }
+      main { display: flex; gap: 0.75rem; flex: 1; min-height: 0; }
+      .pane { background: #14161d; border: 1px solid #232734; border-radius: 12px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; overflow-y: auto; }
+      .lists { width: 40%; }
+      .items { flex: 1; }
+      h2 { font-size: 0.95rem; margin: 0; color: #9aa0ad; }
+      ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+      .row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; background: #1c2030; border-radius: 8px; cursor: pointer; }
+      .row.selected { outline: 2px solid #2563eb; }
+      .row.pending { opacity: 0.55; } /* optimistic row, not yet confirmed by the server */
+      .row .grow { flex: 1; }
+      .row .locked { font-size: 0.8rem; }
+      .row button { padding: 0.15rem 0.5rem; font-size: 0.78rem; }
+      .status { color: #6b6f7a; font-style: italic; padding: 0.4rem; }
+      form { display: flex; gap: 0.5rem; }
+      input[type="text"] { flex: 1; padding: 0.5rem 0.7rem; border-radius: 8px; border: 1px solid #2a2f3d; background: #0f1117; color: inherit; font: inherit; }
+      button { padding: 0.5rem 0.9rem; border: 0; border-radius: 8px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
+      button:hover { background: #1d4ed8; }
+      button.subtle { background: #232734; }
+      .tray { background: #14161d; border: 1px solid #232734; border-radius: 12px; padding: 0.6rem 0.75rem; }
+      .tray h2 { margin-bottom: 0.4rem; }
+      .tray li { display: flex; align-items: center; gap: 0.6rem; padding: 0.3rem 0.5rem; background: #1c2030; border-radius: 8px; font-size: 0.85rem; }
+      .tray .st { color: #9aa0ad; }
+      .tray .err { color: #ff8a9a; font-weight: 600; }
+      footer { color: #6b6f7a; font-size: 0.78rem; text-align: center; }
+      del { color: #6b6f7a; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
