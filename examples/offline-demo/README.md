@@ -20,8 +20,9 @@ Open <http://localhost:3220>.
 ## Flow 1 — the star: offline → reload → drain, exactly-once
 
 1. Flip **Go offline** (top right). The switch is a demo-local wrapper around the public
-   `ClientTransport` seam (`web/offline-transport.ts`) and persists in localStorage — so a reload
-   while offline STAYS offline.
+   `ClientTransport` seam (`web/offline-transport.ts`) and persists in sessionStorage — so a
+   reload while offline STAYS offline (per-tab: going offline in one tab never forces a
+   freshly-opened tab offline too).
 2. Create a list, then add a few items into it. Both render instantly (optimistic), dimmed while
    unconfirmed, and the **Outbox tray** at the bottom counts the queued mutations. The list's id
    was minted client-side (`mintId("lists")`) so the item adds could reference it with no await —
@@ -62,4 +63,4 @@ shown this way — the page itself needs the server — which is why the toggle 
 
 - `docs/enduser/offline.md` — the full model, conflict taxonomy, and honest boundaries.
 - `docs/enduser/optimistic-updates.md` — updater purity rules and the pending-row recipe.
-- `web/offline-transport.ts` — the toggle: ~100 commented lines on the public transport seam.
+- `web/offline-transport.ts` — the toggle: ~130 commented lines on the public transport seam.

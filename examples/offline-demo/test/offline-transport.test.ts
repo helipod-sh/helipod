@@ -104,9 +104,51 @@ describe("offlineToggleTransport", () => {
   it("close() is terminal: drops the inner and ignores later setOffline calls", () => {
     const { make, instances } = fakeInnerFactory();
     const t = offlineToggleTransport("ws://x/api/sync", make, fakeStorage());
+    let closes = 0;
+    t.onClose(() => closes++);
+
     t.close();
     expect(instances[0]!.closed).toBe(true);
+    expect(closes).toBe(1); // close()'s own fire
     t.setOffline(false);
     expect(instances).toHaveLength(1); // no resurrection
+
+    // Exercise the `terminated` guard specifically: setOffline(true) after close() must not
+    // create anything new or fire the close listeners a second time.
+    t.setOffline(true);
+    expect(instances).toHaveLength(1);
+    expect(closes).toBe(1);
+  });
+
+  it("constructed offline announces the down state asynchronously", async () => {
+    const { make, instances } = fakeInnerFactory();
+    const t = offlineToggleTransport("ws://x/api/sync", make, fakeStorage("1"));
+    let closes = 0;
+    t.onClose(() => closes++);
+
+    // Must NOT fire synchronously — the client subscribes its listeners AFTER construction
+    // returns, so a synchronous fire here would be invisible to it.
+    expect(closes).toBe(0);
+
+    await Promise.resolve();
+    expect(closes).toBe(1);
+    expect(instances).toHaveLength(0); // still no socket ever attempted while offline
+
+    // Should not fire again on a later tick.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closes).toBe(1);
+  });
+
+  it("constructed offline then immediately close()d: no double-fire from the queued microtask", async () => {
+    const { make } = fakeInnerFactory();
+    const t = offlineToggleTransport("ws://x/api/sync", make, fakeStorage("1"));
+    let closes = 0;
+    t.onClose(() => closes++);
+
+    t.close(); // fires close listeners once (terminal), before the queued microtask runs
+    expect(closes).toBe(1);
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closes).toBe(1); // the microtask's `!terminated` guard suppressed the second fire
   });
 });

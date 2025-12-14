@@ -31,6 +31,9 @@ export const add = mutation({
     // The demo's conflict rule: the world can change while you're offline. A list locked after
     // you queued an add makes that add terminally invalid when it finally drains.
     const list = await ctx.db.get(args.listId);
+    // A missing list (list === null) falls through and the insert proceeds: the demo's FIFO
+    // drain guarantees the list's own `create` ran first, so this is unreachable in practice —
+    // kept permissive on purpose so a dismissed/never-drained create can't poison this add too.
     if (list !== null && (list.locked as boolean)) {
       throw new ListLockedError(`list "${String(list.name)}" is packed & locked — no more items`);
     }

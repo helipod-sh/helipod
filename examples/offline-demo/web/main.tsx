@@ -41,6 +41,9 @@ function createListOptimistic(store: OptimisticLocalStore, args: { _id?: string;
   const listsQ = store.getQuery(api.lists.list, {});
   if (listsQ === undefined) return;
   const row: PendingList = {
+    // `?? store.placeholderId(...)` is unreachable in THIS app — every call site mints a real
+    // `_id` up front (the create-then-reference chain needs it) — kept so this updater stays an
+    // honest copy-paste template for apps that don't always supply one.
     _id: (args._id ?? store.placeholderId("lists")) as Id<"lists">,
     _creationTime: store.now(),
     name: args.name,
@@ -64,6 +67,7 @@ function addItemOptimistic(store: OptimisticLocalStore, args: { _id?: string; li
   const itemsQ = store.getQuery(api.items.list, { listId: args.listId });
   if (itemsQ === undefined) return;
   const row: PendingItem = {
+    // Same unreachable-but-honest fallback as `createListOptimistic` above — see its comment.
     _id: (args._id ?? store.placeholderId("items")) as Id<"items">,
     _creationTime: store.now(),
     listId: args.listId,
@@ -213,11 +217,13 @@ function Items(props: { listId: Id<"lists"> }) {
 
 function PendingTray() {
   const pending = usePendingMutations();
+  const [offline, setOffline] = useState(transport.isOffline());
+  useEffect(() => transport.onStateChange(setOffline), []);
   if (pending.length === 0) return null;
   return (
     <section className="tray">
       <h2>
-        Outbox — {pending.length} pending {transport.isOffline() ? "(offline: will drain on reconnect)" : ""}
+        Outbox — {pending.length} pending {offline ? "(offline: will drain on reconnect)" : ""}
       </h2>
       <ul>
         {pending.map((e) => (

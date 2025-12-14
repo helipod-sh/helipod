@@ -7,8 +7,9 @@
  * offline are dropped — the reopen sequence rebuilds the whole session from client state, which
  * is exactly how the real transport treats a down period.
  *
- * The flag persists in localStorage so a reload while "offline" STAYS offline — that is what
- * makes the durable outbox's reload-survival visible without a Service Worker.
+ * The flag persists in sessionStorage so a reload while "offline" STAYS offline — per-tab, so
+ * going offline in one tab never forces a fresh tab offline — that is what makes the durable
+ * outbox's reload-survival visible without a Service Worker.
  */
 import { webSocketTransport, type ClientTransport } from "@stackbase/client";
 
@@ -29,7 +30,7 @@ type FlagStorage = { getItem(k: string): string | null; setItem(k: string, v: st
 export function offlineToggleTransport(
   url: string,
   makeInner: (url: string) => ClientTransport = webSocketTransport,
-  storage: FlagStorage | undefined = typeof localStorage === "undefined" ? undefined : localStorage,
+  storage: FlagStorage | undefined = typeof sessionStorage === "undefined" ? undefined : sessionStorage,
 ): OfflineToggleTransport {
   // Stable listener sets: the client subscribes ONCE (to the wrapper); inner transports come and go.
   const messageListeners = new Set<InboundListener>();
@@ -69,7 +70,17 @@ export function offlineToggleTransport(
     t?.close();
   }
 
-  if (!offline) connectInner();
+  if (!offline) {
+    connectInner();
+  } else {
+    // The real transport announces a failed first connection attempt via onClose (its
+    // hadFailedConnect contract) — the client needs `closed = true` so the outbox handshake
+    // re-arms on the eventual reopen instead of latching a Connect that was never sent.
+    // Async because the client subscribes AFTER construction.
+    queueMicrotask(() => {
+      if (!terminated && offline) for (const l of closeListeners) l();
+    });
+  }
 
   return {
     send(message: OutboundMessage): void {
