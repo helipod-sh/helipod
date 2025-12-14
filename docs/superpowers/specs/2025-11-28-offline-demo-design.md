@@ -13,8 +13,10 @@ shipped public APIs** — no engine or client-package changes.
 1. **App shape: trip packing lists** — `lists` + `items`, chosen because creating a list and then
    adding items to it while offline naturally exercises the `mintId` create-then-reference chain.
 2. **Offline simulation: in-app toggle** — a "Go offline" switch in the header, persisted in
-   `localStorage` so a reload while "offline" stays offline (this is what makes the
-   reload-survival half of the story visible without a Service Worker).
+   `sessionStorage` so a reload while "offline" stays offline (this is what makes the
+   reload-survival half of the story visible without a Service Worker). *(post-review correction:
+   sessionStorage — per-tab isolation keeps Flow 2 coherent; localStorage would force late-opened
+   tabs offline)*
 3. **Failure demo: included** — a server-side rule (items rejected once a list is locked) so a
    doomed queued write visibly terminal-fails on drain, with retry/dismiss in the tray.
 4. **Toggle mechanism: demo-local wrapper transport** (Approach A) — a ~50-line implementation of
@@ -84,8 +86,10 @@ Implements the public `ClientTransport` interface; holds a real `webSocketTransp
   `onMessage`/`onClose` through, and fires the wrapper's `onReopen` listeners once the new socket
   opens — triggering the client's normal reconnect path (replay `SetAuth`, resubscribe, FIFO
   drain).
-- The offline flag persists in `localStorage` (`packlist:offline`); at construction the wrapper
-  starts offline if the flag is set, so **reload-while-offline stays offline**.
+- The offline flag persists in `sessionStorage` (`packlist:offline`); at construction the wrapper
+  starts offline if the flag is set, so **reload-while-offline stays offline**. *(post-review
+  correction: sessionStorage — per-tab isolation keeps Flow 2 coherent; localStorage would force
+  late-opened tabs offline)*
 - Stable listener sets live on the wrapper (the client subscribes once, to the wrapper); inner
   transports come and go beneath them.
 
