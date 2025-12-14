@@ -23,17 +23,19 @@ Open <http://localhost:3220>.
    `ClientTransport` seam (`web/offline-transport.ts`) and persists in sessionStorage — so a
    reload while offline STAYS offline (per-tab: going offline in one tab never forces a
    freshly-opened tab offline too).
-2. Create a list, then add a few items into it. Both render instantly (optimistic), dimmed while
-   unconfirmed, and the **Outbox tray** at the bottom counts the queued mutations. The list's id
-   was minted client-side (`mintId("lists")`) so the item adds could reference it with no await —
-   the create-then-reference chain, fully offline.
+2. Create a list, then add a few items into it. The list renders instantly (optimistic, dimmed
+   while unconfirmed), and the **Outbox tray** at the bottom counts every queued mutation. The
+   item rows themselves wait for reconnect: the brand-new list's items query has never been
+   answered while offline, so there is no baseline for the optimistic rows to compose over — the
+   documented honest boundary. (Add items to a list you opened while *online* — as in Flow 3 —
+   and they render instantly too.) The list's id was minted client-side (`mintId("lists")`) so
+   the item adds could reference it with no await — the create-then-reference chain, fully
+   offline.
 3. **Reload the page.** Still offline. The queued mutations are still in the tray (they live in
-   IndexedDB), and the optimistic rows re-render on top of the last-known query baselines via the
-   `optimisticUpdates` registry. Honest boundary: a query with NO baseline yet (e.g. a list pane
-   you never opened) renders "waiting for first sync…" until reconnect — there is deliberately no
-   persisted query cache.
-4. Flip **online**. Watch the tray drain FIFO and empty, and every dimmed row settle authoritative
-   — the same frame, no flicker, exactly-once (server receipts, not client hope).
+   IndexedDB). The panes render "waiting for first sync…" — after a reload there is no query
+   baseline at all until the first reconnect, deliberately: there is no persisted query cache.
+4. Flip **online**. Watch the tray drain FIFO and empty, and the list and its items appear
+   authoritative — exactly-once (server receipts, not client hope).
 
 ## Flow 2 — two tabs
 
