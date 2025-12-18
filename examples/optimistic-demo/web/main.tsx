@@ -108,7 +108,7 @@ function Poll(props: {
   const pending = "pending" in props.poll;
   return (
     <section className={pending ? "poll pending" : "poll"}>
-      <PollHeader poll={props.poll} pending={pending} />
+      <PollHeader poll={props.poll} pending={pending} onToast={props.onToast} />
       {pending ? (
         <p className="status">creating… (rendered via placeholderId, dimmed until the commit settles)</p>
       ) : (
@@ -118,7 +118,7 @@ function Poll(props: {
   );
 }
 
-function PollHeader(props: { poll: PendingPoll; pending: boolean }) {
+function PollHeader(props: { poll: PendingPoll; pending: boolean; onToast: (msg: string) => void }) {
   const setClosed = useMutation(api.polls.setClosed);
   return (
     <h2>
@@ -128,7 +128,11 @@ function PollHeader(props: { poll: PendingPoll; pending: boolean }) {
       {!props.pending && (
         <button
           className="subtle"
-          onClick={() => void setClosed({ id: props.poll._id, closed: !props.poll.closed }).catch(() => {})}
+          onClick={() =>
+            void setClosed({ id: props.poll._id, closed: !props.poll.closed }).catch((e: unknown) =>
+              props.onToast(`close/reopen failed: ${(e as { code?: string }).code ?? "error"}`),
+            )
+          }
         >
           {props.poll.closed ? "reopen" : "close"}
         </button>

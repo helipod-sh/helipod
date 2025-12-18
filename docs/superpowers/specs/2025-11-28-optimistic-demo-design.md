@@ -55,8 +55,11 @@ examples/optimistic-demo/
 ## Schema
 
 - `polls`: `{ question: v.string(), closed: v.boolean() }`
-- `options`: `{ pollId: v.id("polls"), label: v.string(), votes: v.number() }`
+- `options`: `{ pollId: v.id("polls"), label: v.string(), votes: v.number(), order: v.number() }`
   `.index("by_poll", ["pollId"])`
+  *(post-review correction: same-transaction inserts share `_creationTime` and the index tiebreak
+  is the random `_id`, so a poll's initial options need an explicit `order` ordinal for
+  deterministic display — caught by Task 1's unit test)*
 
 Counters live on option rows: each vote is a read-modify-write increment, so rapid fire shows
 stacked optimistic layers as a climbing number. Both tables unsharded (no sharding story here;
@@ -71,7 +74,7 @@ All declare `args` and `returns` validators (typed optimistic store via codegen)
   row per label (`votes: 0`) in one transaction (composite intent), returns the poll id.
 - `polls.setClosed({ id, closed })` → sets `closed` — close AND reopen, so the rollback demo is
   repeatable without restarting.
-- `options.list({ pollId })` → the poll's options (`by_poll`).
+- `options.list({ pollId })` → the poll's options (`by_poll`), sorted by `order`.
 - `options.vote({ id })` → reads the option, reads its parent poll; **throws `PollClosedError`**
   (a demo-defined `UserError` subclass, `code = "POLL_CLOSED"`) when the poll is closed; else
   `replace` with `votes + 1`, returns the new count. With no outbox, an online mutation's failure

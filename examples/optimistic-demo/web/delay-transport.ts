@@ -27,6 +27,20 @@ export function delayTransport(
   let lastScheduledFireAt = 0;
   const pending = new Set<ReturnType<typeof setTimeout>>();
 
+  // Ghost-commit-after-reconnect hazard: if the inner socket dies while a Mutation frame is
+  // sitting in the delay queue, the client already rejects that mutation with
+  // MutationUndeliveredError at close time (and the demo shows the "rolled back exactly" toast).
+  // But `inner` reconnects on its own default backoff (as fast as 300ms), which can beat this
+  // wrapper's own timer (up to 3000ms at the top delay stop) — so without dropping the queue here,
+  // the stale frame fires later and lands on a FRESH session, committing a vote the UI already
+  // told the user was rolled back. Dropping on close, not just on our own close(), keeps the demo
+  // honest: a dead transport can never deliver a frame it queued before it died.
+  inner.onClose(() => {
+    for (const t of pending) clearTimeout(t);
+    pending.clear();
+    lastScheduledFireAt = 0;
+  });
+
   return {
     send(message: OutboundMessage): void {
       if (closed) return;

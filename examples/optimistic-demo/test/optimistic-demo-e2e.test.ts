@@ -129,7 +129,6 @@ describe("pulse E2E — optimistic votes render before the server answers; rollb
       await waitFor(() => seen.includes(1), 2_000, "optimistic value visible");
       expect(resolved).toBe(false); // visible BEFORE the (delayed) server answered — the whole point
       await p;
-      await waitFor(() => resolved, 5_000, "commit resolves");
       // No-flicker settle: once 1 appeared, the count never dropped back to 0.
       const afterOneAppeared = seen.slice(seen.indexOf(1));
       expect(afterOneAppeared.every((n) => n >= 1)).toBe(true);
