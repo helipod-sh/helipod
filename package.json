@@ -17,7 +17,8 @@
       "examples/*",
       "apps/*",
       "ee/packages/*",
-      "benchmarks/convex-comparison"
+      "benchmarks/convex-comparison",
+      "benchmarks/runner"
     ],
     "catalog": {
       "typescript": "^5.7.2",
@@ -34,7 +35,9 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "dev": "turbo run dev",
-    "clean": "turbo run clean && rm -rf node_modules"
+    "clean": "turbo run clean && rm -rf node_modules",
+    "bench:reactive": "bun benchmarks/runner/src/cli.ts run --axis reactive",
+    "bench:compare": "bun benchmarks/runner/src/cli.ts compare"
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-arm64",

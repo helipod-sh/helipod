@@ -50,6 +50,24 @@
         "@stackbase/values": "workspace:*",
       },
     },
+    "benchmarks/runner": {
+      "name": "@stackbase/bench",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/client": "workspace:*",
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-postgres": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "components/auth": {
       "name": "@stackbase/auth",
       "version": "0.0.0",
@@ -972,6 +990,8 @@
     "@stackbase/auth": ["@stackbase/auth@workspace:components/auth"],
 
     "@stackbase/authz": ["@stackbase/authz@workspace:components/authz"],
+
+    "@stackbase/bench": ["@stackbase/bench@workspace:benchmarks/runner"],
 
     "@stackbase/bench-convex-comparison": ["@stackbase/bench-convex-comparison@workspace:benchmarks/convex-comparison"],
 

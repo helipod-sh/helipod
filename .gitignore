@@ -21,6 +21,9 @@ dist/
 .stackbase/
 .stackbase-deploy/
 
+# benchmark results
+benchmarks/results/
+
 # generated example web bundle (run `pnpm web:build`)
 examples/*/web/main.js
 examples/*/web/*.js.map
