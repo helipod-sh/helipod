@@ -29,7 +29,7 @@ import type { DocStore } from "@stackbase/docstore";
 import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { shardIdList, encodeStorageIndexId } from "@stackbase/id-codec";
-import { PgliteClient } from "./pglite-client";
+import { PgliteClient } from "../test/pglite-client";
 
 /* -------------------------------------------------------------------------- */
 /* Bench fixture: one sharded table ("bench", sharded by channelId), two ops    */

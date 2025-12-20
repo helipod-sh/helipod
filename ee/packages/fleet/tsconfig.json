@@ -6,5 +6,5 @@
     "types": ["node"]
   },
   "include": ["src", "test"],
-  "exclude": ["test/fixtures"]
+  "exclude": ["test/fixtures", "bench"]
 }
