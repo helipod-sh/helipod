@@ -30,7 +30,7 @@ const WRITERS_PER_NODE = 8;
 const CLI_BIN = resolve(new URL(".", import.meta.url).pathname, "../../../../packages/cli/dist/bin.js");
 const ADMIN_KEY = "bench-multinode-key";
 function fixtureConvexDir() {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "app", "convex");
+  return resolve(new URL(".", import.meta.url).pathname, "..", "test", "fixtures", "app", "convex");
 }
 
 /* --- embedded postgres --- */
