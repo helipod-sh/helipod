@@ -34,6 +34,8 @@ export {
   writtenTablesFromRanges,
 } from "./range";
 
+export { IntervalIndex } from "./interval-index";
+
 export type { SerializedKeyRange, WriteInvalidation } from "./serialize";
 export { serializeKeyRange, deserializeKeyRange } from "./serialize";
 
