@@ -92,10 +92,8 @@ class Treap<V> {
   size = 0;
 
   insert(start: Uint8Array, end: Uint8Array | null, value: V, valueKey: string): void {
-    const before = this.size;
+    // `size` is bumped inside insertAt only on a genuine new node (idempotent on duplicates).
     this.root = this.insertAt(this.root, start, end, value, valueKey);
-    // size is bumped inside insertAt only on a genuine new node
-    void before;
   }
 
   private insertAt(
@@ -119,9 +117,8 @@ class Treap<V> {
   }
 
   remove(start: Uint8Array, end: Uint8Array | null, valueKey: string): void {
-    const before = this.size;
+    // `size` is decremented inside removeAt only when a node is actually removed.
     this.root = this.removeAt(this.root, start, end, valueKey);
-    void before;
   }
 
   private removeAt(node: Node<V> | null, start: Uint8Array, end: Uint8Array | null, valueKey: string): Node<V> | null {
