@@ -23,6 +23,9 @@ export {
   encodeServerMessage,
 } from "./protocol";
 
+export { applyChanges, driftChecksum } from "./change";
+export type { Change, RowVersion } from "./change";
+
 export type { MatchMode, Subscription } from "./subscription-manager";
 export { SubscriptionManager } from "./subscription-manager";
 
