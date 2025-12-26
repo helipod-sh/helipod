@@ -26,6 +26,13 @@ const modules: Record<string, RegisteredFunction> = {
   "notes:add": mutation<{ owner: string; body: string }, string>({
     handler: (ctx, { owner, body }) => ctx.db.insert("notes", { owner, body }),
   }),
+  // A `v.int64()`-shaped field (a raw `bigint` Value baked in server-side, no schema validator
+  // needed for this plumbing test, and no need to round-trip a bigint through the JSON-only
+  // `Mutation.args` wire shape) — the case the reviewed bug hit: `DocumentValue` can hold a
+  // `bigint`, which is not a valid `JSONValue` on its own (throws on `JSON.stringify`).
+  "notes:addWithCount": mutation<{ owner: string; body: string }, string>({
+    handler: (ctx, { owner, body }) => ctx.db.insert("notes", { owner, body, count: 42n }),
+  }),
 };
 
 async function makeRuntime() {
@@ -78,5 +85,35 @@ describe("written docs ride the in-process commit fan-out (§DLR 2a)", () => {
     expect(doc.newRow).toMatchObject({ owner: "u1", body: "hello" });
     expect(typeof doc.key).toBe("string");
     expect(typeof doc.docId).toBe("string");
+  });
+
+  it("an int64 (bigint) field is convexToJson-tagged, never a raw bigint, in newRow", async () => {
+    // Regression for the reviewed bug: `buildWrittenDocs` used to bare-cast
+    // `e.value.value as JSONValue` — a stored `DocumentValue` can legitimately hold a `bigint`
+    // (`v.int64()`), which is NOT a valid `JSONValue` (it throws on `JSON.stringify` and would
+    // corrupt this wire payload). The fix runs the value through `convexToJson`, which tags a
+    // bigint as `{ $integer: base64(...) }` — assert that shape survives onto `WrittenDoc.newRow`.
+    const runtime = await makeRuntime();
+    const spy = vi.spyOn(runtime.handler, "notifyWrites");
+
+    const conn = runtime.connect("sB");
+    const received: ServerMessage[] = [];
+    conn.onMessage((m) => received.push(m));
+
+    await conn.send({ type: "Mutation", requestId: "r2", udfPath: "notes:addWithCount", args: { owner: "u2", body: "counted" } });
+    const resp = received.find((m) => m.type === "MutationResponse") as MutationResponse;
+    expect(resp.success).toBe(true);
+
+    await waitFor(() => spy.mock.calls.length > 0);
+
+    const invalidation = spy.mock.calls[0]![0] as WriteInvalidation;
+    const doc = invalidation.writtenDocs![0]!;
+    const newRow = doc.newRow as Record<string, unknown>;
+
+    // NOT a raw bigint — JSON.stringify-safe, tagged the same way `convexToJson` tags every
+    // other bigint Value crossing a wire boundary in this repo.
+    expect(typeof newRow.count).not.toBe("bigint");
+    expect(newRow.count).toEqual({ $integer: expect.any(String) });
+    expect(() => JSON.stringify(newRow)).not.toThrow();
   });
 });

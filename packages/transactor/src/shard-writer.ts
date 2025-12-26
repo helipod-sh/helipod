@@ -48,7 +48,7 @@ import type {
   InternalDocumentId,
   TimestampOracle,
 } from "@stackbase/docstore";
-import type { JSONValue } from "@stackbase/values";
+import { convexToJson } from "@stackbase/values";
 import { AsyncMutex } from "./async-mutex";
 import type { HeadroomLimits } from "./headroom";
 import { HeadroomTracker } from "./headroom";
@@ -76,13 +76,19 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /** Build a commit's `WrittenDoc[]` from its staged log entries (§DLR 2a) — shared by the
- *  single-commit and group-commit paths so both fan-outs carry identical row-diff data. */
+ *  single-commit and group-commit paths so both fan-outs carry identical row-diff data.
+ *  `newRow` is a wire payload (eventually forwarded to clients), so it must go through
+ *  `convexToJson` — the same Value→wire boundary every other send-site in the repo uses
+ *  (see `packages/sync/src/handler.ts`) — rather than a bare cast: a stored `DocumentValue`
+ *  can contain `bigint` (`v.int64()`) or `ArrayBuffer` (`v.bytes()`), neither of which is a
+ *  valid `JSONValue` on its own (bigint throws on `JSON.stringify`; `ArrayBuffer` serializes
+ *  to `{}`). */
 function buildWrittenDocs(entries: readonly DocumentLogEntry[], commitTs: bigint): WrittenDoc[] {
   return entries.map((e) => ({
     key: bytesToBase64(e.id.internalId),
     keyspace: docKeyspace(e.id),
     docId: encodeInternalDocumentId(e.id),
-    newRow: e.value === null ? null : (e.value.value as JSONValue),
+    newRow: e.value === null ? null : convexToJson(e.value.value),
     wasPresent: e.prev_ts !== null,
     ts: Number(commitTs),
   }));
