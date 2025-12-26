@@ -30,7 +30,7 @@
  * identical behavior to before this split existed.
  */
 import { CommitGuardRejection, OccConflictError } from "@stackbase/errors";
-import { documentIdKey, encodeStorageTableId, type ShardId } from "@stackbase/id-codec";
+import { documentIdKey, encodeInternalDocumentId, encodeStorageTableId, type ShardId } from "@stackbase/id-codec";
 import {
   RangeSet,
   serializeKeyRange,
@@ -48,11 +48,12 @@ import type {
   InternalDocumentId,
   TimestampOracle,
 } from "@stackbase/docstore";
+import type { JSONValue } from "@stackbase/values";
 import { AsyncMutex } from "./async-mutex";
 import type { HeadroomLimits } from "./headroom";
 import { HeadroomTracker } from "./headroom";
 import { UncommittedWrites } from "./uncommitted-writes";
-import type { CommitResult, OplogDelta, RunInTransactionOptions, TransactionContext, WriteFanout } from "./types";
+import type { CommitResult, OplogDelta, RunInTransactionOptions, TransactionContext, WriteFanout, WrittenDoc } from "./types";
 
 function docKeyspace(id: InternalDocumentId): string {
   return tableKeyspaceId(encodeStorageTableId(id.tableNumber));
@@ -63,6 +64,28 @@ function hexKey(b: Uint8Array): string {
   let s = "";
   for (let i = 0; i < b.length; i++) s += b[i]!.toString(16).padStart(2, "0");
   return s;
+}
+
+/** base64 of raw bytes — MIRRORS `serializeKeyRange`'s private helper (index-key-codec/src/serialize.ts)
+ *  byte-for-byte, so a `WrittenDoc.key` is directly comparable to a `SerializedKeyRange.start` for the
+ *  same document. Deliberately `btoa`, not `Buffer`, to match that helper's runtime-neutral encoding. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+  return btoa(binary);
+}
+
+/** Build a commit's `WrittenDoc[]` from its staged log entries (§DLR 2a) — shared by the
+ *  single-commit and group-commit paths so both fan-outs carry identical row-diff data. */
+function buildWrittenDocs(entries: readonly DocumentLogEntry[], commitTs: bigint): WrittenDoc[] {
+  return entries.map((e) => ({
+    key: bytesToBase64(e.id.internalId),
+    keyspace: docKeyspace(e.id),
+    docId: encodeInternalDocumentId(e.id),
+    newRow: e.value === null ? null : (e.value.value as JSONValue),
+    wasPresent: e.prev_ts !== null,
+    ts: Number(commitTs),
+  }));
 }
 
 /** Fresh empty group-commit batch (Fleet B4, D2) with its promotion promise wired. */
@@ -401,6 +424,7 @@ export class ShardWriter {
       writtenRanges: ranges.map(serializeKeyRange),
       writtenTables: writtenTablesFromRanges(ranges),
       origin,
+      writtenDocs: buildWrittenDocs(entries, commitTs),
     };
     // Fire-and-forget so a slow/failing subscriber never stalls or aborts the single writer.
     if (this.fanout) {
@@ -646,6 +670,7 @@ export class ShardWriter {
             writtenRanges: ranges.map(serializeKeyRange),
             writtenTables: writtenTablesFromRanges(ranges),
             origin: u.origin, // G4: per-unit origin — stamped at publish, never sent to the store
+            writtenDocs: buildWrittenDocs(u.documents, ts),
           };
           if (this.fanout) {
             try {

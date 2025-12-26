@@ -606,7 +606,13 @@ export class EmbeddedRuntime {
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
     const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false, verifyAdmin: options.verifyAdmin });
-    const queue: Array<{ tables: string[]; ranges: import("@stackbase/index-key-codec").SerializedKeyRange[]; commitTs: number; origin?: string }> = [];
+    const queue: Array<{
+      tables: string[];
+      ranges: import("@stackbase/index-key-codec").SerializedKeyRange[];
+      commitTs: number;
+      origin?: string;
+      writtenDocs?: import("@stackbase/transactor").WrittenDoc[];
+    }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
       if (draining) return;
@@ -805,7 +811,13 @@ export class EmbeddedRuntime {
     const namesForCommit = (tableIds: readonly string[]): string[] => translateTableIds(tableIds, tableNumberToName);
 
     adapter.subscribe((payload) => {
-      queue.push({ tables: payload.tables, ranges: payload.ranges, commitTs: payload.commitTs, origin: payload.origin });
+      queue.push({
+        tables: payload.tables,
+        ranges: payload.ranges,
+        commitTs: payload.commitTs,
+        origin: payload.origin,
+        writtenDocs: payload.writtenDocs,
+      });
       void drain();
       if (commitSubs.size > 0) {
         fireCommitSubs(commitSubs, { tables: namesForCommit(payload.tables), ranges: payload.ranges, commitTs: payload.commitTs });

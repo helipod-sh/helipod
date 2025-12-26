@@ -11,7 +11,26 @@ import type {
   IndexOverlayEntry,
   InternalDocumentId,
 } from "@stackbase/docstore";
+import type { JSONValue } from "@stackbase/values";
 import type { HeadroomLimits } from "./headroom";
+
+/** One document written by a commit, carried through the in-process fan-out so the sync tier can
+ *  derive row diffs without re-reading the store. Present only on the local/owner commit path;
+ *  absent on cross-process (fleet) / forwarded paths (those fall back to full re-run). */
+export interface WrittenDoc {
+  /** base64 of the doc's primary-key bytes — matches a `SerializedKeyRange.start` for a point `get`. */
+  key: string;
+  /** the doc's primary keyspace, `table:<encodedTableNumber>` (encoded, matches read-range keyspaces). */
+  keyspace: string;
+  /** the public document id string — the diff `Change.key`. */
+  docId: string;
+  /** the new document JSON, or `null` for a delete/tombstone. */
+  newRow: JSONValue | null;
+  /** whether the doc existed before this commit (`prev_ts !== null`) — distinguishes insert vs update. */
+  wasPresent: boolean;
+  /** the commit ts (number). */
+  ts: number;
+}
 
 /** A committed write's invalidation payload — serializable, so it crosses processes (Tier 2). */
 export interface OplogDelta {
@@ -29,6 +48,8 @@ export interface OplogDelta {
    * `/api/run`, drivers, boot steps) — those simply don't get an origin-frontier advance.
    */
   origin?: string;
+  /** Written documents for local row-diffing (§DLR 2a). Absent on cross-process/forwarded paths. */
+  writtenDocs?: WrittenDoc[];
 }
 
 export interface CommitResult<T> {

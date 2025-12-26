@@ -6,6 +6,7 @@
  */
 export type {
   OplogDelta,
+  WrittenDoc,
   CommitResult,
   WriteFanout,
   TransactionContext,

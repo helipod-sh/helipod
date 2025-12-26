@@ -6,7 +6,7 @@
  * subscriber can ignore its own writes (avoiding a self-loop across processes).
  */
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { OplogDelta, WriteFanout } from "@stackbase/transactor";
+import type { OplogDelta, WriteFanout, WrittenDoc } from "@stackbase/transactor";
 
 export interface EmbeddedWriteFanoutPayload {
   commitTs: number;
@@ -26,6 +26,10 @@ export interface EmbeddedWriteFanoutPayload {
    *  (`DEFAULT_SHARD`); a multi-shard fan-out consumer (B2+) can use it to route/filter, but every
    *  existing consumer today ignores it. */
   shardId: string;
+  /** Written documents for local row-diffing (§DLR 2a) — sourced verbatim from
+   *  `OplogDelta.writtenDocs`. Present only on the local in-process fan-out (this adapter always
+   *  runs in-process at Tier 0/1); absent if a future cross-process adapter swap doesn't carry it. */
+  writtenDocs?: WrittenDoc[];
 }
 
 export type FanoutListener = (payload: EmbeddedWriteFanoutPayload) => void;
@@ -66,6 +70,7 @@ export class EmbeddedWriteFanout implements WriteFanout {
       originId: this.originId,
       origin: delta.origin,
       shardId: delta.shardId,
+      writtenDocs: delta.writtenDocs,
     });
   }
 

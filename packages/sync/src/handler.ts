@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
+import type { WrittenDoc } from "@stackbase/transactor";
 import {
   encodeServerMessage,
   parseClientMessage,
@@ -122,6 +123,8 @@ export interface WriteInvalidation {
   /** Precise write ranges for surgical (range-level) invalidation. */
   ranges: readonly SerializedKeyRange[];
   commitTs: number;
+  /** Written docs for local row-diffing (§DLR 2a). Absent → affected DIFFABLE subs fall back to RERUN. */
+  writtenDocs?: WrittenDoc[];
 }
 
 export interface SyncProtocolHandlerOptions {
