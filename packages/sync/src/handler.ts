@@ -24,6 +24,7 @@ import {
   type MutationBatchEntry,
 } from "./protocol";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
+import { classifyByIdRead } from "./classify";
 import {
   SessionBackpressureController,
   SessionHeartbeatController,
@@ -325,7 +326,8 @@ export class SyncProtocolHandler {
         const { value, tables, readRanges } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges });
+        const byId = classifyByIdRead(value, readRanges) ?? undefined;
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId });
         const json = convexToJson(value);
         const hash = hashValue(json);
         if (q.resultHash !== undefined && q.resultHash === hash) {

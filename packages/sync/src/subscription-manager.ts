@@ -20,6 +20,8 @@ export interface Subscription {
   tables: string[];
   /** Precise read ranges (range-level match key — surgical invalidation). */
   readRanges: readonly SerializedKeyRange[];
+  /** DIFFABLE_BYID marker + the by-id read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */
+  byId?: import("./classify").ByIdRead;
 }
 
 function subKey(sessionId: string, queryId: number): string {
