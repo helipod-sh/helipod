@@ -155,6 +155,10 @@ interface Session {
   bp: SessionBackpressureController;
   /** Transport-level liveness; reaps half-open connections. No-op for ping-less sockets (loopback). */
   hb: SessionHeartbeatController;
+  /** DLR 2a: this session's client advertised `supportsQueryDiff` on `Connect`. Defaults to `false`
+   *  (an old client that predates `QueryDiff`, or one that hasn't sent `Connect` yet) — the emit
+   *  side (Task 5) must check this before ever sending a `QueryDiff` modification. */
+  supportsQueryDiff: boolean;
 }
 
 function errMessage(e: unknown): string {
@@ -206,7 +210,7 @@ export class SyncProtocolHandler {
     // is being torn down", not two independently-evolving ones.
     const bp = new SessionBackpressureController(socket, this.options.backpressure, undefined, () => this.reap(sessionId));
     const hb = new SessionHeartbeatController(socket, () => this.reap(sessionId), this.options.heartbeat);
-    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false, bp, hb });
+    this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false, bp, hb, supportsQueryDiff: false });
     hb.start();
   }
 
@@ -486,6 +490,9 @@ export class SyncProtocolHandler {
     session: Session,
     msg: Extract<ClientMessage, { type: "Connect" }>,
   ): Promise<void> {
+    // DLR 2a: record the capability regardless of the resume-handshake fields below — a client
+    // with no `clientId`/`held`/`ackedThrough` can still advertise `supportsQueryDiff`.
+    session.supportsQueryDiff = msg.supportsQueryDiff === true;
     // Old-client / no-receipts path: a Connect with no resume fields is the reserved no-op.
     if (msg.clientId === undefined && msg.held === undefined && msg.ackedThrough === undefined) return;
     if (!this.executor.classifyClientMutation || !this.executor.deploymentId) return;

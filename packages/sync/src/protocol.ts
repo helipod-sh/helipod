@@ -9,6 +9,7 @@
  * the ephemeral path) so the wire can later gain a binary delta encoding.
  */
 import type { JSONValue } from "@stackbase/values";
+import type { Change } from "./change";
 
 export interface StateVersion {
   /** Bumped when the set of subscribed queries changes. */
@@ -88,7 +89,7 @@ export type ClientMessage =
   // `Connect` activates from the reserved no-op (verdict §(e)): `clientId`/`held`/`ackedThrough` are
   // the resume handshake — the server classifies `held` into `ConnectAck.results` and prunes
   // `ackedThrough` (the contiguous settled-prefix). Absent → today's no-op Connect, bit-for-bit.
-  | { type: "Connect"; sessionId: string; clientId?: string; held?: ClientMutationRef[]; ackedThrough?: ClientMutationRef[] }
+  | { type: "Connect"; sessionId: string; clientId?: string; held?: ClientMutationRef[]; ackedThrough?: ClientMutationRef[]; supportsQueryDiff?: true }
   | { type: "ModifyQuerySet"; add: QueryRequest[]; remove: number[] }
   | { type: "Mutation"; requestId: string; udfPath: string; args: JSONValue; clientId?: string; seq?: number }
   // `MutationBatch` (verdict §(e)): the offline drain's chunk shape — the server applies `entries`
@@ -116,7 +117,12 @@ export type StateModification =
   // `value` to send. Sent ONLY from the subscribe-answer path (`doModifyQuerySet`), never from a
   // reactive re-run push (a push only happens because the read-set was intersected; sending
   // `QueryUnchanged` there is out of scope — see the design doc's Non-goals).
-  | { type: "QueryUnchanged"; queryId: number };
+  | { type: "QueryUnchanged"; queryId: number }
+  // DLR 2a: an incremental row diff for a DIFFABLE query. `changes` apply to the client's keyed
+  // row-map; `checksum` is the server's drift fingerprint of the resulting map (client verifies).
+  // A DIFFABLE query's INITIAL answer is a QueryDiff "reset" (add-all over an empty map). Sent only
+  // to a session that advertised `supportsQueryDiff` on Connect; RERUN queries use QueryUpdated.
+  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }
