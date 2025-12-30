@@ -14,12 +14,25 @@
  * reported for the caller to drop — a mid-rebuild throw never leaves the composed store half-built.
  */
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
+import { applyChanges, driftChecksum, type Change, type RowVersion } from "@stackbase/sync";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { PendingMutation } from "./mutation-log";
 
 /** The query identity hash — `path + ":" + JSON.stringify(argsJson)` (the existing `client.ts` hash). */
 export function queryHash(path: string, argsJson: JSONValue): string {
   return `${path}:${JSON.stringify(argsJson)}`;
+}
+
+/**
+ * DLR Stage 2a — render a by-id DIFFABLE query's value from its keyed row-map: the sole (0-or-1)
+ * entry's row decoded to a `Value`, or `undefined` when the map is empty (a `db.get(id)` returning
+ * `null` renders as no value, exactly as the RERUN path does today). `jsonToConvex` mints a fresh
+ * object every call, so each apply yields a distinct-by-reference value — the identity `recompose`
+ * needs to fire listeners.
+ */
+function renderByIdValue(rows: Map<string, RowVersion>): Value | undefined {
+  for (const rv of rows.values()) return jsonToConvex(rv.row) as Value; // first (and only) entry
+  return undefined;
 }
 
 /**
@@ -75,6 +88,12 @@ export interface Subscription {
    *  a given subscription); this one is a RESULT fingerprint that changes every time the value does.
    */
   lastHash?: string;
+  /** DLR Stage 2a — the by-id materialized cache. For a DIFFABLE query the authoritative base is
+   *  this keyed row-map (`docId -> {row, ts}`); `serverValue` is re-DERIVED from it on every
+   *  `applyDiff` (for by-id: the sole entry's row, or `undefined` when empty). Absent for a RERUN
+   *  query (`serverValue` is set directly by `setServerValue`). Held per-subscription so the client
+   *  can compute the drift checksum and apply incremental `QueryDiff`s over the running map. */
+  diffRows?: Map<string, RowVersion>;
   listeners: Set<Listener>;
 }
 
@@ -138,6 +157,26 @@ export class LayeredQueryStore {
    *  still fire listeners to introduce no new observable difference for app code. */
   markUnchanged(sub: Subscription): void {
     sub.answered = true;
+  }
+
+  /**
+   * DLR Stage 2a — apply a `QueryDiff`'s changes to a DIFFABLE query's keyed row-map, re-derive the
+   * rendered `serverValue` as a FRESH reference (so `recompose`'s reference-inequality check fires
+   * listeners), and report whether the client-recomputed drift checksum diverged from the server's.
+   * The caller (the reconciler) triggers a scoped resync on `drift === true`.
+   *
+   * A reset (the initial subscribe answer) is just add-all over an empty map; an incremental diff
+   * mutates the running map. `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each
+   * apply — the client never mutates a map a listener may still hold. `lastHash` is cleared: the diff
+   * path renders from the row-map, not the resume fingerprint, so a stale hash must never be echoed.
+   */
+  applyDiff(sub: Subscription, changes: readonly Change[], checksum: string): { drift: boolean } {
+    const next = applyChanges(sub.diffRows ?? new Map<string, RowVersion>(), changes);
+    sub.diffRows = next;
+    sub.serverValue = renderByIdValue(next);
+    sub.lastHash = undefined;
+    sub.answered = true;
+    return { drift: driftChecksum(next) !== checksum };
   }
 
   private serverValueOf(hash: string): Value | undefined {

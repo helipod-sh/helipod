@@ -333,7 +333,10 @@ export class StackbaseClient {
     } = {},
   ) {
     this.transport = transport;
-    this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs });
+    // DLR Stage 2a: a by-id `QueryDiff` whose checksum diverges triggers `resync()`. A full resync
+    // (re-subscribe everything) is an acceptable scoped-enough recovery for 2a — since by-id diffs
+    // are trivially correct this path should never fire; a per-query resync is a 2b refinement.
+    this.reconciler = new Reconciler(this.store, { gateTimeoutMs: opts.gateTimeoutMs, onDrift: () => this.resync() });
     this.outbox = opts.outbox;
     this.onClientResetCallback = opts.onClientReset;
     this.outboxMaxQueueSize = opts.outboxMaxQueueSize ?? DEFAULT_OUTBOX_MAX_QUEUE_SIZE;

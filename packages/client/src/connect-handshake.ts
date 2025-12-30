@@ -75,5 +75,8 @@ export function buildConnectMessage(sessionId: string, clientId: string | undefi
     ...(clientId !== undefined ? { clientId } : {}),
     held,
     ackedThrough: outboxAckedThrough(held),
+    // DLR Stage 2a: advertise by-id diff support. The server records this on any `Connect` (even a
+    // resume-handshake one) and sends `QueryDiff` only to a session that advertised it.
+    supportsQueryDiff: true,
   };
 }

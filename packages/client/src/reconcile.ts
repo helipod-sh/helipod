@@ -43,11 +43,18 @@ export class Reconciler {
   private readonly gateTimeoutMs: number;
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /** DLR Stage 2a — invoked when a `QueryDiff`'s client-recomputed drift checksum diverges from the
+   *  server's. The client wires this to a scoped resync (`client.ts` passes `() => this.resync()`).
+   *  For by-id the diff is trivially correct so this should never fire in normal operation; it is the
+   *  safety net that 2b's harder differ inherits already proven. */
+  private readonly onDrift?: (queryId: number) => void;
+
   constructor(
     private readonly store: LayeredQueryStore,
-    opts: { gateTimeoutMs?: number } = {},
+    opts: { gateTimeoutMs?: number; onDrift?: (queryId: number) => void } = {},
   ) {
     this.gateTimeoutMs = opts.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+    this.onDrift = opts.onDrift;
   }
 
   /** Max `endVersion.ts` observed this session (reset on close). Exposed for tests. */
@@ -186,6 +193,18 @@ export class Reconciler {
         if (sub) {
           this.store.markUnchanged(sub);
           (unchanged ??= new Set()).add(sub.hash);
+        }
+      } else if (mod.type === "QueryDiff") {
+        // DLR Stage 2a: a DIFFABLE_BYID sub's answer — a reset (initial) or an incremental diff.
+        // `applyDiff` mutates the sub's row-map and re-derives `serverValue` (a fresh reference, so
+        // the `rebuild` below fires listeners); a checksum mismatch triggers a scoped resync.
+        const sub = this.store.byId.get(mod.queryId);
+        if (sub) {
+          const { drift } = this.store.applyDiff(sub, mod.changes, mod.checksum);
+          if (drift) {
+            console.error(`[stackbase] query "${sub.path}" diff checksum mismatch; resyncing`);
+            this.onDrift?.(mod.queryId);
+          }
         }
       }
       // QueryRemoved: keep the last known base.
