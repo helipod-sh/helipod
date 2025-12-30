@@ -25,6 +25,8 @@ import {
 } from "./protocol";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
 import { classifyByIdRead } from "./classify";
+import { byIdChangesFor, byIdResetChanges } from "./commit-differ";
+import { driftChecksum, type RowVersion } from "./change";
 import {
   SessionBackpressureController,
   SessionHeartbeatController,
@@ -165,6 +167,12 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Same `${sessionId} ${queryId}` composite key `SubscriptionManager` uses internally (it doesn't
+ *  export its own) — `byIdRowMap` is keyed identically so the two stay trivially correlated. */
+function subKey(sessionId: string, queryId: number): string {
+  return `${sessionId} ${queryId}`;
+}
+
 /**
  * Server-minted result fingerprint (subscription resume, design 2025-11-28). Hashes THIS server's
  * own serialization of the value — the client stores and echoes it opaquely, so attach-site and
@@ -188,6 +196,15 @@ export class SyncProtocolHandler {
    * drives stays tiny (usually empty on a single-node deployment, where nothing is ever forwarded).
    */
   private readonly pendingFrontiers = new Map<string, number>();
+  /**
+   * DLR 2a CommitDiffer state: `${sessionId} ${queryId}` -> the current materialized 0-or-1-row map
+   * for a DIFFABLE_BYID sub whose client is diff-capable. EPHEMERAL — reseeded on every subscribe
+   * (`doModifyQuerySet`'s reset), updated on every incremental diff (`doNotifyWrites`), and dropped on
+   * unsubscribe/disconnect. NOT a durable CVR: if lost (process restart, or a sub falling back to the
+   * RERUN/QueryUpdated path for one turn) the drift checksum's client-side mismatch check is the
+   * backstop that resyncs the one affected query — see `change.ts`'s `driftChecksum` doc comment.
+   */
+  private readonly byIdRowMap = new Map<string, Map<string, RowVersion>>();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -220,6 +237,14 @@ export class SyncProtocolHandler {
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
     this.pendingFrontiers.delete(sessionId);
+    this.clearByIdRowMapForSession(sessionId);
+  }
+
+  /** Drop every `byIdRowMap` entry for a session (disconnect/reap) — ephemeral per-sub state, never
+   *  durable, so there's nothing to persist on the way out. */
+  private clearByIdRowMapForSession(sessionId: string): void {
+    const prefix = `${sessionId} `;
+    for (const key of [...this.byIdRowMap.keys()]) if (key.startsWith(prefix)) this.byIdRowMap.delete(key);
   }
 
   /** Reap a session whose heartbeat went dead: close the socket, then tear down like a disconnect. */
@@ -333,11 +358,28 @@ export class SyncProtocolHandler {
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId });
         const json = convexToJson(value);
-        const hash = hashValue(json);
-        if (q.resultHash !== undefined && q.resultHash === hash) {
-          modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+        if (byId && session.supportsQueryDiff) {
+          // DLR 2a: a DIFFABLE_BYID sub's initial answer to a diff-capable client is a QueryDiff
+          // "reset" (add-all over an empty map) instead of QueryUpdated.
+          //
+          // Reset-ts nuance: `execSub`'s return shape (`{value, tables, readRanges}`) doesn't surface
+          // the document's own engine commit ts, only the value. Rather than plumb a new field through
+          // the whole `SyncUdfExecutor` interface for this one call site, we use the session's own
+          // current confirmed ts (`session.version.ts`, unchanged by a ModifyQuerySet — it only bumps
+          // `querySet`) as the reset row's ts. This is safe: the checksum only needs client/server
+          // agreement on THIS row-map (both sides compute it the same way over whatever ts is chosen),
+          // and the very next real write to this id carries its OWN true commit ts through
+          // `byIdChangesFor`, so any placeholder-ts imprecision self-corrects on the first write.
+          const { changes, next } = byIdResetChanges(byId.docId, json, session.version.ts);
+          this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
+          modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next) });
         } else {
-          modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: json, hash });
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({ type: "QueryUpdated", queryId: q.queryId, value: json, hash });
+          }
         }
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: q.queryId, error: errMessage(e) });
@@ -345,6 +387,7 @@ export class SyncProtocolHandler {
     }
     for (const queryId of msg.remove) {
       this.subscriptions.remove(session.sessionId, queryId);
+      this.byIdRowMap.delete(subKey(session.sessionId, queryId));
       modifications.push({ type: "QueryRemoved", queryId });
     }
     // A query-set change bumps querySet (keeps ts).
@@ -570,8 +613,29 @@ export class SyncProtocolHandler {
       const modifications: StateModification[] = [];
       for (const sub of subs) {
         try {
+          if (sub.byId && session.supportsQueryDiff && invalidation.writtenDocs) {
+            // DLR 2a: a DIFFABLE_BYID sub with a diff-capable client and a commit that carried its
+            // written docs gets an incremental QueryDiff — no execSub re-run needed (a write to this
+            // id can only change the single row's VALUE, never the shape of what a future `db.get(id)`
+            // reads, so `sub.byId` itself is trusted as-is here — no reclassification necessary).
+            const wd = invalidation.writtenDocs.find(
+              (w) => w.keyspace === sub.byId!.keyspace && w.key === sub.byId!.key,
+            );
+            const key = subKey(sub.sessionId, sub.queryId);
+            const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
+            const { changes, next } = byIdChangesFor(sub.byId, prevMap, wd);
+            this.byIdRowMap.set(key, next);
+            modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
+            continue;
+          }
           const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-          this.subscriptions.add({ ...sub, tables, readRanges }); // refresh the read set
+          // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
+          // classification — a query whose read shape changes across a refresh (data/identity-
+          // dependent branching) must not keep carrying a `byId` that no longer matches what it
+          // actually reads now (Task 3 review follow-up: a stale `byId` here would drive a WRONG diff
+          // the next time this sub takes the branch above).
+          const byId = classifyByIdRead(value, readRanges) ?? undefined;
+          this.subscriptions.add({ ...sub, tables, readRanges, byId }); // refresh the read set
           const json = convexToJson(value);
           modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
         } catch (e) {
@@ -652,7 +716,15 @@ export class SyncProtocolHandler {
     for (const sub of subs) {
       try {
         const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-        this.subscriptions.add({ ...sub, tables, readRanges });
+        // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
+        // classification — an identity change can change WHAT a query reads (e.g. an
+        // identity-scoped `db.get`), so a stale `byId` here would drive a wrong diff on a later
+        // write. This refresh always answers with QueryUpdated (unchanged from today), so there's
+        // no `byIdRowMap` to seed here — a later incremental diff for this sub starts from
+        // whatever baseline is on file (or an empty one), and the drift checksum (see
+        // `change.ts`) is the backstop that resyncs the one query if that baseline is stale.
+        const byId = classifyByIdRead(value, readRanges) ?? undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId });
         const json = convexToJson(value);
         modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
       } catch (e) {
