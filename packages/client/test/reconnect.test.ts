@@ -306,7 +306,8 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
 
     client.setAuth("tok-1");
     client.subscribe("messages:list", { conversationId: "c1" }, () => {});
-    expect(t.sent.map((m) => m.type)).toEqual(["SetAuth", "ModifyQuerySet"]);
+    // DLR 2a: the capability-only Connect (supportsQueryDiff) precedes the first ModifyQuerySet.
+    expect(t.sent.map((m) => m.type)).toEqual(["SetAuth", "Connect", "ModifyQuerySet"]);
 
     // Simulate a network drop, then two mutations queued while offline (both become `unsent`).
     t.emitClose();
@@ -318,10 +319,12 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
     t.emitReopen();
 
     const afterReopen = t.sent.slice(sentBeforeReopen);
-    // The load-bearing order: SetAuth before the resubscribe before either flushed Mutation.
+    // The load-bearing order: SetAuth before the (DLR 2a) capability Connect before the resubscribe
+    // before either flushed Mutation.
     expect(afterReopen[0]).toEqual({ type: "SetAuth", token: "tok-1" });
-    expect(afterReopen[1]!.type).toBe("ModifyQuerySet");
-    const mutationFrames = afterReopen.slice(2);
+    expect(afterReopen[1]!.type).toBe("Connect");
+    expect(afterReopen[2]!.type).toBe("ModifyQuerySet");
+    const mutationFrames = afterReopen.slice(3);
     expect(mutationFrames.map((m) => m.type)).toEqual(["Mutation", "Mutation"]);
     expect((mutationFrames[0] as { args: unknown }).args).toEqual({ conversationId: "c1", body: "A" });
     expect((mutationFrames[1] as { args: unknown }).args).toEqual({ conversationId: "c1", body: "B" });

@@ -22,6 +22,15 @@ export function byIdChangesFor(
   wd: WrittenDoc | undefined,
 ): { changes: Change[]; next: Map<string, RowVersion> } {
   if (!wd) return { changes: [], next: prev };
+  if (wd.keyspace !== byId.keyspace) {
+    // Defensive: the caller (handler.ts) is expected to only ever pass a `wd` it already matched
+    // to `byId`'s own keyspace (see the `writtenDocs.find(...)` call site). A mismatch here would
+    // mean a caller bug, not a runtime condition to silently recover from — surface it loudly
+    // rather than misapplying a foreign-table write to this sub's row-map.
+    console.error(
+      `[sync] byIdChangesFor: wd.keyspace "${wd.keyspace}" !== byId.keyspace "${byId.keyspace}" (caller bug)`,
+    );
+  }
   const docId = wd.docId;
   let change: Change;
   if (wd.newRow === null) change = { t: "remove", key: docId };

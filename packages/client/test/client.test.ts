@@ -145,7 +145,10 @@ describe("StackbaseClient — protocol safety", () => {
     const seen: Array<Array<{ body: string }>> = [];
     client.subscribe(api.messages.list, { conversationId: "c1" }, (v) => seen.push(v as Array<{ body: string }>));
 
-    expect(t.sent[0]!.type).toBe("ModifyQuerySet");
+    // DLR 2a: a non-outbox client advertises `supportsQueryDiff` via a capability-only Connect before
+    // its first ModifyQuerySet, so the subscribe is the SECOND frame.
+    expect(t.sent[0]!.type).toBe("Connect");
+    expect(t.sent[1]!.type).toBe("ModifyQuerySet");
     // Initial transition (start {0,0} → {1,0}) — applied.
     t.emit({ type: "Transition", startVersion: { querySet: 0, ts: 0 }, endVersion: { querySet: 1, ts: 0 }, modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }] });
     expect(seen.at(-1)).toEqual([]);

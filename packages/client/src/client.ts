@@ -261,6 +261,12 @@ export class StackbaseClient {
    *  Guards against a double-handshake when both the reopen path and the drain's first-connect path
    *  could fire — the drain's `ensureInitialHandshake()` is a no-op once a reopen already sent one. */
   private outboxConnectSent = false;
+  /** DLR Stage 2a — whether this connection has advertised `supportsQueryDiff` (reset at close). A
+   *  non-outbox client has no resume `Connect` to piggyback the capability on (an outbox client's
+   *  `buildConnectMessage` carries it), so it sends a minimal capability-only `Connect` before its
+   *  first subscribe. Without this the server never records the capability and every by-id sub falls
+   *  back to RERUN — correct, but the diff path never engages. */
+  private diffCapabilitySent = false;
   /** The drain (Task 4) — the Web Locks leader that turns the durable queue into exactly-once server
    *  effects. Present iff `opts.outbox` is configured; started at construction. */
   private readonly outboxDrain?: OutboxDrain;
@@ -463,6 +469,7 @@ export class StackbaseClient {
     if (!sub) {
       const queryId = this.nextQueryId++;
       sub = this.store.create(queryId, path, argsJson, hash);
+      this.maybeSendDiffCapability(); // must precede the first ModifyQuerySet (see the method doc)
       this.transport.send({ type: "ModifyQuerySet", add: [{ queryId, udfPath: path, args: argsJson }], remove: [] });
     }
     const listener: Listener = { onUpdate, onError };
@@ -859,6 +866,7 @@ export class StackbaseClient {
   private onTransportClosed(): void {
     this.closed = true;
     this.outboxConnectSent = false; // a fresh connection needs a fresh Connect handshake.
+    this.diffCapabilitySent = false; // ...and must re-advertise the diff capability (new server session).
     // BEFORE the S4 close rules: revert the drain's in-flight chunk (its unresponded units will
     // never get a response on the new server session) so `closeSession` below sees them as plain
     // `unsent` retained entries, and the drain's one-unacked invariant (`active === null`) can't
@@ -898,6 +906,7 @@ export class StackbaseClient {
   private onTransportReopened(): void {
     this.closed = false;
     if (this.hasSetAuth) this.transport.send({ type: "SetAuth", token: this.lastAuthToken });
+    this.maybeSendDiffCapability(); // re-advertise before resync's resubscribes (fresh server session)
     this.resync();
     if (this.outbox) {
       // T3: for a durable-outbox client the naive unsent flush is REPLACED by the `Connect` resume
@@ -997,6 +1006,21 @@ export class StackbaseClient {
   private sendConnect(): void {
     const held = outboxHeldFromLog(this.reconciler.entries());
     this.transport.send(buildConnectMessage(makeEntropy(), this.outboxClientId!, held));
+  }
+
+  /** DLR Stage 2a — advertise by-id diff support once per connection for a NON-outbox client (an
+   *  outbox client's resume `Connect` already carries the flag). A capability-only `Connect` (no
+   *  `clientId`/`held`/`ackedThrough`) is the reserved server no-op path — it records the capability
+   *  and sends no `ConnectAck` — so it never interferes with the outbox handshake or backpressure.
+   *  Sent BEFORE the first `ModifyQuerySet` (fresh connect) and before `resync()` (reopen) so the
+   *  server has the capability recorded when it decides a by-id sub's initial answer; the ordered
+   *  transport guarantees delivery order. Even if it somehow arrived late the diff path self-heals
+   *  (a pre-capability RERUN answer, then diffs resume), but sending it first keeps the common path
+   *  on the diff answer from the very first subscribe. */
+  private maybeSendDiffCapability(): void {
+    if (this.outbox || this.diffCapabilitySent || this.closed) return;
+    this.diffCapabilitySent = true;
+    this.transport.send({ type: "Connect", sessionId: makeEntropy(), supportsQueryDiff: true });
   }
 
   /** Process a `ConnectAck` (verdict §(e)): the capability proof arms the S4 park swap; the

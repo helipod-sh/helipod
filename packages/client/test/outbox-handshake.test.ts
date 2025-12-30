@@ -100,13 +100,20 @@ function enqueueUnsent(client: StackbaseClient, body: string): Promise<unknown> 
 /* -------------------------------------------------------------------------- */
 
 describe("StackbaseClient — the Connect handshake on reopen (T3)", () => {
-  it("no-outbox reopen is byte-identical: NO Connect frame, the naive unsent flush is unchanged", () => {
+  it("no-outbox reopen sends only a capability-only Connect (no resume handshake); the naive unsent flush is unchanged", () => {
     const t = new MockTransport();
     const client = new StackbaseClient(t);
     t.emitClose();
     void client.mutation("messages:send", { body: "A" });
     t.emitReopen();
-    expect(t.connects()).toHaveLength(0); // never sends Connect without an outbox
+    // DLR 2a: a no-outbox client advertises `supportsQueryDiff` via a capability-only Connect, but
+    // NEVER the resume handshake — no clientId/held/ackedThrough (the dedup handshake is outbox-only).
+    const connects = t.connects();
+    expect(connects).toHaveLength(1);
+    expect(connects[0]!.supportsQueryDiff).toBe(true);
+    expect(connects[0]!.clientId).toBeUndefined();
+    expect(connects[0]!.held).toBeUndefined();
+    expect(connects[0]!.ackedThrough).toBeUndefined();
     // The one unsent mutation still flushed exactly as before.
     expect(t.mutations().map((m) => (m.args as { body: string }).body)).toEqual(["A"]);
   });

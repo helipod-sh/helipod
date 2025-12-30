@@ -372,7 +372,7 @@ export class SyncProtocolHandler {
           // `byIdChangesFor`, so any placeholder-ts imprecision self-corrects on the first write.
           const { changes, next } = byIdResetChanges(byId.docId, json, session.version.ts);
           this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
-          modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next) });
+          modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next), reset: true });
         } else {
           const hash = hashValue(json);
           if (q.resultHash !== undefined && q.resultHash === hash) {
@@ -636,6 +636,15 @@ export class SyncProtocolHandler {
           // the next time this sub takes the branch above).
           const byId = classifyByIdRead(value, readRanges) ?? undefined;
           this.subscriptions.add({ ...sub, tables, readRanges, byId }); // refresh the read set
+          // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
+          // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
+          // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
+          // diff-capable again) would diff against a stale prev-map keyed to the OLD id and
+          // accumulate a second, never-pruned entry (the identity-flip bug this closes). A sub
+          // that keeps the SAME byId across this refresh is untouched — its map stays accurate.
+          if (sub.byId && (!byId || byId.keyspace !== sub.byId.keyspace || byId.key !== sub.byId.key)) {
+            this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
+          }
           const json = convexToJson(value);
           modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
         } catch (e) {
@@ -719,14 +728,29 @@ export class SyncProtocolHandler {
         // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
         // classification — an identity change can change WHAT a query reads (e.g. an
         // identity-scoped `db.get`), so a stale `byId` here would drive a wrong diff on a later
-        // write. This refresh always answers with QueryUpdated (unchanged from today), so there's
-        // no `byIdRowMap` to seed here — a later incremental diff for this sub starts from
-        // whatever baseline is on file (or an empty one), and the drift checksum (see
-        // `change.ts`) is the backstop that resyncs the one query if that baseline is stale.
+        // write.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
         this.subscriptions.add({ ...sub, tables, readRanges, byId });
+        const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
-        modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
+        if (byId && session.supportsQueryDiff) {
+          // Reset semantics: this is a RE-BASELINE, not an incremental diff off a single write — the
+          // sub's byId may have just changed to a DIFFERENT (keyspace, key, docId) (e.g. an
+          // identity-scoped `db.get(ctx.identity)` whose target flips under this very SetAuth), so
+          // the row-map must be reseeded from THIS fresh value, never carried forward from whatever
+          // (possibly now-stale) map was on file. Reusing the old map here is exactly the bug this
+          // fixes: the next incremental write would diff against the OLD id's stale prev-map and
+          // accumulate a second, never-pruned entry.
+          const { changes, next } = byIdResetChanges(byId.docId, json, session.version.ts);
+          this.byIdRowMap.set(key, next);
+          modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next), reset: true });
+        } else {
+          // Not DIFFABLE post-refresh (or a non-capable session): unchanged RERUN path. Drop any
+          // stale byIdRowMap entry so a LATER re-classification back to DIFFABLE never resumes
+          // incremental diffing from a map keyed to a byId this refresh has just superseded.
+          this.byIdRowMap.delete(key);
+          modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
+        }
       } catch (e) {
         modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
       }

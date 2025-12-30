@@ -122,7 +122,18 @@ export type StateModification =
   // row-map; `checksum` is the server's drift fingerprint of the resulting map (client verifies).
   // A DIFFABLE query's INITIAL answer is a QueryDiff "reset" (add-all over an empty map). Sent only
   // to a session that advertised `supportsQueryDiff` on Connect; RERUN queries use QueryUpdated.
-  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string };
+  //
+  // `reset` (DLR 2a follow-up, reset semantics): set `true` on EVERY re-baseline of a DIFFABLE
+  // sub's row-map — the initial subscribe answer, and any later re-answer that recomputes the
+  // sub's value/byId from scratch (e.g. a `SetAuth` refresh) rather than incrementally diffing a
+  // single write. The client must clear its row-map before applying `changes` when `reset` is
+  // present, exactly like the initial-subscribe case, instead of merging onto whatever map it had
+  // — a re-baseline can legitimately swap which document the sub even tracks (an identity-scoped
+  // `db.get` whose target id changes under a `SetAuth`), so applying it as an incremental edit onto
+  // the OLD map would leave a stale entry behind. Absent (or `false`) on every ordinary incremental
+  // diff — additive, an old client that doesn't know the field simply applies `changes` as an edit
+  // onto its running map, which is correct for every non-reset QueryDiff.
+  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }

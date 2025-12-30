@@ -9,6 +9,7 @@ import { serializeKeyRange, keySuccessor, tableKeyspaceId, type SerializedKeyRan
 import type { Value } from "@stackbase/values";
 import {
   SyncProtocolHandler,
+  driftChecksum,
   type SyncUdfExecutor,
   type SyncWebSocket,
   type ServerMessage,
@@ -23,6 +24,7 @@ const spanRange = (keyspace: string, start: Uint8Array, end: Uint8Array): Serial
 
 const KS = tableKeyspaceId("3");
 const POINT_A = pointRange(KS, b(1));
+const POINT_U2 = pointRange(KS, b(5));
 const SPAN = spanRange(KS, b(1), b(9));
 
 class MockSocket implements SyncWebSocket {
@@ -178,5 +180,99 @@ describe("SyncProtocolHandler: DIFFABLE_BYID QueryDiff emission", () => {
     if (mods[0]!.type === "QueryUpdated") {
       expect(mods[0]!.value).toEqual([{ _id: "docs|a", n: 1 }, { _id: "docs|b", n: 2 }]);
     }
+  });
+});
+
+/** identity === null -> DIFFABLE_BYID on docs|a (point range at key b(1)). identity === "user2" ->
+ *  STILL DIFFABLE_BYID, but on a DIFFERENT document, docs|u2 (point range at key b(5)) — the
+ *  "viewer's own doc" pattern (`db.get(ctx.identity)`), where a `SetAuth` flips WHICH id a
+ *  by-id sub tracks while staying by-id (byId stays truthy throughout). */
+function makeIdentityFlipExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery(_path, _args, identity) {
+      if (identity === "user2") {
+        return {
+          value: { _id: "docs|u2", n: 100 } as unknown as Value,
+          tables: ["table:3"],
+          readRanges: [POINT_U2],
+        };
+      }
+      return {
+        value: { _id: "docs|a", n: 1 } as unknown as Value,
+        tables: ["table:3"],
+        readRanges: [POINT_A],
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+describe("SyncProtocolHandler: identity-flip re-baseline reseeds byIdRowMap (reset semantics)", () => {
+  it("a SetAuth that flips byId to a DIFFERENT doc reseeds the row-map — no stale old-id entry survives a later write to the new id", async () => {
+    const handler = new SyncProtocolHandler(makeIdentityFlipExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+
+    // Subscribe while identity is null: DIFFABLE_BYID on docs|a, gets a QueryDiff reset.
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+    expect(socket.modifications()[0]).toMatchObject({
+      type: "QueryDiff",
+      reset: true,
+      changes: [{ t: "add", key: "docs|a", row: { _id: "docs|a", n: 1 } }],
+    });
+    socket.clear();
+
+    // SetAuth flips identity to "user2": byId now points at a DIFFERENT (keyspace,key,docId) —
+    // docs|u2 — while staying DIFFABLE (byId stays truthy). The fix under test: this re-baseline
+    // must emit a QueryDiff RESET (reseeding the row-map to {docs|u2}), never a QueryUpdated, and
+    // must never carry the old docs|a entry forward.
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user2" }));
+    const setAuthMods = socket.modifications();
+    expect(setAuthMods).toHaveLength(1);
+    expect(setAuthMods[0]).toMatchObject({
+      type: "QueryDiff",
+      reset: true,
+      changes: [{ t: "add", key: "docs|u2", row: { _id: "docs|u2", n: 100 } }],
+    });
+    socket.clear();
+
+    // A write to the NEW id (docs|u2) must produce a clean incremental QueryDiff reflecting ONLY
+    // docs|u2 — an "edit" (present in the reseeded map), never an "add" (the tell-tale symptom of a
+    // stale prev-map that never got reseeded: `byIdChangesFor` emits "add" whenever the docId isn't
+    // already in its prev-map, which is exactly what a stale docs|a-only map would produce here).
+    const inv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [POINT_U2],
+      commitTs: 55,
+      writtenDocs: [
+        { keyspace: KS, key: POINT_U2.start, docId: "docs|u2", newRow: { _id: "docs|u2", n: 101 }, wasPresent: true, ts: 55 },
+      ],
+    };
+    await handler.notifyWrites(inv);
+
+    const mods = socket.modifications();
+    expect(mods).toHaveLength(1);
+    expect(mods[0]).toMatchObject({
+      type: "QueryDiff",
+      changes: [{ t: "edit", key: "docs|u2", row: { _id: "docs|u2", n: 101 }, ts: 55 }],
+    });
+    // The clean-map invariant: the emitted checksum must equal a driftChecksum computed over a
+    // map containing ONLY docs|u2 (a single (key, ts) pair) — never the accumulated 2-entry map
+    // (stale docs|a + fresh docs|u2) an un-reseeded byIdRowMap would produce. `driftChecksum` folds
+    // over exactly the (key, ts) pairs present, so a surviving stale entry changes this value.
+    const cleanMap = new Map([["docs|u2", { row: { _id: "docs|u2", n: 101 }, ts: 55 }]]);
+    expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(cleanMap));
   });
 });
