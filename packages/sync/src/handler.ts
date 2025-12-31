@@ -24,9 +24,10 @@ import {
   type ClientMutationVerdict,
   type MutationBatchEntry,
 } from "./protocol";
+import { tableOfKeyspaceId } from "@stackbase/index-key-codec";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
-import { classifyByIdRead } from "./classify";
-import { byIdChangesFor, byIdResetChanges } from "./commit-differ";
+import { classifyByIdRead, rangeReadFromDiffable } from "./classify";
+import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
 import { driftChecksum, type RowVersion } from "./change";
 import {
   SessionBackpressureController,
@@ -353,13 +354,29 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables, readRanges } = await this.execSub(session, q.udfPath, q.args);
+        const { value, tables, readRanges, diffableRange } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId });
+        const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range });
         const json = convexToJson(value);
-        if (byId && session.supportsQueryDiff) {
+        if (range && session.supportsQueryDiff) {
+          // DLR 2b: a DIFFABLE_RANGE sub's initial answer to a diff-capable client is a QueryDiff
+          // "reset" (add-all, in the fresh scan's own order) instead of QueryUpdated. The passthrough
+          // guarantee behind `diffableRange` (Task 3: a single-index-range collect with no `.take()`/
+          // limit, read-policy, or post-processing) means `value` IS already the ordered doc array —
+          // no separate re-derivation of order needed.
+          const { changes, next } = rangeResetChanges(range, json as JSONValue[], session.version.ts);
+          this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
+          modifications.push({
+            type: "QueryDiff",
+            queryId: q.queryId,
+            changes,
+            checksum: driftChecksum(next),
+            reset: { mode: "range", orderDir: range.order },
+          });
+        } else if (byId && session.supportsQueryDiff) {
           // DLR 2a: a DIFFABLE_BYID sub's initial answer to a diff-capable client is a QueryDiff
           // "reset" (add-all over an empty map) instead of QueryUpdated.
           //
@@ -614,6 +631,30 @@ export class SyncProtocolHandler {
       const modifications: StateModification[] = [];
       for (const sub of subs) {
         try {
+          if (sub.range && session.supportsQueryDiff && invalidation.writtenDocs) {
+            // DLR 2b: a DIFFABLE_RANGE sub with a diff-capable client and a commit that carried its
+            // written docs gets an incremental QueryDiff — no execSub re-run needed. Unlike a by-id
+            // sub (which only ever cares about writes at its OWN key), a range sub must consider
+            // EVERY write in its TABLE: a write anywhere in the table can enter or exit the range
+            // (an insert, an update that crosses the bounds/filter, a delete). `writtenDocs` is
+            // filtered to the sub's table via `tableOfKeyspaceId` — `sub.range.keyspace` is an INDEX
+            // keyspace (`index:<tableNumber>:<indexName>`) while `wd.keyspace` is always a PRIMARY
+            // keyspace (`table:<tableNumber>`), but both embed the identical `encodeStorageTableId`
+            // table-number string (verified against `indexKeyspaceId`/`tableKeyspaceId`'s shared
+            // encoding in `@stackbase/index-key-codec`), so comparing the parsed table id is the
+            // provably correct match — not a coincidental string prefix trick.
+            const subTable = tableOfKeyspaceId(sub.range.keyspace);
+            const wds = invalidation.writtenDocs.filter((w) => tableOfKeyspaceId(w.keyspace) === subTable);
+            const key = subKey(sub.sessionId, sub.queryId);
+            const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
+            const { changes, next } = rangeChangesFor(sub.range, prevMap, wds);
+            this.byIdRowMap.set(key, next);
+            // Pushed even with an empty `changes` array (e.g. every written doc in the table this
+            // commit was outside the sub's bounds/filter) — an empty QueryDiff still advances the
+            // client's version frontier under this Transition's bracket; the client no-ops it.
+            modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
+            continue;
+          }
           if (sub.byId && session.supportsQueryDiff && invalidation.writtenDocs) {
             // DLR 2a: a DIFFABLE_BYID sub with a diff-capable client and a commit that carried its
             // written docs gets an incremental QueryDiff — no execSub re-run needed (a write to this
@@ -629,14 +670,15 @@ export class SyncProtocolHandler {
             modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
             continue;
           }
-          const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-          // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
-          // classification — a query whose read shape changes across a refresh (data/identity-
-          // dependent branching) must not keep carrying a `byId` that no longer matches what it
-          // actually reads now (Task 3 review follow-up: a stale `byId` here would drive a WRONG diff
-          // the next time this sub takes the branch above).
+          const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+          // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
+          // spreading the sub's stale classification — a query whose read shape changes across a
+          // refresh (data/identity-dependent branching) must not keep carrying a `byId`/`range` that
+          // no longer matches what it actually reads now (Task 3 review follow-up: a stale `byId`
+          // here would drive a WRONG diff the next time this sub takes a branch above).
           const byId = classifyByIdRead(value, readRanges) ?? undefined;
-          this.subscriptions.add({ ...sub, tables, readRanges, byId }); // refresh the read set
+          const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+          this.subscriptions.add({ ...sub, tables, readRanges, byId, range }); // refresh the read set
           // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
           // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
           // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
@@ -644,6 +686,15 @@ export class SyncProtocolHandler {
           // accumulate a second, never-pruned entry (the identity-flip bug this closes). A sub
           // that keeps the SAME byId across this refresh is untouched — its map stays accurate.
           if (sub.byId && (!byId || byId.keyspace !== sub.byId.keyspace || byId.key !== sub.byId.key)) {
+            this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
+          }
+          // Same idea for a range sub, but unconditional: this RERUN branch means a full re-scan
+          // (not an incremental diff) answered this turn — a write anywhere in the table could have
+          // shifted the range's MEMBERSHIP (not just one row's value) with no per-doc diff tracking
+          // it, so the old row-map's membership snapshot predates this RERUN and must not be reused
+          // by a later incremental diff. Drop it unconditionally (not gated on the range classification
+          // itself changing, unlike byId above) so a later write re-seeds via a fresh QueryDiff reset.
+          if (sub.range) {
             this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
           }
           const json = convexToJson(value);

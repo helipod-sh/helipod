@@ -5,8 +5,18 @@
  * SHAPE changes (stops being by-id) never keeps a stale `byId` classification into a later write.
  */
 import { describe, it, expect } from "vitest";
-import { serializeKeyRange, keySuccessor, tableKeyspaceId, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import {
+  serializeKeyRange,
+  keySuccessor,
+  tableKeyspaceId,
+  indexKeyspaceId,
+  indexKeyRangeStart,
+  indexKeyRangeEnd,
+  type SerializedKeyRange,
+} from "@stackbase/index-key-codec";
 import type { Value } from "@stackbase/values";
+import type { RangeRead } from "../src/classify";
+import { orderKeyFor } from "../src/commit-differ";
 import {
   SyncProtocolHandler,
   driftChecksum,
@@ -26,6 +36,26 @@ const KS = tableKeyspaceId("3");
 const POINT_A = pointRange(KS, b(1));
 const POINT_U2 = pointRange(KS, b(5));
 const SPAN = spanRange(KS, b(1), b(9));
+
+// ---------------------------------------------------------------------------------------------
+// DIFFABLE_RANGE (DLR 2b) fixtures — a `channelId = "c"` index range on table 3, mirroring
+// commit-differ.test.ts's own `channelRange` fixture so the two suites stay in lockstep.
+// ---------------------------------------------------------------------------------------------
+const CHANNEL_KEYSPACE = indexKeyspaceId("3", "by_channel");
+const CHANNEL_RANGE: RangeRead = {
+  keyspace: CHANNEL_KEYSPACE,
+  bounds: serializeKeyRange({
+    keyspace: CHANNEL_KEYSPACE,
+    start: indexKeyRangeStart(["c"]),
+    end: indexKeyRangeEnd(["c"])!,
+  }),
+  filters: [],
+  order: "asc",
+  fields: ["channelId"],
+};
+const rangeRow = (id: string, channelId: string, n: number, ct = 100) => ({ _id: id, channelId, n, _creationTime: ct });
+const DOC_A = rangeRow("docs|a", "c", 1, 100);
+const DOC_B = rangeRow("docs|b", "c", 2, 200);
 
 class MockSocket implements SyncWebSocket {
   readonly messages: ServerMessage[] = [];
@@ -274,5 +304,132 @@ describe("SyncProtocolHandler: identity-flip re-baseline reseeds byIdRowMap (res
     // over exactly the (key, ts) pairs present, so a surviving stale entry changes this value.
     const cleanMap = new Map([["docs|u2", { row: { _id: "docs|u2", n: 101 }, ts: 55 }]]);
     expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(cleanMap));
+  });
+});
+
+/** A passthrough single-index-range collect over table 3's `by_channel` index (`channelId = "c"`),
+ *  returning `[DOC_A, DOC_B]` in already-sorted order — the DIFFABLE_RANGE shape `execSub` surfaces
+ *  via `diffableRange` (Task 3/4). */
+function makeRangeExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery() {
+      return {
+        value: [DOC_A, DOC_B] as unknown as Value,
+        tables: ["table:3"],
+        readRanges: [CHANNEL_RANGE.bounds],
+        diffableRange: CHANNEL_RANGE,
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+describe("SyncProtocolHandler: DIFFABLE_RANGE QueryDiff emission (DLR 2b)", () => {
+  it("subscribe (diff-capable session) gets a QueryDiff range reset, then a matching write gets an incremental add", async () => {
+    const handler = new SyncProtocolHandler(makeRangeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+
+    const orderKeyA = orderKeyFor(CHANNEL_RANGE, DOC_A);
+    const orderKeyB = orderKeyFor(CHANNEL_RANGE, DOC_B);
+    const resetMods = socket.modifications();
+    expect(resetMods).toHaveLength(1);
+    expect(resetMods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      reset: { mode: "range", orderDir: "asc" },
+      changes: [
+        { t: "add", key: "docs|a", row: DOC_A, ts: 0, orderKey: orderKeyA },
+        { t: "add", key: "docs|b", row: DOC_B, ts: 0, orderKey: orderKeyB },
+      ],
+    });
+    const resetMap = new Map([
+      ["docs|a", { row: DOC_A, ts: 0, orderKey: orderKeyA }],
+      ["docs|b", { row: DOC_B, ts: 0, orderKey: orderKeyB }],
+    ]);
+    expect((resetMods[0] as { checksum: string }).checksum).toBe(driftChecksum(resetMap));
+    socket.clear();
+
+    // A write inside the sub's range (channelId "c", table 3) — an incremental QueryDiff add at the
+    // right orderKey, skipping execSub entirely.
+    const docC = rangeRow("docs|c", "c", 3, 300);
+    const orderKeyC = orderKeyFor(CHANNEL_RANGE, docC);
+    const inv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 42,
+      writtenDocs: [{ keyspace: KS, key: "irrelevant", docId: "docs|c", newRow: docC, wasPresent: false, ts: 42 }],
+    };
+    await handler.notifyWrites(inv);
+
+    const mods = socket.modifications();
+    expect(mods).toHaveLength(1);
+    expect(mods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      changes: [{ t: "add", key: "docs|c", row: docC, ts: 42, orderKey: orderKeyC }],
+    });
+    // No `reset` on an incremental diff.
+    expect((mods[0] as { reset?: unknown }).reset).toBeUndefined();
+    const nextMap = new Map([...resetMap, ["docs|c", { row: docC, ts: 42, orderKey: orderKeyC }]]);
+    expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(nextMap));
+  });
+
+  it("the table-match guard: a write to a DIFFERENT table (and an out-of-range write in the SAME table) produce NO spurious change for this sub", async () => {
+    const handler = new SyncProtocolHandler(makeRangeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+    socket.clear();
+
+    const orderKeyA = orderKeyFor(CHANNEL_RANGE, DOC_A);
+    const orderKeyB = orderKeyFor(CHANNEL_RANGE, DOC_B);
+    const resetMap = new Map([
+      ["docs|a", { row: DOC_A, ts: 0, orderKey: orderKeyA }],
+      ["docs|b", { row: DOC_B, ts: 0, orderKey: orderKeyB }],
+    ]);
+
+    // A "poison" doc that would WRONGLY look like a valid in-range add if the table-match filter
+    // were missing or wrong: same channelId ("c", so it'd pass `inBounds`/`passesFilters`), but its
+    // `keyspace` belongs to a DIFFERENT table (99, not 3) — proving the filter matches on TABLE, not
+    // on accidentally-matching field values. Plus a genuine same-table write that's simply outside
+    // the range's channel bounds (channelId "z"), proving the bounds check itself still holds too.
+    const foreignTableDoc = rangeRow("docs|evil", "c", 5, 100);
+    const outOfRangeDoc = rangeRow("docs|z", "z", 6, 400);
+    const inv: WriteInvalidation = {
+      tables: ["table:3", "table:99"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 43,
+      writtenDocs: [
+        { keyspace: tableKeyspaceId("99"), key: "irrelevant", docId: "docs|evil", newRow: foreignTableDoc, wasPresent: false, ts: 43 },
+        { keyspace: KS, key: "irrelevant2", docId: "docs|z", newRow: outOfRangeDoc, wasPresent: false, ts: 43 },
+      ],
+    };
+    await handler.notifyWrites(inv);
+
+    const mods = socket.modifications();
+    expect(mods).toHaveLength(1);
+    expect(mods[0]).toMatchObject({ type: "QueryDiff", queryId: 1, changes: [] });
+    // The row-map is untouched — still exactly the post-reset {docs|a, docs|b} map, no trace of
+    // either poison doc.
+    expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(resetMap));
   });
 });
