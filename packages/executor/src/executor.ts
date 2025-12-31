@@ -320,6 +320,10 @@ function deepEqualJson(a: JSONValue, b: JSONValue): boolean {
  * documents, in the same order. Content is compared FULLY (`deepEqualJson`), not just each
  * document's `_id`: a handler that adds/drops/changes a field while preserving `_id` order (e.g.
  * `.map(d => ({...d, x: 1}))`) must still be declined, and `_id`-only equality would miss that.
+ * Also declines whenever the collect declared a `.take(n)` limit (`hadLimit`): the recorded range
+ * is the TRUNCATED top-N window, not the full matching range, so a downstream range-differ would
+ * neither apply the limit (rendering every matching row, not just the top N) nor notice a write
+ * that should promote a new document into the top-N — see `CollectTrace.hadLimit`'s doc comment.
  * Only the executor can make this call: it alone sees both the kernel's collect trace AND the
  * handler's final returned value. Any doubt → `undefined` (the caller falls back to a full RERUN,
  * including on a thrown exception while inspecting a malformed/non-Value return — this helper never
@@ -331,6 +335,7 @@ function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], r
   if (trace.length !== 1) return undefined; // exactly one collect, and no ambiguous second collect
   const t = trace[0]!;
   if (t.hadReadPolicy) return undefined; // dynamic authz was merged in — RERUN, never diff
+  if (t.hadLimit) return undefined; // truncated top-N window, not the full range — RERUN, never diff
   // No other read syscall (e.g. a `db.get` alongside the collect) touched this transaction: the
   // run's full read set must be exactly the one range this collect itself scanned.
   if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;

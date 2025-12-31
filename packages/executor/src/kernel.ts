@@ -79,6 +79,13 @@ export interface CollectTrace {
   /** True when a read policy (authz) was merged into this collect's filters — re-applying dynamic
    *  authz downstream would be unsound, so the executor declines diffability whenever this is set. */
   hadReadPolicy: boolean;
+  /** True when the query declared a `.take(n)` limit. The recorded `bounds`/`docs` reflect the
+   *  TRUNCATED (top-N) result, not the full matching range — a downstream differ diffing the range
+   *  would (a) miss a write that should promote a new document into the top-N, and (b) never apply
+   *  the limit at all, rendering every matching row instead of just the top N. The executor declines
+   *  diffability whenever this is set, regardless of how faithfully the handler passes the result
+   *  through. */
+  hadLimit: boolean;
 }
 
 export interface KernelContext {
@@ -547,6 +554,7 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
         fields: indexSpec.fields,
         docs: docsJson,
         hadReadPolicy,
+        hadLimit: spec.limit !== undefined,
       });
     }
   }
