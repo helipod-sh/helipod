@@ -24,7 +24,16 @@ import {
   type InternalDocumentId,
   type ShardId,
 } from "@stackbase/id-codec";
-import { indexKeyspaceId, keySuccessor, encodeIndexKey, indexKeysEqual, type IndexableValue, type KeyRange } from "@stackbase/index-key-codec";
+import {
+  indexKeyspaceId,
+  keySuccessor,
+  encodeIndexKey,
+  indexKeysEqual,
+  serializeKeyRange,
+  type IndexableValue,
+  type KeyRange,
+  type SerializedKeyRange,
+} from "@stackbase/index-key-codec";
 import {
   computeIndexUpdates,
   extractIndexKey,
@@ -43,6 +52,34 @@ import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
 import type { PolicyRegistry, RuleContext, RelationRegistry } from "./policy";
 import { evalWritePolicy, mergeReadPolicy, resolveReadPolicy } from "./policy";
+
+/**
+ * DLR Stage 2b: one `db.query` collect's metadata, captured by `handleDbQuery` for the
+ * executor's DIFFABLE_RANGE passthrough-guard classification (see `executor.ts`'s
+ * `classifyDiffableRange`). Only the executor can decide diffability — it alone sees both this
+ * trace AND the handler's returned value — so the kernel's job is purely to record, never judge.
+ */
+export interface CollectTrace {
+  /** The single `index:` keyspace this collect scanned (byte-identical to the entry in `readSet`). */
+  keyspace: string;
+  /** The scanned index-range bounds, byte-identical to the `index:` range recorded in the read set. */
+  bounds: SerializedKeyRange;
+  /** The USER's `.where()` filters, captured BEFORE any read-policy merge. */
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+  /**
+   * This collect's documents, JSON-encoded exactly as the syscall response itself carries them
+   * (same array, in fact — see `handleDbQuery`), in order. The executor's passthrough check needs
+   * full per-document content, not just each doc's `_id`: a handler that ADDS/DROPS/CHANGES a
+   * field while preserving `_id` order (e.g. `.map(d => ({...d, x: 1}))`) must still be declined,
+   * and only a full content comparison catches that — `_id`-only equality would not.
+   */
+  docs: JSONValue[];
+  /** True when a read policy (authz) was merged into this collect's filters — re-applying dynamic
+   *  authz downstream would be unsound, so the executor declines diffability whenever this is set. */
+  hadReadPolicy: boolean;
+}
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -71,6 +108,11 @@ export interface KernelContext {
    *  mutation (`"default"` shard) may read everything but may not write sharded tables; a
    *  sharded mutation is subject to the full read+write ownership matrix (D3). */
   readonly shardDeclared: boolean;
+  /** DLR Stage 2b: when present, `handleDbQuery` pushes one `CollectTrace` per `db.query` collect
+   *  onto this array. Only the top-level query-run context sets this (an empty array, populated as
+   *  collects happen); facade/rule-context readers and mutations never set it, so their reads are
+   *  invisible to (and can't be mistaken for) DIFFABLE_RANGE classification. */
+  readonly collectTrace?: CollectTrace[];
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -470,16 +512,46 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
     ),
     limit: spec.limit,
   };
+  // Captured BEFORE any read-policy merge below (DLR 2b): the diffable-range trace must carry
+  // the USER's own filters, never the dynamic authz predicate the merge appends.
+  const userFilters = query.filters ?? [];
 
-  if (!ctx.privileged && ctx.getRuleContext) {
-    const policy = ctx.policyRegistry.get(tableName);
-    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
+  const hadReadPolicy = !ctx.privileged && !!ctx.getRuleContext && !!ctx.policyRegistry.get(tableName)?.read;
+  if (hadReadPolicy) {
+    const policy = ctx.policyRegistry.get(tableName)!;
+    query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext!(), tableName, ctx.relationRegistry));
   }
 
   const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
   const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs, overlay);
-  recordScanReads(ctx, tableMeta, readSet.toArray());
-  return JSON.stringify({ docs: documents.map((d) => convexToJson(d as Value)) });
+  const scannedRanges = readSet.toArray();
+  recordScanReads(ctx, tableMeta, scannedRanges);
+  // Same encoding either consumer needs — computed once and shared by both the syscall response
+  // below and (when tracing) the DLR 2b collect trace, so the trace is byte-identical to what the
+  // handler actually receives.
+  const docsJson = documents.map((d) => convexToJson(d as Value));
+
+  if (ctx.collectTrace) {
+    // DLR 2b: record this collect's metadata for the executor's DIFFABLE_RANGE classification.
+    // Only a clean single-index-range scan is recordable — if this collect's own read set carries
+    // more than one `index:` range (should not happen for a single-index `collect()`, but stay
+    // conservative per Task 1's verified single-range invariant), skip the trace entry entirely so
+    // the executor's `trace.length !== 1` guard declines diffability for the whole run.
+    const indexRanges = scannedRanges.filter((r) => r.keyspace.startsWith("index:"));
+    if (indexRanges.length === 1) {
+      ctx.collectTrace.push({
+        keyspace: indexRanges[0]!.keyspace,
+        bounds: serializeKeyRange(indexRanges[0]!),
+        filters: userFilters,
+        order: spec.order ?? "asc",
+        fields: indexSpec.fields,
+        docs: docsJson,
+        hadReadPolicy,
+      });
+    }
+  }
+
+  return JSON.stringify({ docs: docsJson });
 };
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {

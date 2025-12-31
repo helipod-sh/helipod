@@ -9,7 +9,7 @@ export { QUERY_PROFILE, MUTATION_PROFILE, ACTION_PROFILE, HTTP_ACTION_PROFILE, p
 export type { SeededRandom } from "./seeded-random";
 export { createSeededRandom } from "./seeded-random";
 
-export type { KernelContext, SyscallHandler, SyscallChannel } from "./kernel";
+export type { KernelContext, SyscallHandler, SyscallChannel, CollectTrace } from "./kernel";
 export { SyscallRouter, InlineSyscallChannel, createKernelRouter } from "./kernel";
 
 export type { IndexCatalog, TableMeta } from "./catalog";
@@ -24,7 +24,7 @@ export { query, mutation, action, httpAction } from "./functions";
 export type { HttpRouter, RouteSpec, RouteEntry } from "./http-router";
 export { httpRouter, matchRoute, isReservedHttpPath } from "./http-router";
 
-export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi, WriteRouter, ClientReplay } from "./executor";
+export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi, WriteRouter, ClientReplay, DiffableRange } from "./executor";
 export { InlineUdfExecutor, commitThenThrow, CommitThenThrow } from "./executor";
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";

@@ -8,12 +8,12 @@
  * with native capabilities and no `ctx.db` — they reach data only via `ctx.runQuery`/`runMutation`.
  */
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
-import type { QueryRuntime } from "@stackbase/query-engine";
-import type { KeyRange } from "@stackbase/index-key-codec";
+import type { QueryRuntime, FilterExpr } from "@stackbase/query-engine";
+import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
-import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
+import { createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
@@ -244,6 +244,23 @@ export interface RunOptions {
   primaryRead?: boolean;
 }
 
+/**
+ * DLR Stage 2b: a query run classified as DIFFABLE_RANGE — its ENTIRE result is exactly the
+ * ordered documents of one index-range scan, unmodified by the handler. A subscription carrying
+ * this can be re-evaluated by DIFFING the scanned range against a commit's write set instead of
+ * fully re-running the query handler (the differ's job; not built by this task). `bounds` is
+ * byte-identical to the `index:` range this run's own `readRanges` recorded for `keyspace`, so a
+ * downstream differ can re-scan the exact same interval. Absent whenever the executor has ANY
+ * doubt about passthrough purity — see `classifyDiffableRange`'s guard.
+ */
+export interface DiffableRange {
+  keyspace: string;
+  bounds: SerializedKeyRange;
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+}
+
 export interface UdfResult<T = unknown> {
   value: T;
   logs: string[];
@@ -260,6 +277,73 @@ export interface UdfResult<T = unknown> {
    * than a fresh `MutationResponse`. Absent on every non-dedup / freshly-committed run.
    */
   clientReplay?: ClientReplay;
+  /**
+   * DLR Stage 2b (query runs only): set when this run's ENTIRE result is one passthrough
+   * index-range collect — see `DiffableRange`'s doc comment. Absent for mutations/actions, and for
+   * any query the executor can't PROVE is a clean passthrough (conservative: any doubt → absent).
+   */
+  diffableRange?: DiffableRange;
+}
+
+/** Structural equality over `JSONValue` (the shape `convexToJson` produces) — order-independent
+ *  on object keys, order-SENSITIVE on arrays. Used only by `classifyDiffableRange`'s full
+ *  per-document comparison below; deliberately NOT a `JSON.stringify` comparison, since object key
+ *  order isn't guaranteed to survive `convexToJson`/spread identically on both sides. */
+function deepEqualJson(a: JSONValue, b: JSONValue): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false; // a !== b already excluded a === b === null
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqualJson(a[i]!, b[i]!)) return false;
+    return true;
+  }
+  if (typeof a === "object" && typeof b === "object") {
+    const ak = Object.keys(a);
+    const bk = Object.keys(b);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+      if (!deepEqualJson((a as Record<string, JSONValue>)[k]!, (b as Record<string, JSONValue>)[k]!)) return false;
+    }
+    return true;
+  }
+  return false; // primitives already covered by `a === b` above
+}
+
+/**
+ * DLR Stage 2b passthrough guard. A run is DIFFABLE_RANGE only if EXACTLY ONE index-range
+ * `db.query` collect ran (`trace.length === 1`), no OTHER read syscall touched the transaction
+ * (cross-checked against the run's own `readRanges` — a `db.get` records no `CollectTrace` entry
+ * but DOES land a `table:`-keyspace point read there), no read policy was merged into that
+ * collect (dynamic authz can't be soundly re-applied by a downstream differ), and the handler's
+ * returned value is EXACTLY that collect's ordered documents, unmodified — same length, same
+ * documents, in the same order. Content is compared FULLY (`deepEqualJson`), not just each
+ * document's `_id`: a handler that adds/drops/changes a field while preserving `_id` order (e.g.
+ * `.map(d => ({...d, x: 1}))`) must still be declined, and `_id`-only equality would miss that.
+ * Only the executor can make this call: it alone sees both the kernel's collect trace AND the
+ * handler's final returned value. Any doubt → `undefined` (the caller falls back to a full RERUN,
+ * including on a thrown exception while inspecting a malformed/non-Value return — this helper never
+ * throws); this guard is deliberately the ONLY defense here — the drift-XOR-checksum safety net
+ * downstream can't catch a mis-classified post-processed handler, since a checksum over the
+ * (already wrong) returned value looks internally consistent.
+ */
+function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], readRanges: readonly KeyRange[]): DiffableRange | undefined {
+  if (trace.length !== 1) return undefined; // exactly one collect, and no ambiguous second collect
+  const t = trace[0]!;
+  if (t.hadReadPolicy) return undefined; // dynamic authz was merged in — RERUN, never diff
+  // No other read syscall (e.g. a `db.get` alongside the collect) touched this transaction: the
+  // run's full read set must be exactly the one range this collect itself scanned.
+  if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;
+  if (!Array.isArray(value)) return undefined; // not a list result
+  if (value.length !== t.docs.length) return undefined;
+  try {
+    for (let i = 0; i < value.length; i++) {
+      if (!deepEqualJson(convexToJson(value[i] as Value), t.docs[i]!)) return undefined; // post-processed / reordered
+    }
+  } catch {
+    return undefined; // not a well-formed Value (or anything else unexpected) — decline, never throw
+  }
+  return { keyspace: t.keyspace, bounds: t.bounds, filters: t.filters, order: t.order, fields: t.fields };
 }
 
 /**
@@ -451,13 +535,17 @@ export class InlineUdfExecutor {
           })());
 
         // Main context: carries the registry + rule-context builder → policy enforcement is ON.
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry };
+        // DLR 2b: `collectTrace` is only armed for a QUERY's own top-level kernel context — never
+        // for the facade/rule-context `pctx`s above, so a component facade's internal collects can
+        // never be mistaken for the calling function's own passthrough scan.
+        const collectTrace = fn.type === "query" ? [] : undefined;
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
 
         const value = await fn.handler(guestCtx, args);
-        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
+        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace };
       }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
@@ -467,6 +555,8 @@ export class InlineUdfExecutor {
         throw new Error(commit.value.value.message);
       }
       logEntry("ok");
+      const diffableRange =
+        fn.type === "query" ? classifyDiffableRange(commit.value.value, commit.value.collectTrace ?? [], commit.value.readRanges) : undefined;
       return {
         value: commit.value.value,
         logs: commit.value.logs,
@@ -474,6 +564,7 @@ export class InlineUdfExecutor {
         commitTs: commit.commitTs,
         readRanges: commit.value.readRanges,
         oplog: commit.oplog,
+        ...(diffableRange ? { diffableRange } : {}),
       };
     } catch (e) {
       logEntry("error", e instanceof Error ? e.message : String(e));
