@@ -22,6 +22,8 @@ export interface Subscription {
   readRanges: readonly SerializedKeyRange[];
   /** DIFFABLE_BYID marker + the by-id read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */
   byId?: import("./classify").ByIdRead;
+  /** DIFFABLE_RANGE marker + the range read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */
+  range?: import("./classify").RangeRead;
 }
 
 function subKey(sessionId: string, queryId: number): string {

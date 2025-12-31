@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyByIdRead } from "../src/classify";
+import { classifyByIdRead, rangeReadFromDiffable, type RangeRead } from "../src/classify";
 import { serializeKeyRange, keySuccessor, indexKeyspaceId, tableKeyspaceId } from "@stackbase/index-key-codec";
 
 const b = (...n: number[]) => new Uint8Array(n);
@@ -32,5 +32,13 @@ describe("classifyByIdRead", () => {
   it("RERUN: an array value even with one point range", () => {
     const r = classifyByIdRead([doc] as never, [pointRange(tableKeyspaceId("3"), b(1))]);
     expect(r).toBeNull();
+  });
+});
+
+describe("rangeReadFromDiffable (DLR 2b)", () => {
+  it("adapts a DiffableRange into a RangeRead verbatim", () => {
+    const d = { keyspace: "index:AAA", bounds: { keyspace: "index:AAA", start: "AA", end: "AB" }, filters: [], order: "asc" as const, fields: ["channelId"] };
+    const r: RangeRead = rangeReadFromDiffable(d);
+    expect(r).toEqual(d);
   });
 });
