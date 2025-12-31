@@ -47,3 +47,21 @@ describe("driftChecksum", () => {
     expect(driftChecksum(new Map())).toBe(driftChecksum(new Map()));
   });
 });
+
+describe("orderKey (DLR 2b)", () => {
+  it("applyChanges stores orderKey on the row", () => {
+    const out = applyChanges(new Map(), [{ t: "add", key: "a", row: { _id: "a" }, ts: 5, orderKey: "AAAB" }]);
+    expect(out.get("a")).toEqual({ row: { _id: "a" }, ts: 5, orderKey: "AAAB" });
+  });
+  it("a move (same key+ts, new orderKey) changes the checksum", () => {
+    const m1 = applyChanges(new Map(), [{ t: "add", key: "a", row: {}, ts: 5, orderKey: "AAAB" }]);
+    const m2 = applyChanges(new Map(), [{ t: "add", key: "a", row: {}, ts: 5, orderKey: "AAAC" }]);
+    expect(driftChecksum(m1)).not.toBe(driftChecksum(m2));
+  });
+  it("by-id changes (no orderKey) keep the SAME checksum as before this change", () => {
+    // orderKey === undefined must fold identically to orderKey === "" — a by-id map is unchanged.
+    const byId = applyChanges(new Map(), [{ t: "add", key: "n1", row: { _id: "n1", n: 1 }, ts: 5 }]);
+    const explicitEmpty = applyChanges(new Map(), [{ t: "add", key: "n1", row: { _id: "n1", n: 1 }, ts: 5, orderKey: "" }]);
+    expect(driftChecksum(byId)).toBe(driftChecksum(explicitEmpty));
+  });
+});
