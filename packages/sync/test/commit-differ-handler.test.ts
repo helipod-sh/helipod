@@ -432,4 +432,160 @@ describe("SyncProtocolHandler: DIFFABLE_RANGE QueryDiff emission (DLR 2b)", () =
     // either poison doc.
     expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(resetMap));
   });
+
+  it("RERUN fallback (no writtenDocs) drops the range sub's byIdRowMap entry — a later write re-seeds via a fresh add-all, not stale edits", async () => {
+    const handler = new SyncProtocolHandler(makeRangeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+    socket.clear();
+
+    // An invalidation whose ranges overlap this sub but carries NO `writtenDocs` — the range
+    // incremental branch requires `invalidation.writtenDocs` to be truthy, so this forces the
+    // RERUN fallback (a full `execSub` re-run + QueryUpdated) instead of an incremental QueryDiff.
+    const rerunInv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 50,
+    };
+    await handler.notifyWrites(rerunInv);
+    const rerunMods = socket.modifications();
+    expect(rerunMods).toHaveLength(1);
+    expect(rerunMods[0]!.type).toBe("QueryUpdated"); // RERUN fallback, never a QueryDiff.
+    socket.clear();
+
+    // A subsequent write carrying `writtenDocs` for a row that was ALREADY in the sub's range
+    // pre-RERUN (docs|a) must come back as an "add", not an "edit" — `rangeChangesFor` only emits
+    // "add" when the row-map's `prev.has(key)` is false. Were the RERUN fallback's map-drop
+    // missing, the map would still hold the pre-RERUN {docs|a, docs|b} snapshot and this write
+    // would wrongly diff as an "edit" against stale membership instead of re-seeding fresh.
+    const docA2 = rangeRow("docs|a", "c", 11, 100);
+    const inv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 51,
+      writtenDocs: [{ keyspace: KS, key: "irrelevant", docId: "docs|a", newRow: docA2, wasPresent: true, ts: 51 }],
+    };
+    await handler.notifyWrites(inv);
+    const mods = socket.modifications();
+    expect(mods).toHaveLength(1);
+    expect(mods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      changes: [{ t: "add", key: "docs|a", row: docA2, ts: 51 }],
+    });
+  });
+});
+
+/** identity === null -> a `channelId = "c"` index range (CHANNEL_RANGE). identity === "flip" ->
+ *  the SAME index but a DIFFERENT `channelId = "d"` range (CHANNEL_D_RANGE) — an identity-scoped
+ *  range whose bounds/filters change across a `SetAuth` (the "my own channel" pattern). */
+const CHANNEL_D_RANGE: RangeRead = {
+  keyspace: CHANNEL_KEYSPACE,
+  bounds: serializeKeyRange({
+    keyspace: CHANNEL_KEYSPACE,
+    start: indexKeyRangeStart(["d"]),
+    end: indexKeyRangeEnd(["d"])!,
+  }),
+  filters: [],
+  order: "asc",
+  fields: ["channelId"],
+};
+const DOC_D = rangeRow("docs|d", "d", 1, 500);
+
+function makeRangeIdentityFlipExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery(_path, _args, identity) {
+      if (identity === "flip") {
+        return {
+          value: [DOC_D] as unknown as Value,
+          tables: ["table:3"],
+          readRanges: [CHANNEL_D_RANGE.bounds],
+          diffableRange: CHANNEL_D_RANGE,
+        };
+      }
+      return {
+        value: [DOC_A, DOC_B] as unknown as Value,
+        tables: ["table:3"],
+        readRanges: [CHANNEL_RANGE.bounds],
+        diffableRange: CHANNEL_RANGE,
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+describe("SyncProtocolHandler: SetAuth re-threads a DIFFABLE_RANGE sub's `range` (review follow-up)", () => {
+  it("a SetAuth that changes the sub's diffableRange bounds must diff a LATER write against the NEW bounds, not the stale ones", async () => {
+    const handler = new SyncProtocolHandler(makeRangeIdentityFlipExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+
+    // Subscribe while identity is null: DIFFABLE_RANGE on channel "c", gets a QueryDiff range reset.
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+    expect(socket.modifications()[0]).toMatchObject({ type: "QueryDiff", reset: { mode: "range", orderDir: "asc" } });
+    socket.clear();
+
+    // SetAuth flips identity to "flip": the sub's diffableRange changes from channel "c" to channel
+    // "d" (a DIFFERENT `RangeRead` — different bounds). `byId` stays undefined throughout (range
+    // subs never classify as by-id), so this refresh takes the RERUN/QueryUpdated path — but it
+    // must still recompute and re-thread the FRESH `range` onto the stored subscription (the bug
+    // under test: before the fix, `{ ...sub, tables, readRanges, byId }` silently kept the OLD
+    // `range` from before the SetAuth, spreading it forward via `...sub`).
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "flip" }));
+    const setAuthMods = socket.modifications();
+    expect(setAuthMods).toHaveLength(1);
+    expect(setAuthMods[0]).toMatchObject({ type: "QueryUpdated", value: [DOC_D] });
+    socket.clear();
+
+    // A write to a channel-"d" doc (in the NEW range, NOT the stale channel-"c" one) — the
+    // invalidation's own `ranges` uses the fresh channel-"d" bounds so the subscription is
+    // selected as affected regardless of the bug (that coarse match already used the correctly-
+    // refreshed `readRanges`). The bug is isolated to the FINE-GRAINED bounds check inside
+    // `rangeChangesFor`, which uses `sub.range` directly:
+    //  - STALE `sub.range` (channel "c" bounds): a channel-"d" row fails `inBounds` against a
+    //    channel-"c"-only range => no-op, `changes: []` (the exact silent-corruption this finding
+    //    describes — the write is dropped from the diff forever).
+    //  - FRESH `sub.range` (channel "d" bounds, this fix): a channel-"d" row passes `inBounds`
+    //    against a channel-"d" range => a proper `add`.
+    const docD2 = rangeRow("docs|d2", "d", 2, 600);
+    const orderKeyD2 = orderKeyFor(CHANNEL_D_RANGE, docD2);
+    const inv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_D_RANGE.bounds],
+      commitTs: 60,
+      writtenDocs: [{ keyspace: KS, key: "irrelevant", docId: "docs|d2", newRow: docD2, wasPresent: false, ts: 60 }],
+    };
+    await handler.notifyWrites(inv);
+
+    const mods = socket.modifications();
+    expect(mods).toHaveLength(1);
+    expect(mods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      changes: [{ t: "add", key: "docs|d2", row: docD2, ts: 60, orderKey: orderKeyD2 }],
+    });
+    // The map-drop invariant: SetAuth's RERUN path drops the sub's stale byIdRowMap entry (the
+    // pre-existing else-branch behavior this fix doesn't touch), so this incremental diff started
+    // from an EMPTY prev-map — the emitted checksum must equal a driftChecksum over a map
+    // containing ONLY docs|d2, never a leftover docs|a/docs|b (or docs|d) entry.
+    const cleanMap = new Map([["docs|d2", { row: docD2, ts: 60, orderKey: orderKeyD2 }]]);
+    expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(cleanMap));
+  });
 });

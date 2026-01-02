@@ -776,13 +776,14 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-        // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
-        // classification — an identity change can change WHAT a query reads (e.g. an
-        // identity-scoped `db.get`), so a stale `byId` here would drive a wrong diff on a later
-        // write.
+        const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+        // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
+        // spreading the sub's stale classification — an identity change can change WHAT a query
+        // reads (e.g. an identity-scoped `db.get`, or an identity-scoped range's bounds/filters),
+        // so a stale `byId`/`range` here would drive a wrong diff on a later write.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId });
+        const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {
