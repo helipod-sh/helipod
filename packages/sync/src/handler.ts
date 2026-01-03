@@ -625,6 +625,31 @@ export class SyncProtocolHandler {
       bySession.set(sub.sessionId, list);
     }
 
+    // Response-before-Transition ordering (client-sync verdict §(d); DLR 2b). The committing
+    // session's own `MutationResponse` (which carries the commitTs the client's optimistic gate keys
+    // off) MUST reach the client BEFORE this commit's Transition — only then is the optimistic layer
+    // marked `completed` and dropped ATOMICALLY as the authoritative row ingests (drop-on-observed-
+    // inclusion, never a transient temp+real duplicate frame). But the sync handler and the fan-out
+    // are decoupled (`autoNotifyOnMutation: false`): the fan-out kicks this notify SYNCHRONOUSLY
+    // inside the commit (within `runMutation`), so `doNotifyWrites` is scheduled on a microtask AHEAD
+    // of the response — whose own microtask is only scheduled once `runMutation` resolves back in
+    // `processMutation`. The RERUN (`QueryUpdated`) arm incidentally re-orders correctly by awaiting
+    // `execSub` (a real query), which yields long enough for the response to flush first. The
+    // synchronous DIFFABLE (by-id / range `QueryDiff`) arms have no such yield, so their Transition
+    // raced — and beat — the response, leaving the layer `inflight` at ingest (the 2b regression).
+    //
+    // Restore the invariant at the source for the diff path: when the origin is a diff-capable client
+    // about to receive its OWN commit's Transition, yield a macrotask first. A macrotask is
+    // guaranteed to run after every already-pending microtask (including the response, and any of
+    // `runMutation`'s own post-commit continuation hops), so the ordering holds by construction rather
+    // than by incidental hop-count luck. Scoped to a diff-capable origin present in `bySession`: a
+    // diff-incapable origin still takes the RERUN arm (its `execSub` await is unchanged), and a
+    // non-origin session has no response to order against — so this is byte-identical for every path
+    // that already worked.
+    if (originSessionId && bySession.has(originSessionId) && this.sessions.get(originSessionId)?.supportsQueryDiff) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
     for (const [sessionId, subs] of bySession) {
       const session = this.sessions.get(sessionId);
       if (!session) continue;
