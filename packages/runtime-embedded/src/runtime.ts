@@ -494,6 +494,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
         };
       },
       async runMutation(path, args, identity, origin, dedup): Promise<RunMutationResult> {
@@ -567,7 +568,12 @@ export class EmbeddedRuntime {
         const fn = adminModules[path];
         if (!fn) throw new Error(`unknown admin function: ${path}`);
         const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true, numShards });
-        return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
+        return {
+          value: r.value as Value,
+          tables: writtenTablesFromRanges(r.readRanges),
+          readRanges: r.readRanges.map(serializeKeyRange),
+          ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
+        };
       },
       async runAction(path, args, identity) {
         // `resolve` is the SAME public gate `runQuery`/`runMutation` use above — it throws on
