@@ -15,6 +15,7 @@
  */
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { applyChanges, driftChecksum, type Change, type RowVersion } from "@stackbase/sync";
+import { base64ToBytes, compareKeyBytes } from "@stackbase/index-key-codec";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { PendingMutation } from "./mutation-log";
 
@@ -33,6 +34,24 @@ export function queryHash(path: string, argsJson: JSONValue): string {
 function renderByIdValue(rows: Map<string, RowVersion>): Value | undefined {
   for (const rv of rows.values()) return jsonToConvex(rv.row) as Value; // first (and only) entry
   return undefined;
+}
+
+/**
+ * DLR Stage 2b — render a DIFFABLE_RANGE query's value from its keyed row-map: every row sorted by
+ * `orderKey` (byte comparison via `compareKeyBytes`, matching the engine's own index-key ordering),
+ * reversed for `orderDir === "desc"`. Always an array, never `undefined` — an empty range is `[]`,
+ * mirroring the RERUN path's own "a range query's value is a list" contract. `orderKey` decodes via
+ * `base64ToBytes` (`@stackbase/index-key-codec`), the exact decoder-half of the codec the server's
+ * `orderKeyFor` (`commit-differ.ts`) encodes through — never hand-roll a second base64 codec, or the
+ * client's sort order can silently diverge from the server's. Mints a fresh array every call (never
+ * mutates/reuses a prior render), so `recompose`'s reference-inequality check fires listeners.
+ */
+function renderRangeValue(rows: Map<string, RowVersion>, orderDir: "asc" | "desc"): Value {
+  const entries = [...rows.values()].sort((a, b) =>
+    compareKeyBytes(base64ToBytes(a.orderKey ?? ""), base64ToBytes(b.orderKey ?? "")),
+  );
+  if (orderDir === "desc") entries.reverse();
+  return entries.map((e) => jsonToConvex(e.row)) as Value;
 }
 
 /**
@@ -94,6 +113,15 @@ export interface Subscription {
    *  query (`serverValue` is set directly by `setServerValue`). Held per-subscription so the client
    *  can compute the drift checksum and apply incremental `QueryDiff`s over the running map. */
   diffRows?: Map<string, RowVersion>;
+  /** DLR Stage 2b — which shape to render `diffRows` as: `"byid"` (sole entry's row, or
+   *  `undefined`) or `"range"` (every row sorted by `orderKey`, always an array). Set from a reset
+   *  descriptor's `mode` (`applyDiff`'s `reset` param); undefined for a non-diffable (RERUN) sub, or
+   *  before a diffable sub's first `applyDiff` call. Defaults to by-id rendering when unset, so a
+   *  by-id sub (whose resets are always `reset: true`, never an object) never needs to set it. */
+  renderMode?: "byid" | "range";
+  /** DLR Stage 2b — the range sub's sort direction, set alongside `renderMode` from a range reset's
+   *  `orderDir`. Unused for `renderMode === "byid"`. */
+  orderDir?: "asc" | "desc";
   listeners: Set<Listener>;
 }
 
@@ -160,20 +188,41 @@ export class LayeredQueryStore {
   }
 
   /**
-   * DLR Stage 2a — apply a `QueryDiff`'s changes to a DIFFABLE query's keyed row-map, re-derive the
-   * rendered `serverValue` as a FRESH reference (so `recompose`'s reference-inequality check fires
-   * listeners), and report whether the client-recomputed drift checksum diverged from the server's.
-   * The caller (the reconciler) triggers a scoped resync on `drift === true`.
+   * DLR Stage 2a/2b — apply a `QueryDiff`'s changes to a DIFFABLE query's keyed row-map, re-derive
+   * the rendered `serverValue` as a FRESH reference (so `recompose`'s reference-inequality check
+   * fires listeners), and report whether the client-recomputed drift checksum diverged from the
+   * server's. The caller (the reconciler) triggers a scoped resync on `drift === true`.
    *
-   * A reset (the initial subscribe answer) is just add-all over an empty map; an incremental diff
-   * mutates the running map. `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each
-   * apply — the client never mutates a map a listener may still hold. `lastHash` is cleared: the diff
-   * path renders from the row-map, not the resume fingerprint, so a stale hash must never be echoed.
+   * `reset` (2b — widened from a bare `true`) governs where the diff applies FROM and how the
+   * result renders:
+   *   - `undefined` (an incremental diff): merges `changes` onto the RUNNING `sub.diffRows` map —
+   *     `sub.renderMode`/`orderDir` are left exactly as they were from the last reset.
+   *   - `true` (a by-id reset): the classic 2a reset — `sub.renderMode = "byid"`.
+   *   - `{ mode, orderDir }` (a range reset, or a future non-byid mode): `sub.renderMode = mode`,
+   *     `sub.orderDir = orderDir`.
+   * Both reset forms rebuild from an EMPTY map, never merge onto `sub.diffRows` — a reset is a full
+   * re-baseline (the initial subscribe answer, or a range resync after a drift/table-invalidation),
+   * so a row that's no longer in the result set must disappear, not linger from the prior baseline.
+   * `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each apply — the client never
+   * mutates a map a listener may still hold. `lastHash` is cleared: the diff path renders from the
+   * row-map, not the resume fingerprint, so a stale hash must never be echoed.
    */
-  applyDiff(sub: Subscription, changes: readonly Change[], checksum: string): { drift: boolean } {
-    const next = applyChanges(sub.diffRows ?? new Map<string, RowVersion>(), changes);
+  applyDiff(
+    sub: Subscription,
+    changes: readonly Change[],
+    checksum: string,
+    reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" },
+  ): { drift: boolean } {
+    if (reset === true) {
+      sub.renderMode = "byid";
+    } else if (reset) {
+      sub.renderMode = reset.mode;
+      sub.orderDir = reset.orderDir;
+    }
+    const base = reset !== undefined ? new Map<string, RowVersion>() : (sub.diffRows ?? new Map<string, RowVersion>());
+    const next = applyChanges(base, changes);
     sub.diffRows = next;
-    sub.serverValue = renderByIdValue(next);
+    sub.serverValue = sub.renderMode === "range" ? renderRangeValue(next, sub.orderDir ?? "asc") : renderByIdValue(next);
     sub.lastHash = undefined;
     sub.answered = true;
     return { drift: driftChecksum(next) !== checksum };

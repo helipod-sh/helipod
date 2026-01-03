@@ -195,12 +195,13 @@ export class Reconciler {
           (unchanged ??= new Set()).add(sub.hash);
         }
       } else if (mod.type === "QueryDiff") {
-        // DLR Stage 2a: a DIFFABLE_BYID sub's answer — a reset (initial) or an incremental diff.
-        // `applyDiff` mutates the sub's row-map and re-derives `serverValue` (a fresh reference, so
-        // the `rebuild` below fires listeners); a checksum mismatch triggers a scoped resync.
+        // DLR Stage 2a/2b: a DIFFABLE (by-id or range) sub's answer — a reset (initial subscribe, or
+        // a resync) or an incremental diff. `applyDiff` mutates the sub's row-map and re-derives
+        // `serverValue` (a fresh reference, so the `rebuild` below fires listeners) per `mod.reset`'s
+        // mode (by-id sole-row vs. range sorted array); a checksum mismatch triggers a scoped resync.
         const sub = this.store.byId.get(mod.queryId);
         if (sub) {
-          const { drift } = this.store.applyDiff(sub, mod.changes, mod.checksum);
+          const { drift } = this.store.applyDiff(sub, mod.changes, mod.checksum, mod.reset);
           if (drift) {
             console.error(`[stackbase] query "${sub.path}" diff checksum mismatch; resyncing`);
             this.onDrift?.(mod.queryId);
