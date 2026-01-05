@@ -650,26 +650,28 @@ export class SyncProtocolHandler {
     // pure unnecessary fan-out latency (and, worse, skews any timing-sensitive backpressure test
     // aimed at a non-origin victim). Every non-origin session is therefore computed+sent FIRST, with
     // no added delay; only the origin's own compute+send (if it's diff-capable and present in
-    // `bySession`) is deferred past the macrotask. A diff-incapable origin, or no origin at all,
-    // keeps today's behavior: no yield, immediate sends for every session, origin included.
+    // `bySession`) is deferred past the macrotask. A diff-incapable origin has no synchronous
+    // QueryDiff race to guard against, so it is NOT skipped out of the main loop — it sends inline in
+    // its natural iteration position, exactly like any non-origin session. Deferring it too would
+    // systematically push it behind every non-origin session's compute+send (including RERUN's
+    // `execSub` DB calls), adding avoidable latency for no correctness benefit. A diff-incapable
+    // origin, or no origin at all, thus keeps today's behavior: no yield, immediate sends for every
+    // session, origin included, in its natural position.
+    const originIsDiffCapable =
+      !!originSessionId && bySession.has(originSessionId) && this.sessions.get(originSessionId)?.supportsQueryDiff === true;
+
     for (const [sessionId, subs] of bySession) {
-      if (sessionId === originSessionId) continue; // handled below, possibly after the yield
+      if (originIsDiffCapable && sessionId === originSessionId) continue; // handled below, after the yield
       const session = this.sessions.get(sessionId);
       if (!session) continue;
       await this.sendSessionTransition(session, subs, invalidation);
     }
 
-    if (originSessionId) {
-      const originSubs = bySession.get(originSessionId);
-      if (originSubs) {
-        const originSession = this.sessions.get(originSessionId);
-        if (originSession) {
-          if (originSession.supportsQueryDiff) {
-            await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          }
-          await this.sendSessionTransition(originSession, originSubs, invalidation);
-        }
-      }
+    if (originIsDiffCapable) {
+      const originSubs = bySession.get(originSessionId!)!;
+      const originSession = this.sessions.get(originSessionId!)!;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await this.sendSessionTransition(originSession, originSubs, invalidation);
     }
 
     // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
