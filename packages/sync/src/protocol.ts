@@ -142,7 +142,16 @@ export type StateModification =
   // only checks `reset` for truthiness (the only pattern used anywhere today) treats both forms
   // identically; `mode`/`orderDir` are there for a future client that wants to special-case range
   // resets (e.g. to keep an existing scroll position) without a wire renegotiation.
-  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" } };
+  //
+  // `hash` (DLR 2b Task 10 — resume/DIFFABLE integration): the server-minted result fingerprint of
+  // the reset's fresh value, the SAME `hashValue` fingerprint a RERUN `QueryUpdated` already carries.
+  // Present ONLY on a reset (the answer to a subscribe/resync) — an incremental diff has no
+  // standalone "result" to fingerprint against a future resubscribe, so it stays hashless, exactly
+  // as before this field existed. The client stores it as `Subscription.lastHash` and echoes it back
+  // as `resultHash` on a later resubscribe, the same resume contract `QueryUpdated.hash` already
+  // established — this is what lets a DIFFABLE sub resume via `QueryUnchanged` instead of always
+  // paying for a full reset on reconnect.
+  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" }; hash?: string };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }

@@ -98,13 +98,17 @@ export interface Subscription {
    *  `QueryUnchanged` (subscription resume) also sets this — it IS a delivered reply too, see
    *  `markUnchanged`. */
   answered: boolean;
-  /** Subscription resume (2025-11-28): the server-minted fingerprint of `serverValue` — a
-   *  `"sha256:" + hex` string stored verbatim from the most recent `QueryUpdated.hash`. Echoed
-   *  back as `resultHash` on resubscribe (`client.ts#resync`) so the server can reply
-   *  `QueryUnchanged` instead of resending the full value. A hash-less `QueryUpdated` (old server,
-   *  or wire-compat hand-construction) CLEARS this — an old-server session must never echo a stale
-   *  hash. Distinct from the query-identity `hash` field above (`path + args` — never changes for
-   *  a given subscription); this one is a RESULT fingerprint that changes every time the value does.
+  /** Subscription resume (2025-11-28, widened DLR 2b Task 10 to cover diffable subs): the server-
+   *  minted fingerprint of `serverValue` — a `"sha256:" + hex` string stored verbatim from the most
+   *  recent `QueryUpdated.hash` OR a diffable sub's reset `QueryDiff.hash` (set by `reconcile.ts`,
+   *  never by `LayeredQueryStore.applyDiff` itself — see that method's ownership note). Echoed back
+   *  as `resultHash` on resubscribe (`client.ts#resync`) so the server can reply `QueryUnchanged`
+   *  instead of resending the full value/reset. Cleared whenever there is nothing current to echo: a
+   *  hash-less `QueryUpdated` (old server, or wire-compat hand-construction), or an INCREMENTAL
+   *  `QueryDiff` (the value just changed and carries no fingerprint) — an old-server session, or a
+   *  session mid-diff, must never echo a stale hash. Distinct from the query-identity `hash` field
+   *  above (`path + args` — never changes for a given subscription); this one is a RESULT fingerprint
+   *  that changes every time the value does.
    */
   lastHash?: string;
   /** DLR Stage 2a — the by-id materialized cache. For a DIFFABLE query the authoritative base is
@@ -204,8 +208,25 @@ export class LayeredQueryStore {
    * re-baseline (the initial subscribe answer, or a range resync after a drift/table-invalidation),
    * so a row that's no longer in the result set must disappear, not linger from the prior baseline.
    * `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each apply — the client never
-   * mutates a map a listener may still hold. `lastHash` is cleared: the diff path renders from the
-   * row-map, not the resume fingerprint, so a stale hash must never be echoed.
+   * mutates a map a listener may still hold.
+   *
+   * `lastHash` OWNERSHIP (DLR 2b Task 10): this method does NOT touch `sub.lastHash` — the caller
+   * (`reconcile.ts#ingestTransition`'s `QueryDiff` arm) owns it, since only the caller knows whether
+   * this call was a RESET (carries the server's resume fingerprint, `mod.hash`, to store) or an
+   * INCREMENTAL diff (no fingerprint — the caller clears it instead). Leaving it here would mean
+   * either always clearing it (breaking resume for every diffable sub, the Task 10 regression this
+   * fixes) or reaching into wire-message fields (`mod.hash`) this store-level method doesn't receive.
+   *
+   * NOTE ON AN UNINITIALIZED `renderMode` (DLR 2b Task 10 residual): this method does NOT itself
+   * guard against an INCREMENTAL diff (`reset === undefined`) arriving while `renderMode` has never
+   * been established — it can't distinguish that from the ordinary "first-ever call, reset omitted"
+   * shorthand several of this file's own unit tests use to mean "build from an empty baseline" (a
+   * pattern that predates `reset`'s widening and has no way here to tell "legitimately fresh" apart
+   * from "already answered by something else, never diff-initialized"). The caller
+   * (`reconcile.ts#ingestTransition`) owns that distinction instead — it has `sub.answered`'s
+   * PRE-CALL value on hand, which this method's own post-call mutation of `sub.answered` would
+   * otherwise erase, and doing it there also means the store-level surface tested here stays exactly
+   * as it always was.
    */
   applyDiff(
     sub: Subscription,
@@ -223,7 +244,6 @@ export class LayeredQueryStore {
     const next = applyChanges(base, changes);
     sub.diffRows = next;
     sub.serverValue = sub.renderMode === "range" ? renderRangeValue(next, sub.orderDir ?? "asc") : renderByIdValue(next);
-    sub.lastHash = undefined;
     sub.answered = true;
     return { drift: driftChecksum(next) !== checksum };
   }

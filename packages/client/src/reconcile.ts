@@ -201,10 +201,42 @@ export class Reconciler {
         // mode (by-id sole-row vs. range sorted array); a checksum mismatch triggers a scoped resync.
         const sub = this.store.byId.get(mod.queryId);
         if (sub) {
-          const { drift } = this.store.applyDiff(sub, mod.changes, mod.checksum, mod.reset);
-          if (drift) {
-            console.error(`[stackbase] query "${sub.path}" diff checksum mismatch; resyncing`);
+          // UNINITIALIZED-RENDER-MODE GUARD (DLR 2b Task 10 residual): an INCREMENTAL diff
+          // (`mod.reset === undefined`) arriving for a sub that was already ANSWERED by something
+          // OTHER than a reset (`sub.answered` true, but `sub.renderMode` never established) is
+          // treated exactly like a checksum-drift resync, WITHOUT calling `applyDiff` at all — so
+          // `serverValue`/`diffRows` are left untouched rather than silently mis-rendered (e.g. a
+          // range sub falling back to `applyDiff`'s by-id single-row default). This is reachable even
+          // though the server only ever emits an incremental diff for an already-registered
+          // subscription: a `QueryUnchanged` RESUME answer (Task 10) seeds the SERVER's own row-map
+          // (ready to diff going forward) without teaching the CLIENT anything about render shape —
+          // and a client whose retained cross-session baseline for this query predates diff-
+          // capability entirely (its subscribe was answered `QueryUpdated` in an earlier session,
+          // before this connection ever advertised `supportsQueryDiff`) has no `renderMode` to resume
+          // from. Checked BEFORE `sub.answered` gets read anywhere else this pass (see below), and
+          // gated on `sub.answered`'s PRE-diff value so a genuinely fresh, never-yet-answered sub
+          // (this subscription's first-ever reply) is unaffected — that can only be a real reset
+          // (`mod.reset` defined) on the actual wire, so this branch never fires for it regardless.
+          if (mod.reset === undefined && sub.renderMode === undefined && sub.answered) {
+            console.error(`[stackbase] query "${sub.path}" incremental diff arrived with no established render mode; resyncing`);
+            sub.lastHash = undefined;
             this.onDrift?.(mod.queryId);
+          } else {
+            const { drift } = this.store.applyDiff(sub, mod.changes, mod.checksum, mod.reset);
+            // DLR 2b Task 10 — resume fingerprint ownership: a RESET carries the server's `hashValue`
+            // fingerprint of the fresh baseline (same contract `QueryUpdated.hash` already has) —
+            // store it so a later resubscribe can echo it back for a `QueryUnchanged` resume. An
+            // INCREMENTAL diff (`mod.reset === undefined`) has no such fingerprint (the server never
+            // computes one for a single write's delta) and, more importantly, the value just CHANGED
+            // — any hash on file is now stale, so it must be cleared rather than left dangling.
+            // Echoing nothing on the next resubscribe safely forces a full reset; echoing a stale
+            // hash could never happen here (undefined never matches), but clearing it is the honest,
+            // cheap-to-reason-about invariant.
+            sub.lastHash = mod.reset !== undefined ? mod.hash : undefined;
+            if (drift) {
+              console.error(`[stackbase] query "${sub.path}" diff checksum mismatch; resyncing`);
+              this.onDrift?.(mod.queryId);
+            }
           }
         }
       }

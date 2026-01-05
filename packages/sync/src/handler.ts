@@ -362,23 +362,36 @@ export class SyncProtocolHandler {
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range });
         const json = convexToJson(value);
         if (range && session.supportsQueryDiff) {
-          // DLR 2b: a DIFFABLE_RANGE sub's initial answer to a diff-capable client is a QueryDiff
-          // "reset" (add-all, in the fresh scan's own order) instead of QueryUpdated. The passthrough
-          // guarantee behind `diffableRange` (Task 3: a single-index-range collect with no `.take()`/
-          // limit, read-policy, or post-processing) means `value` IS already the ordered doc array —
-          // no separate re-derivation of order needed.
+          // DLR 2b Task 10: a DIFFABLE_RANGE sub's initial/resumed answer to a diff-capable client is
+          // fingerprinted with the SAME strong `hashValue` a RERUN `QueryUpdated` uses, so subscription
+          // resume (design 2025-11-28) works for a diffable sub too. A matching echoed `resultHash`
+          // means the fresh result is byte-identical to what the client already has — reply
+          // `QueryUnchanged` (no changes on the wire) instead of a full reset.
+          //
+          // CRITICAL: `byIdRowMap` is seeded EITHER WAY. A reconnect is a fresh server session with an
+          // empty `byIdRowMap` (see `disconnect`/`clearByIdRowMapForSession`) — even when the client's
+          // baseline is unchanged and nothing is sent, THIS session still needs a materialized row-map
+          // on file so a LATER incremental write can diff against it (`sendSessionTransition`'s range
+          // arm) instead of finding an empty `prevMap` and computing a wrong diff (spurious `add`s for
+          // rows the client already has).
           const { changes, next } = rangeResetChanges(range, json as JSONValue[], session.version.ts);
           this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
-          modifications.push({
-            type: "QueryDiff",
-            queryId: q.queryId,
-            changes,
-            checksum: driftChecksum(next),
-            reset: { mode: "range", orderDir: range.order },
-          });
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({
+              type: "QueryDiff",
+              queryId: q.queryId,
+              changes,
+              checksum: driftChecksum(next),
+              reset: { mode: "range", orderDir: range.order },
+              hash,
+            });
+          }
         } else if (byId && session.supportsQueryDiff) {
-          // DLR 2a: a DIFFABLE_BYID sub's initial answer to a diff-capable client is a QueryDiff
-          // "reset" (add-all over an empty map) instead of QueryUpdated.
+          // DLR 2a/2b Task 10: a DIFFABLE_BYID sub's initial/resumed answer — same resume integration
+          // as the range arm above (fingerprint + QueryUnchanged-on-match + unconditional seed).
           //
           // Reset-ts nuance: `execSub`'s return shape (`{value, tables, readRanges}`) doesn't surface
           // the document's own engine commit ts, only the value. Rather than plumb a new field through
@@ -390,7 +403,12 @@ export class SyncProtocolHandler {
           // `byIdChangesFor`, so any placeholder-ts imprecision self-corrects on the first write.
           const { changes, next } = byIdResetChanges(byId.docId, json, session.version.ts);
           this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
-          modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next), reset: true });
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next), reset: true, hash });
+          }
         } else {
           const hash = hashValue(json);
           if (q.resultHash !== undefined && q.resultHash === hash) {
@@ -705,6 +723,22 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
+        // NOTE (DLR 2b Task 10): a session's `supportsQueryDiff` can flip true asynchronously
+        // mid-session, independent of when a given sub was last (re)answered — e.g. an outbox
+        // client's capability rides its resume `Connect`, sent AFTER its own resync's
+        // `ModifyQuerySet` (`onTransportReopened`'s ordering; see `client.ts`). That can let a write
+        // take the incremental-diff shortcut below even for a sub this SERVER SESSION never actually
+        // seeded a row-map for (`this.byIdRowMap.get(key) ?? new Map()` silently substitutes an empty
+        // one) — but that empty substitution is the SAME pre-existing behavior the RERUN-fallback
+        // arm below already deliberately relies on (a range sub's map is unconditionally dropped
+        // there, expecting a LATER incremental write to reseed off nothing but its own written docs)
+        // — see `commit-differ-handler.test.ts`'s "RERUN fallback ... re-seeds via a fresh add-all"
+        // and the SetAuth re-thread test, both of which pin this. Task 10 does not touch this
+        // invalidation-loop behavior (its own remit is the subscribe-answer path); the client-side
+        // residual this CAN expose (a diff-capable-but-never-actually-reset client rendering wrong)
+        // is instead guarded at the source of truth for render shape — `reconcile.ts`'s
+        // `ingestTransition` — which resyncs rather than trusting an uninitialized `renderMode`.
+        const key = subKey(sub.sessionId, sub.queryId);
         if (sub.range && session.supportsQueryDiff && invalidation.writtenDocs) {
           // DLR 2b: a DIFFABLE_RANGE sub with a diff-capable client and a commit that carried its
           // written docs gets an incremental QueryDiff — no execSub re-run needed. Unlike a by-id
@@ -719,7 +753,6 @@ export class SyncProtocolHandler {
           // provably correct match — not a coincidental string prefix trick.
           const subTable = tableOfKeyspaceId(sub.range.keyspace);
           const wds = invalidation.writtenDocs.filter((w) => tableOfKeyspaceId(w.keyspace) === subTable);
-          const key = subKey(sub.sessionId, sub.queryId);
           const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
           const { changes, next } = rangeChangesFor(sub.range, prevMap, wds);
           this.byIdRowMap.set(key, next);
@@ -737,7 +770,6 @@ export class SyncProtocolHandler {
           const wd = invalidation.writtenDocs.find(
             (w) => w.keyspace === sub.byId!.keyspace && w.key === sub.byId!.key,
           );
-          const key = subKey(sub.sessionId, sub.queryId);
           const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
           const { changes, next } = byIdChangesFor(sub.byId, prevMap, wd);
           this.byIdRowMap.set(key, next);
