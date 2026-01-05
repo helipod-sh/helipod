@@ -86,7 +86,34 @@ export interface CollectTrace {
    *  diffability whenever this is set, regardless of how faithfully the handler passes the result
    *  through. */
   hadLimit: boolean;
+  /**
+   * DLR Stage 2b identity brand. A per-collect token this run stamps onto BOTH this trace entry and
+   * (via {@link COLLECT_BRAND}) the exact array the guest's `collect()` returned. The executor's
+   * passthrough guard classifies DIFFABLE_RANGE only when the handler's returned value is that SAME
+   * branded array carrying THIS token — proving the array was passed through untouched, since any
+   * `slice`/`filter`/`map`/spread produces a fresh, unbranded array. Content equality alone is
+   * unsound: a JS post-op that is a no-op on the CURRENT data (`docs.slice(0, 10)` when ≤10 rows,
+   * `docs.filter(d => d.big)` when all rows are `big`) is content-indistinguishable from a real
+   * passthrough, yet would silently cap/exclude a later inserted row the differ still emits. */
+  token: string;
 }
+
+/**
+ * DLR Stage 2b. Non-enumerable Symbol key the guest's `collect()` stamps onto the array it returns,
+ * carrying that collect's {@link CollectTrace.token}. The executor's `classifyDiffableRange` accepts
+ * a run as DIFFABLE_RANGE only when the handler's returned value carries this brand matching the
+ * run's single collect trace — i.e. the untouched collect-return array itself, never a copy.
+ * `Symbol.for` keeps the key stable across duplicate module instances (tests resolve workspace deps
+ * via each package's `dist`). NOTE: in-process only. Across a real V8-isolate boundary the guest
+ * array is serialized (dropping the Symbol), so the brand check would have to move guest-side and
+ * travel as an explicit wire flag — out of scope for the current `InlineUdfExecutor`. */
+export const COLLECT_BRAND = Symbol.for("stackbase.executor.collectBrand");
+
+/** Monotonic per-process source for {@link CollectTrace.token}. Never persisted, never used for
+ *  reactivity — purely correlates a branded guest array to its trace entry within one run, so a
+ *  plain counter (not a deterministic value) is correct here. */
+let collectTokenSeq = 0;
+const nextCollectToken = (): string => `ct${++collectTokenSeq}`;
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -564,6 +591,11 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   // handler actually receives.
   const docsJson = documents.map((d) => convexToJson(d as Value));
 
+  // DLR 2b: a per-collect identity token (armed only for a top-level query run). Stamped onto both
+  // this run's trace entry AND — echoed in the response — the array the guest's `collect()` returns,
+  // so the executor can prove the handler returned that EXACT array untouched (see COLLECT_BRAND).
+  const collectToken = ctx.collectTrace ? nextCollectToken() : undefined;
+
   if (ctx.collectTrace) {
     // DLR 2b: record this collect's metadata for the executor's DIFFABLE_RANGE classification.
     // Only a clean single-index-range scan is recordable — if this collect's own read set carries
@@ -581,11 +613,12 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
         docs: docsJson,
         hadReadPolicy,
         hadLimit: spec.limit !== undefined,
+        token: collectToken!,
       });
     }
   }
 
-  return JSON.stringify({ docs: docsJson });
+  return JSON.stringify(collectToken !== undefined ? { docs: docsJson, collectToken } : { docs: docsJson });
 };
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {

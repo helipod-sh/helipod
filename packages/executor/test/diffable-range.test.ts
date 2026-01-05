@@ -58,6 +58,26 @@ const getOne = query<{ id: string }, unknown>({
   handler: (ctx, { id }) => ctx.db.get(id),
 });
 
+// Finding 1 (identity brand): a `.slice(0, 10)` that is VACUOUS on the current data (≤10 rows) —
+// content-identical to a real passthrough, so a content-equality guard would misclassify it
+// DIFFABLE. A later 11th in-range insert would have the differ emit an `add` this slice excludes:
+// permanent silent wrong data. Must be declined (the array `slice` returns is a fresh, unbranded copy).
+const listSlice10 = query<{ channelId: string }, unknown[]>({
+  handler: async (ctx, { channelId }) => {
+    const docs = await ctx.db.query("items", "by_channel").eq("channelId", channelId).collect();
+    return docs.slice(0, 10);
+  },
+});
+
+// Finding 1: a spread copy `[...docs]` — always content-identical to the collect, always a NEW,
+// unbranded array. Must be declined.
+const listSpread = query<{ channelId: string }, unknown[]>({
+  handler: async (ctx, { channelId }) => {
+    const docs = await ctx.db.query("items", "by_channel").eq("channelId", channelId).collect();
+    return [...docs];
+  },
+});
+
 // Finding 1: a `.take(n)` limited collect — passed through unmodified, so (pre-fix) it would have
 // slipped past the value≡collect deep-equal check and been misclassified DIFFABLE_RANGE.
 const listLimited = query<{ channelId: string }, unknown[]>({
@@ -81,6 +101,8 @@ const registry: Record<string, RegisteredFunction> = {
   "items:listLimited": listLimited,
   "items:getOne": getOne,
   "items:getAndList": getAndList,
+  "items:listSlice10": listSlice10,
+  "items:listSpread": listSpread,
 };
 
 let exec: InlineUdfExecutor;
@@ -164,6 +186,21 @@ describe("runQuery diffableRange classification (DLR 2b Task 3)", () => {
   it("a handler that maps/slices the collect result is NOT diffable (passthrough fails)", async () => {
     expect((await runQuery("items:listMapped", { channelId })).diffableRange).toBeUndefined();
     expect((await runQuery("items:listSliced", { channelId })).diffableRange).toBeUndefined();
+  });
+
+  it("a VACUOUS slice(0,10) on ≤10 rows is NOT diffable (identity brand, not content — Finding 1)", async () => {
+    // channel `c` has 2 rows, so slice(0,10) returns an array CONTENT-identical to the collect — a
+    // content-equality guard would wrongly tag this DIFFABLE. The fresh array `slice` returns is
+    // unbranded, so it must decline.
+    const r = await runQuery("items:listSlice10", { channelId });
+    expect(r.value).toHaveLength(2); // sanity: slice was vacuous on the current data
+    expect(r.diffableRange).toBeUndefined();
+  });
+
+  it("a spread copy [...docs] is NOT diffable (fresh unbranded array — Finding 1)", async () => {
+    const r = await runQuery("items:listSpread", { channelId });
+    expect(r.value).toHaveLength(2); // sanity: content-identical to the collect
+    expect(r.diffableRange).toBeUndefined();
   });
 
   it("a by-id get is NOT a range (diffableRange undefined)", async () => {

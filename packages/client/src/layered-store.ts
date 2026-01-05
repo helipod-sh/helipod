@@ -166,11 +166,26 @@ export class LayeredQueryStore {
   /** Set a subscription's authoritative base (from a `QueryUpdated` modification). Does NOT fire —
    *  `recompose` owns all listener firing so the base+drop+rebuild happen as one atomic frame.
    *  `hash` is the server-minted result fingerprint carried on the same modification — stored
-   *  verbatim (undefined clears `lastHash`, e.g. an old server that never sends `hash`). */
+   *  verbatim (undefined clears `lastHash`, e.g. an old server that never sends `hash`).
+   *
+   *  DLR Stage 2b (Finding 2): a `QueryUpdated` is the ONLY way a DIFFABLE (range/by-id) sub ever
+   *  reaches this method — the server sends a full RERUN answer instead of a `QueryDiff` only on a
+   *  RERUN-fallback (a `SetAuth` identity switch drops the server-side row-map; a fleet-forwarded
+   *  RERUN does the same), never in steady state (steady state for a diffable sub is `QueryDiff`).
+   *  So revert the sub to a plain RERUN-rendered sub here: drop the PRIOR identity's `diffRows` and
+   *  `renderMode`. Otherwise a subsequent incremental `QueryDiff` would merge onto the stale previous-
+   *  identity row-map and `renderRangeValue` the prior user's rows for ~1 RTT until drift-resync heals
+   *  — a transient cross-identity leak on an auth-scoped range query. Cleared → a later incremental
+   *  diff instead hits `reconcile.ts`'s uninitialized-render-mode guard (→ resync), and a later
+   *  `QueryDiff` reset re-establishes `renderMode`/`diffRows` cleanly. The immediate frame renders
+   *  `value` directly (recompose reads `serverValue`, never `diffRows`), so no stale row is shown. */
   setServerValue(sub: Subscription, value: Value | undefined, hash?: string): void {
     sub.serverValue = value;
     sub.lastHash = hash;
     sub.answered = true;
+    sub.diffRows = undefined;
+    sub.renderMode = undefined;
+    sub.orderDir = undefined;
   }
 
   /** Mark a subscription as having received its first reply WITHOUT a base value (from a

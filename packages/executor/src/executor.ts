@@ -13,7 +13,7 @@ import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
-import { createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type SyscallRouter } from "./kernel";
+import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
@@ -285,51 +285,35 @@ export interface UdfResult<T = unknown> {
   diffableRange?: DiffableRange;
 }
 
-/** Structural equality over `JSONValue` (the shape `convexToJson` produces) — order-independent
- *  on object keys, order-SENSITIVE on arrays. Used only by `classifyDiffableRange`'s full
- *  per-document comparison below; deliberately NOT a `JSON.stringify` comparison, since object key
- *  order isn't guaranteed to survive `convexToJson`/spread identically on both sides. */
-function deepEqualJson(a: JSONValue, b: JSONValue): boolean {
-  if (a === b) return true;
-  if (a === null || b === null) return false; // a !== b already excluded a === b === null
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!deepEqualJson(a[i]!, b[i]!)) return false;
-    return true;
-  }
-  if (typeof a === "object" && typeof b === "object") {
-    const ak = Object.keys(a);
-    const bk = Object.keys(b);
-    if (ak.length !== bk.length) return false;
-    for (const k of ak) {
-      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
-      if (!deepEqualJson((a as Record<string, JSONValue>)[k]!, (b as Record<string, JSONValue>)[k]!)) return false;
-    }
-    return true;
-  }
-  return false; // primitives already covered by `a === b` above
-}
-
 /**
  * DLR Stage 2b passthrough guard. A run is DIFFABLE_RANGE only if EXACTLY ONE index-range
  * `db.query` collect ran (`trace.length === 1`), no OTHER read syscall touched the transaction
  * (cross-checked against the run's own `readRanges` — a `db.get` records no `CollectTrace` entry
  * but DOES land a `table:`-keyspace point read there), no read policy was merged into that
  * collect (dynamic authz can't be soundly re-applied by a downstream differ), and the handler's
- * returned value is EXACTLY that collect's ordered documents, unmodified — same length, same
- * documents, in the same order. Content is compared FULLY (`deepEqualJson`), not just each
- * document's `_id`: a handler that adds/drops/changes a field while preserving `_id` order (e.g.
- * `.map(d => ({...d, x: 1}))`) must still be declined, and `_id`-only equality would miss that.
+ * returned value is the EXACT, UNMODIFIED array that collect returned — proven by IDENTITY, not
+ * content: the guest branded that array (non-enumerably, {@link COLLECT_BRAND}) with the collect's
+ * `token`, and any `slice`/`filter`/`map`/spread/`[...docs]` produces a fresh, unbranded array that
+ * fails this check and correctly falls to a full RERUN. Content equality is deliberately NOT used:
+ * a JS post-op that is a no-op ON THE CURRENT DATA (`docs.slice(0, 10)` when ≤10 rows, or
+ * `docs.filter(d => d.big)` when every row is `big`) is content-indistinguishable from a real
+ * passthrough, yet would silently cap/exclude a later inserted in-range row the differ still emits —
+ * permanent wrong data the drift checksum can't catch (server and client agree on the same wrong
+ * set). Declining harmless copies to RERUN is the correct conservative trade ("any doubt → RERUN").
  * Also declines whenever the collect declared a `.take(n)` limit (`hadLimit`): the recorded range
  * is the TRUNCATED top-N window, not the full matching range, so a downstream range-differ would
  * neither apply the limit (rendering every matching row, not just the top N) nor notice a write
  * that should promote a new document into the top-N — see `CollectTrace.hadLimit`'s doc comment.
  * Only the executor can make this call: it alone sees both the kernel's collect trace AND the
- * handler's final returned value. Any doubt → `undefined` (the caller falls back to a full RERUN,
- * including on a thrown exception while inspecting a malformed/non-Value return — this helper never
- * throws); this guard is deliberately the ONLY defense here — the drift-XOR-checksum safety net
- * downstream can't catch a mis-classified post-processed handler, since a checksum over the
- * (already wrong) returned value looks internally consistent.
+ * handler's final returned value. Any doubt → `undefined` (the caller falls back to a full RERUN);
+ * this guard is deliberately the ONLY defense here — the drift-XOR-checksum safety net downstream
+ * can't catch a mis-classified post-processed handler, since a checksum over the (already wrong)
+ * returned value looks internally consistent.
+ *
+ * ISOLATE NOTE: the `COLLECT_BRAND` identity check works because the guest and this classifier share
+ * one heap under the current `InlineUdfExecutor`. Across a real V8-isolate boundary the guest array
+ * would be serialized (dropping the Symbol brand), so the brand check would have to run guest-side
+ * and travel as an explicit wire flag on the return value — out of scope now.
  */
 function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], readRanges: readonly KeyRange[]): DiffableRange | undefined {
   if (trace.length !== 1) return undefined; // exactly one collect, and no ambiguous second collect
@@ -340,14 +324,9 @@ function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], r
   // run's full read set must be exactly the one range this collect itself scanned.
   if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;
   if (!Array.isArray(value)) return undefined; // not a list result
-  if (value.length !== t.docs.length) return undefined;
-  try {
-    for (let i = 0; i < value.length; i++) {
-      if (!deepEqualJson(convexToJson(value[i] as Value), t.docs[i]!)) return undefined; // post-processed / reordered
-    }
-  } catch {
-    return undefined; // not a well-formed Value (or anything else unexpected) — decline, never throw
-  }
+  // Identity, not content: the returned value must be the untouched array THIS collect returned,
+  // carrying its token brand. A copy (slice/filter/map/spread) is unbranded → decline.
+  if ((value as unknown as Record<PropertyKey, unknown>)[COLLECT_BRAND] !== t.token) return undefined;
   return { keyspace: t.keyspace, bounds: t.bounds, filters: t.filters, order: t.order, fields: t.fields };
 }
 

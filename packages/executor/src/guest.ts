@@ -7,7 +7,7 @@
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import type { DocumentValue } from "@stackbase/docstore";
 import type { ComparisonOp, ScanOrder } from "@stackbase/query-engine";
-import type { SyscallChannel } from "./kernel";
+import { COLLECT_BRAND, type SyscallChannel } from "./kernel";
 
 export type DocId = string;
 
@@ -69,8 +69,17 @@ export class QueryBuilder {
 
   async collect(): Promise<DocumentValue[]> {
     const res = await this.channel.call("db.query", this.serializeQuery());
-    const { docs } = JSON.parse(res) as { docs: JSONValue[] };
-    return docs.map((d) => jsonToConvex(d) as DocumentValue);
+    const { docs, collectToken } = JSON.parse(res) as { docs: JSONValue[]; collectToken?: string };
+    const out = docs.map((d) => jsonToConvex(d) as DocumentValue);
+    // DLR 2b passthrough identity brand: stamp this collect's token (non-enumerably, so it never
+    // reaches JSON/reactivity) onto the returned array. The executor classifies the run DIFFABLE_RANGE
+    // only when the handler returns THIS exact array — any slice/filter/map/spread yields a fresh,
+    // unbranded array and correctly falls back to a full RERUN. `collectToken` is absent for reads
+    // that aren't a traced top-level query collect, so nothing is branded there. See COLLECT_BRAND.
+    if (collectToken !== undefined) {
+      Object.defineProperty(out, COLLECT_BRAND, { value: collectToken, enumerable: false, configurable: true });
+    }
+    return out;
   }
 
   async paginate(opts: {

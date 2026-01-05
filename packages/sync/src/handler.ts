@@ -629,6 +629,10 @@ export class SyncProtocolHandler {
         error: errMessage(e),
         code: isStackbaseError(e) && !isRetryableError(e) ? e.code : undefined,
       });
+      // Ordering note: `releaseOriginResponseGate` above runs BEFORE this `send`, and that ordering is
+      // intentional and harmless — the release only SCHEDULES a microtask (it un-parks a gated
+      // `doNotifyWrites`), so this synchronous `send` still puts the `MutationResponse` on the wire
+      // first; the released drain can only run once this catch yields.
       // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
       return isRetryableError(e) ? "stop" : "continue";
     }
@@ -920,7 +924,13 @@ export class SyncProtocolHandler {
         // shifted the range's MEMBERSHIP (not just one row's value) with no per-doc diff tracking
         // it, so the old row-map's membership snapshot predates this RERUN and must not be reused
         // by a later incremental diff. Drop it unconditionally (not gated on the range classification
-        // itself changing, unlike byId above) so a later write re-seeds via a fresh QueryDiff reset.
+        // itself changing, unlike byId above). Re-seed happens via a DRIFT-TRIGGERED RESYNC, NOT a
+        // fresh QueryDiff reset: the client ingests the `QueryUpdated` below (which reverts the sub to
+        // plain RERUN rendering — clears `renderMode`/`diffRows`, Finding 2 in `layered-store.ts`),
+        // then on the next write the server emits an INCREMENTAL QueryDiff off the now-empty map
+        // (carrying only that commit's written docs, not full membership). The client sees an
+        // incremental diff against an uninitialized render mode and resyncs (`reconcile.ts`'s
+        // uninitialized-render-mode guard), which is what re-establishes a clean baseline.
         if (sub.range) {
           this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
         }
