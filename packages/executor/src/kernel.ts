@@ -120,6 +120,19 @@ export interface KernelContext {
    *  collects happen); facade/rule-context readers and mutations never set it, so their reads are
    *  invisible to (and can't be mistaken for) DIFFABLE_RANGE classification. */
   readonly collectTrace?: CollectTrace[];
+  /**
+   * In-flight syscall promises the guest initiated through this context's channel. When set (only
+   * the top-level QUERY-run context arms it), {@link InlineSyscallChannel} adds every dispatched
+   * syscall promise here and drops it on settle, and the executor drains any still-pending ones
+   * AFTER the handler returns — BEFORE it snapshots `readRanges`/`collectTrace`. This makes a
+   * query's read set include reads it genuinely made but did NOT await (a "floating"
+   * `db.query(...).collect()` whose result the handler discarded): without it, `txn.reads` is
+   * snapshotted before that scan's `recordScanReads` runs, the read range is lost, and the
+   * subscription never invalidates on a write to a range the query actually read — a reactive-
+   * correctness hole that otherwise survives only by microtask-timing luck. Empty for a
+   * well-behaved query that awaits all its reads, so the drain is a no-op there.
+   */
+  readonly inflight?: Set<Promise<string>>;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -148,7 +161,20 @@ export class InlineSyscallChannel implements SyscallChannel {
     private readonly ctx: KernelContext,
   ) {}
   call(op: string, argJson: string): Promise<string> {
-    return this.router.dispatch(this.ctx, op, argJson);
+    const p = this.router.dispatch(this.ctx, op, argJson);
+    // DLR: track this syscall as in-flight (only when the query-run context armed the set) so the
+    // executor can drain a read the handler initiated but didn't await before snapshotting the read
+    // set. `drop` also settles p's rejection, so a floated-and-rejected read raises no unhandled
+    // rejection. See `KernelContext.inflight`.
+    const inflight = this.ctx.inflight;
+    if (inflight !== undefined) {
+      inflight.add(p);
+      const drop = (): void => {
+        inflight.delete(p);
+      };
+      p.then(drop, drop);
+    }
+    return p;
   }
 }
 

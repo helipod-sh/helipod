@@ -544,12 +544,26 @@ export class InlineUdfExecutor {
         // for the facade/rule-context `pctx`s above, so a component facade's internal collects can
         // never be mistaken for the calling function's own passthrough scan.
         const collectTrace = fn.type === "query" ? [] : undefined;
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace };
+        // DLR: arm in-flight syscall tracking for a query so reads it initiated but didn't await
+        // (a floating `.collect()` whose result the handler discarded) are still captured — see the
+        // drain below and `KernelContext.inflight`.
+        const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, inflight };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
 
         const value = await fn.handler(guestCtx, args);
+        // Drain any read the handler left in-flight (didn't await) BEFORE snapshotting the read set,
+        // so its `recordScanReads`/`CollectTrace` have landed. A no-op when the handler awaited all
+        // its reads (the set is already empty). Reads never spawn further reads, so this terminates.
+        if (inflight !== undefined) {
+          while (inflight.size > 0) {
+            const pending = [...inflight];
+            await Promise.allSettled(pending);
+            for (const p of pending) inflight.delete(p);
+          }
+        }
         return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace };
       }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt

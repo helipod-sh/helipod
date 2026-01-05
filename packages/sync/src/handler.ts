@@ -207,6 +207,34 @@ export class SyncProtocolHandler {
    * backstop that resyncs the one affected query — see `change.ts`'s `driftChecksum` doc comment.
    */
   private readonly byIdRowMap = new Map<string, Map<string, RowVersion>>();
+  /**
+   * DLR 2b — the response-before-Transition gate (replaces the fragile, timer-starvable
+   * `setTimeout(0)`). `commitTs` → a one-shot latch a diff-capable origin's OWN reactive Transition
+   * parks on inside `doNotifyWrites`, released once `processMutation` has actually enqueued that
+   * commit's `MutationResponse` onto the session's outbound queue.
+   *
+   * WHY commit-time registration (via {@link registerOriginResponseGate}, called from the runtime's
+   * fan-out subscribe callback) rather than lazily inside `doNotifyWrites`: the fan-out drain is
+   * SERIAL, so under load `doNotifyWrites` for a commit can run long after that commit's response was
+   * already sent (the drain is backed up behind a flood). Registering the gate inside `doNotifyWrites`
+   * would then happen AFTER the release — the release would find no gate (no-op), and the late gate
+   * would park FOREVER, wedging the whole `notifyTail` (the backpressure-flood regression). The
+   * subscribe callback instead fires SYNCHRONOUSLY inside the commit (before `runMutation` resolves,
+   * hence before the response can be sent), so the gate always exists before its release, whatever the
+   * drain backlog.
+   *
+   * WHY a microtask latch, not `setTimeout(0)`: the release runs as `processMutation` resumes after
+   * `await runMutation` — a MICROTASK, which a tight `await`-loop of mutations (`for (…) await
+   * client.mutation(…)`) drains between every iteration. The old timer sat in Node's TIMER phase,
+   * which that same loop STARVES; because the yield sat ON the single `notifyTail`, a starved timer
+   * stalled the entire fan-out chain. A microtask cannot be starved and cannot stall the tail.
+   *
+   * Scoped to a diff-capable LOCAL origin session (see `registerOriginResponseGate`), so every gate
+   * created here is balanced by exactly one release from that session's own `processMutation` — no
+   * leak, no sent-set, no pruning. Entries are transient: one per in-flight diff-capable-origin commit,
+   * created at commit and dropped on release (or on `disconnect`, defensively).
+   */
+  private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void }>();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -519,6 +547,13 @@ export class SyncProtocolHandler {
         value: convexToJson(value),
         ts: this.mutationResponseTs(commitTs),
       });
+      // DLR 2b: this commit's MutationResponse is now enqueued on the session's outbound queue AHEAD
+      // of the commit's own reactive Transition. Release the gate registered at commit time (when the
+      // origin is a diff-capable session) so `doNotifyWrites` may now flush the origin's own Transition
+      // strictly behind the response. This runs as `processMutation` resumes after `await runMutation`
+      // — a microtask, so a tight `await`-loop of mutations can't starve it. A no-op when no gate was
+      // registered (inline mode, or a diff-incapable origin). See `originResponseGates`.
+      this.releaseOriginResponseGate(commitTs);
       if (forwarded && commitTs > 0) {
         // G4 fleet fallback: the origin tag rode a fan-out on ANOTHER node, so it can't reach this
         // node's `doNotifyWrites`. Record the frontier; `sweepPendingFrontiers` advances this
@@ -656,30 +691,34 @@ export class SyncProtocolHandler {
     // synchronous DIFFABLE (by-id / range `QueryDiff`) arms have no such yield, so their Transition
     // raced — and beat — the response, leaving the layer `inflight` at ingest (the 2b regression).
     //
-    // Restore the invariant at the source for the diff path: when the origin is a diff-capable client
-    // about to receive its OWN commit's Transition, yield a macrotask first. A macrotask is
-    // guaranteed to run after every already-pending microtask (including the response, and any of
-    // `runMutation`'s own post-commit continuation hops), so the ordering holds by construction rather
-    // than by incidental hop-count luck.
+    // Restore the invariant at the source for the diff path with a MICROTASK gate rather than a
+    // macrotask yield: when the origin is a diff-capable client about to receive its OWN commit's
+    // Transition, park that Transition on the gate registered at COMMIT time for this `commitTs`
+    // (`originResponseGates`), and let it resume only once `processMutation` has actually enqueued this
+    // commit's `MutationResponse` (which releases the gate — see `releaseOriginResponseGate`). The
+    // prior fix used `await setTimeout(0)`, which runs in Node's TIMER phase; a tight `await`-loop of
+    // mutations (`for (…) await client.mutation(…)`) STARVES that phase, so the timer never fired and —
+    // because this yield sits ON the single `notifyTail` — it BLOCKED the entire fan-out chain (the
+    // backpressure-flood regression: a stalled victim received ZERO fan-out). The gate instead resumes
+    // on a MICROTASK (the response send is `processMutation` resuming after `await runMutation`), and
+    // microtasks drain between every `await` of that loop — so it cannot be starved and cannot stall
+    // the `notifyTail`. Registration lives at commit time (not here) precisely because the serial drain
+    // can run this method long after the response was sent; see `originResponseGates`' doc comment.
     //
-    // SCOPED to the origin's own Transition only (DLR 2b review): the yield exists solely to let the
-    // origin's already-scheduled `MutationResponse` microtask flush ahead of ITS Transition — a
-    // non-origin session has no response of its own to order against, so delaying its send too is
-    // pure unnecessary fan-out latency (and, worse, skews any timing-sensitive backpressure test
-    // aimed at a non-origin victim). Every non-origin session is therefore computed+sent FIRST, with
-    // no added delay; only the origin's own compute+send (if it's diff-capable and present in
-    // `bySession`) is deferred past the macrotask. A diff-incapable origin has no synchronous
-    // QueryDiff race to guard against, so it is NOT skipped out of the main loop — it sends inline in
-    // its natural iteration position, exactly like any non-origin session. Deferring it too would
-    // systematically push it behind every non-origin session's compute+send (including RERUN's
-    // `execSub` DB calls), adding avoidable latency for no correctness benefit. A diff-incapable
-    // origin, or no origin at all, thus keeps today's behavior: no yield, immediate sends for every
-    // session, origin included, in its natural position.
+    // SCOPED to the origin's own Transition only (DLR 2b review): the gate exists solely to let the
+    // origin's `MutationResponse` flush ahead of ITS Transition — a non-origin session has no response
+    // of its own to order against, so delaying its send too is pure unnecessary fan-out latency (and,
+    // worse, skews any timing-sensitive backpressure test aimed at a non-origin victim). Every
+    // non-origin session is therefore computed+sent FIRST, with no added delay; only the origin's own
+    // compute+send (if it's diff-capable and present in `bySession`) parks on the gate. A
+    // diff-incapable origin has no synchronous QueryDiff race to guard against, so it is NOT skipped
+    // out of the main loop — it sends inline in its natural iteration position, exactly like any
+    // non-origin session.
     const originIsDiffCapable =
       !!originSessionId && bySession.has(originSessionId) && this.sessions.get(originSessionId)?.supportsQueryDiff === true;
 
     for (const [sessionId, subs] of bySession) {
-      if (originIsDiffCapable && sessionId === originSessionId) continue; // handled below, after the yield
+      if (originIsDiffCapable && sessionId === originSessionId) continue; // handled below, after the gate
       const session = this.sessions.get(sessionId);
       if (!session) continue;
       await this.sendSessionTransition(session, subs, invalidation);
@@ -688,7 +727,12 @@ export class SyncProtocolHandler {
     if (originIsDiffCapable) {
       const originSubs = bySession.get(originSessionId!)!;
       const originSession = this.sessions.get(originSessionId!)!;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      // Park until this commit's `MutationResponse` has been enqueued. The gate was registered at
+      // commit time; if the response already flushed (the drain ran this method late), it's already
+      // released (absent) and we proceed immediately. Either way, the origin Transition never precedes
+      // its own response on the wire.
+      const gate = this.originResponseGates.get(invalidation.commitTs);
+      if (gate) await gate.promise;
       await this.sendSessionTransition(originSession, originSubs, invalidation);
     }
 
@@ -706,6 +750,41 @@ export class SyncProtocolHandler {
     // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
     // subscription update this drain didn't already cover.
     this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+  }
+
+  /**
+   * DLR 2b — register the response-before-Transition gate for `commitTs`, at COMMIT time. Called
+   * SYNCHRONOUSLY from the runtime's fan-out subscribe callback (which fires inside the commit,
+   * before `runMutation` resolves and thus before this commit's `MutationResponse` can be sent), so
+   * the gate reliably exists before {@link releaseOriginResponseGate} runs — no matter how backed up
+   * the serial fan-out drain is. Public because the decoupled runtime owns the commit-time seam.
+   *
+   * Registers ONLY for a diff-capable LOCAL origin session — exactly the case `doNotifyWrites` parks
+   * on, and exactly the case whose own `processMutation` will release it, so every gate is balanced
+   * (no leak). A no-origin commit, a foreign/absent session, or a diff-incapable session registers
+   * nothing. Idempotent per `commitTs`.
+   */
+  registerOriginResponseGate(commitTs: number, originSessionId: string | undefined): void {
+    if (originSessionId === undefined) return;
+    if (this.sessions.get(originSessionId)?.supportsQueryDiff !== true) return;
+    if (this.originResponseGates.has(commitTs)) return;
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    this.originResponseGates.set(commitTs, { promise, resolve });
+  }
+
+  /**
+   * DLR 2b — release (and drop) the response gate for `commitTs`. Called right after the commit's
+   * `MutationResponse` is enqueued, so the parked origin Transition flushes strictly behind it. A
+   * no-op when no gate is registered (a diff-incapable / no-origin commit never registered one) — so
+   * an ordinary commit costs nothing here.
+   */
+  private releaseOriginResponseGate(commitTs: number): void {
+    const gate = this.originResponseGates.get(commitTs);
+    if (gate !== undefined) {
+      this.originResponseGates.delete(commitTs);
+      gate.resolve();
+    }
   }
 
   /**
