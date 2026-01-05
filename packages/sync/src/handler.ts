@@ -169,6 +169,26 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The well-known symbol the executor stamps a committed-ts onto an error thrown AFTER its transaction
+ * committed (a `commitThenThrow`). Read via `Symbol.for` (the global registry) rather than importing
+ * the executor so `@stackbase/sync` keeps its executor coupling TYPE-ONLY — no runtime dependency
+ * edge, matching how it already treats `DiffableRange`/`transactor`/`index-key-codec`. MUST stay
+ * byte-identical to `@stackbase/executor`'s `COMMITTED_TS_ERROR_KEY` (guarded by a cross-package
+ * assertion in this handler's tests). See `SyncProtocolHandler.originResponseGates`.
+ */
+const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+
+/** The committed-ts the executor stamped on a post-commit error, or `undefined` for a pre-commit
+ *  throw (no commit → no origin-response gate was ever registered). */
+function committedTsOfError(e: unknown): number | undefined {
+  if (e !== null && typeof e === "object") {
+    const ts = (e as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY];
+    if (typeof ts === "number") return ts;
+  }
+  return undefined;
+}
+
 /** Same `${sessionId} ${queryId}` composite key `SubscriptionManager` uses internally (it doesn't
  *  export its own) — `byIdRowMap` is keyed identically so the two stay trivially correlated. */
 function subKey(sessionId: string, queryId: number): string {
@@ -230,11 +250,16 @@ export class SyncProtocolHandler {
    * stalled the entire fan-out chain. A microtask cannot be starved and cannot stall the tail.
    *
    * Scoped to a diff-capable LOCAL origin session (see `registerOriginResponseGate`), so every gate
-   * created here is balanced by exactly one release from that session's own `processMutation` — no
-   * leak, no sent-set, no pruning. Entries are transient: one per in-flight diff-capable-origin commit,
-   * created at commit and dropped on release (or on `disconnect`, defensively).
+   * created here is balanced by exactly one release from that session's own `processMutation` — on
+   * EVERY post-commit outcome: the success path releases inline, and a commit-then-throw (or any
+   * throw after the commit) releases from its catch via the `committedTs` the executor stamps on the
+   * error (see `releaseOriginResponseGate`/`committedTsOfError`). Entries are transient: one per
+   * in-flight diff-capable-origin commit, created at commit and dropped on release (or on
+   * `disconnect`, which resolves+drops any still-pending gate for the vanishing session so a
+   * mid-flight teardown can never strand a parked `doNotifyWrites`). The `sessionId` is retained so
+   * that disconnect backstop can find a session's gates in this commitTs-keyed map.
    */
-  private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void }>();
+  private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void; sessionId: string }>();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -268,6 +293,13 @@ export class SyncProtocolHandler {
     this.sessions.delete(sessionId);
     this.pendingFrontiers.delete(sessionId);
     this.clearByIdRowMapForSession(sessionId);
+    // Backstop: resolve+drop any origin-response gate still pending for this vanishing session, so a
+    // mutation that committed (registering a gate) but disconnected before its `processMutation`
+    // released it can never leave a `doNotifyWrites` parked forever (DLR 2b review). Under normal
+    // operation `processMutation` releases the gate on every outcome, so this loop is usually empty.
+    for (const [commitTs, gate] of this.originResponseGates) {
+      if (gate.sessionId === sessionId) this.releaseOriginResponseGate(commitTs);
+    }
   }
 
   /** Drop every `byIdRowMap` entry for a session (disconnect/reap) — ephemeral per-sub state, never
@@ -566,6 +598,16 @@ export class SyncProtocolHandler {
       }
       return "continue";
     } catch (e) {
+      // DLR 2b leak fix: a `commitThenThrow` (or any throw AFTER the transaction committed) reaches
+      // THIS catch, not the success release above — but its commit already fired the fan-out, which
+      // registered an origin-response gate at commit time. Release it here, keyed by the `commitTs`
+      // the executor stamped on the error, or a diff-capable subscribed origin's `doNotifyWrites`
+      // parks on the never-resolved gate forever and wedges the whole node's reactive drain. A no-op
+      // when the throw was PRE-commit (no `committedTs` on the error → no gate was ever registered)
+      // or when no gate was registered for this commit (diff-incapable origin). See
+      // `releaseOriginResponseGate`.
+      const committedTs = committedTsOfError(e);
+      if (committedTs !== undefined) this.releaseOriginResponseGate(committedTs);
       // Thread the thrown error's typed `code` (when it's one of ours) onto the wire — a genuinely
       // FRESH (non-replayed) failure previously sent `error` with no `code`, even though the wire
       // shape supports one; only the dedup-replay branch above populated it. That silently starved
@@ -770,7 +812,7 @@ export class SyncProtocolHandler {
     if (this.originResponseGates.has(commitTs)) return;
     let resolve!: () => void;
     const promise = new Promise<void>((r) => (resolve = r));
-    this.originResponseGates.set(commitTs, { promise, resolve });
+    this.originResponseGates.set(commitTs, { promise, resolve, sessionId: originSessionId });
   }
 
   /**

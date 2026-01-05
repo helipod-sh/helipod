@@ -371,6 +371,26 @@ export function commitThenThrow(message: string): CommitThenThrow {
   return new CommitThenThrow(message);
 }
 
+/**
+ * Property key the executor stamps onto an error it throws AFTER its transaction has ALREADY
+ * committed (today the only such case is `CommitThenThrow`). The sync handler reads it (via
+ * {@link committedTsOfError}) to release the origin-response gate that was registered at commit time
+ * — a commit-then-throw from a diff-capable subscribed origin would otherwise leave that gate
+ * unresolved and wedge the whole node's reactive drain forever (DLR 2b review). `Symbol.for` keeps it
+ * stable across duplicate module instances (tests resolve workspace deps via each package's `dist`).
+ */
+export const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+
+/** Read the committed-ts the executor stamped onto a post-commit error, or `undefined` (a pre-commit
+ *  throw — no commit happened, so no gate was ever registered). */
+export function committedTsOfError(e: unknown): number | undefined {
+  if (e !== null && typeof e === "object") {
+    const ts = (e as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY];
+    if (typeof ts === "number") return ts;
+  }
+  return undefined;
+}
+
 export class InlineUdfExecutor {
   private readonly router: SyscallRouter = createKernelRouter();
 
@@ -571,7 +591,13 @@ export class InlineUdfExecutor {
       // committed at this point, so throwing here is safe.
       if (commit.value.value instanceof CommitThenThrow) {
         logEntry("error", commit.value.value.message);
-        throw new Error(commit.value.value.message);
+        // The transaction already committed (its fan-out fired, registering an origin-response gate
+        // for a diff-capable subscribed origin). Stamp the commit's ts onto the error so the sync
+        // handler's catch can release that gate — otherwise the node's reactive drain wedges forever
+        // on a never-resolved gate (DLR 2b review). See `committedTsOfError`.
+        const err = new Error(commit.value.value.message);
+        (err as unknown as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY] = Number(commit.commitTs);
+        throw err;
       }
       logEntry("ok");
       const diffableRange =

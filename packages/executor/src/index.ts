@@ -25,7 +25,7 @@ export type { HttpRouter, RouteSpec, RouteEntry } from "./http-router";
 export { httpRouter, matchRoute, isReservedHttpPath } from "./http-router";
 
 export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi, WriteRouter, ClientReplay, DiffableRange } from "./executor";
-export { InlineUdfExecutor, commitThenThrow, CommitThenThrow } from "./executor";
+export { InlineUdfExecutor, commitThenThrow, CommitThenThrow, committedTsOfError, COMMITTED_TS_ERROR_KEY } from "./executor";
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";
 export { InMemoryLogSink, NoopLogSink } from "./log-sink";
