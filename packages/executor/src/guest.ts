@@ -88,8 +88,21 @@ export class QueryBuilder {
     maxScan?: number;
   }): Promise<{ page: DocumentValue[]; nextCursor: string | null; hasMore: boolean; scanCapped: boolean }> {
     const res = await this.channel.call("db.paginate", JSON.stringify({ ...JSON.parse(this.serializeQuery()), cursor: opts.cursor ?? null, pageSize: opts.pageSize, maxScan: opts.maxScan }));
-    const parsed = JSON.parse(res) as { page: JSONValue[]; nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
-    return { page: parsed.page.map((d) => jsonToConvex(d) as DocumentValue), nextCursor: parsed.nextCursor, hasMore: parsed.hasMore, scanCapped: parsed.scanCapped };
+    const parsed = JSON.parse(res) as { page: JSONValue[]; nextCursor: string | null; hasMore: boolean; scanCapped: boolean; __brandToken?: string };
+    const result = {
+      page: parsed.page.map((d) => jsonToConvex(d) as DocumentValue),
+      nextCursor: parsed.nextCursor,
+      hasMore: parsed.hasMore,
+      scanCapped: parsed.scanCapped,
+    };
+    // DLR 2c passthrough identity brand (mirrors `collect()`'s COLLECT_BRAND stamp above): stamp
+    // this page's token (non-enumerably, so it never reaches JSON/reactivity) onto the returned
+    // `PaginationResult` object. `__brandToken` is absent for a paginate that isn't a traced
+    // top-level query run, so nothing is branded there — existing callers see the identical shape.
+    if (parsed.__brandToken !== undefined) {
+      Object.defineProperty(result, COLLECT_BRAND, { value: parsed.__brandToken, enumerable: false, configurable: true });
+    }
+    return result;
   }
 }
 

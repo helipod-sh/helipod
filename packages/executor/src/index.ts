@@ -9,8 +9,8 @@ export { QUERY_PROFILE, MUTATION_PROFILE, ACTION_PROFILE, HTTP_ACTION_PROFILE, p
 export type { SeededRandom } from "./seeded-random";
 export { createSeededRandom } from "./seeded-random";
 
-export type { KernelContext, SyscallHandler, SyscallChannel, CollectTrace } from "./kernel";
-export { SyscallRouter, InlineSyscallChannel, createKernelRouter } from "./kernel";
+export type { KernelContext, SyscallHandler, SyscallChannel, CollectTrace, PaginateTrace } from "./kernel";
+export { SyscallRouter, InlineSyscallChannel, createKernelRouter, COLLECT_BRAND } from "./kernel";
 
 export type { IndexCatalog, TableMeta } from "./catalog";
 export { SimpleIndexCatalog } from "./catalog";

@@ -543,11 +543,14 @@ export class InlineUdfExecutor {
         // for the facade/rule-context `pctx`s above, so a component facade's internal collects can
         // never be mistaken for the calling function's own passthrough scan.
         const collectTrace = fn.type === "query" ? [] : undefined;
+        // DLR 2c: `paginateTrace` is `collectTrace`'s counterpart for `db.query(...).paginate()`
+        // calls, armed the same way and for the same reason (never for facade/rule-context `pctx`s).
+        const paginateTrace = fn.type === "query" ? [] : undefined;
         // DLR: arm in-flight syscall tracking for a query so reads it initiated but didn't await
         // (a floating `.collect()` whose result the handler discarded) are still captured — see the
         // drain below and `KernelContext.inflight`.
         const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, inflight };
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
