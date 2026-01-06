@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2025-12-25
+
+**DLR Stage 2b — the single-index-range `collect()` differ.** The second stage of
+Differential Log-Tail Reactivity: list subscriptions now receive incremental row
+diffs instead of a full re-send on every write.
+
+### Added
+
+- **Incremental `QueryDiff`s for single-index-range `collect()` subscriptions.** A `.eq(...).collect()` query (with optional declarative `.where()` filters) whose result the handler returns unmodified is classified `DIFFABLE_RANGE`; on each committed write the server derives an `add`/`edit`/`remove`/`move` row diff **from the commit's written docs with no store re-read** and sends just the diff. Requires the client to advertise `supportsQueryDiff`; the diff engages under single-node sharding (the flagship `examples/chat` gets it).
+- **`orderKey` on the row-diff vocabulary** — the engine's index-entry key (`extractIndexKey`, incl. the `_creationTime`/`_id` tiebreak) rides each change; the client sorts its materialized row-map by it (`compareKeyBytes`) to reproduce `collect()` order. The drift checksum folds `orderKey` so a missed reorder/move is caught.
+- **`QueryDiff` reset descriptor** (`{ mode: "byid" | "range", orderDir }`) so the client renders by-id (sole row) vs range (sorted array) and knows the sort direction.
+- **DIFFABLE subscriptions resume via `QueryUnchanged`** — a diffable sub carries a content fingerprint on its reset and echoes it on reconnect; an unchanged re-run answers with the tiny `QueryUnchanged` marker instead of a full reset.
+- **Executor floating-read capture** — an un-awaited query `.collect()`'s read ranges are now recorded (drain-before-snapshot), closing a latent missed-invalidation hole for all queries.
+
+### Fixed
+
+- **The range-diff path was unreachable in production** — the embedded runtime's `syncExecutor.runQuery` dropped the `diffableRange` classification; now forwarded (caught by an end-to-end test through the real server).
+- **Response-before-Transition ordering for the diff path** — the synchronous `QueryDiff` fan-out could beat a client's own `MutationResponse`, breaking the optimistic no-flicker guarantee. Now ordered by a per-`commitTs` **microtask latch** (released on every post-commit outcome, incl. `commitThenThrow`; disconnect backstop) — robust under timer-phase starvation, where a timer-based fix deadlocked the notify pipeline.
+- **Passthrough guard now proves array identity, not content** — a data-vacuous JS post-op (`slice`/`filter` that happens to be a no-op on current data) can no longer be misclassified diffable and later render permanently wrong data.
+- **`SetAuth`/RERUN-fallback on a range sub** no longer leaves stale `diffRows`/`renderMode` on the client (a transient cross-identity frame); it reverts to RERUN rendering and self-heals.
+- `.take()`/limit, tables with a read policy, multi-read and post-processed handlers are conservatively excluded from `DIFFABLE_RANGE` (→ RERUN).
+
+### Performance
+
+- `bench:reactive` **`diffbytes-scan` 2647 → 482 B/update (−82%)**; per-update wire cost is now proportional to the change, not the collection size (so the reduction grows with list size). Propagation latency unchanged (±2%). The benchmark's byte metric was corrected to measure actual inbound wire-frame bytes.
+
+### Deferred
+
+- Pagination-boundary diffs (Stage 2c), log-tail catch-up (Stage 3), optimistic-over-diffs (Stage 4), and fleet per-shard fragments (Stage 5) remain future DLR stages.
+
 ## [1.0.0] — 2025-12-25
 
 First tagged release. An open-source, self-hostable reactive Backend-as-a-Service:
@@ -68,4 +98,5 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
 - **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
+[1.1.0]: https://example.com/releases/tag/v1.1.0
 [1.0.0]: https://example.com/releases/tag/v1.0.0
