@@ -24,7 +24,7 @@ export { query, mutation, action, httpAction } from "./functions";
 export type { HttpRouter, RouteSpec, RouteEntry } from "./http-router";
 export { httpRouter, matchRoute, isReservedHttpPath } from "./http-router";
 
-export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi, WriteRouter, ClientReplay, DiffableRange } from "./executor";
+export type { ExecutorDeps, RunOptions, UdfResult, ComponentContext, ContextProvider, ActionApi, WriteRouter, ClientReplay, DiffableRange, DiffablePage } from "./executor";
 export { InlineUdfExecutor, commitThenThrow, CommitThenThrow, committedTsOfError, COMMITTED_TS_ERROR_KEY } from "./executor";
 
 export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink";

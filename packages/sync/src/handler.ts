@@ -11,7 +11,7 @@ import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import type { WrittenDoc } from "@stackbase/transactor";
-import type { DiffableRange } from "@stackbase/executor";
+import type { DiffableRange, DiffablePage } from "@stackbase/executor";
 import {
   encodeServerMessage,
   parseClientMessage,
@@ -87,7 +87,7 @@ export type RunMutationResult = MutationRan | MutationReplay;
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /**
    * `origin` (G4, client-sync verdict §(d) item 2): the committing session's id, threaded onto the
    * commit's `OplogDelta.origin` so the fan-out can advance THAT session's own `version.ts` past its
@@ -104,7 +104,7 @@ export interface SyncUdfExecutor {
    * any node, incl. a fleet follower; the read must run where the commit runs — verdict §(c) repair 3).
    */
   runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string, dedup?: ClientMutationRef): Promise<RunMutationResult>;
-  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }>;
+  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
   /**
@@ -379,7 +379,7 @@ export class SyncProtocolHandler {
   }
 
   /** Run a subscription's query — privileged for _admin:* on a privileged session; else identity-scoped. */
-  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }> {
+  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }> {
     if (udfPath.startsWith("_admin:")) {
       if (!session.privileged) throw new Error("Forbidden: admin subscription requires admin auth");
       return this.executor.runAdminQuery(udfPath, args);
