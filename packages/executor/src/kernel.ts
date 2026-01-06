@@ -121,20 +121,19 @@ const nextCollectToken = (): string => `ct${++collectTokenSeq}`;
  * {@link CollectTrace} for `collect()`; see that type's doc comment for the shared design
  * rationale (identity brand over content equality, `hadReadPolicy` decline, etc).
  *
- * `startBound`/`endBound` describe the scan window THIS page consumed: `startBound` is the
- * resolved (cursor-adjusted) interval start — byte-identical to this page's own `readSet`
- * `index:` range `start` (see `QueryRuntime.paginate`'s `consumedRange`, which for the common
- * asc-order case always keeps the interval's original `start` regardless of trimming) — and
- * `endBound` is `nextCursor` (the last-included row's key) when there's a next page, else `null`
- * (the last page runs to the base interval's open end).
+ * `bounds` is the byte interval THIS PAGE "owns" in the index keyspace — order-correct for both
+ * `asc` and `desc` (see `PaginatedResult.pageBounds`'s doc comment in `@stackbase/query-engine`
+ * for the asc/desc partition argument). NOT the same as this page's OCC `readSet` range: a desc
+ * page's `readSet` is trimmed to `[lastScanned, interval.end)` (the row the scan stopped ON) for
+ * OCC-validation purposes, which is NOT the page's own key interval and is unsafe to reuse here —
+ * `bounds` mirrors `CollectTrace.bounds`'s shape (a single `SerializedKeyRange`) precisely so a
+ * downstream page differ can byte-membership-test against it exactly like the collect differ does.
  */
 export interface PaginateTrace {
   /** The single `index:` keyspace this page scanned (byte-identical to the entry in `readSet`). */
   keyspace: string;
-  /** Base64-encoded resolved scan-interval start (cursor-adjusted on page 2+). */
-  startBound: string;
-  /** Base64-encoded end of what THIS page consumed (`nextCursor`), or `null` on the last page. */
-  endBound: string | null;
+  /** The byte interval this page owns — see the type doc comment above. */
+  bounds: SerializedKeyRange;
   /** The USER's `.where()` filters, captured BEFORE any read-policy merge. */
   filters: FilterExpr[];
   order: "asc" | "desc";
@@ -685,7 +684,7 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
   }
 
   const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
-  const { page, nextCursor, hasMore, scanCapped, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
+  const { page, nextCursor, hasMore, scanCapped, readSet, pageBounds } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
     cursor: spec.cursor,
     pageSize: spec.pageSize,
     maxScan: spec.maxScan,
@@ -707,8 +706,7 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     if (indexRanges.length === 1) {
       ctx.paginateTrace.push({
         keyspace: indexRanges[0]!.keyspace,
-        startBound: serializeKeyRange(indexRanges[0]!).start,
-        endBound: nextCursor,
+        bounds: pageBounds,
         filters: userFilters,
         order: spec.order ?? "asc",
         fields: indexSpec.fields,

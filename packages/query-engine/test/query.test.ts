@@ -7,7 +7,7 @@ import {
   encodeStorageTableId,
   type InternalDocumentId,
 } from "@stackbase/id-codec";
-import { RangeSet, indexKeyspaceId } from "@stackbase/index-key-codec";
+import { RangeSet, indexKeyspaceId, deserializeKeyRange, keyInRange } from "@stackbase/index-key-codec";
 import type { DocumentValue, IndexWrite } from "@stackbase/docstore";
 import { QueryRuntime, computeIndexUpdates, extractIndexKey, type IndexSpec, type Query } from "../src/index";
 
@@ -140,5 +140,71 @@ describe("stable cursor pagination (desc) under concurrent head inserts", () => 
     expect(page3.page.map((d) => d["body"])).toEqual(["m2", "m1"]);
     expect(page3.hasMore).toBe(false);
     expect(page3.nextCursor).toBeNull();
+  });
+});
+
+describe("PaginatedResult.pageBounds (DLR 2c Task 1 review fix)", () => {
+  const byCreation = idx("by_creation_bounds", []);
+  let docs: DocumentValue[] = [];
+
+  beforeEach(async () => {
+    docs = [];
+    let ts = 0n;
+    for (const creation of [1, 2, 3, 4, 5]) {
+      const id = newDocumentId(TABLE);
+      const doc = makeDoc(id, creation, { body: `m${creation}` });
+      docs.push(doc);
+      await insert([byCreation], id, doc, ++ts);
+    }
+  });
+
+  function keyOf(doc: DocumentValue): Uint8Array {
+    return extractIndexKey(doc, byCreation.fields);
+  }
+
+  it("asc non-final page: bounds include this page's rows, exclude the next page's first row", async () => {
+    const query: Query = { index: byCreation, order: "asc" };
+    const page1 = await qr.paginate(query, 5n, { pageSize: 3 });
+    expect(page1.page.map((d) => d["body"])).toEqual(["m1", "m2", "m3"]); // creation order
+    expect(page1.hasMore).toBe(true);
+
+    const bounds = deserializeKeyRange(page1.pageBounds);
+    for (const d of [docs[0]!, docs[1]!, docs[2]!]) expect(keyInRange(keyOf(d), bounds)).toBe(true);
+    expect(keyInRange(keyOf(docs[3]!), bounds)).toBe(false); // m4 — belongs to the NEXT page, not this one
+  });
+
+  it("asc last page: bounds equal the full (resolved) interval it scanned", async () => {
+    // pageSize 10 > 5 rows: the FIRST page is also the last (hasMore=false, no cursor resolved yet),
+    // so its own resolved interval IS the base interval — bounds must cover every row.
+    const query: Query = { index: byCreation, order: "asc" };
+    const onlyPage = await qr.paginate(query, 5n, { pageSize: 10 });
+    expect(onlyPage.page.map((d) => d["body"])).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(onlyPage.hasMore).toBe(false);
+
+    const bounds = deserializeKeyRange(onlyPage.pageBounds);
+    for (const d of docs) expect(keyInRange(keyOf(d), bounds)).toBe(true);
+  });
+
+  it("desc non-final page: bounds include this page's rows, exclude the next page's row (fails pre-fix — the reported bug)", async () => {
+    const query: Query = { index: byCreation, order: "desc" };
+    const page1 = await qr.paginate(query, 5n, { pageSize: 3 });
+    expect(page1.page.map((d) => d["body"])).toEqual(["m5", "m4", "m3"]); // reverse creation order
+    expect(page1.hasMore).toBe(true);
+
+    const bounds = deserializeKeyRange(page1.pageBounds);
+    for (const d of [docs[4]!, docs[3]!, docs[2]!]) expect(keyInRange(keyOf(d), bounds)).toBe(true);
+    expect(keyInRange(keyOf(docs[1]!), bounds)).toBe(false); // m2 — belongs to the NEXT page, not this one
+  });
+
+  it("desc last page: bounds equal the full (resolved) interval it scanned", async () => {
+    // pageSize 10 > 5 rows: the FIRST page is also the last (hasMore=false, no cursor resolved yet),
+    // so its own resolved interval IS the base interval — bounds must cover every row.
+    const query: Query = { index: byCreation, order: "desc" };
+    const onlyPage = await qr.paginate(query, 5n, { pageSize: 10 });
+    expect(onlyPage.page.map((d) => d["body"])).toEqual(["m5", "m4", "m3", "m2", "m1"]);
+    expect(onlyPage.hasMore).toBe(false);
+
+    const bounds = deserializeKeyRange(onlyPage.pageBounds);
+    for (const d of docs) expect(keyInRange(keyOf(d), bounds)).toBe(true);
   });
 });
