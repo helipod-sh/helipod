@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@stackbase/id-codec": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*",
     "@stackbase/sync": "workspace:*",
     "@stackbase/values": "workspace:*"
   },

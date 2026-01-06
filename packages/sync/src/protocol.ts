@@ -123,17 +123,35 @@ export type StateModification =
   // A DIFFABLE query's INITIAL answer is a QueryDiff "reset" (add-all over an empty map). Sent only
   // to a session that advertised `supportsQueryDiff` on Connect; RERUN queries use QueryUpdated.
   //
-  // `reset` (DLR 2a follow-up, reset semantics): set `true` on EVERY re-baseline of a DIFFABLE
-  // sub's row-map — the initial subscribe answer, and any later re-answer that recomputes the
-  // sub's value/byId from scratch (e.g. a `SetAuth` refresh) rather than incrementally diffing a
-  // single write. The client must clear its row-map before applying `changes` when `reset` is
-  // present, exactly like the initial-subscribe case, instead of merging onto whatever map it had
-  // — a re-baseline can legitimately swap which document the sub even tracks (an identity-scoped
-  // `db.get` whose target id changes under a `SetAuth`), so applying it as an incremental edit onto
-  // the OLD map would leave a stale entry behind. Absent (or `false`) on every ordinary incremental
-  // diff — additive, an old client that doesn't know the field simply applies `changes` as an edit
-  // onto its running map, which is correct for every non-reset QueryDiff.
-  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true };
+  // `reset` (DLR 2a follow-up, reset semantics; DLR 2b widened the shape): set on EVERY re-baseline
+  // of a DIFFABLE sub's row-map — the initial subscribe answer, and any later re-answer that
+  // recomputes the sub's value/byId/range from scratch (e.g. a `SetAuth` refresh) rather than
+  // incrementally diffing a single write. The client must clear its row-map before applying
+  // `changes` when `reset` is present, exactly like the initial-subscribe case, instead of merging
+  // onto whatever map it had — a re-baseline can legitimately swap which document(s) the sub even
+  // tracks (an identity-scoped `db.get` whose target id changes under a `SetAuth`), so applying it
+  // as an incremental edit onto the OLD map would leave a stale entry behind. Absent on every
+  // ordinary incremental diff — additive, an old client that doesn't know the field simply applies
+  // `changes` as an edit onto its running map, which is correct for every non-reset QueryDiff.
+  //
+  // DLR 2a's DIFFABLE_BYID reset keeps emitting the bare `true` it always has (bit-for-bit — no
+  // consuming code anywhere reads `reset` today, so there is nothing to migrate, but the wire bytes
+  // of an already-shipped path are left untouched on principle). DLR 2b's new DIFFABLE_RANGE reset
+  // emits the richer `{ mode: "range", orderDir }` descriptor instead, since a range client needs to
+  // know it's rebuilding an ORDERED list (and in which direction), not a single row. A client that
+  // only checks `reset` for truthiness (the only pattern used anywhere today) treats both forms
+  // identically; `mode`/`orderDir` are there for a future client that wants to special-case range
+  // resets (e.g. to keep an existing scroll position) without a wire renegotiation.
+  //
+  // `hash` (DLR 2b Task 10 — resume/DIFFABLE integration): the server-minted result fingerprint of
+  // the reset's fresh value, the SAME `hashValue` fingerprint a RERUN `QueryUpdated` already carries.
+  // Present ONLY on a reset (the answer to a subscribe/resync) — an incremental diff has no
+  // standalone "result" to fingerprint against a future resubscribe, so it stays hashless, exactly
+  // as before this field existed. The client stores it as `Subscription.lastHash` and echoes it back
+  // as `resultHash` on a later resubscribe, the same resume contract `QueryUpdated.hash` already
+  // established — this is what lets a DIFFABLE sub resume via `QueryUnchanged` instead of always
+  // paying for a full reset on reconnect.
+  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" }; hash?: string };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }

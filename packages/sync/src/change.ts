@@ -8,27 +8,28 @@
 import type { JSONValue } from "@stackbase/values";
 
 export type Change =
-  | { t: "add"; key: string; row: JSONValue; ts: number }
+  | { t: "add"; key: string; row: JSONValue; ts: number; orderKey?: string }
   | { t: "remove"; key: string }
-  | { t: "edit"; key: string; row: JSONValue; ts: number };
+  | { t: "edit"; key: string; row: JSONValue; ts: number; orderKey?: string };
 
 export interface RowVersion {
   row: JSONValue;
   ts: number;
+  orderKey?: string;
 }
 
 /** Apply changes to a keyed row-map, copy-on-write. Returns a NEW map (callers rely on a fresh
- *  reference to fire listeners). `add`/`edit` set `{row, ts}`; `remove` deletes the key. */
+ *  reference to fire listeners). `add`/`edit` set `{row, ts, orderKey}`; `remove` deletes the key. */
 export function applyChanges(rows: Map<string, RowVersion>, changes: readonly Change[]): Map<string, RowVersion> {
   const out = new Map(rows);
   for (const c of changes) {
     if (c.t === "remove") out.delete(c.key);
-    else out.set(c.key, { row: c.row, ts: c.ts });
+    else out.set(c.key, { row: c.row, ts: c.ts, orderKey: c.orderKey });
   }
   return out;
 }
 
-/** FNV-1a 32-bit of `"<key> <ts>"` per row, XOR-folded to 32 bits. Order-independent so server and
+/** FNV-1a 32-bit of `"<key> <ts> <orderKey>"` per row, XOR-folded to 32 bits. Order-independent so server and
  *  client agree regardless of iteration order. Hex string. */
 export function driftChecksum(rows: Map<string, RowVersion>): string {
   let acc = 0;
@@ -39,6 +40,9 @@ export function driftChecksum(rows: Map<string, RowVersion>): string {
     mix(0x00);
     const tsStr = String(rv.ts);
     for (let i = 0; i < tsStr.length; i++) mix(tsStr.charCodeAt(i) & 0xff);
+    mix(0x00);
+    const ok = rv.orderKey ?? "";
+    for (let i = 0; i < ok.length; i++) mix(ok.charCodeAt(i) & 0xff);
     acc = (acc ^ (h >>> 0)) >>> 0;
   }
   return acc.toString(16).padStart(8, "0");

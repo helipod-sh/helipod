@@ -24,7 +24,16 @@ import {
   type InternalDocumentId,
   type ShardId,
 } from "@stackbase/id-codec";
-import { indexKeyspaceId, keySuccessor, encodeIndexKey, indexKeysEqual, type IndexableValue, type KeyRange } from "@stackbase/index-key-codec";
+import {
+  indexKeyspaceId,
+  keySuccessor,
+  encodeIndexKey,
+  indexKeysEqual,
+  serializeKeyRange,
+  type IndexableValue,
+  type KeyRange,
+  type SerializedKeyRange,
+} from "@stackbase/index-key-codec";
 import {
   computeIndexUpdates,
   extractIndexKey,
@@ -43,6 +52,68 @@ import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
 import type { PolicyRegistry, RuleContext, RelationRegistry } from "./policy";
 import { evalWritePolicy, mergeReadPolicy, resolveReadPolicy } from "./policy";
+
+/**
+ * DLR Stage 2b: one `db.query` collect's metadata, captured by `handleDbQuery` for the
+ * executor's DIFFABLE_RANGE passthrough-guard classification (see `executor.ts`'s
+ * `classifyDiffableRange`). Only the executor can decide diffability — it alone sees both this
+ * trace AND the handler's returned value — so the kernel's job is purely to record, never judge.
+ */
+export interface CollectTrace {
+  /** The single `index:` keyspace this collect scanned (byte-identical to the entry in `readSet`). */
+  keyspace: string;
+  /** The scanned index-range bounds, byte-identical to the `index:` range recorded in the read set. */
+  bounds: SerializedKeyRange;
+  /** The USER's `.where()` filters, captured BEFORE any read-policy merge. */
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+  /**
+   * This collect's documents, JSON-encoded exactly as the syscall response itself carries them
+   * (same array, in fact — see `handleDbQuery`), in order. The executor's passthrough check needs
+   * full per-document content, not just each doc's `_id`: a handler that ADDS/DROPS/CHANGES a
+   * field while preserving `_id` order (e.g. `.map(d => ({...d, x: 1}))`) must still be declined,
+   * and only a full content comparison catches that — `_id`-only equality would not.
+   */
+  docs: JSONValue[];
+  /** True when a read policy (authz) was merged into this collect's filters — re-applying dynamic
+   *  authz downstream would be unsound, so the executor declines diffability whenever this is set. */
+  hadReadPolicy: boolean;
+  /** True when the query declared a `.take(n)` limit. The recorded `bounds`/`docs` reflect the
+   *  TRUNCATED (top-N) result, not the full matching range — a downstream differ diffing the range
+   *  would (a) miss a write that should promote a new document into the top-N, and (b) never apply
+   *  the limit at all, rendering every matching row instead of just the top N. The executor declines
+   *  diffability whenever this is set, regardless of how faithfully the handler passes the result
+   *  through. */
+  hadLimit: boolean;
+  /**
+   * DLR Stage 2b identity brand. A per-collect token this run stamps onto BOTH this trace entry and
+   * (via {@link COLLECT_BRAND}) the exact array the guest's `collect()` returned. The executor's
+   * passthrough guard classifies DIFFABLE_RANGE only when the handler's returned value is that SAME
+   * branded array carrying THIS token — proving the array was passed through untouched, since any
+   * `slice`/`filter`/`map`/spread produces a fresh, unbranded array. Content equality alone is
+   * unsound: a JS post-op that is a no-op on the CURRENT data (`docs.slice(0, 10)` when ≤10 rows,
+   * `docs.filter(d => d.big)` when all rows are `big`) is content-indistinguishable from a real
+   * passthrough, yet would silently cap/exclude a later inserted row the differ still emits. */
+  token: string;
+}
+
+/**
+ * DLR Stage 2b. Non-enumerable Symbol key the guest's `collect()` stamps onto the array it returns,
+ * carrying that collect's {@link CollectTrace.token}. The executor's `classifyDiffableRange` accepts
+ * a run as DIFFABLE_RANGE only when the handler's returned value carries this brand matching the
+ * run's single collect trace — i.e. the untouched collect-return array itself, never a copy.
+ * `Symbol.for` keeps the key stable across duplicate module instances (tests resolve workspace deps
+ * via each package's `dist`). NOTE: in-process only. Across a real V8-isolate boundary the guest
+ * array is serialized (dropping the Symbol), so the brand check would have to move guest-side and
+ * travel as an explicit wire flag — out of scope for the current `InlineUdfExecutor`. */
+export const COLLECT_BRAND = Symbol.for("stackbase.executor.collectBrand");
+
+/** Monotonic per-process source for {@link CollectTrace.token}. Never persisted, never used for
+ *  reactivity — purely correlates a branded guest array to its trace entry within one run, so a
+ *  plain counter (not a deterministic value) is correct here. */
+let collectTokenSeq = 0;
+const nextCollectToken = (): string => `ct${++collectTokenSeq}`;
 
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
@@ -71,6 +142,24 @@ export interface KernelContext {
    *  mutation (`"default"` shard) may read everything but may not write sharded tables; a
    *  sharded mutation is subject to the full read+write ownership matrix (D3). */
   readonly shardDeclared: boolean;
+  /** DLR Stage 2b: when present, `handleDbQuery` pushes one `CollectTrace` per `db.query` collect
+   *  onto this array. Only the top-level query-run context sets this (an empty array, populated as
+   *  collects happen); facade/rule-context readers and mutations never set it, so their reads are
+   *  invisible to (and can't be mistaken for) DIFFABLE_RANGE classification. */
+  readonly collectTrace?: CollectTrace[];
+  /**
+   * In-flight syscall promises the guest initiated through this context's channel. When set (only
+   * the top-level QUERY-run context arms it), {@link InlineSyscallChannel} adds every dispatched
+   * syscall promise here and drops it on settle, and the executor drains any still-pending ones
+   * AFTER the handler returns — BEFORE it snapshots `readRanges`/`collectTrace`. This makes a
+   * query's read set include reads it genuinely made but did NOT await (a "floating"
+   * `db.query(...).collect()` whose result the handler discarded): without it, `txn.reads` is
+   * snapshotted before that scan's `recordScanReads` runs, the read range is lost, and the
+   * subscription never invalidates on a write to a range the query actually read — a reactive-
+   * correctness hole that otherwise survives only by microtask-timing luck. Empty for a
+   * well-behaved query that awaits all its reads, so the drain is a no-op there.
+   */
+  readonly inflight?: Set<Promise<string>>;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -99,7 +188,20 @@ export class InlineSyscallChannel implements SyscallChannel {
     private readonly ctx: KernelContext,
   ) {}
   call(op: string, argJson: string): Promise<string> {
-    return this.router.dispatch(this.ctx, op, argJson);
+    const p = this.router.dispatch(this.ctx, op, argJson);
+    // DLR: track this syscall as in-flight (only when the query-run context armed the set) so the
+    // executor can drain a read the handler initiated but didn't await before snapshotting the read
+    // set. `drop` also settles p's rejection, so a floated-and-rejected read raises no unhandled
+    // rejection. See `KernelContext.inflight`.
+    const inflight = this.ctx.inflight;
+    if (inflight !== undefined) {
+      inflight.add(p);
+      const drop = (): void => {
+        inflight.delete(p);
+      };
+      p.then(drop, drop);
+    }
+    return p;
   }
 }
 
@@ -470,16 +572,53 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
     ),
     limit: spec.limit,
   };
+  // Captured BEFORE any read-policy merge below (DLR 2b): the diffable-range trace must carry
+  // the USER's own filters, never the dynamic authz predicate the merge appends.
+  const userFilters = query.filters ?? [];
 
-  if (!ctx.privileged && ctx.getRuleContext) {
-    const policy = ctx.policyRegistry.get(tableName);
-    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
+  const hadReadPolicy = !ctx.privileged && !!ctx.getRuleContext && !!ctx.policyRegistry.get(tableName)?.read;
+  if (hadReadPolicy) {
+    const policy = ctx.policyRegistry.get(tableName)!;
+    query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext!(), tableName, ctx.relationRegistry));
   }
 
   const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
   const { documents, readSet } = await ctx.queryRuntime.collect(query, ctx.snapshotTs, overlay);
-  recordScanReads(ctx, tableMeta, readSet.toArray());
-  return JSON.stringify({ docs: documents.map((d) => convexToJson(d as Value)) });
+  const scannedRanges = readSet.toArray();
+  recordScanReads(ctx, tableMeta, scannedRanges);
+  // Same encoding either consumer needs — computed once and shared by both the syscall response
+  // below and (when tracing) the DLR 2b collect trace, so the trace is byte-identical to what the
+  // handler actually receives.
+  const docsJson = documents.map((d) => convexToJson(d as Value));
+
+  // DLR 2b: a per-collect identity token (armed only for a top-level query run). Stamped onto both
+  // this run's trace entry AND — echoed in the response — the array the guest's `collect()` returns,
+  // so the executor can prove the handler returned that EXACT array untouched (see COLLECT_BRAND).
+  const collectToken = ctx.collectTrace ? nextCollectToken() : undefined;
+
+  if (ctx.collectTrace) {
+    // DLR 2b: record this collect's metadata for the executor's DIFFABLE_RANGE classification.
+    // Only a clean single-index-range scan is recordable — if this collect's own read set carries
+    // more than one `index:` range (should not happen for a single-index `collect()`, but stay
+    // conservative per Task 1's verified single-range invariant), skip the trace entry entirely so
+    // the executor's `trace.length !== 1` guard declines diffability for the whole run.
+    const indexRanges = scannedRanges.filter((r) => r.keyspace.startsWith("index:"));
+    if (indexRanges.length === 1) {
+      ctx.collectTrace.push({
+        keyspace: indexRanges[0]!.keyspace,
+        bounds: serializeKeyRange(indexRanges[0]!),
+        filters: userFilters,
+        order: spec.order ?? "asc",
+        fields: indexSpec.fields,
+        docs: docsJson,
+        hadReadPolicy,
+        hadLimit: spec.limit !== undefined,
+        token: collectToken!,
+      });
+    }
+  }
+
+  return JSON.stringify(collectToken !== undefined ? { docs: docsJson, collectToken } : { docs: docsJson });
 };
 
 const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {

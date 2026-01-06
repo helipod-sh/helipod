@@ -8,12 +8,12 @@
  * with native capabilities and no `ctx.db` — they reach data only via `ctx.runQuery`/`runMutation`.
  */
 import type { OplogDelta, Transactor } from "@stackbase/transactor";
-import type { QueryRuntime } from "@stackbase/query-engine";
-import type { KeyRange } from "@stackbase/index-key-codec";
+import type { QueryRuntime, FilterExpr } from "@stackbase/query-engine";
+import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
-import { createKernelRouter, InlineSyscallChannel, type KernelContext, type SyscallRouter } from "./kernel";
+import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
@@ -244,6 +244,23 @@ export interface RunOptions {
   primaryRead?: boolean;
 }
 
+/**
+ * DLR Stage 2b: a query run classified as DIFFABLE_RANGE — its ENTIRE result is exactly the
+ * ordered documents of one index-range scan, unmodified by the handler. A subscription carrying
+ * this can be re-evaluated by DIFFING the scanned range against a commit's write set instead of
+ * fully re-running the query handler (the differ's job; not built by this task). `bounds` is
+ * byte-identical to the `index:` range this run's own `readRanges` recorded for `keyspace`, so a
+ * downstream differ can re-scan the exact same interval. Absent whenever the executor has ANY
+ * doubt about passthrough purity — see `classifyDiffableRange`'s guard.
+ */
+export interface DiffableRange {
+  keyspace: string;
+  bounds: SerializedKeyRange;
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+}
+
 export interface UdfResult<T = unknown> {
   value: T;
   logs: string[];
@@ -260,6 +277,57 @@ export interface UdfResult<T = unknown> {
    * than a fresh `MutationResponse`. Absent on every non-dedup / freshly-committed run.
    */
   clientReplay?: ClientReplay;
+  /**
+   * DLR Stage 2b (query runs only): set when this run's ENTIRE result is one passthrough
+   * index-range collect — see `DiffableRange`'s doc comment. Absent for mutations/actions, and for
+   * any query the executor can't PROVE is a clean passthrough (conservative: any doubt → absent).
+   */
+  diffableRange?: DiffableRange;
+}
+
+/**
+ * DLR Stage 2b passthrough guard. A run is DIFFABLE_RANGE only if EXACTLY ONE index-range
+ * `db.query` collect ran (`trace.length === 1`), no OTHER read syscall touched the transaction
+ * (cross-checked against the run's own `readRanges` — a `db.get` records no `CollectTrace` entry
+ * but DOES land a `table:`-keyspace point read there), no read policy was merged into that
+ * collect (dynamic authz can't be soundly re-applied by a downstream differ), and the handler's
+ * returned value is the EXACT, UNMODIFIED array that collect returned — proven by IDENTITY, not
+ * content: the guest branded that array (non-enumerably, {@link COLLECT_BRAND}) with the collect's
+ * `token`, and any `slice`/`filter`/`map`/spread/`[...docs]` produces a fresh, unbranded array that
+ * fails this check and correctly falls to a full RERUN. Content equality is deliberately NOT used:
+ * a JS post-op that is a no-op ON THE CURRENT DATA (`docs.slice(0, 10)` when ≤10 rows, or
+ * `docs.filter(d => d.big)` when every row is `big`) is content-indistinguishable from a real
+ * passthrough, yet would silently cap/exclude a later inserted in-range row the differ still emits —
+ * permanent wrong data the drift checksum can't catch (server and client agree on the same wrong
+ * set). Declining harmless copies to RERUN is the correct conservative trade ("any doubt → RERUN").
+ * Also declines whenever the collect declared a `.take(n)` limit (`hadLimit`): the recorded range
+ * is the TRUNCATED top-N window, not the full matching range, so a downstream range-differ would
+ * neither apply the limit (rendering every matching row, not just the top N) nor notice a write
+ * that should promote a new document into the top-N — see `CollectTrace.hadLimit`'s doc comment.
+ * Only the executor can make this call: it alone sees both the kernel's collect trace AND the
+ * handler's final returned value. Any doubt → `undefined` (the caller falls back to a full RERUN);
+ * this guard is deliberately the ONLY defense here — the drift-XOR-checksum safety net downstream
+ * can't catch a mis-classified post-processed handler, since a checksum over the (already wrong)
+ * returned value looks internally consistent.
+ *
+ * ISOLATE NOTE: the `COLLECT_BRAND` identity check works because the guest and this classifier share
+ * one heap under the current `InlineUdfExecutor`. Across a real V8-isolate boundary the guest array
+ * would be serialized (dropping the Symbol brand), so the brand check would have to run guest-side
+ * and travel as an explicit wire flag on the return value — out of scope now.
+ */
+function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], readRanges: readonly KeyRange[]): DiffableRange | undefined {
+  if (trace.length !== 1) return undefined; // exactly one collect, and no ambiguous second collect
+  const t = trace[0]!;
+  if (t.hadReadPolicy) return undefined; // dynamic authz was merged in — RERUN, never diff
+  if (t.hadLimit) return undefined; // truncated top-N window, not the full range — RERUN, never diff
+  // No other read syscall (e.g. a `db.get` alongside the collect) touched this transaction: the
+  // run's full read set must be exactly the one range this collect itself scanned.
+  if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;
+  if (!Array.isArray(value)) return undefined; // not a list result
+  // Identity, not content: the returned value must be the untouched array THIS collect returned,
+  // carrying its token brand. A copy (slice/filter/map/spread) is unbranded → decline.
+  if ((value as unknown as Record<PropertyKey, unknown>)[COLLECT_BRAND] !== t.token) return undefined;
+  return { keyspace: t.keyspace, bounds: t.bounds, filters: t.filters, order: t.order, fields: t.fields };
 }
 
 /**
@@ -280,6 +348,26 @@ export class CommitThenThrow {
 /** Build a CommitThenThrow sentinel — RETURN it from a mutation (see the class doc + its ⚠️). */
 export function commitThenThrow(message: string): CommitThenThrow {
   return new CommitThenThrow(message);
+}
+
+/**
+ * Property key the executor stamps onto an error it throws AFTER its transaction has ALREADY
+ * committed (today the only such case is `CommitThenThrow`). The sync handler reads it (via
+ * {@link committedTsOfError}) to release the origin-response gate that was registered at commit time
+ * — a commit-then-throw from a diff-capable subscribed origin would otherwise leave that gate
+ * unresolved and wedge the whole node's reactive drain forever (DLR 2b review). `Symbol.for` keeps it
+ * stable across duplicate module instances (tests resolve workspace deps via each package's `dist`).
+ */
+export const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+
+/** Read the committed-ts the executor stamped onto a post-commit error, or `undefined` (a pre-commit
+ *  throw — no commit happened, so no gate was ever registered). */
+export function committedTsOfError(e: unknown): number | undefined {
+  if (e !== null && typeof e === "object") {
+    const ts = (e as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY];
+    if (typeof ts === "number") return ts;
+  }
+  return undefined;
 }
 
 export class InlineUdfExecutor {
@@ -451,22 +539,48 @@ export class InlineUdfExecutor {
           })());
 
         // Main context: carries the registry + rule-context builder → policy enforcement is ON.
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry };
+        // DLR 2b: `collectTrace` is only armed for a QUERY's own top-level kernel context — never
+        // for the facade/rule-context `pctx`s above, so a component facade's internal collects can
+        // never be mistaken for the calling function's own passthrough scan.
+        const collectTrace = fn.type === "query" ? [] : undefined;
+        // DLR: arm in-flight syscall tracking for a query so reads it initiated but didn't await
+        // (a floating `.collect()` whose result the handler discarded) are still captured — see the
+        // drain below and `KernelContext.inflight`.
+        const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, inflight };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
 
         const value = await fn.handler(guestCtx, args);
-        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray() };
+        // Drain any read the handler left in-flight (didn't await) BEFORE snapshotting the read set,
+        // so its `recordScanReads`/`CollectTrace` have landed. A no-op when the handler awaited all
+        // its reads (the set is already empty). Reads never spawn further reads, so this terminates.
+        if (inflight !== undefined) {
+          while (inflight.size > 0) {
+            const pending = [...inflight];
+            await Promise.allSettled(pending);
+            for (const p of pending) inflight.delete(p);
+          }
+        }
+        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace };
       }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.
       if (commit.value.value instanceof CommitThenThrow) {
         logEntry("error", commit.value.value.message);
-        throw new Error(commit.value.value.message);
+        // The transaction already committed (its fan-out fired, registering an origin-response gate
+        // for a diff-capable subscribed origin). Stamp the commit's ts onto the error so the sync
+        // handler's catch can release that gate — otherwise the node's reactive drain wedges forever
+        // on a never-resolved gate (DLR 2b review). See `committedTsOfError`.
+        const err = new Error(commit.value.value.message);
+        (err as unknown as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY] = Number(commit.commitTs);
+        throw err;
       }
       logEntry("ok");
+      const diffableRange =
+        fn.type === "query" ? classifyDiffableRange(commit.value.value, commit.value.collectTrace ?? [], commit.value.readRanges) : undefined;
       return {
         value: commit.value.value,
         logs: commit.value.logs,
@@ -474,6 +588,7 @@ export class InlineUdfExecutor {
         commitTs: commit.commitTs,
         readRanges: commit.value.readRanges,
         oplog: commit.oplog,
+        ...(diffableRange ? { diffableRange } : {}),
       };
     } catch (e) {
       logEntry("error", e instanceof Error ? e.message : String(e));

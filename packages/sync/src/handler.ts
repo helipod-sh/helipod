@@ -11,6 +11,7 @@ import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
 import { isRetryableError, isStackbaseError } from "@stackbase/errors";
 import type { SerializedKeyRange } from "@stackbase/index-key-codec";
 import type { WrittenDoc } from "@stackbase/transactor";
+import type { DiffableRange } from "@stackbase/executor";
 import {
   encodeServerMessage,
   parseClientMessage,
@@ -23,9 +24,10 @@ import {
   type ClientMutationVerdict,
   type MutationBatchEntry,
 } from "./protocol";
+import { tableOfKeyspaceId } from "@stackbase/index-key-codec";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
-import { classifyByIdRead } from "./classify";
-import { byIdChangesFor, byIdResetChanges } from "./commit-differ";
+import { classifyByIdRead, rangeReadFromDiffable } from "./classify";
+import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
 import { driftChecksum, type RowVersion } from "./change";
 import {
   SessionBackpressureController,
@@ -85,7 +87,7 @@ export type RunMutationResult = MutationRan | MutationReplay;
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }>;
   /**
    * `origin` (G4, client-sync verdict §(d) item 2): the committing session's id, threaded onto the
    * commit's `OplogDelta.origin` so the fan-out can advance THAT session's own `version.ts` past its
@@ -102,7 +104,7 @@ export interface SyncUdfExecutor {
    * any node, incl. a fleet follower; the read must run where the commit runs — verdict §(c) repair 3).
    */
   runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string, dedup?: ClientMutationRef): Promise<RunMutationResult>;
-  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }>;
+  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
   /**
@@ -167,6 +169,26 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * The well-known symbol the executor stamps a committed-ts onto an error thrown AFTER its transaction
+ * committed (a `commitThenThrow`). Read via `Symbol.for` (the global registry) rather than importing
+ * the executor so `@stackbase/sync` keeps its executor coupling TYPE-ONLY — no runtime dependency
+ * edge, matching how it already treats `DiffableRange`/`transactor`/`index-key-codec`. MUST stay
+ * byte-identical to `@stackbase/executor`'s `COMMITTED_TS_ERROR_KEY` (guarded by a cross-package
+ * assertion in this handler's tests). See `SyncProtocolHandler.originResponseGates`.
+ */
+const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+
+/** The committed-ts the executor stamped on a post-commit error, or `undefined` for a pre-commit
+ *  throw (no commit → no origin-response gate was ever registered). */
+function committedTsOfError(e: unknown): number | undefined {
+  if (e !== null && typeof e === "object") {
+    const ts = (e as Record<PropertyKey, unknown>)[COMMITTED_TS_ERROR_KEY];
+    if (typeof ts === "number") return ts;
+  }
+  return undefined;
+}
+
 /** Same `${sessionId} ${queryId}` composite key `SubscriptionManager` uses internally (it doesn't
  *  export its own) — `byIdRowMap` is keyed identically so the two stay trivially correlated. */
 function subKey(sessionId: string, queryId: number): string {
@@ -205,6 +227,39 @@ export class SyncProtocolHandler {
    * backstop that resyncs the one affected query — see `change.ts`'s `driftChecksum` doc comment.
    */
   private readonly byIdRowMap = new Map<string, Map<string, RowVersion>>();
+  /**
+   * DLR 2b — the response-before-Transition gate (replaces the fragile, timer-starvable
+   * `setTimeout(0)`). `commitTs` → a one-shot latch a diff-capable origin's OWN reactive Transition
+   * parks on inside `doNotifyWrites`, released once `processMutation` has actually enqueued that
+   * commit's `MutationResponse` onto the session's outbound queue.
+   *
+   * WHY commit-time registration (via {@link registerOriginResponseGate}, called from the runtime's
+   * fan-out subscribe callback) rather than lazily inside `doNotifyWrites`: the fan-out drain is
+   * SERIAL, so under load `doNotifyWrites` for a commit can run long after that commit's response was
+   * already sent (the drain is backed up behind a flood). Registering the gate inside `doNotifyWrites`
+   * would then happen AFTER the release — the release would find no gate (no-op), and the late gate
+   * would park FOREVER, wedging the whole `notifyTail` (the backpressure-flood regression). The
+   * subscribe callback instead fires SYNCHRONOUSLY inside the commit (before `runMutation` resolves,
+   * hence before the response can be sent), so the gate always exists before its release, whatever the
+   * drain backlog.
+   *
+   * WHY a microtask latch, not `setTimeout(0)`: the release runs as `processMutation` resumes after
+   * `await runMutation` — a MICROTASK, which a tight `await`-loop of mutations (`for (…) await
+   * client.mutation(…)`) drains between every iteration. The old timer sat in Node's TIMER phase,
+   * which that same loop STARVES; because the yield sat ON the single `notifyTail`, a starved timer
+   * stalled the entire fan-out chain. A microtask cannot be starved and cannot stall the tail.
+   *
+   * Scoped to a diff-capable LOCAL origin session (see `registerOriginResponseGate`), so every gate
+   * created here is balanced by exactly one release from that session's own `processMutation` — on
+   * EVERY post-commit outcome: the success path releases inline, and a commit-then-throw (or any
+   * throw after the commit) releases from its catch via the `committedTs` the executor stamps on the
+   * error (see `releaseOriginResponseGate`/`committedTsOfError`). Entries are transient: one per
+   * in-flight diff-capable-origin commit, created at commit and dropped on release (or on
+   * `disconnect`, which resolves+drops any still-pending gate for the vanishing session so a
+   * mid-flight teardown can never strand a parked `doNotifyWrites`). The `sessionId` is retained so
+   * that disconnect backstop can find a session's gates in this commitTs-keyed map.
+   */
+  private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void; sessionId: string }>();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -238,6 +293,13 @@ export class SyncProtocolHandler {
     this.sessions.delete(sessionId);
     this.pendingFrontiers.delete(sessionId);
     this.clearByIdRowMapForSession(sessionId);
+    // Backstop: resolve+drop any origin-response gate still pending for this vanishing session, so a
+    // mutation that committed (registering a gate) but disconnected before its `processMutation`
+    // released it can never leave a `doNotifyWrites` parked forever (DLR 2b review). Under normal
+    // operation `processMutation` releases the gate on every outcome, so this loop is usually empty.
+    for (const [commitTs, gate] of this.originResponseGates) {
+      if (gate.sessionId === sessionId) this.releaseOriginResponseGate(commitTs);
+    }
   }
 
   /** Drop every `byIdRowMap` entry for a session (disconnect/reap) — ephemeral per-sub state, never
@@ -317,7 +379,7 @@ export class SyncProtocolHandler {
   }
 
   /** Run a subscription's query — privileged for _admin:* on a privileged session; else identity-scoped. */
-  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[] }> {
+  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange }> {
     if (udfPath.startsWith("_admin:")) {
       if (!session.privileged) throw new Error("Forbidden: admin subscription requires admin auth");
       return this.executor.runAdminQuery(udfPath, args);
@@ -352,15 +414,44 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables, readRanges } = await this.execSub(session, q.udfPath, q.args);
+        const { value, tables, readRanges, diffableRange } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId });
+        const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range });
         const json = convexToJson(value);
-        if (byId && session.supportsQueryDiff) {
-          // DLR 2a: a DIFFABLE_BYID sub's initial answer to a diff-capable client is a QueryDiff
-          // "reset" (add-all over an empty map) instead of QueryUpdated.
+        if (range && session.supportsQueryDiff) {
+          // DLR 2b Task 10: a DIFFABLE_RANGE sub's initial/resumed answer to a diff-capable client is
+          // fingerprinted with the SAME strong `hashValue` a RERUN `QueryUpdated` uses, so subscription
+          // resume (design 2025-11-28) works for a diffable sub too. A matching echoed `resultHash`
+          // means the fresh result is byte-identical to what the client already has — reply
+          // `QueryUnchanged` (no changes on the wire) instead of a full reset.
+          //
+          // CRITICAL: `byIdRowMap` is seeded EITHER WAY. A reconnect is a fresh server session with an
+          // empty `byIdRowMap` (see `disconnect`/`clearByIdRowMapForSession`) — even when the client's
+          // baseline is unchanged and nothing is sent, THIS session still needs a materialized row-map
+          // on file so a LATER incremental write can diff against it (`sendSessionTransition`'s range
+          // arm) instead of finding an empty `prevMap` and computing a wrong diff (spurious `add`s for
+          // rows the client already has).
+          const { changes, next } = rangeResetChanges(range, json as JSONValue[], session.version.ts);
+          this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({
+              type: "QueryDiff",
+              queryId: q.queryId,
+              changes,
+              checksum: driftChecksum(next),
+              reset: { mode: "range", orderDir: range.order },
+              hash,
+            });
+          }
+        } else if (byId && session.supportsQueryDiff) {
+          // DLR 2a/2b Task 10: a DIFFABLE_BYID sub's initial/resumed answer — same resume integration
+          // as the range arm above (fingerprint + QueryUnchanged-on-match + unconditional seed).
           //
           // Reset-ts nuance: `execSub`'s return shape (`{value, tables, readRanges}`) doesn't surface
           // the document's own engine commit ts, only the value. Rather than plumb a new field through
@@ -372,7 +463,12 @@ export class SyncProtocolHandler {
           // `byIdChangesFor`, so any placeholder-ts imprecision self-corrects on the first write.
           const { changes, next } = byIdResetChanges(byId.docId, json, session.version.ts);
           this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
-          modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next), reset: true });
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({ type: "QueryDiff", queryId: q.queryId, changes, checksum: driftChecksum(next), reset: true, hash });
+          }
         } else {
           const hash = hashValue(json);
           if (q.resultHash !== undefined && q.resultHash === hash) {
@@ -483,6 +579,13 @@ export class SyncProtocolHandler {
         value: convexToJson(value),
         ts: this.mutationResponseTs(commitTs),
       });
+      // DLR 2b: this commit's MutationResponse is now enqueued on the session's outbound queue AHEAD
+      // of the commit's own reactive Transition. Release the gate registered at commit time (when the
+      // origin is a diff-capable session) so `doNotifyWrites` may now flush the origin's own Transition
+      // strictly behind the response. This runs as `processMutation` resumes after `await runMutation`
+      // — a microtask, so a tight `await`-loop of mutations can't starve it. A no-op when no gate was
+      // registered (inline mode, or a diff-incapable origin). See `originResponseGates`.
+      this.releaseOriginResponseGate(commitTs);
       if (forwarded && commitTs > 0) {
         // G4 fleet fallback: the origin tag rode a fan-out on ANOTHER node, so it can't reach this
         // node's `doNotifyWrites`. Record the frontier; `sweepPendingFrontiers` advances this
@@ -495,6 +598,16 @@ export class SyncProtocolHandler {
       }
       return "continue";
     } catch (e) {
+      // DLR 2b leak fix: a `commitThenThrow` (or any throw AFTER the transaction committed) reaches
+      // THIS catch, not the success release above — but its commit already fired the fan-out, which
+      // registered an origin-response gate at commit time. Release it here, keyed by the `commitTs`
+      // the executor stamped on the error, or a diff-capable subscribed origin's `doNotifyWrites`
+      // parks on the never-resolved gate forever and wedges the whole node's reactive drain. A no-op
+      // when the throw was PRE-commit (no `committedTs` on the error → no gate was ever registered)
+      // or when no gate was registered for this commit (diff-incapable origin). See
+      // `releaseOriginResponseGate`.
+      const committedTs = committedTsOfError(e);
+      if (committedTs !== undefined) this.releaseOriginResponseGate(committedTs);
       // Thread the thrown error's typed `code` (when it's one of ours) onto the wire — a genuinely
       // FRESH (non-replayed) failure previously sent `error` with no `code`, even though the wire
       // shape supports one; only the dedup-replay branch above populated it. That silently starved
@@ -516,6 +629,10 @@ export class SyncProtocolHandler {
         error: errMessage(e),
         code: isStackbaseError(e) && !isRetryableError(e) ? e.code : undefined,
       });
+      // Ordering note: `releaseOriginResponseGate` above runs BEFORE this `send`, and that ordering is
+      // intentional and harmless — the release only SCHEDULES a microtask (it un-parks a gated
+      // `doNotifyWrites`), so this synchronous `send` still puts the `MutationResponse` on the wire
+      // first; the released drain can only run once this catch yields.
       // See the doc comment above: TRANSIENT (retryable) stops the batch drain; TERMINAL continues.
       return isRetryableError(e) ? "stop" : "continue";
     }
@@ -607,54 +724,62 @@ export class SyncProtocolHandler {
       bySession.set(sub.sessionId, list);
     }
 
+    // Response-before-Transition ordering (client-sync verdict §(d); DLR 2b). The committing
+    // session's own `MutationResponse` (which carries the commitTs the client's optimistic gate keys
+    // off) MUST reach the client BEFORE this commit's Transition — only then is the optimistic layer
+    // marked `completed` and dropped ATOMICALLY as the authoritative row ingests (drop-on-observed-
+    // inclusion, never a transient temp+real duplicate frame). But the sync handler and the fan-out
+    // are decoupled (`autoNotifyOnMutation: false`): the fan-out kicks this notify SYNCHRONOUSLY
+    // inside the commit (within `runMutation`), so `doNotifyWrites` is scheduled on a microtask AHEAD
+    // of the response — whose own microtask is only scheduled once `runMutation` resolves back in
+    // `processMutation`. The RERUN (`QueryUpdated`) arm incidentally re-orders correctly by awaiting
+    // `execSub` (a real query), which yields long enough for the response to flush first. The
+    // synchronous DIFFABLE (by-id / range `QueryDiff`) arms have no such yield, so their Transition
+    // raced — and beat — the response, leaving the layer `inflight` at ingest (the 2b regression).
+    //
+    // Restore the invariant at the source for the diff path with a MICROTASK gate rather than a
+    // macrotask yield: when the origin is a diff-capable client about to receive its OWN commit's
+    // Transition, park that Transition on the gate registered at COMMIT time for this `commitTs`
+    // (`originResponseGates`), and let it resume only once `processMutation` has actually enqueued this
+    // commit's `MutationResponse` (which releases the gate — see `releaseOriginResponseGate`). The
+    // prior fix used `await setTimeout(0)`, which runs in Node's TIMER phase; a tight `await`-loop of
+    // mutations (`for (…) await client.mutation(…)`) STARVES that phase, so the timer never fired and —
+    // because this yield sits ON the single `notifyTail` — it BLOCKED the entire fan-out chain (the
+    // backpressure-flood regression: a stalled victim received ZERO fan-out). The gate instead resumes
+    // on a MICROTASK (the response send is `processMutation` resuming after `await runMutation`), and
+    // microtasks drain between every `await` of that loop — so it cannot be starved and cannot stall
+    // the `notifyTail`. Registration lives at commit time (not here) precisely because the serial drain
+    // can run this method long after the response was sent; see `originResponseGates`' doc comment.
+    //
+    // SCOPED to the origin's own Transition only (DLR 2b review): the gate exists solely to let the
+    // origin's `MutationResponse` flush ahead of ITS Transition — a non-origin session has no response
+    // of its own to order against, so delaying its send too is pure unnecessary fan-out latency (and,
+    // worse, skews any timing-sensitive backpressure test aimed at a non-origin victim). Every
+    // non-origin session is therefore computed+sent FIRST, with no added delay; only the origin's own
+    // compute+send (if it's diff-capable and present in `bySession`) parks on the gate. A
+    // diff-incapable origin has no synchronous QueryDiff race to guard against, so it is NOT skipped
+    // out of the main loop — it sends inline in its natural iteration position, exactly like any
+    // non-origin session.
+    const originIsDiffCapable =
+      !!originSessionId && bySession.has(originSessionId) && this.sessions.get(originSessionId)?.supportsQueryDiff === true;
+
     for (const [sessionId, subs] of bySession) {
+      if (originIsDiffCapable && sessionId === originSessionId) continue; // handled below, after the gate
       const session = this.sessions.get(sessionId);
       if (!session) continue;
-      const modifications: StateModification[] = [];
-      for (const sub of subs) {
-        try {
-          if (sub.byId && session.supportsQueryDiff && invalidation.writtenDocs) {
-            // DLR 2a: a DIFFABLE_BYID sub with a diff-capable client and a commit that carried its
-            // written docs gets an incremental QueryDiff — no execSub re-run needed (a write to this
-            // id can only change the single row's VALUE, never the shape of what a future `db.get(id)`
-            // reads, so `sub.byId` itself is trusted as-is here — no reclassification necessary).
-            const wd = invalidation.writtenDocs.find(
-              (w) => w.keyspace === sub.byId!.keyspace && w.key === sub.byId!.key,
-            );
-            const key = subKey(sub.sessionId, sub.queryId);
-            const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
-            const { changes, next } = byIdChangesFor(sub.byId, prevMap, wd);
-            this.byIdRowMap.set(key, next);
-            modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
-            continue;
-          }
-          const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-          // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
-          // classification — a query whose read shape changes across a refresh (data/identity-
-          // dependent branching) must not keep carrying a `byId` that no longer matches what it
-          // actually reads now (Task 3 review follow-up: a stale `byId` here would drive a WRONG diff
-          // the next time this sub takes the branch above).
-          const byId = classifyByIdRead(value, readRanges) ?? undefined;
-          this.subscriptions.add({ ...sub, tables, readRanges, byId }); // refresh the read set
-          // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
-          // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
-          // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
-          // diff-capable again) would diff against a stale prev-map keyed to the OLD id and
-          // accumulate a second, never-pruned entry (the identity-flip bug this closes). A sub
-          // that keeps the SAME byId across this refresh is untouched — its map stays accurate.
-          if (sub.byId && (!byId || byId.keyspace !== sub.byId.keyspace || byId.key !== sub.byId.key)) {
-            this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
-          }
-          const json = convexToJson(value);
-          modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
-        } catch (e) {
-          modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
-        }
-      }
-      const start = session.version;
-      const end: StateVersion = { querySet: start.querySet, ts: invalidation.commitTs };
-      session.version = end;
-      this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
+      await this.sendSessionTransition(session, subs, invalidation);
+    }
+
+    if (originIsDiffCapable) {
+      const originSubs = bySession.get(originSessionId!)!;
+      const originSession = this.sessions.get(originSessionId!)!;
+      // Park until this commit's `MutationResponse` has been enqueued. The gate was registered at
+      // commit time; if the response already flushed (the drain ran this method late), it's already
+      // released (absent) and we proceed immediately. Either way, the origin Transition never precedes
+      // its own response on the wire.
+      const gate = this.originResponseGates.get(invalidation.commitTs);
+      if (gate) await gate.promise;
+      await this.sendSessionTransition(originSession, originSubs, invalidation);
     }
 
     // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
@@ -671,6 +796,154 @@ export class SyncProtocolHandler {
     // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
     // subscription update this drain didn't already cover.
     this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+  }
+
+  /**
+   * DLR 2b — register the response-before-Transition gate for `commitTs`, at COMMIT time. Called
+   * SYNCHRONOUSLY from the runtime's fan-out subscribe callback (which fires inside the commit,
+   * before `runMutation` resolves and thus before this commit's `MutationResponse` can be sent), so
+   * the gate reliably exists before {@link releaseOriginResponseGate} runs — no matter how backed up
+   * the serial fan-out drain is. Public because the decoupled runtime owns the commit-time seam.
+   *
+   * Registers ONLY for a diff-capable LOCAL origin session — exactly the case `doNotifyWrites` parks
+   * on, and exactly the case whose own `processMutation` will release it, so every gate is balanced
+   * (no leak). A no-origin commit, a foreign/absent session, or a diff-incapable session registers
+   * nothing. Idempotent per `commitTs`.
+   */
+  registerOriginResponseGate(commitTs: number, originSessionId: string | undefined): void {
+    if (originSessionId === undefined) return;
+    if (this.sessions.get(originSessionId)?.supportsQueryDiff !== true) return;
+    if (this.originResponseGates.has(commitTs)) return;
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    this.originResponseGates.set(commitTs, { promise, resolve, sessionId: originSessionId });
+  }
+
+  /**
+   * DLR 2b — release (and drop) the response gate for `commitTs`. Called right after the commit's
+   * `MutationResponse` is enqueued, so the parked origin Transition flushes strictly behind it. A
+   * no-op when no gate is registered (a diff-incapable / no-origin commit never registered one) — so
+   * an ordinary commit costs nothing here.
+   */
+  private releaseOriginResponseGate(commitTs: number): void {
+    const gate = this.originResponseGates.get(commitTs);
+    if (gate !== undefined) {
+      this.originResponseGates.delete(commitTs);
+      gate.resolve();
+    }
+  }
+
+  /**
+   * Compute one session's modifications for this commit (by-id / range `QueryDiff` incremental arms,
+   * or the RERUN `QueryUpdated`/`QueryFailed` arm) and send its Transition. Extracted from
+   * `doNotifyWrites`'s per-session loop body (byte-identical logic) so the origin session's own call
+   * can be deferred past the response-ordering macrotask yield while every non-origin session is
+   * computed+sent immediately, with no shared logic duplicated between the two call sites.
+   */
+  private async sendSessionTransition(
+    session: Session,
+    subs: Subscription[],
+    invalidation: WriteInvalidation,
+  ): Promise<void> {
+    const modifications: StateModification[] = [];
+    for (const sub of subs) {
+      try {
+        // NOTE (DLR 2b Task 10): a session's `supportsQueryDiff` can flip true asynchronously
+        // mid-session, independent of when a given sub was last (re)answered — e.g. an outbox
+        // client's capability rides its resume `Connect`, sent AFTER its own resync's
+        // `ModifyQuerySet` (`onTransportReopened`'s ordering; see `client.ts`). That can let a write
+        // take the incremental-diff shortcut below even for a sub this SERVER SESSION never actually
+        // seeded a row-map for (`this.byIdRowMap.get(key) ?? new Map()` silently substitutes an empty
+        // one) — but that empty substitution is the SAME pre-existing behavior the RERUN-fallback
+        // arm below already deliberately relies on (a range sub's map is unconditionally dropped
+        // there, expecting a LATER incremental write to reseed off nothing but its own written docs)
+        // — see `commit-differ-handler.test.ts`'s "RERUN fallback ... re-seeds via a fresh add-all"
+        // and the SetAuth re-thread test, both of which pin this. Task 10 does not touch this
+        // invalidation-loop behavior (its own remit is the subscribe-answer path); the client-side
+        // residual this CAN expose (a diff-capable-but-never-actually-reset client rendering wrong)
+        // is instead guarded at the source of truth for render shape — `reconcile.ts`'s
+        // `ingestTransition` — which resyncs rather than trusting an uninitialized `renderMode`.
+        const key = subKey(sub.sessionId, sub.queryId);
+        if (sub.range && session.supportsQueryDiff && invalidation.writtenDocs) {
+          // DLR 2b: a DIFFABLE_RANGE sub with a diff-capable client and a commit that carried its
+          // written docs gets an incremental QueryDiff — no execSub re-run needed. Unlike a by-id
+          // sub (which only ever cares about writes at its OWN key), a range sub must consider
+          // EVERY write in its TABLE: a write anywhere in the table can enter or exit the range
+          // (an insert, an update that crosses the bounds/filter, a delete). `writtenDocs` is
+          // filtered to the sub's table via `tableOfKeyspaceId` — `sub.range.keyspace` is an INDEX
+          // keyspace (`index:<tableNumber>:<indexName>`) while `wd.keyspace` is always a PRIMARY
+          // keyspace (`table:<tableNumber>`), but both embed the identical `encodeStorageTableId`
+          // table-number string (verified against `indexKeyspaceId`/`tableKeyspaceId`'s shared
+          // encoding in `@stackbase/index-key-codec`), so comparing the parsed table id is the
+          // provably correct match — not a coincidental string prefix trick.
+          const subTable = tableOfKeyspaceId(sub.range.keyspace);
+          const wds = invalidation.writtenDocs.filter((w) => tableOfKeyspaceId(w.keyspace) === subTable);
+          const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
+          const { changes, next } = rangeChangesFor(sub.range, prevMap, wds);
+          this.byIdRowMap.set(key, next);
+          // Pushed even with an empty `changes` array (e.g. every written doc in the table this
+          // commit was outside the sub's bounds/filter) — an empty QueryDiff still advances the
+          // client's version frontier under this Transition's bracket; the client no-ops it.
+          modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
+          continue;
+        }
+        if (sub.byId && session.supportsQueryDiff && invalidation.writtenDocs) {
+          // DLR 2a: a DIFFABLE_BYID sub with a diff-capable client and a commit that carried its
+          // written docs gets an incremental QueryDiff — no execSub re-run needed (a write to this
+          // id can only change the single row's VALUE, never the shape of what a future `db.get(id)`
+          // reads, so `sub.byId` itself is trusted as-is here — no reclassification necessary).
+          const wd = invalidation.writtenDocs.find(
+            (w) => w.keyspace === sub.byId!.keyspace && w.key === sub.byId!.key,
+          );
+          const prevMap = this.byIdRowMap.get(key) ?? new Map<string, RowVersion>();
+          const { changes, next } = byIdChangesFor(sub.byId, prevMap, wd);
+          this.byIdRowMap.set(key, next);
+          modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
+          continue;
+        }
+        const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+        // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
+        // spreading the sub's stale classification — a query whose read shape changes across a
+        // refresh (data/identity-dependent branching) must not keep carrying a `byId`/`range` that
+        // no longer matches what it actually reads now (Task 3 review follow-up: a stale `byId`
+        // here would drive a WRONG diff the next time this sub takes a branch above).
+        const byId = classifyByIdRead(value, readRanges) ?? undefined;
+        const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range }); // refresh the read set
+        // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
+        // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
+        // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
+        // diff-capable again) would diff against a stale prev-map keyed to the OLD id and
+        // accumulate a second, never-pruned entry (the identity-flip bug this closes). A sub
+        // that keeps the SAME byId across this refresh is untouched — its map stays accurate.
+        if (sub.byId && (!byId || byId.keyspace !== sub.byId.keyspace || byId.key !== sub.byId.key)) {
+          this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
+        }
+        // Same idea for a range sub, but unconditional: this RERUN branch means a full re-scan
+        // (not an incremental diff) answered this turn — a write anywhere in the table could have
+        // shifted the range's MEMBERSHIP (not just one row's value) with no per-doc diff tracking
+        // it, so the old row-map's membership snapshot predates this RERUN and must not be reused
+        // by a later incremental diff. Drop it unconditionally (not gated on the range classification
+        // itself changing, unlike byId above). Re-seed happens via a DRIFT-TRIGGERED RESYNC, NOT a
+        // fresh QueryDiff reset: the client ingests the `QueryUpdated` below (which reverts the sub to
+        // plain RERUN rendering — clears `renderMode`/`diffRows`, Finding 2 in `layered-store.ts`),
+        // then on the next write the server emits an INCREMENTAL QueryDiff off the now-empty map
+        // (carrying only that commit's written docs, not full membership). The client sees an
+        // incremental diff against an uninitialized render mode and resyncs (`reconcile.ts`'s
+        // uninitialized-render-mode guard), which is what re-establishes a clean baseline.
+        if (sub.range) {
+          this.byIdRowMap.delete(subKey(sub.sessionId, sub.queryId));
+        }
+        const json = convexToJson(value);
+        modifications.push({ type: "QueryUpdated", queryId: sub.queryId, value: json, hash: hashValue(json) });
+      } catch (e) {
+        modifications.push({ type: "QueryFailed", queryId: sub.queryId, error: errMessage(e) });
+      }
+    }
+    const start = session.version;
+    const end: StateVersion = { querySet: start.querySet, ts: invalidation.commitTs };
+    session.version = end;
+    this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
   }
 
   /** Emit a standalone empty ts-advancing Transition — advances `session.version.ts` to `ts` with no
@@ -724,13 +997,14 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges } = await this.execSub(session, sub.udfPath, sub.args);
-        // Recompute `byId` from THIS fresh (value, readRanges) instead of spreading the sub's stale
-        // classification — an identity change can change WHAT a query reads (e.g. an
-        // identity-scoped `db.get`), so a stale `byId` here would drive a wrong diff on a later
-        // write.
+        const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+        // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
+        // spreading the sub's stale classification — an identity change can change WHAT a query
+        // reads (e.g. an identity-scoped `db.get`, or an identity-scoped range's bounds/filters),
+        // so a stale `byId`/`range` here would drive a wrong diff on a later write.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId });
+        const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {

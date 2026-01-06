@@ -113,13 +113,20 @@ function isTransition(m: ServerMessage): m is TransitionMsg {
 function isMutationResponseOk(m: ServerMessage): m is MrOk {
   return m.type === "MutationResponse" && m.success;
 }
-/** True if a Transition's modifications carry a list value containing an item with this `body`. */
+/** True if a Transition's modifications carry this `body` — either as a full `QueryUpdated` list
+ *  value, or (DLR 2b: a range collect like `messages:list` is now DIFFABLE_RANGE) as an add/edit
+ *  `QueryDiff` change whose row carries it. */
 function modsIncludeBody(m: ServerMessage, body: string): boolean {
   if (!isTransition(m)) return false;
   return m.modifications.some((mod) => {
-    if (mod.type !== "QueryUpdated") return false;
-    const val = mod.value;
-    return Array.isArray(val) && (val as Array<{ body?: string }>).some((d) => d?.body === body);
+    if (mod.type === "QueryUpdated") {
+      const val = mod.value;
+      return Array.isArray(val) && (val as Array<{ body?: string }>).some((d) => d?.body === body);
+    }
+    if (mod.type === "QueryDiff") {
+      return mod.changes.some((c) => (c.t === "add" || c.t === "edit") && (c.row as { body?: string })?.body === body);
+    }
+    return false;
   });
 }
 

@@ -37,7 +37,7 @@ export {
 export { IntervalIndex } from "./interval-index";
 
 export type { SerializedKeyRange, WriteInvalidation } from "./serialize";
-export { serializeKeyRange, deserializeKeyRange } from "./serialize";
+export { serializeKeyRange, deserializeKeyRange, bytesToBase64, base64ToBytes } from "./serialize";
 
 export type { Cursor, SimpleCursor, IndexCursor } from "./cursor";
 export { encodeCursor, decodeCursor, getCursorId, InvalidCursorError } from "./cursor";

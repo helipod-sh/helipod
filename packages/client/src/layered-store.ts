@@ -15,6 +15,7 @@
  */
 import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
 import { applyChanges, driftChecksum, type Change, type RowVersion } from "@stackbase/sync";
+import { base64ToBytes, compareKeyBytes } from "@stackbase/index-key-codec";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { PendingMutation } from "./mutation-log";
 
@@ -33,6 +34,24 @@ export function queryHash(path: string, argsJson: JSONValue): string {
 function renderByIdValue(rows: Map<string, RowVersion>): Value | undefined {
   for (const rv of rows.values()) return jsonToConvex(rv.row) as Value; // first (and only) entry
   return undefined;
+}
+
+/**
+ * DLR Stage 2b — render a DIFFABLE_RANGE query's value from its keyed row-map: every row sorted by
+ * `orderKey` (byte comparison via `compareKeyBytes`, matching the engine's own index-key ordering),
+ * reversed for `orderDir === "desc"`. Always an array, never `undefined` — an empty range is `[]`,
+ * mirroring the RERUN path's own "a range query's value is a list" contract. `orderKey` decodes via
+ * `base64ToBytes` (`@stackbase/index-key-codec`), the exact decoder-half of the codec the server's
+ * `orderKeyFor` (`commit-differ.ts`) encodes through — never hand-roll a second base64 codec, or the
+ * client's sort order can silently diverge from the server's. Mints a fresh array every call (never
+ * mutates/reuses a prior render), so `recompose`'s reference-inequality check fires listeners.
+ */
+function renderRangeValue(rows: Map<string, RowVersion>, orderDir: "asc" | "desc"): Value {
+  const entries = [...rows.values()].sort((a, b) =>
+    compareKeyBytes(base64ToBytes(a.orderKey ?? ""), base64ToBytes(b.orderKey ?? "")),
+  );
+  if (orderDir === "desc") entries.reverse();
+  return entries.map((e) => jsonToConvex(e.row)) as Value;
 }
 
 /**
@@ -79,13 +98,17 @@ export interface Subscription {
    *  `QueryUnchanged` (subscription resume) also sets this — it IS a delivered reply too, see
    *  `markUnchanged`. */
   answered: boolean;
-  /** Subscription resume (2025-11-28): the server-minted fingerprint of `serverValue` — a
-   *  `"sha256:" + hex` string stored verbatim from the most recent `QueryUpdated.hash`. Echoed
-   *  back as `resultHash` on resubscribe (`client.ts#resync`) so the server can reply
-   *  `QueryUnchanged` instead of resending the full value. A hash-less `QueryUpdated` (old server,
-   *  or wire-compat hand-construction) CLEARS this — an old-server session must never echo a stale
-   *  hash. Distinct from the query-identity `hash` field above (`path + args` — never changes for
-   *  a given subscription); this one is a RESULT fingerprint that changes every time the value does.
+  /** Subscription resume (2025-11-28, widened DLR 2b Task 10 to cover diffable subs): the server-
+   *  minted fingerprint of `serverValue` — a `"sha256:" + hex` string stored verbatim from the most
+   *  recent `QueryUpdated.hash` OR a diffable sub's reset `QueryDiff.hash` (set by `reconcile.ts`,
+   *  never by `LayeredQueryStore.applyDiff` itself — see that method's ownership note). Echoed back
+   *  as `resultHash` on resubscribe (`client.ts#resync`) so the server can reply `QueryUnchanged`
+   *  instead of resending the full value/reset. Cleared whenever there is nothing current to echo: a
+   *  hash-less `QueryUpdated` (old server, or wire-compat hand-construction), or an INCREMENTAL
+   *  `QueryDiff` (the value just changed and carries no fingerprint) — an old-server session, or a
+   *  session mid-diff, must never echo a stale hash. Distinct from the query-identity `hash` field
+   *  above (`path + args` — never changes for a given subscription); this one is a RESULT fingerprint
+   *  that changes every time the value does.
    */
   lastHash?: string;
   /** DLR Stage 2a — the by-id materialized cache. For a DIFFABLE query the authoritative base is
@@ -94,6 +117,15 @@ export interface Subscription {
    *  query (`serverValue` is set directly by `setServerValue`). Held per-subscription so the client
    *  can compute the drift checksum and apply incremental `QueryDiff`s over the running map. */
   diffRows?: Map<string, RowVersion>;
+  /** DLR Stage 2b — which shape to render `diffRows` as: `"byid"` (sole entry's row, or
+   *  `undefined`) or `"range"` (every row sorted by `orderKey`, always an array). Set from a reset
+   *  descriptor's `mode` (`applyDiff`'s `reset` param); undefined for a non-diffable (RERUN) sub, or
+   *  before a diffable sub's first `applyDiff` call. Defaults to by-id rendering when unset, so a
+   *  by-id sub (whose resets are always `reset: true`, never an object) never needs to set it. */
+  renderMode?: "byid" | "range";
+  /** DLR Stage 2b — the range sub's sort direction, set alongside `renderMode` from a range reset's
+   *  `orderDir`. Unused for `renderMode === "byid"`. */
+  orderDir?: "asc" | "desc";
   listeners: Set<Listener>;
 }
 
@@ -134,11 +166,26 @@ export class LayeredQueryStore {
   /** Set a subscription's authoritative base (from a `QueryUpdated` modification). Does NOT fire —
    *  `recompose` owns all listener firing so the base+drop+rebuild happen as one atomic frame.
    *  `hash` is the server-minted result fingerprint carried on the same modification — stored
-   *  verbatim (undefined clears `lastHash`, e.g. an old server that never sends `hash`). */
+   *  verbatim (undefined clears `lastHash`, e.g. an old server that never sends `hash`).
+   *
+   *  DLR Stage 2b (Finding 2): a `QueryUpdated` is the ONLY way a DIFFABLE (range/by-id) sub ever
+   *  reaches this method — the server sends a full RERUN answer instead of a `QueryDiff` only on a
+   *  RERUN-fallback (a `SetAuth` identity switch drops the server-side row-map; a fleet-forwarded
+   *  RERUN does the same), never in steady state (steady state for a diffable sub is `QueryDiff`).
+   *  So revert the sub to a plain RERUN-rendered sub here: drop the PRIOR identity's `diffRows` and
+   *  `renderMode`. Otherwise a subsequent incremental `QueryDiff` would merge onto the stale previous-
+   *  identity row-map and `renderRangeValue` the prior user's rows for ~1 RTT until drift-resync heals
+   *  — a transient cross-identity leak on an auth-scoped range query. Cleared → a later incremental
+   *  diff instead hits `reconcile.ts`'s uninitialized-render-mode guard (→ resync), and a later
+   *  `QueryDiff` reset re-establishes `renderMode`/`diffRows` cleanly. The immediate frame renders
+   *  `value` directly (recompose reads `serverValue`, never `diffRows`), so no stale row is shown. */
   setServerValue(sub: Subscription, value: Value | undefined, hash?: string): void {
     sub.serverValue = value;
     sub.lastHash = hash;
     sub.answered = true;
+    sub.diffRows = undefined;
+    sub.renderMode = undefined;
+    sub.orderDir = undefined;
   }
 
   /** Mark a subscription as having received its first reply WITHOUT a base value (from a
@@ -160,21 +207,58 @@ export class LayeredQueryStore {
   }
 
   /**
-   * DLR Stage 2a — apply a `QueryDiff`'s changes to a DIFFABLE query's keyed row-map, re-derive the
-   * rendered `serverValue` as a FRESH reference (so `recompose`'s reference-inequality check fires
-   * listeners), and report whether the client-recomputed drift checksum diverged from the server's.
-   * The caller (the reconciler) triggers a scoped resync on `drift === true`.
+   * DLR Stage 2a/2b — apply a `QueryDiff`'s changes to a DIFFABLE query's keyed row-map, re-derive
+   * the rendered `serverValue` as a FRESH reference (so `recompose`'s reference-inequality check
+   * fires listeners), and report whether the client-recomputed drift checksum diverged from the
+   * server's. The caller (the reconciler) triggers a scoped resync on `drift === true`.
    *
-   * A reset (the initial subscribe answer) is just add-all over an empty map; an incremental diff
-   * mutates the running map. `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each
-   * apply — the client never mutates a map a listener may still hold. `lastHash` is cleared: the diff
-   * path renders from the row-map, not the resume fingerprint, so a stale hash must never be echoed.
+   * `reset` (2b — widened from a bare `true`) governs where the diff applies FROM and how the
+   * result renders:
+   *   - `undefined` (an incremental diff): merges `changes` onto the RUNNING `sub.diffRows` map —
+   *     `sub.renderMode`/`orderDir` are left exactly as they were from the last reset.
+   *   - `true` (a by-id reset): the classic 2a reset — `sub.renderMode = "byid"`.
+   *   - `{ mode, orderDir }` (a range reset, or a future non-byid mode): `sub.renderMode = mode`,
+   *     `sub.orderDir = orderDir`.
+   * Both reset forms rebuild from an EMPTY map, never merge onto `sub.diffRows` — a reset is a full
+   * re-baseline (the initial subscribe answer, or a range resync after a drift/table-invalidation),
+   * so a row that's no longer in the result set must disappear, not linger from the prior baseline.
+   * `applyChanges` is copy-on-write, so `diffRows` becomes a new Map each apply — the client never
+   * mutates a map a listener may still hold.
+   *
+   * `lastHash` OWNERSHIP (DLR 2b Task 10): this method does NOT touch `sub.lastHash` — the caller
+   * (`reconcile.ts#ingestTransition`'s `QueryDiff` arm) owns it, since only the caller knows whether
+   * this call was a RESET (carries the server's resume fingerprint, `mod.hash`, to store) or an
+   * INCREMENTAL diff (no fingerprint — the caller clears it instead). Leaving it here would mean
+   * either always clearing it (breaking resume for every diffable sub, the Task 10 regression this
+   * fixes) or reaching into wire-message fields (`mod.hash`) this store-level method doesn't receive.
+   *
+   * NOTE ON AN UNINITIALIZED `renderMode` (DLR 2b Task 10 residual): this method does NOT itself
+   * guard against an INCREMENTAL diff (`reset === undefined`) arriving while `renderMode` has never
+   * been established — it can't distinguish that from the ordinary "first-ever call, reset omitted"
+   * shorthand several of this file's own unit tests use to mean "build from an empty baseline" (a
+   * pattern that predates `reset`'s widening and has no way here to tell "legitimately fresh" apart
+   * from "already answered by something else, never diff-initialized"). The caller
+   * (`reconcile.ts#ingestTransition`) owns that distinction instead — it has `sub.answered`'s
+   * PRE-CALL value on hand, which this method's own post-call mutation of `sub.answered` would
+   * otherwise erase, and doing it there also means the store-level surface tested here stays exactly
+   * as it always was.
    */
-  applyDiff(sub: Subscription, changes: readonly Change[], checksum: string): { drift: boolean } {
-    const next = applyChanges(sub.diffRows ?? new Map<string, RowVersion>(), changes);
+  applyDiff(
+    sub: Subscription,
+    changes: readonly Change[],
+    checksum: string,
+    reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" },
+  ): { drift: boolean } {
+    if (reset === true) {
+      sub.renderMode = "byid";
+    } else if (reset) {
+      sub.renderMode = reset.mode;
+      sub.orderDir = reset.orderDir;
+    }
+    const base = reset !== undefined ? new Map<string, RowVersion>() : (sub.diffRows ?? new Map<string, RowVersion>());
+    const next = applyChanges(base, changes);
     sub.diffRows = next;
-    sub.serverValue = renderByIdValue(next);
-    sub.lastHash = undefined;
+    sub.serverValue = sub.renderMode === "range" ? renderRangeValue(next, sub.orderDir ?? "asc") : renderByIdValue(next);
     sub.answered = true;
     return { drift: driftChecksum(next) !== checksum };
   }

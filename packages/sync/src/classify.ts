@@ -6,6 +6,7 @@
  */
 import type { Value } from "@stackbase/values";
 import { deserializeKeyRange, keySuccessor, compareKeyBytes, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import type { FilterExpr } from "@stackbase/query-engine";
 
 export interface ByIdRead {
   keyspace: string;
@@ -42,4 +43,18 @@ export function classifyByIdRead(value: Value, readRanges: readonly SerializedKe
   const docId = singleDocId(value);
   if (docId === null) return null; // array or non-doc scalar => RERUN
   return { keyspace: r.keyspace, key: r.start, docId };
+}
+
+export interface RangeRead {
+  keyspace: string;
+  bounds: SerializedKeyRange;
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+}
+
+/** Adapt the executor's DiffableRange (identical shape) into the sync tier's RangeRead. Kept as a
+ *  named boundary so the two packages don't share a type import path the differ also depends on. */
+export function rangeReadFromDiffable(d: RangeRead): RangeRead {
+  return { keyspace: d.keyspace, bounds: d.bounds, filters: d.filters, order: d.order, fields: d.fields };
 }

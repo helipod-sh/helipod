@@ -20,13 +20,17 @@ export interface WriteInvalidation {
   ranges: readonly SerializedKeyRange[];
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+/** Exported (DLR 2b) so client-side code (e.g. `@stackbase/client`'s range render mode) can decode
+ *  an `orderKey` the exact same way the server encoded it via `orderKeyFor` (`commit-differ.ts`,
+ *  which itself routes through `serializeKeyRange`/`deserializeKeyRange` — same codec, no drift).
+ *  Never hand-roll a second base64 codec; import these instead. */
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
   return btoa(binary);
 }
 
-function base64ToBytes(b64: string): Uint8Array {
+export function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);

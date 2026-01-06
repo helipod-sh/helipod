@@ -405,6 +405,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@stackbase/id-codec": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/sync": "workspace:*",
         "@stackbase/values": "workspace:*",
       },

@@ -494,6 +494,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
         };
       },
       async runMutation(path, args, identity, origin, dedup): Promise<RunMutationResult> {
@@ -567,7 +568,12 @@ export class EmbeddedRuntime {
         const fn = adminModules[path];
         if (!fn) throw new Error(`unknown admin function: ${path}`);
         const r = await executor.run(fn, jsonToConvex(args), { path, privileged: true, numShards });
-        return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
+        return {
+          value: r.value as Value,
+          tables: writtenTablesFromRanges(r.readRanges),
+          readRanges: r.readRanges.map(serializeKeyRange),
+          ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
+        };
       },
       async runAction(path, args, identity) {
         // `resolve` is the SAME public gate `runQuery`/`runMutation` use above — it throws on
@@ -811,6 +817,16 @@ export class EmbeddedRuntime {
     const namesForCommit = (tableIds: readonly string[]): string[] => translateTableIds(tableIds, tableNumberToName);
 
     adapter.subscribe((payload) => {
+      // DLR 2b response-before-Transition gate: register SYNCHRONOUSLY here, at commit time (this
+      // callback fires inside the commit, before `runMutation` resolves — hence before the committing
+      // session's `MutationResponse` can be sent). Registering here rather than lazily inside
+      // `doNotifyWrites` is essential: the fan-out `drain` below is SERIAL, so under load
+      // `doNotifyWrites` for this commit can run long after its response already flushed; a gate
+      // registered there would arrive after its own release and then park forever, wedging the whole
+      // notify chain (the backpressure-flood stall). The handler scopes this to a diff-capable local
+      // origin session and drops it on the matching `processMutation` release — see
+      // `registerOriginResponseGate`.
+      handler.registerOriginResponseGate(payload.commitTs, payload.origin);
       queue.push({
         tables: payload.tables,
         ranges: payload.ranges,
