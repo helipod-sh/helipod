@@ -495,6 +495,7 @@ export class EmbeddedRuntime {
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
+          ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };
       },
       async runMutation(path, args, identity, origin, dedup): Promise<RunMutationResult> {
@@ -573,6 +574,7 @@ export class EmbeddedRuntime {
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
+          ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };
       },
       async runAction(path, args, identity) {

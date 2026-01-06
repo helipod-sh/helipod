@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyByIdRead, rangeReadFromDiffable, type RangeRead } from "../src/classify";
+import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable, type RangeRead } from "../src/classify";
 import { serializeKeyRange, keySuccessor, indexKeyspaceId, tableKeyspaceId } from "@stackbase/index-key-codec";
 
 const b = (...n: number[]) => new Uint8Array(n);
@@ -40,5 +40,21 @@ describe("rangeReadFromDiffable (DLR 2b)", () => {
     const d = { keyspace: "index:AAA", bounds: { keyspace: "index:AAA", start: "AA", end: "AB" }, filters: [], order: "asc" as const, fields: ["channelId"] };
     const r: RangeRead = rangeReadFromDiffable(d);
     expect(r).toEqual(d);
+  });
+});
+
+describe("pageReadFromDiffable (DLR 2c)", () => {
+  it("adapts a DiffablePage into a RangeRead carrying pageMeta", () => {
+    const d = {
+      keyspace: "index:9001:by_channel",
+      bounds: { keyspace: "index:9001:by_channel", start: "AA", end: "AB" },
+      filters: [],
+      order: "asc" as const,
+      fields: ["channelId"],
+      pageMeta: { nextCursor: "AB", hasMore: true, scanCapped: false },
+    };
+    const r = pageReadFromDiffable(d);
+    expect(r.bounds).toEqual(d.bounds);
+    expect(r.pageMeta).toEqual(d.pageMeta);
   });
 });

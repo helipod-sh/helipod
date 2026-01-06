@@ -45,16 +45,33 @@ export function classifyByIdRead(value: Value, readRanges: readonly SerializedKe
   return { keyspace: r.keyspace, key: r.start, docId };
 }
 
+/** A page's fixed metadata, as returned to the guest by `db.query(...).paginate()` — see
+ *  `DiffablePage`'s doc comment in `packages/executor/src/executor.ts`. */
+export interface PageMeta {
+  nextCursor: string | null;
+  hasMore: boolean;
+  scanCapped: boolean;
+}
+
 export interface RangeRead {
   keyspace: string;
   bounds: SerializedKeyRange;
   filters: FilterExpr[];
   order: "asc" | "desc";
   fields: string[];
+  /** Present iff this range is a page (DLR Stage 2c) — the page's own fixed metadata. */
+  pageMeta?: PageMeta;
 }
 
 /** Adapt the executor's DiffableRange (identical shape) into the sync tier's RangeRead. Kept as a
  *  named boundary so the two packages don't share a type import path the differ also depends on. */
 export function rangeReadFromDiffable(d: RangeRead): RangeRead {
   return { keyspace: d.keyspace, bounds: d.bounds, filters: d.filters, order: d.order, fields: d.fields };
+}
+
+/** Adapt the executor's DiffablePage (structurally RangeRead & {pageMeta}) into the sync tier's
+ *  RangeRead, carrying `pageMeta` through verbatim. Kept as a named boundary for the same reason as
+ *  `rangeReadFromDiffable` above. */
+export function pageReadFromDiffable(d: RangeRead & { pageMeta: PageMeta }): RangeRead {
+  return { keyspace: d.keyspace, bounds: d.bounds, filters: d.filters, order: d.order, fields: d.fields, pageMeta: d.pageMeta };
 }
