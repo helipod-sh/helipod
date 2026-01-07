@@ -143,6 +143,12 @@ export type StateModification =
   // identically; `mode`/`orderDir` are there for a future client that wants to special-case range
   // resets (e.g. to keep an existing scroll position) without a wire renegotiation.
   //
+  // DLR 2c's new `{ mode: "page" }` reset is the `.paginate()` sibling of `range`: same ordered
+  // add-all reset shape, but carries the page's own fixed metadata (`nextCursor`/`hasMore`/
+  // `scanCapped`) alongside `orderDir` so a diff-capable client can keep its pagination controls
+  // in sync WITHOUT a separate `QueryUpdated` round-trip for the metadata. A client that only checks
+  // `reset` for truthiness still treats it identically to `byid`/`range`.
+  //
   // `hash` (DLR 2b Task 10 — resume/DIFFABLE integration): the server-minted result fingerprint of
   // the reset's fresh value, the SAME `hashValue` fingerprint a RERUN `QueryUpdated` already carries.
   // Present ONLY on a reset (the answer to a subscribe/resync) — an incremental diff has no
@@ -150,8 +156,19 @@ export type StateModification =
   // as before this field existed. The client stores it as `Subscription.lastHash` and echoes it back
   // as `resultHash` on a later resubscribe, the same resume contract `QueryUpdated.hash` already
   // established — this is what lets a DIFFABLE sub resume via `QueryUnchanged` instead of always
-  // paying for a full reset on reconnect.
-  | { type: "QueryDiff"; queryId: number; changes: Change[]; checksum: string; reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" }; hash?: string };
+  // paying for a full reset on reconnect. For a `page` reset the hash is over the WHOLE
+  // `PaginationResult` (the page rows plus `nextCursor`/`hasMore`), not just the row array.
+  | {
+      type: "QueryDiff";
+      queryId: number;
+      changes: Change[];
+      checksum: string;
+      reset?:
+        | true
+        | { mode: "byid" | "range"; orderDir?: "asc" | "desc" }
+        | { mode: "page"; orderDir: "asc" | "desc"; nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
+      hash?: string;
+    };
 
 export type ServerMessage =
   | { type: "Transition"; startVersion: StateVersion; endVersion: StateVersion; modifications: StateModification[] }

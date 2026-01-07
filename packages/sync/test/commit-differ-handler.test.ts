@@ -15,6 +15,7 @@ import {
   type SerializedKeyRange,
 } from "@stackbase/index-key-codec";
 import type { Value } from "@stackbase/values";
+import type { DiffablePage } from "@stackbase/executor";
 import type { RangeRead } from "../src/classify";
 import { orderKeyFor } from "../src/commit-differ";
 import {
@@ -587,5 +588,114 @@ describe("SyncProtocolHandler: SetAuth re-threads a DIFFABLE_RANGE sub's `range`
     // containing ONLY docs|d2, never a leftover docs|a/docs|b (or docs|d) entry.
     const cleanMap = new Map([["docs|d2", { row: docD2, ts: 60, orderKey: orderKeyD2 }]]);
     expect((mods[0] as { checksum: string }).checksum).toBe(driftChecksum(cleanMap));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// DIFFABLE_PAGE (DLR 2c) — a `.paginate()` sub over the same `channelId = "c"` index range, with a
+// genuine TWO-SIDED bounds (a real page window, `end` non-null — unlike an unbounded `.collect()`
+// range which can have `end: null`) plus `pageMeta`. `execSub` surfaces this via `diffablePage`
+// (Task 3/4); a page IS a range for invalidation, so it reuses `rangeResetChanges`/`rangeChangesFor`
+// unchanged (Task 4's whole point — no new differ).
+// ---------------------------------------------------------------------------------------------
+const PAGE_RANGE: RangeRead = {
+  ...CHANNEL_RANGE,
+  pageMeta: { nextCursor: "X", hasMore: true, scanCapped: false },
+};
+
+function makePageExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery() {
+      return {
+        value: { page: [DOC_A, DOC_B], nextCursor: "X", hasMore: true, scanCapped: false } as unknown as Value,
+        tables: ["table:3"],
+        readRanges: [CHANNEL_RANGE.bounds],
+        diffablePage: PAGE_RANGE as unknown as DiffablePage,
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+describe("SyncProtocolHandler: DIFFABLE_PAGE QueryDiff emission (DLR 2c)", () => {
+  it("subscribe (diff-capable session) gets a QueryDiff page reset with pageMeta, then in-bounds/out-of-bounds writes diff incrementally", async () => {
+    const handler = new SyncProtocolHandler(makePageExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage("s1", JSON.stringify({ type: "Connect", sessionId: "s1", supportsQueryDiff: true }));
+
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "q", args: {} }], remove: [] }),
+    );
+
+    const orderKeyA = orderKeyFor(CHANNEL_RANGE, DOC_A);
+    const orderKeyB = orderKeyFor(CHANNEL_RANGE, DOC_B);
+    const resetMods = socket.modifications();
+    expect(resetMods).toHaveLength(1);
+    expect(resetMods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      reset: { mode: "page", orderDir: "asc", nextCursor: "X", hasMore: true, scanCapped: false },
+      changes: [
+        { t: "add", key: "docs|a", row: DOC_A, ts: 0, orderKey: orderKeyA },
+        { t: "add", key: "docs|b", row: DOC_B, ts: 0, orderKey: orderKeyB },
+      ],
+    });
+    const resetMap = new Map([
+      ["docs|a", { row: DOC_A, ts: 0, orderKey: orderKeyA }],
+      ["docs|b", { row: DOC_B, ts: 0, orderKey: orderKeyB }],
+    ]);
+    expect((resetMods[0] as { checksum: string }).checksum).toBe(driftChecksum(resetMap));
+    socket.clear();
+
+    // An IN-BOUNDS write (channelId "c", inside the page's window) — an incremental QueryDiff add,
+    // row-only, no `reset` — the existing range invalidation arm (`sub.range` truthy for a page)
+    // handles this unchanged.
+    const docC = rangeRow("docs|c", "c", 3, 300);
+    const orderKeyC = orderKeyFor(CHANNEL_RANGE, docC);
+    const inBoundsInv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 42,
+      writtenDocs: [{ keyspace: KS, key: "irrelevant", docId: "docs|c", newRow: docC, wasPresent: false, ts: 42 }],
+    };
+    await handler.notifyWrites(inBoundsInv);
+
+    const inBoundsMods = socket.modifications();
+    expect(inBoundsMods).toHaveLength(1);
+    expect(inBoundsMods[0]).toMatchObject({
+      type: "QueryDiff",
+      queryId: 1,
+      changes: [{ t: "add", key: "docs|c", row: docC, ts: 42, orderKey: orderKeyC }],
+    });
+    expect((inBoundsMods[0] as { reset?: unknown }).reset).toBeUndefined();
+    const afterInBoundsMap = new Map([...resetMap, ["docs|c", { row: docC, ts: 42, orderKey: orderKeyC }]]);
+    expect((inBoundsMods[0] as { checksum: string }).checksum).toBe(driftChecksum(afterInBoundsMap));
+    socket.clear();
+
+    // An OUT-OF-BOUNDS write (channelId "z", outside the page's channel-"c" window) — no change at
+    // all: an empty `changes` array, same as the range table-match/out-of-range guard test above.
+    const outOfBoundsDoc = rangeRow("docs|z", "z", 6, 400);
+    const outOfBoundsInv: WriteInvalidation = {
+      tables: ["table:3"],
+      ranges: [CHANNEL_RANGE.bounds],
+      commitTs: 43,
+      writtenDocs: [{ keyspace: KS, key: "irrelevant2", docId: "docs|z", newRow: outOfBoundsDoc, wasPresent: false, ts: 43 }],
+    };
+    await handler.notifyWrites(outOfBoundsInv);
+
+    const outOfBoundsMods = socket.modifications();
+    expect(outOfBoundsMods).toHaveLength(1);
+    expect(outOfBoundsMods[0]).toMatchObject({ type: "QueryDiff", queryId: 1, changes: [] });
+    expect((outOfBoundsMods[0] as { checksum: string }).checksum).toBe(driftChecksum(afterInBoundsMap));
   });
 });

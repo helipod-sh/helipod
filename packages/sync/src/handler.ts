@@ -26,7 +26,7 @@ import {
 } from "./protocol";
 import { tableOfKeyspaceId } from "@stackbase/index-key-codec";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
-import { classifyByIdRead, rangeReadFromDiffable } from "./classify";
+import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable } from "./classify";
 import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
 import { driftChecksum, type RowVersion } from "./change";
 import {
@@ -414,14 +414,45 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
-        const { value, tables, readRanges, diffableRange } = await this.execSub(session, q.udfPath, q.args);
+        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
         const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range });
+        // DLR 2c: a page IS a range for invalidation purposes (two-sided bounds + pageMeta) — the
+        // existing range differ (`rangeChangesFor`) already handles it unchanged, see `doNotifyWrites`.
+        const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range });
         const json = convexToJson(value);
-        if (range && session.supportsQueryDiff) {
+        if (page && session.supportsQueryDiff) {
+          // DLR 2c: a DIFFABLE_PAGE sub's initial/resumed answer — same reset-with-hash contract as
+          // the range arm below, but the reset descriptor also carries the page's own fixed metadata
+          // (`nextCursor`/`hasMore`/`scanCapped`) so a diff-capable client's pagination controls stay
+          // in sync without a separate `QueryUpdated` round-trip. The passthrough guarantee (the
+          // executor's `.paginate()` return shape) means `json.page` IS the ordered page rows.
+          const orderedRows = (json as { page: JSONValue[] }).page;
+          const { changes, next } = rangeResetChanges(page, orderedRows, session.version.ts);
+          this.byIdRowMap.set(subKey(session.sessionId, q.queryId), next);
+          const hash = hashValue(json);
+          if (q.resultHash !== undefined && q.resultHash === hash) {
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+          } else {
+            modifications.push({
+              type: "QueryDiff",
+              queryId: q.queryId,
+              changes,
+              checksum: driftChecksum(next),
+              reset: {
+                mode: "page",
+                orderDir: page.order,
+                nextCursor: page.pageMeta!.nextCursor,
+                hasMore: page.pageMeta!.hasMore,
+                scanCapped: page.pageMeta!.scanCapped,
+              },
+              hash,
+            });
+          }
+        } else if (range && session.supportsQueryDiff) {
           // DLR 2b Task 10: a DIFFABLE_RANGE sub's initial/resumed answer to a diff-capable client is
           // fingerprinted with the SAME strong `hashValue` a RERUN `QueryUpdated` uses, so subscription
           // resume (design 2025-11-28) works for a diffable sub too. A matching echoed `resultHash`
@@ -901,7 +932,7 @@ export class SyncProtocolHandler {
           modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
           continue;
         }
-        const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — a query whose read shape changes across a
         // refresh (data/identity-dependent branching) must not keep carrying a `byId`/`range` that
@@ -909,7 +940,13 @@ export class SyncProtocolHandler {
         // here would drive a WRONG diff the next time this sub takes a branch above).
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
         const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range }); // refresh the read set
+        // DLR 2c: same reasoning for a page sub — without this, a page's RERUN fallback (a commit
+        // with no `writtenDocs`) would silently DROP its classification (`diffablePage` was never
+        // read here, so `range` would resolve to `undefined` and overwrite the sub's page range via
+        // `...sub`'s spread below), permanently reverting it to RERUN even once `writtenDocs` starts
+        // flowing again on a later commit.
+        const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range }); // refresh the read set
         // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
         // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
         // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
@@ -997,14 +1034,18 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges, diffableRange } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — an identity change can change WHAT a query
         // reads (e.g. an identity-scoped `db.get`, or an identity-scoped range's bounds/filters),
         // so a stale `byId`/`range` here would drive a wrong diff on a later write.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
         const range = diffableRange ? rangeReadFromDiffable(diffableRange) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range });
+        // DLR 2c: same reasoning for a page sub — a fresh page (with fresh two-sided bounds) is
+        // threaded through as `range` (a page IS a range for invalidation), same as the
+        // subscribe-answer path in `doModifyQuerySet`.
+        const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {
