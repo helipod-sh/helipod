@@ -59,6 +59,16 @@ const pageSpread = query<{ channelId: string }, unknown>({
   },
 });
 
+// A `maxScan`-truncated passthrough paginate: a sparse `where` filter plus a small `maxScan` means
+// the scan can give up before filling the page. The executor must decline this — see
+// `classifyDiffablePage`'s `scanCapped` guard — because `nextCursor` (= where the scan gave up)
+// and `pageBounds` (= up to the last MATCHED row) partition the keyspace unsoundly, leaving an
+// un-owned gap a downstream differ would silently miss.
+const pageCapped = query<{ channelId: string }, unknown>({
+  handler: (ctx, { channelId }) =>
+    ctx.db.query("items", "by_channel").eq("channelId", channelId).where("gt", "n", 2).paginate({ pageSize: 20, maxScan: 2 }),
+});
+
 const registry: Record<string, RegisteredFunction> = {
   "items:add": addItem,
   "items:list": list,
@@ -66,6 +76,7 @@ const registry: Record<string, RegisteredFunction> = {
   "items:pageFiltered": pageFiltered,
   "items:pageMapped": pageMapped,
   "items:pageSpread": pageSpread,
+  "items:pageCapped": pageCapped,
 };
 
 let exec: InlineUdfExecutor;
@@ -120,5 +131,25 @@ describe("runQuery diffablePage classification (DLR 2c Task 2)", () => {
     const r = await runQuery("items:list", { channelId });
     expect(r.diffablePage).toBeUndefined();
     expect(r.diffableRange).toBeDefined();
+  });
+
+  it("a maxScan-truncated (scanCapped) page is NOT diffable — un-owned bounds gap, must RERUN", async () => {
+    // Interleave matched/unmatched rows so the scan caps out on an UNMATCHED row right after a
+    // MATCHED one: n=3 (matches `gt 2`, included) then n=1 (fails, but is still what the scan
+    // stopped ON). That leaves the failing row's own key inside the OCC read-set (so a later write
+    // to it wakes the sub) but OUTSIDE `pageBounds` (so a differ would silently ignore it) — exactly
+    // the unsound partition `classifyDiffablePage`'s `scanCapped` guard must decline.
+    const dChannel = "d";
+    for (const n of [3, 1, 4, 2, 5]) {
+      await exec.run(addItem, { channelId: dChannel, n }, { path: "items:add" });
+    }
+    const r = await runQuery("items:pageCapped", { channelId: dChannel });
+    // Sanity: this really is a scanCapped, under-filled page (not just any old page).
+    const value = r.value as { page: unknown[]; scanCapped: boolean; hasMore: boolean };
+    expect(value.scanCapped).toBe(true);
+    expect(value.page.length).toBeLessThan(20);
+    expect(value.hasMore).toBe(true);
+    // The actual assertion: an unsound-bounds page must never be classified diffable.
+    expect(r.diffablePage).toBeUndefined();
   });
 });

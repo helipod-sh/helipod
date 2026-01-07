@@ -366,13 +366,20 @@ function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], r
  * object the paginate call returned — proven by IDENTITY (the {@link COLLECT_BRAND} stamp), not
  * content, for the same reason `classifyDiffableRange` insists on identity: a `.page` pull or a
  * `{...result}` spread is content-indistinguishable from a real passthrough on the current data
- * yet would silently drop the fixed page metadata a downstream differ needs. Any doubt →
- * `undefined` (falls back to a full RERUN).
+ * yet would silently drop the fixed page metadata a downstream differ needs. Also declines whenever
+ * the paginate call hit its `maxScan` cap without filling the page (`scanCapped`): on a truncated
+ * scan, `nextCursor` resumes from `lastScanned` (where the scan gave up) while `bounds`/`pageBounds`
+ * only extends to `keySuccessor(lastIncluded)` (the last MATCHED row, which can be strictly earlier)
+ * — an un-owned gap `(lastIncluded, lastScanned]` that IS in the OCC read set (so a write there wakes
+ * the subscription) but is NOT in `pageBounds` (so a downstream differ's `inBounds` check silently
+ * ignores it), unlike a full or naturally-`hasMore` page where the two partitions agree. A fresh
+ * RERUN sees the write; a diff wouldn't. Any doubt → `undefined` (falls back to a full RERUN).
  */
 function classifyDiffablePage(value: unknown, trace: readonly PaginateTrace[], readRanges: readonly KeyRange[]): DiffablePage | undefined {
   if (trace.length !== 1) return undefined; // exactly one paginate call, and no ambiguous second one
   const t = trace[0]!;
   if (t.hadReadPolicy) return undefined; // dynamic authz was merged in — RERUN, never diff
+  if (t.scanCapped) return undefined; // a maxScan-truncated page has an un-owned bounds gap — RERUN, never diff
   // No other read syscall touched this transaction: the run's full read set must be exactly the
   // one range this paginate call itself scanned.
   if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;
