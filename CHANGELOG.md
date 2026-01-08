@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2025-12-25
+
+**DLR Stage 2c — the key-range-pinned pagination differ.** The third and final
+query-shape slice of Differential Log-Tail Reactivity: a `.paginate()` query's
+page now receives incremental row diffs instead of a full re-send.
+
+### Added
+
+- **Incremental `QueryDiff`s for `.paginate()` subscriptions.** After the initial load, a page is pinned to its `[startBound, endBound)` key interval and reactively diffed as a fixed two-sided-bound `DIFFABLE` query — **reusing the Stage 2b range differ verbatim**. This dissolves the count-bounded "pull-in" problem: every write (insert/edit/delete/move) diffs with zero store reads. The page's row count drifts from its initial `pageSize` under live edits (correct reactive semantics — new items appear, deleted items vanish; the boundary stays put so page N+1 stays contiguous). Reference-grounded in Convex's `(cursor, continueCursor]` key-bounded pages and this project's own "known boundary keys" DLR design.
+- **Object-return passthrough by identity** — the `PaginationResult` object is brand-checked (extending Stage 2b's collect-array brand), so a handler that post-processes the result (`.page`, `{...result}`, a mapped page), reads twice, uses a read policy, or hits a `maxScan` cap falls back to RERUN.
+- Only `.page` diffs; `nextCursor`/`hasMore`/`scanCapped` are pinned at load and never re-sent. Resume via `QueryUnchanged` works over the whole `PaginationResult`.
+
+### Fixed
+
+- **Descending page bounds** — the page's key interval is now computed correctly for `order:"desc"` (previously an asc-only formula covered *none* of a desc page's rows → missed invalidation). The query engine owns the bound math per order.
+- **`scanCapped` pages decline to RERUN** — a `maxScan`-truncated page has an un-owned bounds gap, so it is no longer classified diffable (silent-wrong-data guard, mirroring `.take()`/limit).
+
+### Performance
+
+- `bench:reactive` gains a **`diffbytes-paginate`** scenario: **475 B/update** (a ~20-row full-page re-send was ~2.6 KB), matching `diffbytes-scan` — the per-update cost is proportional to the change, not the page size. No regression on other scenarios.
+
+### Deferred
+
+- Page rebalancing (`splitCursor`) for an unboundedly-growing page, and later DLR stages (Stage 3 log-tail catch-up, Stage 4 optimistic-over-diffs, Stage 5 fleet per-shard fragments).
+
 ## [1.1.0] — 2025-12-25
 
 **DLR Stage 2b — the single-index-range `collect()` differ.** The second stage of
@@ -98,5 +123,6 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
 - **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
+[1.2.0]: https://example.com/releases/tag/v1.2.0
 [1.1.0]: https://example.com/releases/tag/v1.1.0
 [1.0.0]: https://example.com/releases/tag/v1.0.0
