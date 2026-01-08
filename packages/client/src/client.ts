@@ -858,6 +858,10 @@ export class StackbaseClient {
         udfPath: s.path,
         args: s.args,
         ...(s.answered && s.serverValue !== undefined && s.lastHash !== undefined ? { resultHash: s.lastHash } : {}),
+        // DLR Stage 3: echo the client's observed-inclusion frontier so the server can skip the
+        // re-run entirely when nothing touched this query's read-set since. Fresh `subscribe()`
+        // never sets this — only a resume resubscribe has a meaningful watermark to echo.
+        sinceTs: this.reconciler.maxObservedTs,
       })),
       remove: [],
     });

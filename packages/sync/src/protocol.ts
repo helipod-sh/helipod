@@ -46,6 +46,12 @@ export interface QueryRequest {
   udfPath: string;
   args: JSONValue;
   resultHash?: string;
+  /**
+   * DLR Stage 3 — the client's `maxObservedTs` at resume time; lets the server skip the re-run
+   * when nothing touched the query's read-set since. Present only on a resume resubscribe;
+   * absent on a fresh subscribe.
+   */
+  sinceTs?: number;
 }
 
 /**

@@ -405,4 +405,29 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
     };
     expect(() => new StackbaseClient(bare)).not.toThrow();
   });
+
+  it("a resume resubscribe echoes sinceTs = maxObservedTs; a fresh subscribe does not (DLR Stage 3)", () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    client.subscribe("notes:list", { box: "a" }, () => {});
+    const firstAdd = (t.sent.find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>).add[0] as {
+      sinceTs?: number;
+    };
+    expect(firstAdd.sinceTs).toBeUndefined(); // fresh subscribe: no sinceTs
+
+    // Advance the client's observed-ts frontier to 7 via a normal, in-band Transition.
+    t.emit({
+      type: "Transition",
+      startVersion: { querySet: 0, ts: 0 },
+      endVersion: { querySet: 1, ts: 7 },
+      modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }],
+    });
+    expect(client.__maxObservedTs).toBe(7);
+
+    const before = t.sent.length;
+    t.emitReopen();
+    const resumeAdd = (t.sent.slice(before).find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>)
+      .add[0] as { sinceTs?: number };
+    expect(resumeAdd.sinceTs).toBe(7); // resume: sinceTs = maxObservedTs
+  });
 });
