@@ -115,6 +115,40 @@ export const COLLECT_BRAND = Symbol.for("stackbase.executor.collectBrand");
 let collectTokenSeq = 0;
 const nextCollectToken = (): string => `ct${++collectTokenSeq}`;
 
+/**
+ * DLR Stage 2c: one `db.query(...).paginate()` call's metadata, captured by `handleDbPaginate` for
+ * a future executor passthrough-guard classification of paginated queries — mirrors
+ * {@link CollectTrace} for `collect()`; see that type's doc comment for the shared design
+ * rationale (identity brand over content equality, `hadReadPolicy` decline, etc).
+ *
+ * `bounds` is the byte interval THIS PAGE "owns" in the index keyspace — order-correct for both
+ * `asc` and `desc` (see `PaginatedResult.pageBounds`'s doc comment in `@stackbase/query-engine`
+ * for the asc/desc partition argument). NOT the same as this page's OCC `readSet` range: a desc
+ * page's `readSet` is trimmed to `[lastScanned, interval.end)` (the row the scan stopped ON) for
+ * OCC-validation purposes, which is NOT the page's own key interval and is unsafe to reuse here —
+ * `bounds` mirrors `CollectTrace.bounds`'s shape (a single `SerializedKeyRange`) precisely so a
+ * downstream page differ can byte-membership-test against it exactly like the collect differ does.
+ */
+export interface PaginateTrace {
+  /** The single `index:` keyspace this page scanned (byte-identical to the entry in `readSet`). */
+  keyspace: string;
+  /** The byte interval this page owns — see the type doc comment above. */
+  bounds: SerializedKeyRange;
+  /** The USER's `.where()` filters, captured BEFORE any read-policy merge. */
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+  /** True when a read policy (authz) was merged into this page's filters — see
+   *  `CollectTrace.hadReadPolicy`'s doc comment; same soundness rationale applies here. */
+  hadReadPolicy: boolean;
+  /** DLR 2c identity brand — reuses {@link COLLECT_BRAND}, stamped onto the `PaginationResult`
+   *  object the guest's `paginate()` returns (mirrors `CollectTrace.token`). */
+  token: string;
+  nextCursor: string | null;
+  hasMore: boolean;
+  scanCapped: boolean;
+}
+
 export interface KernelContext {
   readonly profile: UdfEnvironmentProfile;
   readonly txn: TransactionContext;
@@ -147,6 +181,10 @@ export interface KernelContext {
    *  collects happen); facade/rule-context readers and mutations never set it, so their reads are
    *  invisible to (and can't be mistaken for) DIFFABLE_RANGE classification. */
   readonly collectTrace?: CollectTrace[];
+  /** DLR Stage 2c: when present, `handleDbPaginate` pushes one `PaginateTrace` per
+   *  `db.query(...).paginate()` call onto this array — the `paginate()` counterpart of
+   *  `collectTrace` above, armed the same way (only the top-level query-run context sets it). */
+  readonly paginateTrace?: PaginateTrace[];
   /**
    * In-flight syscall promises the guest initiated through this context's channel. When set (only
    * the top-level QUERY-run context arms it), {@link InlineSyscallChannel} adds every dispatched
@@ -635,20 +673,58 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
     order: spec.order,
     filters: spec.filters?.map((f) => ({ op: f.op, field: f.field, value: jsonToConvex(f.value) }) as FilterExpr),
   };
+  // Captured BEFORE any read-policy merge below (DLR 2c, mirrors `handleDbQuery`): the paginate
+  // trace must carry the USER's own filters, never the dynamic authz predicate the merge appends.
+  const userFilters = query.filters ?? [];
 
-  if (!ctx.privileged && ctx.getRuleContext) {
-    const policy = ctx.policyRegistry.get(tableName);
-    if (policy?.read) query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext(), tableName, ctx.relationRegistry));
+  const hadReadPolicy = !ctx.privileged && !!ctx.getRuleContext && !!ctx.policyRegistry.get(tableName)?.read;
+  if (hadReadPolicy) {
+    const policy = ctx.policyRegistry.get(tableName)!;
+    query.filters = mergeReadPolicy(query.filters, await resolveReadPolicy(policy, await ctx.getRuleContext!(), tableName, ctx.relationRegistry));
   }
 
   const overlay = ctx.txn.pendingIndexOverlay(indexSpec.indexId);
-  const { page, nextCursor, hasMore, scanCapped, readSet } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
+  const { page, nextCursor, hasMore, scanCapped, readSet, pageBounds } = await ctx.queryRuntime.paginate(query, ctx.snapshotTs, {
     cursor: spec.cursor,
     pageSize: spec.pageSize,
     maxScan: spec.maxScan,
   }, overlay);
-  recordScanReads(ctx, tableMeta, readSet.toArray());
-  return JSON.stringify({ page: page.map((d) => convexToJson(d as Value)), nextCursor, hasMore, scanCapped });
+  const scannedRanges = readSet.toArray();
+  recordScanReads(ctx, tableMeta, scannedRanges);
+
+  // DLR 2c: a per-page identity token (armed only for a top-level query run), mirroring
+  // `CollectTrace.token` — stamped onto both this run's trace entry AND — echoed in the response —
+  // the object the guest's `paginate()` returns, so a future executor classifier can prove the
+  // handler returned that exact page object untouched (see `COLLECT_BRAND`).
+  const paginateToken = ctx.paginateTrace ? nextCollectToken() : undefined;
+
+  if (ctx.paginateTrace) {
+    // Only a clean single-index-range scan is recordable — same conservative guard as
+    // `handleDbQuery`'s collect trace: a paginate whose own read set carries more than one
+    // `index:` range skips the trace entry, so a downstream length check declines diffability.
+    const indexRanges = scannedRanges.filter((r) => r.keyspace.startsWith("index:"));
+    if (indexRanges.length === 1) {
+      ctx.paginateTrace.push({
+        keyspace: indexRanges[0]!.keyspace,
+        bounds: pageBounds,
+        filters: userFilters,
+        order: spec.order ?? "asc",
+        fields: indexSpec.fields,
+        hadReadPolicy,
+        token: paginateToken!,
+        nextCursor,
+        hasMore,
+        scanCapped,
+      });
+    }
+  }
+
+  const pageJson = page.map((d) => convexToJson(d as Value));
+  return JSON.stringify(
+    paginateToken !== undefined
+      ? { page: pageJson, nextCursor, hasMore, scanCapped, __brandToken: paginateToken }
+      : { page: pageJson, nextCursor, hasMore, scanCapped },
+  );
 };
 
 const handleConsoleLog: SyscallHandler = async (ctx, argJson) => {

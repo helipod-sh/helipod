@@ -183,6 +183,67 @@ describe("LayeredQueryStore.applyDiff — range mode (DLR 2b)", () => {
   });
 });
 
+describe("LayeredQueryStore.applyDiff — page mode (DLR 2c)", () => {
+  it("a page reset renders { page: sorted rows, nextCursor, hasMore }; add grows it, remove shrinks it", () => {
+    const s = new LayeredQueryStore();
+    const sub = s.create(1, "items:page", { channelId: "c" }, "h1");
+    s.applyDiff(
+      sub,
+      [
+        { t: "add", key: "b", row: { _id: "b", n: 2 }, ts: 5, orderKey: orderKeyB64([2]) },
+        { t: "add", key: "a", row: { _id: "a", n: 1 }, ts: 5, orderKey: orderKeyB64([1]) },
+      ],
+      ck2([
+        ["b", { row: { _id: "b", n: 2 }, ts: 5, orderKey: orderKeyB64([2]) }],
+        ["a", { row: { _id: "a", n: 1 }, ts: 5, orderKey: orderKeyB64([1]) }],
+      ]),
+      { mode: "page", orderDir: "asc", nextCursor: "CUR", hasMore: true, scanCapped: false },
+    );
+    const v = sub.serverValue as { page: Array<{ _id: string }>; nextCursor: string; hasMore: boolean };
+    expect(v.page.map((d) => d._id)).toEqual(["a", "b"]);
+    expect(v.nextCursor).toBe("CUR");
+    expect(v.hasMore).toBe(true);
+
+    // an in-bounds insert grows the page (row count exceeds the initial size — correct reactive semantics)
+    s.applyDiff(
+      sub,
+      [{ t: "add", key: "c", row: { _id: "c", n: 3 }, ts: 6, orderKey: orderKeyB64([3]) }],
+      ck2([
+        ["a", { row: { _id: "a", n: 1 }, ts: 5, orderKey: orderKeyB64([1]) }],
+        ["b", { row: { _id: "b", n: 2 }, ts: 5, orderKey: orderKeyB64([2]) }],
+        ["c", { row: { _id: "c", n: 3 }, ts: 6, orderKey: orderKeyB64([3]) }],
+      ]),
+    );
+    expect((sub.serverValue as any).page.map((d: any) => d._id)).toEqual(["a", "b", "c"]);
+    expect((sub.serverValue as any).nextCursor).toBe("CUR"); // metadata fixed across incremental diffs
+
+    const before = sub.serverValue;
+    s.applyDiff(
+      sub,
+      [{ t: "remove", key: "a" }],
+      ck2([
+        ["b", { row: { _id: "b", n: 2 }, ts: 5, orderKey: orderKeyB64([2]) }],
+        ["c", { row: { _id: "c", n: 3 }, ts: 6, orderKey: orderKeyB64([3]) }],
+      ]),
+    );
+    expect(sub.serverValue).not.toBe(before); // fresh object
+    expect((sub.serverValue as any).page.map((d: any) => d._id)).toEqual(["b", "c"]);
+  });
+
+  it("an empty page renders { page: [], ...metadata }", () => {
+    const s = new LayeredQueryStore();
+    const sub = s.create(1, "items:page", { channelId: "c" }, "h1");
+    s.applyDiff(sub, [], driftChecksum(new Map()), {
+      mode: "page",
+      orderDir: "asc",
+      nextCursor: null,
+      hasMore: false,
+      scanCapped: false,
+    });
+    expect(sub.serverValue).toEqual({ page: [], nextCursor: null, hasMore: false, scanCapped: false });
+  });
+});
+
 // Finding 2 (DLR 2b final review): a range sub that receives a `QueryUpdated` (the RERUN answer the
 // server sends on a SetAuth identity switch — it drops its server-side row-map) must NOT keep its
 // prior-identity `diffRows`/`renderMode`, or the NEXT incremental `QueryDiff` merges the new

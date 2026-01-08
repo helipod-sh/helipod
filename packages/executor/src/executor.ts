@@ -13,7 +13,7 @@ import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
-import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type SyscallRouter } from "./kernel";
+import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type PaginateTrace, type SyscallRouter } from "./kernel";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
@@ -261,6 +261,25 @@ export interface DiffableRange {
   fields: string[];
 }
 
+/**
+ * DLR Stage 2c: a query run classified as DIFFABLE_PAGE — its ENTIRE result is exactly the
+ * `PaginationResult` of one `db.query(...).paginate()` call, unmodified by the handler. Mirrors
+ * `DiffableRange` (see its doc comment) but for a paginated read: `bounds` is the two-sided byte
+ * interval this page owns (`[startBound, endBound)`, order-correct for asc/desc — see
+ * `PaginateTrace.bounds`'s doc comment), and `pageMeta` is the page's own fixed metadata
+ * (`nextCursor`/`hasMore`/`scanCapped`) as returned to the guest, for a downstream differ to
+ * reuse verbatim rather than recomputing. Absent whenever the executor has ANY doubt about
+ * passthrough purity — see `classifyDiffablePage`'s guard.
+ */
+export interface DiffablePage {
+  keyspace: string;
+  bounds: SerializedKeyRange;
+  filters: FilterExpr[];
+  order: "asc" | "desc";
+  fields: string[];
+  pageMeta: { nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
+}
+
 export interface UdfResult<T = unknown> {
   value: T;
   logs: string[];
@@ -283,6 +302,14 @@ export interface UdfResult<T = unknown> {
    * any query the executor can't PROVE is a clean passthrough (conservative: any doubt → absent).
    */
   diffableRange?: DiffableRange;
+  /**
+   * DLR Stage 2c (query runs only): set when this run's ENTIRE result is one passthrough
+   * paginate — see `DiffablePage`'s doc comment. Absent for mutations/actions, and for any query
+   * the executor can't PROVE is a clean passthrough (conservative: any doubt → absent). Mutually
+   * exclusive with `diffableRange` by construction — a collect run's `paginateTrace` is empty and
+   * a paginate run's `collectTrace` is empty, so at most one of the two classifiers can match.
+   */
+  diffablePage?: DiffablePage;
 }
 
 /**
@@ -328,6 +355,47 @@ function classifyDiffableRange(value: unknown, trace: readonly CollectTrace[], r
   // carrying its token brand. A copy (slice/filter/map/spread) is unbranded → decline.
   if ((value as unknown as Record<PropertyKey, unknown>)[COLLECT_BRAND] !== t.token) return undefined;
   return { keyspace: t.keyspace, bounds: t.bounds, filters: t.filters, order: t.order, fields: t.fields };
+}
+
+/**
+ * DLR Stage 2c passthrough guard — `classifyDiffableRange`'s paginate counterpart. A run is
+ * DIFFABLE_PAGE only if EXACTLY ONE `db.query(...).paginate()` call ran (`trace.length === 1`),
+ * no OTHER read syscall touched the transaction (cross-checked against the run's own
+ * `readRanges`, same rationale as `classifyDiffableRange`), no read policy was merged into that
+ * page's filters, and the handler's returned value is the EXACT, UNMODIFIED `PaginationResult`
+ * object the paginate call returned — proven by IDENTITY (the {@link COLLECT_BRAND} stamp), not
+ * content, for the same reason `classifyDiffableRange` insists on identity: a `.page` pull or a
+ * `{...result}` spread is content-indistinguishable from a real passthrough on the current data
+ * yet would silently drop the fixed page metadata a downstream differ needs. Also declines whenever
+ * the paginate call hit its `maxScan` cap without filling the page (`scanCapped`): on a truncated
+ * scan, `nextCursor` resumes from `lastScanned` (where the scan gave up) while `bounds`/`pageBounds`
+ * only extends to `keySuccessor(lastIncluded)` (the last MATCHED row, which can be strictly earlier)
+ * — an un-owned gap `(lastIncluded, lastScanned]` that IS in the OCC read set (so a write there wakes
+ * the subscription) but is NOT in `pageBounds` (so a downstream differ's `inBounds` check silently
+ * ignores it), unlike a full or naturally-`hasMore` page where the two partitions agree. A fresh
+ * RERUN sees the write; a diff wouldn't. Any doubt → `undefined` (falls back to a full RERUN).
+ */
+function classifyDiffablePage(value: unknown, trace: readonly PaginateTrace[], readRanges: readonly KeyRange[]): DiffablePage | undefined {
+  if (trace.length !== 1) return undefined; // exactly one paginate call, and no ambiguous second one
+  const t = trace[0]!;
+  if (t.hadReadPolicy) return undefined; // dynamic authz was merged in — RERUN, never diff
+  if (t.scanCapped) return undefined; // a maxScan-truncated page has an un-owned bounds gap — RERUN, never diff
+  // No other read syscall touched this transaction: the run's full read set must be exactly the
+  // one range this paginate call itself scanned.
+  if (readRanges.length !== 1 || readRanges[0]!.keyspace !== t.keyspace) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined; // a PaginationResult object, not an array/scalar
+  // Identity, not content: the returned value must be the untouched PaginationResult object THIS
+  // paginate call returned, carrying its token brand. A `.page` pull or a `{...result}` spread is
+  // unbranded → decline.
+  if ((value as Record<PropertyKey, unknown>)[COLLECT_BRAND] !== t.token) return undefined;
+  return {
+    keyspace: t.keyspace,
+    bounds: t.bounds,
+    filters: t.filters,
+    order: t.order,
+    fields: t.fields,
+    pageMeta: { nextCursor: t.nextCursor, hasMore: t.hasMore, scanCapped: t.scanCapped },
+  };
 }
 
 /**
@@ -543,11 +611,14 @@ export class InlineUdfExecutor {
         // for the facade/rule-context `pctx`s above, so a component facade's internal collects can
         // never be mistaken for the calling function's own passthrough scan.
         const collectTrace = fn.type === "query" ? [] : undefined;
+        // DLR 2c: `paginateTrace` is `collectTrace`'s counterpart for `db.query(...).paginate()`
+        // calls, armed the same way and for the same reason (never for facade/rule-context `pctx`s).
+        const paginateTrace = fn.type === "query" ? [] : undefined;
         // DLR: arm in-flight syscall tracking for a query so reads it initiated but didn't await
         // (a floating `.collect()` whose result the handler discarded) are still captured — see the
         // drain below and `KernelContext.inflight`.
         const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, inflight };
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
@@ -563,7 +634,7 @@ export class InlineUdfExecutor {
             for (const p of pending) inflight.delete(p);
           }
         }
-        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace };
+        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace, paginateTrace: kctx.paginateTrace };
       }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
@@ -581,6 +652,8 @@ export class InlineUdfExecutor {
       logEntry("ok");
       const diffableRange =
         fn.type === "query" ? classifyDiffableRange(commit.value.value, commit.value.collectTrace ?? [], commit.value.readRanges) : undefined;
+      const diffablePage =
+        fn.type === "query" ? classifyDiffablePage(commit.value.value, commit.value.paginateTrace ?? [], commit.value.readRanges) : undefined;
       return {
         value: commit.value.value,
         logs: commit.value.logs,
@@ -589,6 +662,7 @@ export class InlineUdfExecutor {
         readRanges: commit.value.readRanges,
         oplog: commit.oplog,
         ...(diffableRange ? { diffableRange } : {}),
+        ...(diffablePage ? { diffablePage } : {}),
       };
     } catch (e) {
       logEntry("error", e instanceof Error ? e.message : String(e));

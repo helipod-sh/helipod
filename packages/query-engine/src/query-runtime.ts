@@ -12,7 +12,9 @@ import {
   compareKeyBytes,
   indexKeyspaceId,
   keySuccessor,
+  serializeKeyRange,
   type KeyRange,
+  type SerializedKeyRange,
 } from "@stackbase/index-key-codec";
 import { encodeStorageTableId } from "@stackbase/id-codec";
 import type { DocStore, DocumentValue, IndexOverlayEntry } from "@stackbase/docstore";
@@ -39,6 +41,24 @@ export interface PaginatedResult {
   hasMore: boolean;
   scanCapped: boolean;
   readSet: RangeSet;
+  /**
+   * DLR Stage 2c (review fix): the byte interval THIS PAGE "owns" in the index keyspace — the
+   * range a downstream page differ uses for `SerializedKeyRange`/`keyInRange` membership checks,
+   * order-correct for both `asc` and `desc` (unlike the raw OCC `readSet`, which for a desc page
+   * is trimmed to `[lastScanned, interval.end)` — the row the scan stopped ON, not the page's own
+   * lowest included key — and is therefore NOT safe to reuse for page-ownership membership).
+   *
+   * - **asc, non-final page**: `[interval.start, keySuccessor(lastIncluded))` — the next asc page
+   *   resumes at `keySuccessor(cursor) === keySuccessor(lastIncluded)`, so the two pages partition
+   *   the keyspace with no gap and no overlap.
+   * - **desc, non-final page**: `[lastIncluded, interval.end)` — `lastIncluded` is this page's
+   *   LOWEST included key (scanned high-to-low); the next desc page resumes with its OWN
+   *   `interval.end === cursor === lastIncluded`, so it owns `[base.start, lastIncluded)` — again
+   *   a clean partition.
+   * - **last page** (`hasMore === false`), either order: the full resolved `interval` — nothing
+   *   beyond it exists to own.
+   */
+  pageBounds: SerializedKeyRange;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -167,12 +187,17 @@ export class QueryRuntime {
       const lastKey = hasMoreOverlay ? pageEntries[pageEntries.length - 1]!.key : null;
       const overlayReadSet = new RangeSet();
       overlayReadSet.add({ keyspace: this.keyspace(query.index), start: interval.start, end: interval.end });
+      // The overlay path always scans (and returns) the FULL remaining interval in one shot — there
+      // is no cursor-adjusted "next page" boundary to trim to, so the page owns the whole interval
+      // regardless of order (mirrors `overlayReadSet` above).
+      const overlayPageBounds = serializeKeyRange({ keyspace: this.keyspace(query.index), start: interval.start, end: interval.end });
       return {
         page: pageEntries.map((e) => e.value),
         nextCursor: lastKey ? bytesToBase64(lastKey) : null,
         hasMore: hasMoreOverlay,
         scanCapped: false,
         readSet: overlayReadSet,
+        pageBounds: overlayPageBounds,
       };
     }
 
@@ -213,7 +238,23 @@ export class QueryRuntime {
     // When capped, resume past where we STOPPED scanning (lastScanned), not the last returned row.
     const cursorKey = scanCapped ? lastScanned : hasMore ? lastIncluded : null;
     const nextCursor = cursorKey ? bytesToBase64(cursorKey) : null;
-    return { page, nextCursor, hasMore, scanCapped, readSet };
+
+    // The interval THIS PAGE owns (see `PaginatedResult.pageBounds`'s doc comment for the asc/desc
+    // partition argument). `lastIncluded` — this page's own last INCLUDED row — is the correct
+    // pivot, not `lastScanned` (the row the scan happened to stop ON, which for a filtered or
+    // scan-capped page is not necessarily in the page at all). Order-independent fallback to the
+    // full interval when nothing was included (e.g. a scan-capped page whose scanned rows all
+    // failed the filter) — there is no real "next page" boundary to trim to yet.
+    const keyspace = this.keyspace(query.index);
+    const pageBoundsRange: KeyRange =
+      !hasMore || lastIncluded === null
+        ? { keyspace, start: interval.start, end: interval.end }
+        : order === "asc"
+          ? { keyspace, start: interval.start, end: keySuccessor(lastIncluded) }
+          : { keyspace, start: lastIncluded, end: interval.end };
+    const pageBounds = serializeKeyRange(pageBoundsRange);
+
+    return { page, nextCursor, hasMore, scanCapped, readSet, pageBounds };
   }
 
   /**

@@ -55,6 +55,30 @@ function renderRangeValue(rows: Map<string, RowVersion>, orderDir: "asc" | "desc
 }
 
 /**
+ * DLR Stage 2c — render a DIFFABLE_PAGE (`.paginate()`) query's value from its keyed row-map: the
+ * `.paginate()`-shaped `{ page, nextCursor, hasMore, scanCapped }` result, with `page` sorted exactly
+ * as `renderRangeValue` sorts a plain range (same `orderKey` byte-comparison decode). The pagination
+ * metadata (`nextCursor`/`hasMore`/`scanCapped`) is NOT re-derived from the row-map — it is PINNED at
+ * the last reset (`applyDiff`'s `reset` param) and carried through unchanged on every incremental
+ * diff, so an in-bounds row add/remove reactively grows/shrinks `page` without silently moving the
+ * cursor or flipping `hasMore` out from under the caller (that only happens on the NEXT explicit
+ * reset — a fresh subscribe or a resync). Mints a fresh object every call (never mutates/reuses a
+ * prior render), so `recompose`'s reference-inequality check fires listeners.
+ */
+function renderPageValue(
+  rows: Map<string, RowVersion>,
+  orderDir: "asc" | "desc",
+  meta: { nextCursor: string | null; hasMore: boolean; scanCapped: boolean },
+): Value {
+  return {
+    page: renderRangeValue(rows, orderDir),
+    nextCursor: meta.nextCursor,
+    hasMore: meta.hasMore,
+    scanCapped: meta.scanCapped,
+  } as Value;
+}
+
+/**
  * The writeable view of composed state an optimistic updater receives. Reads see the composed
  * state as built so far (prior layers + this updater's own writes); writes stack on top.
  *
@@ -117,15 +141,21 @@ export interface Subscription {
    *  query (`serverValue` is set directly by `setServerValue`). Held per-subscription so the client
    *  can compute the drift checksum and apply incremental `QueryDiff`s over the running map. */
   diffRows?: Map<string, RowVersion>;
-  /** DLR Stage 2b — which shape to render `diffRows` as: `"byid"` (sole entry's row, or
-   *  `undefined`) or `"range"` (every row sorted by `orderKey`, always an array). Set from a reset
-   *  descriptor's `mode` (`applyDiff`'s `reset` param); undefined for a non-diffable (RERUN) sub, or
-   *  before a diffable sub's first `applyDiff` call. Defaults to by-id rendering when unset, so a
-   *  by-id sub (whose resets are always `reset: true`, never an object) never needs to set it. */
-  renderMode?: "byid" | "range";
-  /** DLR Stage 2b — the range sub's sort direction, set alongside `renderMode` from a range reset's
-   *  `orderDir`. Unused for `renderMode === "byid"`. */
+  /** DLR Stage 2b/2c — which shape to render `diffRows` as: `"byid"` (sole entry's row, or
+   *  `undefined`), `"range"` (every row sorted by `orderKey`, always an array), or `"page"` (2c —
+   *  `{ page, nextCursor, hasMore, scanCapped }`, `page` sorted the same way `"range"` is). Set from a
+   *  reset descriptor's `mode` (`applyDiff`'s `reset` param); undefined for a non-diffable (RERUN)
+   *  sub, or before a diffable sub's first `applyDiff` call. Defaults to by-id rendering when unset,
+   *  so a by-id sub (whose resets are always `reset: true`, never an object) never needs to set it. */
+  renderMode?: "byid" | "range" | "page";
+  /** DLR Stage 2b — the range/page sub's sort direction, set alongside `renderMode` from a
+   *  range/page reset's `orderDir`. Unused for `renderMode === "byid"`. */
   orderDir?: "asc" | "desc";
+  /** DLR Stage 2c — a page sub's pagination metadata, set alongside `renderMode`/`orderDir` from a
+   *  page reset's `nextCursor`/`hasMore`/`scanCapped`. PINNED across incremental diffs — see
+   *  `renderPageValue`'s doc for why it is not re-derived from the row-map on every apply. Unused for
+   *  any other `renderMode`. */
+  pageMeta?: { nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
   listeners: Set<Listener>;
 }
 
@@ -186,6 +216,7 @@ export class LayeredQueryStore {
     sub.diffRows = undefined;
     sub.renderMode = undefined;
     sub.orderDir = undefined;
+    sub.pageMeta = undefined;
   }
 
   /** Mark a subscription as having received its first reply WITHOUT a base value (from a
@@ -247,18 +278,32 @@ export class LayeredQueryStore {
     sub: Subscription,
     changes: readonly Change[],
     checksum: string,
-    reset?: true | { mode: "byid" | "range"; orderDir?: "asc" | "desc" },
+    reset?:
+      | true
+      | { mode: "byid" | "range"; orderDir?: "asc" | "desc" }
+      | { mode: "page"; orderDir: "asc" | "desc"; nextCursor: string | null; hasMore: boolean; scanCapped: boolean },
   ): { drift: boolean } {
     if (reset === true) {
       sub.renderMode = "byid";
     } else if (reset) {
       sub.renderMode = reset.mode;
       sub.orderDir = reset.orderDir;
+      if (reset.mode === "page") {
+        sub.pageMeta = { nextCursor: reset.nextCursor, hasMore: reset.hasMore, scanCapped: reset.scanCapped };
+      }
     }
+    // `reset === undefined` (an incremental diff): `renderMode`/`orderDir`/`pageMeta` are left exactly
+    // as they were from the last reset — a page sub's pagination metadata is PINNED across incremental
+    // diffs (see `renderPageValue`'s doc), not re-derived here.
     const base = reset !== undefined ? new Map<string, RowVersion>() : (sub.diffRows ?? new Map<string, RowVersion>());
     const next = applyChanges(base, changes);
     sub.diffRows = next;
-    sub.serverValue = sub.renderMode === "range" ? renderRangeValue(next, sub.orderDir ?? "asc") : renderByIdValue(next);
+    sub.serverValue =
+      sub.renderMode === "page"
+        ? renderPageValue(next, sub.orderDir ?? "asc", sub.pageMeta!)
+        : sub.renderMode === "range"
+          ? renderRangeValue(next, sub.orderDir ?? "asc")
+          : renderByIdValue(next);
     sub.answered = true;
     return { drift: driftChecksum(next) !== checksum };
   }
