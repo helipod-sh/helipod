@@ -424,10 +424,17 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
     });
     expect(client.__maxObservedTs).toBe(7);
 
+    // A REAL reconnect: the transport actually closes before it reopens. `closeSession()` resets
+    // `reconciler.maxObservedTs` to 0 on close (reconcile.ts — "the ts-gate is only sound over one
+    // monotone feed"), so this exercises the real resume path, not just an in-session resync.
+    t.emitClose();
+    expect(client.__maxObservedTs).toBe(0); // frontier reset by the close, as designed
+
     const before = t.sent.length;
     t.emitReopen();
     const resumeAdd = (t.sent.slice(before).find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>)
       .add[0] as { sinceTs?: number };
-    expect(resumeAdd.sinceTs).toBe(7); // resume: sinceTs = maxObservedTs
+    // The pre-close observed ts (7) must still be echoed — not the post-close reset value (0).
+    expect(resumeAdd.sinceTs).toBe(7);
   });
 });
