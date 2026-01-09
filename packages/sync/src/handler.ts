@@ -29,6 +29,7 @@ import { SubscriptionManager, type Subscription } from "./subscription-manager";
 import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable } from "./classify";
 import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
 import { driftChecksum, type RowVersion } from "./change";
+import { ResumeRegistry, regKey } from "./resume-registry";
 import {
   SessionBackpressureController,
   SessionHeartbeatController,
@@ -260,6 +261,15 @@ export class SyncProtocolHandler {
    * that disconnect backstop can find a session's gates in this commitTs-keyed map.
    */
   private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void; sessionId: string }>();
+  /**
+   * DLR Stage 3: the compute-saving half of reconnect resume (see `resume-registry.ts`'s doc
+   * comment). Populated on every subscribe (`doModifyQuerySet`), advanced on every commit
+   * (`doNotifyWrites`, unconditionally — independent of `bySession`, so an entry with zero live
+   * subscribers still advances during its TTL-retained "gap"), and retain/release-tracked across
+   * subscribe/unsubscribe/disconnect. Not yet CONSULTED anywhere (that's a later task) — this task
+   * only keeps it correctly populated.
+   */
+  private readonly resumeRegistry = new ResumeRegistry();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -289,6 +299,14 @@ export class SyncProtocolHandler {
   disconnect(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     session?.hb.stop();
+    // DLR Stage 3: release this session's resume-registry entries BEFORE dropping its
+    // subscriptions — needs each sub's (udfPath, args) to reconstruct the same regKey `upsert`
+    // used. A sub with zero remaining subscribers (across ALL sessions) stays TTL-retained, not
+    // evicted — see `resumeRegistry`'s doc comment.
+    const identity = session?.identity ?? null;
+    for (const sub of this.subscriptions.forSession(sessionId)) {
+      this.resumeRegistry.release(regKey(identity, sub.udfPath, sub.args), Date.now());
+    }
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
     this.pendingFrontiers.delete(sessionId);
@@ -321,6 +339,12 @@ export class SyncProtocolHandler {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+  }
+
+  /** @internal test/debug only — the live ResumeRegistry (DLR Stage 3), for tests to assert
+   *  population/advance/retain-release wiring without duplicating its internals. */
+  get __resumeRegistry(): ResumeRegistry {
+    return this.resumeRegistry;
   }
 
   private send(session: Session, msg: ServerMessage): void {
@@ -423,6 +447,13 @@ export class SyncProtocolHandler {
         // existing range differ (`rangeChangesFor`) already handles it unchanged, see `doNotifyWrites`.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range });
+        // DLR Stage 3: populate the resume registry for this (identity, path, args). ALWAYS pair
+        // `upsert` with `retain` — an `upsert` on a refCount-0 TTL-pending entry clears
+        // `expiresAtMs` without a paired `retain` would leak (never swept again).
+        const wasDiffable = !!(diffableRange || diffablePage || byId);
+        const rrKey = regKey(session.identity, q.udfPath, q.args);
+        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable);
+        this.resumeRegistry.retain(rrKey);
         const json = convexToJson(value);
         if (page && session.supportsQueryDiff) {
           // DLR 2c: a DIFFABLE_PAGE sub's initial/resumed answer — same reset-with-hash contract as
@@ -513,6 +544,12 @@ export class SyncProtocolHandler {
       }
     }
     for (const queryId of msg.remove) {
+      // DLR Stage 3: release before dropping the sub — `SubscriptionManager.get` still has its
+      // (udfPath, args) here, needed to reconstruct the same regKey `upsert` used.
+      const removedSub = this.subscriptions.get(session.sessionId, queryId);
+      if (removedSub) {
+        this.resumeRegistry.release(regKey(session.identity, removedSub.udfPath, removedSub.args), Date.now());
+      }
       this.subscriptions.remove(session.sessionId, queryId);
       this.byIdRowMap.delete(subKey(session.sessionId, queryId));
       modifications.push({ type: "QueryRemoved", queryId });
@@ -744,6 +781,13 @@ export class SyncProtocolHandler {
   }
 
   private async doNotifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
+    // DLR Stage 3: advance the resume registry ONCE per commit, independent of `bySession` below —
+    // an entry with zero live subscribers (TTL-retained across a disconnect "gap") must still see
+    // its `lastInvalidatedTs` advance, or a resuming client would wrongly trust a stale result.
+    // Piggyback a bounded opportunistic sweep here too (no separate timer needed).
+    this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    this.resumeRegistry.sweep(Date.now());
+
     // Use surgical range-level matching: only re-run subscriptions whose read ranges overlap the write ranges.
     const affected = this.subscriptions.findAffectedByRanges(invalidation.ranges ?? [], invalidation.tables);
 

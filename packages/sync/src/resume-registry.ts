@@ -136,4 +136,15 @@ export class ResumeRegistry {
       }
     }
   }
+
+  /** @internal test/debug only — a live entry's current refCount, or undefined if no such entry. */
+  __refCount(key: string): number | undefined {
+    return this.entries.get(key)?.refCount;
+  }
+
+  /** @internal test/debug only — a live entry's pending TTL expiry, or undefined (not pending / no
+   *  such entry). */
+  __expiresAtMs(key: string): number | undefined {
+    return this.entries.get(key)?.expiresAtMs;
+  }
 }
