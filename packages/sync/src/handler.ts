@@ -437,6 +437,37 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
+        // DLR Stage 3 — the reconnect COMPUTE-SKIP: a resume resubscribe carries `sinceTs` (the
+        // client's own last-observed frontier). If the resume registry proves this query's read set
+        // hasn't been touched by any commit since then, the cached client result is PROVABLY still
+        // valid — answer `QueryUnchanged` without paying for a re-run. Diffable subs (byId/range/page)
+        // are excluded: they have their own fingerprint/QueryDiff resume path above, and mixing the
+        // two would bypass their reset-seeding (`byIdRowMap`) invariants. A missing entry (TTL-evicted)
+        // or a `lastInvalidatedTs` above `sinceTs` (a write landed during the gap) falls through to the
+        // normal `execSub` re-run below.
+        if (q.sinceTs !== undefined) {
+          const rrKey = regKey(session.identity, q.udfPath, q.args);
+          const entry = this.resumeRegistry.lookup(rrKey);
+          if (entry && !entry.wasDiffable && entry.lastInvalidatedTs <= q.sinceTs) {
+            // The skipped sub registers with the RETAINED read set — correct, since an unchanged
+            // result means an unchanged read set. Must carry the SAME `rrKey` as both `resumeKey` (so
+            // a later release targets the right entry) and the `retain` below (paired with THIS
+            // subscription, mirroring the populate-site invariant in the execSub path below).
+            this.subscriptions.add({
+              sessionId: session.sessionId,
+              queryId: q.queryId,
+              udfPath: q.udfPath,
+              args: q.args,
+              tables: [...entry.tables],
+              readRanges: entry.readRanges,
+              byId: undefined,
+              resumeKey: rrKey,
+            });
+            this.resumeRegistry.retain(rrKey);
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+            continue;
+          }
+        }
         const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.

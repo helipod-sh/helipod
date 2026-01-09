@@ -5,7 +5,7 @@
  * itself is unit-tested in `resume-registry.test.ts` — this suite only proves the WIRING.
  */
 import { describe, it, expect } from "vitest";
-import { indexKeyspaceId, keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import { indexKeyspaceId, keySuccessor, serializeKeyRange, tableKeyspaceId, type SerializedKeyRange } from "@stackbase/index-key-codec";
 import type { Value } from "@stackbase/values";
 import { regKey } from "../src/resume-registry";
 import { SyncProtocolHandler, type SyncUdfExecutor, type SyncWebSocket, type ServerMessage, type WriteInvalidation } from "../src/index";
@@ -46,6 +46,45 @@ function makeExecutor(): SyncUdfExecutor {
       throw new Error("not used in this test");
     },
   };
+}
+
+/** A single-doc point-range read (DIFFABLE_BYID) on docs|a — same shape `resume-diffable.test.ts`
+ *  uses, kept local so this suite doesn't reach into another test file's internals. */
+const DOC_KS = tableKeyspaceId("3");
+const POINT_A: SerializedKeyRange = serializeKeyRange({ keyspace: DOC_KS, start: new Uint8Array([1]), end: keySuccessor(new Uint8Array([1])) });
+function makeByIdExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery() {
+      return {
+        value: { _id: "docs|a", n: 1 } as unknown as Value,
+        tables: ["table:3"],
+        readRanges: [POINT_A],
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+/** Wraps an executor's `runQuery` with a call counter, so tests can assert the compute-skip branch
+ *  did (or did NOT) invoke `execSub`. */
+function withRunQueryCounter(base: SyncUdfExecutor): { executor: SyncUdfExecutor; runQueryCalls: () => number } {
+  let n = 0;
+  const executor: SyncUdfExecutor = {
+    ...base,
+    async runQuery(udfPath, args, identity) {
+      n++;
+      return base.runQuery(udfPath, args, identity);
+    },
+  };
+  return { executor, runQueryCalls: () => n };
 }
 
 describe("SyncProtocolHandler: ResumeRegistry wiring (DLR Stage 3, Task 3)", () => {
@@ -140,5 +179,158 @@ describe("SyncProtocolHandler: ResumeRegistry wiring (DLR Stage 3, Task 3)", () 
     expect(handler.__resumeRegistry.__expiresAtMs(anonKey)).toBeDefined(); // TTL-armed → will be swept
     // And no stray entry was ever created under the post-auth identity.
     expect(handler.__resumeRegistry.lookup(regKey("user123", "notes:list", { box: "a" }))).toBeUndefined();
+  });
+});
+
+describe("SyncProtocolHandler: reconnect compute-skip (DLR Stage 3, Task 4)", () => {
+  it("Scenario A: a resume resubscribe with sinceTs >= lastInvalidatedTs skips execSub and answers QueryUnchanged; the sub is still live", async () => {
+    const { executor, runQueryCalls } = withRunQueryCounter(makeExecutor());
+    const handler = new SyncProtocolHandler(executor);
+    const socket1 = new MockSocket();
+    handler.connect("s1", socket1);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    expect(runQueryCalls()).toBe(1);
+
+    const key = regKey(null, "notes:list", { box: "a" });
+    const seededTs = handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs;
+
+    handler.disconnect("s1"); // release (TTL-retained, not evicted)
+
+    const socket2 = new MockSocket();
+    handler.connect("s2", socket2);
+    await handler.handleMessage(
+      "s2",
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        add: [{ queryId: 2, udfPath: "notes:list", args: { box: "a" }, sinceTs: seededTs }],
+        remove: [],
+      }),
+    );
+
+    // The skip branch fired: execSub was NOT invoked a second time.
+    expect(runQueryCalls()).toBe(1);
+
+    const resumeTransition = socket2.messages.at(-1) as Extract<ServerMessage, { type: "Transition" }>;
+    expect(resumeTransition.type).toBe("Transition");
+    expect(resumeTransition.modifications).toEqual([{ type: "QueryUnchanged", queryId: 2 }]);
+
+    // The new sub is registered live (not a leaked/orphaned no-op): a subsequent intersecting write
+    // produces a Transition for it.
+    const intersecting: WriteInvalidation = { tables: ["notes"], ranges: [RANGE_A], commitTs: seededTs + 50 };
+    await handler.notifyWrites(intersecting);
+    expect(runQueryCalls()).toBe(2); // the RERUN path re-executes on the live write
+    const pushed = socket2.messages.at(-1) as Extract<ServerMessage, { type: "Transition" }>;
+    expect(pushed.type).toBe("Transition");
+    expect(pushed.modifications).toEqual([
+      expect.objectContaining({ type: "QueryUpdated", queryId: 2 }),
+    ]);
+  });
+
+  it("Scenario A: the skip-path sub carries resumeKey — disconnect releases it (no leak)", async () => {
+    const { executor } = withRunQueryCounter(makeExecutor());
+    const handler = new SyncProtocolHandler(executor);
+    const socket1 = new MockSocket();
+    handler.connect("s1", socket1);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    const key = regKey(null, "notes:list", { box: "a" });
+    const seededTs = handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs;
+    handler.disconnect("s1");
+
+    const socket2 = new MockSocket();
+    handler.connect("s2", socket2);
+    await handler.handleMessage(
+      "s2",
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        add: [{ queryId: 2, udfPath: "notes:list", args: { box: "a" }, sinceTs: seededTs }],
+        remove: [],
+      }),
+    );
+    expect(handler.__resumeRegistry.__refCount(key)).toBe(1); // retained by the skip path
+
+    handler.disconnect("s2");
+    // If the skip-path `add` had omitted `resumeKey`, this release would be a no-op (removedSub
+    // would have no stored resumeKey to release by) and refCount would stay stuck at 1 forever.
+    expect(handler.__resumeRegistry.__refCount(key)).toBe(0);
+  });
+
+  it("Scenario B (CRITICAL — gap-write guard): a write intersecting the query's range above sinceTs during the gap forces a full re-run, never the skip", async () => {
+    const { executor, runQueryCalls } = withRunQueryCounter(makeExecutor());
+    const handler = new SyncProtocolHandler(executor);
+    const socket1 = new MockSocket();
+    handler.connect("s1", socket1);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    expect(runQueryCalls()).toBe(1);
+
+    const key = regKey(null, "notes:list", { box: "a" });
+    const staleSinceTs = handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs;
+
+    handler.disconnect("s1");
+
+    // A gap write: intersects the query's range, lands ABOVE staleSinceTs, while nobody is subscribed.
+    const gapWrite: WriteInvalidation = { tables: ["notes"], ranges: [RANGE_A], commitTs: staleSinceTs + 9 };
+    await handler.notifyWrites(gapWrite);
+    expect(handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs).toBe(staleSinceTs + 9);
+
+    const socket2 = new MockSocket();
+    handler.connect("s2", socket2);
+    await handler.handleMessage(
+      "s2",
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        add: [{ queryId: 2, udfPath: "notes:list", args: { box: "a" }, sinceTs: staleSinceTs }],
+        remove: [],
+      }),
+    );
+
+    // lastInvalidatedTs (staleSinceTs + 9) > sinceTs (staleSinceTs) => re-run, NOT skipped.
+    expect(runQueryCalls()).toBe(2);
+    const transition = socket2.messages.at(-1) as Extract<ServerMessage, { type: "Transition" }>;
+    expect(transition.modifications[0]!.type).not.toBe("QueryUnchanged");
+  });
+
+  it("Scenario C: a DIFFABLE (by-id) registry entry is EXCLUDED from the skip — it keeps taking the existing resume path (execSub still runs)", async () => {
+    const { executor, runQueryCalls } = withRunQueryCounter(makeByIdExecutor());
+    const handler = new SyncProtocolHandler(executor);
+    const socket1 = new MockSocket();
+    handler.connect("s1", socket1);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "docs:get", args: { id: "docs|a" } }], remove: [] }),
+    );
+    expect(runQueryCalls()).toBe(1);
+
+    const key = regKey(null, "docs:get", { id: "docs|a" });
+    const entry = handler.__resumeRegistry.lookup(key)!;
+    // Confirms this scenario is realized via a REAL diffable result (classifyByIdRead's point-range
+    // classification), not just asserted at the unit-gate boundary.
+    expect(entry.wasDiffable).toBe(true);
+    const seededTs = entry.lastInvalidatedTs;
+
+    handler.disconnect("s1");
+
+    const socket2 = new MockSocket();
+    handler.connect("s2", socket2);
+    await handler.handleMessage(
+      "s2",
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        add: [{ queryId: 2, udfPath: "docs:get", args: { id: "docs|a" }, sinceTs: seededTs }],
+        remove: [],
+      }),
+    );
+
+    // wasDiffable === true => the !entry.wasDiffable gate fails => never eligible for the skip,
+    // regardless of how favorable sinceTs is.
+    expect(runQueryCalls()).toBe(2);
   });
 });
