@@ -117,4 +117,28 @@ describe("SyncProtocolHandler: ResumeRegistry wiring (DLR Stage 3, Task 3)", () 
     expect(handler.__resumeRegistry.lookup(key)).toBeDefined(); // still TTL-retained
     expect(handler.__resumeRegistry.__refCount(key)).toBe(0);
   });
+
+  it("SetAuth after subscribe does not leak — release uses the sub's stored resumeKey, not the mutated session.identity", async () => {
+    const handler = new SyncProtocolHandler(makeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    // Subscribe while anonymous (identity === null) — the registry entry is keyed under null.
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    const anonKey = regKey(null, "notes:list", { box: "a" });
+    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(1);
+
+    // Authenticate: `handleSetAuth` mutates `session.identity` in place and re-runs the sub.
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user123" }));
+
+    // Disconnect. Release MUST target the ORIGINAL (null) key the entry was created under — a key
+    // re-derived from the now-"user123" identity would miss it and leak the entry forever.
+    handler.disconnect("s1");
+    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(0); // released, not leaked
+    expect(handler.__resumeRegistry.__expiresAtMs(anonKey)).toBeDefined(); // TTL-armed → will be swept
+    // And no stray entry was ever created under the post-auth identity.
+    expect(handler.__resumeRegistry.lookup(regKey("user123", "notes:list", { box: "a" }))).toBeUndefined();
+  });
 });

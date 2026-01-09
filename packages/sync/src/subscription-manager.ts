@@ -24,6 +24,13 @@ export interface Subscription {
   byId?: import("./classify").ByIdRead;
   /** DIFFABLE_RANGE marker + the range read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */
   range?: import("./classify").RangeRead;
+  /**
+   * DLR Stage 3: the resume-registry key this sub was registered under, captured at subscribe time.
+   * Release MUST use this stored key — never a key re-derived from `session.identity` at teardown,
+   * because `SetAuth` can mutate `session.identity` in place after subscribe, which would otherwise
+   * release a different key than `upsert` created (a silent no-op → permanent registry leak).
+   */
+  resumeKey?: string;
 }
 
 function subKey(sessionId: string, queryId: number): string {

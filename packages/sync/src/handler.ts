@@ -300,12 +300,11 @@ export class SyncProtocolHandler {
     const session = this.sessions.get(sessionId);
     session?.hb.stop();
     // DLR Stage 3: release this session's resume-registry entries BEFORE dropping its
-    // subscriptions — needs each sub's (udfPath, args) to reconstruct the same regKey `upsert`
-    // used. A sub with zero remaining subscribers (across ALL sessions) stays TTL-retained, not
-    // evicted — see `resumeRegistry`'s doc comment.
-    const identity = session?.identity ?? null;
+    // subscriptions — by each sub's STORED `resumeKey` (never a key re-derived from the
+    // possibly-since-changed `session.identity`). A sub with zero remaining subscribers (across
+    // ALL sessions) stays TTL-retained, not evicted — see `resumeRegistry`'s doc comment.
     for (const sub of this.subscriptions.forSession(sessionId)) {
-      this.resumeRegistry.release(regKey(identity, sub.udfPath, sub.args), Date.now());
+      if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
     }
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
@@ -446,12 +445,15 @@ export class SyncProtocolHandler {
         // DLR 2c: a page IS a range for invalidation purposes (two-sided bounds + pageMeta) — the
         // existing range differ (`rangeChangesFor`) already handles it unchanged, see `doNotifyWrites`.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range });
-        // DLR Stage 3: populate the resume registry for this (identity, path, args). ALWAYS pair
-        // `upsert` with `retain` — an `upsert` on a refCount-0 TTL-pending entry clears
-        // `expiresAtMs` without a paired `retain` would leak (never swept again).
-        const wasDiffable = !!(diffableRange || diffablePage || byId);
+        // DLR Stage 3: capture the resume-registry key at subscribe time and store it ON the sub, so
+        // release uses the SAME key `upsert` created it under — even if `SetAuth` later mutates
+        // `session.identity` in place (a re-derived key would miss the entry → permanent leak).
         const rrKey = regKey(session.identity, q.udfPath, q.args);
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range, resumeKey: rrKey });
+        // Populate the resume registry for this (identity, path, args). ALWAYS pair `upsert` with
+        // `retain` — an `upsert` on a refCount-0 TTL-pending entry clears `expiresAtMs`; without a
+        // paired `retain` it would leak (never swept again).
+        const wasDiffable = !!(diffableRange || diffablePage || byId);
         this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable);
         this.resumeRegistry.retain(rrKey);
         const json = convexToJson(value);
@@ -544,11 +546,11 @@ export class SyncProtocolHandler {
       }
     }
     for (const queryId of msg.remove) {
-      // DLR Stage 3: release before dropping the sub — `SubscriptionManager.get` still has its
-      // (udfPath, args) here, needed to reconstruct the same regKey `upsert` used.
+      // DLR Stage 3: release by the sub's STORED `resumeKey` (the key `upsert` created it under),
+      // never a key re-derived from the possibly-since-changed `session.identity`.
       const removedSub = this.subscriptions.get(session.sessionId, queryId);
-      if (removedSub) {
-        this.resumeRegistry.release(regKey(session.identity, removedSub.udfPath, removedSub.args), Date.now());
+      if (removedSub?.resumeKey) {
+        this.resumeRegistry.release(removedSub.resumeKey, Date.now());
       }
       this.subscriptions.remove(session.sessionId, queryId);
       this.byIdRowMap.delete(subKey(session.sessionId, queryId));
