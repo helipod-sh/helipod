@@ -29,6 +29,9 @@ export type { Change, RowVersion } from "./change";
 export type { MatchMode, Subscription } from "./subscription-manager";
 export { SubscriptionManager } from "./subscription-manager";
 
+export type { ResumeLookup } from "./resume-registry";
+export { ResumeRegistry, regKey, TTL_MS } from "./resume-registry";
+
 export type {
   SyncWebSocket,
   SyncUdfExecutor,
