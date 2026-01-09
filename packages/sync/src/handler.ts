@@ -441,7 +441,7 @@ export class SyncProtocolHandler {
         // client's own last-observed frontier). If the resume registry proves this query's read set
         // hasn't been touched by any commit since then, the cached client result is PROVABLY still
         // valid — answer `QueryUnchanged` without paying for a re-run. Diffable subs (byId/range/page)
-        // are excluded: they have their own fingerprint/QueryDiff resume path above, and mixing the
+        // are excluded: they have their own fingerprint/QueryDiff resume path below, and mixing the
         // two would bypass their reset-seeding (`byIdRowMap`) invariants. A missing entry (TTL-evicted)
         // or a `lastInvalidatedTs` above `sinceTs` (a write landed during the gap) falls through to the
         // normal `execSub` re-run below.
