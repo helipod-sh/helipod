@@ -281,6 +281,10 @@ export class SyncProtocolHandler {
     this.verifyAdmin = options.verifyAdmin ?? (() => false);
     this.sweepTimer = setInterval(() => {
       for (const session of this.sessions.values()) session.bp.flush();
+      // DLR Stage 3: also sweep expired resume-registry entries here, not only on commit
+      // (`doNotifyWrites`) — otherwise a fully IDLE server (no commits) never evicts a released
+      // entry past its TTL. Bounded, memory-only cleanup; the on-commit sweep still handles the busy case.
+      this.resumeRegistry.sweep(Date.now());
     }, FLUSH_SWEEP_MS);
     // Don't keep the process alive for the sweep (Node); loopback-only usage exits cleanly.
     (this.sweepTimer as { unref?: () => void }).unref?.();
