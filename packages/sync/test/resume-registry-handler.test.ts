@@ -157,29 +157,10 @@ describe("SyncProtocolHandler: ResumeRegistry wiring (DLR Stage 3, Task 3)", () 
     expect(handler.__resumeRegistry.__refCount(key)).toBe(0);
   });
 
-  it("SetAuth after subscribe does not leak — release uses the sub's stored resumeKey, not the mutated session.identity", async () => {
-    const handler = new SyncProtocolHandler(makeExecutor());
-    const socket = new MockSocket();
-    handler.connect("s1", socket);
-    // Subscribe while anonymous (identity === null) — the registry entry is keyed under null.
-    await handler.handleMessage(
-      "s1",
-      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
-    );
-    const anonKey = regKey(null, "notes:list", { box: "a" });
-    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(1);
-
-    // Authenticate: `handleSetAuth` mutates `session.identity` in place and re-runs the sub.
-    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user123" }));
-
-    // Disconnect. Release MUST target the ORIGINAL (null) key the entry was created under — a key
-    // re-derived from the now-"user123" identity would miss it and leak the entry forever.
-    handler.disconnect("s1");
-    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(0); // released, not leaked
-    expect(handler.__resumeRegistry.__expiresAtMs(anonKey)).toBeDefined(); // TTL-armed → will be swept
-    // And no stray entry was ever created under the post-auth identity.
-    expect(handler.__resumeRegistry.lookup(regKey("user123", "notes:list", { box: "a" }))).toBeUndefined();
-  });
+  // NOTE: SetAuth re-keying (release-by-stored-resumeKey + entry migration) is covered by the
+  // "SetAuth re-keys the registry entry to the new identity" test in the whole-branch-fixes block
+  // below, which supersedes the earlier Task-3 "does not leak" test (that asserted the pre-re-key
+  // model where no user123 entry was created — no longer the behavior).
 });
 
 describe("SyncProtocolHandler: reconnect compute-skip (DLR Stage 3, Task 4)", () => {
@@ -332,5 +313,105 @@ describe("SyncProtocolHandler: reconnect compute-skip (DLR Stage 3, Task 4)", ()
     // wasDiffable === true => the !entry.wasDiffable gate fails => never eligible for the skip,
     // regardless of how favorable sinceTs is.
     expect(runQueryCalls()).toBe(2);
+  });
+});
+
+/**
+ * Whole-branch review fixes: (1) the registry must track a read-set that SHIFTS on a live re-run
+ * (a data-dependent query), or a gap write to the NEW range is missed → wrong skip → stale data;
+ * (2) `SetAuth` must re-key the entry to the new identity so `sub.resumeKey` always matches the
+ * identity its read-set belongs to.
+ */
+describe("SyncProtocolHandler: resume registry lockstep (DLR Stage 3, whole-branch fixes)", () => {
+  /** runQuery returns RANGE_A on the first (subscribe) run, then RANGE_B on every later run — a
+   *  data-dependent query whose read-set shifts across a live re-run. */
+  function makeShiftingExecutor(): { executor: SyncUdfExecutor; runQueryCalls: () => number } {
+    let n = 0;
+    const executor: SyncUdfExecutor = {
+      async runQuery() {
+        n++;
+        return {
+          value: [{ _id: "notes|x", box: n === 1 ? "a" : "b" }] as unknown as Value,
+          tables: ["notes"],
+          readRanges: [n === 1 ? RANGE_A : RANGE_B],
+        };
+      },
+      async runMutation() {
+        throw new Error("not used in this test");
+      },
+      async runAdminQuery() {
+        throw new Error("not used in this test");
+      },
+      async runAction() {
+        throw new Error("not used in this test");
+      },
+    };
+    return { executor, runQueryCalls: () => n };
+  }
+
+  it("a live re-run that shifts the read-set keeps the registry in lockstep — a gap write to the NEW range re-runs (not a stale skip)", async () => {
+    const { executor, runQueryCalls } = makeShiftingExecutor();
+    const handler = new SyncProtocolHandler(executor);
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    // Subscribe: read-set = RANGE_A (the first run).
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    const key = regKey(null, "notes:list", { box: "a" });
+    expect(runQueryCalls()).toBe(1);
+
+    // A live write intersecting RANGE_A triggers a re-run; the re-run's read-set SHIFTS to RANGE_B.
+    await handler.notifyWrites({ tables: ["notes"], ranges: [RANGE_A], commitTs: 10 });
+    expect(runQueryCalls()).toBe(2); // the live re-run happened
+    // The fix keeps the registry entry in lockstep: it advanced to 10 AND now indexes RANGE_B.
+    expect(handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs).toBe(10);
+
+    // Client's observed frontier after that transition is 10. Disconnect (entry retained w/ RANGE_B).
+    handler.disconnect("s1");
+
+    // GAP write: intersects the NEW range (RANGE_B), NOT the original RANGE_A, at ts 20. WITHOUT the
+    // fix the entry still indexes RANGE_A → no overlap → lastInvalidatedTs stuck at 10 (the bug).
+    await handler.notifyWrites({ tables: ["notes"], ranges: [RANGE_B], commitTs: 20 });
+    expect(handler.__resumeRegistry.lookup(key)!.lastInvalidatedTs).toBe(20);
+
+    // Reconnect + resubscribe with sinceTs = 10 → lastInvalidatedTs (20) > 10 → MUST re-run. WITHOUT
+    // the fix it would be 10 <= 10 → a wrong QueryUnchanged skip serving the pre-gap-write value.
+    const socket2 = new MockSocket();
+    handler.connect("s2", socket2);
+    await handler.handleMessage(
+      "s2",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" }, sinceTs: 10 }], remove: [] }),
+    );
+    expect(runQueryCalls()).toBe(3); // re-ran, did NOT wrongly skip
+  });
+
+  it("SetAuth re-keys the registry entry to the new identity — old key released (TTL), new key retained, no leak", async () => {
+    const handler = new SyncProtocolHandler(makeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+    const anonKey = regKey(null, "notes:list", { box: "a" });
+    const authedKey = regKey("user123", "notes:list", { box: "a" });
+    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(1);
+    expect(handler.__resumeRegistry.lookup(authedKey)).toBeUndefined();
+
+    // Authenticate: `handleSetAuth` re-runs the sub under the new identity and re-keys the entry.
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user123" }));
+
+    // Old (null) key released (refCount 0 + TTL-armed); new (user123) key retained.
+    expect(handler.__resumeRegistry.__refCount(anonKey)).toBe(0);
+    expect(handler.__resumeRegistry.__expiresAtMs(anonKey)).toBeDefined();
+    expect(handler.__resumeRegistry.__refCount(authedKey)).toBe(1);
+    expect(handler.__resumeRegistry.lookup(authedKey)).toBeDefined();
+
+    // Disconnect releases the sub's CURRENT (user123) key — no leak on either key.
+    handler.disconnect("s1");
+    expect(handler.__resumeRegistry.__refCount(authedKey)).toBe(0);
+    expect(handler.__resumeRegistry.__expiresAtMs(authedKey)).toBeDefined();
   });
 });

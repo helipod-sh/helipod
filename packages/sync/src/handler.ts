@@ -1024,6 +1024,17 @@ export class SyncProtocolHandler {
         // flowing again on a later commit.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
         this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range }); // refresh the read set
+        // DLR Stage 3 (whole-branch review fix): keep the resume registry's read-set in LOCKSTEP with
+        // this fresh re-run. A data/identity-dependent query can shift its read ranges here (e.g.
+        // `get(user)` then a range keyed on `user.currentRoom`); a registry still frozen at the
+        // ORIGINAL subscribe would then miss a gap write to the NEW range → `lastInvalidatedTs`
+        // wouldn't advance → a wrong reconnect skip → SILENT STALE DATA. Re-upsert re-indexes the
+        // entry under the current ranges; `advanceOnCommit` already moved its `lastInvalidatedTs` to
+        // this commit, so the ts is a no-op — only the ranges/tables/wasDiffable change. (No `retain`:
+        // the sub is live, so refCount ≥ 1 and `expiresAtMs` is already unset — no leak.)
+        if (sub.resumeKey) {
+          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId);
+        }
         // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
         // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
         // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
@@ -1122,7 +1133,22 @@ export class SyncProtocolHandler {
         // threaded through as `range` (a page IS a range for invalidation), same as the
         // subscribe-answer path in `doModifyQuerySet`.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range });
+        // DLR Stage 3: an identity change RE-KEYS this sub's resume-registry entry. The read-set was
+        // captured under the OLD identity; under the NEW identity the query can read different rows,
+        // so the entry must move to `regKey(newIdentity, ...)`. This keeps the load-bearing invariant
+        // that `sub.resumeKey === regKey(session.identity, path, args)` at all times — which is what
+        // makes the live-re-run upsert (in `sendSessionTransition`) correctly keyed. Upsert the new
+        // key first (so `retain` finds it), then retain-new + release-old only when the key actually
+        // changed (refCount stays balanced: original subscribe retained the old key). A reconnect
+        // under the new identity now finds the migrated entry; a reconnect under the OLD identity
+        // misses (its entry TTL-sweeps) → re-run, never a stale skip.
+        const newResumeKey = regKey(session.identity, sub.udfPath, sub.args);
+        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId);
+        if (sub.resumeKey !== newResumeKey) {
+          this.resumeRegistry.retain(newResumeKey);
+          if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
+        }
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range, resumeKey: newResumeKey });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {
