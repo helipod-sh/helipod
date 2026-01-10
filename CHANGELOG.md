@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2025-12-25
+
+**DLR Stage 3 — compute-saving reconnect resume.** Reconnect resume now saves
+server CPU, not just bandwidth: when the server can prove a subscribed query's
+result is unchanged since the client last saw it, it answers `QueryUnchanged`
+**without re-executing the query handler**. Before this, every subscribed query
+was fully re-run and re-hashed on reconnect (only the bandwidth half of
+"fast-resume" had shipped); this closes the compute half.
+
+### Added
+
+- **Scalar `sinceTs` resume checkpoint.** On reconnect, the client stamps each resubscribe with `sinceTs` = its max observed commit ts (`resync()`); a fresh subscribe carries none. Captured before the session's observed frontier is reset on close, so it always reflects the client's true frontier.
+- **Server-side `ResumeRegistry`** (`packages/sync`): a per-`(identity, path, args)` registry of `{readRanges, tables, lastInvalidatedTs, wasDiffable}` over the Stage-1 interval index. `advanceOnCommit` advances `lastInvalidatedTs` on every intersecting commit — **including for entries with no live subscriber** (released entries stay indexed for a 60s TTL), so a write during a client's disconnect gap is never missed. Mirrors `SubscriptionManager.findAffectedByRanges` exactly.
+- **The reconnect compute-skip.** On a resubscribe carrying `sinceTs`, a RERUN (non-diffable) query whose `entry.lastInvalidatedTs <= sinceTs` is registered from the retained read-set and answered `QueryUnchanged` with **no `execSub`**. A missing entry (TTL-evicted), `lastInvalidatedTs > sinceTs`, or a diffable sub (which keeps its own fingerprint/QueryDiff resume) all fall through to a normal re-run — conservative by construction.
+- `bench:reactive` gains a **`resume-compute`** A/B scenario: N=50 RERUN subscriptions, reconnect re-executions with the skip **ON = 0** vs **OFF = 50** (`reExecsSaved = 50`); a partial-change variant (1 of N touched during the gap) re-executes **exactly 1**.
+
+### Fixed
+
+- **The registry read-set stays in lockstep with live re-runs.** A data-dependent query whose read-set shifts on a live re-run (e.g. `get(user)` then a range keyed on `user.currentRoom`) previously left the registry indexing the *subscribe-time* ranges; a gap write to the *new* range was then missed → a wrong skip → silent stale data. The re-run path (`sendSessionTransition`) now re-upserts the registry with the fresh read-set. (Whole-branch review Critical.)
+- **`SetAuth` re-keys the registry entry** to the new identity (release old, retain+upsert new), maintaining the invariant that a subscription's registry key always matches the identity its read-set was produced under — so a reconnect under the new identity finds the migrated entry, and one under the old identity misses and re-runs.
+- **`sinceTs` no longer resets to 0 on a real reconnect** — the client snapshots its observed frontier before `closeSession()` clears it (the feature was a silent no-op on genuine reconnects before this).
+- **Registry entries are released by the subscription's stored key**, not a key re-derived from the possibly-`SetAuth`-mutated `session.identity` (which would leak the entry). The registry is also swept on the idle timer, not only on commit.
+
+### Boundaries
+
+- Single-node only: the registry is per-node in-memory, so a cross-node reconnect in a fleet finds no entry and safely re-runs. Fleet per-shard resume fragments remain a future DLR stage.
+
 ## [1.2.0] — 2025-12-25
 
 **DLR Stage 2c — the key-range-pinned pagination differ.** The third and final
@@ -123,6 +150,7 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
 - **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
+[1.3.0]: https://example.com/releases/tag/v1.3.0
 [1.2.0]: https://example.com/releases/tag/v1.2.0
 [1.1.0]: https://example.com/releases/tag/v1.1.0
 [1.0.0]: https://example.com/releases/tag/v1.0.0

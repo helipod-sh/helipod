@@ -405,4 +405,36 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
     };
     expect(() => new StackbaseClient(bare)).not.toThrow();
   });
+
+  it("a resume resubscribe echoes sinceTs = maxObservedTs; a fresh subscribe does not (DLR Stage 3)", () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t);
+    client.subscribe("notes:list", { box: "a" }, () => {});
+    const firstAdd = (t.sent.find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>).add[0] as {
+      sinceTs?: number;
+    };
+    expect(firstAdd.sinceTs).toBeUndefined(); // fresh subscribe: no sinceTs
+
+    // Advance the client's observed-ts frontier to 7 via a normal, in-band Transition.
+    t.emit({
+      type: "Transition",
+      startVersion: { querySet: 0, ts: 0 },
+      endVersion: { querySet: 1, ts: 7 },
+      modifications: [{ type: "QueryUpdated", queryId: 1, value: [] }],
+    });
+    expect(client.__maxObservedTs).toBe(7);
+
+    // A REAL reconnect: the transport actually closes before it reopens. `closeSession()` resets
+    // `reconciler.maxObservedTs` to 0 on close (reconcile.ts — "the ts-gate is only sound over one
+    // monotone feed"), so this exercises the real resume path, not just an in-session resync.
+    t.emitClose();
+    expect(client.__maxObservedTs).toBe(0); // frontier reset by the close, as designed
+
+    const before = t.sent.length;
+    t.emitReopen();
+    const resumeAdd = (t.sent.slice(before).find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>)
+      .add[0] as { sinceTs?: number };
+    // The pre-close observed ts (7) must still be echoed — not the post-close reset value (0).
+    expect(resumeAdd.sinceTs).toBe(7);
+  });
 });

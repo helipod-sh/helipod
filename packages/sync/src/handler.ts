@@ -29,6 +29,7 @@ import { SubscriptionManager, type Subscription } from "./subscription-manager";
 import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable } from "./classify";
 import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
 import { driftChecksum, type RowVersion } from "./change";
+import { ResumeRegistry, regKey } from "./resume-registry";
 import {
   SessionBackpressureController,
   SessionHeartbeatController,
@@ -260,6 +261,15 @@ export class SyncProtocolHandler {
    * that disconnect backstop can find a session's gates in this commitTs-keyed map.
    */
   private readonly originResponseGates = new Map<number, { promise: Promise<void>; resolve: () => void; sessionId: string }>();
+  /**
+   * DLR Stage 3: the compute-saving half of reconnect resume (see `resume-registry.ts`'s doc
+   * comment). Populated on every subscribe (`doModifyQuerySet`), advanced on every commit
+   * (`doNotifyWrites`, unconditionally — independent of `bySession`, so an entry with zero live
+   * subscribers still advances during its TTL-retained "gap"), and retain/release-tracked across
+   * subscribe/unsubscribe/disconnect. Not yet CONSULTED anywhere (that's a later task) — this task
+   * only keeps it correctly populated.
+   */
+  private readonly resumeRegistry = new ResumeRegistry();
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -271,6 +281,10 @@ export class SyncProtocolHandler {
     this.verifyAdmin = options.verifyAdmin ?? (() => false);
     this.sweepTimer = setInterval(() => {
       for (const session of this.sessions.values()) session.bp.flush();
+      // DLR Stage 3: also sweep expired resume-registry entries here, not only on commit
+      // (`doNotifyWrites`) — otherwise a fully IDLE server (no commits) never evicts a released
+      // entry past its TTL. Bounded, memory-only cleanup; the on-commit sweep still handles the busy case.
+      this.resumeRegistry.sweep(Date.now());
     }, FLUSH_SWEEP_MS);
     // Don't keep the process alive for the sweep (Node); loopback-only usage exits cleanly.
     (this.sweepTimer as { unref?: () => void }).unref?.();
@@ -289,6 +303,13 @@ export class SyncProtocolHandler {
   disconnect(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     session?.hb.stop();
+    // DLR Stage 3: release this session's resume-registry entries BEFORE dropping its
+    // subscriptions — by each sub's STORED `resumeKey` (never a key re-derived from the
+    // possibly-since-changed `session.identity`). A sub with zero remaining subscribers (across
+    // ALL sessions) stays TTL-retained, not evicted — see `resumeRegistry`'s doc comment.
+    for (const sub of this.subscriptions.forSession(sessionId)) {
+      if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
+    }
     this.subscriptions.removeSession(sessionId);
     this.sessions.delete(sessionId);
     this.pendingFrontiers.delete(sessionId);
@@ -321,6 +342,12 @@ export class SyncProtocolHandler {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+  }
+
+  /** @internal test/debug only — the live ResumeRegistry (DLR Stage 3), for tests to assert
+   *  population/advance/retain-release wiring without duplicating its internals. */
+  get __resumeRegistry(): ResumeRegistry {
+    return this.resumeRegistry;
   }
 
   private send(session: Session, msg: ServerMessage): void {
@@ -414,6 +441,37 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const q of msg.add) {
       try {
+        // DLR Stage 3 — the reconnect COMPUTE-SKIP: a resume resubscribe carries `sinceTs` (the
+        // client's own last-observed frontier). If the resume registry proves this query's read set
+        // hasn't been touched by any commit since then, the cached client result is PROVABLY still
+        // valid — answer `QueryUnchanged` without paying for a re-run. Diffable subs (byId/range/page)
+        // are excluded: they have their own fingerprint/QueryDiff resume path below, and mixing the
+        // two would bypass their reset-seeding (`byIdRowMap`) invariants. A missing entry (TTL-evicted)
+        // or a `lastInvalidatedTs` above `sinceTs` (a write landed during the gap) falls through to the
+        // normal `execSub` re-run below.
+        if (q.sinceTs !== undefined) {
+          const rrKey = regKey(session.identity, q.udfPath, q.args);
+          const entry = this.resumeRegistry.lookup(rrKey);
+          if (entry && !entry.wasDiffable && entry.lastInvalidatedTs <= q.sinceTs) {
+            // The skipped sub registers with the RETAINED read set — correct, since an unchanged
+            // result means an unchanged read set. Must carry the SAME `rrKey` as both `resumeKey` (so
+            // a later release targets the right entry) and the `retain` below (paired with THIS
+            // subscription, mirroring the populate-site invariant in the execSub path below).
+            this.subscriptions.add({
+              sessionId: session.sessionId,
+              queryId: q.queryId,
+              udfPath: q.udfPath,
+              args: q.args,
+              tables: [...entry.tables],
+              readRanges: entry.readRanges,
+              byId: undefined,
+              resumeKey: rrKey,
+            });
+            this.resumeRegistry.retain(rrKey);
+            modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
+            continue;
+          }
+        }
         const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
@@ -422,7 +480,17 @@ export class SyncProtocolHandler {
         // DLR 2c: a page IS a range for invalidation purposes (two-sided bounds + pageMeta) — the
         // existing range differ (`rangeChangesFor`) already handles it unchanged, see `doNotifyWrites`.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range });
+        // DLR Stage 3: capture the resume-registry key at subscribe time and store it ON the sub, so
+        // release uses the SAME key `upsert` created it under — even if `SetAuth` later mutates
+        // `session.identity` in place (a re-derived key would miss the entry → permanent leak).
+        const rrKey = regKey(session.identity, q.udfPath, q.args);
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range, resumeKey: rrKey });
+        // Populate the resume registry for this (identity, path, args). ALWAYS pair `upsert` with
+        // `retain` — an `upsert` on a refCount-0 TTL-pending entry clears `expiresAtMs`; without a
+        // paired `retain` it would leak (never swept again).
+        const wasDiffable = !!(diffableRange || diffablePage || byId);
+        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable);
+        this.resumeRegistry.retain(rrKey);
         const json = convexToJson(value);
         if (page && session.supportsQueryDiff) {
           // DLR 2c: a DIFFABLE_PAGE sub's initial/resumed answer — same reset-with-hash contract as
@@ -513,6 +581,12 @@ export class SyncProtocolHandler {
       }
     }
     for (const queryId of msg.remove) {
+      // DLR Stage 3: release by the sub's STORED `resumeKey` (the key `upsert` created it under),
+      // never a key re-derived from the possibly-since-changed `session.identity`.
+      const removedSub = this.subscriptions.get(session.sessionId, queryId);
+      if (removedSub?.resumeKey) {
+        this.resumeRegistry.release(removedSub.resumeKey, Date.now());
+      }
       this.subscriptions.remove(session.sessionId, queryId);
       this.byIdRowMap.delete(subKey(session.sessionId, queryId));
       modifications.push({ type: "QueryRemoved", queryId });
@@ -744,6 +818,13 @@ export class SyncProtocolHandler {
   }
 
   private async doNotifyWrites(invalidation: WriteInvalidation, originSessionId?: string): Promise<void> {
+    // DLR Stage 3: advance the resume registry ONCE per commit, independent of `bySession` below —
+    // an entry with zero live subscribers (TTL-retained across a disconnect "gap") must still see
+    // its `lastInvalidatedTs` advance, or a resuming client would wrongly trust a stale result.
+    // Piggyback a bounded opportunistic sweep here too (no separate timer needed).
+    this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    this.resumeRegistry.sweep(Date.now());
+
     // Use surgical range-level matching: only re-run subscriptions whose read ranges overlap the write ranges.
     const affected = this.subscriptions.findAffectedByRanges(invalidation.ranges ?? [], invalidation.tables);
 
@@ -947,6 +1028,17 @@ export class SyncProtocolHandler {
         // flowing again on a later commit.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
         this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range }); // refresh the read set
+        // DLR Stage 3 (whole-branch review fix): keep the resume registry's read-set in LOCKSTEP with
+        // this fresh re-run. A data/identity-dependent query can shift its read ranges here (e.g.
+        // `get(user)` then a range keyed on `user.currentRoom`); a registry still frozen at the
+        // ORIGINAL subscribe would then miss a gap write to the NEW range → `lastInvalidatedTs`
+        // wouldn't advance → a wrong reconnect skip → SILENT STALE DATA. Re-upsert re-indexes the
+        // entry under the current ranges; `advanceOnCommit` already moved its `lastInvalidatedTs` to
+        // this commit, so the ts is a no-op — only the ranges/tables/wasDiffable change. (No `retain`:
+        // the sub is live, so refCount ≥ 1 and `expiresAtMs` is already unset — no leak.)
+        if (sub.resumeKey) {
+          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId);
+        }
         // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
         // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
         // refresh has just superseded. Left alone, a LATER incremental write (once this sub is
@@ -1045,7 +1137,22 @@ export class SyncProtocolHandler {
         // threaded through as `range` (a page IS a range for invalidation), same as the
         // subscribe-answer path in `doModifyQuerySet`.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range });
+        // DLR Stage 3: an identity change RE-KEYS this sub's resume-registry entry. The read-set was
+        // captured under the OLD identity; under the NEW identity the query can read different rows,
+        // so the entry must move to `regKey(newIdentity, ...)`. This keeps the load-bearing invariant
+        // that `sub.resumeKey === regKey(session.identity, path, args)` at all times — which is what
+        // makes the live-re-run upsert (in `sendSessionTransition`) correctly keyed. Upsert the new
+        // key first (so `retain` finds it), then retain-new + release-old only when the key actually
+        // changed (refCount stays balanced: original subscribe retained the old key). A reconnect
+        // under the new identity now finds the migrated entry; a reconnect under the OLD identity
+        // misses (its entry TTL-sweeps) → re-run, never a stale skip.
+        const newResumeKey = regKey(session.identity, sub.udfPath, sub.args);
+        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId);
+        if (sub.resumeKey !== newResumeKey) {
+          this.resumeRegistry.retain(newResumeKey);
+          if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
+        }
+        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range, resumeKey: newResumeKey });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {

@@ -187,6 +187,15 @@ export class StackbaseClient {
   private version: StateVersion = { ...INITIAL_VERSION };
   private resyncing = false;
   private closed = false;
+  // DLR Stage 3: the observed-ts frontier as of the moment BEFORE the current close. `closeSession`
+  // resets `reconciler.maxObservedTs` to 0 on every transport close (reconcile.ts ~line 320, "the
+  // ts-gate is only sound over one monotone feed") — so on a genuine reconnect, `maxObservedTs` is
+  // already 0 by the time `resync()` runs and echoing it alone would defeat the resume watermark.
+  // Captured in `onTransportClosed()` BEFORE `closeSession()` runs; `resync()` echoes
+  // `Math.max(resumeSinceTs, reconciler.maxObservedTs)` so a real reconnect (observedTs reset to 0)
+  // uses this snapshot, while a same-session drift resync (observedTs intact, no close in between)
+  // uses the live value instead.
+  private resumeSinceTs = 0;
   private readonly store = new LayeredQueryStore();
   private readonly reconciler: Reconciler;
   /** Mutation promise callbacks, keyed by requestId — resolved/rejected here; layers live in the log. */
@@ -858,6 +867,14 @@ export class StackbaseClient {
         udfPath: s.path,
         args: s.args,
         ...(s.answered && s.serverValue !== undefined && s.lastHash !== undefined ? { resultHash: s.lastHash } : {}),
+        // DLR Stage 3: echo the client's observed-inclusion frontier so the server can skip the
+        // re-run entirely when nothing touched this query's read-set since. Fresh `subscribe()`
+        // never sets this — only a resume resubscribe has a meaningful watermark to echo. `Math.max`
+        // with `resumeSinceTs` (the pre-close snapshot) covers both resume paths: a real transport
+        // close resets `reconciler.maxObservedTs` to 0 (see `resumeSinceTs`'s own comment), so the
+        // snapshot wins there; a same-session drift resync never closed, so `maxObservedTs` is still
+        // live and wins instead.
+        sinceTs: Math.max(this.resumeSinceTs, this.reconciler.maxObservedTs),
       })),
       remove: [],
     });
@@ -873,6 +890,9 @@ export class StackbaseClient {
     // wedge the rest of this tab session (see `OutboxDrain#onTransportClosed`). Leadership and the
     // interval nudge survive a reconnect-class close; only `close()` stops the drain.
     this.outboxDrain?.onTransportClosed();
+    // DLR Stage 3: snapshot the observed-ts frontier BEFORE `closeSession()` resets it to 0, so the
+    // next `resync()` can still echo a real watermark on reconnect (see `resumeSinceTs`'s own comment).
+    this.resumeSinceTs = this.reconciler.maxObservedTs;
     // S4 close rules: unsent retained; inflight/completed layers drop; frontier resets. Task 2's
     // park swap (armed + durable) is folded in here via `this.outboxArmed` — `rejectedInflight`
     // already excludes anything that parked instead; a parked entry's promise stays pending in
