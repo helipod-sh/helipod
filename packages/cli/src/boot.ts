@@ -81,14 +81,32 @@ export function parseNumShards(raw: string | undefined): number | undefined {
 /**
  * Parse `STACKBASE_GROUP_COMMIT` (Fleet B4) — a boolean env flag, same `1`/`true`/`yes`
  * (case-insensitive) shape `@stackbase/fleet`'s `fleetMultiWriterEnabled` uses for
- * `STACKBASE_FLEET_MULTI_WRITER`. Default OFF (unset/anything else → false) at this task — T5 owns
- * flipping the production default once the throughput win is E2E-proven. Unlike `STACKBASE_FLEET_
+ * `STACKBASE_FLEET_MULTI_WRITER`. This is just the token PARSER (truthy = `1`/`true`/`yes`); the
+ * single-node DEFAULT when the var is unset is store-conditional — see `resolveGroupCommit`. Unlike `STACKBASE_FLEET_
  * SHARDS`, group commit needs no persist-once story: it's a per-boot transactor construction choice,
  * not a durable invariant the log depends on, so a plain env read (no `resolveNumShards`-style
  * mismatch-fail-fast) is the right shape.
  */
 export function groupCommitEnabled(raw: string | undefined): boolean {
   return /^(1|true|yes)$/i.test(raw ?? "");
+}
+
+/**
+ * Resolve the single-node (non-fleet) group-commit default. An explicit `STACKBASE_GROUP_COMMIT`
+ * always wins (either direction). When it is unset, the default is STORE-CONDITIONAL: ON for
+ * Postgres, OFF for SQLite. Rationale (benchmark, `docs/dev/research/writes-benchmark.md`): group
+ * commit batches concurrent commits into one fsync — a strict win on fsync-bound Postgres (+39% at
+ * 8 clients, +58% at 64, and byte-identical latency at 1 client thanks to the opportunistic "batch
+ * of 1 when idle" design, so no low-traffic regression) but a ~8% loss on CPU-bound in-memory
+ * SQLite (nothing to amortize, pure pipeline overhead). Fleet B4 gated auto-enable on a single
+ * GLOBAL 2× threshold and missed (1.63×), shipping dark-off; the per-store data shows the win is
+ * store-dependent, so a store-conditional default is the correct refinement (scoped to the
+ * single-node path — the fleet path still threads its own `STACKBASE_GROUP_COMMIT` read).
+ */
+export function resolveGroupCommit(opts: { envRaw: string | undefined; databaseUrl: string | undefined }): boolean {
+  const raw = opts.envRaw;
+  if (raw !== undefined && raw !== "") return groupCommitEnabled(raw); // explicit override, either way
+  return isPostgresUrl(opts.databaseUrl); // default: ON for Postgres, OFF for SQLite
 }
 
 /** Build the fail-fast message for a `STACKBASE_FLEET_SHARDS` value that disagrees with what's
@@ -290,7 +308,9 @@ export async function bootLoaded(opts: {
   // pattern in `@stackbase/fleet`'s `node.ts`) and threads it in as `opts.fleet.groupCommit`; the
   // non-fleet path (dev, `serve` without `--fleet`, the single binary) reads the env var directly.
   // No persist-once story needed (see `groupCommitEnabled`'s doc comment) — a plain per-boot read.
-  const groupCommit = opts.fleet ? (opts.fleet.groupCommit ?? false) : groupCommitEnabled(process.env.STACKBASE_GROUP_COMMIT);
+  const groupCommit = opts.fleet
+    ? (opts.fleet.groupCommit ?? false)
+    : resolveGroupCommit({ envRaw: process.env.STACKBASE_GROUP_COMMIT, databaseUrl: opts.databaseUrl });
 
   // File storage is always on. Blobs sit beside the SQLite file (`<dataDir>/storage`); the signing
   // key is the deployment admin key (already fail-fasted-if-unset by `serve`). The `_storage` table

@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2025-12-25
+
+### Changed
+
+- **Group commit now defaults ON for single-node Postgres deployments** (OFF for SQLite). `STACKBASE_GROUP_COMMIT` still overrides either direction. Group commit batches concurrent commits into one fsync: benchmarked as a **+39% (8 clients) to +58% (64 clients)** write-throughput win on real containerized Postgres — with lower p50 latency and *byte-identical* latency at 1 client (the opportunistic "batch of 1 when idle" design adds no wait), so there is no low-traffic regression. It stays off on CPU-bound SQLite, where batching is pure overhead (~−8%). Refines Fleet B4's single global 2× auto-enable gate (which missed at 1.63× and shipped dark-off) into the correct store-conditional default. See `docs/dev/research/writes-benchmark.md`.
+
+### Added
+
+- **`bun run bench:writes`** — a write/commit-throughput benchmark axis (`--axis writes`): commit latency + throughput at 1/8/64 concurrent writers, contended read-modify-write (OCC) cost, and group-commit OFF-vs-ON, over SQLite and Postgres. Surfaced that write throughput is single-writer-bound (flat across concurrency; scale by sharding, not threads) and that Postgres is fsync-bound — the ceiling the reactive-path optimizations can't move.
+
 ## [1.3.0] — 2025-12-25
 
 **DLR Stage 3 — compute-saving reconnect resume.** Reconnect resume now saves
@@ -150,6 +160,7 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
 - **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
+[1.4.0]: https://example.com/releases/tag/v1.4.0
 [1.3.0]: https://example.com/releases/tag/v1.3.0
 [1.2.0]: https://example.com/releases/tag/v1.2.0
 [1.1.0]: https://example.com/releases/tag/v1.1.0
