@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { groupCommitEnabled, bootLoaded } from "../src/boot";
+import { groupCommitEnabled, resolveGroupCommit, bootLoaded } from "../src/boot";
 import { loadConvexDir } from "../src/load-modules";
 
 describe("groupCommitEnabled", () => {
@@ -30,6 +30,32 @@ describe("groupCommitEnabled", () => {
   });
 });
 
+describe("resolveGroupCommit — store-conditional default (single-node)", () => {
+  const PG = "postgres://u:p@h:5432/db";
+  const PGQL = "postgresql://u:p@h/db";
+
+  it("unset env → ON for Postgres, OFF for SQLite (no url)", () => {
+    expect(resolveGroupCommit({ envRaw: undefined, databaseUrl: PG })).toBe(true);
+    expect(resolveGroupCommit({ envRaw: undefined, databaseUrl: PGQL })).toBe(true);
+    expect(resolveGroupCommit({ envRaw: undefined, databaseUrl: undefined })).toBe(false);
+    expect(resolveGroupCommit({ envRaw: undefined, databaseUrl: "/tmp/db.sqlite" })).toBe(false);
+  });
+
+  it("empty env string is treated as unset → store-conditional", () => {
+    expect(resolveGroupCommit({ envRaw: "", databaseUrl: PG })).toBe(true);
+    expect(resolveGroupCommit({ envRaw: "", databaseUrl: undefined })).toBe(false);
+  });
+
+  it("explicit env always wins, overriding the store default either direction", () => {
+    // explicit OFF on Postgres
+    expect(resolveGroupCommit({ envRaw: "0", databaseUrl: PG })).toBe(false);
+    expect(resolveGroupCommit({ envRaw: "false", databaseUrl: PG })).toBe(false);
+    // explicit ON on SQLite
+    expect(resolveGroupCommit({ envRaw: "1", databaseUrl: undefined })).toBe(true);
+    expect(resolveGroupCommit({ envRaw: "yes", databaseUrl: "/tmp/db.sqlite" })).toBe(true);
+  });
+});
+
 describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fleet)", () => {
   const DATA_DIR = "./.tmp-groupcommit-boot";
   const DATA = `${DATA_DIR}/db.sqlite`;
@@ -42,7 +68,7 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
     else process.env[ENV_KEY] = savedEnv;
   });
 
-  it("absent: runtime.groupCommitStats() stays all-zero after a committing mutation (default OFF)", async () => {
+  it("absent + SQLite store: runtime.groupCommitStats() stays all-zero after a committing mutation (store-conditional default → OFF for SQLite)", async () => {
     delete process.env[ENV_KEY];
     const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });

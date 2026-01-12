@@ -49,11 +49,33 @@ Absolute numbers are machine-specific — the *shape* is the signal.)
    on SQLite is the read-collect-replace work, not conflict retries. The column
    lights up on the sharded/fleet axis, where concurrent writers race.
 
-## The lever this surfaces
+## The lever this surfaced → group commit now defaults ON for Postgres
 
-On the single-node axis, **group commit is the one under-utilized win**: off by
-default, but a measurable +29% on Postgres (the store most production deployments
-use). Worth revisiting whether it should auto-enable when the store is Postgres —
-Fleet B4 gated it at 2× and it came in at 1.63×, so it shipped dark-off; this axis
-confirms the ~1.3–1.6× PG win holds and is the highest-value single-node write
-optimization currently gated behind a flag.
+The axis identified group commit as the one under-utilized single-node write win, so
+we characterized it properly. Full group-commit OFF-vs-ON curve on **real
+containerized `postgres:16`** (`fsync=on`, `synchronous_commit=on`, real on-disk
+volume — genuine fsync per commit), 5s/cell:
+
+| clients | OFF ops/s | ON ops/s | gain | p50 OFF→ON (ms) | p99 OFF→ON (ms) |
+|---|---|---|---|---|---|
+| 1 | 1,149 | 1,164 | **+1% (neutral)** | 0.84 → 0.83 | 1.24 → 1.27 |
+| 8 | 1,213 | 1,686 | **+39%** | 6.55 → 4.50 | 7.89 → 9.0 |
+| 64 | 1,206 | 1,907 | **+58%** | 52.95 → 33.25 | 69.75 → 46.65 |
+
+Group commit on Postgres is a **strict Pareto improvement or neutral** across the
+whole concurrency range: at 1 client it's byte-identical latency (the opportunistic
+"batch of 1 when idle" design adds no wait), and at 8/64 clients it's +39%/+58%
+throughput **and** ~30–37% lower p50. The gain *grows* on real disk fsync vs the
+embedded-PG numbers above (more fsync cost to amortize). The only blemish is a
+minor p99 bump at 8 clients (7.9 → 9.0 ms), which inverts to a large p99 win at 64.
+
+**Decision (shipped):** the single-node group-commit default is now
+**store-conditional** — ON for Postgres, OFF for SQLite — resolved in
+`resolveGroupCommit` (`packages/cli/src/boot.ts`); `STACKBASE_GROUP_COMMIT` still
+overrides either direction. Fleet B4 had gated auto-enable on a single *global* 2×
+threshold and missed (1.63×), shipping dark-off; the per-store data shows the win is
+store-dependent, so a store-conditional default is the correct refinement. No
+correctness risk: the group-commit failure contract is defined (a flush error rejects
+every unit's promise; units retry) and the collateral-rejection hazard was already
+fixed by the outbox split-retry work. Scoped to the single-node path — the fleet path
+still threads its own `STACKBASE_GROUP_COMMIT` read.
