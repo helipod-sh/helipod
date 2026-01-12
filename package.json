@@ -37,6 +37,7 @@
     "dev": "turbo run dev",
     "clean": "turbo run clean && rm -rf node_modules",
     "bench:reactive": "bun benchmarks/runner/src/cli.ts run --axis reactive",
+    "bench:writes": "bun benchmarks/runner/src/cli.ts run --axis writes",
     "bench:compare": "bun benchmarks/runner/src/cli.ts compare"
   },
   "trustedDependencies": [
