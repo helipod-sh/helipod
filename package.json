@@ -38,6 +38,7 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "bench:reactive": "bun benchmarks/runner/src/cli.ts run --axis reactive",
     "bench:writes": "bun benchmarks/runner/src/cli.ts run --axis writes",
+    "bench:sharded": "bun benchmarks/runner/src/cli.ts run --axis sharded --store pg",
     "bench:compare": "bun benchmarks/runner/src/cli.ts compare"
   },
   "trustedDependencies": [
