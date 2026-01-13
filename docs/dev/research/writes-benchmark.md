@@ -79,3 +79,51 @@ correctness risk: the group-commit failure contract is defined (a flush error re
 every unit's promise; units retry) and the collateral-rejection hazard was already
 fixed by the outbox split-retry work. Scoped to the single-node path — the fleet path
 still threads its own `STACKBASE_GROUP_COMMIT` read.
+
+# Sharded write scale-out (`--axis sharded`)
+
+The `writes` axis showed write throughput is single-writer-bound — flat across
+concurrency. `bun run bench:sharded` answers the follow-up: does **single-node
+sharding** (the core `ShardedTransactor` — one per-shard writer/connection, via
+`createEmbeddedRuntime({numShards})`) break that ceiling? Postgres only (sharding
+parallelizes I/O only when the store has a connection per shard; SQLite is one file).
+64 client loops, insert mix, group commit OFF (to isolate the sharding variable);
+each cell builds its own `NodePgClient` with `commitPool: { shards: shardIdList(N) }`.
+
+| shards | embedded PG ops/s | scale | real-disk PG ops/s | scale | real-disk p50 (ms) |
+|---|---|---|---|---|---|
+| 1 | 4,443 | 1.00× | 1,181 | 1.00× | 53.8 |
+| 2 | 7,486 | 1.68× | 2,230 | 1.89× | 34.1 |
+| 4 | 10,428 | 2.35× | 2,900 | 2.46× | 20.8 |
+| 8 | 11,494 | 2.59× | 3,371 | **2.85×** | 14.3 |
+
+## What the data says
+
+1. **Sharding breaks the single-writer ceiling.** Write throughput scales ~2.6–2.85×
+   at 8 shards (embedded and real-disk PG agree on the shape), and p50 latency drops
+   sharply (53.8 → 14.3 ms on real disk) as load spreads across writers. The
+   single-writer ~1.2–4.5k ops/s ceiling the `writes` axis found is not a wall — it's
+   a per-shard number.
+
+2. **Scaling is sub-linear with diminishing returns** (1.68/1.89× → 2.35/2.46× →
+   2.59/2.85×). It is not 8× at 8 shards: Postgres still has one shared WAL and one
+   fsync stream, and this machine has finite cores, so per-shard parallelism is capped
+   by the shared storage substrate. The knee is ~4 shards; 4→8 adds little. (Real-disk
+   PG scales *slightly better* at the top than embedded, because its single writer is
+   more fsync-bound, leaving more serialization for the extra connections to absorb.)
+
+3. **OCC conflicts are a multi-writer phenomenon — now visible.** The single-writer
+   `writes` axis reported 0 OCC conflicts everywhere (one serial writer, nothing to
+   conflict with). With 8 shards under the contended `rmw80` pool, `occConflicts`
+   finally lights up (5 in a 3s window on embedded PG) — concurrent writers on the
+   same shard racing the same doc trigger the transactor's deterministic-replay path.
+   `rmw80` still scales ~2× (3,971 → 8,002 ops/s at 8 shards); the conflicts are rare
+   and retried, not errors.
+
+## Boundary
+
+This is **single-node** sharding (multiple per-shard writers in one process). Multi-
+*node* write scale-out (the fleet coordinator, per-shard failover, cross-node
+forwarding) is `ee/@stackbase/fleet` Tier 2 and has its own `commit.bench.ts` /
+`multinode-pg.bench.ts`. The takeaway for a single deployment: writes scale with
+shards up to the shared-WAL knee (~4 shards, ~2.5×) before multi-node is needed.
