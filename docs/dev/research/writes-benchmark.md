@@ -127,3 +127,56 @@ This is **single-node** sharding (multiple per-shard writers in one process). Mu
 forwarding) is `ee/@stackbase/fleet` Tier 2 and has its own `commit.bench.ts` /
 `multinode-pg.bench.ts`. The takeaway for a single deployment: writes scale with
 shards up to the shared-WAL knee (~4 shards, ~2.5×) before multi-node is needed.
+
+# Multi-node fleet write scale-out (`ee/@stackbase/fleet`)
+
+The next question: past the single-node shared-WAL knee, does adding *nodes* add
+write capacity? `ee/packages/fleet/bench/multinode-pg.bench.ts` spawns N real
+`serve --fleet` writer nodes (`STACKBASE_FLEET_MULTI_WRITER`) over a **shared**
+Postgres, waits for the balancer to partition 4·N shards across them, and drives
+concurrent writes **routed direct-to-owner** (HTTP `POST /api/run` to each shard's
+owning node), measuring aggregate mut/s. Opt-in: `STACKBASE_BENCH_MULTINODE=1`.
+
+| nodes | shards | agg mut/s | per-node mut/s | scale vs 1 | p50 (ms) | p99 (ms) |
+|---|---|---|---|---|---|---|
+| 1 | 4 | 2,725 | 2,725 | 1.00× | 2.51 | 8.88 |
+| 2 | 8 | 3,518 | 1,759 | 1.29× | 3.69 | 14.56 |
+| 3 | 12 | 3,857 | 1,286 | 1.42× | 5.01 | 20.61 |
+
+## What the data says
+
+1. **The shared Postgres is largely the ceiling.** Adding nodes gives *sub-linear,
+   fast-flattening* returns (1.29× at 2 nodes, only 1.42× at 3), and per-node
+   throughput drops as nodes are added (2,725 → 1,759 → 1,286). Every node commits to
+   the same Postgres — one WAL, one fsync stream — so multi-node distributes the
+   *engine* (execution/OCC/event-loop) across processes but not the *storage* I/O
+   that the single-node axis already showed is the bottleneck. Latency also grows with
+   node count (p50 2.5 → 5.0 ms, p99 8.9 → 20.6 ms) from cross-node coordination plus
+   shared-PG contention. This is exactly the "either answer is honest" question the
+   bench poses — and the answer here is: shared storage caps it.
+
+2. **True linear write scale-out needs partitioned storage, not shared-PG
+   multi-node.** To get past this ceiling each node needs its own storage substrate
+   (a store-per-shard / distributed object-storage substrate — the deferred B5
+   reshard / CAS-manifest direction), so fsync parallelizes across independent WAL
+   streams. Shared-PG multi-node buys engine headroom and per-shard failover/HA, not
+   raw write scale.
+
+3. **Methodology caveats.** Writes here go over HTTP `POST /api/run` (a round trip +
+   JSON per write), so absolute mut/s are lower than the in-process sharded axis above
+   and the two are not comparable in absolute terms — the *scaling ratio* is the
+   signal. The bench's naive driver does **no client-side retry**: under sustained
+   load a small fraction of writes can be rejected during a lease renewal (one run
+   showed 83 such rejections in the measurement window; another showed 0), which a
+   real client (the receipted outbox / effectively-once path) retries transparently.
+   The bench's strict `errors === 0` ship-gate can therefore trip intermittently on
+   lease-churn — a robustness follow-up for the parked bench (tolerate a small
+   transient rate, or add retry to the driver), not a data-loss bug.
+
+## Where write performance stands (all three axes)
+
+- **Group commit** (single-node, Postgres): +39–58% for free — shipped default-on in
+  1.4.0.
+- **Sharding** (single-node): ~2.6–2.85× to the ~4-shard shared-WAL knee.
+- **Multi-node fleet** (shared PG): ~1.4× at 3 nodes — engine headroom + HA, but the
+  shared WAL caps raw write scale; linear scale-out awaits partitioned storage.
