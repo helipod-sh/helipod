@@ -54,6 +54,7 @@
       "name": "@stackbase/bench",
       "version": "0.0.0",
       "dependencies": {
+        "@aws-sdk/client-s3": "catalog:",
         "@stackbase/client": "workspace:*",
         "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-postgres": "workspace:*",
