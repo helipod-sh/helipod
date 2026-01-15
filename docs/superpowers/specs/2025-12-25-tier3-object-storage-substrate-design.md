@@ -374,9 +374,50 @@ directly.
   Tier-3-partial-replica seam (the verdict's §c-question-5 reservation) would address it and is left
   open.
 - **Multi-region / cross-bucket** — one bucket per deployment for v1.
-- **A real-bucket benchmark** — the tens-of-ms floor and the throughput scaling with shard count are
-  claimed from the object-store round-trip model; a `bench:objectstore` axis (the natural extension
-  of the write-benchmark family) should measure them against a real bucket before any build commits.
+- **A real-bucket benchmark** — DONE (§13 below): `bun run bench:objectstore` measured the primitives
+  against a real MinIO before any build commits, per this gate. The remote-S3 latency floor and the
+  per-prefix scaling on *distributed* S3 (vs single-node MinIO) remain to be measured against a real
+  cloud bucket.
+
+---
+
+## 13. Measured — `bench:objectstore` primitive validation (2025-12-25)
+
+The design's three load-bearing claims were measured against a real `minio/minio`
+(`RELEASE.2025-09-07`) via `bun run bench:objectstore` (`benchmarks/runner/src/cores/objectstore.ts`
+— the minimal `ObjectStore` seam of §3 over the AWS SDK's conditional `PutObject`). Local loopback
+MinIO, so latencies are a best-case **floor**, not the remote-S3 reality (§9's 10–100 ms).
+
+- **CAS one-winner: CONFIRMED.** 8 concurrent `If-Match` PUTs on a stale etag → exactly **1 winner**,
+  7 rejected with `412 PreconditionFailed`; a deterministic wrong-etag PUT is rejected and a
+  right-etag PUT accepted. The fence primitive the whole tier rests on works. **Caveat: it is
+  version-dependent** — this passed on MinIO 2025-09; older builds ignore `If-Match`. The §3
+  boot-time CAS probe is therefore not optional. (A methodology trap this surfaced: a probe that
+  writes *constant* content sees a *constant* MD5 etag, so every `If-Match` trivially matches and the
+  test falsely reports "CAS unsupported" — the racers must write distinct bodies so the etag actually
+  moves. The `bench:objectstore` probe does.)
+- **Op latency (local MinIO floor):** `putImmutable` p50 1.4 ms, `casPut` p50 1.8 ms, `get` p50
+  0.8 ms; one flush (segment PUT + manifest CAS) p50 **3.4 ms**. Real remote S3 would be ~10–100× this
+  per §9 — the *shape* holds, the absolute floor is network-bound.
+- **Group commit is DEFINITIVELY mandatory.** At batch = 1, the flush floor caps commits at **~296/s**
+  — the exact flat single-shard ceiling shape B4 measured on Postgres, now network-bound and an order
+  of magnitude worse, confirming §4. Modeled amortization (commits/s = batch ÷ flush): batch 10 →
+  3.0k, 100 → 30k, 500 → 148k. Batching a lane's queued commits into one segment + one CAS is the
+  only path to usable throughput — B4's dark-off machinery is drawn on exactly here.
+- **Shard-prefix parallelism: present but backend-bounded on single MinIO.** Aggregate flushes/s
+  across independent prefixes scaled 1.00 → 1.46 → 2.08 → 2.38 → 2.45× at 1/2/4/8/16 prefixes —
+  sub-linear, plateauing ~2.4× because *one* MinIO process + disk backs every prefix (the same
+  shared-backend ceiling the shared-WAL story showed). On genuinely **distributed** S3, which scales
+  throughput per key-prefix across its own fleet, this is expected to scale substantially further —
+  the claim that "N lanes = N independent contention domains" holds architecturally but is
+  under-demonstrated by a single-node MinIO and needs a real-cloud-bucket run to quantify.
+
+**Implementation note (from this exercise):** Bun's native `S3Client` is faster for the
+non-conditional ops and can read etags (`S3Client.stat`), but its `write` API exposes no
+`If-Match`/`If-None-Match`, so the `ObjectStore` adapter's `casPut` — the fence — must use the AWS
+SDK's conditional `PutObject` (or raw SigV4 HTTP with the header). The seam can mix: Bun.S3 for
+`putImmutable`/`get`/`list`, AWS SDK for `casPut`; or AWS SDK throughout (what `bench:objectstore`
+uses).
 
 ---
 
