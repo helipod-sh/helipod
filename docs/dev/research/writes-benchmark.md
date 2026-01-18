@@ -180,3 +180,49 @@ owning node), measuring aggregate mut/s. Opt-in: `STACKBASE_BENCH_MULTINODE=1`.
 - **Sharding** (single-node): ~2.6–2.85× to the ~4-shard shared-WAL knee.
 - **Multi-node fleet** (shared PG): ~1.4× at 3 nodes — engine headroom + HA, but the
   shared WAL caps raw write scale; linear scale-out awaits partitioned storage.
+
+# Raw-Postgres baseline — how close is Stackbase to `pgbench`? (`bench:pgbench`)
+
+`bun run bench:pgbench` runs `pgbench` (raw single-`INSERT`-per-transaction) and
+Stackbase's own commit path (`runCommitBench`, insert mix) against the **same**
+`postgres:16` container, so "how close to raw Postgres?" is a measured ratio, not the
+prior structural estimate. Sequential, no lock contention.
+
+| clients | pgbench raw tps | Stackbase gc-off ops/s (ratio) | Stackbase gc-on ops/s (ratio) |
+|---|---|---|---|
+| 1 | 9,866 | 583 (0.06×) | 573 (0.06×) |
+| 8 | 27,786 | 592 (0.02×) | 869 (0.03×) |
+| 64 | 67,504 | 576 (0.01×) | 1,037 (0.02×) |
+
+## What the data says — read the caveats first
+
+1. **Two deliberate design choices explain the gap, not inefficiency.** (a) Stackbase
+   is **single-writer** by design (reactivity's serializable-commit foundation), so its
+   commit rate is flat (~580/s) while `pgbench` uses N *concurrent* writers and scales
+   to 67k/s. (b) Each Stackbase commit is ~3–4 SQL statements (MVCC log insert + index
+   updates + the fence/frontier `UPDATE`) vs `pgbench`'s single bare `INSERT`. So the
+   apples-to-apples per-writer number is the **c1 row: ~580 vs ~9,900 → ≈6% of one raw
+   Postgres connection** (a Stackbase commit ≈ 17× a bare `INSERT` here).
+
+2. **This substrate's fsync is nearly free — so the ratio is a floor that NARROWS on
+   real hardware.** `pgbench` at c1 = 9,866 tps ⇒ **0.10 ms/commit**, far below a real
+   disk fsync (~1–10 ms) — Docker Desktop on macOS does not durably flush, so `pgbench`
+   is WAL-cache-bound, not fsync-bound. Stackbase, meanwhile, is **round-trip- and
+   single-writer-bound** (its ~580/s doesn't move with the fake-fast fsync). The
+   consequence: on real-fsync hardware, where `pgbench` would drop toward the low
+   thousands, the ratio would rise substantially — this ~6% is a *worst-case* floor
+   measured on the substrate most favorable to raw Postgres. (This is exactly why the
+   bare-metal-Linux run, perf-backlog #5, is the companion measurement; absolutes here
+   travel only as same-substrate ratios.)
+
+3. **Group commit (the shipped PG default) recovers part of the gap** — it batches the
+   fence + commit that `pgbench` pays per transaction, so Stackbase gc-on scales with
+   concurrency (573 → 1,037 at c1 → c64) where gc-off stays flat.
+
+**The honest one-liner:** on a fsync-nearly-free substrate, Stackbase's full
+reactive-transactional commit runs at ~6% of a single raw `pgbench` `INSERT` stream and
+~1% of 64-way raw Postgres — the cost of single-writer serializability + a
+multi-statement MVCC/fence commit — and that ratio improves on real storage and with
+group commit. It is the price of what Stackbase adds over a bare `INSERT`
+(serializable reactive transactions with a consistent cross-shard frontier), not lost
+efficiency.

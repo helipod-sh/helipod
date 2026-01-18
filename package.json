@@ -40,7 +40,8 @@
     "bench:writes": "bun benchmarks/runner/src/cli.ts run --axis writes",
     "bench:sharded": "bun benchmarks/runner/src/cli.ts run --axis sharded --store pg",
     "bench:compare": "bun benchmarks/runner/src/cli.ts compare",
-    "bench:objectstore": "bun benchmarks/runner/src/objectstore-bench.ts"
+    "bench:objectstore": "bun benchmarks/runner/src/objectstore-bench.ts",
+    "bench:pgbench": "bun benchmarks/runner/src/pgbench-baseline.ts"
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-arm64",
