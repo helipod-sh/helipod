@@ -42,7 +42,8 @@
     "bench:compare": "bun benchmarks/runner/src/cli.ts compare",
     "bench:objectstore": "bun benchmarks/runner/src/objectstore-bench.ts",
     "bench:pgbench": "bun benchmarks/runner/src/pgbench-baseline.ts",
-    "bench:wswrite": "bun benchmarks/runner/src/ws-write-bench.ts"
+    "bench:wswrite": "bun benchmarks/runner/src/ws-write-bench.ts",
+    "bench:broadcast": "bun benchmarks/runner/src/broadcast-dedup-bench.ts"
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-arm64",
