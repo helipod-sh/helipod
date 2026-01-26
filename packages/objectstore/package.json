@@ -11,6 +11,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-support/conformance": {
+      "types": "./test-support/conformance.ts",
+      "default": "./test-support/conformance.ts"
+    },
+    "./test-support/memory-objectstore": {
+      "types": "./test-support/memory-objectstore.ts",
+      "default": "./test-support/memory-objectstore.ts"
     }
   },
   "files": ["dist"],
