@@ -102,26 +102,31 @@ export class S3ObjectStore implements ObjectStore {
     await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
-  /** Probe: PUT a sentinel key with `If-None-Match: *` twice. The 2nd must throw `CasConflict` —
-   *  if it instead succeeds, the store isn't actually enforcing conditional writes (some S3-compatible
-   *  stores silently ignore the header), which would silently break the whole Tier-3 CAS fence.
-   *  Uses a unique (timestamp + random) sentinel key so the probe is safely re-runnable across boots. */
+  /** Probe: verify the store enforces BOTH conditional-write modes the fence relies on — `If-None-Match`
+   *  (create-only, used to birth a manifest) AND `If-Match` (compare-and-swap update, the manifest fence
+   *  that the WHOLE substrate rests on). Some S3-compatible stores honor one and silently ignore the
+   *  other; a store that ignored `If-Match` would pass a create-only probe yet allow two-winner manifest
+   *  updates — the exact corruption this exists to prevent (whole-branch review, Slice 1). Fail closed on
+   *  either gap. Unique (timestamp + random) sentinel key so the probe is safely re-runnable across boots. */
   async assertCasSupported(): Promise<void> {
     const sentinel = `_probe/cas-support-${Date.now()}-${randomBytes(6).toString("hex")}`;
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const failed = (mode: string) =>
+      new Error(`object store does not enforce conditional writes (${mode}) — required for the Tier-3 fence`);
+    /** Run `op`; return true iff it did NOT throw a CasConflict (i.e. the store accepted a write it
+     *  should have rejected → CAS not enforced). Rethrows any non-CAS error (403/network/etc.). */
+    const accepted = async (op: () => Promise<unknown>): Promise<boolean> => {
+      try { await op(); return true; } catch (e) { if (isCasConflict(e)) return false; throw e; }
+    };
     try {
-      await this.casPut(sentinel, new TextEncoder().encode("probe-1"), null);
-      let secondSucceeded = false;
-      try {
-        await this.casPut(sentinel, new TextEncoder().encode("probe-2"), null);
-        secondSucceeded = true;
-      } catch (e) {
-        if (!isCasConflict(e)) throw e;
-      }
-      if (secondSucceeded) {
-        throw new Error(
-          "object store does not enforce conditional writes (If-Match) — required for the Tier-3 fence",
-        );
-      }
+      // (1) If-None-Match: create once, then a second create-only must be REJECTED.
+      const { etag } = await this.casPut(sentinel, enc("probe-1"), null);
+      if (await accepted(() => this.casPut(sentinel, enc("probe-2"), null))) throw failed("If-None-Match");
+      // (2) If-Match with a WRONG etag must be REJECTED (the CAS-update fence).
+      if (await accepted(() => this.casPut(sentinel, enc("probe-3"), "\"deadbeefdeadbeefdeadbeefdeadbeef\""))) throw failed("If-Match");
+      // (3) If-Match with the RIGHT etag must SUCCEED (a conforming store isn't rejecting valid CAS).
+      try { await this.casPut(sentinel, enc("probe-4"), etag); }
+      catch (e) { if (isCasConflict(e)) throw new Error("object store rejected a valid If-Match CAS (etag mismatch on the sentinel) — cannot use for the Tier-3 fence"); throw e; }
     } finally {
       await this.delete(sentinel).catch(() => {});
     }
