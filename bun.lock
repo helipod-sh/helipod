@@ -584,6 +584,19 @@
         "vitest": "catalog:",
       },
     },
+    "packages/objectstore-fs": {
+      "name": "@stackbase/objectstore-fs",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/objectstore": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/query-engine": {
       "name": "@stackbase/query-engine",
       "version": "0.0.0",
@@ -1045,6 +1058,8 @@
     "@stackbase/index-key-codec": ["@stackbase/index-key-codec@workspace:packages/index-key-codec"],
 
     "@stackbase/objectstore": ["@stackbase/objectstore@workspace:packages/objectstore"],
+
+    "@stackbase/objectstore-fs": ["@stackbase/objectstore-fs@workspace:packages/objectstore-fs"],
 
     "@stackbase/query-engine": ["@stackbase/query-engine@workspace:packages/query-engine"],
 
