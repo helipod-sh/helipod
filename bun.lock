@@ -203,10 +203,11 @@
         "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/objectstore": "workspace:*",
+        "@stackbase/values": "workspace:*",
       },
       "devDependencies": {
         "@stackbase/id-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@stackbase/objectstore-fs": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
