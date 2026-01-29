@@ -20,6 +20,30 @@ function freshLocal(): SqliteDocStore {
   return new SqliteDocStore(isBun ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" }));
 }
 
+/** A local store whose Nth `write()` call throws (simulates a post-CAS local-apply disk fault), all
+ *  other methods delegating to a real SqliteDocStore. */
+function throwingWriteLocal(real: SqliteDocStore, throwOnWriteCall: number): SqliteDocStore {
+  let n = 0;
+  return new Proxy(real, {
+    get(target, prop, recv) {
+      if (prop === "write") {
+        return async (...args: unknown[]) => {
+          n += 1;
+          if (n >= throwOnWriteCall) throw new Error("simulated local disk fault");
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return (target as any).write(...args);
+        };
+      }
+      const v = Reflect.get(target, prop, recv);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as SqliteDocStore;
+}
+async function readManifestRaw(os: FsObjectStore): Promise<{ segments: number[]; frontierTs: string }> {
+  const e = await os.get("s0/manifest");
+  return JSON.parse(new TextDecoder().decode(e!.body));
+}
+
 const dirs: string[] = [];
 async function freshBucket(): Promise<FsObjectStore> {
   const dir = await mkdtemp(join(tmpdir(), "objectstore-substrate-test-"));
@@ -154,6 +178,34 @@ describe("ObjectStoreDocStore", () => {
     expect(await store.count(encodeStorageTableId(TABLE))).toBe(1);
     expect((await store.scan(encodeStorageTableId(TABLE))).length).toBe(1);
 
+    await store.close();
+  });
+
+  it("commitWriteBatch([]) is a no-op — returns [] and writes no segment (matches SqliteDocStore)", async () => {
+    const objectStore = await freshBucket();
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await store.commitWriteBatch([])).toEqual([]);
+    expect(await objectStore.get("s0/seg/0")).toBeNull(); // no segment written
+    expect((await readManifestRaw(objectStore)).segments).toEqual([]); // manifest unchanged
+    await store.close();
+  });
+
+  it("post-CAS local-apply failure: commit is DURABLE, instance is poisoned, further commits refused", async () => {
+    const objectStore = await freshBucket();
+    // 2nd write() (commit #2's local apply) throws; open()/commit#1's writes succeed first.
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: throwingWriteLocal(freshLocal(), 2) });
+
+    await store.commitWrite([doc(newDocumentId(TABLE), "a")], []); // commit #1 — local write #1 ok
+
+    // commit #2: CAS lands (durable), local write #2 throws → poison + a non-retryable "durable but
+    // inconsistent" error (NOT a plain retryable failure that would double-commit).
+    await expect(store.commitWrite([doc(newDocumentId(TABLE), "b")], [])).rejects.toThrow(/durable/i);
+    // the commit IS durable: the manifest advanced and seg/1 exists.
+    expect((await readManifestRaw(objectStore)).segments).toEqual([0, 1]);
+    expect(await objectStore.get("s0/seg/1")).not.toBeNull();
+
+    // further commits are refused until the store is re-opened.
+    await expect(store.commitWrite([doc(newDocumentId(TABLE), "c")], [])).rejects.toThrow(/poisoned|re-opened/i);
     await store.close();
   });
 });

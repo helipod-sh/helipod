@@ -67,6 +67,9 @@ export class ObjectStoreDocStore implements DocStore {
   /** The next free segment seqno for THIS process — dense (`[0..n]`), advanced only after a
    *  successful manifest CAS references it. */
   private nextSeqno: number;
+  /** Set when a post-CAS local apply fails: the commit is durable but the local materialization is
+   *  inconsistent, so further commits are refused until the store is re-opened (re-bootstrapped). */
+  private poisoned = false;
   /** Serializes `commitWrite`/`commitWriteBatch` — see class doc. */
   private mutex: Promise<void> = Promise.resolve();
 
@@ -131,6 +134,13 @@ export class ObjectStoreDocStore implements DocStore {
 
   async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
     return this.runExclusive(async () => {
+      // Empty batch is a no-op (matches SqliteDocStore.commitWriteBatch) — never write an empty segment.
+      if (units.length === 0) return [];
+      if (this.poisoned) {
+        throw new Error(
+          `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        );
+      }
       const localMax = await this.local.maxTimestamp();
       const cachedTsCounter = BigInt(this.cached.manifest.tsCounter);
       const floor = cachedTsCounter > localMax ? cachedTsCounter : localMax;
@@ -179,13 +189,27 @@ export class ObjectStoreDocStore implements DocStore {
         throw e;
       }
 
-      // CAS succeeded: the durable log now includes this commit. Advance local cached state and
-      // apply the SAME rows to the local store via the explicit-ts path (bootstrap's own primitive).
+      // CAS succeeded: the durable log now includes this commit — it CANNOT be un-committed. Apply the
+      // SAME rows to the local store via the explicit-ts path (bootstrap's own primitive) BEFORE
+      // advancing the cached cursor, so `cached`/`nextSeqno` never claim "caught up" while `local` is
+      // behind. If a post-CAS local write throws (a genuine local-store fault), the commit is still
+      // DURABLE, so we must NOT surface a retryable-looking failure (which would double-commit under
+      // fresh timestamps) — poison this instance (its local materialization is now inconsistent) and
+      // throw a distinct, non-retryable error demanding a re-open. A restart re-bootstraps correctly
+      // from the object log (which already contains this commit).
+      try {
+        for (const u of stampedUnits) {
+          await this.local.write(u.documents, u.indexUpdates, "Overwrite", shardId);
+        }
+      } catch (e) {
+        this.poisoned = true;
+        throw new Error(
+          `post-commit local apply failed after a DURABLE commit to shard '${this.shard}' (seqno ${seqno}); ` +
+            `the commit is durable but this ObjectStoreDocStore's local materialization is inconsistent and must be re-opened. Cause: ${(e as Error)?.message ?? String(e)}`,
+        );
+      }
       this.cached = { manifest: next, etag };
       this.nextSeqno = seqno + 1;
-      for (const u of stampedUnits) {
-        await this.local.write(u.documents, u.indexUpdates, "Overwrite", shardId);
-      }
 
       return tsList;
     });
