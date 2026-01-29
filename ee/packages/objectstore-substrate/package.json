@@ -29,8 +29,10 @@
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "catalog:",
     "@stackbase/id-codec": "workspace:*",
     "@stackbase/objectstore-fs": "workspace:*",
+    "@stackbase/objectstore-s3": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
