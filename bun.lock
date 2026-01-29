@@ -207,9 +207,11 @@
       },
       "devDependencies": {
         "@aws-sdk/client-s3": "catalog:",
+        "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/objectstore-fs": "workspace:*",
         "@stackbase/objectstore-s3": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
