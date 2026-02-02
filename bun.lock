@@ -196,6 +196,28 @@
         "ws": "^8.18.0",
       },
     },
+    "ee/packages/objectstore-substrate": {
+      "name": "@stackbase/objectstore-substrate",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/objectstore": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@aws-sdk/client-s3": "catalog:",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/objectstore-fs": "workspace:*",
+        "@stackbase/objectstore-s3": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "examples/auth-demo": {
       "name": "@stackbase/example-auth-demo",
       "version": "0.0.0",
@@ -1076,6 +1098,8 @@
     "@stackbase/objectstore-fs": ["@stackbase/objectstore-fs@workspace:packages/objectstore-fs"],
 
     "@stackbase/objectstore-s3": ["@stackbase/objectstore-s3@workspace:packages/objectstore-s3"],
+
+    "@stackbase/objectstore-substrate": ["@stackbase/objectstore-substrate@workspace:ee/packages/objectstore-substrate"],
 
     "@stackbase/query-engine": ["@stackbase/query-engine@workspace:packages/query-engine"],
 

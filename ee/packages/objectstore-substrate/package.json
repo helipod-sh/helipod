@@ -1,0 +1,43 @@
+{
+  "name": "@stackbase/objectstore-substrate",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/objectstore": "workspace:*",
+    "@stackbase/values": "workspace:*"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/objectstore-fs": "workspace:*",
+    "@stackbase/objectstore-s3": "workspace:*",
+    "@stackbase/runtime-embedded": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
