@@ -359,6 +359,63 @@ export class ObjectStoreDocStore implements DocStore {
     }
   }
 
+  // ── GC (Tier 3 Slice 3, Task 3.3) — reclaim what the latest snapshot has superseded ─────────
+
+  /**
+   * Reclaim durable objects the CURRENT manifest's snapshot has superseded: every segment with
+   * `seqno <= snapshotSegBase` (its state is captured in the snapshot, so bootstrap never reads
+   * it) and every snapshot object except the current one (`snapshotTs`). The newest snapshot is
+   * the floor — no consumer/replica watermark (that's a later slice).
+   *
+   * Runs under `runExclusive` — it reads `this.cached.manifest` and must see a consistent
+   * snapshot pointer, and must not race a concurrent commit/snapshot that could move
+   * `snapshotSegBase` out from under it. Never touches the manifest itself or `this.cached`/
+   * `nextSeqno` — GC is purely subtractive over objects the manifest no longer needs.
+   */
+  async gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> {
+    return this.runExclusive(async () => {
+      if (this.poisoned) {
+        throw new Error(
+          `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        );
+      }
+      if (this.cached.manifest.snapshotTs === undefined) {
+        return { deletedSegments: 0, deletedSnapshots: 0 }; // no snapshot yet — nothing to GC
+      }
+      const segBase = this.cached.manifest.snapshotSegBase!;
+      const keepSnap = this.cached.manifest.snapshotTs!;
+
+      const segPrefix = `s${this.shard}/seg/`;
+      const segKeys = await this.objectStore.list(segPrefix);
+      let deletedSegments = 0;
+      for (const key of segKeys) {
+        const suffix = key.slice(key.lastIndexOf("/") + 1);
+        const seqno = Number(suffix);
+        // Defensive: skip any key whose suffix doesn't parse to an integer — never delete an
+        // object we don't understand. NEVER delete seqno > segBase (a live segment bootstrap
+        // still replays); the predicate below is deliberately `<=`, never anything looser.
+        if (!Number.isInteger(seqno)) continue;
+        if (seqno <= segBase) {
+          await this.objectStore.delete(key);
+          deletedSegments++;
+        }
+      }
+
+      const snapPrefix = `s${this.shard}/snap/`;
+      const snapKeys = await this.objectStore.list(snapPrefix);
+      let deletedSnapshots = 0;
+      for (const key of snapKeys) {
+        const ts = key.slice(key.lastIndexOf("/") + 1);
+        if (ts !== keepSnap) {
+          await this.objectStore.delete(key);
+          deletedSnapshots++;
+        }
+      }
+
+      return { deletedSegments, deletedSnapshots };
+    });
+  }
+
   // ── Everything else: forward to the local materialized store ───────────────────────────────
 
   setupSchema(options?: SchemaSetupOptions): Promise<void> {
