@@ -15,6 +15,7 @@ import type {
   ClientVerdictWrite,
   CommitUnit,
   ConflictStrategy,
+  DatabaseIndexUpdate,
   DocStore,
   DocumentLogEntry,
   DocumentValue,
@@ -608,6 +609,63 @@ export class SqliteDocStore implements DocStore {
       for (const { identity, clientId, maxSeq } of maxByClient.values()) upsert.run(identity, clientId, maxSeq, now);
       return { deletedCount: rows.length };
     });
+  }
+
+  /**
+   * The store's CURRENT state (Tier 3 Slice 3, Task 3.1 — the snapshot source): for every document
+   * id across every table, its LATEST revision, EXCLUDING ids whose latest revision is a tombstone
+   * (`value === null`) — mirrors `scan()`'s per-table "newest revision per id" query, just without
+   * the `table_id` filter, so it spans the whole store in one pass. Plus every CURRENT row of the
+   * `indexes` table (the newest revision per `(index_id, key)`, live pointer OR deletion marker
+   * alike — mirrors `index_scan()`'s own `MAX(ts)`-per-key subquery, but unlike `index_scan` this
+   * does NOT skip deleted markers: the snapshot must reproduce the index table's own current rows
+   * exactly, not the documents they resolve to).
+   *
+   * Each returned `DocumentLogEntry`/`IndexWrite` carries its REAL `ts`/`prev_ts` (not renumbered) —
+   * `ObjectStoreDocStore.snapshot()` stamps the payload's own `frontierTs`/`segBase` around this, and
+   * restoring via `write(dump.documents, dump.indexUpdates, "Overwrite")` on a fresh store reproduces
+   * this exact state, with `prev_ts` chains intact so a tail segment's `prev_ts` still resolves.
+   */
+  async dumpCurrentState(): Promise<{ documents: DocumentLogEntry[]; indexUpdates: IndexWrite[] }> {
+    const docRows = this.prep(
+      `SELECT d.table_id AS table_id, d.internal_id AS internal_id, d.ts AS ts, d.prev_ts AS prev_ts, d.value AS value FROM documents d ` +
+        `WHERE d.ts = (SELECT MAX(d2.ts) FROM documents d2 WHERE d2.table_id = d.table_id AND d2.internal_id = d.internal_id) ` +
+        `AND d.value IS NOT NULL ORDER BY d.table_id ASC, d.internal_id ASC`,
+    ).all();
+
+    const documents: DocumentLogEntry[] = docRows.map((row) => {
+      const id: InternalDocumentId = {
+        tableNumber: decodeStorageTableId(row.table_id as string),
+        internalId: row.internal_id as Uint8Array,
+      };
+      const value: ResolvedDocument = { id, value: this.parseValue(row.value as string) };
+      return { ts: asBigInt(row.ts), id, value, prev_ts: asBigIntOrNull(row.prev_ts) };
+    });
+
+    const idxRows = this.prep(
+      `SELECT i.index_id AS index_id, i.key AS key, i.ts AS ts, i.table_id AS table_id, i.internal_id AS internal_id, i.deleted AS deleted FROM indexes i ` +
+        `WHERE i.ts = (SELECT MAX(i2.ts) FROM indexes i2 WHERE i2.index_id = i.index_id AND i2.key = i.key) ` +
+        `ORDER BY i.index_id ASC, i.key ASC`,
+    ).all();
+
+    const indexUpdates: IndexWrite[] = idxRows.map((row) => {
+      const deleted = Number(row.deleted) === 1;
+      const value: DatabaseIndexUpdate["value"] = deleted
+        ? { type: "Deleted" }
+        : {
+            type: "NonClustered",
+            docId: {
+              tableNumber: decodeStorageTableId(row.table_id as string),
+              internalId: row.internal_id as Uint8Array,
+            },
+          };
+      return {
+        ts: asBigInt(row.ts),
+        update: { indexId: row.index_id as string, key: row.key as Uint8Array, value },
+      };
+    });
+
+    return { documents, indexUpdates };
   }
 
   /** Close the underlying database adapter (checkpoint + release the file). Used by graceful shutdown. */
