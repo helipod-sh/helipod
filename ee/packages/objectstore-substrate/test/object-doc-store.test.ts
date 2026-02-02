@@ -6,6 +6,7 @@ import { newDocumentId, encodeStorageTableId, type InternalDocumentId } from "@s
 import type { DocumentLogEntry } from "@stackbase/docstore";
 import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { FsObjectStore } from "@stackbase/objectstore-fs";
+import type { ObjectStore } from "@stackbase/objectstore";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { FencedError } from "../src/fenced-error";
 
@@ -39,9 +40,31 @@ function throwingWriteLocal(real: SqliteDocStore, throwOnWriteCall: number): Sql
     },
   }) as SqliteDocStore;
 }
-async function readManifestRaw(os: FsObjectStore): Promise<{ segments: number[]; frontierTs: string }> {
+async function readManifestRaw(os: { get: FsObjectStore["get"] }): Promise<{ segments: number[]; frontierTs: string }> {
   const e = await os.get("s0/manifest");
   return JSON.parse(new TextDecoder().decode(e!.body));
+}
+
+/** An ObjectStore whose Nth `casPut` LANDS (the underlying write succeeds) and THEN throws a generic
+ *  error — simulates a lost response after the CAS was durably applied on an S3-family store. Every
+ *  other method delegates to a real FsObjectStore. */
+function casLandsThenThrows(real: FsObjectStore, throwOnCasCall: number): ObjectStore {
+  let n = 0;
+  return new Proxy(real, {
+    get(target, prop, recv) {
+      if (prop === "casPut") {
+        return async (...args: unknown[]) => {
+          n += 1;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const res = await (target as any).casPut(...args); // the CAS LANDS (durable)
+          if (n >= throwOnCasCall) throw new Error("simulated lost response after CAS landed");
+          return res;
+        };
+      }
+      const v = Reflect.get(target, prop, recv);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as unknown as ObjectStore;
 }
 
 const dirs: string[] = [];
@@ -125,7 +148,11 @@ describe("ObjectStoreDocStore", () => {
     const id2 = newDocumentId(TABLE);
     await expect(store2.commitWrite([doc(id2, "second")], [])).rejects.toBeInstanceOf(FencedError);
 
+    // The fenced store is now poisoned (C1): a further commit is refused, never reuses a seqno.
+    await expect(store2.commitWrite([doc(newDocumentId(TABLE), "third")], [])).rejects.toThrow(/poisoned|re-open/i);
+
     // No new segment landed for store2's attempt — still exactly the one segment store1 wrote.
+    // (fs keep-first; store2's orphan PUT collided with seqno 0 — see the C1 test for the real hazard.)
     const segments = await objectStore.list("s0/seg/");
     expect(segments).toEqual(["s0/seg/0"]);
 
@@ -187,6 +214,22 @@ describe("ObjectStoreDocStore", () => {
     expect(await store.commitWriteBatch([])).toEqual([]);
     expect(await objectStore.get("s0/seg/0")).toBeNull(); // no segment written
     expect((await readManifestRaw(objectStore)).segments).toEqual([]); // manifest unchanged
+    await store.close();
+  });
+
+  it("post-CAS-landed generic error poisons the instance (S3-overwrite seqno-reuse corruption guard, C1)", async () => {
+    // commit #1's casManifest LANDS (durable) then throws a generic error (lost response). Call #1 is
+    // open()'s create-only manifest CAS (must succeed), so throw on call #2.
+    const objectStore = casLandsThenThrows(await freshBucket(), 2);
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+
+    // commit #1: seg/0 PUT, manifest CAS lands durably, then the generic error surfaces → poison + rethrow.
+    await expect(store.commitWrite([doc(newDocumentId(TABLE), "a")], [])).rejects.toThrow(/lost response/i);
+    // the CAS DID land — the manifest references seg/0 durably.
+    expect((await readManifestRaw(objectStore)).segments).toEqual([0]);
+    // CRITICAL: the instance must NOT serve another commit (which would reuse seqno 0 against a stale
+    // cursor and overwrite the durable seg/0 on an overwrite-semantics store) — it is poisoned.
+    await expect(store.commitWrite([doc(newDocumentId(TABLE), "b")], [])).rejects.toThrow(/poisoned|re-open/i);
     await store.close();
   });
 

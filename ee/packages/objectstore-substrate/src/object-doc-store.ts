@@ -18,6 +18,24 @@
  * the mutex two concurrent `commitWriteBatch` calls from the same process could race the same cached
  * etag into `casManifest` and (since only one wins) leave the loser's local apply inconsistent with
  * which segment its ts's actually landed in.
+ *
+ * Any `casManifest` failure (fence OR ambiguous/lost-response) POISONS this instance (whole-branch
+ * review C1): the cached cursor is then untrustworthy and reusing a segment seqno would overwrite a
+ * durable referenced segment on an overwrite-semantics store. Recovery = re-open (re-bootstrap).
+ *
+ * SLICE-2 BOUNDARIES — follow-ups the failover/replica slices (S4/S5) MUST NOT inherit silently:
+ * - **Globals + client-verdict receipts are LOCAL-ONLY** (`writeGlobal*`/`recordClientVerdict`/… forward
+ *   to the local store; they never enter the segment log). So a from-scratch bootstrap over object
+ *   storage alone does NOT reconstruct them: `createEmbeddedRuntime` would mint a NEW `deploymentId`
+ *   (flipping every outbox client to `known:false`) and lose dedup receipts (effectively-once →
+ *   at-least-once). Single-node with a PERSISTENT local SQLite file survives restarts fine; but the
+ *   failover slice (a fresh node materializing from the bucket) MUST persist `deploymentId` (e.g. in
+ *   the manifest) and address receipt durability before it can claim "byte-identical from object
+ *   storage alone" for engine bookkeeping. Effectively-once itself → the manifest idempotency window (deferred).
+ * - **Fence/failure paths are tested only on `objectstore-fs`** (keep-first `putImmutable`), which
+ *   structurally masks the C1 overwrite hazard the fix above guards; add MinIO-gated fence/failure
+ *   variants when the failover slice lands (the C1 unit test simulates the overwrite hazard via a
+ *   wrapper, so the fix is covered — but real-S3 coverage of the fence path is still owed).
  */
 import type { ObjectStore } from "@stackbase/objectstore";
 import { isCasConflict } from "@stackbase/objectstore";
@@ -177,13 +195,22 @@ export class ObjectStoreDocStore implements DocStore {
       try {
         ({ etag } = await casManifest(this.objectStore, this.shard, next, this.cached.etag));
       } catch (e) {
+        // ANY casManifest failure POISONS this instance (whole-branch review C1). After a failed CAS
+        // our cached `{manifest, etag}` and `nextSeqno` are untrustworthy: a `CasConflict` means we
+        // were fenced (the manifest moved); a GENERIC error is AMBIGUOUS — the CAS may have LANDED
+        // (a lost response) even though it threw. In both cases, continuing to serve commits on this
+        // instance would reuse `seqno` against a stale cursor and, on an OVERWRITE-semantics object
+        // store (S3/R2/MinIO — `objectstore-fs`'s keep-first hides this, which is why no test caught
+        // it), OVERWRITE a durable manifest-referenced segment with different bytes → silent log
+        // corruption + ts regression. So we stop: the instance must be RE-OPENED (re-bootstrapped from
+        // the true manifest), which resyncs `cached`/`nextSeqno`. (Poisoning a clean CAS-fail that
+        // truly didn't land is stricter than necessary — that only overwrites our own unreferenced
+        // orphan — but ambiguity makes it the correct universal choice.) The just-PUT `seg/${seqno}`
+        // is an orphan (unreferenced or ambiguously-referenced; GC is a later slice).
+        this.poisoned = true;
         if (isCasConflict(e)) {
-          // The fence: someone else's commit already moved the manifest past our cached etag.
-          // Nothing is applied locally — the segment object we just wrote is orphaned (unreferenced
-          // by any manifest, harmless garbage; GC is a later slice) and this process must stop, not
-          // retry (see FencedError's doc).
           throw new FencedError(
-            `commit fenced: manifest for shard '${this.shard}' moved (stale etag) — this writer is no longer current`,
+            `commit fenced: manifest for shard '${this.shard}' moved (stale etag) — this writer is no longer current and is now poisoned (re-open to continue)`,
           );
         }
         throw e;
