@@ -12,12 +12,18 @@ import type { ObjectStore } from "@stackbase/objectstore";
 
 /** The per-shard commit pointer. `frontierTs`/`tsCounter` are decimal-string bigints (JSON has no
  *  native bigint) — the highest committed timestamp and the monotone CAS-content counter, respectively.
- *  `segments` is the dense `seqno` chain (`[0, 1, 2, …]`) of `s{shard}/seg/{seqno}` objects, in order. */
+ *  `segments` is the dense `seqno` chain (`[0, 1, 2, …]`) of `s{shard}/seg/{seqno}` objects, in order.
+ *  `snapshotTs`/`snapshotSegBase` (Tier 3 Slice 3, Task 3.2) are optional and set together: the
+ *  latest snapshot's key suffix (`s{shard}/snap/{snapshotTs}`) and the highest segment seqno it
+ *  COVERS — bootstrap restores that snapshot then replays only segments with `seqno >
+ *  snapshotSegBase`. Unset on a fresh manifest (no snapshot taken yet) — full-replay bootstrap. */
 export interface Manifest {
   epoch: number;
   frontierTs: string;
   tsCounter: string;
   segments: number[];
+  snapshotTs?: string;
+  snapshotSegBase?: number;
 }
 
 function manifestKey(shard: string): string {

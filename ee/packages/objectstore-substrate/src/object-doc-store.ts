@@ -61,11 +61,17 @@ import type { JSONValue } from "@stackbase/values";
 import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { encodeSegment, decodeSegment, type SegmentPayload } from "./segment";
 import { readManifest, createManifest, casManifest, type Manifest } from "./manifest";
+import { writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
 import { FencedError } from "./fenced-error";
 
 function segmentKey(shard: string, seqno: number): string {
   return `s${shard}/seg/${seqno}`;
 }
+
+/** Take a snapshot after this many committed segments since the last one (Tier 3 Slice 3, Task
+ *  3.2). Small deliberately — tests exercise the cadence without huge commit loops; a real
+ *  deployment can raise it if snapshot-object churn matters more than bootstrap tail length. */
+const SNAPSHOT_EVERY = 8;
 
 export interface ObjectStoreDocStoreOpts {
   objectStore: ObjectStore;
@@ -90,6 +96,9 @@ export class ObjectStoreDocStore implements DocStore {
   private poisoned = false;
   /** Serializes `commitWrite`/`commitWriteBatch` — see class doc. */
   private mutex: Promise<void> = Promise.resolve();
+  /** Committed segments since the last successful snapshot (or since `open`) — `maybeSnapshot`'s
+   *  cadence trigger. Reset to 0 only on a successful `snapshot()`. */
+  private committedSegmentsSinceSnapshot = 0;
 
   private constructor(objectStore: ObjectStore, shard: string, local: SqliteDocStore, cached: { manifest: Manifest; etag: string }, nextSeqno: number) {
     this.objectStore = objectStore;
@@ -101,10 +110,13 @@ export class ObjectStoreDocStore implements DocStore {
 
   /**
    * Open (or initialize) a shard's object-storage-backed store: read-or-create the manifest, then
-   * BOOTSTRAP the local store by replaying every referenced segment, in order, via the explicit-ts
+   * BOOTSTRAP the local store. If the manifest references a snapshot (Tier 3 Slice 3, Task 3.2),
+   * restore it first (`write(..., "Overwrite")` of its current-state dump) and replay only the
+   * TAIL segments (`seqno > snapshotSegBase`) — O(state + tail) instead of the full log. Otherwise
+   * (no snapshot taken yet) replay every referenced segment, in order, via the same explicit-ts
    * `write(..., "Overwrite")` path — the identical primitive a post-CAS commit applies with, and the
    * one a replica tailer would use (design record §7). A fresh (empty) bucket bootstraps to an empty
-   * local store; a bucket with prior commits reconstructs the IDENTICAL current state.
+   * local store; a bucket with prior commits reconstructs the IDENTICAL current state either way.
    */
   static async open(opts: ObjectStoreDocStoreOpts): Promise<ObjectStoreDocStore> {
     const { objectStore, shard, local } = opts;
@@ -123,7 +135,19 @@ export class ObjectStoreDocStore implements DocStore {
       }
     }
 
+    const snapshotSegBase = cached.manifest.snapshotSegBase;
+    if (cached.manifest.snapshotTs !== undefined) {
+      const snap = await readSnapshot(objectStore, shard, cached.manifest.snapshotTs);
+      if (snap === null) {
+        throw new Error(
+          `objectstore-substrate: bootstrap missing snapshot '${cached.manifest.snapshotTs}' referenced by manifest (torn state)`,
+        );
+      }
+      await local.write(snap.documents, snap.indexUpdates, "Overwrite");
+    }
+
     for (const seqno of cached.manifest.segments) {
+      if (snapshotSegBase !== undefined && seqno <= snapshotSegBase) continue; // covered by the snapshot
       const entry = await objectStore.get(segmentKey(shard, seqno));
       if (entry === null) {
         throw new Error(`objectstore-substrate: bootstrap missing segment '${segmentKey(shard, seqno)}' referenced by manifest`);
@@ -151,7 +175,7 @@ export class ObjectStoreDocStore implements DocStore {
   // ── Commit path (intercepted, object-first) ─────────────────────────────────────────────────
 
   async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
-    return this.runExclusive(async () => {
+    const tsList = await this.runExclusive(async () => {
       // Empty batch is a no-op (matches SqliteDocStore.commitWriteBatch) — never write an empty segment.
       if (units.length === 0) return [];
       if (this.poisoned) {
@@ -184,8 +208,11 @@ export class ObjectStoreDocStore implements DocStore {
       const payload: SegmentPayload = { documents: allDocuments, indexUpdates: allIndexUpdates };
       await this.objectStore.putImmutable(segmentKey(this.shard, seqno), encodeSegment(payload));
 
+      // Spread `this.cached.manifest` FIRST so `snapshotTs`/`snapshotSegBase` (Task 3.2) carry
+      // forward untouched — a commit never changes what the latest snapshot covers, only
+      // `snapshot()` does — then override the fields this commit actually advances.
       const next: Manifest = {
-        epoch: this.cached.manifest.epoch,
+        ...this.cached.manifest,
         frontierTs: maxTs.toString(),
         tsCounter: maxTs.toString(),
         segments: [...this.cached.manifest.segments, seqno],
@@ -237,9 +264,16 @@ export class ObjectStoreDocStore implements DocStore {
       }
       this.cached = { manifest: next, etag };
       this.nextSeqno = seqno + 1;
+      this.committedSegmentsSinceSnapshot++;
 
       return tsList;
     });
+    // Outside the exclusive block (DEADLOCK HAZARD — see class doc / snapshot()'s own doc): a
+    // snapshot itself takes the mutex, so triggering it from inside the commit's own exclusive
+    // body would chain a second `runExclusive` onto a mutex this call still holds. Best-effort: a
+    // snapshot failure must never fail an already-durable commit.
+    await this.#maybeSnapshotBestEffort();
+    return tsList;
   }
 
   async commitWrite(
@@ -250,6 +284,79 @@ export class ObjectStoreDocStore implements DocStore {
   ): Promise<bigint> {
     const out = await this.commitWriteBatch([{ documents, indexUpdates, meta: opts?.meta }], shardId);
     return out[0]!;
+  }
+
+  // ── Snapshots (Tier 3 Slice 3, Task 3.2) — object-first, under the commit mutex ─────────────
+
+  /**
+   * Take a snapshot of the local store's current state and CAS the manifest to reference it, so a
+   * future `open` can bootstrap in O(state + tail) instead of replaying the whole segment log.
+   * Serializes against commits via `runExclusive` — same reasoning as `commitWriteBatch`: it reads
+   * `cached`/`nextSeqno` and CAS's the manifest, so it must not race a concurrent commit's CAS
+   * against the same cached etag.
+   *
+   * DEADLOCK HAZARD: `runExclusive` is NOT reentrant. Never call `snapshot()`/`maybeSnapshot()` from
+   * INSIDE another `runExclusive` body (e.g. the commit path's own exclusive block) — chain it AFTER
+   * that block resolves instead (see `commitWriteBatch`'s `#maybeSnapshotBestEffort` call site).
+   */
+  async snapshot(): Promise<void> {
+    return this.runExclusive(async () => {
+      if (this.poisoned) {
+        throw new Error(
+          `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        );
+      }
+      if (this.nextSeqno === 0) return; // no committed segments yet — nothing to snapshot
+
+      const dump = await this.local.dumpCurrentState();
+      const frontierTs = this.cached.manifest.frontierTs;
+      const segBase = this.nextSeqno - 1; // the last committed seqno
+      const payload: SnapshotPayload = { frontierTs, segBase, documents: dump.documents, indexUpdates: dump.indexUpdates };
+
+      // Object-first (same torn-forward discipline as segments): the snapshot object lands BEFORE
+      // the manifest references it, so the manifest can never point at an absent snapshot.
+      await writeSnapshot(this.objectStore, this.shard, payload);
+
+      const next: Manifest = { ...this.cached.manifest, snapshotTs: frontierTs, snapshotSegBase: segBase };
+      try {
+        const { etag } = await casManifest(this.objectStore, this.shard, next, this.cached.etag);
+        this.cached = { manifest: next, etag };
+      } catch (e) {
+        // Same C1 discipline as the commit path: ANY casManifest failure (fence or ambiguous lost
+        // response) leaves `cached`'s etag untrustworthy for the NEXT commit's CAS — poison rather
+        // than risk a stale-etag reuse. Note `nextSeqno` is unaffected either way (a snapshot never
+        // consumes a segment seqno), but the poisoned flag still forces a re-open before any further
+        // commit or snapshot is served.
+        this.poisoned = true;
+        if (isCasConflict(e)) {
+          throw new FencedError(
+            `snapshot fenced: manifest for shard '${this.shard}' moved (stale etag) — this writer is no longer current and is now poisoned (re-open to continue)`,
+          );
+        }
+        throw e;
+      }
+      this.committedSegmentsSinceSnapshot = 0;
+    });
+  }
+
+  /** Take a snapshot if `SNAPSHOT_EVERY` segments have committed since the last one. No-op
+   *  (including a poisoned instance — the next commit/explicit `snapshot()` call will surface that
+   *  loudly) otherwise. */
+  async maybeSnapshot(): Promise<void> {
+    if (this.poisoned) return;
+    if (this.committedSegmentsSinceSnapshot < SNAPSHOT_EVERY) return;
+    await this.snapshot();
+  }
+
+  /** `maybeSnapshot()`, swallowing any error — called from OUTSIDE the commit's exclusive block
+   *  (see `commitWriteBatch`). A snapshot failure must never fail an already-durable commit; if it
+   *  poisoned this instance, the next commit's own poisoned-check surfaces that loudly instead. */
+  async #maybeSnapshotBestEffort(): Promise<void> {
+    try {
+      await this.maybeSnapshot();
+    } catch {
+      // Swallowed by design — see doc comment above.
+    }
   }
 
   // ── Everything else: forward to the local materialized store ───────────────────────────────
