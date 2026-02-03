@@ -129,3 +129,78 @@ describe("ObjectStoreDocStore snapshot cadence + fast bootstrap", () => {
     await fresh.close();
   });
 });
+
+describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch review, Task 3.3 fix)", () => {
+  it("3.3-fix-a: segments length is bounded to the post-snapshot tail across MANY commits — never grows with total commit count", async () => {
+    const objectStore = await freshBucket();
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+
+    const totalCommits = 3 * SNAPSHOT_EVERY;
+    let sawASnapshotTrim = false;
+    for (let i = 0; i < totalCommits; i++) {
+      await store.commitWrite([doc(newDocumentId(TABLE), `doc-${i}`)], []);
+      const manifest = await readManifestRaw(objectStore);
+      // The array must NEVER hold more than a single cadence window's worth of tail entries — in
+      // particular it must stay far below `totalCommits` even once we're deep into the run. This is
+      // the load-bearing assertion the old unbounded `segments` array (appended forever, trimmed
+      // never) would have failed once `i` grew large.
+      expect(manifest.segments.length).toBeLessThanOrEqual(SNAPSHOT_EVERY);
+      if (manifest.segments.length === 0 && i + 1 >= SNAPSHOT_EVERY) sawASnapshotTrim = true;
+    }
+
+    // Sanity: at least one cadence snapshot actually fired and trimmed the array to empty (proves the
+    // bound above isn't just "we never committed enough to see growth").
+    expect(sawASnapshotTrim).toBe(true);
+
+    // After the full run, the array holds only the tail since the LAST snapshot, not the whole history.
+    const finalManifest = await readManifestRaw(objectStore);
+    expect(finalManifest.segments.length).toBeLessThan(totalCommits);
+    expect(finalManifest.segments.length).toBeLessThanOrEqual(SNAPSHOT_EVERY);
+
+    await store.close();
+  });
+
+  it("3.3-fix-b: empty-tail bootstrap — a snapshot covering ALL segments (empty trimmed tail) still yields the correct nextSeqno on fresh open, not 0 (the old Math.max(...[])→0 trap)", async () => {
+    const objectStore = await freshBucket();
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+
+    // Commit EXACTLY SNAPSHOT_EVERY docs so the cadence snapshot fires and covers every committed
+    // segment — the trimmed tail is empty (`segments: []`), the exact case `Math.max(...[])` would
+    // have thrown/degenerated to 0 for.
+    for (let i = 0; i < SNAPSHOT_EVERY; i++) {
+      await store.commitWrite([doc(newDocumentId(TABLE), `doc-${i}`)], []);
+    }
+    const manifestAfterSnap = await readManifestRaw(objectStore);
+    expect(manifestAfterSnap.snapshotTs).toBeDefined();
+    expect(manifestAfterSnap.snapshotSegBase).toBe(SNAPSHOT_EVERY - 1);
+    expect(manifestAfterSnap.segments).toEqual([]); // empty tail — the trap case
+
+    const priorMaxTs = await store.maxTimestamp();
+    expect(priorMaxTs).toBe(BigInt(SNAPSHOT_EVERY));
+    await store.close();
+
+    // A FRESH open over this exact bucket state must derive nextSeqno = SNAPSHOT_EVERY (from the
+    // explicit `nextSeqno` field), NOT 0 (which `Math.max(...cached.manifest.segments)` would have
+    // produced against an empty trimmed array).
+    const fresh = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await fresh.maxTimestamp()).toBe(priorMaxTs); // bootstrap restored the snapshot correctly
+
+    const nextId = newDocumentId(TABLE);
+    const nextTs = await fresh.commitWrite([doc(nextId, "post-bootstrap")], []);
+
+    // ts must continue forward, never regress/collide with the restored state.
+    expect(nextTs).toBe(priorMaxTs + 1n);
+
+    // The new segment object must land at seqno = SNAPSHOT_EVERY (the correct next-free cursor) — a
+    // buggy `Math.max(...[])→0` bootstrap would instead have written `seg/0`, OVERWRITING (or, on
+    // keep-first `objectstore-fs`, silently colliding with) the durable seg/0 the snapshot already
+    // superseded, which is exactly the corruption class this fix closes.
+    expect(await objectStore.get(`s0/seg/${SNAPSHOT_EVERY}`)).not.toBeNull();
+    const manifestAfterNext = await readManifestRaw(objectStore);
+    expect(manifestAfterNext.segments).toEqual([SNAPSHOT_EVERY]);
+
+    expect((await fresh.get(nextId))!.ts).toBe(nextTs);
+
+    await fresh.close();
+  });
+});

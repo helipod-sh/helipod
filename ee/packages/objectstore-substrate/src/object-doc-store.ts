@@ -143,6 +143,16 @@ export class ObjectStoreDocStore implements DocStore {
           `objectstore-substrate: bootstrap missing snapshot '${cached.manifest.snapshotTs}' referenced by manifest (torn state)`,
         );
       }
+      // BENIGN DIVERGENCE (whole-branch review, Minor #2): `dumpCurrentState` (and so this restore)
+      // excludes tombstones, so if `snap.frontierTs` is itself a DELETE's ts and the process restarts
+      // with no tail beyond this snapshot, the restored `documents` table has no row AT that ts — the
+      // local store's `maxTimestamp()` (`MAX(ts) FROM documents`) then TRAILS `manifest.frontierTs`.
+      // This is SAFE for commit-ts correctness: `commitWriteBatch`'s floor is
+      // `max(tsCounter, localMax)` and `tsCounter == frontierTs` here, so no ts is ever reused or
+      // regressed. But it means `DocStore.maxTimestamp()`'s "highest committed timestamp" contract can
+      // diverge post-restore — a consumer needing the AUTHORITATIVE frontier must read the manifest
+      // (`frontierTs`), not call `local.maxTimestamp()`. Not fixed here (seeding a fake tombstone row
+      // just to keep `maxTimestamp()` honest is worse than documenting the divergence).
       await local.write(snap.documents, snap.indexUpdates, "Overwrite");
     }
 
@@ -156,7 +166,15 @@ export class ObjectStoreDocStore implements DocStore {
       await local.write(payload.documents, payload.indexUpdates, "Overwrite");
     }
 
-    const nextSeqno = cached.manifest.segments.length === 0 ? 0 : Math.max(...cached.manifest.segments) + 1;
+    // Read the explicit `nextSeqno` cursor (whole-branch review, Task 3.3 fix) — NEVER derive it from
+    // `segments` via `Math.max(...)`: once `snapshot()` trims `segments` to the post-snapshot tail, a
+    // snapshot-covers-everything bootstrap (empty tail) would otherwise compute 0 instead of the true
+    // cursor, and even pre-trim, `Math.max(...segments)` argument-spreads the WHOLE array onto the
+    // call stack and throws `RangeError: Maximum call stack size exceeded` past ~100k segments.
+    // `nextSeqno ?? …` is a belt-and-suspenders fallback for a hand-built/pre-fix test fixture
+    // manifest missing the field — the real commit/snapshot paths always set it.
+    const nextSeqno =
+      cached.manifest.nextSeqno ?? (cached.manifest.segments.length === 0 ? 0 : Math.max(...cached.manifest.segments) + 1);
     return new ObjectStoreDocStore(objectStore, shard, local, cached, nextSeqno);
   }
 
@@ -216,6 +234,7 @@ export class ObjectStoreDocStore implements DocStore {
         frontierTs: maxTs.toString(),
         tsCounter: maxTs.toString(),
         segments: [...this.cached.manifest.segments, seqno],
+        nextSeqno: seqno + 1,
       };
 
       let etag: string;
@@ -298,6 +317,11 @@ export class ObjectStoreDocStore implements DocStore {
    * DEADLOCK HAZARD: `runExclusive` is NOT reentrant. Never call `snapshot()`/`maybeSnapshot()` from
    * INSIDE another `runExclusive` body (e.g. the commit path's own exclusive block) — chain it AFTER
    * that block resolves instead (see `commitWriteBatch`'s `#maybeSnapshotBestEffort` call site).
+   *
+   * BENIGN DIVERGENCE (whole-branch review, Minor #2): if this snapshot's boundary (`frontierTs`) is
+   * a DELETE's ts, the dump it captures (`dumpCurrentState` excludes tombstones) has no row at that
+   * ts — see the matching note at `open()`'s snapshot-restore site for the full explanation and why
+   * it's safe (the `tsCounter` commit floor, not `local.maxTimestamp()`, is what guards ts reuse).
    */
   async snapshot(): Promise<void> {
     return this.runExclusive(async () => {
@@ -317,7 +341,19 @@ export class ObjectStoreDocStore implements DocStore {
       // the manifest references it, so the manifest can never point at an absent snapshot.
       await writeSnapshot(this.objectStore, this.shard, payload);
 
-      const next: Manifest = { ...this.cached.manifest, snapshotTs: frontierTs, snapshotSegBase: segBase };
+      // TRIM `segments` to the post-snapshot tail (whole-branch review, Task 3.3 fix): everything
+      // <= segBase is now covered by the snapshot itself — bootstrap's `open()` never reads them
+      // again (see the segBase skip in the replay loop above) — so keeping them in the manifest only
+      // grows this array without bound over the store's history (O(N²) commits, and a
+      // `Math.max(...segments)` bootstrap read that would eventually RangeError). `nextSeqno` is
+      // preserved untouched by the `{...cached.manifest}` spread below — a snapshot never advances or
+      // rewinds the segment cursor, only `commitWriteBatch` does.
+      const next: Manifest = {
+        ...this.cached.manifest,
+        snapshotTs: frontierTs,
+        snapshotSegBase: segBase,
+        segments: this.cached.manifest.segments.filter((s) => s > segBase),
+      };
       try {
         const { etag } = await casManifest(this.objectStore, this.shard, next, this.cached.etag);
         this.cached = { manifest: next, etag };
@@ -371,6 +407,18 @@ export class ObjectStoreDocStore implements DocStore {
    * snapshot pointer, and must not race a concurrent commit/snapshot that could move
    * `snapshotSegBase` out from under it. Never touches the manifest itself or `this.cached`/
    * `nextSeqno` — GC is purely subtractive over objects the manifest no longer needs.
+   *
+   * PERFORMANCE NOTE (whole-branch review, Minor #4): because it runs under `runExclusive`, `gc()`
+   * blocks `commitWriteBatch`/`snapshot()` on this instance for the ENTIRE list+delete sweep — fine
+   * for a manual, occasional, single-node call (today's only caller), but revisit the locking
+   * granularity once GC becomes an automatic/background driver.
+   *
+   * S4 MULTI-WRITER HAZARD (whole-branch review, Minor #3, not reachable in single-node Slice 3): this
+   * deletes every `snap/*` except THIS instance's own cached `snapshotTs`. A stale/fenced writer whose
+   * `poisoned` flag hasn't tripped yet (it only trips after an ATTEMPTED CAS — see the class doc's C1
+   * note) still holds an OLD `snapshotTs` and would delete the CURRENT writer's live snapshot out from
+   * under it, sinking a fresh bootstrap. Before `gc()` is exposed under multi-writer (S4), it must be
+   * epoch-fenced (checked against the current manifest's `epoch`) before it deletes anything.
    */
   async gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> {
     return this.runExclusive(async () => {

@@ -7,7 +7,7 @@ describe("manifest helpers", () => {
   it("createManifest seeds an empty manifest; a second create on the same shard is a CasConflict", async () => {
     const os = new MemoryObjectStore();
     const created = await createManifest(os, "0");
-    expect(created.manifest).toEqual({ epoch: 0, frontierTs: "0", tsCounter: "0", segments: [] });
+    expect(created.manifest).toEqual({ epoch: 0, frontierTs: "0", tsCounter: "0", segments: [], nextSeqno: 0 });
     expect(typeof created.etag).toBe("string");
 
     await expect(createManifest(os, "0")).rejects.toSatisfy((e: unknown) => isCasConflict(e));
