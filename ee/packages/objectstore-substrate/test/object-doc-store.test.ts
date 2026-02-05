@@ -89,7 +89,7 @@ describe("ObjectStoreDocStore", () => {
     const manifestEntry = await objectStore.get("s0/manifest");
     expect(manifestEntry).not.toBeNull();
     const manifest = JSON.parse(new TextDecoder().decode(manifestEntry!.body));
-    expect(manifest).toEqual({ epoch: 0, frontierTs: "0", tsCounter: "0", segments: [] });
+    expect(manifest).toEqual({ epoch: 0, frontierTs: "0", tsCounter: "0", segments: [], nextSeqno: 0 });
 
     await store.close();
   });

@@ -53,7 +53,9 @@ interface WireResolvedDocument {
   value: JSONValue;
 }
 
-interface WireDocumentLogEntry {
+// Exported (not just `SegmentPayload`-internal) so `snapshot.ts` can build a `WireSnapshotPayload`
+// out of the SAME per-row wire shapes — see `encodeDocumentLogEntries`/`encodeIndexWrites` below.
+export interface WireDocumentLogEntry {
   ts: string; // decimal bigint
   id: WireInternalDocumentId;
   value: WireResolvedDocument | null; // null preserved verbatim (tombstone)
@@ -68,7 +70,7 @@ interface WireDatabaseIndexUpdate {
   value: WireDatabaseIndexValue;
 }
 
-interface WireIndexWrite {
+export interface WireIndexWrite {
   ts: string; // decimal bigint
   update: WireDatabaseIndexUpdate;
 }
@@ -137,11 +139,29 @@ function decodeIndexWrite(write: WireIndexWrite): IndexWrite {
   return { ts: BigInt(write.ts), update: decodeIndexUpdate(write.update) };
 }
 
+/** Row-array wrappers around the single-row codecs above — exported so `snapshot.ts` can build a
+ *  `WireSnapshotPayload` (which carries the SAME `documents`/`indexUpdates` wire arrays plus its own
+ *  `frontierTs`/`segBase` fields) out of these directly, instead of duplicating the per-row
+ *  bigint/base64/`Value` tagging logic. `encodeSegment`/`decodeSegment` below are themselves just
+ *  these applied to a bare `{documents, indexUpdates}` envelope. */
+export function encodeDocumentLogEntries(documents: readonly DocumentLogEntry[]): WireDocumentLogEntry[] {
+  return documents.map(encodeDocumentLogEntry);
+}
+export function decodeDocumentLogEntries(wire: readonly WireDocumentLogEntry[]): DocumentLogEntry[] {
+  return wire.map(decodeDocumentLogEntry);
+}
+export function encodeIndexWrites(writes: readonly IndexWrite[]): WireIndexWrite[] {
+  return writes.map(encodeIndexWrite);
+}
+export function decodeIndexWrites(wire: readonly WireIndexWrite[]): IndexWrite[] {
+  return wire.map(decodeIndexWrite);
+}
+
 /** Encode a segment's rows to bytes (UTF-8 JSON) for `ObjectStore.putImmutable`. */
 export function encodeSegment(payload: SegmentPayload): Uint8Array {
   const wire: WireSegmentPayload = {
-    documents: payload.documents.map(encodeDocumentLogEntry),
-    indexUpdates: payload.indexUpdates.map(encodeIndexWrite),
+    documents: encodeDocumentLogEntries(payload.documents),
+    indexUpdates: encodeIndexWrites(payload.indexUpdates),
   };
   return new TextEncoder().encode(JSON.stringify(wire));
 }
@@ -151,7 +171,7 @@ export function encodeSegment(payload: SegmentPayload): Uint8Array {
 export function decodeSegment(bytes: Uint8Array): SegmentPayload {
   const wire = JSON.parse(new TextDecoder().decode(bytes)) as WireSegmentPayload;
   return {
-    documents: wire.documents.map(decodeDocumentLogEntry),
-    indexUpdates: wire.indexUpdates.map(decodeIndexWrite),
+    documents: decodeDocumentLogEntries(wire.documents),
+    indexUpdates: decodeIndexWrites(wire.indexUpdates),
   };
 }
