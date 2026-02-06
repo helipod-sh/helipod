@@ -20,8 +20,13 @@
  * which segment its ts's actually landed in.
  *
  * Any `casManifest` failure (fence OR ambiguous/lost-response) POISONS this instance (whole-branch
- * review C1): the cached cursor is then untrustworthy and reusing a segment seqno would overwrite a
- * durable referenced segment on an overwrite-semantics store. Recovery = re-open (re-bootstrap).
+ * review C1): the cached cursor is then untrustworthy. `putImmutable` is KEEP-FIRST on every adapter
+ * (fs/memory/s3 — s3 via a create-only `IfNoneMatch: "*"` conditional PUT, Tier 3 Slice 4 review), so a
+ * reused segment seqno can never overwrite a durable, manifest-referenced segment written by someone
+ * else — it silently no-ops and the writer's OWN manifest CAS fails separately on its stale etag. Poison
+ * is therefore not a corruption guard against overwriting live data (there is no such hazard left); it's
+ * the correct response to an untrustworthy cached cursor after any CAS failure. Recovery = re-open
+ * (re-bootstrap).
  *
  * OWNERSHIP (Tier 3 Slice 4, Task 4.2): `open()` only MATERIALIZES — it bootstraps `local` from the
  * bucket (snapshot + tail replay) but claims NO ownership. A writer must additionally `acquire()`
@@ -45,10 +50,13 @@
  *   failover slice (a fresh node materializing from the bucket) MUST persist `deploymentId` (e.g. in
  *   the manifest) and address receipt durability before it can claim "byte-identical from object
  *   storage alone" for engine bookkeeping. Effectively-once itself → the manifest idempotency window (deferred).
- * - **Fence/failure paths are tested only on `objectstore-fs`** (keep-first `putImmutable`), which
- *   structurally masks the C1 overwrite hazard the fix above guards; add MinIO-gated fence/failure
- *   variants when the failover slice lands (the C1 unit test simulates the overwrite hazard via a
- *   wrapper, so the fix is covered — but real-S3 coverage of the fence path is still owed).
+ * - **Fence/failure paths are exercised at the substrate level only on `objectstore-fs`** (keep-first
+ *   `putImmutable`, same as every adapter now — `objectstore-s3` was fixed to keep-first too, Tier 3
+ *   Slice 4 review, closing the overwrite hazard this note used to describe). The `objectstore-s3`
+ *   package's OWN conformance suite (run against real MinIO under `STACKBASE_OBJECTSTORE_S3=1`) proves
+ *   the keep-first invariant on S3 directly; a MinIO-gated fence/failure variant AT THIS SUBSTRATE LEVEL
+ *   (as opposed to a bare adapter conformance check) is still a nice-to-have for the failover slice, not
+ *   a correctness gap — the adapter-level guarantee is what the fence's safety actually rests on.
  */
 import type { ObjectStore } from "@stackbase/objectstore";
 import { isCasConflict } from "@stackbase/objectstore";
@@ -271,8 +279,13 @@ export class ObjectStoreDocStore implements DocStore {
         this.poisoned = false;
         return { acquired: true as const };
       } catch (e) {
-        this.poisoned = true;
-        if (!isCasConflict(e)) throw e;
+        if (!isCasConflict(e)) {
+          this.poisoned = true;
+          throw e;
+        }
+        // A lost acquire race (CasConflict) is an EXPECTED, retryable outcome — a concurrent
+        // challenger simply won first. Do NOT poison: `this.held`/`this.cached` are untouched (this
+        // instance never claimed anything), so it remains exactly as usable as before the attempt.
         const reread = await readManifest(this.objectStore, this.shard);
         if (reread === null) throw e;
         return { acquired: false as const, heldBy: reread.manifest.writerId, expiresAt: Number(reread.manifest.leaseExpiresAt) };
@@ -412,14 +425,20 @@ export class ObjectStoreDocStore implements DocStore {
         // our cached `{manifest, etag}` and `nextSeqno` are untrustworthy: a `CasConflict` means we
         // were fenced (the manifest moved); a GENERIC error is AMBIGUOUS — the CAS may have LANDED
         // (a lost response) even though it threw. In both cases, continuing to serve commits on this
-        // instance would reuse `seqno` against a stale cursor and, on an OVERWRITE-semantics object
-        // store (S3/R2/MinIO — `objectstore-fs`'s keep-first hides this, which is why no test caught
-        // it), OVERWRITE a durable manifest-referenced segment with different bytes → silent log
-        // corruption + ts regression. So we stop: the instance must be RE-OPENED (re-bootstrapped from
-        // the true manifest), which resyncs `cached`/`nextSeqno`. (Poisoning a clean CAS-fail that
-        // truly didn't land is stricter than necessary — that only overwrites our own unreferenced
-        // orphan — but ambiguity makes it the correct universal choice.) The just-PUT `seg/${seqno}`
-        // is an orphan (unreferenced or ambiguously-referenced; GC is a later slice).
+        // instance would reuse `seqno` against a stale cursor.
+        //
+        // CORRECTED (Tier 3 Slice 4, Task 4.2 review): `putImmutable` is KEEP-FIRST on every adapter,
+        // including S3 (via a create-only `IfNoneMatch: "*"` conditional PUT — see `objectstore-s3`'s
+        // `putImmutable`). So this just-PUT `seg/${seqno}` can NEVER overwrite a live, manifest-
+        // referenced segment written by whoever actually holds the frontier at that seqno — if a
+        // concurrent/challenging writer already committed a DIFFERENT segment at this seqno, our PUT is
+        // silently dropped (their bytes win) and OUR manifest CAS below still fails on its own stale
+        // etag. The durable log is therefore safe by construction; poisoning here is not a corruption
+        // guard against a real hazard (there no longer is one for `seg/${seqno}` itself) but simply the
+        // correct response to an untrustworthy cursor after ANY CAS failure — the instance must be
+        // RE-OPENED (re-bootstrapped from the true manifest), which resyncs `cached`/`nextSeqno`. The
+        // just-PUT `seg/${seqno}` is at worst an unreferenced orphan of OUR OWN (never someone else's
+        // live data); reclaiming it is GC's concern, not a correctness one.
         this.poisoned = true;
         if (isCasConflict(e)) {
           throw new FencedError(

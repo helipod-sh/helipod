@@ -253,7 +253,7 @@ describe("ObjectStoreDocStore", () => {
     await store.close();
   });
 
-  it("post-CAS-landed generic error poisons the instance (S3-overwrite seqno-reuse corruption guard, C1)", async () => {
+  it("post-CAS-landed generic error poisons the instance (ambiguous-CAS untrustworthy-cursor guard, C1)", async () => {
     // commit #1's casManifest LANDS (durable) then throws a generic error (lost response). Call #1 is
     // open()'s create-only manifest CAS, call #2 is acquire()'s claim CAS (both must succeed), so
     // throw on call #3 — commit #1's own CAS.
@@ -264,8 +264,10 @@ describe("ObjectStoreDocStore", () => {
     await expect(store.commitWrite([doc(newDocumentId(TABLE), "a")], [])).rejects.toThrow(/lost response/i);
     // the CAS DID land — the manifest references seg/0 durably.
     expect((await readManifestRaw(objectStore)).segments).toEqual([0]);
-    // CRITICAL: the instance must NOT serve another commit (which would reuse seqno 0 against a stale
-    // cursor and overwrite the durable seg/0 on an overwrite-semantics store) — it is poisoned.
+    // CRITICAL: the instance must NOT serve another commit off its now-untrustworthy cursor. (Reusing
+    // seqno 0 can no longer OVERWRITE a live segment — `putImmutable` is keep-first on every adapter,
+    // including S3 via `IfNoneMatch:"*"` — but the cursor itself is still unreliable after an ambiguous
+    // CAS, so poisoning + demanding a re-open remains correct.) It is poisoned.
     await expect(store.commitWrite([doc(newDocumentId(TABLE), "b")], [])).rejects.toThrow(/poisoned|re-open/i);
     await store.close();
   });

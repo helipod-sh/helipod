@@ -148,6 +148,64 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeB.close();
   });
 
+  it("4.2e: a zombie writer's reused-seqno commit cannot clobber a LIVE segment another writer already committed at that seqno — the manifest still references the live owner's data after a fresh bootstrap (Critical, Task 4.2 review)", async () => {
+    // The exact scenario the review's Critical finding describes: A commits seg/0 (nextSeqno=1). B
+    // acquires (fences A, epoch 2 — acquire consumes NO seqno) and commits its OWN seg/1. Zombie A,
+    // unaware it's fenced, then commits: it reuses `seqno = A.nextSeqno = 1` and attempts
+    // `putImmutable("s0/seg/1", A-bytes)` against a key B already durably wrote. `putImmutable` is
+    // keep-first on every adapter (Task 4.2 review, including S3 via `IfNoneMatch:"*"` — proven
+    // separately by `objectstore-s3`'s own conformance suite), so A's PUT silently no-ops (B's bytes
+    // win) and A's manifest CAS then fails on its own stale etag — FencedError, log intact.
+    const objectStore = await freshBucket();
+    const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+    const idA0 = newDocumentId(TABLE);
+    await storeA.commitWrite([doc(idA0, "a-seg0")], []); // A's seg/0 — A's local nextSeqno is now 1
+
+    // B acquires past A's lease expiry (fences A, bumps epoch to 2 — consumes no segment seqno) and
+    // commits its own seg/1.
+    const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+    const idB1 = newDocumentId(TABLE);
+    await storeB.commitWrite([doc(idB1, "b-seg1")], []); // B's seg/1 — now LIVE and manifest-referenced
+
+    const manifestAfterB = await readManifestRaw(objectStore);
+    expect(manifestAfterB.segments).toEqual([0, 1]);
+    expect(manifestAfterB.frontierTs).toBe("2");
+
+    // Zombie A, unaware it was fenced, attempts its second commit — reusing seqno 1, the SAME key B's
+    // commit just durably occupied.
+    const idA1 = newDocumentId(TABLE);
+    await expect(storeA.commitWrite([doc(idA1, "zombie-a-seg1")], [])).rejects.toBeInstanceOf(FencedError);
+
+    // seg/1 must still hold B's bytes, not A's — keep-first won the collision.
+    const seg1 = await objectStore.get("s0/seg/1");
+    expect(seg1).not.toBeNull();
+    const seg1Text = new TextDecoder().decode(seg1!.body);
+    expect(seg1Text).toContain("b-seg1");
+    expect(seg1Text).not.toContain("zombie-a-seg1");
+
+    // The manifest is untouched by the zombie's failed attempt — still exactly A's seg/0 + B's seg/1,
+    // owned by B at epoch 2.
+    const manifestAfterZombie = await readManifestRaw(objectStore);
+    expect(manifestAfterZombie.segments).toEqual([0, 1]);
+    expect(manifestAfterZombie.frontierTs).toBe("2");
+    expect(manifestAfterZombie.writerId).toBe("B");
+    expect(manifestAfterZombie.epoch).toBe(2);
+
+    // A fresh bootstrap from the bucket sees ONLY A's seg/0 and B's seg/1 — B's committed data
+    // survived intact; the zombie's phantom write never entered the log.
+    const storeC = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect((await storeC.get(idA0))!.value.value.body).toBe("a-seg0");
+    expect((await storeC.get(idB1))!.value.value.body).toBe("b-seg1");
+    expect(await storeC.get(idA1)).toBeNull();
+    expect(await storeC.maxTimestamp()).toBe(2n);
+
+    await storeA.close();
+    await storeB.close();
+    await storeC.close();
+  });
+
   it("4.2d: heartbeat renews the lease — a challenger against the OLD expiry is refused", async () => {
     const objectStore = await freshBucket();
     const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });

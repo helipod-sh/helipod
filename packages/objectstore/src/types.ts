@@ -16,8 +16,13 @@ export function isCasConflict(e: unknown): boolean {
 
 export interface ObjectStore {
   /** Immutable write (segments). Idempotent by key — a retry with the SAME key + bytes is a no-op.
-   *  (Callers must honor immutability: never `putImmutable` a key with different bytes — adapters differ
-   *  on the never-reached different-bytes case: fs/memory keep-first, s3 overwrites.) */
+   *  KEEP-FIRST on every adapter (fs/memory/s3): if the key already exists, the write is silently
+   *  dropped and the EXISTING object wins — never an error, never an overwrite. Callers must still
+   *  honor immutability in practice (never intentionally `putImmutable` a key with different bytes),
+   *  but callers relying on the Tier-3 fence depend on this keep-first guarantee to hold even when
+   *  they DON'T: a fenced/zombie writer reusing a segment seqno must never be able to clobber a live,
+   *  manifest-referenced segment (s3 achieves this via a create-only conditional PUT,
+   *  `IfNoneMatch: "*"`, treating the precondition failure as a no-op rather than an error). */
   putImmutable(key: string, body: Uint8Array): Promise<void>;
   /** Conditional write — the commit LINEARIZATION POINT. `ifMatch: null` ⇒ create-only (If-None-Match:*);
    *  otherwise a compare-and-swap on the current etag (If-Match). Returns the new etag on success; throws

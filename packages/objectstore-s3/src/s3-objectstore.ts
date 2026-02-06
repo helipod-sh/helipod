@@ -47,8 +47,23 @@ export class S3ObjectStore implements ObjectStore {
     });
   }
 
+  /** Write-once/keep-first (matches fs/memory — see `@stackbase/objectstore`'s `ObjectStore` doc).
+   *  Issues the SAME create-only conditional PUT `casPut(key, body, null)` uses (`IfNoneMatch: "*"`);
+   *  a precondition failure means the key already exists — that is a KEEP-FIRST NO-OP (the existing
+   *  object wins), not an error, so this stays idempotent-by-key like the other adapters. This is the
+   *  invariant the Tier-3 fence relies on: a fenced/zombie writer that reuses a segment seqno can never
+   *  overwrite a LIVE manifest-referenced segment on S3 (it silently loses the race; its manifest CAS
+   *  still fails separately, throwing `FencedError`). Any OTHER error (network/permissions/etc.)
+   *  rethrows. */
   async putImmutable(key: string, body: Uint8Array): Promise<void> {
-    await this.s3.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body }));
+    try {
+      await this.s3.send(
+        new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, IfNoneMatch: "*" }),
+      );
+    } catch (e) {
+      if (isCasConflictResponse(e)) return; // keep-first: the existing object wins
+      throw e;
+    }
   }
 
   async casPut(key: string, body: Uint8Array, ifMatch: string | null): Promise<{ etag: string }> {

@@ -35,6 +35,19 @@ export function runObjectStoreConformance(
       expect(await store.get("seg/does-not-exist")).toBeNull();
     });
 
+    it("putImmutable is keep-first: a second putImmutable with DIFFERENT bytes at the same key is a silent no-op — get still returns the FIRST write, no throw (the Tier-3 fence's zombie-writer-safety invariant)", async () => {
+      const store = await makeStore();
+      const bytesA = new TextEncoder().encode("first-writer-A");
+      const bytesB = new TextEncoder().encode("second-writer-B-totally-different-and-longer");
+
+      await store.putImmutable("keep-first/k", bytesA);
+      await store.putImmutable("keep-first/k", bytesB); // must NOT throw, must NOT overwrite
+
+      const round = await store.get("keep-first/k");
+      expect(round).not.toBeNull();
+      expect(new TextDecoder().decode(round!.body)).toBe("first-writer-A");
+    });
+
     it("casPut(k, b, null) creates and returns an etag; a second create-only casPut throws CasConflict", async () => {
       const store = await makeStore();
       const b1 = new TextEncoder().encode("v1");
