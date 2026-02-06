@@ -80,6 +80,9 @@ describe("the engine runs over ObjectStoreDocStore, wired through createEmbedded
 
     // ---- Runtime #1: commit through the real engine, over the object-storage substrate. ----
     const store1 = await ObjectStoreDocStore.open({ objectStore: bucket, shard: SHARD, local: freshLocal() });
+    // Tier 3 Slice 4, Task 4.2: commits now require a held lease.
+    const acquired = await store1.acquire({ writerId: "w", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+    if (!acquired.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${acquired.heldBy})`);
     const runtime1 = await createEmbeddedRuntime({ store: store1, catalog: notesCatalog(), modules });
 
     const id1 = (await runtime1.run<string>("notes:add", { body: "first" })).value;

@@ -79,6 +79,9 @@ async function readManifestRaw(bucket: ObjectStore): Promise<{ segments: number[
 async function scenario(makeBucket: () => Promise<ObjectStore>): Promise<void> {
   const bucket = await makeBucket();
   const store = await ObjectStoreDocStore.open({ objectStore: bucket, shard: SHARD, local: freshLocal() });
+  // Tier 3 Slice 4, Task 4.2: commits now require a held lease.
+  const acquired = await store.acquire({ writerId: "w", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+  if (!acquired.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${acquired.heldBy})`);
 
   // Expected FINAL current state, tracked as we go: live id -> body (a delete removes the entry).
   const expected = new Map<string, { id: InternalDocumentId; body: string }>();

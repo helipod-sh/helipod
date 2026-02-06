@@ -7,29 +7,44 @@
  * the MONOTONE field the seam doc calls for: a real `ObjectStore`'s etag is content-derived, so an
  * A→B→A content sequence could reuse an etag (ABA) — a manifest that never repeats its content (because
  * this field strictly increases every successful CAS) closes that hole.
+ *
+ * `epoch`/`writerId`/`leaseExpiresAt` (Tier 3 Slice 4, Task 4.2) turn the manifest into the LEASE: an
+ * unowned/fresh manifest has `writerId: ""`, `leaseExpiresAt: "0"`, `epoch: 0`. `ObjectStoreDocStore`'s
+ * `acquire()` CAS's `epoch` upward and stamps `writerId`/`leaseExpiresAt` to claim ownership (the epoch
+ * bump is what FENCES any prior owner's cached etag); `heartbeat()` CAS-renews `leaseExpiresAt` alone.
+ * See `object-doc-store.ts`'s class doc for the full acquire/heartbeat/commit-gating protocol.
  */
 import type { ObjectStore } from "@stackbase/objectstore";
 
-/** The per-shard commit pointer. `frontierTs`/`tsCounter` are decimal-string bigints (JSON has no
- *  native bigint) — the highest committed timestamp and the monotone CAS-content counter, respectively.
- *  `segments` is the `seqno` chain of `s{shard}/seg/{seqno}` objects a bootstrap still needs to
- *  replay, in order — dense (`[0, 1, 2, …]`) from a fresh manifest, but TRIMMED by `snapshot()`
- *  (Tier 3 Slice 3, Task 3.3 fix) to only `seqno > snapshotSegBase` once a snapshot covers the
- *  earlier ones, so this array stays BOUNDED (the post-snapshot tail) rather than growing with total
- *  commit history. `nextSeqno` (Task 3.3 fix) is the authoritative next-free-segment-seqno cursor —
- *  it is NOT derivable from `segments` once `segments` is trimmed (a `Math.max(...segments)` bootstrap
- *  computation both breaks on a trimmed/empty array and throws `RangeError` on a large untrimmed one),
- *  so it is tracked as its own field and must be read directly by `open()`.
+/** The per-shard commit pointer AND lease. `frontierTs`/`tsCounter` are decimal-string bigints (JSON
+ *  has no native bigint) — the highest committed timestamp and the monotone CAS-content counter,
+ *  respectively. `segments` is the `seqno` chain of `s{shard}/seg/{seqno}` objects a bootstrap still
+ *  needs to replay, in order — dense (`[0, 1, 2, …]`) from a fresh manifest, but TRIMMED by
+ *  `snapshot()` (Tier 3 Slice 3, Task 3.3 fix) to only `seqno > snapshotSegBase` once a snapshot
+ *  covers the earlier ones, so this array stays BOUNDED (the post-snapshot tail) rather than growing
+ *  with total commit history. `nextSeqno` (Task 3.3 fix) is the authoritative next-free-segment-seqno
+ *  cursor — it is NOT derivable from `segments` once `segments` is trimmed (a `Math.max(...segments)`
+ *  bootstrap computation both breaks on a trimmed/empty array and throws `RangeError` on a large
+ *  untrimmed one), so it is tracked as its own field and must be read directly by `open()`.
  *  `snapshotTs`/`snapshotSegBase` (Tier 3 Slice 3, Task 3.2) are optional and set together: the
  *  latest snapshot's key suffix (`s{shard}/snap/{snapshotTs}`) and the highest segment seqno it
  *  COVERS — bootstrap restores that snapshot then replays only segments with `seqno >
- *  snapshotSegBase`. Unset on a fresh manifest (no snapshot taken yet) — full-replay bootstrap. */
+ *  snapshotSegBase`. Unset on a fresh manifest (no snapshot taken yet) — full-replay bootstrap.
+ *  `writerId`/`leaseExpiresAt` (Tier 3 Slice 4) are the LEASE: `writerId === ""` means unowned;
+ *  otherwise the lease is live while `now <= Number(leaseExpiresAt)` (both are decimal-string
+ *  ms-epoch, matching the `frontierTs`/`tsCounter` no-native-bigint-in-JSON convention — `now` itself
+ *  is a plain number, not a bigint, so `leaseExpiresAt` is a decimal STRING of a NUMBER, not a bigint,
+ *  purely for the same JSON-round-trip-safety reason). `epoch` (present since Slice 2, now
+ *  load-bearing) is bumped by every successful `acquire()` — the epoch bump is the mechanical fence
+ *  that invalidates a prior owner's cached etag. */
 export interface Manifest {
   epoch: number;
   frontierTs: string;
   tsCounter: string;
   segments: number[];
   nextSeqno: number;
+  writerId: string;
+  leaseExpiresAt: string;
   snapshotTs?: string;
   snapshotSegBase?: number;
 }
@@ -38,9 +53,11 @@ function manifestKey(shard: string): string {
   return `s${shard}/manifest`;
 }
 
-/** The seeded manifest a fresh shard's `createManifest` writes: no commits yet. */
+/** The seeded manifest a fresh shard's `createManifest` writes: no commits yet, unowned
+ *  (`writerId: ""`, `leaseExpiresAt: "0"` — any `now >= 0` sees this lease as already-expired, so the
+ *  first `acquire()` always succeeds without a live-lease refusal). */
 function emptyManifest(): Manifest {
-  return { epoch: 0, frontierTs: "0", tsCounter: "0", segments: [], nextSeqno: 0 };
+  return { epoch: 0, frontierTs: "0", tsCounter: "0", segments: [], nextSeqno: 0, writerId: "", leaseExpiresAt: "0" };
 }
 
 /** Read the shard's current manifest + its etag (for a follow-up `casManifest`), or `null` if the

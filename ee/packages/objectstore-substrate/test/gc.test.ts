@@ -19,6 +19,15 @@ function freshLocal(): SqliteDocStore {
   return new SqliteDocStore(isBun ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" }));
 }
 
+/** `ObjectStoreDocStore.open` + `acquire()` with a huge TTL (Tier 3 Slice 4, Task 4.2) — commits now
+ *  require a held lease. */
+async function openAndAcquire(objectStore: FsObjectStore, shard: string, local: SqliteDocStore): Promise<ObjectStoreDocStore> {
+  const store = await ObjectStoreDocStore.open({ objectStore, shard, local });
+  const result = await store.acquire({ writerId: "w", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+  if (!result.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${result.heldBy})`);
+  return store;
+}
+
 const dirs: string[] = [];
 async function freshBucket(): Promise<FsObjectStore> {
   const dir = await mkdtemp(join(tmpdir(), "objectstore-substrate-gc-test-"));
@@ -46,7 +55,7 @@ const SNAPSHOT_EVERY = 8;
 describe("ObjectStoreDocStore.gc", () => {
   it("3.3a: no snapshot yet — gc() is a no-op", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     await store.commitWrite([doc(newDocumentId(TABLE), "a")], []);
     const result = await store.gc();
@@ -60,7 +69,7 @@ describe("ObjectStoreDocStore.gc", () => {
 
   it("3.3b: deletes segments <= snapshotSegBase, keeps segments > snapshotSegBase, keeps only the newest snapshot, returns correct counts, and a fresh open still materializes full state", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     // First batch: trigger the FIRST cadence snapshot (segBase = SNAPSHOT_EVERY - 1).
     const firstIds: InternalDocumentId[] = [];

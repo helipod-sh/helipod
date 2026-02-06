@@ -23,6 +23,19 @@
  * review C1): the cached cursor is then untrustworthy and reusing a segment seqno would overwrite a
  * durable referenced segment on an overwrite-semantics store. Recovery = re-open (re-bootstrap).
  *
+ * OWNERSHIP (Tier 3 Slice 4, Task 4.2): `open()` only MATERIALIZES — it bootstraps `local` from the
+ * bucket (snapshot + tail replay) but claims NO ownership. A writer must additionally `acquire()`
+ * before it may commit; a replica (Slice 5) opens without ever acquiring. `acquire({writerId,
+ * leaseTtlMs, now})` re-reads the manifest fresh, refuses if a DIFFERENT writer's lease is still live,
+ * else catches this instance's local store up to the manifest frontier (`materializeTo` — the same
+ * primitive `open()` bootstraps with) and CAS-bumps `epoch` to claim the lease — the epoch bump is
+ * what fences any prior owner's cached etag. `heartbeat({now, leaseTtlMs})` CAS-renews
+ * `leaseExpiresAt` alone (epoch/writerId unchanged); ANY heartbeat CAS failure means a challenger
+ * fenced this instance — it poisons and throws `FencedError`. `commitWriteBatch` now REQUIRES a held
+ * lease (throws before the poisoned check if `acquire()` was never called) and additionally asserts
+ * its cached epoch still matches the held epoch before every CAS — defense in depth against serving a
+ * commit after having been silently fenced.
+ *
  * SLICE-2 BOUNDARIES — follow-ups the failover/replica slices (S4/S5) MUST NOT inherit silently:
  * - **Globals + client-verdict receipts are LOCAL-ONLY** (`writeGlobal*`/`recordClientVerdict`/… forward
  *   to the local store; they never enter the segment log). So a from-scratch bootstrap over object
@@ -94,6 +107,11 @@ export class ObjectStoreDocStore implements DocStore {
   /** Set when a post-CAS local apply fails: the commit is durable but the local materialization is
    *  inconsistent, so further commits are refused until the store is re-opened (re-bootstrapped). */
   private poisoned = false;
+  /** The lease this instance currently holds (Tier 3 Slice 4), or `null` if it has never
+   *  `acquire()`'d (or was fenced — see `heartbeat`/`commitWriteBatch`). `commitWriteBatch` refuses to
+   *  run without this set; `epoch` is the CAS-bumped value `acquire()` claimed, checked against
+   *  `this.cached.manifest.epoch` before every commit as a defense-in-depth fence check. */
+  private held: { epoch: number; writerId: string } | null = null;
   /** Serializes `commitWrite`/`commitWriteBatch` — see class doc. */
   private mutex: Promise<void> = Promise.resolve();
   /** Committed segments since the last successful snapshot (or since `open`) — `maybeSnapshot`'s
@@ -110,13 +128,11 @@ export class ObjectStoreDocStore implements DocStore {
 
   /**
    * Open (or initialize) a shard's object-storage-backed store: read-or-create the manifest, then
-   * BOOTSTRAP the local store. If the manifest references a snapshot (Tier 3 Slice 3, Task 3.2),
-   * restore it first (`write(..., "Overwrite")` of its current-state dump) and replay only the
-   * TAIL segments (`seqno > snapshotSegBase`) — O(state + tail) instead of the full log. Otherwise
-   * (no snapshot taken yet) replay every referenced segment, in order, via the same explicit-ts
-   * `write(..., "Overwrite")` path — the identical primitive a post-CAS commit applies with, and the
-   * one a replica tailer would use (design record §7). A fresh (empty) bucket bootstraps to an empty
-   * local store; a bucket with prior commits reconstructs the IDENTICAL current state either way.
+   * BOOTSTRAP (materialize) the local store — via `materializeTo`, see its doc for the snapshot +
+   * tail-replay algorithm. This claims NO ownership (Tier 3 Slice 4): a writer must additionally
+   * `acquire()` before it may commit; a replica (Slice 5) opens without ever acquiring. A fresh
+   * (empty) bucket bootstraps to an empty local store; a bucket with prior commits reconstructs the
+   * IDENTICAL current state either way.
    */
   static async open(opts: ObjectStoreDocStoreOpts): Promise<ObjectStoreDocStore> {
     const { objectStore, shard, local } = opts;
@@ -135,35 +151,66 @@ export class ObjectStoreDocStore implements DocStore {
       }
     }
 
-    const snapshotSegBase = cached.manifest.snapshotSegBase;
-    if (cached.manifest.snapshotTs !== undefined) {
-      const snap = await readSnapshot(objectStore, shard, cached.manifest.snapshotTs);
+    // Construct with `nextSeqno: 0` (a fresh `local` has applied nothing yet) and let `materializeTo`
+    // do the actual bootstrap work — the SAME primitive `acquire()` uses to catch a re-acquiring
+    // instance up to the manifest frontier (Tier 3 Slice 4, Task 4.2 — factored out for that reuse).
+    const store = new ObjectStoreDocStore(objectStore, shard, local, cached, 0);
+    await store.materializeTo(cached.manifest);
+    return store;
+  }
+
+  /**
+   * Materialize `this.local`/`this.nextSeqno` up to `manifest`'s frontier by applying whatever this
+   * instance hasn't already applied: if `manifest` references a snapshot this instance hasn't yet
+   * covered (`snapshotSegBase` at or beyond `this.nextSeqno`), restore it first
+   * (`write(..., "Overwrite")` of its current-state dump), then replay every remaining referenced
+   * segment in order via the same explicit-ts `write(..., "Overwrite")` path — the identical primitive
+   * a post-CAS commit applies with, and the one a replica tailer would use (design record §7).
+   *
+   * Two callers: `open()` on a brand-new instance (`this.nextSeqno === 0`, so this is a full
+   * bootstrap — snapshot-if-any + every segment), and `acquire()` on an ALREADY-materialized instance
+   * that may be behind the CURRENT manifest (a re-acquiring/challenging writer) — in that case
+   * skipping already-applied segments (and skipping a snapshot restore if this instance is already
+   * past its `segBase`) matters both for correctness (never double-apply, though `Overwrite` is
+   * idempotent) and so a challenger that's only slightly behind doesn't needlessly re-read a snapshot
+   * object. Restoring the snapshot when we're behind it is also what makes catch-up correct even if
+   * the fencing owner's `gc()` has since deleted the pre-snapshot segments we'd otherwise be missing.
+   *
+   * Not gated on `runExclusive` itself — both callers already hold it.
+   */
+  private async materializeTo(manifest: Manifest): Promise<void> {
+    let appliedThrough = this.nextSeqno - 1; // highest seqno already applied locally (-1 if none)
+
+    if (manifest.snapshotTs !== undefined && manifest.snapshotSegBase !== undefined && manifest.snapshotSegBase > appliedThrough) {
+      const snap = await readSnapshot(this.objectStore, this.shard, manifest.snapshotTs);
       if (snap === null) {
         throw new Error(
-          `objectstore-substrate: bootstrap missing snapshot '${cached.manifest.snapshotTs}' referenced by manifest (torn state)`,
+          `objectstore-substrate: missing snapshot '${manifest.snapshotTs}' referenced by manifest for shard '${this.shard}' (torn state)`,
         );
       }
-      // BENIGN DIVERGENCE (whole-branch review, Minor #2): `dumpCurrentState` (and so this restore)
-      // excludes tombstones, so if `snap.frontierTs` is itself a DELETE's ts and the process restarts
-      // with no tail beyond this snapshot, the restored `documents` table has no row AT that ts — the
-      // local store's `maxTimestamp()` (`MAX(ts) FROM documents`) then TRAILS `manifest.frontierTs`.
-      // This is SAFE for commit-ts correctness: `commitWriteBatch`'s floor is
-      // `max(tsCounter, localMax)` and `tsCounter == frontierTs` here, so no ts is ever reused or
-      // regressed. But it means `DocStore.maxTimestamp()`'s "highest committed timestamp" contract can
-      // diverge post-restore — a consumer needing the AUTHORITATIVE frontier must read the manifest
-      // (`frontierTs`), not call `local.maxTimestamp()`. Not fixed here (seeding a fake tombstone row
-      // just to keep `maxTimestamp()` honest is worse than documenting the divergence).
-      await local.write(snap.documents, snap.indexUpdates, "Overwrite");
+      // BENIGN DIVERGENCE (whole-branch review, Minor #2, carried from the original open()): `dumpCurrentState`
+      // (and so this restore) excludes tombstones, so if `snap.frontierTs` is itself a DELETE's ts and
+      // there's no tail beyond this snapshot, the restored `documents` table has no row AT that ts — the
+      // local store's `maxTimestamp()` (`MAX(ts) FROM documents`) then TRAILS `manifest.frontierTs`. This
+      // is SAFE for commit-ts correctness: `commitWriteBatch`'s floor is `max(tsCounter, localMax)` and
+      // `tsCounter == frontierTs` here, so no ts is ever reused or regressed. But it means
+      // `DocStore.maxTimestamp()`'s "highest committed timestamp" contract can diverge post-restore — a
+      // consumer needing the AUTHORITATIVE frontier must read the manifest (`frontierTs`), not call
+      // `local.maxTimestamp()`. Not fixed here (seeding a fake tombstone row just to keep `maxTimestamp()`
+      // honest is worse than documenting the divergence).
+      await this.local.write(snap.documents, snap.indexUpdates, "Overwrite");
+      appliedThrough = manifest.snapshotSegBase;
     }
 
-    for (const seqno of cached.manifest.segments) {
-      if (snapshotSegBase !== undefined && seqno <= snapshotSegBase) continue; // covered by the snapshot
-      const entry = await objectStore.get(segmentKey(shard, seqno));
+    for (const seqno of manifest.segments) {
+      if (seqno <= appliedThrough) continue; // already applied (or covered by the snapshot just restored)
+      const entry = await this.objectStore.get(segmentKey(this.shard, seqno));
       if (entry === null) {
-        throw new Error(`objectstore-substrate: bootstrap missing segment '${segmentKey(shard, seqno)}' referenced by manifest`);
+        throw new Error(`objectstore-substrate: missing segment '${segmentKey(this.shard, seqno)}' referenced by manifest for shard '${this.shard}'`);
       }
       const payload = decodeSegment(entry.body);
-      await local.write(payload.documents, payload.indexUpdates, "Overwrite");
+      await this.local.write(payload.documents, payload.indexUpdates, "Overwrite");
+      appliedThrough = seqno;
     }
 
     // Read the explicit `nextSeqno` cursor (whole-branch review, Task 3.3 fix) — NEVER derive it from
@@ -171,11 +218,108 @@ export class ObjectStoreDocStore implements DocStore {
     // snapshot-covers-everything bootstrap (empty tail) would otherwise compute 0 instead of the true
     // cursor, and even pre-trim, `Math.max(...segments)` argument-spreads the WHOLE array onto the
     // call stack and throws `RangeError: Maximum call stack size exceeded` past ~100k segments.
-    // `nextSeqno ?? …` is a belt-and-suspenders fallback for a hand-built/pre-fix test fixture
-    // manifest missing the field — the real commit/snapshot paths always set it.
-    const nextSeqno =
-      cached.manifest.nextSeqno ?? (cached.manifest.segments.length === 0 ? 0 : Math.max(...cached.manifest.segments) + 1);
-    return new ObjectStoreDocStore(objectStore, shard, local, cached, nextSeqno);
+    this.nextSeqno = manifest.nextSeqno;
+  }
+
+  /**
+   * Claim ownership of this shard for `opts.writerId` (Tier 3 Slice 4, Task 4.2) — the manifest CAS
+   * IS the fence: a successful acquire bumps `epoch`, which invalidates any prior owner's cached
+   * etag, so its next `commitWriteBatch`/`heartbeat` fails loudly (`FencedError` + poison).
+   *
+   * Re-reads the manifest FRESH (not `this.cached` — this instance may be stale or may never have
+   * committed before). If the lease is currently LIVE and held by a DIFFERENT writer
+   * (`now <= leaseExpiresAt`), refuses: `{acquired: false, heldBy, expiresAt}` — this is what
+   * prevents two live writers ping-ponging (a heartbeating owner's lease never expires). Otherwise
+   * (unowned, or the current lease is EXPIRED, or `opts.writerId` already owns it and is re-claiming)
+   * catches this instance's local store up to the just-read manifest via `materializeTo` — REQUIRED so
+   * a challenger that was behind (or a fresh instance that only `open()`'d) is fully materialized to
+   * the manifest's frontier BEFORE it starts committing under the claimed lease — then CAS-bumps
+   * `epoch` and stamps `writerId`/`leaseExpiresAt`.
+   *
+   * A `CasConflict` (lost the acquire race to a concurrent challenger) re-reads and returns
+   * `{acquired: false, ...}` — the caller may retry. Any OTHER `casManifest` failure is ambiguous
+   * (may have landed despite throwing — same lost-response concern as the commit path's C1 fix) and
+   * poisons this instance exactly like a commit/heartbeat CAS failure does (global constraint: lease
+   * CAS failures poison like commit CAS failures).
+   */
+  async acquire(
+    opts: { writerId: string; leaseTtlMs: number; now: number },
+  ): Promise<{ acquired: true } | { acquired: false; heldBy: string; expiresAt: number }> {
+    return this.runExclusive(async () => {
+      const fresh = await readManifest(this.objectStore, this.shard);
+      if (fresh === null) {
+        throw new Error(`objectstore-substrate: acquire() found no manifest for shard '${this.shard}' — open() must initialize it first`);
+      }
+      const { manifest, etag } = fresh;
+
+      if (manifest.writerId !== "" && opts.now <= Number(manifest.leaseExpiresAt) && manifest.writerId !== opts.writerId) {
+        return { acquired: false as const, heldBy: manifest.writerId, expiresAt: Number(manifest.leaseExpiresAt) };
+      }
+
+      await this.materializeTo(manifest);
+
+      const next: Manifest = {
+        ...manifest,
+        epoch: manifest.epoch + 1,
+        writerId: opts.writerId,
+        leaseExpiresAt: String(opts.now + opts.leaseTtlMs),
+      };
+      try {
+        const { etag: newEtag } = await casManifest(this.objectStore, this.shard, next, etag);
+        this.cached = { manifest: next, etag: newEtag };
+        this.held = { epoch: next.epoch, writerId: opts.writerId };
+        this.poisoned = false;
+        return { acquired: true as const };
+      } catch (e) {
+        this.poisoned = true;
+        if (!isCasConflict(e)) throw e;
+        const reread = await readManifest(this.objectStore, this.shard);
+        if (reread === null) throw e;
+        return { acquired: false as const, heldBy: reread.manifest.writerId, expiresAt: Number(reread.manifest.leaseExpiresAt) };
+      }
+    });
+  }
+
+  /**
+   * Renew the currently-held lease's `leaseExpiresAt` (Tier 3 Slice 4, Task 4.2) — `epoch`/`writerId`
+   * are carried forward UNCHANGED (a heartbeat is not a re-claim). Requires `this.held` (throws a
+   * clear error if `acquire()` was never called) and refuses on an already-`poisoned` instance.
+   *
+   * ANY `casManifest` failure means the manifest moved out from under this instance — a challenger
+   * bumped `epoch` (fenced us) or is mid-fence — so this ALWAYS poisons and throws `FencedError`,
+   * unlike the commit path's CasConflict-vs-ambiguous-error distinction: a heartbeat's whole job is to
+   * detect exactly this condition, so there is no "retry" case to special-case.
+   */
+  async heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void> {
+    return this.runExclusive(async () => {
+      if (this.held === null) {
+        throw new Error(`objectstore-substrate: heartbeat() on shard '${this.shard}' called without a held lease — acquire() first`);
+      }
+      if (this.poisoned) {
+        throw new Error(
+          `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        );
+      }
+      const next: Manifest = { ...this.cached.manifest, leaseExpiresAt: String(opts.now + opts.leaseTtlMs) };
+      try {
+        const { etag } = await casManifest(this.objectStore, this.shard, next, this.cached.etag);
+        this.cached = { manifest: next, etag };
+      } catch (e) {
+        this.poisoned = true;
+        this.held = null;
+        throw new FencedError(
+          `heartbeat fenced: manifest for shard '${this.shard}' moved (stale etag) — this writer is no longer current and is now poisoned ` +
+            `(re-acquire to continue). Cause: ${(e as Error)?.message ?? String(e)}`,
+        );
+      }
+    });
+  }
+
+  /** Voluntarily give up the held lease WITHOUT touching the bucket — the lease simply expires on its
+   *  own at `leaseExpiresAt` (Tier 3 Slice 4, Task 4.2). After this, `commitWriteBatch` refuses until
+   *  a fresh `acquire()`. */
+  release(): void {
+    this.held = null;
   }
 
   /** Chain `fn` onto the mutex so commits from this process serialize (see class doc). */
@@ -194,11 +338,30 @@ export class ObjectStoreDocStore implements DocStore {
 
   async commitWriteBatch(units: readonly CommitUnit[], shardId?: ShardId): Promise<bigint[]> {
     const tsList = await this.runExclusive(async () => {
+      // Tier 3 Slice 4, Task 4.2: commits REQUIRE a held lease — checked BEFORE the poisoned check
+      // (and before the empty-batch no-op) so a caller can never commit, not even a no-op, without
+      // having `acquire()`'d first.
+      if (this.held === null) {
+        throw new Error(`ObjectStoreDocStore for shard '${this.shard}': not the lease owner — call acquire() before committing`);
+      }
       // Empty batch is a no-op (matches SqliteDocStore.commitWriteBatch) — never write an empty segment.
       if (units.length === 0) return [];
       if (this.poisoned) {
         throw new Error(
           `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        );
+      }
+      // Defense in depth (Task 4.2): the cached manifest's epoch must still match the epoch this
+      // instance claimed via `acquire()`. It can only diverge if another `acquire()` on this SAME
+      // instance somehow changed `this.held` without updating `this.cached` to match (not possible in
+      // the current code paths) OR — the real case — a bug elsewhere let a commit slip through after a
+      // fence that `casManifest` itself hasn't yet been given the chance to reject. Either way, a
+      // divergence here means we can no longer trust our own bookkeeping enough to attempt the CAS.
+      if (this.cached.manifest.epoch !== this.held.epoch) {
+        this.poisoned = true;
+        throw new FencedError(
+          `commit fenced: shard '${this.shard}' cached epoch (${this.cached.manifest.epoch}) diverges from the held lease epoch ` +
+            `(${this.held.epoch}) — this writer was fenced by another acquirer and is now poisoned (re-acquire to continue)`,
         );
       }
       const localMax = await this.local.maxTimestamp();
@@ -226,11 +389,15 @@ export class ObjectStoreDocStore implements DocStore {
       const payload: SegmentPayload = { documents: allDocuments, indexUpdates: allIndexUpdates };
       await this.objectStore.putImmutable(segmentKey(this.shard, seqno), encodeSegment(payload));
 
-      // Spread `this.cached.manifest` FIRST so `snapshotTs`/`snapshotSegBase` (Task 3.2) carry
-      // forward untouched — a commit never changes what the latest snapshot covers, only
-      // `snapshot()` does — then override the fields this commit actually advances.
+      // Spread `this.cached.manifest` FIRST so `snapshotTs`/`snapshotSegBase` (Task 3.2) and
+      // `writerId`/`leaseExpiresAt` (Task 4.2 — a commit is not a lease renewal, only `heartbeat` is)
+      // carry forward untouched — then override the fields this commit actually advances. `epoch` is
+      // set EXPLICITLY from `this.held.epoch` (equal to `this.cached.manifest.epoch` per the assert
+      // above, but explicit here as the defense-in-depth belt to that assert's suspenders) rather than
+      // left to the spread, so this commit can never accidentally carry a stale epoch forward.
       const next: Manifest = {
         ...this.cached.manifest,
+        epoch: this.held.epoch,
         frontierTs: maxTs.toString(),
         tsCounter: maxTs.toString(),
         segments: [...this.cached.manifest.segments, seqno],

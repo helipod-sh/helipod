@@ -78,6 +78,9 @@ afterEach(async () => {
 async function materializationScenario(makeBucket: () => Promise<ObjectStore>): Promise<void> {
   const bucket = await makeBucket();
   const store1 = await ObjectStoreDocStore.open({ objectStore: bucket, shard: SHARD, local: freshLocal() });
+  // Tier 3 Slice 4, Task 4.2: commits now require a held lease.
+  const acquired = await store1.acquire({ writerId: "w", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+  if (!acquired.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${acquired.heldBy})`);
 
   const idA = newDocumentId(TABLE);
   const idB = newDocumentId(TABLE);

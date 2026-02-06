@@ -19,6 +19,15 @@ function freshLocal(): SqliteDocStore {
   return new SqliteDocStore(isBun ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" }));
 }
 
+/** `ObjectStoreDocStore.open` + `acquire()` with a huge TTL (Tier 3 Slice 4, Task 4.2) — commits now
+ *  require a held lease. */
+async function openAndAcquire(objectStore: FsObjectStore, shard: string, local: SqliteDocStore): Promise<ObjectStoreDocStore> {
+  const store = await ObjectStoreDocStore.open({ objectStore, shard, local });
+  const result = await store.acquire({ writerId: "w", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+  if (!result.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${result.heldBy})`);
+  return store;
+}
+
 const dirs: string[] = [];
 async function freshBucket(): Promise<FsObjectStore> {
   const dir = await mkdtemp(join(tmpdir(), "objectstore-substrate-snap-test-"));
@@ -43,7 +52,7 @@ const SNAPSHOT_EVERY = 8;
 describe("ObjectStoreDocStore snapshot cadence + fast bootstrap", () => {
   it("3.2a: cadence writes a snapshot object and records it on the manifest, state unchanged", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     const ids: InternalDocumentId[] = [];
     for (let i = 0; i < SNAPSHOT_EVERY; i++) {
@@ -72,7 +81,7 @@ describe("ObjectStoreDocStore snapshot cadence + fast bootstrap", () => {
 
   it("3.2b: fast-bootstrap proof — a fresh open materializes full state from snapshot + tail alone, pre-snapshot segments deleted", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     // Commit enough to trigger a snapshot.
     const preIds: InternalDocumentId[] = [];
@@ -133,7 +142,7 @@ describe("ObjectStoreDocStore snapshot cadence + fast bootstrap", () => {
 describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch review, Task 3.3 fix)", () => {
   it("3.3-fix-a: segments length is bounded to the post-snapshot tail across MANY commits — never grows with total commit count", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     const totalCommits = 3 * SNAPSHOT_EVERY;
     let sawASnapshotTrim = false;
@@ -162,7 +171,7 @@ describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch revi
 
   it("3.3-fix-b: empty-tail bootstrap — a snapshot covering ALL segments (empty trimmed tail) still yields the correct nextSeqno on fresh open, not 0 (the old Math.max(...[])→0 trap)", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     // Commit EXACTLY SNAPSHOT_EVERY docs so the cadence snapshot fires and covers every committed
     // segment — the trimmed tail is empty (`segments: []`), the exact case `Math.max(...[])` would
@@ -182,7 +191,7 @@ describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch revi
     // A FRESH open over this exact bucket state must derive nextSeqno = SNAPSHOT_EVERY (from the
     // explicit `nextSeqno` field), NOT 0 (which `Math.max(...cached.manifest.segments)` would have
     // produced against an empty trimmed array).
-    const fresh = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const fresh = await openAndAcquire(objectStore, "0", freshLocal());
     expect(await fresh.maxTimestamp()).toBe(priorMaxTs); // bootstrap restored the snapshot correctly
 
     const nextId = newDocumentId(TABLE);
