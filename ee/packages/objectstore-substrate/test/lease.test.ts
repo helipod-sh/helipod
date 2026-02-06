@@ -152,32 +152,32 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeB.close();
   });
 
-  it("4.2e: a zombie writer's independently-orphaned commit cannot clobber the live owner's data — the manifest still references only the live owner's segments after a fresh bootstrap (Critical, Task 4.2 review; seqno numbering updated for Finding 1's skip-one-on-acquire, Task 4.5)", async () => {
+  it("4.2e: a zombie writer's independently-orphaned commit cannot clobber the live owner's data — the manifest still references only the live owner's segments after a fresh bootstrap (Critical, Task 4.2 review; seqno numbering updated for Finding 1's durable-burn-on-acquire, Task 4.5/4.6)", async () => {
     // The review's original Critical finding: A commits seg/0 (nextSeqno=1). B acquires (fences A,
     // epoch 2) and commits. Zombie A, unaware it's fenced, then commits reusing a seqno.
     //
-    // UPDATED (Task 4.5): B's acquire now SKIPS the one seqno (1) a just-fenced A could have dirtied
-    // (skip-one-on-acquire, Finding 1) — so B's own commit lands at seg/2, not seg/1. Zombie A's
-    // second commit (still using ITS OWN uncorrected `nextSeqno = 1`, since A was never told it was
-    // fenced) therefore targets seg/1, which is now simply UNCLAIMED rather than B's live data — its
-    // `putImmutable` succeeds (no collision to keep-first-reject), but A's manifest CAS still fails on
-    // its own stale etag (fenced), so the write it just landed is an ORPHAN: durable, but never
-    // manifest-referenced, exactly like Finding 1's own scenario. This test now demonstrates the
-    // OUTCOME both fixes jointly guarantee: whichever of {keep-first, skip-one} is what actually
-    // prevents a given collision, B's committed data is never shadowed and the zombie's write never
-    // enters the materialized log.
+    // UPDATED (Task 4.5/4.6): B's acquire now durably BURNS the one seqno (1) a just-fenced A could
+    // have dirtied (durable-burn-on-acquire: the claim CAS advances manifest.nextSeqno past it) — so
+    // B's own commit lands at seg/2, not seg/1. Zombie A's second commit (still using ITS OWN
+    // uncorrected `nextSeqno = 1`, since A was never told it was fenced) therefore targets seg/1, which
+    // is now simply UNCLAIMED rather than B's live data — its `putImmutable` succeeds (no collision to
+    // keep-first-reject), but A's manifest CAS still fails on its own stale etag (fenced), so the write
+    // it just landed is an ORPHAN: durable, but never manifest-referenced, exactly like Finding 1's own
+    // scenario. This test demonstrates the OUTCOME both fixes jointly guarantee: whichever of
+    // {keep-first, durable-burn} prevents a given collision, B's committed data is never shadowed and
+    // the zombie's write never enters the materialized log.
     const objectStore = await freshBucket();
     const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
     const idA0 = newDocumentId(TABLE);
     await storeA.commitWrite([doc(idA0, "a-seg0")], []); // A's seg/0 — A's local nextSeqno is now 1
 
-    // B acquires past A's lease expiry (fences A, bumps epoch to 2; skip-one-on-acquire advances B's
-    // OWN nextSeqno past the seqno (1) A's stalled zombie could dirty) and commits its own segment.
+    // B acquires past A's lease expiry (fences A, bumps epoch to 2; durable-burn-on-acquire advances
+    // the manifest cursor past the seqno (1) A's stalled zombie could dirty) and commits its own segment.
     const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
     const idB1 = newDocumentId(TABLE);
-    await storeB.commitWrite([doc(idB1, "b-seg2")], []); // lands as seg/2 (skip-one moved past seg/1)
+    await storeB.commitWrite([doc(idB1, "b-seg2")], []); // lands as seg/2 (durable burn moved past seg/1)
 
     const manifestAfterB = await readManifestRaw(objectStore);
     expect(manifestAfterB.segments).toEqual([0, 2]);
@@ -215,15 +215,15 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeC.close();
   });
 
-  it("4.5: skip-one-on-acquire fences a fenced predecessor's DIRTY (uncommitted) orphan segment — a taking-over writer's own commit must not let the orphan shadow its bytes (Critical, whole-branch review, Task 4.5)", async () => {
+  it("4.5: durable-burn-on-acquire fences a fenced predecessor's DIRTY (uncommitted) orphan segment — a taking-over writer's own commit must not let the orphan shadow its bytes (Critical, whole-branch review, Task 4.5/4.6)", async () => {
     // The exact scenario Finding 1 describes, distinct from 4.2e's "zombie commits AFTER B already
     // took the seqno" case: here A's `putImmutable` for its OWN commit lands durably, but A stalls
     // BEFORE its `casManifest` — so the manifest's `nextSeqno` is UNCHANGED and the segment A just
-    // wrote is an orphan (durable, but never referenced). Without the skip-one fence, a taking-over B
-    // would reuse that exact seqno, its `putImmutable` would silently keep-first no-op against A's
+    // wrote is an orphan (durable, but never referenced). Without the durable-burn fence, a taking-over
+    // B would reuse that exact seqno, its `putImmutable` would silently keep-first no-op against A's
     // orphan bytes, and B's manifest CAS would still succeed — referencing A's (failed) data instead
-    // of B's. `acquire()`'s skip-one-on-acquire (`this.nextSeqno = next.nextSeqno + 1`) must prevent
-    // this by construction.
+    // of B's. `acquire()`'s durable-burn-on-acquire (the claim CAS advances manifest.nextSeqno past the
+    // orphan, and this writer starts at that advanced value) must prevent this by construction.
     const objectStore = await freshBucket();
     const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
