@@ -3,3 +3,4 @@ export { readManifest, createManifest, casManifest, type Manifest } from "./mani
 export { ObjectStoreDocStore, type ObjectStoreDocStoreOpts } from "./object-doc-store";
 export { FencedError } from "./fenced-error";
 export { encodeSnapshot, decodeSnapshot, snapshotKey, writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
+export { readGlobals, createGlobals, ensureGlobals, type FleetGlobals } from "./globals";

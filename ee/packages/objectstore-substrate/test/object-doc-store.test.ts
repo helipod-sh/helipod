@@ -21,6 +21,22 @@ function freshLocal(): SqliteDocStore {
   return new SqliteDocStore(isBun ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" }));
 }
 
+/** `ObjectStoreDocStore.open` + `acquire()` with a huge TTL (Tier 3 Slice 4, Task 4.2) — commits now
+ *  require a held lease, so every test that commits needs this instead of bare `open`. A huge TTL
+ *  means the lease never expires within a test's lifetime unless the test explicitly drives `now`
+ *  forward past it (the fence tests do that themselves via a second `acquire()` call). */
+async function openAndAcquire(
+  objectStore: ObjectStore,
+  shard: string,
+  local: SqliteDocStore,
+  writerId = "w",
+): Promise<ObjectStoreDocStore> {
+  const store = await ObjectStoreDocStore.open({ objectStore, shard, local });
+  const result = await store.acquire({ writerId, leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+  if (!result.acquired) throw new Error(`test setup: acquire() unexpectedly refused (heldBy ${result.heldBy})`);
+  return store;
+}
+
 /** A local store whose Nth `write()` call throws (simulates a post-CAS local-apply disk fault), all
  *  other methods delegating to a real SqliteDocStore. */
 function throwingWriteLocal(real: SqliteDocStore, throwOnWriteCall: number): SqliteDocStore {
@@ -89,14 +105,22 @@ describe("ObjectStoreDocStore", () => {
     const manifestEntry = await objectStore.get("s0/manifest");
     expect(manifestEntry).not.toBeNull();
     const manifest = JSON.parse(new TextDecoder().decode(manifestEntry!.body));
-    expect(manifest).toEqual({ epoch: 0, frontierTs: "0", tsCounter: "0", segments: [], nextSeqno: 0 });
+    expect(manifest).toEqual({
+      epoch: 0,
+      frontierTs: "0",
+      tsCounter: "0",
+      segments: [],
+      nextSeqno: 0,
+      writerId: "",
+      leaseExpiresAt: "0",
+    });
 
     await store.close();
   });
 
   it("commitWrite of one doc returns ts=1, lands seg/0, advances the manifest, and is visible via get", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     const id = newDocumentId(TABLE);
     const ts = await store.commitWrite([doc(id, "hello")], []);
@@ -121,7 +145,7 @@ describe("ObjectStoreDocStore", () => {
 
   it("commitWriteBatch stamps strictly-increasing ts per unit and returns them in order", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     const idA = newDocumentId(TABLE);
     const idB = newDocumentId(TABLE);
@@ -136,35 +160,49 @@ describe("ObjectStoreDocStore", () => {
     await store.close();
   });
 
-  it("fence: a stale-etag committer throws FencedError with no new segment and no local write", async () => {
+  it("fence: after a challenger's acquire bumps the epoch, the stale owner's next commit throws FencedError and is poisoned (Tier 3 Slice 4)", async () => {
+    // Under the Task 4.2 lease protocol, a well-behaved `acquire()` ALWAYS re-syncs its caller's local
+    // `nextSeqno` to the manifest's current frontier first (see `materializeTo`) — so the OLD
+    // "a store with a stale nextSeqno reuses an already-consumed seqno" collision this test used to
+    // exercise can no longer happen through the acquire() gateway. What replaces it: a challenger's
+    // acquire() bumps `epoch` (the fence) WITHOUT the original owner knowing — its next commit attempt
+    // finds its cached manifest etag stale and throws `FencedError`.
     const objectStore = await freshBucket();
     const store1 = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
-    const store2 = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await store1.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
 
     const id1 = newDocumentId(TABLE);
     await store1.commitWrite([doc(id1, "first")], []);
 
-    // store2 opened before store1 committed — its cached manifest etag is now stale.
+    // A different writer ("B") acquires once A's lease has expired (now=2000 > A's leaseExpiresAt=
+    // 1000) — a legitimate takeover that bumps the manifest's epoch, fencing store1 without store1
+    // knowing yet (its cached epoch is now stale).
+    const store2 = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await store2.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+
+    // store1, unaware it was fenced, attempts a second commit — the manifest CAS fails (moved etag),
+    // throwing FencedError and poisoning the instance.
     const id2 = newDocumentId(TABLE);
-    await expect(store2.commitWrite([doc(id2, "second")], [])).rejects.toBeInstanceOf(FencedError);
+    await expect(store1.commitWrite([doc(id2, "second")], [])).rejects.toBeInstanceOf(FencedError);
 
-    // The fenced store is now poisoned (C1): a further commit is refused, never reuses a seqno.
-    await expect(store2.commitWrite([doc(newDocumentId(TABLE), "third")], [])).rejects.toThrow(/poisoned|re-open/i);
+    // The fenced store is now poisoned AND its held lease cleared (C1 + Finding 2, Task 4.5 — the
+    // `held === null` guard is checked before `poisoned`, so the message is now "not the lease owner"
+    // rather than "poisoned"; either way a further commit is durably refused).
+    await expect(store1.commitWrite([doc(newDocumentId(TABLE), "third")], [])).rejects.toThrow(/not the lease owner/i);
 
-    // No new segment landed for store2's attempt — still exactly the one segment store1 wrote.
-    // (fs keep-first; store2's orphan PUT collided with seqno 0 — see the C1 test for the real hazard.)
-    const segments = await objectStore.list("s0/seg/");
-    expect(segments).toEqual(["s0/seg/0"]);
-
-    // The manifest still reflects only store1's commit.
+    // The manifest still reflects only store1's first commit, now owned by B at epoch 2 — store1's
+    // failed second attempt's segment PUT landed as an unreferenced orphan (reclaiming it is GC's
+    // concern, not correctness here), but the manifest itself never names it.
     const manifestEntry = await objectStore.get("s0/manifest");
     const manifest = JSON.parse(new TextDecoder().decode(manifestEntry!.body));
     expect(manifest.segments).toEqual([0]);
     expect(manifest.frontierTs).toBe("1");
+    expect(manifest.writerId).toBe("B");
+    expect(manifest.epoch).toBe(2);
 
-    // store2's local store never received the write.
-    expect(await store2.get(id2)).toBeNull();
-    // A fresh store bootstrapped from the bucket only ever sees store1's document.
+    // store1's local store never received "second".
+    expect(await store1.get(id2)).toBeNull();
+    // A fresh store bootstrapped from the bucket only ever sees store1's first commit.
     const store3 = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await store3.get(id2)).toBeNull();
     expect((await store3.get(id1))!.value.value.body).toBe("first");
@@ -176,7 +214,7 @@ describe("ObjectStoreDocStore", () => {
 
   it("bootstrap: a second ObjectStoreDocStore.open over the same bucket materializes the committed doc", async () => {
     const objectStore = await freshBucket();
-    const store1 = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store1 = await openAndAcquire(objectStore, "0", freshLocal());
     const id = newDocumentId(TABLE);
     await store1.commitWrite([doc(id, "durable")], []);
     await store1.close();
@@ -192,7 +230,7 @@ describe("ObjectStoreDocStore", () => {
 
   it("reads forward to the local store: setupSchema/write/scan/count/globals work through the decorator", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     expect(await store.writeGlobalIfAbsent("k", "v1")).toBe(true);
     expect(await store.writeGlobalIfAbsent("k", "v2")).toBe(false);
@@ -210,33 +248,37 @@ describe("ObjectStoreDocStore", () => {
 
   it("commitWriteBatch([]) is a no-op — returns [] and writes no segment (matches SqliteDocStore)", async () => {
     const objectStore = await freshBucket();
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
     expect(await store.commitWriteBatch([])).toEqual([]);
     expect(await objectStore.get("s0/seg/0")).toBeNull(); // no segment written
     expect((await readManifestRaw(objectStore)).segments).toEqual([]); // manifest unchanged
     await store.close();
   });
 
-  it("post-CAS-landed generic error poisons the instance (S3-overwrite seqno-reuse corruption guard, C1)", async () => {
+  it("post-CAS-landed generic error poisons the instance (ambiguous-CAS untrustworthy-cursor guard, C1)", async () => {
     // commit #1's casManifest LANDS (durable) then throws a generic error (lost response). Call #1 is
-    // open()'s create-only manifest CAS (must succeed), so throw on call #2.
-    const objectStore = casLandsThenThrows(await freshBucket(), 2);
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    // open()'s create-only manifest CAS, call #2 is acquire()'s claim CAS (both must succeed), so
+    // throw on call #3 — commit #1's own CAS.
+    const objectStore = casLandsThenThrows(await freshBucket(), 3);
+    const store = await openAndAcquire(objectStore, "0", freshLocal());
 
     // commit #1: seg/0 PUT, manifest CAS lands durably, then the generic error surfaces → poison + rethrow.
     await expect(store.commitWrite([doc(newDocumentId(TABLE), "a")], [])).rejects.toThrow(/lost response/i);
     // the CAS DID land — the manifest references seg/0 durably.
     expect((await readManifestRaw(objectStore)).segments).toEqual([0]);
-    // CRITICAL: the instance must NOT serve another commit (which would reuse seqno 0 against a stale
-    // cursor and overwrite the durable seg/0 on an overwrite-semantics store) — it is poisoned.
+    // CRITICAL: the instance must NOT serve another commit off its now-untrustworthy cursor. (Reusing
+    // seqno 0 can no longer OVERWRITE a live segment — `putImmutable` is keep-first on every adapter,
+    // including S3 via `IfNoneMatch:"*"` — but the cursor itself is still unreliable after an ambiguous
+    // CAS, so poisoning + demanding a re-open remains correct.) It is poisoned.
     await expect(store.commitWrite([doc(newDocumentId(TABLE), "b")], [])).rejects.toThrow(/poisoned|re-open/i);
     await store.close();
   });
 
   it("post-CAS local-apply failure: commit is DURABLE, instance is poisoned, further commits refused", async () => {
     const objectStore = await freshBucket();
-    // 2nd write() (commit #2's local apply) throws; open()/commit#1's writes succeed first.
-    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: throwingWriteLocal(freshLocal(), 2) });
+    // 2nd write() (commit #2's local apply) throws; open()/acquire()/commit#1's writes succeed first
+    // (open/acquire make zero `local.write` calls on a fresh, commit-less bucket).
+    const store = await openAndAcquire(objectStore, "0", throwingWriteLocal(freshLocal(), 2));
 
     await store.commitWrite([doc(newDocumentId(TABLE), "a")], []); // commit #1 — local write #1 ok
 
