@@ -110,11 +110,13 @@ export class ObjectStoreDocStore implements DocStore {
    *  successful CAS (never speculatively), under `mutex`. */
   private cached: { manifest: Manifest; etag: string };
   /** The next free segment seqno for THIS process — advanced by one on every successful commit CAS
-   *  (dense in the common case), AND skipped forward by one extra on a successful `acquire()`
-   *  (skip-one-on-acquire, Finding 1/Task 4.5 — see `acquire()`'s doc) to fence out a seqno a just-
-   *  fenced predecessor may have orphaned. Non-dense-by-one-per-takeover is expected and harmless:
-   *  never read as `[0..n]` — `materializeTo`/GC always iterate the manifest's own explicit
-   *  `segments`/`nextSeqno` fields. */
+   *  (dense in the common case), AND durably burned forward by one extra on every successful
+   *  TAKEOVER `acquire()` (Task 4.6, superseding the earlier in-process-only skip-one of Task 4.5 —
+   *  see `acquire()`'s doc) to fence out the seqno the immediate predecessor may have orphaned. The
+   *  burn lives in the DURABLE `manifest.nextSeqno` itself (not just this in-process field) so it
+   *  survives across a CHAIN of stalled takeovers with no successful commit in between — see
+   *  `acquire()`. Non-dense-by-one-per-takeover is expected and harmless: never read as `[0..n]` —
+   *  `materializeTo`/GC always iterate the manifest's own explicit `segments`/`nextSeqno` fields. */
   private nextSeqno: number;
   /** Set when a post-CAS local apply fails: the commit is durable but the local materialization is
    *  inconsistent, so further commits are refused until the store is re-opened (re-bootstrapped). */
@@ -270,46 +272,56 @@ export class ObjectStoreDocStore implements DocStore {
 
       await this.materializeTo(manifest);
 
+      // DURABLE-BURN-ON-ACQUIRE (Task 4.6, superseding Task 4.5's in-process-only skip-one — see the
+      // re-review that found it insufficient): a predecessor we're about to fence may have
+      // `putImmutable`'d a segment at EXACTLY `manifest.nextSeqno` (its in-flight commit's object PUT)
+      // and then stalled/crashed BEFORE its own `casManifest` — that segment is a durable but
+      // UNREFERENCED orphan, never covered by `materializeTo` above (it only replays
+      // `manifest.segments`). Because `commitWriteBatch` writes EXACTLY ONE segment per flush (the
+      // invariant documented at its `putImmutable` call site below), a fenced writer can have orphaned
+      // AT MOST ONE seqno — the one it would have referenced next. If a taking-over writer's first
+      // commit reused that same seqno, its `putImmutable` would silently no-op (keep-first) against
+      // the orphan's bytes while its manifest CAS still succeeds (referencing a segment that holds the
+      // OLD writer's data, not the new writer's) — an acknowledged write silently lost.
+      //
+      // Task 4.5's original fix only advanced THIS PROCESS's in-memory `nextSeqno`, leaving the
+      // DURABLE `manifest.nextSeqno` untouched — correct for exactly one stalled predecessor, but a
+      // CHAIN of ≥2 writers that each stall BEFORE their own commit CAS (a correlated object-store
+      // outage — precisely the failover trigger) each re-read the SAME unmoved durable cursor and
+      // recompute the SAME target seqno, so generation N+2 can collide with generation N+1's orphan.
+      // The fix: fold the burn into THIS claim CAS so it moves the DURABLE cursor on EVERY takeover,
+      // not just this process's view of it — `manifest.nextSeqno` becomes a monotone cursor advanced
+      // by BOTH a successful commit AND every takeover-acquire, so no live writer ever targets a seqno
+      // a prior generation may have written, no matter how many generations stalled in a row.
+      //
+      // GATED on `manifest.epoch > 0` (the PRE-bump value just read, i.e. "has anyone EVER held this
+      // shard's lease before"): a commit can only exist/stall if someone previously held the lease
+      // (`commitWriteBatch` requires `this.held`, which only ever comes from a prior successful
+      // `acquire()`), so on the FIRST-EVER acquire of a brand-new manifest (`epoch === 0`, `nextSeqno
+      // === 0`) there is provably no predecessor and nothing to burn — every commit lands densely
+      // from `seg/0`, matching every pre-Slice-4.5 test's assumption. Every acquire AFTER that first
+      // one (a genuine takeover OR the same writer's own re-acquire, e.g. after a poisoning event) DID
+      // have a predecessor that could have stalled mid-commit, so it always burns — regardless of
+      // whether `opts.writerId` matches the previous owner, since a crash-and-restart can resume under
+      // the identical writerId.
+      const burn = manifest.epoch > 0;
       const next: Manifest = {
         ...manifest,
         epoch: manifest.epoch + 1,
         writerId: opts.writerId,
         leaseExpiresAt: String(opts.now + opts.leaseTtlMs),
+        nextSeqno: burn ? manifest.nextSeqno + 1 : manifest.nextSeqno,
       };
       try {
         const { etag: newEtag } = await casManifest(this.objectStore, this.shard, next, etag);
         this.cached = { manifest: next, etag: newEtag };
         this.held = { epoch: next.epoch, writerId: opts.writerId };
         this.poisoned = false;
-        // SKIP-ONE-ON-ACQUIRE (whole-branch review, Finding 1 — dirty-fence orphan shadow, Task 4.5):
-        // a predecessor we just fenced may have `putImmutable`'d a segment at EXACTLY
-        // `manifest.nextSeqno` (its in-flight commit's object PUT) and then stalled/crashed BEFORE its
-        // own `casManifest` — that segment is a durable but UNREFERENCED orphan, never covered by
-        // `materializeTo` above (it only replays `manifest.segments`). Because `commitWriteBatch` writes
-        // EXACTLY ONE segment per flush (the invariant documented at its `putImmutable` call site below),
-        // a fenced writer can have orphaned AT MOST ONE seqno — the one it would have referenced next.
-        // If THIS writer's first commit reused that same seqno, its `putImmutable` would silently
-        // no-op (keep-first) against the orphan's bytes while its manifest CAS still succeeds
-        // (referencing a segment that holds the OLD writer's data, not this writer's) — an
-        // acknowledged write silently lost. Skipping the one seqno a fenced predecessor could have
-        // dirtied closes this: the durable cursor (`manifest.nextSeqno`, unaffected — only THIS
-        // in-process cursor advances) is left alone, so segments become non-dense by one integer per
-        // takeover (harmless: bootstrap/GC iterate the explicit `manifest.segments` array and read
-        // `manifest.nextSeqno` directly, never assume `[0..n]` density — see `materializeTo`'s doc).
-        //
-        // GATED on `manifest.epoch > 0` (the PRE-bump value just read, i.e. "has anyone EVER held this
-        // shard's lease before"): a commit can only exist/stall if someone previously held the lease
-        // (`commitWriteBatch` requires `this.held`, which only ever comes from a prior successful
-        // `acquire()`), so on the FIRST-EVER acquire of a brand-new manifest (`epoch === 0`, `nextSeqno
-        // === 0`) there is provably no predecessor and nothing to skip — every commit lands densely
-        // from `seg/0`, matching every pre-Slice-4.5 test's assumption. Every acquire AFTER that first
-        // one (a genuine takeover OR the same writer's own re-acquire, e.g. after a poisoning event) DID
-        // have a predecessor that could have stalled mid-commit, so it always skips — regardless of
-        // whether `opts.writerId` matches the previous owner, since a crash-and-restart can resume under
-        // the identical writerId.
-        if (manifest.epoch > 0) {
-          this.nextSeqno = next.nextSeqno + 1;
-        }
+        // The durable cursor is already correctly advanced (or not) by `next.nextSeqno` above — just
+        // adopt it. Segments become non-dense by one integer per takeover (harmless: bootstrap/GC
+        // iterate the explicit `manifest.segments` array and read `manifest.nextSeqno` directly, never
+        // assume `[0..n]` density — see `materializeTo`'s doc).
+        this.nextSeqno = next.nextSeqno;
         return { acquired: true as const };
       } catch (e) {
         if (!isCasConflict(e)) {
@@ -433,14 +445,15 @@ export class ObjectStoreDocStore implements DocStore {
       const maxTs = tsList[tsList.length - 1]!;
       const seqno = this.nextSeqno;
       const payload: SegmentPayload = { documents: allDocuments, indexUpdates: allIndexUpdates };
-      // INVARIANT (load-bearing for `acquire()`'s skip-one-on-acquire fence, Finding 1, Task 4.5):
-      // this flush writes EXACTLY ONE segment (one `putImmutable`, one `seqno`). That is what bounds a
-      // fenced-mid-commit writer to AT MOST ONE orphaned seqno — the one it would have referenced here
-      // — which is what makes "skip exactly one seqno on takeover" airtight. A future change to batch
-      // a flush across MULTIPLE segments (multiple `putImmutable`s / multiple seqnos per
-      // `commitWriteBatch` call) would let a mid-flush crash orphan more than one, and MUST revisit
-      // `acquire()`'s skip-one accordingly. Group commit (multiple `CommitUnit`s coalesced into this
-      // one call) is fine as-is — it's still one segment.
+      // INVARIANT (load-bearing for `acquire()`'s durable-burn-on-acquire fence, Task 4.6/4.5): this
+      // flush writes EXACTLY ONE segment (one `putImmutable`, one `seqno`). That is what bounds a
+      // fenced-mid-commit writer to AT MOST ONE orphaned seqno per takeover — the one it would have
+      // referenced here — which is what makes "burn exactly one seqno per takeover" airtight for
+      // arbitrarily long chains of stalled generations. A future change to batch a flush across
+      // MULTIPLE segments (multiple `putImmutable`s / multiple seqnos per `commitWriteBatch` call)
+      // would let a mid-flush crash orphan more than one, and MUST revisit `acquire()`'s burn
+      // accordingly. Group commit (multiple `CommitUnit`s coalesced into this one call) is fine as-is
+      // — it's still one segment.
       await this.objectStore.putImmutable(segmentKey(this.shard, seqno), encodeSegment(payload));
 
       // Spread `this.cached.manifest` FIRST so `snapshotTs`/`snapshotSegBase` (Task 3.2) and
@@ -480,16 +493,18 @@ export class ObjectStoreDocStore implements DocStore {
         // instance must be RE-OPENED (re-bootstrapped from the true manifest), which resyncs
         // `cached`/`nextSeqno`.
         //
-        // REVERSE DIRECTION (whole-branch review, Finding 1, Task 4.5): the just-PUT `seg/${seqno}` is
-        // NOT simply "an unreferenced orphan of our own, harmless to leave behind" — if THIS writer is
-        // in fact the one being fenced right now (a challenger's `acquire()` just won), that orphan sits
-        // at exactly the seqno the challenger's manifest still points at as `nextSeqno`. Keep-first means
-        // the challenger's own first commit could otherwise reuse this seqno, have ITS `putImmutable`
-        // silently no-op against OUR bytes, and CAS a manifest that references a segment holding OUR
-        // (failed) data instead of theirs — an acknowledged write lost. What makes this safe is
-        // `acquire()`'s skip-one-on-acquire fence (see its doc comment): a taking-over writer always
-        // skips the one seqno a just-fenced predecessor could have dirtied, so it never reuses this key.
-        // Reclaiming the orphan itself is still GC's concern, not a correctness one.
+        // REVERSE DIRECTION (whole-branch review, Finding 1, Task 4.5, robustified Task 4.6): the
+        // just-PUT `seg/${seqno}` is NOT simply "an unreferenced orphan of our own, harmless to leave
+        // behind" — if THIS writer is in fact the one being fenced right now (a challenger's
+        // `acquire()` just won), that orphan sits at exactly the seqno the challenger's manifest still
+        // points at as `nextSeqno`. Keep-first means the challenger's own first commit could otherwise
+        // reuse this seqno, have ITS `putImmutable` silently no-op against OUR bytes, and CAS a
+        // manifest that references a segment holding OUR (failed) data instead of theirs — an
+        // acknowledged write lost. What makes this safe, even across a CHAIN of such stalled
+        // generations, is `acquire()`'s durable-burn-on-acquire fence (see its doc comment): every
+        // takeover durably advances `manifest.nextSeqno` past the seqno a just-fenced predecessor could
+        // have dirtied, so no later generation ever reuses this key. Reclaiming the orphan itself is
+        // still GC's concern, not a correctness one.
         this.poisoned = true;
         if (isCasConflict(e)) {
           // Symmetric with `heartbeat()`'s fence path (Finding 2, whole-branch review, Task 4.5): a

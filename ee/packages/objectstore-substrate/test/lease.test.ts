@@ -288,6 +288,83 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeC.close();
   });
 
+  it("4.6: durable-burn-on-acquire is robust across a CHAIN of stalled takeovers with NO successful commit between them — the gap Task 4.5's in-process-only skip-one missed (whole-branch v2 re-review)", async () => {
+    // A commits once (manifest.nextSeqno lands at N=1), then A's SECOND commit stalls before its own
+    // manifest CAS — an orphan at seg/N, durable but unreferenced. B takes over (its claim CAS must
+    // durably burn nextSeqno to N+1) and ALSO stalls before ITS first commit's manifest CAS — a
+    // SECOND orphan at seg/{N+1} — so NO successful commit ever lands between the two takeovers. With
+    // the old Task 4.5 fix (in-process-only `this.nextSeqno = manifest.nextSeqno + 1`, leaving the
+    // DURABLE manifest.nextSeqno untouched by acquire), C's takeover would re-read the SAME unmoved
+    // durable cursor (still N) and recompute the SAME target (N+1) that B just orphaned — a collision
+    // that resurrects B's failed write and loses C's. The fix (Task 4.6) makes EVERY takeover durably
+    // burn the cursor, so C lands at N+2 no matter how many generations stalled in a row.
+    const objectStore = await freshBucket();
+    const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+    const idA0 = newDocumentId(TABLE);
+    await storeA.commitWrite([doc(idA0, "a-seg-committed")], []); // lands as seg/0; manifest.nextSeqno -> 1
+
+    const manifestAfterA = await readManifestRaw(objectStore);
+    const N = manifestAfterA.nextSeqno;
+    expect(N).toBe(1);
+
+    // A's SECOND commit: object PUT lands durably at seg/N, but stalls before the manifest CAS that
+    // would reference it — an orphan, modeled directly against the bucket (same technique as the 4.5
+    // test above) to avoid racing real timers.
+    const idAOrphan = newDocumentId(TABLE);
+    await objectStore.putImmutable(`s0/seg/${N}`, encodeSegment({ documents: [doc(idAOrphan, "a-orphan-uncommitted")], indexUpdates: [] }));
+
+    // B takes over past A's lease expiry. Its claim CAS must durably burn manifest.nextSeqno to N+1
+    // — assert this BEFORE B ever attempts a commit, proving the burn happens at acquire time itself.
+    const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+    const manifestAfterB = await readManifestRaw(objectStore);
+    expect(manifestAfterB.nextSeqno).toBe(N + 1);
+
+    // B's FIRST commit ALSO stalls before its manifest CAS — a second orphan at seg/{N+1}. B never
+    // successfully commits, so no commit advances the durable cursor between the two takeovers.
+    const idBOrphan = newDocumentId(TABLE);
+    await objectStore.putImmutable(`s0/seg/${N + 1}`, encodeSegment({ documents: [doc(idBOrphan, "b-orphan-uncommitted")], indexUpdates: [] }));
+
+    // C takes over past B's lease expiry.
+    const storeC = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeC.acquire({ writerId: "C", leaseTtlMs: 1000, now: 4000 })).toEqual({ acquired: true });
+    const manifestAfterC = await readManifestRaw(objectStore);
+    // THE assertion the chain exercises: the durable cursor must have advanced past BOTH orphans, not
+    // just A's — exactly what the old in-process-only skip-one got wrong (it would leave this at N).
+    expect(manifestAfterC.nextSeqno).toBe(N + 2);
+
+    const idC = newDocumentId(TABLE);
+    await storeC.commitWrite([doc(idC, "c-bytes")], []);
+    const manifestAfterCCommit = await readManifestRaw(objectStore);
+    expect(manifestAfterCCommit.segments).toEqual([0, N + 2]);
+    expect(manifestAfterCCommit.nextSeqno).toBe(N + 3);
+
+    // C's committed segment holds ONLY C's bytes — not shadowed by (or shadowing) either orphan.
+    const cSeg = await objectStore.get(`s0/seg/${N + 2}`);
+    expect(cSeg).not.toBeNull();
+    const cSegText = new TextDecoder().decode(cSeg!.body);
+    expect(cSegText).toContain("c-bytes");
+    expect(cSegText).not.toContain("a-orphan-uncommitted");
+    expect(cSegText).not.toContain("b-orphan-uncommitted");
+
+    // A fresh bootstrap sees ONLY A's real commit (seg/0) and C's committed segment — NEITHER orphan
+    // ever entered materialized state, and `segments` excludes both N and N+1.
+    const storeD = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect((await storeD.get(idA0))!.value.value.body).toBe("a-seg-committed");
+    expect((await storeD.get(idC))!.value.value.body).toBe("c-bytes");
+    expect(await storeD.get(idAOrphan)).toBeNull();
+    expect(await storeD.get(idBOrphan)).toBeNull();
+    const finalManifest = await readManifestRaw(objectStore);
+    expect(finalManifest.segments).not.toContain(N);
+    expect(finalManifest.segments).not.toContain(N + 1);
+
+    await storeA.close();
+    await storeB.close();
+    await storeC.close();
+    await storeD.close();
+  });
+
   it("4.2d: heartbeat renews the lease — a challenger against the OLD expiry is refused", async () => {
     const objectStore = await freshBucket();
     const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
