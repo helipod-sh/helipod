@@ -38,6 +38,16 @@ export async function createGlobals(os: ObjectStore, globals: FleetGlobals): Pro
  *  create them (create-only). Two nodes racing to initialize a fresh bucket both call this concurrently:
  *  the `casPut` one-winner property means exactly one `createGlobals` lands; the loser's `CasConflict` is
  *  caught here and resolved by re-reading — so both callers converge on the SAME winning globals. */
+/**
+ * SINGLE-DEPLOYMENT-PER-BUCKET (whole-branch review, Finding 3, Task 4.5): Slice 4's object keyspace
+ * is bare (`s{shard}/...`, `globals`) — NOT namespaced per deployment (design record §5's
+ * `deployment/{id}/...` layout is deferred to Slice 5/6). Consequence: this function has no way to
+ * tell "a fresh deployment pointed at an already-occupied bucket" apart from "a node of the SAME
+ * deployment reconnecting" — a misconfigured second deployment aimed at an occupied bucket silently
+ * ADOPTS the first's `deploymentId` (and, if it differs, its `numShards` too) rather than erroring.
+ * This is a documented boundary, not a bug: fix it by giving each deployment its own bucket/prefix
+ * until key-namespacing lands.
+ */
 export async function ensureGlobals(os: ObjectStore, globals: FleetGlobals): Promise<FleetGlobals> {
   const existing = await readGlobals(os);
   if (existing !== null) return existing;

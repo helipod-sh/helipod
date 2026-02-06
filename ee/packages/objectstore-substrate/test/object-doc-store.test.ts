@@ -185,8 +185,10 @@ describe("ObjectStoreDocStore", () => {
     const id2 = newDocumentId(TABLE);
     await expect(store1.commitWrite([doc(id2, "second")], [])).rejects.toBeInstanceOf(FencedError);
 
-    // The fenced store is now poisoned (C1): a further commit is refused.
-    await expect(store1.commitWrite([doc(newDocumentId(TABLE), "third")], [])).rejects.toThrow(/poisoned|re-open/i);
+    // The fenced store is now poisoned AND its held lease cleared (C1 + Finding 2, Task 4.5 — the
+    // `held === null` guard is checked before `poisoned`, so the message is now "not the lease owner"
+    // rather than "poisoned"; either way a further commit is durably refused).
+    await expect(store1.commitWrite([doc(newDocumentId(TABLE), "third")], [])).rejects.toThrow(/not the lease owner/i);
 
     // The manifest still reflects only store1's first commit, now owned by B at epoch 2 — store1's
     // failed second attempt's segment PUT landed as an unreferenced orphan (reclaiming it is GC's

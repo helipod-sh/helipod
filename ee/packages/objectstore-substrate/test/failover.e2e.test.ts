@@ -173,7 +173,10 @@ async function scenario(makeBucket: () => Promise<ObjectStore>): Promise<void> {
 
   // ── Step 5: A "revives" as a zombie — its next commit/heartbeat is fenced and poisons it ────────
   await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "zombie-a")], [])).rejects.toBeInstanceOf(FencedError);
-  await expect(storeA.heartbeat({ now: now2000 + 10, leaseTtlMs: 1000 })).rejects.toThrow(/poisoned|re-open/i);
+  // The commit-fence also clears A's `held` (Finding 2, Task 4.5, symmetric with heartbeat's own fence
+  // path) — A's subsequent heartbeat call now hits the `held === null` guard first, surfacing as "no
+  // held lease" rather than "poisoned"; either way A is durably refused from here on.
+  await expect(storeA.heartbeat({ now: now2000 + 10, leaseTtlMs: 1000 })).rejects.toThrow(/held lease/i);
 
   // The manifest still references B's frontier UNCHANGED by A's zombie attempt — the log was not
   // corrupted (same frontier/epoch/writerId as right after B's own commits, above).

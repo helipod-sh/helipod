@@ -17,6 +17,7 @@ import { FsObjectStore } from "@stackbase/objectstore-fs";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { FencedError } from "../src/fenced-error";
 import type { Manifest } from "../src/manifest";
+import { encodeSegment } from "../src/segment";
 
 const TABLE = 30001;
 
@@ -96,7 +97,10 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     // A, unaware it was fenced, throws FencedError on its next commit AND is poisoned.
     const idA2 = newDocumentId(TABLE);
     await expect(storeA.commitWrite([doc(idA2, "second-from-a")], [])).rejects.toBeInstanceOf(FencedError);
-    await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "third-from-a")], [])).rejects.toThrow(/poisoned|re-open/i);
+    // A commit-fence now clears `held` too (Finding 2, Task 4.5, symmetric with heartbeat's fence path)
+    // — the very next call hits the `held === null` guard (checked before `poisoned`), so it now
+    // surfaces as "not the lease owner" rather than "poisoned"; either way, A is durably refused.
+    await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "third-from-a")], [])).rejects.toThrow(/not the lease owner/i);
 
     // B's own commit (the actual current owner) still succeeds.
     const idB = newDocumentId(TABLE);
@@ -148,58 +152,136 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeB.close();
   });
 
-  it("4.2e: a zombie writer's reused-seqno commit cannot clobber a LIVE segment another writer already committed at that seqno — the manifest still references the live owner's data after a fresh bootstrap (Critical, Task 4.2 review)", async () => {
-    // The exact scenario the review's Critical finding describes: A commits seg/0 (nextSeqno=1). B
-    // acquires (fences A, epoch 2 — acquire consumes NO seqno) and commits its OWN seg/1. Zombie A,
-    // unaware it's fenced, then commits: it reuses `seqno = A.nextSeqno = 1` and attempts
-    // `putImmutable("s0/seg/1", A-bytes)` against a key B already durably wrote. `putImmutable` is
-    // keep-first on every adapter (Task 4.2 review, including S3 via `IfNoneMatch:"*"` — proven
-    // separately by `objectstore-s3`'s own conformance suite), so A's PUT silently no-ops (B's bytes
-    // win) and A's manifest CAS then fails on its own stale etag — FencedError, log intact.
+  it("4.2e: a zombie writer's independently-orphaned commit cannot clobber the live owner's data — the manifest still references only the live owner's segments after a fresh bootstrap (Critical, Task 4.2 review; seqno numbering updated for Finding 1's skip-one-on-acquire, Task 4.5)", async () => {
+    // The review's original Critical finding: A commits seg/0 (nextSeqno=1). B acquires (fences A,
+    // epoch 2) and commits. Zombie A, unaware it's fenced, then commits reusing a seqno.
+    //
+    // UPDATED (Task 4.5): B's acquire now SKIPS the one seqno (1) a just-fenced A could have dirtied
+    // (skip-one-on-acquire, Finding 1) — so B's own commit lands at seg/2, not seg/1. Zombie A's
+    // second commit (still using ITS OWN uncorrected `nextSeqno = 1`, since A was never told it was
+    // fenced) therefore targets seg/1, which is now simply UNCLAIMED rather than B's live data — its
+    // `putImmutable` succeeds (no collision to keep-first-reject), but A's manifest CAS still fails on
+    // its own stale etag (fenced), so the write it just landed is an ORPHAN: durable, but never
+    // manifest-referenced, exactly like Finding 1's own scenario. This test now demonstrates the
+    // OUTCOME both fixes jointly guarantee: whichever of {keep-first, skip-one} is what actually
+    // prevents a given collision, B's committed data is never shadowed and the zombie's write never
+    // enters the materialized log.
     const objectStore = await freshBucket();
     const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
     const idA0 = newDocumentId(TABLE);
     await storeA.commitWrite([doc(idA0, "a-seg0")], []); // A's seg/0 — A's local nextSeqno is now 1
 
-    // B acquires past A's lease expiry (fences A, bumps epoch to 2 — consumes no segment seqno) and
-    // commits its own seg/1.
+    // B acquires past A's lease expiry (fences A, bumps epoch to 2; skip-one-on-acquire advances B's
+    // OWN nextSeqno past the seqno (1) A's stalled zombie could dirty) and commits its own segment.
     const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
     const idB1 = newDocumentId(TABLE);
-    await storeB.commitWrite([doc(idB1, "b-seg1")], []); // B's seg/1 — now LIVE and manifest-referenced
+    await storeB.commitWrite([doc(idB1, "b-seg2")], []); // lands as seg/2 (skip-one moved past seg/1)
 
     const manifestAfterB = await readManifestRaw(objectStore);
-    expect(manifestAfterB.segments).toEqual([0, 1]);
+    expect(manifestAfterB.segments).toEqual([0, 2]);
     expect(manifestAfterB.frontierTs).toBe("2");
 
-    // Zombie A, unaware it was fenced, attempts its second commit — reusing seqno 1, the SAME key B's
-    // commit just durably occupied.
+    // Zombie A, unaware it was fenced, attempts its second commit — reusing seqno 1 (A's own
+    // never-corrected view), a key B never touched.
     const idA1 = newDocumentId(TABLE);
     await expect(storeA.commitWrite([doc(idA1, "zombie-a-seg1")], [])).rejects.toBeInstanceOf(FencedError);
 
-    // seg/1 must still hold B's bytes, not A's — keep-first won the collision.
-    const seg1 = await objectStore.get("s0/seg/1");
-    expect(seg1).not.toBeNull();
-    const seg1Text = new TextDecoder().decode(seg1!.body);
-    expect(seg1Text).toContain("b-seg1");
-    expect(seg1Text).not.toContain("zombie-a-seg1");
+    // seg/2 must hold B's bytes — B's live, manifest-referenced data is untouched by the zombie.
+    const seg2 = await objectStore.get("s0/seg/2");
+    expect(seg2).not.toBeNull();
+    expect(new TextDecoder().decode(seg2!.body)).toContain("b-seg2");
 
-    // The manifest is untouched by the zombie's failed attempt — still exactly A's seg/0 + B's seg/1,
-    // owned by B at epoch 2.
+    // The manifest is untouched by the zombie's failed attempt — still exactly A's seg/0 + B's seg/2,
+    // owned by B at epoch 2. (seg/1 durably exists as the zombie's unreferenced orphan — harmless,
+    // never read by any bootstrap since `segments` never names it.)
     const manifestAfterZombie = await readManifestRaw(objectStore);
-    expect(manifestAfterZombie.segments).toEqual([0, 1]);
+    expect(manifestAfterZombie.segments).toEqual([0, 2]);
     expect(manifestAfterZombie.frontierTs).toBe("2");
     expect(manifestAfterZombie.writerId).toBe("B");
     expect(manifestAfterZombie.epoch).toBe(2);
 
-    // A fresh bootstrap from the bucket sees ONLY A's seg/0 and B's seg/1 — B's committed data
+    // A fresh bootstrap from the bucket sees ONLY A's seg/0 and B's seg/2 — B's committed data
     // survived intact; the zombie's phantom write never entered the log.
     const storeC = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
     expect((await storeC.get(idA0))!.value.value.body).toBe("a-seg0");
-    expect((await storeC.get(idB1))!.value.value.body).toBe("b-seg1");
+    expect((await storeC.get(idB1))!.value.value.body).toBe("b-seg2");
     expect(await storeC.get(idA1)).toBeNull();
     expect(await storeC.maxTimestamp()).toBe(2n);
+
+    await storeA.close();
+    await storeB.close();
+    await storeC.close();
+  });
+
+  it("4.5: skip-one-on-acquire fences a fenced predecessor's DIRTY (uncommitted) orphan segment — a taking-over writer's own commit must not let the orphan shadow its bytes (Critical, whole-branch review, Task 4.5)", async () => {
+    // The exact scenario Finding 1 describes, distinct from 4.2e's "zombie commits AFTER B already
+    // took the seqno" case: here A's `putImmutable` for its OWN commit lands durably, but A stalls
+    // BEFORE its `casManifest` — so the manifest's `nextSeqno` is UNCHANGED and the segment A just
+    // wrote is an orphan (durable, but never referenced). Without the skip-one fence, a taking-over B
+    // would reuse that exact seqno, its `putImmutable` would silently keep-first no-op against A's
+    // orphan bytes, and B's manifest CAS would still succeed — referencing A's (failed) data instead
+    // of B's. `acquire()`'s skip-one-on-acquire (`this.nextSeqno = next.nextSeqno + 1`) must prevent
+    // this by construction.
+    const objectStore = await freshBucket();
+    const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+
+    const idA0 = newDocumentId(TABLE);
+    await storeA.commitWrite([doc(idA0, "a-seg0")], []); // lands as seg/0; A's local nextSeqno is now 1
+
+    const manifestBeforeStall = await readManifestRaw(objectStore);
+    expect(manifestBeforeStall.nextSeqno).toBe(1); // the durable cursor A's stalled commit will reuse
+    const orphanSeqno = manifestBeforeStall.nextSeqno;
+
+    // Simulate A's SECOND commit: its object-storage PUT succeeds (durable) but it stalls before the
+    // manifest CAS that would reference it — an orphan at exactly `seg/${orphanSeqno}`, written but
+    // never manifest-referenced. This is done directly against the bucket (not via `storeA`) to model
+    // "A's process got exactly this far and no further" without racing real timers.
+    const idAOrphan = newDocumentId(TABLE);
+    await objectStore.putImmutable(
+      `s0/seg/${orphanSeqno}`,
+      encodeSegment({ documents: [doc(idAOrphan, "a-orphan-uncommitted")], indexUpdates: [] }),
+    );
+    // The manifest itself is untouched by the orphan PUT — still points at seg/0 only, nextSeqno 1.
+    const manifestAfterOrphanPut = await readManifestRaw(objectStore);
+    expect(manifestAfterOrphanPut).toEqual(manifestBeforeStall);
+
+    // A's lease (ttl=1000 from now=0) expires; B takes over well past it.
+    const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+
+    const idB = newDocumentId(TABLE);
+    await storeB.commitWrite([doc(idB, "b-bytes")], []);
+
+    // (a) B's commit must have written seg/{orphanSeqno + 1}, skipping the dirtied seqno entirely —
+    // not colliding with (or being shadowed by) the orphan at seg/{orphanSeqno}.
+    const manifestAfterB = await readManifestRaw(objectStore);
+    expect(manifestAfterB.segments).toEqual([0, orphanSeqno + 1]);
+    expect(manifestAfterB.nextSeqno).toBe(orphanSeqno + 2);
+
+    // seg/{orphanSeqno} on the bucket is UNTOUCHED — still holds A's orphan bytes (keep-first left it
+    // alone since B never targeted that key), but it is not reachable from the manifest at all.
+    const orphanObj = await objectStore.get(`s0/seg/${orphanSeqno}`);
+    expect(orphanObj).not.toBeNull();
+    expect(new TextDecoder().decode(orphanObj!.body)).toContain("a-orphan-uncommitted");
+
+    const bSeg = await objectStore.get(`s0/seg/${orphanSeqno + 1}`);
+    expect(bSeg).not.toBeNull();
+    const bSegText = new TextDecoder().decode(bSeg!.body);
+    expect(bSegText).toContain("b-bytes");
+    expect(bSegText).not.toContain("a-orphan-uncommitted");
+
+    // (b) A FRESH bootstrap of shard "0" materializes B's committed doc and does NOT resurrect the
+    // orphan (it was never manifest-referenced, so `materializeTo`'s replay loop never reads it).
+    const storeC = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect((await storeC.get(idA0))!.value.value.body).toBe("a-seg0");
+    expect((await storeC.get(idB))!.value.value.body).toBe("b-bytes");
+    expect(await storeC.get(idAOrphan)).toBeNull(); // the orphan never entered materialized state
+
+    // (c) `manifest.segments` does not include the orphaned seqno.
+    expect(manifestAfterB.segments).not.toContain(orphanSeqno);
 
     await storeA.close();
     await storeB.close();

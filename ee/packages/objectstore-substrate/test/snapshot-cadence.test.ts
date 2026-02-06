@@ -188,9 +188,14 @@ describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch revi
     expect(priorMaxTs).toBe(BigInt(SNAPSHOT_EVERY));
     await store.close();
 
-    // A FRESH open over this exact bucket state must derive nextSeqno = SNAPSHOT_EVERY (from the
-    // explicit `nextSeqno` field), NOT 0 (which `Math.max(...cached.manifest.segments)` would have
-    // produced against an empty trimmed array).
+    // A FRESH open+acquire over this exact bucket state must derive its committing cursor from the
+    // explicit `nextSeqno` field, NOT 0 (which `Math.max(...cached.manifest.segments)` would have
+    // produced against an empty trimmed array). `openAndAcquire`'s `acquire()` additionally applies
+    // skip-one-on-acquire (Finding 1, Task 4.5 — this is a re-acquire of an already-once-acquired
+    // manifest, `epoch > 0`, so it conservatively skips one seqno the PRIOR holder could have dirtied),
+    // so the next commit lands one past the bootstrapped cursor: `SNAPSHOT_EVERY + 1`, not
+    // `SNAPSHOT_EVERY`. The `Math.max(...[])→0` trap this test targets is still fully exercised — 0
+    // would have been catastrophically wrong either way.
     const fresh = await openAndAcquire(objectStore, "0", freshLocal());
     expect(await fresh.maxTimestamp()).toBe(priorMaxTs); // bootstrap restored the snapshot correctly
 
@@ -200,13 +205,13 @@ describe("ObjectStoreDocStore manifest.segments stays bounded (whole-branch revi
     // ts must continue forward, never regress/collide with the restored state.
     expect(nextTs).toBe(priorMaxTs + 1n);
 
-    // The new segment object must land at seqno = SNAPSHOT_EVERY (the correct next-free cursor) — a
-    // buggy `Math.max(...[])→0` bootstrap would instead have written `seg/0`, OVERWRITING (or, on
-    // keep-first `objectstore-fs`, silently colliding with) the durable seg/0 the snapshot already
-    // superseded, which is exactly the corruption class this fix closes.
-    expect(await objectStore.get(`s0/seg/${SNAPSHOT_EVERY}`)).not.toBeNull();
+    // The new segment object must land at seqno = SNAPSHOT_EVERY + 1 (the correct next-free cursor
+    // AFTER skip-one) — a buggy `Math.max(...[])→0` bootstrap would instead have written `seg/0`,
+    // OVERWRITING (or, on keep-first `objectstore-fs`, silently colliding with) the durable seg/0 the
+    // snapshot already superseded, which is exactly the corruption class this fix closes.
+    expect(await objectStore.get(`s0/seg/${SNAPSHOT_EVERY + 1}`)).not.toBeNull();
     const manifestAfterNext = await readManifestRaw(objectStore);
-    expect(manifestAfterNext.segments).toEqual([SNAPSHOT_EVERY]);
+    expect(manifestAfterNext.segments).toEqual([SNAPSHOT_EVERY + 1]);
 
     expect((await fresh.get(nextId))!.ts).toBe(nextTs);
 
