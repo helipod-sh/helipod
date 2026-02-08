@@ -97,10 +97,14 @@ the fan-out cells and a parameterized per-connection query for `distinct`.
   before ramping and **aborts with exact raise instructions** (`ulimit -n 65536`, plus the
   macOS `launchctl limit maxfiles` note) if the sweep can't fit. It also spawns children with
   the inherited (raised) limit and re-checks inside each child.
-- Ephemeral-port pressure on loopback (all connections share one destination tuple): the
-  runner documents and, if needed at 50k, splits the server across two listening ports
-  (`--ports 2`) to stay under the ~64k source-port ceiling per destination. (Design decision:
-  ports flag exists from day one but defaults to 1; the 50k default sweep fits.)
+- Ephemeral-port pressure on loopback (all connections share one destination tuple, and the OS
+  ephemeral-port range — ~16k by default on macOS — caps distinct source ports per
+  destination). *(post-plan correction: the originally sketched `--ports N` multi-listener
+  escape hatch is not implementable against the shipped single-listener `startDevServer`
+  without engine changes, which this slice forbids. Instead the sweep records the highest N
+  that completes cleanly and the findings doc documents the cap and the exact OS settings —
+  an honest partial baseline over a garbage full one. A multi-listener flag can be its own
+  follow-up if a real machine needs it.)*
 
 ## Honesty rules (house style — stated in the report and the findings doc)
 
