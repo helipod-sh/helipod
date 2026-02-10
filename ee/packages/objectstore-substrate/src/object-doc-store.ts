@@ -85,7 +85,9 @@ import { readManifest, createManifest, casManifest, type Manifest } from "./mani
 import { writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
 import { FencedError } from "./fenced-error";
 
-function segmentKey(shard: string, seqno: number): string {
+/** Exported (Tier 3 Slice 5, Task 5.1) so `replica-tailer.ts` can pull the SAME segment objects this
+ *  class's own commit/`materializeTo` path writes/reads, without duplicating the key format. */
+export function segmentKey(shard: string, seqno: number): string {
   return `s${shard}/seg/${seqno}`;
 }
 

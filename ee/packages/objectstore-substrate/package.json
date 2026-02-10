@@ -25,13 +25,13 @@
   "dependencies": {
     "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
     "@stackbase/objectstore": "workspace:*",
     "@stackbase/values": "workspace:*"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "catalog:",
     "@stackbase/executor": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
     "@stackbase/objectstore-fs": "workspace:*",
     "@stackbase/objectstore-s3": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
