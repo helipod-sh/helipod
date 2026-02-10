@@ -57,7 +57,13 @@ runner (bench:connections)
 
 Each swept over `N ∈ {1k, 5k, 10k, 25k, 50k}` (default; `--max` pushes best-effort beyond, and
 `--n` overrides the sweep for quick runs). Fixture app: one table, a `hot:get`-style query for
-the fan-out cells and a parameterized per-connection query for `distinct`.
+the fan-out cells and a parameterized per-connection query for `distinct`. *(post-plan
+correction: the `--n`/`--max` CLI flags sketched above were not implemented as flags — the
+shipped control surface is a `CONN_NS` env var (a comma-separated N list, replacing both "override
+the sweep" and "push beyond the default" with one mechanism) plus `CONN_WORKERS` for the swarm's
+worker-process count, both read in `scenarios/connections.ts`'s `nsFromEnv`/`workersFromEnv`. Same
+capability, env instead of CLI flags — see `connections-findings.md`'s Caps/reproduction section
+for the actual invocations used.)*
 
 1. **`idle`** — establish N swarm connections all subscribed to the hot query; no writes for
    the measure window. Report: ΔRSS/connection (server RSS at N minus baseline RSS, over N),
