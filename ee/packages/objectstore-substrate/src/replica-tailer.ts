@@ -245,8 +245,10 @@ export class ObjectStoreReplicaTailer {
 
     if (round.documents.length === 0 && round.indexUpdates.length === 0) {
       // The manifest's frontier advanced but this round applied nothing new (can only happen if a
-      // GC-race refresh mid-round landed us exactly back at a fully-caught-up state) — advance the
-      // watermark without an invalidation call (nothing to invalidate).
+      // GC-race refresh mid-round landed us exactly back at a fully-caught-up state) — advance both
+      // cursors without an invalidation call (nothing to invalidate). Safe to advance appliedSeqno
+      // here too: an empty round means `#materializeRound` didn't skip delivering anything to a sink.
+      this.appliedSeqnoValue = round.appliedSeqno;
       this.appliedMaxTsValue = newMaxTs;
       this.#wakeSatisfiedWaiters();
       return true;
@@ -254,8 +256,13 @@ export class ObjectStoreReplicaTailer {
 
     const inv = this.#buildInvalidation(round.documents, round.indexUpdates, newMaxTs);
     await this.onInvalidation(inv);
-    // Advance ONLY after onInvalidation resolves — mirrors the fleet tailer: a throwing/slow handler
-    // must not cause this round to be silently skipped on the next tick.
+    // Advance BOTH cursors together, ONLY after onInvalidation resolves — mirrors the fleet tailer's
+    // single-`wm`-advanced-after-sink discipline. If onInvalidation throws, this line never runs and
+    // BOTH appliedSeqnoValue/appliedMaxTsValue stay put: the next tick re-reads the same manifest
+    // state, `#materializeRound` re-pulls the identical segments/snapshot from the still-unadvanced
+    // appliedSeqnoValue, re-applies them via idempotent `write(..., "Overwrite")`, and rebuilds the
+    // SAME invalidation to redeliver — no missed range, at the cost of a redundant (harmless) re-pull.
+    this.appliedSeqnoValue = round.appliedSeqno;
     this.appliedMaxTsValue = newMaxTs;
     this.#wakeSatisfiedWaiters();
     return true;
@@ -263,8 +270,16 @@ export class ObjectStoreReplicaTailer {
 
   /**
    * Pulls + applies everything between `this.appliedSeqnoValue` and `manifest`'s frontier, mutating
-   * `local` and `this.appliedSeqnoValue` as it goes, and returns every row applied THIS round (for
-   * `#buildInvalidation`) plus the final manifest revision actually reached.
+   * `local` as it goes (idempotent — a segment/snapshot already reflected in `local` is a safe
+   * no-op re-`Overwrite`), and returns every row applied THIS round (for `#buildInvalidation`), the
+   * final manifest revision actually reached, and the seqno cursor the round advanced to.
+   *
+   * Deliberately does NOT mutate `this.appliedSeqnoValue` — only `#tickOnce` may do that, and only
+   * AFTER its `onInvalidation` sink resolves (see that method's doc). This method runs entirely
+   * against a LOCAL `appliedSeqno` variable seeded from the instance field, so a caller that discards
+   * this round's result (sink threw) leaves the instance cursor exactly where it started, and a retry
+   * re-runs this same method from the same starting point — re-applying idempotently and rebuilding
+   * the identical returned batch.
    *
    * Mirrors `object-doc-store.ts`'s `materializeTo` — same snapshot-restore-then-replay-tail shape —
    * with one addition `materializeTo` doesn't need: a MISSING segment (`objectStore.get` returns
@@ -272,21 +287,22 @@ export class ObjectStoreReplicaTailer {
    * once a NEWER snapshot supersedes it. The safe recovery is therefore always available: re-read the
    * manifest (it must now reference a snapshot covering the missing seqno, or GC could not have
    * deleted it) and restart the round against that fresher manifest — looping rather than recursing,
-   * so partial progress already applied (and already reflected in `this.appliedSeqnoValue`) is never
+   * so partial progress already applied (and already reflected in the local `appliedSeqno`) is never
    * discarded, and the accumulated `documents`/`indexUpdates` carry across the restart intact.
    */
   async #materializeRound(
     initialManifest: Manifest,
-  ): Promise<{ documents: DocumentLogEntry[]; indexUpdates: IndexWrite[]; manifest: Manifest }> {
+  ): Promise<{ documents: DocumentLogEntry[]; indexUpdates: IndexWrite[]; manifest: Manifest; appliedSeqno: number }> {
     const documents: DocumentLogEntry[] = [];
     const indexUpdates: IndexWrite[] = [];
     let manifest = initialManifest;
+    let appliedSeqno = this.appliedSeqnoValue;
 
     for (;;) {
       if (
         manifest.snapshotTs !== undefined &&
         manifest.snapshotSegBase !== undefined &&
-        manifest.snapshotSegBase >= this.appliedSeqnoValue
+        manifest.snapshotSegBase >= appliedSeqno
       ) {
         const snap = await readSnapshot(this.objectStore, this.shard, manifest.snapshotTs);
         if (snap === null) {
@@ -298,12 +314,12 @@ export class ObjectStoreReplicaTailer {
         await this.local.write(snap.documents, snap.indexUpdates, "Overwrite");
         documents.push(...snap.documents);
         indexUpdates.push(...snap.indexUpdates);
-        this.appliedSeqnoValue = manifest.snapshotSegBase;
+        appliedSeqno = manifest.snapshotSegBase;
       }
 
       let missedSegment = false;
       for (const seqno of manifest.segments) {
-        if (seqno <= this.appliedSeqnoValue) continue; // already applied (or covered by the snapshot just restored)
+        if (seqno <= appliedSeqno) continue; // already applied (or covered by the snapshot just restored)
         const entry = await this.objectStore.get(segmentKey(this.shard, seqno));
         if (entry === null) {
           // Raced GC — fall back to the snapshot path against a FRESH manifest read and restart.
@@ -321,9 +337,9 @@ export class ObjectStoreReplicaTailer {
         await this.local.write(payload.documents, payload.indexUpdates, "Overwrite");
         documents.push(...payload.documents);
         indexUpdates.push(...payload.indexUpdates);
-        this.appliedSeqnoValue = seqno;
+        appliedSeqno = seqno;
       }
-      if (!missedSegment) return { documents, indexUpdates, manifest };
+      if (!missedSegment) return { documents, indexUpdates, manifest, appliedSeqno };
     }
   }
 

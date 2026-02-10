@@ -247,4 +247,67 @@ describe("ObjectStoreReplicaTailer", () => {
 
     await writer.close();
   });
+
+  it("5.1d (regression, Critical review fix): a throwing onInvalidation leaves BOTH cursors unadvanced, and the retry re-delivers the SAME invalidation", async () => {
+    const bucket = await freshBucket();
+    const writer = await openAndAcquire(bucket, "0", freshLocal());
+
+    const idA = newDocumentId(TABLE);
+    const tsA = await writer.commitWrite([doc(idA, "a")], []); // segment 0
+
+    const replicaLocal = freshLocal();
+    await ObjectStoreDocStore.open({ objectStore: bucket, shard: "0", local: replicaLocal });
+
+    let shouldThrow = true;
+    const applied: AppliedInvalidation[] = [];
+    const tailer = new ObjectStoreReplicaTailer({
+      objectStore: bucket,
+      shard: "0",
+      local: replicaLocal,
+      onInvalidation: async (inv) => {
+        if (shouldThrow) {
+          shouldThrow = false;
+          throw new Error("sink boom");
+        }
+        applied.push(inv);
+      },
+    });
+
+    // Correlate the tailer to "caught up through ts0 / segment 0" — mirrors 5.1a/5.1c's first tick.
+    expect(await tailer.tick()).toBe(false);
+    expect(tailer.appliedSeqno).toBe(0);
+    expect(tailer.appliedMaxTs).toBe(tsA);
+
+    // A genuinely new commit — segment 1.
+    const idB = newDocumentId(TABLE);
+    const tsB = await writer.commitWrite([doc(idB, "b")], []);
+    expect(tsB).toBeGreaterThan(tsA);
+
+    // tick() #1: onInvalidation throws. The whole tick() call must reject — and BOTH cursors must
+    // stay exactly where they were before this tick (the bug: appliedSeqno used to advance mid-round,
+    // BEFORE the sink ran, so a throw here used to leave it desynced from appliedMaxTs).
+    await expect(tailer.tick()).rejects.toThrow("sink boom");
+    expect(applied).toEqual([]);
+    expect(tailer.appliedSeqno).toBe(0);
+    expect(tailer.appliedMaxTs).toBe(tsA);
+    // The row IS already in `local` — applying to `local` is idempotent Overwrite and happens before
+    // the sink is even invoked. The invariant this test guards is the CURSOR, not physical presence.
+    expect((await replicaLocal.get(idB))?.value.value.body).toBe("b");
+
+    // tick() #2: the sink now succeeds. The retry must re-pull from the SAME (unadvanced) cursor,
+    // re-apply idempotently, and rebuild + redeliver the IDENTICAL invalidation — not silently skip
+    // it via an empty-round short circuit. Only now do both cursors advance, together.
+    expect(await tailer.tick()).toBe(true);
+    expect(applied.length).toBe(1);
+    expect(applied[0]!.newMaxTs).toBe(tsB);
+    expect(applied[0]!.writtenDocs).toEqual([{ tableId: encodeStorageTableId(TABLE), internalId: idB.internalId }]);
+    expect(tailer.appliedSeqno).toBe(1);
+    expect(tailer.appliedMaxTs).toBe(tsB);
+
+    // A further tick with nothing new → false, no further invalidation.
+    expect(await tailer.tick()).toBe(false);
+    expect(applied.length).toBe(1);
+
+    await writer.close();
+  });
 });
