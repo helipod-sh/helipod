@@ -65,9 +65,11 @@
         "@stackbase/runtime-embedded": "workspace:*",
         "@stackbase/sync": "workspace:*",
         "@stackbase/values": "workspace:*",
+        "ws": "^8.18.0",
       },
       "devDependencies": {
         "@types/node": "catalog:",
+        "@types/ws": "^8.5.13",
         "typescript": "catalog:",
         "vitest": "catalog:",
       },
