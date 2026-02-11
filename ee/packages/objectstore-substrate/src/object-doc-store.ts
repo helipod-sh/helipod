@@ -84,6 +84,7 @@ import { encodeSegment, decodeSegment, type SegmentPayload } from "./segment";
 import { readManifest, createManifest, casManifest, type Manifest } from "./manifest";
 import { writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
 import { FencedError } from "./fenced-error";
+import { readConsumerWatermarks } from "./consumers";
 
 /** Exported (Tier 3 Slice 5, Task 5.1) so `replica-tailer.ts` can pull the SAME segment objects this
  *  class's own commit/`materializeTo` path writes/reads, without duplicating the key format. */
@@ -658,27 +659,40 @@ export class ObjectStoreDocStore implements DocStore {
   // ── GC (Tier 3 Slice 3, Task 3.3) — reclaim what the latest snapshot has superseded ─────────
 
   /**
-   * Reclaim durable objects the CURRENT manifest's snapshot has superseded: every segment with
-   * `seqno <= snapshotSegBase` (its state is captured in the snapshot, so bootstrap never reads
-   * it) and every snapshot object except the current one (`snapshotTs`). The newest snapshot is
-   * the floor — no consumer/replica watermark (that's a later slice).
+   * Reclaim durable objects the CURRENT manifest's snapshot (and every registered consumer's
+   * watermark) has superseded: every segment with `seqno <= min(snapshotSegBase, W_min)` (where
+   * `W_min` is the SLOWEST published `consumers/{id}` watermark's `appliedSeqno` — `+Infinity` when
+   * no consumers are registered, so the floor collapses back to plain `snapshotSegBase`, byte-for-
+   * byte the Slice 3 behavior) and every snapshot object except the current one (`snapshotTs`) — the
+   * newest snapshot is always kept regardless of `W_min` (a replica re-materializing after falling
+   * behind the tail restores the NEWEST snapshot via `materializeTo`'s fallback path, never an older
+   * one, so keeping only the newest is correct independent of any watermark).
+   *
+   * The watermark floor is the Tier 3 Slice 5, Task 5.2 addition (closing the Slice 3/4 GC-under-
+   * replicas deferral): a lagging replica's `ObjectStoreReplicaTailer` publishes its own
+   * `appliedSeqno` via `publishConsumerWatermark`; as long as it hasn't fallen behind
+   * `snapshotSegBase` itself (its own snapshot-fallback backstop covers that case — see
+   * `replica-tailer.ts`), `gc()` here will never delete a segment `(W_min, snapshotSegBase]` that
+   * replica still needs to tail.
    *
    * Runs under `runExclusive` — it reads `this.cached.manifest` and must see a consistent
    * snapshot pointer, and must not race a concurrent commit/snapshot that could move
    * `snapshotSegBase` out from under it. Never touches the manifest itself or `this.cached`/
-   * `nextSeqno` — GC is purely subtractive over objects the manifest no longer needs.
+   * `nextSeqno` — GC is purely subtractive over objects the manifest (and consumers) no longer need.
    *
    * PERFORMANCE NOTE (whole-branch review, Minor #4): because it runs under `runExclusive`, `gc()`
-   * blocks `commitWriteBatch`/`snapshot()` on this instance for the ENTIRE list+delete sweep — fine
-   * for a manual, occasional, single-node call (today's only caller), but revisit the locking
-   * granularity once GC becomes an automatic/background driver.
+   * blocks `commitWriteBatch`/`snapshot()` on this instance for the ENTIRE list+delete sweep (now
+   * also a `consumers/` list+get sweep) — fine for a manual, occasional, single-node call (today's
+   * only caller), but revisit the locking granularity once GC becomes an automatic/background driver.
    *
    * S4 MULTI-WRITER HAZARD (whole-branch review, Minor #3, not reachable in single-node Slice 3): this
    * deletes every `snap/*` except THIS instance's own cached `snapshotTs`. A stale/fenced writer whose
    * `poisoned` flag hasn't tripped yet (it only trips after an ATTEMPTED CAS — see the class doc's C1
    * note) still holds an OLD `snapshotTs` and would delete the CURRENT writer's live snapshot out from
    * under it, sinking a fresh bootstrap. Before `gc()` is exposed under multi-writer (S4), it must be
-   * epoch-fenced (checked against the current manifest's `epoch`) before it deletes anything.
+   * epoch-fenced (checked against the current manifest's `epoch`) before it deletes anything —
+   * STILL DEFERRED (Slice 6): the watermark floor added here guards against stranding a lagging
+   * READ REPLICA, but does nothing to fence `gc()` itself against running under a stale WRITER.
    */
   async gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> {
     return this.runExclusive(async () => {
@@ -693,6 +707,10 @@ export class ObjectStoreDocStore implements DocStore {
       const segBase = this.cached.manifest.snapshotSegBase!;
       const keepSnap = this.cached.manifest.snapshotTs!;
 
+      const watermarks = await readConsumerWatermarks(this.objectStore);
+      const wMin = watermarks.length > 0 ? Math.min(...watermarks.map((w) => w.appliedSeqno)) : Number.POSITIVE_INFINITY;
+      const floor = Math.min(segBase, wMin);
+
       const segPrefix = `s${this.shard}/seg/`;
       const segKeys = await this.objectStore.list(segPrefix);
       let deletedSegments = 0;
@@ -700,10 +718,11 @@ export class ObjectStoreDocStore implements DocStore {
         const suffix = key.slice(key.lastIndexOf("/") + 1);
         const seqno = Number(suffix);
         // Defensive: skip any key whose suffix doesn't parse to an integer — never delete an
-        // object we don't understand. NEVER delete seqno > segBase (a live segment bootstrap
-        // still replays); the predicate below is deliberately `<=`, never anything looser.
+        // object we don't understand. NEVER delete seqno > floor (a live segment bootstrap or a
+        // still-tailing replica may still need it); the predicate below is deliberately `<=`,
+        // never anything looser.
         if (!Number.isInteger(seqno)) continue;
-        if (seqno <= segBase) {
+        if (seqno <= floor) {
           await this.objectStore.delete(key);
           deletedSegments++;
         }

@@ -10,3 +10,4 @@ export {
   type ObjectStoreReplicaTailerOptions,
   type AppliedInvalidation,
 } from "./replica-tailer";
+export { publishConsumerWatermark, readConsumerWatermarks, removeConsumer } from "./consumers";
