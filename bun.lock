@@ -209,6 +209,7 @@
       "devDependencies": {
         "@aws-sdk/client-s3": "catalog:",
         "@stackbase/executor": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/objectstore-fs": "workspace:*",
         "@stackbase/objectstore-s3": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
