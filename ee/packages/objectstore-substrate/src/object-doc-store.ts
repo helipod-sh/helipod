@@ -661,7 +661,7 @@ export class ObjectStoreDocStore implements DocStore {
   /**
    * Reclaim durable objects the CURRENT manifest's snapshot (and every registered consumer's
    * watermark) has superseded: every segment with `seqno <= min(snapshotSegBase, W_min)` (where
-   * `W_min` is the SLOWEST published `consumers/{id}` watermark's `appliedSeqno` — `+Infinity` when
+   * `W_min` is the SLOWEST published `s{shard}/consumers/{id}` watermark's `appliedSeqno` — `+Infinity` when
    * no consumers are registered, so the floor collapses back to plain `snapshotSegBase`, byte-for-
    * byte the Slice 3 behavior) and every snapshot object except the current one (`snapshotTs`) — the
    * newest snapshot is always kept regardless of `W_min` (a replica re-materializing after falling
@@ -707,7 +707,7 @@ export class ObjectStoreDocStore implements DocStore {
       const segBase = this.cached.manifest.snapshotSegBase!;
       const keepSnap = this.cached.manifest.snapshotTs!;
 
-      const watermarks = await readConsumerWatermarks(this.objectStore);
+      const watermarks = await readConsumerWatermarks(this.objectStore, this.shard);
       const wMin = watermarks.length > 0 ? Math.min(...watermarks.map((w) => w.appliedSeqno)) : Number.POSITIVE_INFINITY;
       const floor = Math.min(segBase, wMin);
 

@@ -40,13 +40,19 @@
  * first step) — this tailer never creates the schema itself, only applies rows into it.
  */
 import type { ObjectStore } from "@stackbase/objectstore";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId } from "@stackbase/docstore";
 import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { encodeStorageTableId, internalIdToHex } from "@stackbase/id-codec";
 import { readManifest, type Manifest } from "./manifest";
 import { readSnapshot } from "./snapshot";
 import { decodeSegment } from "./segment";
 import { segmentKey } from "./object-doc-store";
+
+/** Bounds the missing-segment retry loop in `#materializeRound` (Finding 4, whole-branch review):
+ *  on the shipped strongly-consistent adapters (fs/S3) a raced-GC restart converges in one or two
+ *  iterations; this cap turns a hypothetically eventually-consistent store's non-convergence into a
+ *  loud, clear error instead of an infinite spin. The normal convergence path is unaffected. */
+const MAX_MISSING_SEGMENT_RETRIES = 8;
 
 /** Mirrors the fleet tailer's `AppliedInvalidation` shape byte-for-byte (see that file's doc for why
  *  this is a deliberate parallel type, not a shared import — the substrate must not depend on
@@ -297,12 +303,17 @@ export class ObjectStoreReplicaTailer {
     const indexUpdates: IndexWrite[] = [];
     let manifest = initialManifest;
     let appliedSeqno = this.appliedSeqnoValue;
+    let missingSegmentRetries = 0;
 
     for (;;) {
+      // `>` (not `>=`, Finding 3, whole-branch review): when `snapshotSegBase === appliedSeqno` the
+      // replica has already applied THROUGH the snapshot base — re-restoring the whole snapshot would
+      // be a redundant (if idempotent) full restore instead of just replaying the tail. Also narrows
+      // Finding 1's blast radius to rounds that actually jump the replica forward past the snapshot.
       if (
         manifest.snapshotTs !== undefined &&
         manifest.snapshotSegBase !== undefined &&
-        manifest.snapshotSegBase >= appliedSeqno
+        manifest.snapshotSegBase > appliedSeqno
       ) {
         const snap = await readSnapshot(this.objectStore, this.shard, manifest.snapshotTs);
         if (snap === null) {
@@ -311,6 +322,38 @@ export class ObjectStoreReplicaTailer {
               `'${manifest.snapshotTs}' referenced by the manifest (torn state)`,
           );
         }
+
+        // Finding 1 (CRITICAL, whole-branch review): `write(..., "Overwrite")` is an OVERLAY
+        // (INSERT OR REPLACE), never a replace-all, and `dumpCurrentState` (the snapshot's own
+        // source) EXCLUDES tombstones — so the snapshot alone cannot express "this doc was deleted
+        // in the range this restore jumps over." Left unhandled, a doc the replica still has LIVE
+        // that the snapshot silently dropped stays phantom-live on the replica forever, and
+        // `#buildInvalidation` (deriving `writtenDocs` from `snap.documents`, which never mentions
+        // it) would emit no invalidation for it either.
+        //
+        // Fix: diff the replica's OWN current live docs against the snapshot's live-doc set and
+        // APPEND a tombstone for anything the snapshot dropped, at the snapshot's own frontier ts
+        // (>= every existing replica revision, since the replica is BEHIND the snapshot whenever
+        // this branch runs) — append-only, so a concurrent MVCC read against `local` never sees rows
+        // physically disappear mid-restore. Do NOT truncate the store to fake a "fresh" restore.
+        const snapshotIds = new Set(snap.documents.map((d) => this.#docKey(d.id)));
+        const replicaState = await this.local.dumpCurrentState();
+        const deleted = replicaState.documents.filter((d) => !snapshotIds.has(this.#docKey(d.id)));
+        if (deleted.length > 0) {
+          const frontierTs = BigInt(snap.frontierTs);
+          const tombstones: DocumentLogEntry[] = deleted.map((d) => ({
+            ts: frontierTs,
+            id: d.id,
+            value: null,
+            prev_ts: d.ts,
+          }));
+          await this.local.write(tombstones, [], "Overwrite");
+          // Fold the tombstones into this round's `documents` too — NOT just applied to `local` —
+          // so `#buildInvalidation`'s `writtenDocs` covers the deletion and a `db.get(id)`
+          // subscription on the deleted doc actually re-runs.
+          documents.push(...tombstones);
+        }
+
         await this.local.write(snap.documents, snap.indexUpdates, "Overwrite");
         documents.push(...snap.documents);
         indexUpdates.push(...snap.indexUpdates);
@@ -323,6 +366,16 @@ export class ObjectStoreReplicaTailer {
         const entry = await this.objectStore.get(segmentKey(this.shard, seqno));
         if (entry === null) {
           // Raced GC — fall back to the snapshot path against a FRESH manifest read and restart.
+          // Bounded (Finding 4, whole-branch review): the shipped strongly-consistent adapters
+          // (fs/S3) converge in one or two restarts; this cap turns a hypothetically
+          // eventually-consistent store's non-convergence into a loud error, not an infinite spin.
+          if (++missingSegmentRetries > MAX_MISSING_SEGMENT_RETRIES) {
+            throw new Error(
+              `objectstore-substrate: replica tailer for shard '${this.shard}' — missing segment ` +
+                `'${segmentKey(this.shard, seqno)}' did not resolve via snapshot fallback after ` +
+                `${MAX_MISSING_SEGMENT_RETRIES} retries`,
+            );
+          }
           const refreshed = await readManifest(this.objectStore, this.shard);
           if (refreshed === null) {
             throw new Error(
@@ -343,6 +396,13 @@ export class ObjectStoreReplicaTailer {
     }
   }
 
+  /** `${tableId}|${internalIdHex}` — the doc-identity key both `#buildInvalidation`'s dedupe and
+   *  `#materializeRound`'s snapshot-restore diff (Finding 1) use to compare doc ids across two
+   *  differently-sourced document sets (segment/snapshot rows vs. `dumpCurrentState`'s rows). */
+  #docKey(id: InternalDocumentId): string {
+    return `${encodeStorageTableId(id.tableNumber)}|${internalIdToHex(id.internalId)}`;
+  }
+
   /** Builds the round's `AppliedInvalidation` — mirrors the fleet tailer's derivation
    *  (`replica-tailer.ts` ~:476-488): `writtenDocs` DISTINCT-deduped by `(tableId, internalId)` from
    *  the applied documents, `writtenKeys` straight from the applied index writes, `writtenTables`
@@ -358,7 +418,7 @@ export class ObjectStoreReplicaTailer {
     for (const d of documents) {
       const tableId = encodeStorageTableId(d.id.tableNumber);
       tables.add(tableId);
-      const dedupeKey = `${tableId}|${internalIdToHex(d.id.internalId)}`;
+      const dedupeKey = this.#docKey(d.id);
       if (seenDocs.has(dedupeKey)) continue;
       seenDocs.add(dedupeKey);
       writtenDocs.push({ tableId, internalId: d.id.internalId });

@@ -72,8 +72,8 @@ describe("ObjectStoreDocStore.gc — watermark floor (Task 5.2)", () => {
 
     // A lagging consumer at seqno 3 — well below segBase (7).
     const consumerId = "replica-1";
-    await publishConsumerWatermark(objectStore, consumerId, { appliedSeqno: 3 });
-    expect(await readConsumerWatermarks(objectStore)).toEqual([{ consumerId, appliedSeqno: 3 }]);
+    await publishConsumerWatermark(objectStore, "0", consumerId, { appliedSeqno: 3 });
+    expect(await readConsumerWatermarks(objectStore, "0")).toEqual([{ consumerId, appliedSeqno: 3 }]);
 
     // --- first gc(): floor = min(segBase=7, W_min=3) = 3 ---
     const firstResult = await store.gc();
@@ -90,7 +90,7 @@ describe("ObjectStoreDocStore.gc — watermark floor (Task 5.2)", () => {
 
     // Advance the consumer past segBase — the watermark floor no longer binds; a third gc()
     // reclaims exactly what remains at/below segBase (7): seqnos 4,5,6,7.
-    await publishConsumerWatermark(objectStore, consumerId, { appliedSeqno: 100 });
+    await publishConsumerWatermark(objectStore, "0", consumerId, { appliedSeqno: 100 });
     const thirdResult = await store.gc();
     expect(thirdResult.deletedSegments).toBe(4);
     const afterThirdGc = (await objectStore.list(segPrefix)).map((k) => seqnoOf(segPrefix, k)).sort((a, b) => a - b);
@@ -111,7 +111,7 @@ describe("ObjectStoreDocStore.gc — watermark floor (Task 5.2)", () => {
     }
 
     const consumerId = "replica-2";
-    await publishConsumerWatermark(objectStore, consumerId, { appliedSeqno: 2 });
+    await publishConsumerWatermark(objectStore, "0", consumerId, { appliedSeqno: 2 });
 
     const segPrefix = "s0/seg/";
     const first = await store.gc();
@@ -119,8 +119,8 @@ describe("ObjectStoreDocStore.gc — watermark floor (Task 5.2)", () => {
     let remaining = (await objectStore.list(segPrefix)).map((k) => seqnoOf(segPrefix, k)).sort((a, b) => a - b);
     expect(remaining).toEqual([3, 4, 5, 6, 7, 8, 9]);
 
-    await removeConsumer(objectStore, consumerId);
-    expect(await readConsumerWatermarks(objectStore)).toEqual([]);
+    await removeConsumer(objectStore, "0", consumerId);
+    expect(await readConsumerWatermarks(objectStore, "0")).toEqual([]);
 
     const second = await store.gc();
     expect(second.deletedSegments).toBe(5); // 3,4,5,6,7 (up to segBase=7)
@@ -141,7 +141,7 @@ describe("ObjectStoreDocStore.gc — watermark floor (Task 5.2)", () => {
       await store.commitWrite([doc(newDocumentId(TABLE), `tail-${i}`)], []);
     }
 
-    expect(await readConsumerWatermarks(objectStore)).toEqual([]); // no consumers published
+    expect(await readConsumerWatermarks(objectStore, "0")).toEqual([]); // no consumers published
 
     const segPrefix = "s0/seg/";
     const result = await store.gc();

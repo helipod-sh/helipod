@@ -26,6 +26,11 @@ function doc(id: InternalDocumentId, body: string, prevTs: bigint | null = null)
   return { ts: 0n, id, prev_ts: prevTs, value: { id, value: { body } } };
 }
 
+/** A DELETE (tombstone) commit — `value: null`, per `DocumentLogEntry`'s own contract. */
+function del(id: InternalDocumentId, prevTs: bigint | null): DocumentLogEntry {
+  return { ts: 0n, id, prev_ts: prevTs, value: null };
+}
+
 function freshLocal(): SqliteDocStore {
   const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
   return new SqliteDocStore(isBun ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" }));
@@ -307,6 +312,71 @@ describe("ObjectStoreReplicaTailer", () => {
     // A further tick with nothing new → false, no further invalidation.
     expect(await tailer.tick()).toBe(false);
     expect(applied.length).toBe(1);
+
+    await writer.close();
+  });
+
+  it("5.1e (regression, Finding 1 whole-branch review): a doc deleted in the range a snapshot-restore jumps over must NOT resurrect on the replica, and its deletion must be invalidated", async () => {
+    const bucket = await freshBucket();
+    const writer = await openAndAcquire(bucket, "0", freshLocal());
+
+    // Two live docs, bootstrapped onto the replica EARLY (before anything is deleted or the
+    // snapshot cadence fires) — mirrors 5.1c's "bootstrap early, correlate, then let the writer
+    // race ahead of the replica" shape.
+    const idA = newDocumentId(TABLE);
+    const idB = newDocumentId(TABLE);
+    const tsA = await writer.commitWrite([doc(idA, "a")], []); // segment 0
+    const tsB = await writer.commitWrite([doc(idB, "b")], []); // segment 1
+
+    const replicaLocal = freshLocal();
+    await ObjectStoreDocStore.open({ objectStore: bucket, shard: "0", local: replicaLocal });
+    expect((await replicaLocal.get(idA))?.value.value.body).toBe("a");
+    expect((await replicaLocal.get(idB))?.value.value.body).toBe("b");
+
+    const applied: AppliedInvalidation[] = [];
+    const tailer = new ObjectStoreReplicaTailer({
+      objectStore: bucket,
+      shard: "0",
+      local: replicaLocal,
+      onInvalidation: async (inv) => {
+        applied.push(inv);
+      },
+    });
+    // Correlate the tailer to "caught up through tsB / segment 1" — mirrors 5.1c/5.1d's first tick.
+    expect(await tailer.tick()).toBe(false);
+    expect(tailer.appliedSeqno).toBe(1);
+    expect(tailer.appliedMaxTs).toBe(tsB);
+
+    // The writer DELETES A (segment 2), then commits enough filler to trigger the cadence snapshot
+    // (SNAPSHOT_EVERY total commits: A, B, delete-A, + 5 filler = 8 → segBase = 7) — the snapshot's
+    // live-doc dump therefore EXCLUDES A (tombstoned) entirely; it never mentions A at all.
+    await writer.commitWrite([del(idA, tsA)], []); // segment 2
+    let lastTs = tsB;
+    for (let i = 0; i < SNAPSHOT_EVERY - 3; i++) {
+      lastTs = await writer.commitWrite([doc(newDocumentId(TABLE), `filler-${i}`)], []);
+    }
+    const gcResult = await writer.gc();
+    expect(gcResult.deletedSegments).toBeGreaterThan(0); // segments 0..segBase are now GONE
+
+    // The replica's appliedSeqno (1) is well below the new snapshotSegBase (7) — its next tick MUST
+    // fall into the snapshot-restore branch (`#materializeRound`'s Finding-1 diff+tombstone path),
+    // NOT fail on the now-absent pre-snapshot segments.
+    expect(await tailer.tick()).toBe(true);
+
+    // THE ASSERTION: A must be gone on the replica — NOT resurrected by the snapshot overlay, which
+    // never mentions A at all (a tombstone can't appear in a dump that excludes tombstones).
+    expect(await replicaLocal.get(idA)).toBeNull();
+    // B (never deleted, present in the snapshot) must still read live and unaffected.
+    expect((await replicaLocal.get(idB))?.value.value.body).toBe("b");
+
+    // The round's invalidation must cover A's deletion too — a `db.get(idA)` subscription must
+    // re-run, not go silently stale forever.
+    expect(applied.length).toBe(1);
+    expect(applied[0]!.writtenDocs).toContainEqual({ tableId: encodeStorageTableId(TABLE), internalId: idA.internalId });
+    expect(tailer.appliedMaxTs).toBe(lastTs);
+
+    // A further tick with nothing new → false.
+    expect(await tailer.tick()).toBe(false);
 
     await writer.close();
   });
