@@ -12,8 +12,17 @@ import { FencedError } from "../src/fenced-error";
 
 const TABLE = 30001;
 
+// SNAPSHOT_EVERY is 8 (object-doc-store.ts) — mirrored here (not exported; same note as every other
+// test file in this package that needs to drive the cadence snapshot deliberately).
+const SNAPSHOT_EVERY = 8;
+
 function doc(id: InternalDocumentId, body: string): DocumentLogEntry {
   return { ts: 0n, id, prev_ts: null, value: { id, value: { body } } };
+}
+
+/** A DELETE (tombstone) commit — `value: null`, per `DocumentLogEntry`'s own contract. */
+function del(id: InternalDocumentId, prevTs: bigint | null): DocumentLogEntry {
+  return { ts: 0n, id, prev_ts: prevTs, value: null };
 }
 
 function freshLocal(): SqliteDocStore {
@@ -292,5 +301,54 @@ describe("ObjectStoreDocStore", () => {
     // further commits are refused until the store is re-opened.
     await expect(store.commitWrite([doc(newDocumentId(TABLE), "c")], [])).rejects.toThrow(/poisoned|re-opened/i);
     await store.close();
+  });
+
+  it("5.5-fix (writer-path regression, Slice 5 re-review): a stale writer instance re-acquiring after another writer deleted+snapshotted+GC'd a doc must NOT resurrect it via materializeTo's catch-up", async () => {
+    // The writer-path analog of `replica-tailer.test.ts`'s 5.1e — same hazard (Finding 1, whole-
+    // branch review), reached from `acquire()`'s catch-up (`materializeTo`) instead of the tailer's
+    // `#materializeRound`. Both now call the shared `applySnapshotState` helper.
+    const objectStore = await freshBucket();
+    const writer = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const acq1 = await writer.acquire({ writerId: "w1", leaseTtlMs: 1000, now: 0 });
+    expect(acq1.acquired).toBe(true);
+
+    const idA = newDocumentId(TABLE);
+    const idB = newDocumentId(TABLE);
+    const tsA = await writer.commitWrite([doc(idA, "a")], []); // seg 0
+    await writer.commitWrite([doc(idB, "b")], []); // seg 1
+
+    // A SEPARATE, already-`open()`'d writer instance whose local store bootstrapped A and B LIVE —
+    // simulates a writer process that opened early (but hasn't `acquire()`'d/committed anything of
+    // its own yet) when it's about to take over from an incumbent whose lease has since expired.
+    const staleLocal = freshLocal();
+    const stale = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: staleLocal });
+    expect((await staleLocal.get(idA))?.value.value.body).toBe("a");
+    expect((await staleLocal.get(idB))?.value.value.body).toBe("b");
+
+    // The live writer deletes A, then commits enough filler to trigger the cadence snapshot
+    // (A, B, delete-A + 5 filler = 8 commits -> segBase = 7) — the snapshot's live-doc dump
+    // therefore EXCLUDES A entirely. GC then reclaims the pre-snapshot segments.
+    await writer.commitWrite([del(idA, tsA)], []); // seg 2
+    for (let i = 0; i < SNAPSHOT_EVERY - 3; i++) {
+      await writer.commitWrite([doc(newDocumentId(TABLE), `filler-${i}`)], []);
+    }
+    const gcResult = await writer.gc();
+    expect(gcResult.deletedSegments).toBeGreaterThan(0); // pre-snapshot segments are GONE
+
+    // Take over: the incumbent's short lease (ttl 1000, claimed at now=0) has long expired by
+    // now=2000, so a DIFFERENT writerId may claim it. `acquire()`'s catch-up calls `materializeTo`
+    // against the fresh (post-snapshot, post-GC) manifest onto `staleLocal`, which is NON-EMPTY and
+    // still has A live from its own earlier `open()` bootstrap.
+    const acq2 = await stale.acquire({ writerId: "w2", leaseTtlMs: 1000, now: 2000 });
+    expect(acq2.acquired).toBe(true);
+
+    // THE ASSERTION: A must be gone on the taking-over writer's own local store — NOT resurrected by
+    // the snapshot overlay (which never mentions A). Left unfixed, `stale` could re-commit A next,
+    // permanently undoing the delete in the durable log.
+    expect(await staleLocal.get(idA)).toBeNull();
+    expect((await staleLocal.get(idB))?.value.value.body).toBe("b");
+
+    await writer.close();
+    await stale.close();
   });
 });

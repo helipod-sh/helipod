@@ -47,6 +47,7 @@ import { readManifest, type Manifest } from "./manifest";
 import { readSnapshot } from "./snapshot";
 import { decodeSegment } from "./segment";
 import { segmentKey } from "./object-doc-store";
+import { applySnapshotState } from "./apply-snapshot";
 
 /** Bounds the missing-segment retry loop in `#materializeRound` (Finding 4, whole-branch review):
  *  on the shipped strongly-consistent adapters (fs/S3) a raced-GC restart converges in one or two
@@ -331,30 +332,17 @@ export class ObjectStoreReplicaTailer {
         // `#buildInvalidation` (deriving `writtenDocs` from `snap.documents`, which never mentions
         // it) would emit no invalidation for it either.
         //
-        // Fix: diff the replica's OWN current live docs against the snapshot's live-doc set and
-        // APPEND a tombstone for anything the snapshot dropped, at the snapshot's own frontier ts
-        // (>= every existing replica revision, since the replica is BEHIND the snapshot whenever
-        // this branch runs) — append-only, so a concurrent MVCC read against `local` never sees rows
-        // physically disappear mid-restore. Do NOT truncate the store to fake a "fresh" restore.
-        const snapshotIds = new Set(snap.documents.map((d) => this.#docKey(d.id)));
-        const replicaState = await this.local.dumpCurrentState();
-        const deleted = replicaState.documents.filter((d) => !snapshotIds.has(this.#docKey(d.id)));
-        if (deleted.length > 0) {
-          const frontierTs = BigInt(snap.frontierTs);
-          const tombstones: DocumentLogEntry[] = deleted.map((d) => ({
-            ts: frontierTs,
-            id: d.id,
-            value: null,
-            prev_ts: d.ts,
-          }));
-          await this.local.write(tombstones, [], "Overwrite");
+        // Fix extracted into the shared `applySnapshotState` helper (Slice 5 re-review) — see its
+        // doc for the full diff+tombstone rationale; `object-doc-store.ts`'s `materializeTo` (the
+        // writer's own catch-up path) calls the SAME helper for the identical hazard.
+        const snapFrontierTs = BigInt(snap.frontierTs);
+        const { deletedDocs } = await applySnapshotState(this.local, snap, snapFrontierTs);
+        if (deletedDocs.length > 0) {
           // Fold the tombstones into this round's `documents` too — NOT just applied to `local` —
           // so `#buildInvalidation`'s `writtenDocs` covers the deletion and a `db.get(id)`
           // subscription on the deleted doc actually re-runs.
-          documents.push(...tombstones);
+          documents.push(...deletedDocs);
         }
-
-        await this.local.write(snap.documents, snap.indexUpdates, "Overwrite");
         documents.push(...snap.documents);
         indexUpdates.push(...snap.indexUpdates);
         appliedSeqno = manifest.snapshotSegBase;
@@ -396,9 +384,10 @@ export class ObjectStoreReplicaTailer {
     }
   }
 
-  /** `${tableId}|${internalIdHex}` — the doc-identity key both `#buildInvalidation`'s dedupe and
-   *  `#materializeRound`'s snapshot-restore diff (Finding 1) use to compare doc ids across two
-   *  differently-sourced document sets (segment/snapshot rows vs. `dumpCurrentState`'s rows). */
+  /** `${tableId}|${internalIdHex}` — the doc-identity key `#buildInvalidation`'s dedupe uses to
+   *  distinguish applied documents by `(tableId, internalId)`. (The snapshot-restore diff this
+   *  method used to also serve, Finding 1, now lives in the shared `applySnapshotState` helper,
+   *  keyed by `@stackbase/id-codec`'s own `documentIdKey` — see `apply-snapshot.ts`.) */
   #docKey(id: InternalDocumentId): string {
     return `${encodeStorageTableId(id.tableNumber)}|${internalIdToHex(id.internalId)}`;
   }

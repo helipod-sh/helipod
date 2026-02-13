@@ -85,6 +85,7 @@ import { readManifest, createManifest, casManifest, type Manifest } from "./mani
 import { writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
 import { FencedError } from "./fenced-error";
 import { readConsumerWatermarks } from "./consumers";
+import { applySnapshotState } from "./apply-snapshot";
 
 /** Exported (Tier 3 Slice 5, Task 5.1) so `replica-tailer.ts` can pull the SAME segment objects this
  *  class's own commit/`materializeTo` path writes/reads, without duplicating the key format. */
@@ -205,6 +206,20 @@ export class ObjectStoreDocStore implements DocStore {
           `objectstore-substrate: missing snapshot '${manifest.snapshotTs}' referenced by manifest for shard '${this.shard}' (torn state)`,
         );
       }
+      // TOMBSTONE-CORRECT RESTORE (Slice 5 re-review fix): this instance's `local` may be NON-EMPTY
+      // and STALE here — `open()` always calls this against a fresh, empty local (safe either way),
+      // but `acquire()`'s takeover catch-up calls it against an ALREADY-OPEN, possibly-behind writer
+      // instance. A snapshot's own `dumpCurrentState` source excludes tombstones, so applying
+      // `snap.documents` alone (an overlay `write(..., "Overwrite")`, never a replace-all) cannot
+      // express "this doc was deleted in the range this restore jumps over" — a doc `local` still
+      // has LIVE that the snapshot silently dropped would otherwise stay phantom-live and could be
+      // RE-COMMITTED by this writer, permanently undoing the delete in the durable log. The shared
+      // `applySnapshotState` helper (also used by the replica tailer's `#materializeRound` — see its
+      // doc for the full diff+tombstone rationale) diffs+tombstones before applying. On the common
+      // fresh-`open()` path `local` is empty, so the diff is a no-op — byte-identical to before this
+      // fix. This method has no invalidation sink to feed (the writer's own transactor/tailer own
+      // reactivity, not catch-up), so the returned `deletedDocs` are ignored here.
+      //
       // BENIGN DIVERGENCE (whole-branch review, Minor #2, carried from the original open()): `dumpCurrentState`
       // (and so this restore) excludes tombstones, so if `snap.frontierTs` is itself a DELETE's ts and
       // there's no tail beyond this snapshot, the restored `documents` table has no row AT that ts — the
@@ -215,7 +230,7 @@ export class ObjectStoreDocStore implements DocStore {
       // consumer needing the AUTHORITATIVE frontier must read the manifest (`frontierTs`), not call
       // `local.maxTimestamp()`. Not fixed here (seeding a fake tombstone row just to keep `maxTimestamp()`
       // honest is worse than documenting the divergence).
-      await this.local.write(snap.documents, snap.indexUpdates, "Overwrite");
+      await applySnapshotState(this.local, snap, BigInt(snap.frontierTs));
       appliedThrough = manifest.snapshotSegBase;
     }
 
