@@ -422,6 +422,7 @@
         "@electric-sql/pglite": "^0.2.17",
         "@stackbase/client": "workspace:*",
         "@stackbase/fleet": "workspace:*",
+        "@stackbase/objectstore-substrate": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
         "@stackbase/triggers": "workspace:*",
         "@stackbase/workflow": "workspace:*",

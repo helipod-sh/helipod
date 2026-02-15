@@ -126,6 +126,10 @@ export interface ServeOptions {
   /** The URL other fleet nodes reach THIS node at (recorded on the lease when it's the writer, and
    *  the target sync nodes forward writes / proxy httpActions to). Flag wins over env. */
   advertiseUrl?: string;
+  /** Tier 3: run this node's store as the object-storage substrate (single-shard writer over the
+   *  given bucket/dir) instead of SQLite/Postgres — `s3://…`/`s3+http(s)://…`/`file://…`/a bare path,
+   *  see `objectstore-select.ts`'s grammar doc. Mutually exclusive with `fleet`. Flag wins over env. */
+  objectStoreUrl?: string;
 }
 
 /** Fail-fast messages for `--fleet` misconfiguration (asserted verbatim by `fleet-flags.test.ts`). */
@@ -196,6 +200,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let storageEndpoint: string | undefined;
   let fleet = process.env.STACKBASE_FLEET === "1" || process.env.STACKBASE_FLEET?.trim().toLowerCase() === "true";
   let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
+  let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -209,8 +214,22 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--storage-endpoint" && args[i + 1]) storageEndpoint = args[++i] as string;
     else if (a === "--fleet") fleet = true;
     else if (a === "--advertise-url" && args[i + 1]) advertiseUrl = args[++i] as string;
+    else if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i] as string;
   }
-  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl, storageBucket, storageEndpoint, fleet, advertiseUrl };
+  return {
+    convexDir,
+    dataPath,
+    ip,
+    port,
+    dashboard,
+    allowDeploy,
+    databaseUrl,
+    storageBucket,
+    storageEndpoint,
+    fleet,
+    advertiseUrl,
+    ...(objectStoreUrl !== undefined ? { objectStoreUrl } : {}),
+  };
 }
 
 /**
@@ -236,8 +255,22 @@ export async function startServe(
     adminKey: string;
     fleetModule?: FleetModule;
     fleetConfig?: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number; numShards?: number };
+    /** Tier 3 Slice 6: called once, synchronously, the moment the object-store lease-heartbeat driver
+     *  detects this node has been fenced. `serveCommand` wires this to trigger graceful shutdown; a
+     *  direct `startServe` test caller may omit it (the driver just logs and stops on its own). */
+    onObjectStoreFenced?: (e: Error) => void;
   },
-): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime; fleet?: FleetHandles; role?: "sync" | "writer" }> {
+): Promise<{
+  server: DevServer;
+  store: DocStore;
+  runtime: EmbeddedRuntime;
+  fleet?: FleetHandles;
+  role?: "sync" | "writer";
+  /** Tier 3 Slice 6: set only when `--object-store` was given — release this node's shard-0 lease.
+   *  Caller must call this AFTER `server.close()` (stops the heartbeat driver) and BEFORE
+   *  `store.close()` — see `serveCommand`'s shutdown. */
+  objectStoreRelease?: () => void;
+}> {
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
   // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
   const prep =
@@ -250,7 +283,7 @@ export async function startServe(
         })
       : undefined;
 
-  const { runtime, adminApi, project, store, components, storageRoutes } = await bootProject({
+  const { runtime, adminApi, project, store, components, storageRoutes, objectStoreRelease } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey: opts.adminKey,
@@ -259,6 +292,8 @@ export async function startServe(
     ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
     ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
     ...(prep ? { fleet: prep.runtimeOptions } : {}),
+    ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
+    ...(opts.onObjectStoreFenced ? { objectStoreOnFenced: opts.onObjectStoreFenced } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -308,7 +343,7 @@ export async function startServe(
     runtime,
     { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy, fleet },
   );
-  return { server, store, runtime, fleet, role: prep?.role };
+  return { server, store, runtime, fleet, role: prep?.role, ...(objectStoreRelease ? { objectStoreRelease } : {}) };
 }
 
 /** CLI wrapper: flags → fail-fast → startServe → signal handlers → run forever. */
@@ -322,6 +357,13 @@ export async function serveCommand(args: string[]): Promise<number> {
   if (!existsSync(join(opts.convexDir, "_generated", "server.ts"))) {
     process.stderr.write(
       `✗ ${opts.convexDir}/_generated not found — run \`stackbase codegen --dir ${opts.convexDir}\` and commit _generated/ before deploying.\n`,
+    );
+    return 1;
+  }
+
+  if (opts.fleet && opts.objectStoreUrl !== undefined) {
+    process.stderr.write(
+      "✗ --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.\n",
     );
     return 1;
   }
@@ -369,7 +411,22 @@ export async function serveCommand(args: string[]): Promise<number> {
     };
   }
 
-  const { server, store, role, fleet } = await startServe({ ...opts, adminKey, fleetModule, fleetConfig });
+  // Tier 3 Slice 6: a forward-reference trampoline — `startServe` needs `onObjectStoreFenced` BEFORE
+  // it resolves (so it can thread it into the lease-heartbeat driver at boot), but `shutdown` (which
+  // the fence should trigger) can only be defined AFTER `startServe` resolves (it closes over
+  // `server`/`store`/`objectStoreRelease`, all part of `startServe`'s result). The indirection lets a
+  // fence detected mid-boot-window-adjacent still trigger a real graceful shutdown once one exists.
+  let triggerObjectStoreFencedShutdown: (() => void) | undefined;
+  const { server, store, role, fleet, objectStoreRelease } = await startServe({
+    ...opts,
+    adminKey,
+    fleetModule,
+    fleetConfig,
+    onObjectStoreFenced: (e) => {
+      process.stderr.write(`✗ object-store lease lost — shutting down: ${e.message}\n`);
+      triggerObjectStoreFencedShutdown?.();
+    },
+  });
   process.stdout.write(
     JSON.stringify({
       level: "info",
@@ -381,6 +438,8 @@ export async function serveCommand(args: string[]): Promise<number> {
       allowDeploy: opts.allowDeploy,
       // Additive: present only in fleet mode. Task 7's 2-process E2E asserts each node's role here.
       ...(role ? { fleet: true, role } : {}),
+      // Additive: present only in object-store mode (Tier 3 Slice 6).
+      ...(opts.objectStoreUrl !== undefined ? { objectStore: true } : {}),
     }) + "\n",
   );
 
@@ -391,10 +450,15 @@ export async function serveCommand(args: string[]): Promise<number> {
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
     // Stop the fleet node (lease acquire loop / replica tailer) before the store closes.
     if (fleet) await fleet.stop();
+    // `server.close()` stops every registered driver first (including the object-store
+    // lease-heartbeat driver, if any) — release the lease only AFTER that, so a heartbeat tick can
+    // never race a voluntary release into a spurious "fenced" log during normal shutdown.
     await server.close();
+    if (objectStoreRelease) objectStoreRelease();
     await store.close();
     process.exit(0);
   };
+  triggerObjectStoreFencedShutdown = () => void shutdown();
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
 

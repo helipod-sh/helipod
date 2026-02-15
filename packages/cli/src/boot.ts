@@ -7,6 +7,7 @@
 import { mkdirSync, readFileSync, accessSync, constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DocStore } from "@stackbase/docstore";
@@ -19,10 +20,11 @@ import {
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
 import type { GeneratedBundle } from "@stackbase/codegen";
-import type { ComponentDefinition } from "@stackbase/component";
+import type { ComponentDefinition, Driver } from "@stackbase/component";
 import type { RegisteredFunction } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { BlobStore } from "@stackbase/blobstore";
+import type { ObjectStore } from "@stackbase/objectstore";
 import {
   storageContextProvider,
   storageReaper,
@@ -33,6 +35,7 @@ import {
 } from "@stackbase/storage";
 import { receiptsReaper } from "@stackbase/receipts";
 import { makeBlobStore, isS3Config, resolveStorageConfig, type StorageConfig } from "./blobstore-select";
+import { resolveObjectStore } from "./objectstore-select";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
@@ -52,6 +55,176 @@ export function makeStore(opts: { dataPath: string; databaseUrl?: string }): Doc
   const adapter =
     detectRuntime() === "bun" ? new BunSqliteAdapter({ path: opts.dataPath }) : new NodeSqliteAdapter({ path: opts.dataPath });
   return new SqliteDocStore(adapter);
+}
+
+// ── Tier 3 Slice 6 (Task 6.3): the object-storage writer node ──────────────────────────────────
+// `stackbase serve --object-store <url>` boots a single-shard (shard "0") writer node whose store is
+// the Tier 3 object-storage substrate (`@stackbase/objectstore-substrate`) instead of the usual
+// SQLite/Postgres store. Mirrors the fleet-store-bypass shape: `bootLoaded`'s `store = opts.fleet?.
+// store ?? objectStoreOverride ?? makeStore(...)`. The substrate is an ENTERPRISE (`ee/`) package —
+// core `packages/cli` keeps ZERO static/type dependency on it (same discipline `serve.ts`'s
+// `FleetModule` applies to `@stackbase/fleet`): the shapes below are hand-declared structural
+// mirrors, loaded only via a dynamic, non-literal `import()` so `tsc`/bundlers never resolve it
+// either. A deployment that never sets `--object-store` pays nothing — the import is never reached.
+
+/** The subset of `ObjectStoreDocStore`'s API this module drives directly (`acquire`/`heartbeat`/
+ *  `release`, plus the full `DocStore` surface every other boot code path already expects). */
+export interface ObjectStoreWriterStore extends DocStore {
+  acquire(opts: {
+    writerId: string;
+    leaseTtlMs: number;
+    now: number;
+  }): Promise<{ acquired: true } | { acquired: false; heldBy: string; expiresAt: number }>;
+  heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void>;
+  release(): void;
+}
+
+/** Structural mirror of `@stackbase/objectstore-substrate`'s public surface this module needs. */
+export interface ObjectStoreSubstrateModule {
+  ObjectStoreDocStore: {
+    open(opts: { objectStore: ObjectStore; shard: string; local: SqliteDocStore }): Promise<ObjectStoreWriterStore>;
+  };
+  ensureGlobals(
+    objectStore: ObjectStore,
+    globals: { deploymentId: string; numShards: number },
+  ): Promise<{ deploymentId: string; numShards: number }>;
+  leaseHeartbeatDriver(
+    store: { heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void> },
+    opts: { leaseTtlMs: number; heartbeatMs: number; onFenced?: (e: Error) => void },
+  ): Driver;
+}
+
+export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
+  "stackbase: --object-store requires @stackbase/objectstore-substrate — install it (bun add @stackbase/objectstore-substrate).";
+
+/** Dynamic-import gate for the ee substrate package (mirrors `serve.ts`'s `@stackbase/fleet` gate:
+ *  an indirect (non-literal) specifier so `tsc` never statically resolves the enterprise package). */
+async function loadObjectStoreSubstrateModule(): Promise<ObjectStoreSubstrateModule> {
+  try {
+    const specifier: string = "@stackbase/objectstore-substrate";
+    return (await import(specifier)) as unknown as ObjectStoreSubstrateModule;
+  } catch {
+    throw new Error(OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE);
+  }
+}
+
+/** Bounded retry over `store.acquire(...)` (Task 6.3): `acquire()` is a single attempt that returns
+ *  `{acquired:false, heldBy, expiresAt}` when a DIFFERENT live writer currently holds the shard —
+ *  this polls until acquired or `timeoutMs` elapses, then fails fast with a clear "held by" message.
+ *  A crashed predecessor's lease simply expires on its own (no CAS involved in expiry), so a fresh
+ *  boot's retry loop takes over automatically once `timeoutMs` covers the remaining TTL — no manual
+ *  intervention needed for the common failover case. Exported for direct unit testing (no bucket
+ *  needed — a fake `{acquire}` is enough). */
+export async function acquireWithRetry(
+  store: Pick<ObjectStoreWriterStore, "acquire">,
+  opts: { writerId: string; leaseTtlMs: number; timeoutMs: number; pollIntervalMs?: number; now?: () => number },
+): Promise<void> {
+  const now = opts.now ?? Date.now;
+  const pollIntervalMs = opts.pollIntervalMs ?? 1000;
+  const deadline = now() + opts.timeoutMs;
+  let last: { heldBy: string; expiresAt: number } | undefined;
+  for (;;) {
+    const result = await store.acquire({ writerId: opts.writerId, leaseTtlMs: opts.leaseTtlMs, now: now() });
+    if (result.acquired) return;
+    last = { heldBy: result.heldBy, expiresAt: result.expiresAt };
+    if (now() >= deadline) {
+      throw new Error(
+        `stackbase: --object-store shard "0" held by '${last.heldBy}' until ${new Date(last.expiresAt).toISOString()} — ` +
+          `timed out after ${opts.timeoutMs}ms waiting for the lease to free up. If '${last.heldBy}' crashed, its lease ` +
+          `will expire on its own and a retry will take over; otherwise stop that writer before starting this one.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+}
+
+/** Construct the concrete `SqliteDocStore` the substrate's `ObjectStoreDocStore.open()` needs as its
+ *  local materialize target — the same adapter-selection logic as `makeStore`'s SQLite branch, but
+ *  narrowly typed to `SqliteDocStore` (not the widened `DocStore`) since `open()` calls SQLite-
+ *  specific methods (`dumpCurrentState`) the generic `DocStore` interface doesn't declare. Always
+ *  SQLite regardless of `--database-url` — the object-store path's local cache is never Postgres. */
+function makeLocalSqliteStore(dataPath: string): SqliteDocStore {
+  mkdirSync(dirname(resolve(dataPath)), { recursive: true });
+  const adapter =
+    detectRuntime() === "bun" ? new BunSqliteAdapter({ path: dataPath }) : new NodeSqliteAdapter({ path: dataPath });
+  return new SqliteDocStore(adapter);
+}
+
+/** Mirrors `@stackbase/runtime-embedded`'s own private `DEPLOYMENT_ID_GLOBAL_KEY` (and
+ *  `@stackbase/fleet`'s exported `FLEET_DEPLOYMENT_ID_KEY`) — the same well-known magic string, not
+ *  otherwise exported for cross-package reuse (fleet re-declares its own copy too). `createEmbeddedRuntime`
+ *  reads-or-mints this global on `options.store` right after boot; pre-seeding it here (carried note
+ *  I1) makes a fresh local materialization ADOPT the bucket's `FleetGlobals.deploymentId` instead of
+ *  the runtime minting a brand-new one — which would otherwise flip every outbox client to
+ *  `known:false` on a from-scratch node. `writeGlobalIfAbsent` no-ops if this dataPath already carries
+ *  a value (a same-node restart) — never overwrite an existing stamp. */
+const RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY = "fleet:deploymentId";
+
+/** Default lease TTL (ms) — mirrors `@stackbase/fleet`'s own default (`STACKBASE_FLEET_LEASE_TTL_MS`
+ *  unset case). Overridable via `bootLoaded`'s `objectStoreLeaseTtlMs` (tests only; not a CLI flag). */
+export const DEFAULT_OBJECTSTORE_LEASE_TTL_MS = 15000;
+/** Default heartbeat cadence (ms) — comfortably under the lease TTL (see `leaseHeartbeatDriver`'s own
+ *  `heartbeatMs < leaseTtlMs` assertion). */
+export const DEFAULT_OBJECTSTORE_HEARTBEAT_MS = 5000;
+
+/**
+ * Build (ee-gate → resolve → adopt globals → materialize → acquire) a Tier 3 object-storage writer
+ * node's store (Task 6.3). Returns the store to use at the `opts.fleet?.store ?? …` seam, any extra
+ * drivers to register (the lease-heartbeat), and a `release` handle for graceful shutdown. Throws
+ * (fail-fast) on: a CAS-unsupported object store, `@stackbase/objectstore-substrate` not installed,
+ * or a bounded-retry acquire timeout (another live writer holds the shard).
+ */
+async function buildObjectStoreWriterNode(opts: {
+  objectStoreUrl: string;
+  dataPath: string;
+  onFenced?: (e: Error) => void;
+  leaseTtlMs?: number;
+  heartbeatMs?: number;
+  acquireTimeoutMs?: number;
+  /** Test-only: shorten `acquireWithRetry`'s poll cadence (default 1000ms) so a short-`leaseTtlMs`
+   *  takeover test doesn't wait a full second per retry. Not surfaced as a CLI flag. */
+  acquirePollIntervalMs?: number;
+  writerId?: string;
+}): Promise<{ store: ObjectStoreWriterStore; drivers: Driver[]; release: () => void }> {
+  const resolved = resolveObjectStore(opts.objectStoreUrl);
+  if (resolved === null) {
+    throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
+  }
+  await resolved.objectStore.assertCasSupported();
+
+  const substrate = await loadObjectStoreSubstrateModule();
+  const writerId = opts.writerId ?? randomUUID();
+  const leaseTtlMs = opts.leaseTtlMs ?? DEFAULT_OBJECTSTORE_LEASE_TTL_MS;
+  const heartbeatMs = opts.heartbeatMs ?? DEFAULT_OBJECTSTORE_HEARTBEAT_MS;
+  // A crashed predecessor's lease is only reclaimable once it expires — give the retry window enough
+  // room to actually observe that (leaseTtlMs) plus a margin for polling/clock skew, unless overridden.
+  const acquireTimeoutMs = opts.acquireTimeoutMs ?? leaseTtlMs + 5000;
+
+  // Slice-4 carried note I1: adopt the bucket's existing deployment identity (never overwrite it) —
+  // a fresh deployment mints one here (non-determinism is fine at this CLI-adjacent layer).
+  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards: 1 });
+
+  const local = makeLocalSqliteStore(opts.dataPath);
+  const store = await substrate.ObjectStoreDocStore.open({ objectStore: resolved.objectStore, shard: "0", local });
+  // Pre-seed the runtime's own deployment-id global on the just-materialized LOCAL store so
+  // `createEmbeddedRuntime` adopts the bucket's identity instead of minting a fresh one (see the
+  // constant's doc comment above).
+  await store.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+
+  await acquireWithRetry(store, {
+    writerId,
+    leaseTtlMs,
+    timeoutMs: acquireTimeoutMs,
+    ...(opts.acquirePollIntervalMs !== undefined ? { pollIntervalMs: opts.acquirePollIntervalMs } : {}),
+  });
+
+  const heartbeat = substrate.leaseHeartbeatDriver(store, {
+    leaseTtlMs,
+    heartbeatMs,
+    onFenced: (e) => opts.onFenced?.(e),
+  });
+
+  return { store, drivers: [heartbeat], release: () => store.release() };
 }
 
 // ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
@@ -172,6 +345,13 @@ export interface BootResult {
    * server splices into its dispatch (NOT user `http.ts` routes) — see `server.ts`.
    */
   storageRoutes: StorageRoute[];
+  /**
+   * Tier 3 Slice 6: set only when `objectStoreUrl` was given — releases this node's shard-0 write
+   * lease (in-process only; does not touch the bucket — see `ObjectStoreDocStore.release()`'s doc,
+   * the lease still expires on its own TTL). `serve.ts`'s shutdown calls this AFTER `server.close()`
+   * (which stops the lease-heartbeat driver) and BEFORE `store.close()`.
+   */
+  objectStoreRelease?: () => void;
 }
 
 /**
@@ -282,10 +462,50 @@ export async function bootLoaded(opts: {
      *  straight into `createEmbeddedRuntime`; absent outside a fleet (the runtime owns it there). */
     externalReceiptsGuard?: boolean;
   };
+  /**
+   * Tier 3 Slice 6: object-storage substrate writer node. When set, `store` (at the `opts.fleet?.
+   * store ?? … ?? makeStore(...)` seam below) becomes an `ObjectStoreDocStore` over this URL's
+   * bucket (shard "0") instead of the usual SQLite/Postgres store — see `buildObjectStoreWriterNode`'s
+   * doc comment. Mutually exclusive with `fleet` (Tier 2 and Tier 3 are alternative write-scaling
+   * stories); combining both throws.
+   */
+  objectStoreUrl?: string;
+  /** Called once, synchronously, the moment the lease-heartbeat driver detects this node has been
+   *  fenced (lost the shard-0 lease to a challenger). `serve.ts` wires this to trigger graceful
+   *  shutdown. Ignored when `objectStoreUrl` is unset. */
+  objectStoreOnFenced?: (e: Error) => void;
+  /** Test-only overrides (mirrors `storageUploadTtlMs`'s pattern) — unset → the production defaults
+   *  (`DEFAULT_OBJECTSTORE_LEASE_TTL_MS`/`DEFAULT_OBJECTSTORE_HEARTBEAT_MS`/`leaseTtlMs + 5000`). */
+  objectStoreLeaseTtlMs?: number;
+  objectStoreHeartbeatMs?: number;
+  objectStoreAcquireTimeoutMs?: number;
+  objectStoreAcquirePollIntervalMs?: number;
+  /** Test-only: force a deterministic writer id instead of a fresh `randomUUID()` per boot. */
+  objectStoreWriterId?: string;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
-  const store = opts.fleet?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
+
+  if (opts.objectStoreUrl !== undefined && opts.fleet) {
+    throw new Error("stackbase: --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.");
+  }
+  // Tier 3 Slice 6: ee-gate → resolve → adopt globals → materialize → acquire the shard-0 lease
+  // BEFORE anything else boots — a failed acquire (another live writer holds it) must fail the whole
+  // boot fast, not leave a runtime half-constructed over a store this process doesn't own.
+  const objectStoreNode =
+    opts.objectStoreUrl !== undefined
+      ? await buildObjectStoreWriterNode({
+          objectStoreUrl: opts.objectStoreUrl,
+          dataPath: opts.dataPath,
+          onFenced: opts.objectStoreOnFenced,
+          leaseTtlMs: opts.objectStoreLeaseTtlMs,
+          heartbeatMs: opts.objectStoreHeartbeatMs,
+          acquireTimeoutMs: opts.objectStoreAcquireTimeoutMs,
+          acquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs,
+          writerId: opts.objectStoreWriterId,
+        })
+      : undefined;
+  const store = opts.fleet?.store ?? objectStoreNode?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
   // Shards B2a (T5): resolve NUM_SHARDS. A fleet caller (`serve.ts --fleet`) has ALREADY resolved
   // + persisted its count against the durable Postgres store BEFORE `prepareFleetNode` (which needs
@@ -298,6 +518,13 @@ export async function bootLoaded(opts: {
   let numShards: number;
   if (opts.fleet) {
     numShards = opts.fleet.numShards ?? 1;
+  } else if (objectStoreNode) {
+    // Tier 3 Slice 6 scope boundary: single-shard-node only. The substrate's own per-shard lease
+    // concept ("shard 0" over the bucket) is a DIFFERENT axis from the engine's ShardedTransactor
+    // `numShards` — composing the two (an N-lane ShardedTransactor over one object-storage shard) is
+    // an explicitly deferred follow-on ("multi-shard single node"), not built here.
+    await store.setupSchema();
+    numShards = 1;
   } else {
     await store.setupSchema();
     numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
@@ -350,6 +577,9 @@ export async function bootLoaded(opts: {
       // `client_mutations` rows. Always on (every deployment has the receipts tables); no-op work when
       // no client ever wrote a receipt. Reads the SAME `store` the runtime commits to.
       receiptsReaper(store),
+      // Tier 3 Slice 6: the lease-heartbeat driver (renews shard-0's lease on cadence; stops +
+      // signals via `objectStoreOnFenced` on a fence). Empty outside the object-store path.
+      ...(objectStoreNode?.drivers ?? []),
       ...project.drivers,
     ],
     // Fleet (Tier 2): route writes to the lease-holder when not the writer, defer drivers until
@@ -399,7 +629,18 @@ export async function bootLoaded(opts: {
     logSink,
     catalog: project.catalog,
   });
-  return { runtime, adminApi, project, generated, store, logSink, components: opts.components, blobStore, storageRoutes: routes };
+  return {
+    runtime,
+    adminApi,
+    project,
+    generated,
+    store,
+    logSink,
+    components: opts.components,
+    blobStore,
+    storageRoutes: routes,
+    ...(objectStoreNode ? { objectStoreRelease: objectStoreNode.release } : {}),
+  };
 }
 
 /**
@@ -457,6 +698,14 @@ export async function bootProject(opts: {
      *  straight into `createEmbeddedRuntime`; absent outside a fleet (the runtime owns it there). */
     externalReceiptsGuard?: boolean;
   };
+  /** Tier 3 Slice 6 object-storage writer node wiring (see `bootLoaded`'s matching opts). */
+  objectStoreUrl?: string;
+  objectStoreOnFenced?: (e: Error) => void;
+  objectStoreLeaseTtlMs?: number;
+  objectStoreHeartbeatMs?: number;
+  objectStoreAcquireTimeoutMs?: number;
+  objectStoreAcquirePollIntervalMs?: number;
+  objectStoreWriterId?: string;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -470,6 +719,15 @@ export async function bootProject(opts: {
     ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
     ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
     ...(opts.fleet ? { fleet: opts.fleet } : {}),
+    ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
+    ...(opts.objectStoreOnFenced ? { objectStoreOnFenced: opts.objectStoreOnFenced } : {}),
+    ...(opts.objectStoreLeaseTtlMs !== undefined ? { objectStoreLeaseTtlMs: opts.objectStoreLeaseTtlMs } : {}),
+    ...(opts.objectStoreHeartbeatMs !== undefined ? { objectStoreHeartbeatMs: opts.objectStoreHeartbeatMs } : {}),
+    ...(opts.objectStoreAcquireTimeoutMs !== undefined ? { objectStoreAcquireTimeoutMs: opts.objectStoreAcquireTimeoutMs } : {}),
+    ...(opts.objectStoreAcquirePollIntervalMs !== undefined
+      ? { objectStoreAcquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs }
+      : {}),
+    ...(opts.objectStoreWriterId !== undefined ? { objectStoreWriterId: opts.objectStoreWriterId } : {}),
   });
 }
 
