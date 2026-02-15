@@ -4,6 +4,7 @@ import { S3ObjectStore } from "@stackbase/objectstore-s3";
 import {
   resolveObjectStore,
   parseS3ObjectStoreUrl,
+  parseFsObjectStorePath,
   defaultObjectStoreNodeConfig,
 } from "../src/objectstore-select";
 
@@ -30,6 +31,62 @@ describe("resolveObjectStore", () => {
     const r2 = resolveObjectStore("/var/lib/stackbase/objects");
     expect(r2!.kind).toBe("fs");
     expect(r2!.objectStore).toBeInstanceOf(FsObjectStore);
+  });
+
+  it("resolves the fs directory correctly for file:// and bare paths (parseFsObjectStorePath)", () => {
+    expect(parseFsObjectStorePath("file:///abs/path")).toBe("/abs/path");
+    expect(parseFsObjectStorePath("./data/objects")).toBe("./data/objects");
+  });
+
+  it("s3+http:// forces an http endpoint, parsed into the same S3ObjectStore config as s3://", () => {
+    const r = resolveObjectStore("s3+http://key:sec@host:9000/bucket");
+    expect(r).not.toBeNull();
+    expect(r!.kind).toBe("s3");
+    expect(r!.objectStore).toBeInstanceOf(S3ObjectStore);
+
+    const parsed = parseS3ObjectStoreUrl("s3+http://key:sec@host:9000/bucket", {});
+    expect(parsed.endpoint).toBe("http://host:9000");
+    expect(parsed.bucket).toBe("bucket");
+    expect(parsed.accessKeyId).toBe("key");
+    expect(parsed.secretAccessKey).toBe("sec");
+  });
+
+  it("s3+https:// forces an https endpoint", () => {
+    const r = resolveObjectStore("s3+https://key:sec@host:9000/bucket");
+    expect(r).not.toBeNull();
+    expect(r!.kind).toBe("s3");
+    expect(r!.objectStore).toBeInstanceOf(S3ObjectStore);
+
+    const parsed = parseS3ObjectStoreUrl("s3+https://key:sec@host:9000/bucket", {});
+    expect(parsed.endpoint).toBe("https://host:9000");
+  });
+
+  it("an explicit ?endpoint= still wins over the s3+https:// scheme-implied protocol", () => {
+    const parsed = parseS3ObjectStoreUrl(
+      "s3+https://key:sec@host:9000/bucket?endpoint=http%3A%2F%2Foverride.example.com",
+      {},
+    );
+    expect(parsed.endpoint).toBe("http://override.example.com");
+  });
+
+  it("CRITICAL: rejects unrecognized schemes instead of silently falling back to a local FsObjectStore", () => {
+    // Before the fix, any scheme other than the literal "s3://" fell through to the fs branch
+    // and would have constructed an FsObjectStore rooted at the whole URL string — silently
+    // writing to local disk instead of the intended shared bucket. Now it must throw.
+    expect(() => resolveObjectStore("gs://bucket/x")).toThrow(/unsupported scheme/i);
+    expect(() => resolveObjectStore("azure://bucket/x")).toThrow(/unsupported scheme/i);
+    expect(() => resolveObjectStore("http://bucket/x")).toThrow(/unsupported scheme/i);
+    // A same-name-different-case typo must also be rejected, not silently normalized to s3://.
+    expect(() => resolveObjectStore("S3://key:secret@localhost:9000/bucket")).toThrow(/unsupported scheme/i);
+
+    try {
+      resolveObjectStore("gs://bucket/x");
+      throw new Error("expected resolveObjectStore to throw");
+    } catch (e) {
+      expect((e as Error).message).not.toMatch(/FsObjectStore/);
+      expect((e as Error).message).toMatch(/s3:\/\//);
+      expect((e as Error).message).toMatch(/file:\/\//);
+    }
   });
 
   it("s3:// URL with userinfo creds selects S3ObjectStore, parsing bucket/endpoint/region", () => {
