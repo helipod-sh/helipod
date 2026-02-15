@@ -23,6 +23,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
+    "@stackbase/component": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
