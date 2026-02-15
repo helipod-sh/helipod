@@ -11,6 +11,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { newDocumentId } from "@stackbase/id-codec";
 import type { DriverContext } from "@stackbase/component";
 import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { FsObjectStore } from "@stackbase/objectstore-fs";
@@ -196,6 +197,56 @@ describe("leaseHeartbeatDriver (Tier 3 Slice 6, Task 6.2)", () => {
     driver.stop?.();
   });
 
+  it("6.2a-5 (review finding 1): a store fenced via the COMMIT path (not heartbeat's own CAS) still surfaces as FencedError to the driver — no zombie re-arm", async () => {
+    // Reproduces the exact scenario the Slice 6 Task 6.2 review flagged: `commitWriteBatch`'s CAS-fail
+    // path ALSO sets `poisoned = true; held = null` and throws `FencedError` — but to the COMMITTER
+    // (the transactor calling `commitWrite`), never to the heartbeat driver. Before the fix,
+    // `heartbeat()` threw a bare `Error` for `held === null`/`poisoned`, so the driver's `wake()` (which
+    // only treats `instanceof FencedError` as terminal) misclassified this as a transient blip and kept
+    // re-arming forever — a zombie node that rejects every commit but never stops/calls `onFenced`.
+    const objectStore = await freshBucket();
+    const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await store.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+
+    const { ctx, setNow, liveTimerCount, fireDueTimers } = makeFakeDriverContext();
+    setNow(0);
+    const fencedErrors: FencedError[] = [];
+    const driver: LeaseHeartbeatDriver = leaseHeartbeatDriver(store, {
+      leaseTtlMs: 1000,
+      heartbeatMs: 300,
+      onFenced: (e) => fencedErrors.push(e),
+    });
+    driver.start(ctx);
+    expect(liveTimerCount()).toBe(1);
+
+    // A challenger acquires past A's lease expiry — bumps epoch/writerId in the manifest, but does NOT
+    // touch A's own in-process `held`/`poisoned` state (that's exactly the gap this scenario exploits).
+    const challenger = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await challenger.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+
+    // A (unaware it was fenced) attempts a non-empty COMMIT — not a heartbeat. Its CAS loses the
+    // stale-etag race against B's acquire, so `commitWriteBatch` itself throws `FencedError` to THIS
+    // caller and, as a side effect, sets `poisoned = true; held = null` on the store instance the
+    // driver is watching (an empty batch would short-circuit before the CAS ever runs).
+    const id = newDocumentId(30001);
+    await expect(
+      store.commitWrite([{ ts: 0n, id, prev_ts: null, value: { id, value: { body: "zombie" } } }], []),
+    ).rejects.toBeInstanceOf(FencedError);
+
+    // The store is now poisoned/unheld via the COMMIT path — the heartbeat driver hasn't ticked yet and
+    // knows nothing about this. Fire its due timer: `store.heartbeat()` must itself surface `FencedError`
+    // (not a bare `Error`) so the driver correctly classifies this as terminal.
+    setNow(300);
+    await fireDueTimers();
+
+    expect(fencedErrors).toHaveLength(1);
+    expect(fencedErrors[0]).toBeInstanceOf(FencedError);
+    expect(liveTimerCount()).toBe(0); // did NOT re-arm — the zombie-node bug this finding fixes
+
+    await store.close();
+    await challenger.close();
+  });
+
   it("6.2a-4: stop() clears the timer and prevents any further re-arm", async () => {
     const objectStore = await freshBucket();
     const store = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
@@ -218,5 +269,19 @@ describe("leaseHeartbeatDriver (Tier 3 Slice 6, Task 6.2)", () => {
     expect(manifest.leaseExpiresAt).toBe("1000"); // never renewed past the original acquire
 
     await store.close();
+  });
+
+  it("6.2a-6 (review finding 3): construction throws when heartbeatMs >= leaseTtlMs", () => {
+    const flaky = { heartbeat: async () => {} };
+    // Equal: a beat exactly as slow as the TTL leaves no renewal margin at all.
+    expect(() => leaseHeartbeatDriver(flaky, { leaseTtlMs: 1000, heartbeatMs: 1000 })).toThrow(
+      /heartbeatMs.*leaseTtlMs/i,
+    );
+    // Slower than the TTL: strictly worse, must also throw.
+    expect(() => leaseHeartbeatDriver(flaky, { leaseTtlMs: 1000, heartbeatMs: 1500 })).toThrow(
+      /heartbeatMs.*leaseTtlMs/i,
+    );
+    // A comfortably-shorter cadence is fine (this is what every other test in this file uses).
+    expect(() => leaseHeartbeatDriver(flaky, { leaseTtlMs: 1000, heartbeatMs: 300 })).not.toThrow();
   });
 });

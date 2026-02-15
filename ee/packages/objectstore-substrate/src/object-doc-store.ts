@@ -368,12 +368,22 @@ export class ObjectStoreDocStore implements DocStore {
    */
   async heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void> {
     return this.runExclusive(async () => {
+      // Both branches below throw `FencedError`, not a bare `Error`: the heartbeat driver is only
+      // ever started AFTER a successful `acquire()`, so seeing `held === null` or `poisoned` DURING
+      // operation means ownership was already lost by some other path — most commonly `commitWriteBatch`'s
+      // own CAS-fail branch, which sets `poisoned = true; held = null` and throws `FencedError` to the
+      // TRANSACTOR, never to this heartbeat. If heartbeat instead threw a plain `Error` here, the
+      // heartbeat driver (which only treats `instanceof FencedError` as terminal) would misclassify a
+      // commit-path fence as a transient heartbeat hiccup and re-arm forever — a zombie node that
+      // rejects every write but never calls `onFenced`/stops. See the Slice 6 Task 6.2 review finding.
       if (this.held === null) {
-        throw new Error(`objectstore-substrate: heartbeat() on shard '${this.shard}' called without a held lease — acquire() first`);
+        throw new FencedError(
+          `heartbeat on a store with no held lease for shard '${this.shard}' — ownership is lost (never acquired or already fenced)`,
+        );
       }
       if (this.poisoned) {
-        throw new Error(
-          `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
+        throw new FencedError(
+          `heartbeat on a poisoned store for shard '${this.shard}' (fenced or a prior apply failed) — ownership is lost`,
         );
       }
       const next: Manifest = { ...this.cached.manifest, leaseExpiresAt: String(opts.now + opts.leaseTtlMs) };

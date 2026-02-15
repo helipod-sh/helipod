@@ -60,6 +60,16 @@ export interface LeaseHeartbeatDriver extends Driver {
  */
 export function leaseHeartbeatDriver(store: HeartbeatableStore, opts: LeaseHeartbeatDriverOpts): LeaseHeartbeatDriver {
   const { leaseTtlMs, heartbeatMs, onFenced } = opts;
+  // Fail fast rather than silently letting the lease lapse: a beat cadence at or slower than the TTL
+  // means a single missed/delayed tick (GC pause, event-loop stall, a slow object-store round trip)
+  // can let `leaseExpiresAt` pass with no renewal in flight — exactly the failure this driver exists
+  // to prevent. Catch it at construction, not in production telemetry.
+  if (heartbeatMs >= leaseTtlMs) {
+    throw new Error(
+      `objectstore-substrate: leaseHeartbeatDriver requires heartbeatMs (${heartbeatMs}) < leaseTtlMs (${leaseTtlMs}) — ` +
+        `a heartbeat cadence at or slower than the lease TTL can let the lease lapse before a renewal ever lands`,
+    );
+  }
   let ctx: DriverContext;
   let timer: number | null = null;
   // Set the instant a fence is detected (BEFORE calling `onFenced`) OR `stop()` is called — guards
@@ -101,7 +111,16 @@ export function leaseHeartbeatDriver(store: HeartbeatableStore, opts: LeaseHeart
             `[objectstore-substrate] FATAL: lease heartbeat fenced — this node no longer owns its shard's write lease ` +
               `and must stop serving writes. Cause: ${e.message}`,
           );
-          onFenced?.(e);
+          // The fence path is terminal/shutdown — a throwing `onFenced` callback must not escape as an
+          // unhandled rejection (this whole branch runs inside a fire-and-forget `.then` rejection
+          // handler with no caller to catch it). Log the callback's own failure and swallow it; the
+          // driver has already done its job (stopped, logged the fence) regardless of what the
+          // callback does.
+          try {
+            onFenced?.(e);
+          } catch (callbackError) {
+            console.error("[objectstore-substrate] lease heartbeat: onFenced callback threw:", callbackError);
+          }
           return;
         }
         // Transient object-store blip — the lease may still be alive until `leaseExpiresAt`. Log and
