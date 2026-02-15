@@ -102,6 +102,12 @@ export function leaseHeartbeatDriver(store: HeartbeatableStore, opts: LeaseHeart
         armTimer();
       },
       (e: unknown) => {
+        // A tick already in flight when `stop()` was called resolves AFTER `stopped` flipped: this is
+        // ordinary teardown (graceful shutdown nulls the lease via `release()` right after `stop()`, so
+        // the in-flight `heartbeat()` legitimately throws `FencedError` — "no held lease"), NOT a real
+        // ownership loss. Swallow it silently: firing `onFenced` or logging a FATAL here would be a
+        // false alarm on every clean shutdown. Only an error surfacing while still running is real.
+        if (stopped) return;
         if (e instanceof FencedError) {
           // Terminal: this node has lost the lease. Set `stopped` BEFORE calling `onFenced` (same
           // ordering discipline as `stop()` below) so nothing re-arms even if `onFenced` somehow
