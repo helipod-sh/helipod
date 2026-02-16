@@ -8,7 +8,14 @@ import { dirname, join, resolve } from "node:path";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
-import { bootProject, isPostgresUrl, loadDashboard, resolveNumShards, parseNumShards } from "./boot";
+import {
+  bootProject,
+  isPostgresUrl,
+  isObjectStoreBootFailFast,
+  loadDashboard,
+  resolveNumShards,
+  parseNumShards,
+} from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
@@ -126,7 +133,56 @@ export interface ServeOptions {
   /** The URL other fleet nodes reach THIS node at (recorded on the lease when it's the writer, and
    *  the target sync nodes forward writes / proxy httpActions to). Flag wins over env. */
   advertiseUrl?: string;
+  /** Tier 3: run this node's store as the object-storage substrate (single-shard writer over the
+   *  given bucket/dir) instead of SQLite/Postgres — `s3://…`/`s3+http(s)://…`/`file://…`/a bare path,
+   *  see `objectstore-select.ts`'s grammar doc. Mutually exclusive with `fleet`. Flag wins over env. */
+  objectStoreUrl?: string;
 }
+
+/**
+ * Race `promise` against a `ms`-millisecond timeout, resolving to `undefined` (never rejecting)
+ * if the timeout wins OR if `promise` itself rejects — used only for genuinely best-effort work
+ * (Task 6.6 F1: `objectStoreRelease()`'s bucket CAS at shutdown) where an unbounded hang or a
+ * swallowed failure are both acceptable outcomes, so the caller never needs a `try`/`catch`. The
+ * loser keeps running in the background (unobserved) — fine here since `objectStoreRelease()`
+ * itself never throws (its underlying `relinquish()` swallows CAS errors by design) and the
+ * process exits shortly after either way.
+ */
+export function raceWithTimeout(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolveOuter) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolveOuter();
+      }
+    }, ms);
+    promise.then(
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveOuter();
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveOuter();
+        }
+      },
+    );
+  });
+}
+
+/** Bound on `objectStoreRelease()` at shutdown (Task 6.6 F1) — `relinquish()` is a live bucket CAS
+ *  call with no timeout of its own; an unreachable bucket at shutdown could otherwise hang on the
+ *  AWS SDK's socket timeout, delaying `process.exit(0)` past a container's grace period (→ SIGKILL,
+ *  skipping the rest of graceful shutdown too). Timing out here is SAFE: the release is best-effort
+ *  — the lease TTL-expires on its own regardless — so an abandoned relinquish just means the next
+ *  writer's takeover waits out the full TTL instead of being immediate, not any data-safety loss. */
+export const OBJECTSTORE_RELINQUISH_TIMEOUT_MS = 2000;
 
 /** Fail-fast messages for `--fleet` misconfiguration (asserted verbatim by `fleet-flags.test.ts`). */
 export const FLEET_ERR_NO_DB =
@@ -196,6 +252,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let storageEndpoint: string | undefined;
   let fleet = process.env.STACKBASE_FLEET === "1" || process.env.STACKBASE_FLEET?.trim().toLowerCase() === "true";
   let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
+  let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
@@ -209,8 +266,22 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--storage-endpoint" && args[i + 1]) storageEndpoint = args[++i] as string;
     else if (a === "--fleet") fleet = true;
     else if (a === "--advertise-url" && args[i + 1]) advertiseUrl = args[++i] as string;
+    else if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i] as string;
   }
-  return { convexDir, dataPath, ip, port, dashboard, allowDeploy, databaseUrl, storageBucket, storageEndpoint, fleet, advertiseUrl };
+  return {
+    convexDir,
+    dataPath,
+    ip,
+    port,
+    dashboard,
+    allowDeploy,
+    databaseUrl,
+    storageBucket,
+    storageEndpoint,
+    fleet,
+    advertiseUrl,
+    ...(objectStoreUrl !== undefined ? { objectStoreUrl } : {}),
+  };
 }
 
 /**
@@ -236,8 +307,23 @@ export async function startServe(
     adminKey: string;
     fleetModule?: FleetModule;
     fleetConfig?: { databaseUrl: string; advertiseUrl: string; leaseTtlMs?: number; numShards?: number };
+    /** Tier 3 Slice 6: called once, synchronously, the moment the object-store lease-heartbeat driver
+     *  detects this node has been fenced. `serveCommand` wires this to trigger graceful shutdown; a
+     *  direct `startServe` test caller may omit it (the driver just logs and stops on its own). */
+    onObjectStoreFenced?: (e: Error) => void;
   },
-): Promise<{ server: DevServer; store: DocStore; runtime: EmbeddedRuntime; fleet?: FleetHandles; role?: "sync" | "writer" }> {
+): Promise<{
+  server: DevServer;
+  store: DocStore;
+  runtime: EmbeddedRuntime;
+  fleet?: FleetHandles;
+  role?: "sync" | "writer";
+  /** Tier 3 Slice 6: set only when `--object-store` was given — relinquish this node's shard-0
+   *  lease (Task 6.5: bucket-clearing `store.relinquish()`, for immediate takeover, not just the
+   *  in-process `release()`). Caller must call this AFTER `server.close()` (stops the heartbeat
+   *  driver) and BEFORE `store.close()` — see `serveCommand`'s shutdown. */
+  objectStoreRelease?: () => Promise<void>;
+}> {
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
   // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
   const prep =
@@ -250,7 +336,7 @@ export async function startServe(
         })
       : undefined;
 
-  const { runtime, adminApi, project, store, components, storageRoutes } = await bootProject({
+  const { runtime, adminApi, project, store, components, storageRoutes, objectStoreRelease } = await bootProject({
     convexDir: opts.convexDir,
     dataPath: opts.dataPath,
     adminKey: opts.adminKey,
@@ -259,6 +345,8 @@ export async function startServe(
     ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
     ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
     ...(prep ? { fleet: prep.runtimeOptions } : {}),
+    ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
+    ...(opts.onObjectStoreFenced ? { objectStoreOnFenced: opts.onObjectStoreFenced } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -308,7 +396,7 @@ export async function startServe(
     runtime,
     { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy, fleet },
   );
-  return { server, store, runtime, fleet, role: prep?.role };
+  return { server, store, runtime, fleet, role: prep?.role, ...(objectStoreRelease ? { objectStoreRelease } : {}) };
 }
 
 /** CLI wrapper: flags → fail-fast → startServe → signal handlers → run forever. */
@@ -322,6 +410,13 @@ export async function serveCommand(args: string[]): Promise<number> {
   if (!existsSync(join(opts.convexDir, "_generated", "server.ts"))) {
     process.stderr.write(
       `✗ ${opts.convexDir}/_generated not found — run \`stackbase codegen --dir ${opts.convexDir}\` and commit _generated/ before deploying.\n`,
+    );
+    return 1;
+  }
+
+  if (opts.fleet && opts.objectStoreUrl !== undefined) {
+    process.stderr.write(
+      "✗ --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.\n",
     );
     return 1;
   }
@@ -369,7 +464,37 @@ export async function serveCommand(args: string[]): Promise<number> {
     };
   }
 
-  const { server, store, role, fleet } = await startServe({ ...opts, adminKey, fleetModule, fleetConfig });
+  // Tier 3 Slice 6: a forward-reference trampoline — `startServe` needs `onObjectStoreFenced` BEFORE
+  // it resolves (so it can thread it into the lease-heartbeat driver at boot), but `shutdown` (which
+  // the fence should trigger) can only be defined AFTER `startServe` resolves (it closes over
+  // `server`/`store`/`objectStoreRelease`, all part of `startServe`'s result). The indirection lets a
+  // fence detected mid-boot-window-adjacent still trigger a real graceful shutdown once one exists.
+  let triggerObjectStoreFencedShutdown: (() => void) | undefined;
+  let booted: Awaited<ReturnType<typeof startServe>>;
+  try {
+    booted = await startServe({
+      ...opts,
+      adminKey,
+      fleetModule,
+      fleetConfig,
+      onObjectStoreFenced: (e) => {
+        process.stderr.write(`✗ object-store lease lost — shutting down: ${e.message}\n`);
+        triggerObjectStoreFencedShutdown?.();
+      },
+    });
+  } catch (e) {
+    // Task 6.6 F2: mirror the fleet path's clean-message UX for the object-store boot fail-fasts
+    // (ee-package missing, acquire-timeout "held by", bad --object-store URL/creds) — these are
+    // KNOWN, actionable misconfigurations, not crashes. Anything else (a genuine bug) is NOT
+    // swallowed here — rethrow so it surfaces with its full stack via `bin.ts`'s catch-all, same as
+    // before this fix, rather than being misreported as a tidy one-liner.
+    if (isObjectStoreBootFailFast(e)) {
+      process.stderr.write(`✗ ${e.message}\n`);
+      return 1;
+    }
+    throw e;
+  }
+  const { server, store, role, fleet, objectStoreRelease } = booted;
   process.stdout.write(
     JSON.stringify({
       level: "info",
@@ -381,6 +506,8 @@ export async function serveCommand(args: string[]): Promise<number> {
       allowDeploy: opts.allowDeploy,
       // Additive: present only in fleet mode. Task 7's 2-process E2E asserts each node's role here.
       ...(role ? { fleet: true, role } : {}),
+      // Additive: present only in object-store mode (Tier 3 Slice 6).
+      ...(opts.objectStoreUrl !== undefined ? { objectStore: true } : {}),
     }) + "\n",
   );
 
@@ -391,10 +518,21 @@ export async function serveCommand(args: string[]): Promise<number> {
     process.stdout.write(JSON.stringify({ level: "info", msg: "shutting down" }) + "\n");
     // Stop the fleet node (lease acquire loop / replica tailer) before the store closes.
     if (fleet) await fleet.stop();
+    // `server.close()` stops every registered driver first (including the object-store
+    // lease-heartbeat driver, if any) — release the lease only AFTER that, so a heartbeat tick can
+    // never race a voluntary release into a spurious "fenced" log during normal shutdown.
     await server.close();
+    // Task 6.5: this calls `store.relinquish()`, which best-effort CAS-clears the lease in the
+    // bucket itself — awaited so a challenger's takeover on the next poll is genuinely immediate,
+    // not merely started-and-abandoned by an unhandled shutdown-time rejection.
+    // Task 6.6 F1: bounded — see `raceWithTimeout`'s doc comment. An unreachable bucket must not be
+    // able to hang shutdown past the container's grace period; timing out here is safe because the
+    // release is best-effort (the lease TTL-expires on its own either way).
+    if (objectStoreRelease) await raceWithTimeout(objectStoreRelease(), OBJECTSTORE_RELINQUISH_TIMEOUT_MS);
     await store.close();
     process.exit(0);
   };
+  triggerObjectStoreFencedShutdown = () => void shutdown();
   process.on("SIGTERM", () => void shutdown());
   process.on("SIGINT", () => void shutdown());
 

@@ -392,4 +392,91 @@ describe("ObjectStoreDocStore lease protocol (Tier 3 Slice 4, Task 4.2)", () => 
     await storeA.close();
     await storeB.close();
   });
+
+  it("6.5: relinquish() CAS-clears the lease in the bucket — a challenger acquires IMMEDIATELY (even at now:0, no expiry wait); a no-op on an unheld/poisoned/never-acquired instance", async () => {
+    const objectStore = await freshBucket();
+    const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+
+    const idA = newDocumentId(TABLE);
+    await storeA.commitWrite([doc(idA, "from-a")], []);
+
+    // Before relinquish: the manifest still shows A's live lease.
+    const beforeRelinquish = await readManifestRaw(objectStore);
+    expect(beforeRelinquish.writerId).toBe("A");
+    expect(Number(beforeRelinquish.leaseExpiresAt)).toBeGreaterThan(0);
+    const epochBefore = beforeRelinquish.epoch;
+
+    await storeA.relinquish();
+
+    // The bucket manifest itself is now cleared — unowned + immediately-expired.
+    const afterRelinquish = await readManifestRaw(objectStore);
+    expect(afterRelinquish.writerId).toBe("");
+    expect(afterRelinquish.leaseExpiresAt).toBe("0");
+    // relinquish() does NOT bump epoch (Task 6.5 design) — only acquire() ever does.
+    expect(afterRelinquish.epoch).toBe(epochBefore);
+
+    // A's own commit is refused post-relinquish, exactly like release() (held is cleared).
+    await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "post-relinquish")], [])).rejects.toThrow(/not the lease owner/i);
+
+    // A challenger's acquire succeeds IMMEDIATELY — even at now:0 (i.e. it never has to observe a
+    // real expiry), proving relinquish() unblocks a challenger without any TTL wait.
+    const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    const acquireB = await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 0 });
+    expect(acquireB).toEqual({ acquired: true });
+
+    // B already sees A's committed row (acquire's catch-up materialized it before claiming).
+    expect((await storeB.get(idA))!.value.value.body).toBe("from-a");
+
+    const afterB = await readManifestRaw(objectStore);
+    expect(afterB.writerId).toBe("B");
+    expect(afterB.epoch).toBe(epochBefore + 1); // B's OWN acquire is what bumps epoch, not relinquish
+
+    // relinquish() on an instance that was never `acquire()`'d (never held anything) is a harmless
+    // no-op — it must not touch B's live lease.
+    const storeNeverAcquired = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    await expect(storeNeverAcquired.relinquish()).resolves.toBeUndefined();
+    const afterNeverAcquiredRelinquish = await readManifestRaw(objectStore);
+    expect(afterNeverAcquiredRelinquish.writerId).toBe("B"); // untouched
+    expect(afterNeverAcquiredRelinquish.epoch).toBe(epochBefore + 1);
+
+    // relinquish() on A again (already fenced/held-cleared from its own earlier relinquish()) is
+    // ALSO a harmless no-op — must not throw and must not disturb B's live lease.
+    await expect(storeA.relinquish()).resolves.toBeUndefined();
+    const afterSecondRelinquish = await readManifestRaw(objectStore);
+    expect(afterSecondRelinquish.writerId).toBe("B");
+    expect(afterSecondRelinquish.epoch).toBe(epochBefore + 1);
+
+    await storeA.close();
+    await storeB.close();
+    await storeNeverAcquired.close();
+  });
+
+  it("6.5: relinquish() on a POISONED instance (fenced mid-commit) is a harmless no-op — it must not throw and must not disturb the fencing challenger's live lease", async () => {
+    const objectStore = await freshBucket();
+    const storeA = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeA.acquire({ writerId: "A", leaseTtlMs: 1000, now: 0 })).toEqual({ acquired: true });
+    await storeA.commitWrite([doc(newDocumentId(TABLE), "from-a")], []);
+
+    // B fences A (past A's lease expiry).
+    const storeB = await ObjectStoreDocStore.open({ objectStore, shard: "0", local: freshLocal() });
+    expect(await storeB.acquire({ writerId: "B", leaseTtlMs: 1000, now: 2000 })).toEqual({ acquired: true });
+
+    // A, unaware it was fenced, poisons itself on its next commit attempt (held is also cleared by
+    // the commit-fence path — see 4.2b above).
+    await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "zombie")], [])).rejects.toBeInstanceOf(FencedError);
+
+    const beforeRelinquish = await readManifestRaw(objectStore);
+    expect(beforeRelinquish.writerId).toBe("B");
+
+    // A's relinquish() is a no-op (held is already null from the fence) — must not throw, must not
+    // touch B's live lease.
+    await expect(storeA.relinquish()).resolves.toBeUndefined();
+    const afterRelinquish = await readManifestRaw(objectStore);
+    expect(afterRelinquish.writerId).toBe("B");
+    expect(afterRelinquish.epoch).toBe(beforeRelinquish.epoch);
+
+    await storeA.close();
+    await storeB.close();
+  });
 });

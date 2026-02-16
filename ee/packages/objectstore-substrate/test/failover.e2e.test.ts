@@ -175,8 +175,13 @@ async function scenario(makeBucket: () => Promise<ObjectStore>): Promise<void> {
   await expect(storeA.commitWrite([doc(newDocumentId(TABLE), "zombie-a")], [])).rejects.toBeInstanceOf(FencedError);
   // The commit-fence also clears A's `held` (Finding 2, Task 4.5, symmetric with heartbeat's own fence
   // path) — A's subsequent heartbeat call now hits the `held === null` guard first, surfacing as "no
-  // held lease" rather than "poisoned"; either way A is durably refused from here on.
-  await expect(storeA.heartbeat({ now: now2000 + 10, leaseTtlMs: 1000 })).rejects.toThrow(/held lease/i);
+  // held lease" rather than "poisoned"; either way A is durably refused from here on. This is itself a
+  // fence condition from the heartbeat driver's perspective (Slice 6 Task 6.2 review finding), so it
+  // must be a `FencedError`, not a bare `Error` — otherwise the heartbeat driver (which only treats
+  // `instanceof FencedError` as terminal) would misclassify this as a transient blip and re-arm forever.
+  const zombieHeartbeatError: unknown = await storeA.heartbeat({ now: now2000 + 10, leaseTtlMs: 1000 }).catch((e: unknown) => e);
+  expect(zombieHeartbeatError).toBeInstanceOf(FencedError);
+  expect((zombieHeartbeatError as Error).message).toMatch(/held lease/i);
 
   // The manifest still references B's frontier UNCHANGED by A's zombie attempt — the log was not
   // corrupted (same frontier/epoch/writerId as right after B's own commits, above).
