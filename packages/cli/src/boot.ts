@@ -101,6 +101,23 @@ export interface ObjectStoreSubstrateModule {
 export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
   "stackbase: --object-store requires @stackbase/objectstore-substrate — install it (bun add @stackbase/objectstore-substrate).";
 
+/**
+ * True when `e` is one of this module's object-store fail-fast BOOT errors — the ee-package-missing
+ * gate (`OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE`), `acquireWithRetry`'s "held by '<writer>' until …"
+ * timeout, and every `resolveObjectStore` parse/validation throw (bad scheme, missing bucket,
+ * missing credentials, unparseable URL) — all of which share the `"stackbase: --object-store"` /
+ * `"stackbase: invalid --object-store"` message prefix. `serveCommand` uses this to print a clean
+ * `✗ <message>` instead of a raw stack trace for these KNOWN, actionable misconfigurations.
+ *
+ * Deliberately narrow: it does NOT match `assertCasSupported()`'s runtime bucket-connectivity
+ * errors (a live AWS SDK network/permissions failure, unprefixed) — those are left to surface with
+ * their full stack, since misclassifying a genuine crash as a tidy one-liner would hide the real
+ * cause.
+ */
+export function isObjectStoreBootFailFast(e: unknown): e is Error {
+  return e instanceof Error && /^stackbase: (--object-store|invalid --object-store)\b/.test(e.message);
+}
+
 /** Dynamic-import gate for the ee substrate package (mirrors `serve.ts`'s `@stackbase/fleet` gate:
  *  an indirect (non-literal) specifier so `tsc` never statically resolves the enterprise package). */
 async function loadObjectStoreSubstrateModule(): Promise<ObjectStoreSubstrateModule> {

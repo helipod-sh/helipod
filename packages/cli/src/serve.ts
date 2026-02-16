@@ -8,7 +8,14 @@ import { dirname, join, resolve } from "node:path";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
 import { startDevServer } from "./server";
-import { bootProject, isPostgresUrl, loadDashboard, resolveNumShards, parseNumShards } from "./boot";
+import {
+  bootProject,
+  isPostgresUrl,
+  isObjectStoreBootFailFast,
+  loadDashboard,
+  resolveNumShards,
+  parseNumShards,
+} from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
@@ -131,6 +138,51 @@ export interface ServeOptions {
    *  see `objectstore-select.ts`'s grammar doc. Mutually exclusive with `fleet`. Flag wins over env. */
   objectStoreUrl?: string;
 }
+
+/**
+ * Race `promise` against a `ms`-millisecond timeout, resolving to `undefined` (never rejecting)
+ * if the timeout wins OR if `promise` itself rejects — used only for genuinely best-effort work
+ * (Task 6.6 F1: `objectStoreRelease()`'s bucket CAS at shutdown) where an unbounded hang or a
+ * swallowed failure are both acceptable outcomes, so the caller never needs a `try`/`catch`. The
+ * loser keeps running in the background (unobserved) — fine here since `objectStoreRelease()`
+ * itself never throws (its underlying `relinquish()` swallows CAS errors by design) and the
+ * process exits shortly after either way.
+ */
+export function raceWithTimeout(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolveOuter) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolveOuter();
+      }
+    }, ms);
+    promise.then(
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveOuter();
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveOuter();
+        }
+      },
+    );
+  });
+}
+
+/** Bound on `objectStoreRelease()` at shutdown (Task 6.6 F1) — `relinquish()` is a live bucket CAS
+ *  call with no timeout of its own; an unreachable bucket at shutdown could otherwise hang on the
+ *  AWS SDK's socket timeout, delaying `process.exit(0)` past a container's grace period (→ SIGKILL,
+ *  skipping the rest of graceful shutdown too). Timing out here is SAFE: the release is best-effort
+ *  — the lease TTL-expires on its own regardless — so an abandoned relinquish just means the next
+ *  writer's takeover waits out the full TTL instead of being immediate, not any data-safety loss. */
+export const OBJECTSTORE_RELINQUISH_TIMEOUT_MS = 2000;
 
 /** Fail-fast messages for `--fleet` misconfiguration (asserted verbatim by `fleet-flags.test.ts`). */
 export const FLEET_ERR_NO_DB =
@@ -418,16 +470,31 @@ export async function serveCommand(args: string[]): Promise<number> {
   // `server`/`store`/`objectStoreRelease`, all part of `startServe`'s result). The indirection lets a
   // fence detected mid-boot-window-adjacent still trigger a real graceful shutdown once one exists.
   let triggerObjectStoreFencedShutdown: (() => void) | undefined;
-  const { server, store, role, fleet, objectStoreRelease } = await startServe({
-    ...opts,
-    adminKey,
-    fleetModule,
-    fleetConfig,
-    onObjectStoreFenced: (e) => {
-      process.stderr.write(`✗ object-store lease lost — shutting down: ${e.message}\n`);
-      triggerObjectStoreFencedShutdown?.();
-    },
-  });
+  let booted: Awaited<ReturnType<typeof startServe>>;
+  try {
+    booted = await startServe({
+      ...opts,
+      adminKey,
+      fleetModule,
+      fleetConfig,
+      onObjectStoreFenced: (e) => {
+        process.stderr.write(`✗ object-store lease lost — shutting down: ${e.message}\n`);
+        triggerObjectStoreFencedShutdown?.();
+      },
+    });
+  } catch (e) {
+    // Task 6.6 F2: mirror the fleet path's clean-message UX for the object-store boot fail-fasts
+    // (ee-package missing, acquire-timeout "held by", bad --object-store URL/creds) — these are
+    // KNOWN, actionable misconfigurations, not crashes. Anything else (a genuine bug) is NOT
+    // swallowed here — rethrow so it surfaces with its full stack via `bin.ts`'s catch-all, same as
+    // before this fix, rather than being misreported as a tidy one-liner.
+    if (isObjectStoreBootFailFast(e)) {
+      process.stderr.write(`✗ ${e.message}\n`);
+      return 1;
+    }
+    throw e;
+  }
+  const { server, store, role, fleet, objectStoreRelease } = booted;
   process.stdout.write(
     JSON.stringify({
       level: "info",
@@ -458,7 +525,10 @@ export async function serveCommand(args: string[]): Promise<number> {
     // Task 6.5: this calls `store.relinquish()`, which best-effort CAS-clears the lease in the
     // bucket itself — awaited so a challenger's takeover on the next poll is genuinely immediate,
     // not merely started-and-abandoned by an unhandled shutdown-time rejection.
-    if (objectStoreRelease) await objectStoreRelease();
+    // Task 6.6 F1: bounded — see `raceWithTimeout`'s doc comment. An unreachable bucket must not be
+    // able to hang shutdown past the container's grace period; timing out here is safe because the
+    // release is best-effort (the lease TTL-expires on its own either way).
+    if (objectStoreRelease) await raceWithTimeout(objectStoreRelease(), OBJECTSTORE_RELINQUISH_TIMEOUT_MS);
     await store.close();
     process.exit(0);
   };
