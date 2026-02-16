@@ -77,6 +77,10 @@ export interface ObjectStoreWriterStore extends DocStore {
   }): Promise<{ acquired: true } | { acquired: false; heldBy: string; expiresAt: number }>;
   heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void>;
   release(): void;
+  /** Tier 3 Slice 6, Task 6.5: the graceful-shutdown variant of `release()` — best-effort CAS-clears
+   *  the lease in the bucket itself so a challenger's `acquire()` takes over immediately instead of
+   *  waiting out the full TTL. See `ObjectStoreDocStore.relinquish()`'s doc. */
+  relinquish(): Promise<void>;
 }
 
 /** Structural mirror of `@stackbase/objectstore-substrate`'s public surface this module needs. */
@@ -170,9 +174,11 @@ export const DEFAULT_OBJECTSTORE_HEARTBEAT_MS = 5000;
 /**
  * Build (ee-gate → resolve → adopt globals → materialize → acquire) a Tier 3 object-storage writer
  * node's store (Task 6.3). Returns the store to use at the `opts.fleet?.store ?? …` seam, any extra
- * drivers to register (the lease-heartbeat), and a `release` handle for graceful shutdown. Throws
- * (fail-fast) on: a CAS-unsupported object store, `@stackbase/objectstore-substrate` not installed,
- * or a bounded-retry acquire timeout (another live writer holds the shard).
+ * drivers to register (the lease-heartbeat), and a `release` handle for graceful shutdown — which
+ * calls `store.relinquish()` (Task 6.5), NOT the in-process-only `store.release()`, so a challenger
+ * can take over the shard immediately instead of waiting out the full lease TTL. Throws (fail-fast)
+ * on: a CAS-unsupported object store, `@stackbase/objectstore-substrate` not installed, or a
+ * bounded-retry acquire timeout (another live writer holds the shard).
  */
 async function buildObjectStoreWriterNode(opts: {
   objectStoreUrl: string;
@@ -185,7 +191,7 @@ async function buildObjectStoreWriterNode(opts: {
    *  takeover test doesn't wait a full second per retry. Not surfaced as a CLI flag. */
   acquirePollIntervalMs?: number;
   writerId?: string;
-}): Promise<{ store: ObjectStoreWriterStore; drivers: Driver[]; release: () => void }> {
+}): Promise<{ store: ObjectStoreWriterStore; drivers: Driver[]; release: () => Promise<void> }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
     throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
@@ -224,7 +230,7 @@ async function buildObjectStoreWriterNode(opts: {
     onFenced: (e) => opts.onFenced?.(e),
   });
 
-  return { store, drivers: [heartbeat], release: () => store.release() };
+  return { store, drivers: [heartbeat], release: () => store.relinquish() };
 }
 
 // ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
@@ -346,12 +352,13 @@ export interface BootResult {
    */
   storageRoutes: StorageRoute[];
   /**
-   * Tier 3 Slice 6: set only when `objectStoreUrl` was given — releases this node's shard-0 write
-   * lease (in-process only; does not touch the bucket — see `ObjectStoreDocStore.release()`'s doc,
-   * the lease still expires on its own TTL). `serve.ts`'s shutdown calls this AFTER `server.close()`
-   * (which stops the lease-heartbeat driver) and BEFORE `store.close()`.
+   * Tier 3 Slice 6: set only when `objectStoreUrl` was given — relinquishes this node's shard-0
+   * write lease (Task 6.5: `store.relinquish()`, which best-effort CAS-clears the lease IN THE
+   * BUCKET, not just in-process — see `ObjectStoreDocStore.relinquish()`'s doc — so a challenger
+   * takes over immediately instead of waiting out the full TTL). `serve.ts`'s shutdown calls this
+   * AFTER `server.close()` (which stops the lease-heartbeat driver) and BEFORE `store.close()`.
    */
-  objectStoreRelease?: () => void;
+  objectStoreRelease?: () => Promise<void>;
 }
 
 /**

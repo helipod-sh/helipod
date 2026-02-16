@@ -12,18 +12,17 @@
  *   2. Commit a mutation via `POST /api/run` -> read it back via a query.
  *   3. A `notes:list` WS subscription opened BEFORE a second mutation fires reactively — the commit
  *      fan-out works over the object-store store, same reactive path as SQLite/Postgres.
- *   4. Graceful shutdown (`server.close()` -> `objectStoreRelease()` -> `store.close()`, the exact
- *      order `serveCommand`'s own SIGTERM/SIGINT handler uses) releases node A's IN-PROCESS hold.
- *      `objectStoreRelease()` does NOT touch the bucket manifest (see `object-doc-store.ts`'s
- *      `release()` doc) — a second node's `acquire()` only succeeds once A's lease naturally
- *      EXPIRES, which `boot.ts`'s `acquireWithRetry` polls for. `startServe`/`ServeOptions` expose
- *      no lease-timing override (those knobs are `bootLoaded`-only, test-only, not CLI flags — see
- *      `boot.ts`), so this scenario runs on the real default lease TTL (15s) / heartbeat (5s) —
- *      this is WHY the test carries a generous explicit timeout, not a bug.
+ *   4. Graceful shutdown (`server.close()` -> `await objectStoreRelease()` -> `store.close()`, the
+ *      exact order `serveCommand`'s own SIGTERM/SIGINT handler uses) — Task 6.5: `objectStoreRelease()`
+ *      now calls `store.relinquish()`, which best-effort CAS-clears the lease IN THE BUCKET (not just
+ *      node A's in-process hold — see `object-doc-store.ts`'s `relinquish()` doc), so a second node's
+ *      `acquire()` succeeds IMMEDIATELY instead of waiting out the full lease TTL.
  *   5. Boot node B (fresh local data dir, SAME bucket) -> adopts node A's `deploymentId` (asserted
  *      via `store.getGlobal`, the Slice-4 carried-note-I1 proof already exercised by
- *      `objectstore-boot.test.ts`, now one level up through the real server) -> acquires once A's
- *      lease expires -> serves -> SEES A's committed data, materialized fresh from the bucket alone.
+ *      `objectstore-boot.test.ts`, now one level up through the real server) -> acquires PROMPTLY
+ *      (well under the lease TTL — the wall clock is asserted below, closing the Task 6.4 review's
+ *      Important finding) -> serves -> SEES A's committed data, materialized fresh from the bucket
+ *      alone.
  */
 import { describe, it, expect, afterEach, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -181,23 +180,28 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
     expect(typeof deploymentIdA).toBe("string");
 
     /* 4. Graceful shutdown — the exact order serveCommand's own SIGTERM/SIGINT handler uses:
-     * server.close() (stops the heartbeat driver) BEFORE objectStoreRelease() BEFORE store.close(). */
+     * server.close() (stops the heartbeat driver) BEFORE await objectStoreRelease() BEFORE
+     * store.close(). Task 6.5: objectStoreRelease() now calls store.relinquish(), which
+     * best-effort CAS-clears the lease in the bucket — awaited so node B's takeover below is
+     * measuring a genuinely-cleared lease, not racing an in-flight CAS. */
     await nodeA.server.close();
-    nodeA.objectStoreRelease?.();
+    await nodeA.objectStoreRelease?.();
     await nodeA.store.close();
     nodeAClosed = true;
   } finally {
     if (!nodeAClosed) {
       await nodeA.server.close().catch(() => {});
-      nodeA.objectStoreRelease?.();
+      await nodeA.objectStoreRelease?.().catch(() => {});
       await Promise.resolve(nodeA.store.close()).catch(() => {});
     }
   }
 
-  /* 5. Boot node B: FRESH local data dir, SAME bucket. Node A's release() only cleared its
-   * in-process hold — the bucket manifest still shows A's lease live until it naturally expires, so
-   * this `startServe` call blocks inside `acquireWithRetry` until that happens (real default lease
-   * TTL, no override available through this entrypoint — see the file doc comment). */
+  /* 5. Boot node B: FRESH local data dir, SAME bucket. Task 6.5: node A's relinquish() ALREADY
+   * cleared the lease in the bucket (step 4, above) — node B's `acquire()` (via `acquireWithRetry`)
+   * should therefore succeed on its very first poll, PROMPTLY, not after waiting out the real
+   * default lease TTL (15s). Assert the wall clock directly: this is the exact behavior the Task 6.4
+   * review flagged as missing (a full-TTL write outage on every graceful rolling deploy). */
+  const takeoverStart = Date.now();
   const nodeB = await startServe({
     convexDir: CONVEX_DIR,
     dataPath: freshDataDir(`${label}-b`),
@@ -208,7 +212,15 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
     allowDeploy: false,
     objectStoreUrl,
   });
+  const takeoverMs = Date.now() - takeoverStart;
   try {
+    // THE assertion this fix exists for: node B's acquire (inside startServe -> bootLoaded ->
+    // buildObjectStoreWriterNode -> acquireWithRetry) must NOT have waited out node A's lease TTL
+    // (default 15000ms) — a prompt takeover completes in well under a second locally; an 8000ms
+    // bound absorbs CI/MinIO-container network variance while still being unambiguously far below
+    // the 15000ms TTL this fix eliminates waiting for.
+    expect(takeoverMs).toBeLessThan(8000);
+
     // Adopts node A's deploymentId — never mints a fresh one (Slice-4 carried-note I1).
     const deploymentIdB = await nodeB.store.getGlobal("fleet:deploymentId");
     expect(deploymentIdB).toBe(deploymentIdA);
@@ -221,7 +233,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
     ]);
   } finally {
     await nodeB.server.close();
-    nodeB.objectStoreRelease?.();
+    await nodeB.objectStoreRelease?.();
     await nodeB.store.close();
   }
 }
@@ -232,15 +244,15 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
 describe("stackbase serve --object-store — end-to-end (fs, real server)", () => {
   it(
-    "commit -> bucket -> reactive fan-out -> read-back; a second node takes over after release",
+    "commit -> bucket -> reactive fan-out -> read-back; a second node takes over IMMEDIATELY after relinquish (Task 6.5)",
     async () => {
       const bucketDir = mkdtempSync(join(tmpdir(), "sb-objstore-serve-e2e-fs-bucket-"));
       tmpDirs.push(bucketDir);
       await scenario(`file://${bucketDir}`, "fs");
     },
-    // Generous: node B's acquire genuinely waits out node A's real (default 15s) lease TTL via
-    // `acquireWithRetry`'s poll loop — see the file doc comment.
-    45_000,
+    // No longer needs to be generous for a full-TTL wait (Task 6.5 fix) — kept moderately above the
+    // fast-path expectation to absorb ordinary CI slack around boot/materialize/HTTP round trips.
+    20_000,
   );
 });
 
@@ -334,13 +346,14 @@ maybeDescribe("stackbase serve --object-store — end-to-end (real MinIO, gated)
   afterAll(() => stopMinio());
 
   it(
-    "commit -> bucket -> reactive fan-out -> read-back; a second node takes over after release",
+    "commit -> bucket -> reactive fan-out -> read-back; a second node takes over IMMEDIATELY after relinquish (Task 6.5)",
     async () => {
       const { port } = await startMinio();
       const objectStoreUrl = `s3://${MINIO_USER}:${MINIO_PASS}@127.0.0.1:${port}/${BUCKET}?region=us-east-1&forcePathStyle=true`;
       await scenario(objectStoreUrl, "minio");
     },
-    // Docker spin-up + the same real lease-TTL wait as the fs arm, plus network round trips.
-    120_000,
+    // Docker/MinIO spin-up dominates this budget now (Task 6.5 removed the full-TTL wait); still
+    // generous for container start + network round trips.
+    90_000,
   );
 });

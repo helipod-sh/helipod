@@ -31,12 +31,12 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
     const listed = await runtime.run("notes:list", {});
     expect(listed.value).toEqual([{ box: "b1", text: "hello" }]);
 
-    objectStoreRelease?.();
+    await objectStoreRelease?.();
     await runtime.stopDrivers();
     await store.close();
   });
 
-  it("a fresh boot against the SAME bucket (different local dir) ADOPTS the existing deploymentId and takes over after release", async () => {
+  it("a fresh boot against the SAME bucket (different local dir) ADOPTS the existing deploymentId and takes over immediately after relinquish (Task 6.5)", async () => {
     const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
     const bucket = `file://${ROOT}/bucket-adopt`;
 
@@ -57,10 +57,10 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
     const deploymentIdA = await nodeA.store.getGlobal("fleet:deploymentId");
     expect(typeof deploymentIdA).toBe("string");
 
-    // Release node A's in-process hold and stop its heartbeat — its lease still needs to EXPIRE
-    // (release() doesn't touch the bucket) before node B's acquire can succeed; the short TTL above
-    // plus acquireWithRetry's bounded retry loop covers that wait.
-    nodeA.objectStoreRelease?.();
+    // Task 6.5: objectStoreRelease() now calls store.relinquish(), which best-effort CAS-clears the
+    // lease IN THE BUCKET — node B's acquire below should succeed immediately, not after waiting out
+    // the short TTL above (which still exists purely as a fallback/no-regression margin).
+    await nodeA.objectStoreRelease?.();
     await nodeA.runtime.stopDrivers();
     await nodeA.store.close();
 
@@ -85,7 +85,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
       const listed = await nodeB.runtime.run("notes:list", {});
       expect(listed.value).toEqual([{ box: "b1", text: "from-a" }]);
     } finally {
-      nodeB.objectStoreRelease?.();
+      await nodeB.objectStoreRelease?.();
       await nodeB.runtime.stopDrivers();
       await nodeB.store.close();
     }

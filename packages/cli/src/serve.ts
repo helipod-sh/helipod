@@ -266,10 +266,11 @@ export async function startServe(
   runtime: EmbeddedRuntime;
   fleet?: FleetHandles;
   role?: "sync" | "writer";
-  /** Tier 3 Slice 6: set only when `--object-store` was given — release this node's shard-0 lease.
-   *  Caller must call this AFTER `server.close()` (stops the heartbeat driver) and BEFORE
-   *  `store.close()` — see `serveCommand`'s shutdown. */
-  objectStoreRelease?: () => void;
+  /** Tier 3 Slice 6: set only when `--object-store` was given — relinquish this node's shard-0
+   *  lease (Task 6.5: bucket-clearing `store.relinquish()`, for immediate takeover, not just the
+   *  in-process `release()`). Caller must call this AFTER `server.close()` (stops the heartbeat
+   *  driver) and BEFORE `store.close()` — see `serveCommand`'s shutdown. */
+  objectStoreRelease?: () => Promise<void>;
 }> {
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
   // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
@@ -454,7 +455,10 @@ export async function serveCommand(args: string[]): Promise<number> {
     // lease-heartbeat driver, if any) — release the lease only AFTER that, so a heartbeat tick can
     // never race a voluntary release into a spurious "fenced" log during normal shutdown.
     await server.close();
-    if (objectStoreRelease) objectStoreRelease();
+    // Task 6.5: this calls `store.relinquish()`, which best-effort CAS-clears the lease in the
+    // bucket itself — awaited so a challenger's takeover on the next poll is genuinely immediate,
+    // not merely started-and-abandoned by an unhandled shutdown-time rejection.
+    if (objectStoreRelease) await objectStoreRelease();
     await store.close();
     process.exit(0);
   };

@@ -403,9 +403,50 @@ export class ObjectStoreDocStore implements DocStore {
 
   /** Voluntarily give up the held lease WITHOUT touching the bucket — the lease simply expires on its
    *  own at `leaseExpiresAt` (Tier 3 Slice 4, Task 4.2). After this, `commitWriteBatch` refuses until
-   *  a fresh `acquire()`. */
+   *  a fresh `acquire()`. IN-PROCESS ONLY: a challenger's `acquire()` still has to wait out the full
+   *  remaining TTL, since nothing in the bucket changed. See `relinquish()` — the graceful-shutdown
+   *  variant that ALSO clears the lease in the bucket itself, so a challenger can take over
+   *  immediately instead of waiting for expiry (Tier 3 Slice 6, Task 6.5). */
   release(): void {
     this.held = null;
+  }
+
+  /**
+   * Graceful-shutdown variant of `release()` (Tier 3 Slice 6, Task 6.5): best-effort CAS the manifest
+   * to clear the lease (`writerId: "", leaseExpiresAt: "0"`) so a challenger's very next `acquire()`
+   * — even at `now: 0` — sees an unowned/already-expired lease and takes over IMMEDIATELY, instead of
+   * having to wait out this writer's full remaining `leaseTtlMs`. This closes the production gap the
+   * Task 6.4 review found: every graceful rolling-deploy stop/start pair otherwise ate a full-TTL
+   * write outage.
+   *
+   * Deliberately best-effort: a CAS failure here means either (a) we were already fenced — someone
+   * else owns the shard now, which is exactly the state we wanted anyway, or (b) a transient blip —
+   * the lease still expires naturally, falling back to the pre-6.5 behavior. Neither case should
+   * block or fail a clean shutdown, so any CAS error is swallowed. Does NOT bump `epoch` — clearing
+   * `writerId`/`leaseExpiresAt` is sufficient for a challenger's refusal check to pass trivially; the
+   * challenger's own `acquire()` bumps `epoch` and fences any stale in-process state on ITS claim, the
+   * same as an expiry-based takeover always has. Does NOT poison on a swallowed CAS failure — this is
+   * a clean voluntary exit, not a fence.
+   *
+   * Runs under `runExclusive` (serializes with commits/heartbeat/acquire, same as every other
+   * lease/commit operation on this instance). A no-op if this instance never held the lease
+   * (`this.held === null` — already fenced, or `acquire()` was never called): nothing to relinquish.
+   * Always demotes `this.held` to `null` at the end, regardless of the CAS outcome.
+   */
+  async relinquish(): Promise<void> {
+    return this.runExclusive(async () => {
+      if (this.held === null) return; // nothing held — already fenced, or never acquired
+      const next: Manifest = { ...this.cached.manifest, writerId: "", leaseExpiresAt: "0" };
+      try {
+        const { etag } = await casManifest(this.objectStore, this.shard, next, this.cached.etag);
+        this.cached = { manifest: next, etag };
+      } catch {
+        // Swallowed by design — see doc comment above: a clean shutdown must never throw, and a CAS
+        // failure here is either "someone already fenced us" (fine) or "transient" (falls back to
+        // natural TTL expiry).
+      }
+      this.held = null;
+    });
   }
 
   /** Chain `fn` onto the mutex so commits from this process serialize (see class doc). */
