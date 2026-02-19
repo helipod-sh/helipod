@@ -838,6 +838,11 @@ export class ObjectStoreDocStore implements DocStore {
       let deletedSnapshots = 0;
       for (const key of snapKeys) {
         const ts = key.slice(key.lastIndexOf("/") + 1);
+        // Defensive parity with the segment loop above: never touch an object whose suffix isn't a
+        // valid decimal-bigint ts — a malformed `snap/*` key is unreachable (only `writeSnapshot`
+        // writes them, always with a numeric frontierTs), but a bare `BigInt(ts)` throw here would
+        // wedge snapshot reclamation past that key on every swallow-driven sweep, so skip it.
+        if (!/^\d+$/.test(ts)) continue;
         // Strictly older than keepSnap (TOCTOU-safe — see the doc comment above): NEVER delete
         // keepSnap itself or anything >= it (a `>=` snapshot can only belong to a new owner that
         // raced ahead of us in the gap between the epoch re-read above and this sweep).
