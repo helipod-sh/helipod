@@ -741,24 +741,42 @@ export class ObjectStoreDocStore implements DocStore {
    * `replica-tailer.ts`), `gc()` here will never delete a segment `(W_min, snapshotSegBase]` that
    * replica still needs to tail.
    *
-   * Runs under `runExclusive` — it reads `this.cached.manifest` and must see a consistent
-   * snapshot pointer, and must not race a concurrent commit/snapshot that could move
-   * `snapshotSegBase` out from under it. Never touches the manifest itself or `this.cached`/
-   * `nextSeqno` — GC is purely subtractive over objects the manifest (and consumers) no longer need.
+   * Runs under `runExclusive` — it must not race a concurrent commit/snapshot/acquire on THIS
+   * instance. Never touches the manifest itself or `this.cached`/`nextSeqno` (beyond adopting a
+   * freshly re-read manifest when the epoch check below passes) — GC is purely subtractive over
+   * objects the manifest (and consumers) no longer need.
    *
    * PERFORMANCE NOTE (whole-branch review, Minor #4): because it runs under `runExclusive`, `gc()`
    * blocks `commitWriteBatch`/`snapshot()` on this instance for the ENTIRE list+delete sweep (now
-   * also a `consumers/` list+get sweep) — fine for a manual, occasional, single-node call (today's
-   * only caller), but revisit the locking granularity once GC becomes an automatic/background driver.
+   * also a `consumers/` list+get sweep) — fine for a manual, occasional, single-node call, but revisit
+   * the locking granularity if GC's cadence ever needs to tighten.
    *
-   * S4 MULTI-WRITER HAZARD (whole-branch review, Minor #3, not reachable in single-node Slice 3): this
-   * deletes every `snap/*` except THIS instance's own cached `snapshotTs`. A stale/fenced writer whose
-   * `poisoned` flag hasn't tripped yet (it only trips after an ATTEMPTED CAS — see the class doc's C1
-   * note) still holds an OLD `snapshotTs` and would delete the CURRENT writer's live snapshot out from
-   * under it, sinking a fresh bootstrap. Before `gc()` is exposed under multi-writer (S4), it must be
-   * epoch-fenced (checked against the current manifest's `epoch`) before it deletes anything —
-   * STILL DEFERRED (Slice 6): the watermark floor added here guards against stranding a lagging
-   * READ REPLICA, but does nothing to fence `gc()` itself against running under a stale WRITER.
+   * GC-FENCING (Tier 3 Slice 7, Task 7.1 — closes the Slice-4/5/6 deferral above): `gc()` used to
+   * trust `this.cached.manifest` — a snapshot pointer that can be ARBITRARILY STALE the instant a
+   * challenger fences this writer (bumps `epoch`) without this instance having attempted a
+   * commit/heartbeat since. A stale writer's cached `snapshotTs` then names an OLD snapshot, and the
+   * pre-Slice-7 "delete every `snap/*` except my cached `snapshotTs`" predicate would delete the NEW
+   * owner's live snapshot — sinking that owner's next bootstrap. Fixed by two changes, in order:
+   *   1. `this.held === null` (never an owner — a replica, or an already-demoted/fenced writer) is a
+   *      harmless no-op: never GC.
+   *   2. RE-READ the manifest fresh (never trust `this.cached`) and compare its `epoch` against
+   *      `this.held.epoch`. A mismatch means a challenger's `acquire()` landed since we last knew —
+   *      we've been fenced RIGHT NOW, even though nothing told us yet — so we poison + demote and
+   *      delete NOTHING. Only once the epoch matches do we adopt the fresh manifest as current truth
+   *      and compute the delete floor/keepSnap FROM IT (never from a value read before this check).
+   * This closes the TOCTOU window at the READ side, but a fence could still land in the gap BETWEEN
+   * this re-read and the deletes below (the sweep isn't atomic with the epoch check) — so the delete
+   * PREDICATES themselves must independently tolerate a same-gap fence:
+   *   - Segments: `seqno <= floor` (unchanged) — a new owner's commits only ever land at HIGHER
+   *     seqnos than the frontier this floor was computed from, so this predicate can never reach one.
+   *   - Snapshots: **`BigInt(ts) < BigInt(keepSnap)`** (strictly older), not "every snapshot except
+   *     keepSnap" — a new owner racing a snapshot into the gap produces a `ts` NEWER than our
+   *     `keepSnap` (ts's are monotone `frontierTs` values), which `<` by construction never matches.
+   *     `keepSnap` itself is also never deleted (not `<` itself). Compared as `bigint`, not string —
+   *     ts's are decimal-string bigints, and a naive string compare orders `"9"` after `"10"`.
+   * Together: a fenced/stale writer's `gc()` deletes nothing (the epoch check catches the common case,
+   * and the TOCTOU-safe predicates catch the rest), while the happy-path owner's behavior is unchanged
+   * (its own re-read always matches its own held epoch).
    */
   async gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> {
     return this.runExclusive(async () => {
@@ -767,11 +785,32 @@ export class ObjectStoreDocStore implements DocStore {
           `ObjectStoreDocStore for shard '${this.shard}' is poisoned (a prior post-commit local apply failed); it must be re-opened before further use`,
         );
       }
-      if (this.cached.manifest.snapshotTs === undefined) {
+      if (this.held === null) {
+        return { deletedSegments: 0, deletedSnapshots: 0 }; // not an owner (replica, or already fenced) — never GC
+      }
+
+      // RE-READ (never trust `this.cached` — it may be arbitrarily stale if we've been fenced since
+      // our last commit/heartbeat). The shard's manifest must exist by now (this instance itself
+      // `open()`'d/`acquire()`'d it).
+      const fresh = await readManifest(this.objectStore, this.shard);
+      if (fresh === null) {
+        throw new Error(`objectstore-substrate: gc() found no manifest for shard '${this.shard}' — open() must initialize it first`);
+      }
+      if (fresh.manifest.epoch !== this.held.epoch) {
+        // Fenced: a challenger's acquire() landed since we last knew. Poison + demote, delete
+        // NOTHING — the fresh manifest's snapshot/segments belong to whoever holds the epoch now.
+        this.poisoned = true;
+        this.held = null;
+        return { deletedSegments: 0, deletedSnapshots: 0 };
+      }
+      this.cached = fresh; // adopt current truth — safe, epoch matches what we hold
+
+      if (fresh.manifest.snapshotTs === undefined) {
         return { deletedSegments: 0, deletedSnapshots: 0 }; // no snapshot yet — nothing to GC
       }
-      const segBase = this.cached.manifest.snapshotSegBase!;
-      const keepSnap = this.cached.manifest.snapshotTs!;
+      const segBase = fresh.manifest.snapshotSegBase!;
+      const keepSnap = fresh.manifest.snapshotTs!;
+      const keepSnapBig = BigInt(keepSnap);
 
       const watermarks = await readConsumerWatermarks(this.objectStore, this.shard);
       const wMin = watermarks.length > 0 ? Math.min(...watermarks.map((w) => w.appliedSeqno)) : Number.POSITIVE_INFINITY;
@@ -799,7 +838,15 @@ export class ObjectStoreDocStore implements DocStore {
       let deletedSnapshots = 0;
       for (const key of snapKeys) {
         const ts = key.slice(key.lastIndexOf("/") + 1);
-        if (ts !== keepSnap) {
+        // Defensive parity with the segment loop above: never touch an object whose suffix isn't a
+        // valid decimal-bigint ts — a malformed `snap/*` key is unreachable (only `writeSnapshot`
+        // writes them, always with a numeric frontierTs), but a bare `BigInt(ts)` throw here would
+        // wedge snapshot reclamation past that key on every swallow-driven sweep, so skip it.
+        if (!/^\d+$/.test(ts)) continue;
+        // Strictly older than keepSnap (TOCTOU-safe — see the doc comment above): NEVER delete
+        // keepSnap itself or anything >= it (a `>=` snapshot can only belong to a new owner that
+        // raced ahead of us in the gap between the epoch re-read above and this sweep).
+        if (BigInt(ts) < keepSnapBig) {
           await this.objectStore.delete(key);
           deletedSnapshots++;
         }

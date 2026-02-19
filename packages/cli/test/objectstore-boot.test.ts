@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
+import { FsObjectStore } from "@stackbase/objectstore-fs";
 import { loadConvexDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
@@ -88,6 +89,61 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
       await nodeB.objectStoreRelease?.();
       await nodeB.runtime.stopDrivers();
       await nodeB.store.close();
+    }
+  });
+
+  // Tier 3 Slice 7, Task 7.3a: the gc-driver registered on the object-store writer node's boot
+  // reclaims storage automatically, on a running node, without breaking reads/bootstrap. Uses a
+  // real (short) sweep cadence + a real sleep — `createEmbeddedRuntime`'s DriverContext.setTimer
+  // is backed by real `setTimeout`, same pattern `storage-e2e.test.ts` uses for the storage reaper.
+  it("the gc-driver reclaims superseded segments/snapshots automatically while the node stays live and queryable", async () => {
+    const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
+    const bucketDir = `${ROOT}/bucket-gc`;
+    const boot = await bootLoaded({
+      loaded,
+      components: [],
+      dataPath: `${ROOT}/node-gc/db.sqlite`,
+      adminKey: "k",
+      objectStoreUrl: `file://${bucketDir}`,
+      objectStoreWriterId: "node-gc",
+      objectStoreGcMs: 200, // short cadence — observable within the test's timescale
+    });
+    try {
+      // SNAPSHOT_EVERY is 8 (object-doc-store.ts) — mirrors gc-driver.test.ts's own note. Drive two
+      // cadences' worth of commits so the bucket has a stale (first) snapshot + segments superseded
+      // by the second snapshot for gc() to reclaim.
+      const SNAPSHOT_EVERY = 8;
+      for (let i = 0; i < 2 * SNAPSHOT_EVERY; i++) {
+        await boot.runtime.run("notes:add", { box: "b1", text: `note-${i}` });
+      }
+
+      // Introspect the bucket directly (a fresh FsObjectStore rooted at the SAME dir the writer
+      // node's `file://` URL resolved to — `parseFsObjectStorePath` is a pure string slice, so this
+      // is exactly the writer's own bucket, not a separate copy).
+      const inspector = new FsObjectStore({ dir: bucketDir });
+      const segPrefix = "s0/seg/";
+      const snapPrefix = "s0/snap/";
+      const preSweepSegCount = (await inspector.list(segPrefix)).length;
+      const preSweepSnapCount = (await inspector.list(snapPrefix)).length;
+      expect(preSweepSegCount).toBe(2 * SNAPSHOT_EVERY); // nothing reclaimed yet
+      expect(preSweepSnapCount).toBe(2); // both snapshots still present (stale + current)
+
+      // Wait past the gc-driver's cadence (armed on boot, no up-front sweep) for a real sweep to fire.
+      await new Promise<void>((r) => setTimeout(r, 500));
+
+      const postSweepSegCount = (await inspector.list(segPrefix)).length;
+      const postSweepSnapCount = (await inspector.list(snapPrefix)).length;
+      expect(postSweepSegCount).toBeLessThan(preSweepSegCount); // superseded segments reclaimed
+      expect(postSweepSnapCount).toBe(1); // only the current snapshot survives
+
+      // The node stays live + queryable after reclamation — a read still returns the current state
+      // (reclamation didn't break bootstrap/materialization).
+      const listed = await boot.runtime.run("notes:list", {});
+      expect((listed.value as unknown[]).length).toBe(2 * SNAPSHOT_EVERY);
+    } finally {
+      await boot.objectStoreRelease?.();
+      await boot.runtime.stopDrivers();
+      await boot.store.close();
     }
   });
 
