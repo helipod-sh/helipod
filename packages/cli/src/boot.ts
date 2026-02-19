@@ -81,6 +81,9 @@ export interface ObjectStoreWriterStore extends DocStore {
    *  the lease in the bucket itself so a challenger's `acquire()` takes over immediately instead of
    *  waiting out the full TTL. See `ObjectStoreDocStore.relinquish()`'s doc. */
   relinquish(): Promise<void>;
+  /** Tier 3 Slice 7, Task 7.1/7.2: best-effort, self-fencing reclamation of superseded segments/
+   *  snapshots. Driven automatically on a cadence by the gc-driver (Task 7.3) once registered. */
+  gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }>;
 }
 
 /** Structural mirror of `@stackbase/objectstore-substrate`'s public surface this module needs. */
@@ -95,6 +98,10 @@ export interface ObjectStoreSubstrateModule {
   leaseHeartbeatDriver(
     store: { heartbeat(opts: { now: number; leaseTtlMs: number }): Promise<void> },
     opts: { leaseTtlMs: number; heartbeatMs: number; onFenced?: (e: Error) => void },
+  ): Driver;
+  gcDriver(
+    store: { gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> },
+    opts: { sweepMs: number },
   ): Driver;
 }
 
@@ -187,6 +194,12 @@ export const DEFAULT_OBJECTSTORE_LEASE_TTL_MS = 15000;
 /** Default heartbeat cadence (ms) — comfortably under the lease TTL (see `leaseHeartbeatDriver`'s own
  *  `heartbeatMs < leaseTtlMs` assertion). */
 export const DEFAULT_OBJECTSTORE_HEARTBEAT_MS = 5000;
+/** Default gc-driver sweep cadence (ms) — Tier 3 Slice 7, Task 7.3. gc() is best-effort/idempotent/
+ *  self-fencing (Task 7.1), so there's no correctness ratio to enforce against the lease TTL the way
+ *  the heartbeat has — this is purely a reclamation-latency-vs-sweep-cost tradeoff, mirroring
+ *  `storageReaper`'s own 60s default. Overridable via `STACKBASE_OBJECTSTORE_GC_MS` (env, production
+ *  tuning) or `bootLoaded`'s `objectStoreGcMs` option (tests). */
+export const DEFAULT_OBJECTSTORE_GC_MS = 60000;
 
 /**
  * Build (ee-gate → resolve → adopt globals → materialize → acquire) a Tier 3 object-storage writer
@@ -208,6 +221,8 @@ async function buildObjectStoreWriterNode(opts: {
    *  takeover test doesn't wait a full second per retry. Not surfaced as a CLI flag. */
   acquirePollIntervalMs?: number;
   writerId?: string;
+  /** Tier 3 Slice 7, Task 7.3: the gc-driver's sweep cadence — unset → `DEFAULT_OBJECTSTORE_GC_MS`. */
+  gcMs?: number;
 }): Promise<{ store: ObjectStoreWriterStore; drivers: Driver[]; release: () => Promise<void> }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
@@ -246,8 +261,12 @@ async function buildObjectStoreWriterNode(opts: {
     heartbeatMs,
     onFenced: (e) => opts.onFenced?.(e),
   });
+  // Tier 3 Slice 7, Task 7.3: the periodic reclamation driver — self-fencing/best-effort (Task 7.1),
+  // so it needs no `onFenced`-style shutdown wiring the way the heartbeat does (see gc-driver.ts's
+  // module doc: a fenced gc() is a harmless no-op, never a "stop serving writes" signal).
+  const gc = substrate.gcDriver(store, { sweepMs: opts.gcMs ?? DEFAULT_OBJECTSTORE_GC_MS });
 
-  return { store, drivers: [heartbeat], release: () => store.relinquish() };
+  return { store, drivers: [heartbeat, gc], release: () => store.relinquish() };
 }
 
 // ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
@@ -506,6 +525,10 @@ export async function bootLoaded(opts: {
   objectStoreAcquirePollIntervalMs?: number;
   /** Test-only: force a deterministic writer id instead of a fresh `randomUUID()` per boot. */
   objectStoreWriterId?: string;
+  /** Tier 3 Slice 7, Task 7.3: the gc-driver's sweep cadence (ms). Unset → `DEFAULT_OBJECTSTORE_GC_MS`
+   *  (~60s). `serve.ts` threads `STACKBASE_OBJECTSTORE_GC_MS` in here; tests can also set it directly
+   *  to force an observable reclamation on a short timescale. Ignored when `objectStoreUrl` is unset. */
+  objectStoreGcMs?: number;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
@@ -527,6 +550,7 @@ export async function bootLoaded(opts: {
           acquireTimeoutMs: opts.objectStoreAcquireTimeoutMs,
           acquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs,
           writerId: opts.objectStoreWriterId,
+          gcMs: opts.objectStoreGcMs,
         })
       : undefined;
   const store = opts.fleet?.store ?? objectStoreNode?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
@@ -730,6 +754,7 @@ export async function bootProject(opts: {
   objectStoreAcquireTimeoutMs?: number;
   objectStoreAcquirePollIntervalMs?: number;
   objectStoreWriterId?: string;
+  objectStoreGcMs?: number;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -752,6 +777,7 @@ export async function bootProject(opts: {
       ? { objectStoreAcquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs }
       : {}),
     ...(opts.objectStoreWriterId !== undefined ? { objectStoreWriterId: opts.objectStoreWriterId } : {}),
+    ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
   });
 }
 
