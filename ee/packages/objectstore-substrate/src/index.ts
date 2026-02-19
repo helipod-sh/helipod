@@ -8,6 +8,7 @@ export {
   type LeaseHeartbeatDriverOpts,
   type HeartbeatableStore,
 } from "./heartbeat-driver";
+export { gcDriver, type GcDriver, type GcDriverOpts, type GcableStore } from "./gc-driver";
 export { encodeSnapshot, decodeSnapshot, snapshotKey, writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";
 export { readGlobals, createGlobals, ensureGlobals, type FleetGlobals } from "./globals";
 export { readGlobalFrontier } from "./frontier";
