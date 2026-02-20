@@ -24,7 +24,12 @@ import {
   indexKeyspaceId,
   tableKeyspaceId,
 } from "@stackbase/index-key-codec";
-import { encodeStorageIndexId, encodeStorageTableId } from "@stackbase/id-codec";
+import {
+  encodeStorageIndexId,
+  encodeStorageTableId,
+  keyToPointRange as canonicalKeyToPointRange,
+  docKeyToPointRange as canonicalDocKeyToPointRange,
+} from "@stackbase/id-codec";
 import { keyToPointRange, docKeyToPointRange } from "../src/node";
 
 describe("keyToPointRange", () => {
@@ -176,5 +181,34 @@ describe("docKeyToPointRange", () => {
 
     const writeRange = deserializeKeyRange(docKeyToPointRange(encodeStorageTableId(tableNumber), key));
     expect(rangesOverlap(writeRange, readRange!)).toBe(false);
+  });
+});
+
+/**
+ * Task 8.1b (Tier 3 Slice 8) — `keyToPointRange`/`docKeyToPointRange` were extracted verbatim out of
+ * this package into `@stackbase/id-codec` (see that package's `point-range.ts`), with `ee/packages/
+ * fleet/src/ranges.ts` reduced to a thin re-export. This is the golden-value proof the extraction
+ * didn't change a byte: fleet's own re-exported functions (imported here, as everywhere else in this
+ * file, via `../src/node`) and the canonical `@stackbase/id-codec` functions produce IDENTICAL
+ * `SerializedKeyRange` output for the same inputs.
+ */
+describe("extraction parity: fleet's re-export vs the canonical @stackbase/id-codec functions", () => {
+  it("keyToPointRange: identical output for the same (indexId, key)", () => {
+    const storageIndexId = encodeStorageIndexId(10001, "by_creation");
+    const key = encodeIndexKey(["hello", 42]);
+
+    expect(keyToPointRange(storageIndexId, key)).toEqual(canonicalKeyToPointRange(storageIndexId, key));
+  });
+
+  it("docKeyToPointRange: identical output for the same (tableId, internalId)", () => {
+    const tableId = encodeStorageTableId(10001);
+    const internalId = new Uint8Array([1, 2, 3, 4]);
+
+    expect(docKeyToPointRange(tableId, internalId)).toEqual(canonicalDocKeyToPointRange(tableId, internalId));
+  });
+
+  it("fleet's re-export IS the canonical function (same reference, not just equal output)", () => {
+    expect(keyToPointRange).toBe(canonicalKeyToPointRange);
+    expect(docKeyToPointRange).toBe(canonicalDocKeyToPointRange);
   });
 });

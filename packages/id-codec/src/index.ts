@@ -35,6 +35,8 @@ export {
   decodeStorageIndexId,
 } from "./storage-id";
 
+export { keyToPointRange, docKeyToPointRange } from "./point-range";
+
 export {
   DEFAULT_SHARD,
   DefaultShardKeyResolver,
