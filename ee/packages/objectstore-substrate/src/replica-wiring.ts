@@ -124,6 +124,10 @@ export function startReplicaReactiveTailer(opts: StartReplicaReactiveTailerOptio
   // the watermark ONLY if it actually advanced since our last publish — the accurate POST-advance
   // value, never the stale pre-tick one.
   async function pump(): Promise<void> {
+    // The single guarded chokepoint for BOTH drive paths (the timer's `wake()` and the `__pump()` test
+    // seam): once `stop()` has run, a round already in flight or a manual `__pump()` is a no-op — the
+    // replica has been halted and must not apply/publish further.
+    if (stopped) return;
     await tailer.tick();
     if (tailer.appliedSeqno !== lastPublishedSeqno) {
       await publishConsumerWatermark(objectStore, shard, consumerId, { appliedSeqno: tailer.appliedSeqno });

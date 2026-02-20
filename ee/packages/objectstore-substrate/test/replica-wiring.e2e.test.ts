@@ -171,10 +171,17 @@ describe("startReplicaReactiveTailer: the wiring helper drives cross-node reacti
         expect(mine!.appliedSeqno).toBe(manifestState!.manifest.nextSeqno - 1);
 
         // ── stop() halts the tailer: a further writer commit is NOT picked up ──────────────────
+        // Deterministic proof (not a timer race): after stop(), a manual __pump() shares the SAME
+        // `stopped` chokepoint the background loop's wake() checks, so it must be a no-op. The writer
+        // commits "third"; we drive __pump() explicitly — had stop() failed to set the guard, this
+        // would apply "third" and the assertion below would fail. It does not, proving the halt.
         await tailerHandle.stop();
         await writerRuntime.run<string>("notes:add", { body: "third" });
-        await new Promise((r) => setTimeout(r, 200)); // several poll intervals, had it still been running
+        await tailerHandle.__pump(); // no-op because stopped — would otherwise apply "third"
         expect((latestQueryValue(serverMsgs, 1) as string[]).sort()).toEqual(["first", "second"]);
+        // The replica's own local + watermark are likewise unchanged past the halt.
+        const afterStop = (await replicaRuntime.run<string[]>("notes:list", {})).value;
+        expect(afterStop.sort()).toEqual(["first", "second"]);
       } finally {
         conn.close();
       }
