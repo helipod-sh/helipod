@@ -103,6 +103,20 @@ export interface ObjectStoreSubstrateModule {
     store: { gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> },
     opts: { sweepMs: number },
   ): Driver;
+  /** Tier 3 Slice 8, Task 8.2: the replica reactive-tailer wiring helper (Task 8.1). `runtime` is
+   *  typed as the real `EmbeddedRuntime` here (already a core, non-enterprise import in this
+   *  module) rather than the ee package's own narrower structural mirror — `EmbeddedRuntime`
+   *  satisfies it, and the real substrate module accepts anything shaped like it at runtime. */
+  startReplicaReactiveTailer(opts: {
+    runtime: EmbeddedRuntime;
+    objectStore: ObjectStore;
+    shard: string;
+    local: SqliteDocStore;
+    consumerId: string;
+    pollMs?: number;
+  }): { stop(): Promise<void> };
+  /** Tier 3 Slice 8, Task 8.2: deregister a departed consumer's watermark (shutdown). */
+  removeConsumer(objectStore: ObjectStore, shard: string, consumerId: string): Promise<void>;
 }
 
 export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
@@ -269,6 +283,133 @@ async function buildObjectStoreWriterNode(opts: {
   return { store, drivers: [heartbeat, gc], release: () => store.relinquish() };
 }
 
+// ── Tier 3 Slice 8 (Task 8.2): the object-storage REPLICA node ─────────────────────────────────
+// `stackbase serve --object-store <url> --replica` boots a read-scaled REPLICA instead of a writer:
+// it MATERIALIZES the shard from the bucket (`ObjectStoreDocStore.open`, same as the writer) but
+// NEVER `acquire()`s the write lease, and runs no heartbeat/gc drivers — only the Task 8.1 reactive-
+// tailer wiring helper (`startReplicaReactiveTailer`), started AFTER the runtime is built (its sink
+// needs the runtime; see `replica-wiring.ts`'s module doc for the chicken-and-egg). Mutation
+// rejection is then FREE: `commitWriteBatch` already throws "not the lease owner" for an
+// unacquired store — `wrapReplicaWriteRejection` below only improves that message's wording.
+
+/** Tier 3 Slice 8, Task 8.2: the DX-clear message a mutation sees when routed to a `--replica`
+ *  node, in place of the substrate's internal "not the lease owner" wording (accurate, but not
+ *  meaningful to an app developer who doesn't know the substrate's lease vocabulary). See
+ *  `wrapReplicaWriteRejection`'s doc. */
+export const REPLICA_WRITE_REJECTED_MESSAGE =
+  "stackbase: this node is a read replica (--replica) — it holds no write lease and cannot commit " +
+  "mutations. Send writes to the primary/writer node.";
+
+const LEASE_OWNER_REJECTION_RE = /not the lease owner/;
+
+/**
+ * Decorate `store` so `commitWrite`/`commitWriteBatch` re-throw `REPLICA_WRITE_REJECTED_MESSAGE` in
+ * place of `ObjectStoreDocStore`'s internal "not the lease owner" error — every other error (a
+ * genuine bug, a validation failure) and every other `DocStore` method (reads, globals, close, …)
+ * pass through UNCHANGED.
+ *
+ * Implemented as a `Proxy` whose `get` trap `.bind(target)`s every forwarded function to the REAL
+ * underlying instance rather than the proxy itself — required because `ObjectStoreDocStore` uses a
+ * genuine JS private method internally (`#maybeSnapshotBestEffort`, called from inside its own
+ * `commitWriteBatch`); invoking a method with `this` bound to a Proxy instead of the real instance
+ * would throw ("cannot read private member from an object whose class did not declare it") the
+ * moment that private access executes. `.bind(target)` sidesteps the hazard without needing to
+ * enumerate `DocStore`'s ~20 methods by hand (mirroring `ObjectStoreDocStore`'s own "everything
+ * else: forward" section, but generically, over whatever `DocStore` happens to declare).
+ */
+export function wrapReplicaWriteRejection(store: DocStore): DocStore {
+  return new Proxy(store, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      const bound = (value as (...args: unknown[]) => unknown).bind(target);
+      if (prop !== "commitWrite" && prop !== "commitWriteBatch") return bound;
+      return async (...args: unknown[]): Promise<unknown> => {
+        try {
+          return await bound(...args);
+        } catch (e) {
+          if (e instanceof Error && LEASE_OWNER_REJECTION_RE.test(e.message)) {
+            throw new Error(REPLICA_WRITE_REJECTED_MESSAGE);
+          }
+          throw e;
+        }
+      };
+    },
+  });
+}
+
+/** Test-only default when `bootLoaded`'s `objectStoreReplicaConsumerId` is unset — a per-process
+ *  random id so N replicas over one bucket never collide on the same `s{shard}/consumers/{id}` key. */
+function defaultReplicaConsumerId(): string {
+  return `replica-${randomUUID()}`;
+}
+
+/** Default poll interval (ms) for a replica's reactive tailer (Task 8.2) — mirrors
+ *  `ObjectStoreReplicaTailer`'s own shipped default. Overridable via `bootLoaded`'s
+ *  `objectStoreReplicaPollMs` (tests only; not a CLI flag). */
+export const DEFAULT_OBJECTSTORE_REPLICA_POLL_MS = 1000;
+
+/**
+ * Build (ee-gate → resolve → adopt globals → materialize, NO acquire) a Tier 3 object-storage
+ * REPLICA node's store (Task 8.2, design record §7/§8). Unlike `buildObjectStoreWriterNode`, this
+ * never calls `acquire()` — the returned store rejects every mutation for free (the class doc's
+ * "the neat part"), surfaced via `wrapReplicaWriteRejection`'s clear DX message.
+ *
+ * Returns the store to use at `bootLoaded`'s store seam, plus `attachTailer(runtime)` — call this
+ * AFTER `createEmbeddedRuntime` builds the replica's own runtime (the tailer's sink needs it; see
+ * `replica-wiring.ts`'s module doc for why this can't be a driver passed INTO the runtime itself).
+ * `attachTailer` starts `startReplicaReactiveTailer` and returns a `release()` handle that stops
+ * the tailer AND `removeConsumer`s this replica's watermark (so a departed replica stops pinning
+ * the writer's gc) — the shutdown handle `bootLoaded` threads out as `BootResult.objectStoreRelease`,
+ * same field the writer path uses (mutually exclusive by construction — `serve.ts` calls whichever
+ * one boot actually built, identically either way).
+ */
+async function buildObjectStoreReplicaNode(opts: {
+  objectStoreUrl: string;
+  dataPath: string;
+  /** Test-only: force a deterministic consumer-watermark id. Unset → `defaultReplicaConsumerId()`. */
+  consumerId?: string;
+  /** Test-only: shorten the tailer's poll cadence. Unset → `DEFAULT_OBJECTSTORE_REPLICA_POLL_MS`. */
+  pollMs?: number;
+}): Promise<{
+  store: DocStore;
+  attachTailer: (runtime: EmbeddedRuntime) => () => Promise<void>;
+}> {
+  const resolved = resolveObjectStore(opts.objectStoreUrl);
+  if (resolved === null) {
+    throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
+  }
+  await resolved.objectStore.assertCasSupported();
+
+  const substrate = await loadObjectStoreSubstrateModule();
+
+  // Same adopt-not-mint identity discipline as the writer path (see `RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY`'s
+  // doc comment) — a replica must NEVER mint a fresh deploymentId; it always adopts whatever the
+  // bucket (established by the writer, or an earlier node) already carries.
+  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards: 1 });
+
+  const local = makeLocalSqliteStore(opts.dataPath);
+  // NO acquire() — a replica only MATERIALIZES (Tier 3 Slice 4's `open()` claims no ownership).
+  const rawStore = await substrate.ObjectStoreDocStore.open({ objectStore: resolved.objectStore, shard: "0", local });
+  await rawStore.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+
+  const store = wrapReplicaWriteRejection(rawStore);
+  const consumerId = opts.consumerId ?? defaultReplicaConsumerId();
+  const pollMs = opts.pollMs ?? DEFAULT_OBJECTSTORE_REPLICA_POLL_MS;
+  const objectStore = resolved.objectStore;
+
+  return {
+    store,
+    attachTailer: (runtime: EmbeddedRuntime) => {
+      const handle = substrate.startReplicaReactiveTailer({ runtime, objectStore, shard: "0", local, consumerId, pollMs });
+      return async () => {
+        await handle.stop();
+        await substrate.removeConsumer(objectStore, "0", consumerId);
+      };
+    },
+  };
+}
+
 // ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
 // Decided ONCE, at first boot, and immutable after: `STACKBASE_FLEET_SHARDS` (or the fleet
 // default of 8) is persisted via `writeGlobalIfAbsent` the first time the store is writable; every
@@ -388,11 +529,15 @@ export interface BootResult {
    */
   storageRoutes: StorageRoute[];
   /**
-   * Tier 3 Slice 6: set only when `objectStoreUrl` was given — relinquishes this node's shard-0
-   * write lease (Task 6.5: `store.relinquish()`, which best-effort CAS-clears the lease IN THE
-   * BUCKET, not just in-process — see `ObjectStoreDocStore.relinquish()`'s doc — so a challenger
-   * takes over immediately instead of waiting out the full TTL). `serve.ts`'s shutdown calls this
-   * AFTER `server.close()` (which stops the lease-heartbeat driver) and BEFORE `store.close()`.
+   * Set only when `objectStoreUrl` was given — the object-store node's graceful-shutdown handle.
+   * `serve.ts`'s shutdown calls this AFTER `server.close()` and BEFORE `store.close()`. Two shapes,
+   * mutually exclusive by construction (at most one of `replica`/writer ever built this boot):
+   *   - Writer (Tier 3 Slice 6, Task 6.5): `store.relinquish()`, which best-effort CAS-clears the
+   *     lease IN THE BUCKET, not just in-process — see `ObjectStoreDocStore.relinquish()`'s doc —
+   *     so a challenger takes over immediately instead of waiting out the full TTL.
+   *   - Replica (Tier 3 Slice 8, Task 8.2): stops the reactive-tailer wiring helper (Task 8.1) and
+   *     `removeConsumer`s this replica's watermark, so a departed replica stops pinning the
+   *     writer's gc — see `buildObjectStoreReplicaNode`'s doc.
    */
   objectStoreRelease?: () => Promise<void>;
 }
@@ -529,6 +674,19 @@ export async function bootLoaded(opts: {
    *  (~60s). `serve.ts` threads `STACKBASE_OBJECTSTORE_GC_MS` in here; tests can also set it directly
    *  to force an observable reclamation on a short timescale. Ignored when `objectStoreUrl` is unset. */
   objectStoreGcMs?: number;
+  /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
+   *  instead of a writer — materializes + tails, NEVER acquires the write lease (every mutation is
+   *  rejected with `REPLICA_WRITE_REJECTED_MESSAGE`), and runs no heartbeat/gc drivers. Requires
+   *  `objectStoreUrl` (throws if set without it — `serve.ts` also validates this at the CLI-flag
+   *  level, before ever reaching here). Ignored (no-op) when `objectStoreUrl` is unset. */
+  replica?: boolean;
+  /** Test-only: force a deterministic consumer-watermark id for the replica's tailer. Ignored
+   *  unless `replica` is set. See `buildObjectStoreReplicaNode`'s `consumerId`. */
+  objectStoreReplicaConsumerId?: string;
+  /** Test-only: shorten the replica's reactive-tailer poll cadence so a materialize-and-fan-out
+   *  round is observable within a test's timescale. Unset → `DEFAULT_OBJECTSTORE_REPLICA_POLL_MS`
+   *  (1000ms). Ignored unless `replica` is set. */
+  objectStoreReplicaPollMs?: number;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
@@ -536,11 +694,20 @@ export async function bootLoaded(opts: {
   if (opts.objectStoreUrl !== undefined && opts.fleet) {
     throw new Error("stackbase: --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.");
   }
-  // Tier 3 Slice 6: ee-gate → resolve → adopt globals → materialize → acquire the shard-0 lease
-  // BEFORE anything else boots — a failed acquire (another live writer holds it) must fail the whole
-  // boot fast, not leave a runtime half-constructed over a store this process doesn't own.
-  const objectStoreNode =
-    opts.objectStoreUrl !== undefined
+  if (opts.replica && opts.objectStoreUrl === undefined) {
+    // Defense in depth: `serve.ts` already validates this synchronously at the CLI-flag level,
+    // before ever calling `bootProject`/`bootLoaded` — this only guards a direct `bootLoaded` caller
+    // (e.g. a test) that sets `replica` without `objectStoreUrl`.
+    throw new Error(
+      "stackbase: --replica requires --object-store — a replica materializes from an object-storage bucket; pass --object-store <url>.",
+    );
+  }
+  // Tier 3 Slice 6/8: ee-gate → resolve → adopt globals → materialize → (writer only) acquire the
+  // shard-0 lease BEFORE anything else boots — a failed acquire (another live writer holds it) must
+  // fail the whole boot fast, not leave a runtime half-constructed over a store this process doesn't
+  // own. A `--replica` node (Task 8.2) never acquires — see `buildObjectStoreReplicaNode`.
+  const objectStoreWriterNode =
+    opts.objectStoreUrl !== undefined && !opts.replica
       ? await buildObjectStoreWriterNode({
           objectStoreUrl: opts.objectStoreUrl,
           dataPath: opts.dataPath,
@@ -553,7 +720,20 @@ export async function bootLoaded(opts: {
           gcMs: opts.objectStoreGcMs,
         })
       : undefined;
-  const store = opts.fleet?.store ?? objectStoreNode?.store ?? makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
+  const objectStoreReplicaNode =
+    opts.objectStoreUrl !== undefined && opts.replica
+      ? await buildObjectStoreReplicaNode({
+          objectStoreUrl: opts.objectStoreUrl,
+          dataPath: opts.dataPath,
+          consumerId: opts.objectStoreReplicaConsumerId,
+          pollMs: opts.objectStoreReplicaPollMs,
+        })
+      : undefined;
+  const store =
+    opts.fleet?.store ??
+    objectStoreWriterNode?.store ??
+    objectStoreReplicaNode?.store ??
+    makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
   // Shards B2a (T5): resolve NUM_SHARDS. A fleet caller (`serve.ts --fleet`) has ALREADY resolved
   // + persisted its count against the durable Postgres store BEFORE `prepareFleetNode` (which needs
@@ -566,11 +746,11 @@ export async function bootLoaded(opts: {
   let numShards: number;
   if (opts.fleet) {
     numShards = opts.fleet.numShards ?? 1;
-  } else if (objectStoreNode) {
-    // Tier 3 Slice 6 scope boundary: single-shard-node only. The substrate's own per-shard lease
-    // concept ("shard 0" over the bucket) is a DIFFERENT axis from the engine's ShardedTransactor
-    // `numShards` — composing the two (an N-lane ShardedTransactor over one object-storage shard) is
-    // an explicitly deferred follow-on ("multi-shard single node"), not built here.
+  } else if (objectStoreWriterNode || objectStoreReplicaNode) {
+    // Tier 3 Slice 6/8 scope boundary: single-shard-node only (writer OR replica). The substrate's
+    // own per-shard lease concept ("shard 0" over the bucket) is a DIFFERENT axis from the engine's
+    // ShardedTransactor `numShards` — composing the two (an N-lane ShardedTransactor over one
+    // object-storage shard) is an explicitly deferred follow-on ("multi-shard single node").
     await store.setupSchema();
     numShards = 1;
   } else {
@@ -625,9 +805,12 @@ export async function bootLoaded(opts: {
       // `client_mutations` rows. Always on (every deployment has the receipts tables); no-op work when
       // no client ever wrote a receipt. Reads the SAME `store` the runtime commits to.
       receiptsReaper(store),
-      // Tier 3 Slice 6: the lease-heartbeat driver (renews shard-0's lease on cadence; stops +
-      // signals via `objectStoreOnFenced` on a fence). Empty outside the object-store path.
-      ...(objectStoreNode?.drivers ?? []),
+      // Tier 3 Slice 6: the lease-heartbeat + gc drivers (renews shard-0's lease on cadence; stops +
+      // signals via `objectStoreOnFenced` on a fence). Writer-only — empty outside the object-store
+      // writer path (absent entirely for a `--replica` node, Task 8.2: no heartbeat, no gc — a
+      // replica holds no lease and reclaims nothing; its OWN reactive-tailer wiring is started
+      // separately, below, once the runtime exists).
+      ...(objectStoreWriterNode?.drivers ?? []),
       ...project.drivers,
     ],
     // Fleet (Tier 2): route writes to the lease-holder when not the writer, defer drivers until
@@ -655,6 +838,12 @@ export async function bootLoaded(opts: {
     // above (fleet: threaded in already-resolved; non-fleet: read from STACKBASE_GROUP_COMMIT).
     groupCommit,
   });
+
+  // Tier 3 Slice 8, Task 8.2: NOW that the replica's own runtime exists, start the reactive-tailer
+  // wiring helper (Task 8.1) — it can't be a driver passed INTO `createEmbeddedRuntime` above
+  // because its sink needs the runtime itself (chicken-and-egg; see `replica-wiring.ts`'s module
+  // doc). `attachTailer` returns the shutdown handle (stop the tailer + `removeConsumer`).
+  const objectStoreReplicaRelease = objectStoreReplicaNode ? objectStoreReplicaNode.attachTailer(runtime) : undefined;
 
   const storageRouteDeps: StorageRouteDeps = {
     // The routes reach the privileged `_storage:_finalize`/`_get` built-ins via `runSystem` (trusted,
@@ -687,7 +876,11 @@ export async function bootLoaded(opts: {
     components: opts.components,
     blobStore,
     storageRoutes: routes,
-    ...(objectStoreNode ? { objectStoreRelease: objectStoreNode.release } : {}),
+    // Mutually exclusive by construction (Task 8.2 guards `objectStoreUrl !== undefined && !replica`
+    // vs. `&& replica`) — at most one of these two spreads ever contributes a key, so `serve.ts`'s
+    // shutdown can call `objectStoreRelease()` generically without knowing which node type booted.
+    ...(objectStoreWriterNode ? { objectStoreRelease: objectStoreWriterNode.release } : {}),
+    ...(objectStoreReplicaRelease ? { objectStoreRelease: objectStoreReplicaRelease } : {}),
   };
 }
 
@@ -755,6 +948,10 @@ export async function bootProject(opts: {
   objectStoreAcquirePollIntervalMs?: number;
   objectStoreWriterId?: string;
   objectStoreGcMs?: number;
+  /** Tier 3 Slice 8 replica boot wiring (see `bootLoaded`'s matching opts). */
+  replica?: boolean;
+  objectStoreReplicaConsumerId?: string;
+  objectStoreReplicaPollMs?: number;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -778,6 +975,11 @@ export async function bootProject(opts: {
       : {}),
     ...(opts.objectStoreWriterId !== undefined ? { objectStoreWriterId: opts.objectStoreWriterId } : {}),
     ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
+    ...(opts.replica !== undefined ? { replica: opts.replica } : {}),
+    ...(opts.objectStoreReplicaConsumerId !== undefined
+      ? { objectStoreReplicaConsumerId: opts.objectStoreReplicaConsumerId }
+      : {}),
+    ...(opts.objectStoreReplicaPollMs !== undefined ? { objectStoreReplicaPollMs: opts.objectStoreReplicaPollMs } : {}),
   });
 }
 
