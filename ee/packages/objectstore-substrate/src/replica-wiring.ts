@@ -119,6 +119,12 @@ export function startReplicaReactiveTailer(opts: StartReplicaReactiveTailerOptio
   // Set by `stop()` BEFORE clearing the timer — guards every re-entry point against resurrecting a
   // timer after `stop()`, mirroring `gc-driver.ts`'s same `stopped` guard.
   let stopped = false;
+  // The round currently in flight (if any), tracked so `stop()` can AWAIT it before returning — see
+  // `stop()`. Without this, a `pump()` already past its top guard (mid-`tailer.tick()` or mid-publish)
+  // could complete AFTER `stop()` returns and the boot layer's `removeConsumer()` deletes this
+  // consumer's watermark — RE-CREATING it with a never-reused per-process consumerId, permanently
+  // pinning the writer's gc floor (a storage leak on every routine replica restart).
+  let inflight: Promise<void> | undefined;
 
   // One round: tick the tailer (drives the reactivity sink AND advances `appliedSeqno`), then publish
   // the watermark ONLY if it actually advanced since our last publish — the accurate POST-advance
@@ -129,6 +135,10 @@ export function startReplicaReactiveTailer(opts: StartReplicaReactiveTailerOptio
     // replica has been halted and must not apply/publish further.
     if (stopped) return;
     await tailer.tick();
+    // Re-check AFTER the tick's awaits: if `stop()` landed while we were ticking, skip the publish
+    // entirely (nothing to resurrect). The stop-during-publish window is closed separately by
+    // `stop()` awaiting `inflight`.
+    if (stopped) return;
     if (tailer.appliedSeqno !== lastPublishedSeqno) {
       await publishConsumerWatermark(objectStore, shard, consumerId, { appliedSeqno: tailer.appliedSeqno });
       lastPublishedSeqno = tailer.appliedSeqno;
@@ -145,13 +155,14 @@ export function startReplicaReactiveTailer(opts: StartReplicaReactiveTailerOptio
   // mirroring `gc-driver.ts`'s `wake()`.
   function wake(): void {
     if (stopped) return;
-    pump()
-      .catch((e: unknown) => {
-        console.error(`objectstore-substrate: replica reactive tailer wiring pump failed for shard '${shard}'`, e);
-      })
-      .finally(() => {
-        armTimer();
-      });
+    const round = pump().catch((e: unknown) => {
+      console.error(`objectstore-substrate: replica reactive tailer wiring pump failed for shard '${shard}'`, e);
+    });
+    inflight = round;
+    void round.finally(() => {
+      if (inflight === round) inflight = undefined;
+      armTimer();
+    });
   }
 
   armTimer();
@@ -164,6 +175,11 @@ export function startReplicaReactiveTailer(opts: StartReplicaReactiveTailerOptio
         clearTimeout(timer);
         timer = undefined;
       }
+      // Await any round already in flight (incl. its watermark publish) so the caller's shutdown
+      // `removeConsumer()` runs strictly AFTER the last possible publish — otherwise a mid-publish
+      // round would resurrect the watermark just deleted (Slice-8 whole-branch review). `stopped` is
+      // already set, so no NEW round can start; this only drains the one that may already be running.
+      await inflight;
       tailer.stop();
     },
     __pump: pump,

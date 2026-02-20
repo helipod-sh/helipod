@@ -189,4 +189,78 @@ describe("startReplicaReactiveTailer: the wiring helper drives cross-node reacti
       await teardown(h);
     }
   });
+
+  it("stop() awaits an in-flight watermark publish — a later removeConsumer can't be resurrected (whole-branch fix)", async () => {
+    // The race the whole-branch review found: a background pump() already past its guards, mid-publish,
+    // could complete AFTER stop() returns and the boot layer's removeConsumer() deletes the watermark —
+    // re-creating it (with a never-reused per-process consumerId) and permanently pinning the writer's
+    // gc floor. The fix: stop() awaits the in-flight round. This proves stop() blocks until the
+    // gated publish completes, so a subsequent removeConsumer is guaranteed to run last.
+    const bucket = await freshFsBucket();
+    const h: Partial<Handles> = {};
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((r) => (releaseGate = r));
+    let consumerCasPuts = 0;
+    const gatedBucket = new Proxy(bucket, {
+      get(target, prop, receiver) {
+        if (prop === "casPut") {
+          return async (key: string, body: Uint8Array, ifMatch: string | null) => {
+            if (key.includes("/consumers/")) {
+              consumerCasPuts++;
+              await gate; // hold the watermark publish in flight
+            }
+            return (target as ObjectStore).casPut(key, body, ifMatch);
+          };
+        }
+        const val = Reflect.get(target, prop, receiver);
+        return typeof val === "function" ? val.bind(target) : val;
+      },
+    }) as ObjectStore;
+
+    try {
+      const writerStore = await ObjectStoreDocStore.open({ objectStore: bucket, shard: SHARD, local: freshLocal() });
+      h.writerStore = writerStore;
+      const acq = await writerStore.acquire({ writerId: "writer", leaseTtlMs: Number.MAX_SAFE_INTEGER, now: 0 });
+      if (!acq.acquired) throw new Error("test setup: acquire refused");
+      const writerRuntime = await createEmbeddedRuntime({ store: writerStore, catalog: notesCatalog(), modules });
+      h.writerRuntime = writerRuntime;
+      await writerRuntime.run<string>("notes:add", { body: "first" });
+
+      const replicaLocal = freshLocal();
+      h.replicaLocal = replicaLocal;
+      await ObjectStoreDocStore.open({ objectStore: gatedBucket, shard: SHARD, local: replicaLocal });
+      const replicaRuntime = await createEmbeddedRuntime({ store: replicaLocal, catalog: notesCatalog(), modules });
+      h.replicaRuntime = replicaRuntime;
+
+      const handle = startReplicaReactiveTailer({
+        runtime: replicaRuntime,
+        objectStore: gatedBucket,
+        shard: SHARD,
+        local: replicaLocal,
+        consumerId: "replica-race",
+        pollMs: 5,
+      });
+      h.tailerHandle = handle;
+
+      // Wait until the background loop's pump reaches the gated publish (now in flight).
+      const deadline = Date.now() + 5000;
+      while (consumerCasPuts === 0) {
+        if (Date.now() > deadline) throw new Error("pump never reached the gated publish");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      // stop() must NOT resolve while the in-flight publish is gated.
+      let done = false;
+      const stopPromise = handle.stop().then(() => (done = true));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(done).toBe(false); // stop() is awaiting the in-flight publish, not returning early
+
+      releaseGate();
+      await stopPromise;
+      expect(done).toBe(true); // resolves only once the in-flight publish has completed
+    } finally {
+      releaseGate?.(); // ensure no dangling gate on a failure path
+      await teardown(h);
+    }
+  });
 });
