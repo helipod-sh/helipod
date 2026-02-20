@@ -18,3 +18,9 @@ export {
   type AppliedInvalidation,
 } from "./replica-tailer";
 export { publishConsumerWatermark, readConsumerWatermarks, removeConsumer } from "./consumers";
+export {
+  startReplicaReactiveTailer,
+  type ReplicaReactiveRuntime,
+  type StartReplicaReactiveTailerOptions,
+  type ReplicaReactiveTailerHandle,
+} from "./replica-wiring";

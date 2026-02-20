@@ -141,6 +141,12 @@ export interface ServeOptions {
    *  `STACKBASE_OBJECTSTORE_GC_MS`. Unset → `boot.ts`'s `DEFAULT_OBJECTSTORE_GC_MS` (~60s). Ignored
    *  unless `objectStoreUrl` is set. */
   objectStoreGcMs?: number;
+  /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
+   *  (materialize + tail, no write lease — every mutation is rejected) instead of a writer. REQUIRES
+   *  `objectStoreUrl` (validated in `serveCommand`, before `startServe` is ever called). Optional so
+   *  existing (non-replica) `ServeOptions` literals need no change; `resolveServeOptions` always
+   *  sets it. Flag (`--replica`) wins over `STACKBASE_REPLICA` env. */
+  replica?: boolean;
 }
 
 /**
@@ -257,6 +263,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let fleet = process.env.STACKBASE_FLEET === "1" || process.env.STACKBASE_FLEET?.trim().toLowerCase() === "true";
   let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
+  let replica = /^(1|true|yes)$/i.test(process.env.STACKBASE_REPLICA ?? "");
   // Tier 3 Slice 7, Task 7.3: gc-driver cadence — env-only (no CLI flag), mirroring how
   // STACKBASE_FLEET_LEASE_TTL_MS is a pure ops/test tuning knob with no flag equivalent.
   // `parseLeaseTtlMs`'s "positive finite number, else undefined" parse is generic, not lease-specific.
@@ -275,6 +282,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--fleet") fleet = true;
     else if (a === "--advertise-url" && args[i + 1]) advertiseUrl = args[++i] as string;
     else if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i] as string;
+    else if (a === "--replica") replica = true;
   }
   return {
     convexDir,
@@ -290,6 +298,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     advertiseUrl,
     ...(objectStoreUrl !== undefined ? { objectStoreUrl } : {}),
     ...(objectStoreGcMs !== undefined ? { objectStoreGcMs } : {}),
+    replica,
   };
 }
 
@@ -357,6 +366,7 @@ export async function startServe(
     ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
     ...(opts.onObjectStoreFenced ? { objectStoreOnFenced: opts.onObjectStoreFenced } : {}),
     ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
+    ...(opts.replica ? { replica: opts.replica } : {}),
   });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -427,6 +437,17 @@ export async function serveCommand(args: string[]): Promise<number> {
   if (opts.fleet && opts.objectStoreUrl !== undefined) {
     process.stderr.write(
       "✗ --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.\n",
+    );
+    return 1;
+  }
+
+  // Tier 3 Slice 8, Task 8.2: `--replica` only makes sense over an object-storage bucket — fail
+  // fast, synchronously, before any boot work starts (mirrors the fleet+object-store mutual-
+  // exclusion check just above).
+  if (opts.replica && opts.objectStoreUrl === undefined) {
+    process.stderr.write(
+      "✗ --replica requires --object-store — a replica materializes from an object-storage bucket; " +
+        "set --object-store <url> (or STACKBASE_OBJECT_STORE).\n",
     );
     return 1;
   }
@@ -518,6 +539,8 @@ export async function serveCommand(args: string[]): Promise<number> {
       ...(role ? { fleet: true, role } : {}),
       // Additive: present only in object-store mode (Tier 3 Slice 6).
       ...(opts.objectStoreUrl !== undefined ? { objectStore: true } : {}),
+      // Additive: present only for a read-only replica node (Tier 3 Slice 8, Task 8.2).
+      ...(opts.replica ? { replica: true } : {}),
     }) + "\n",
   );
 
