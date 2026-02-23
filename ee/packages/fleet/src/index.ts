@@ -48,3 +48,10 @@ export {
   type ReplicaTailerOptions,
 } from "./replica-tailer";
 export { stablePrefixFromFrontier, type StablePrefixTs } from "./stable-prefix";
+export {
+  reshardFleet,
+  ReshardFleetLiveError,
+  ReshardVerificationError,
+  NUM_SHARDS_GLOBAL_KEY,
+  type ReshardResult,
+} from "./reshard";
