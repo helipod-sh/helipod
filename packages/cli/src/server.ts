@@ -77,6 +77,10 @@ export interface DevServerOptions {
   /** Fleet node handle — present only under `serve --fleet`. Enables `/_fleet/run` and the sync-role
    *  httpAction proxy. Absent → byte-for-byte the non-fleet behavior. */
   fleet?: FleetHandles;
+  /** Tier 3 Slice 8 follow-on (replica write-forwarding): present only when THIS node is itself a
+   *  `--replica` configured with `--writer-url` — enables `/api/run`'s single-hop defensive guard
+   *  (`handleHttpRequest`'s `replicaWriterUrl` param). Absent → byte-for-byte unchanged behavior. */
+  replicaWriterUrl?: string;
 }
 
 /** Content-type for an embedded dashboard asset, derived from its extension. */
@@ -251,6 +255,7 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           currentRoutes,
           options.deploy,
           options.fleet,
+          options.replicaWriterUrl,
         );
         if (response.status === 404 && (req.method ?? "GET") === "GET" && options.webDir) {
           const file = resolveStatic(options.webDir, path);
@@ -405,6 +410,7 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
         currentRoutes,
         options.deploy,
         options.fleet,
+        options.replicaWriterUrl,
       );
       if (response.status === 404 && req.method === "GET" && options.webDir) {
         const file = resolveStatic(options.webDir, path);

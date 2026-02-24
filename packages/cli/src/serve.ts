@@ -147,6 +147,10 @@ export interface ServeOptions {
    *  existing (non-replica) `ServeOptions` literals need no change; `resolveServeOptions` always
    *  sets it. Flag (`--replica`) wins over `STACKBASE_REPLICA` env. */
   replica?: boolean;
+  /** Tier 3 Slice 8 follow-on (replica write-forwarding): the writer node's URL — when set on a
+   *  `--replica` boot, every mutation/action FORWARDS here instead of being rejected. Ignored
+   *  unless `replica` is also set. Flag (`--writer-url`) wins over `STACKBASE_WRITER_URL` env. */
+  writerUrl?: string;
 }
 
 /**
@@ -264,6 +268,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   let replica = /^(1|true|yes)$/i.test(process.env.STACKBASE_REPLICA ?? "");
+  let writerUrl = process.env.STACKBASE_WRITER_URL;
   // Tier 3 Slice 7, Task 7.3: gc-driver cadence — env-only (no CLI flag), mirroring how
   // STACKBASE_FLEET_LEASE_TTL_MS is a pure ops/test tuning knob with no flag equivalent.
   // `parseLeaseTtlMs`'s "positive finite number, else undefined" parse is generic, not lease-specific.
@@ -283,6 +288,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--advertise-url" && args[i + 1]) advertiseUrl = args[++i] as string;
     else if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i] as string;
     else if (a === "--replica") replica = true;
+    else if (a === "--writer-url" && args[i + 1]) writerUrl = args[++i] as string;
   }
   return {
     convexDir,
@@ -299,6 +305,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     ...(objectStoreUrl !== undefined ? { objectStoreUrl } : {}),
     ...(objectStoreGcMs !== undefined ? { objectStoreGcMs } : {}),
     replica,
+    ...(writerUrl !== undefined ? { writerUrl } : {}),
   };
 }
 
@@ -354,20 +361,22 @@ export async function startServe(
         })
       : undefined;
 
-  const { runtime, adminApi, project, store, components, storageRoutes, objectStoreRelease } = await bootProject({
-    convexDir: opts.convexDir,
-    dataPath: opts.dataPath,
-    adminKey: opts.adminKey,
-    databaseUrl: opts.databaseUrl,
-    storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
-    ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
-    ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
-    ...(prep ? { fleet: prep.runtimeOptions } : {}),
-    ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
-    ...(opts.onObjectStoreFenced ? { objectStoreOnFenced: opts.onObjectStoreFenced } : {}),
-    ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
-    ...(opts.replica ? { replica: opts.replica } : {}),
-  });
+  const { runtime, adminApi, project, store, components, storageRoutes, objectStoreRelease, replicaWriterUrl } =
+    await bootProject({
+      convexDir: opts.convexDir,
+      dataPath: opts.dataPath,
+      adminKey: opts.adminKey,
+      databaseUrl: opts.databaseUrl,
+      storage: { bucket: opts.storageBucket, endpoint: opts.storageEndpoint },
+      ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
+      ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
+      ...(prep ? { fleet: prep.runtimeOptions } : {}),
+      ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
+      ...(opts.onObjectStoreFenced ? { objectStoreOnFenced: opts.onObjectStoreFenced } : {}),
+      ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
+      ...(opts.replica ? { replica: opts.replica } : {}),
+      ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
+    });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
 
@@ -414,7 +423,17 @@ export async function startServe(
     : undefined;
   server = await startDevServer(
     runtime,
-    { port: opts.port, ip: opts.ip, admin: { api: adminApi, key: opts.adminKey }, dashboard, routes: project.routes, storageRoutes, deploy, fleet },
+    {
+      port: opts.port,
+      ip: opts.ip,
+      admin: { api: adminApi, key: opts.adminKey },
+      dashboard,
+      routes: project.routes,
+      storageRoutes,
+      deploy,
+      fleet,
+      ...(replicaWriterUrl !== undefined ? { replicaWriterUrl } : {}),
+    },
   );
   return { server, store, runtime, fleet, role: prep?.role, ...(objectStoreRelease ? { objectStoreRelease } : {}) };
 }
@@ -448,6 +467,17 @@ export async function serveCommand(args: string[]): Promise<number> {
     process.stderr.write(
       "✗ --replica requires --object-store — a replica materializes from an object-storage bucket; " +
         "set --object-store <url> (or STACKBASE_OBJECT_STORE).\n",
+    );
+    return 1;
+  }
+
+  // Tier 3 Slice 8 follow-on (replica write-forwarding): `--writer-url` only means something on a
+  // replica — fail fast rather than silently ignore it (which would look like forwarding is
+  // configured when it isn't).
+  if (opts.writerUrl !== undefined && !opts.replica) {
+    process.stderr.write(
+      "✗ --writer-url only applies to --replica (it's the writer this replica forwards mutations/" +
+        "actions to) — pass --replica too, or drop --writer-url (or STACKBASE_WRITER_URL).\n",
     );
     return 1;
   }
@@ -541,6 +571,8 @@ export async function serveCommand(args: string[]): Promise<number> {
       ...(opts.objectStoreUrl !== undefined ? { objectStore: true } : {}),
       // Additive: present only for a read-only replica node (Tier 3 Slice 8, Task 8.2).
       ...(opts.replica ? { replica: true } : {}),
+      // Additive: present only when this replica forwards writes (Tier 3 Slice 8 follow-on).
+      ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
     }) + "\n",
   );
 

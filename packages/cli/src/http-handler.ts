@@ -149,6 +149,14 @@ export async function handleHttpRequest(
   routes?: ResolvedRoute[],
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> },
   fleet?: FleetHandles,
+  /**
+   * Tier 3 Slice 8 follow-on (replica write-forwarding): set only when THIS node is itself a
+   * `--replica` configured with `--writer-url` — i.e. it forwards mutations/actions elsewhere
+   * via its own `ReplicaWriteForwarder` (`replica-forward.ts`). Used SOLELY for the `/api/run`
+   * single-hop defensive guard below; the value itself is never read here (a plain presence
+   * check — `boot.ts`/`serve.ts` own using it to construct the actual forwarder).
+   */
+  replicaWriterUrl?: string,
 ): Promise<HttpResponse> {
   // Fleet write-forwarding target: a sync node's `WriteForwarder` POSTs mutations/actions here.
   // Enabled only in fleet mode (harmless on the writer — `runtime.run` executes locally there).
@@ -338,10 +346,42 @@ export async function handleHttpRequest(
   }
   if (req.method === "POST" && req.path === "/api/run") {
     try {
-      const parsed = JSON.parse(req.body ?? "{}") as { path?: string; args?: JSONValue };
+      const parsed = JSON.parse(req.body ?? "{}") as {
+        path?: string;
+        args?: JSONValue;
+        /** Tier 3 Slice 8 follow-on (replica write-forwarding): set by `ReplicaWriteForwarder`
+         *  (`replica-forward.ts`) — signals this is ALREADY a forward hop, so the receiver must
+         *  not treat it as a fresh direct call needing forwarding of its own. Ignored on a WRITER
+         *  (which has no `writeRouter` and so runs everything locally regardless); checked below
+         *  ONLY to guard against a request landing on ANOTHER replica by misconfiguration. */
+        forwarded?: boolean;
+      };
       if (!parsed.path) return json(400, { error: "missing function path" });
-      const result = await runtime.run(parsed.path, parsed.args ?? {});
-      return json(200, { value: convexToJson(result.value as Value), committed: result.committed });
+      // Single-hop guard (Tier 3 Slice 8 follow-on): a `forwarded: true` request must land on the
+      // actual writer. If THIS node is itself a replica configured to forward elsewhere
+      // (`replicaWriterUrl` set), receiving one here means some caller's `--writer-url` points at
+      // this replica instead of the real writer — reject clearly rather than silently forwarding
+      // again (which, under a symmetric misconfiguration, could loop between two replicas).
+      if (parsed.forwarded && replicaWriterUrl !== undefined) {
+        return json(409, {
+          error:
+            "stackbase: this node is a read replica configured to forward writes (--writer-url) and " +
+            "received an already-forwarded write — check --writer-url points at the actual writer, not another replica.",
+        });
+      }
+      // Identity pass-through (Tier 3 Slice 8 follow-on): `/api/run` had no identity support
+      // before this — additive/backward-compatible (no `Authorization` header -> `identity:
+      // null`, byte-identical to before). Mirrors the httpAction router's own bearer -> identity
+      // convention (the caller's raw token is passed straight through, unresolved).
+      const identity = bearer(req.authorization) ?? null;
+      const result = await runtime.run(parsed.path, parsed.args ?? {}, { identity });
+      return json(200, {
+        value: convexToJson(result.value as Value),
+        committed: result.committed,
+        // Additive: lets a forwarding replica's `ReplicaWriteForwarder` report the writer's real
+        // commitTs instead of a hardcoded 0 — see `EmbeddedRuntime.forwardedResult`'s doc comment.
+        commitTs: String(result.oplog?.commitTs ?? result.commitTs ?? 0n),
+      });
     } catch (e) {
       const err = toStackbaseError(e);
       return json(getHttpStatus(err), { error: err.message, code: err.code });
