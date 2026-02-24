@@ -377,7 +377,14 @@ directly.
 - **A real-bucket benchmark** — DONE (§13 below): `bun run bench:objectstore` measured the primitives
   against a real MinIO before any build commits, per this gate. The remote-S3 latency floor and the
   per-prefix scaling on *distributed* S3 (vs single-node MinIO) remain to be measured against a real
-  cloud bucket.
+  cloud bucket. **The harness for that has since shipped** (2026-02-20): `bun run bench:objectstore`
+  now runs the SAME primitive measurements against a REAL bucket (AWS S3 / R2 / any S3-compatible)
+  when `STACKBASE_OBJECTSTORE_S3_BUCKET`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY` are set, via the
+  actual production `S3ObjectStore` adapter, cleaning up its run-scoped objects afterward — see
+  `benchmarks/docs/realcloud-objectstore-bench.md`. The harness itself was validated end-to-end
+  against a real S3-compatible endpoint (MinIO, standing in for a real bucket since no cloud
+  credentials were available to build this); **actual AWS S3 / R2 numbers are still TBD** — that doc's
+  results table is a placeholder for whoever runs it next.
 
 ---
 

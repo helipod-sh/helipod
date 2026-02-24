@@ -62,6 +62,8 @@
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
+        "@stackbase/objectstore": "workspace:*",
+        "@stackbase/objectstore-s3": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@stackbase/sync": "workspace:*",
         "@stackbase/values": "workspace:*",
