@@ -36,6 +36,7 @@ import {
 import { receiptsReaper } from "@stackbase/receipts";
 import { makeBlobStore, isS3Config, resolveStorageConfig, type StorageConfig } from "./blobstore-select";
 import { resolveObjectStore } from "./objectstore-select";
+import { ReplicaWriteForwarder } from "./replica-forward";
 import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
@@ -540,6 +541,15 @@ export interface BootResult {
    *     writer's gc — see `buildObjectStoreReplicaNode`'s doc.
    */
   objectStoreRelease?: () => Promise<void>;
+  /**
+   * Tier 3 Slice 8 follow-on (replica write-forwarding): set only when this boot is a
+   * `--replica` configured with `--writer-url` (i.e. a `ReplicaWriteForwarder` was wired in as
+   * the runtime's `writeRouter`). `serve.ts` threads this straight through to
+   * `startDevServer`'s `replicaWriterUrl` option, which arms `/api/run`'s single-hop defensive
+   * guard (`http-handler.ts`). Absent whenever `--writer-url` is unset (the pre-existing
+   * reject-with-message replica behavior, unchanged) or this isn't a replica boot at all.
+   */
+  replicaWriterUrl?: string;
 }
 
 /**
@@ -687,6 +697,14 @@ export async function bootLoaded(opts: {
    *  round is observable within a test's timescale. Unset → `DEFAULT_OBJECTSTORE_REPLICA_POLL_MS`
    *  (1000ms). Ignored unless `replica` is set. */
   objectStoreReplicaPollMs?: number;
+  /**
+   * Tier 3 Slice 8 follow-on: the writer node's URL, from `--writer-url`/`STACKBASE_WRITER_URL`.
+   * When set on a `replica` boot, every mutation/action is FORWARDED here (`ReplicaWriteForwarder`,
+   * wired in as `createEmbeddedRuntime`'s `writeRouter`) instead of being rejected locally.
+   * Ignored unless `replica` is also set. Unset (the default) → today's unchanged reject-with-
+   * `REPLICA_WRITE_REJECTED_MESSAGE` behavior.
+   */
+  writerUrl?: string;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
@@ -734,6 +752,13 @@ export async function bootLoaded(opts: {
     objectStoreWriterNode?.store ??
     objectStoreReplicaNode?.store ??
     makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
+
+  // Tier 3 Slice 8 follow-on (replica write-forwarding): a replica boot with `--writer-url` set
+  // gets a `ReplicaWriteForwarder` wired in as the runtime's `writeRouter` below — every
+  // mutation/action forwards to the writer instead of attempting (and failing) a local commit.
+  // Unset `writerUrl` (the default) → no writeRouter, unchanged reject-with-message behavior.
+  const replicaWriteForwarder =
+    objectStoreReplicaNode && opts.writerUrl !== undefined ? new ReplicaWriteForwarder(opts.writerUrl) : undefined;
 
   // Shards B2a (T5): resolve NUM_SHARDS. A fleet caller (`serve.ts --fleet`) has ALREADY resolved
   // + persisted its count against the durable Postgres store BEFORE `prepareFleetNode` (which needs
@@ -816,6 +841,10 @@ export async function bootLoaded(opts: {
     // Fleet (Tier 2): route writes to the lease-holder when not the writer, defer drivers until
     // promotion, and (writer boot) fan out commits cross-process via pg_notify.
     ...(opts.fleet?.writeRouter ? { writeRouter: opts.fleet.writeRouter } : {}),
+    // Tier 3 Slice 8 follow-on (replica write-forwarding): mutually exclusive with `opts.fleet`
+    // (guarded at the top of this function — `--object-store` + `--fleet` throws), so at most one
+    // of these two `writeRouter` spreads ever contributes a key.
+    ...(replicaWriteForwarder ? { writeRouter: replicaWriteForwarder } : {}),
     ...(opts.fleet?.deferDrivers ? { deferDrivers: true } : {}),
     ...(opts.fleet?.fanoutAdapter ? { fanoutAdapter: opts.fleet.fanoutAdapter } : {}),
     // Fleet B3 hybrid (multi-writer): the replica-backed query path + the own-commit RYOW drain gate.
@@ -881,6 +910,9 @@ export async function bootLoaded(opts: {
     // shutdown can call `objectStoreRelease()` generically without knowing which node type booted.
     ...(objectStoreWriterNode ? { objectStoreRelease: objectStoreWriterNode.release } : {}),
     ...(objectStoreReplicaRelease ? { objectStoreRelease: objectStoreReplicaRelease } : {}),
+    // Tier 3 Slice 8 follow-on (replica write-forwarding): threaded through so `serve.ts` can arm
+    // `/api/run`'s single-hop defensive guard on THIS node (`startDevServer`'s `replicaWriterUrl`).
+    ...(replicaWriteForwarder ? { replicaWriterUrl: opts.writerUrl } : {}),
   };
 }
 
@@ -952,6 +984,8 @@ export async function bootProject(opts: {
   replica?: boolean;
   objectStoreReplicaConsumerId?: string;
   objectStoreReplicaPollMs?: number;
+  /** Tier 3 Slice 8 follow-on (replica write-forwarding — see `bootLoaded`'s matching opt). */
+  writerUrl?: string;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -980,6 +1014,7 @@ export async function bootProject(opts: {
       ? { objectStoreReplicaConsumerId: opts.objectStoreReplicaConsumerId }
       : {}),
     ...(opts.objectStoreReplicaPollMs !== undefined ? { objectStoreReplicaPollMs: opts.objectStoreReplicaPollMs } : {}),
+    ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
   });
 }
 
