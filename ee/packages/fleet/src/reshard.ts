@@ -15,10 +15,15 @@
  * the two epochs strictly non-overlapping, so changing a key's lane between them is as safe as any
  * config change to a stopped system.
  *
- * `F = min(frontier_ts)` is monotone across a reshard: retained lanes' frontiers are untouched, new
- * lanes are seeded at `MAX(ts)` (never below the true high-water mark — the same F1 seed
- * `LeaseManager.setup()`/`tryAcquire()` use, see `frontierSeedExpr` in `./lease.ts`), and deleting a
- * lane can only raise or hold `min(frontier_ts)`, never lower it.
+ * `F = min(frontier_ts)` is monotone across a reshard: new lanes are seeded at `MAX(ts)` (never
+ * below the true high-water mark — the same F1 seed `LeaseManager.setup()`/`tryAcquire()` use, see
+ * `frontierSeedExpr` in `./lease.ts`), retained lanes are GREATEST-bumped up to that same floor
+ * (never lowered — a documented, safe deviation from "retained rows untouched": raise-only can
+ * never regress F, and it proactively heals a lane whose frontier legitimately lags `MAX(ts)` after
+ * a crash stop — no `selfFence` ran, so nothing bumped it since the last idle-closer beat — the
+ * same healing a node boot's `seedFrontierAll` would eventually do), and deleting a lane can only
+ * raise or hold `min(frontier_ts)`, never lower it. Net effect: EVERY post-reshard lane is
+ * `>= MAX(ts)`, making the post-verify's F1 check a true post-condition rather than a best-effort one.
  */
 import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
 import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
@@ -51,6 +56,20 @@ export class ReshardVerificationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ReshardVerificationError";
+  }
+}
+
+/** Thrown when `reshardFleet` is pointed at a Postgres database that has never run a fleet on it —
+ *  no `shard_leases`/`fleet_nodes` tables. Without this pre-gate, the live-fleet gate query below
+ *  would throw a raw `relation "fleet_nodes" does not exist`, which reads like an internal SQL bug
+ *  rather than the operator-actionable "you haven't booted a fleet here yet" that it actually is. */
+export class ReshardNotAFleetError extends Error {
+  constructor() {
+    super(
+      "this database is not a fleet store (no shard_leases/fleet_nodes tables) — a fleet is " +
+        "initialized by `stackbase serve --fleet`; run the fleet at least once before resharding",
+    );
+    this.name = "ReshardNotAFleetError";
   }
 }
 
@@ -105,13 +124,18 @@ function shardIdSet(rows: PgRow[]): Set<ShardId> {
 
 /**
  * Change a STOPPED Postgres fleet's shard count from whatever it currently is to `opts.targetShards`.
- * See the module doc comment for the full safety argument. Steps (verbatim to the plan):
+ * See the module doc comment for the full safety argument. Steps (verbatim to the plan, plus the
+ * not-a-fleet pre-gate):
  *   1. validate `targetShards >= 1`
- *   2. refuse if any `fleet_nodes`/`shard_leases` row is live (`ReshardFleetLiveError`)
- *   3. read the current lane set + the current `fleet:numShards` global
- *   4. one transaction: upsert the global, INSERT new lanes (seeded at `MAX(ts)`), DELETE surplus
- *      lanes
- *   5. post-verify (count/set/frontier-floor/global) — `ReshardVerificationError` on any mismatch
+ *   2. probe that this is actually a fleet store (`shard_leases`/`fleet_nodes` exist) —
+ *      `ReshardNotAFleetError` otherwise, before the next step's raw SQL can throw an opaque
+ *      "relation does not exist"
+ *   3. refuse if any `fleet_nodes`/`shard_leases` row is live (`ReshardFleetLiveError`)
+ *   4. read the current lane set + the current `fleet:numShards` global
+ *   5. one transaction: upsert the global, INSERT new lanes (seeded at `MAX(ts)`), DELETE surplus
+ *      lanes, then GREATEST-bump every remaining lane's frontier up to that same `MAX(ts)` floor
+ *      (heals a retained lane that crash-stopped below it — see the module doc comment)
+ *   6. post-verify (count/set/frontier-floor/global) — `ReshardVerificationError` on any mismatch
  */
 export async function reshardFleet(client: PgClient, opts: { targetShards: number }): Promise<ReshardResult> {
   const { targetShards } = opts;
@@ -119,7 +143,17 @@ export async function reshardFleet(client: PgClient, opts: { targetShards: numbe
     throw new RangeError(`reshardFleet: targetShards must be an integer >= 1, got ${targetShards}`);
   }
 
-  // 2. Precondition — stopped fleet. Live means EITHER an unexpired fleet_nodes presence row OR an
+  // 2. Not-a-fleet pre-gate: without this, a fresh/never-fleeted Postgres database makes the live-
+  // fleet gate query below (step 3) throw a raw `relation "fleet_nodes" does not exist` — technically
+  // correct but reads like an internal bug rather than "you haven't booted a fleet here yet".
+  const fleetProbe = await client.query(
+    `SELECT to_regclass('shard_leases') IS NOT NULL AND to_regclass('fleet_nodes') IS NOT NULL AS is_fleet`,
+  );
+  if (fleetProbe[0]?.is_fleet !== true) {
+    throw new ReshardNotAFleetError();
+  }
+
+  // 3. Precondition — stopped fleet. Live means EITHER an unexpired fleet_nodes presence row OR an
   // unexpired shard_leases row with a writer_url — the exact `liveNodes()` query shape from
   // `./lease.ts`, run directly here (no LeaseManager instance needed for a one-shot read).
   const liveRows = await client.query(
@@ -132,7 +166,7 @@ export async function reshardFleet(client: PgClient, opts: { targetShards: numbe
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   if (liveUrls.length > 0) throw new ReshardFleetLiveError(liveUrls);
 
-  // 3. Read current state.
+  // 4. Read current state.
   const laneRows = await client.query(`SELECT shard_id FROM shard_leases`);
   const currentLanes = shardIdSet(laneRows);
   const persistedNumShards = await readNumShardsGlobal(client);
@@ -148,7 +182,8 @@ export async function reshardFleet(client: PgClient, opts: { targetShards: numbe
     throw new ReshardVerificationError(`internal invariant violation: "${DEFAULT_SHARD}" lane marked for deletion`);
   }
 
-  // 4. One transaction: global upsert + lane INSERTs (seeded at MAX(ts)) + lane DELETEs.
+  // 5. One transaction: global upsert + lane INSERTs (seeded at MAX(ts)) + lane DELETEs + a
+  // GREATEST-bump of every REMAINING lane's frontier up to that same MAX(ts) floor.
   await client.transaction(async (tx) => {
     const seedFragment = (await documentsTableExists(tx))
       ? `(SELECT COALESCE(MAX(ts), 0) FROM documents)`
@@ -174,9 +209,20 @@ export async function reshardFleet(client: PgClient, opts: { targetShards: numbe
     for (const shardId of deleted) {
       await tx.query(`DELETE FROM shard_leases WHERE shard_id = $1`, [shardId]);
     }
+
+    // Heal every REMAINING lane (retained + just-created) up to the F1 floor — matches boot's
+    // `LeaseManager.seedFrontierAll` healing exactly, see the module doc comment. `GREATEST` only
+    // ever RAISES a lane's frontier, so this is a no-op for a lane already >= the floor (the common
+    // case — a live-fenced fleet's frontiers already track every commit) and only actually moves a
+    // lane that legitimately lagged, e.g. a retained lane left behind by a crash stop (`kill -9`,
+    // no `selfFence` ran). This is what makes the post-verify below a TRUE post-condition rather
+    // than a best-effort check: after this statement, every post-reshard lane is >= MAX(ts).
+    await tx.query(`UPDATE shard_leases SET frontier_ts = GREATEST(frontier_ts, ${seedFragment})`);
   });
 
-  // 5. Post-verify (read-only, after commit).
+  // 6. Post-verify (read-only, after commit). The F1 floor check below is now a true post-condition
+  // — the in-tx GREATEST-bump above guarantees every lane is >= MAX(ts) — rather than a best-effort
+  // check that could throw on a legitimately-lagging retained lane the tx never touched.
   const postLaneRows = await client.query(`SELECT shard_id, frontier_ts FROM shard_leases`);
   const postLaneIds = postLaneRows.map((r) => r.shard_id as ShardId);
   const postSet = new Set(postLaneIds);

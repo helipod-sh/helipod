@@ -9,7 +9,13 @@ import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
 import { shardIdList } from "@stackbase/id-codec";
 import { LeaseManager } from "../src/lease";
-import { reshardFleet, ReshardFleetLiveError, ReshardVerificationError, NUM_SHARDS_GLOBAL_KEY } from "../src/reshard";
+import {
+  reshardFleet,
+  ReshardFleetLiveError,
+  ReshardVerificationError,
+  ReshardNotAFleetError,
+  NUM_SHARDS_GLOBAL_KEY,
+} from "../src/reshard";
 
 const maybeDescribe = embeddedPgAvailable() ? describe : describe.skip;
 
@@ -178,13 +184,67 @@ maybeDescribe("reshardFleet (embedded PostgreSQL 16)", () => {
     expect(result.newShards).toBe(3);
     expect(await readLaneIds()).toEqual(shardIdList(3).slice().sort());
   });
+
+  it("9.4 crash-stop: a RETAINED lane lagging MAX(ts) is healed to the floor, not a false verify failure", async () => {
+    // Whole-branch review finding (IMPORTANT): the post-verify's min(frontier_ts) >= MAX(ts) check
+    // used to be a best-effort check, not a true post-condition — reshard only seeds NEW lanes at
+    // MAX(ts) and never touched a RETAINED lane's frontier. A crash stop (kill -9, no selfFence run)
+    // can leave a retained lane's frontier BELOW MAX(ts) with no live nodes (leases simply expire),
+    // so the gate passes but the tx would then commit successfully and the post-verify would still
+    // throw — a false "reshard failed" even though the surgery landed durably. The fix: GREATEST-
+    // bump every lane (including retained ones) up to the MAX(ts) floor inside the same tx.
+    const T = 5_000n;
+    await seedStoppedFleet({ numShards: 2, documentMaxTs: T });
+
+    // Simulate the crash-stop lag directly: "default" is retained (targetShards stays 2 below), so
+    // this row is never touched by the tx's INSERT/DELETE — only the new GREATEST-bump reaches it.
+    await client.query(`UPDATE shard_leases SET frontier_ts = $1 WHERE shard_id = 'default'`, [T - 1_000n]);
+
+    const before = await client.query(`SELECT shard_id, frontier_ts FROM shard_leases`);
+    const beforeDefault = before.find((r) => r.shard_id === "default")!.frontier_ts as bigint;
+    expect(beforeDefault).toBe(T - 1_000n);
+
+    // Same target (2 -> 2): both lanes are RETAINED, created=[]/deleted=[] — isolates the healing
+    // behavior from the create/delete paths already covered above.
+    const result = await reshardFleet(client, { targetShards: 2 });
+
+    expect(result.created).toEqual([]);
+    expect(result.deleted).toEqual([]);
+
+    const after = await client.query(`SELECT shard_id, frontier_ts FROM shard_leases`);
+    for (const row of after) {
+      expect(row.frontier_ts as bigint).toBeGreaterThanOrEqual(T);
+    }
+    // The lagging "default" lane was specifically healed up to the floor.
+    expect(after.find((r) => r.shard_id === "default")!.frontier_ts as bigint).toBe(T);
+    expect(BigInt(result.frontierFloor)).toBeGreaterThanOrEqual(T);
+  });
+
+  it("9.4 not-a-fleet: a Postgres database with no shard_leases/fleet_nodes throws a clear error, not a raw relation-does-not-exist", async () => {
+    // Whole-branch review finding (MINOR, DX): deliberately do NOT call seedStoppedFleet — this
+    // schema has neither shard_leases nor fleet_nodes (the beforeEach's DROP/CREATE SCHEMA leaves it
+    // completely bare, not even persistence_globals/documents from setupSchema()).
+    await expect(reshardFleet(client, { targetShards: 4 })).rejects.toThrow(ReshardNotAFleetError);
+
+    let caught: unknown;
+    try {
+      await reshardFleet(client, { targetShards: 4 });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ReshardNotAFleetError);
+    expect((caught as Error).message).toContain("not a fleet store");
+    expect((caught as Error).message).toContain("stackbase serve --fleet");
+    expect((caught as Error).message).not.toContain("relation");
+  });
 });
 
 // Sanity: the exported error classes carry the right `name` (used by callers doing string-based
 // error routing, e.g. a CLI catch block) independent of the embedded-PG gate.
 describe("reshard error classes", () => {
-  it("ReshardFleetLiveError / ReshardVerificationError set .name to their class name", () => {
+  it("ReshardFleetLiveError / ReshardVerificationError / ReshardNotAFleetError set .name to their class name", () => {
     expect(new ReshardFleetLiveError(["http://a"]).name).toBe("ReshardFleetLiveError");
     expect(new ReshardVerificationError("x").name).toBe("ReshardVerificationError");
+    expect(new ReshardNotAFleetError().name).toBe("ReshardNotAFleetError");
   });
 });

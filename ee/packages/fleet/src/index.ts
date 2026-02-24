@@ -52,6 +52,7 @@ export {
   reshardFleet,
   ReshardFleetLiveError,
   ReshardVerificationError,
+  ReshardNotAFleetError,
   NUM_SHARDS_GLOBAL_KEY,
   type ReshardResult,
 } from "./reshard";
