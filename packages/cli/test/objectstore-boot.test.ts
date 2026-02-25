@@ -37,6 +37,39 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
     await store.close();
   });
 
+  it("multi-shard (--shards 3): boots+acquires all 3 lanes, the runtime commits+reads over the ShardedObjectStoreDocStore composite, and the bucket has every lane's manifest", async () => {
+    const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
+    const bucketDir = `${ROOT}/ms-bucket`;
+    const { runtime, store, objectStoreRelease } = await bootLoaded({
+      loaded,
+      components: [],
+      dataPath: `${ROOT}/ms-node/db.sqlite`,
+      adminKey: "k",
+      objectStoreUrl: `file://${bucketDir}`,
+      objectStoreWriterId: "ms-node",
+      objectStoreShards: 3,
+    });
+    expect(objectStoreRelease).toBeDefined();
+
+    // The runtime works over the composite: mutations commit (this fixture is unsharded, so they
+    // land on the "default" lane) and `notes:list` reads fan out + MERGE across all 3 lanes.
+    expect((await runtime.run("notes:add", { box: "b3", text: "one" })).value).toBeTruthy();
+    expect((await runtime.run("notes:add", { box: "b4", text: "two" })).value).toBeTruthy();
+    const listed = await runtime.run("notes:list", {});
+    expect((listed.value as Array<{ box: string; text: string }>).map((r) => r.text).sort()).toEqual(["one", "two"]);
+
+    // Every lane in shardIdList(3) = ["default","s1","s2"] was opened + acquired: each has its own
+    // manifest object under its own `s{shardId}/…` prefix (a distinct contention domain per §5).
+    const inspector = new FsObjectStore({ dir: bucketDir });
+    for (const shardId of ["default", "s1", "s2"]) {
+      expect(await inspector.get(`s${shardId}/manifest`), `lane '${shardId}' manifest`).not.toBeNull();
+    }
+
+    await objectStoreRelease?.();
+    await runtime.stopDrivers();
+    await store.close();
+  });
+
   it("a fresh boot against the SAME bucket (different local dir) ADOPTS the existing deploymentId and takes over immediately after relinquish (Task 6.5)", async () => {
     const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
     const bucket = `file://${ROOT}/bucket-adopt`;

@@ -25,6 +25,7 @@ import type { RegisteredFunction } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { BlobStore } from "@stackbase/blobstore";
 import type { ObjectStore } from "@stackbase/objectstore";
+import { shardIdList, DEFAULT_SHARD } from "@stackbase/id-codec";
 import {
   storageContextProvider,
   storageReaper,
@@ -92,6 +93,13 @@ export interface ObjectStoreSubstrateModule {
   ObjectStoreDocStore: {
     open(opts: { objectStore: ObjectStore; shard: string; local: SqliteDocStore }): Promise<ObjectStoreWriterStore>;
   };
+  /** Tier 3 multi-shard single-node serve: the N-lane composite DocStore — routes writes by
+   *  `shardId` to the owning lane, fans reads out + merges across lanes (k-way merge for ordered
+   *  index scans). Constructed over a `Map<shardId, ObjectStoreDocStore>` when `--shards N` (N>1). */
+  ShardedObjectStoreDocStore: new (
+    lanes: ReadonlyMap<string, DocStore>,
+    opts?: { defaultShard?: string },
+  ) => DocStore;
   ensureGlobals(
     objectStore: ObjectStore,
     globals: { deploymentId: string; numShards: number },
@@ -238,7 +246,14 @@ async function buildObjectStoreWriterNode(opts: {
   writerId?: string;
   /** Tier 3 Slice 7, Task 7.3: the gc-driver's sweep cadence — unset → `DEFAULT_OBJECTSTORE_GC_MS`. */
   gcMs?: number;
-}): Promise<{ store: ObjectStoreWriterStore; drivers: Driver[]; release: () => Promise<void> }> {
+  /** Tier 3 multi-shard single-node serve: the number of object-storage lanes this ONE node owns.
+   *  Unset / `<= 1` → the shipped single-shard path (one `ObjectStoreDocStore` over shard "0",
+   *  byte-identical to before). `> 1` → this node opens+acquires+heartbeats+gcs EVERY lane in
+   *  `shardIdList(shards)` (`["default","s1",…]`) and composes them behind a
+   *  `ShardedObjectStoreDocStore`; the engine's `numShards`-sized `ShardedTransactor` then routes
+   *  each write to its owning lane and reads fan out + merge across all lanes. */
+  shards?: number;
+}): Promise<{ store: DocStore; drivers: Driver[]; release: () => Promise<void> }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
     throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
@@ -252,36 +267,71 @@ async function buildObjectStoreWriterNode(opts: {
   // A crashed predecessor's lease is only reclaimable once it expires — give the retry window enough
   // room to actually observe that (leaseTtlMs) plus a margin for polling/clock skew, unless overridden.
   const acquireTimeoutMs = opts.acquireTimeoutMs ?? leaseTtlMs + 5000;
+  const gcMs = opts.gcMs ?? DEFAULT_OBJECTSTORE_GC_MS;
+
+  // The lane ids this node owns. Single-shard (the default) keeps the shipped shard "0" prefix
+  // (backward-compatible with every existing single-shard bucket/test); multi-shard uses the
+  // engine's canonical `shardIdList` ids so the `ShardedTransactor`'s `shardIdForKeyValue` routing
+  // agrees with which lane owns a doc. (A `s0` bucket and a `sdefault`/`ss1`/… bucket are distinct
+  // layouts chosen at first boot — moving between them is the deferred object-storage reshard.)
+  const numShards = opts.shards && opts.shards > 1 ? opts.shards : 1;
+  const shardIds: string[] = numShards > 1 ? [...shardIdList(numShards)] : ["0"];
 
   // Slice-4 carried note I1: adopt the bucket's existing deployment identity (never overwrite it) —
   // a fresh deployment mints one here (non-determinism is fine at this CLI-adjacent layer).
-  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards: 1 });
+  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards });
 
-  const local = makeLocalSqliteStore(opts.dataPath);
-  const store = await substrate.ObjectStoreDocStore.open({ objectStore: resolved.objectStore, shard: "0", local });
-  // Pre-seed the runtime's own deployment-id global on the just-materialized LOCAL store so
-  // `createEmbeddedRuntime` adopts the bucket's identity instead of minting a fresh one (see the
-  // constant's doc comment above).
-  await store.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+  // Build ONE lane: open (materialize its own local SQLite) → seed the runtime's deployment-id
+  // global so `createEmbeddedRuntime` adopts the bucket's identity → acquire its lease → arm its
+  // heartbeat + gc drivers. Each lane is an independent `s{shardId}/…` prefix + local file.
+  const buildLane = async (
+    shardId: string,
+    laneDataPath: string,
+  ): Promise<{ lane: ObjectStoreWriterStore; heartbeat: Driver; gc: Driver }> => {
+    const local = makeLocalSqliteStore(laneDataPath);
+    const lane = await substrate.ObjectStoreDocStore.open({ objectStore: resolved.objectStore, shard: shardId, local });
+    await lane.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+    await acquireWithRetry(lane, {
+      writerId,
+      leaseTtlMs,
+      timeoutMs: acquireTimeoutMs,
+      ...(opts.acquirePollIntervalMs !== undefined ? { pollIntervalMs: opts.acquirePollIntervalMs } : {}),
+    });
+    const heartbeat = substrate.leaseHeartbeatDriver(lane, {
+      leaseTtlMs,
+      heartbeatMs,
+      onFenced: (e) => opts.onFenced?.(e),
+    });
+    // Tier 3 Slice 7, Task 7.3: the periodic reclamation driver — self-fencing/best-effort (Task 7.1),
+    // so it needs no `onFenced`-style shutdown wiring the way the heartbeat does.
+    const gc = substrate.gcDriver(lane, { sweepMs: gcMs });
+    return { lane, heartbeat, gc };
+  };
 
-  await acquireWithRetry(store, {
-    writerId,
-    leaseTtlMs,
-    timeoutMs: acquireTimeoutMs,
-    ...(opts.acquirePollIntervalMs !== undefined ? { pollIntervalMs: opts.acquirePollIntervalMs } : {}),
-  });
+  // Lanes are built SEQUENTIALLY (each acquire may retry against a crashed predecessor's TTL, and a
+  // fresh multi-shard node acquiring all lanes serially is fine at boot). Single-shard keeps the
+  // exact `opts.dataPath`; multi-shard gives each lane its own `<dataPath>.<shardId>` local file.
+  const built: Array<{ shardId: string; lane: ObjectStoreWriterStore; heartbeat: Driver; gc: Driver }> = [];
+  for (const shardId of shardIds) {
+    const laneDataPath = numShards > 1 ? `${opts.dataPath}.${shardId}` : opts.dataPath;
+    built.push({ shardId, ...(await buildLane(shardId, laneDataPath)) });
+  }
 
-  const heartbeat = substrate.leaseHeartbeatDriver(store, {
-    leaseTtlMs,
-    heartbeatMs,
-    onFenced: (e) => opts.onFenced?.(e),
-  });
-  // Tier 3 Slice 7, Task 7.3: the periodic reclamation driver — self-fencing/best-effort (Task 7.1),
-  // so it needs no `onFenced`-style shutdown wiring the way the heartbeat does (see gc-driver.ts's
-  // module doc: a fenced gc() is a harmless no-op, never a "stop serving writes" signal).
-  const gc = substrate.gcDriver(store, { sweepMs: opts.gcMs ?? DEFAULT_OBJECTSTORE_GC_MS });
+  const drivers = built.flatMap((b) => [b.heartbeat, b.gc]);
+  // Graceful shutdown relinquishes EVERY owned lane's bucket lease (best-effort, in parallel) so a
+  // successor takes each over immediately rather than waiting out the TTL — see `relinquish()`'s doc.
+  const release = async (): Promise<void> => {
+    await Promise.all(built.map((b) => b.lane.relinquish()));
+  };
 
-  return { store, drivers: [heartbeat, gc], release: () => store.relinquish() };
+  if (numShards === 1) return { store: built[0]!.lane, drivers, release };
+
+  // Multi-shard: compose the lanes behind the routing/merging `ShardedObjectStoreDocStore`. Its
+  // default lane ("default") is `shardIdList(N)[0]` — always present — and is where deployment-level
+  // globals/receipts resolve (a single source of truth), matching `ensureGlobals`' own default.
+  const lanes = new Map<string, DocStore>(built.map((b) => [b.shardId, b.lane]));
+  const store = new substrate.ShardedObjectStoreDocStore(lanes, { defaultShard: DEFAULT_SHARD });
+  return { store, drivers, release };
 }
 
 // ── Tier 3 Slice 8 (Task 8.2): the object-storage REPLICA node ─────────────────────────────────
@@ -684,6 +734,13 @@ export async function bootLoaded(opts: {
    *  (~60s). `serve.ts` threads `STACKBASE_OBJECTSTORE_GC_MS` in here; tests can also set it directly
    *  to force an observable reclamation on a short timescale. Ignored when `objectStoreUrl` is unset. */
   objectStoreGcMs?: number;
+  /** Tier 3 multi-shard single-node serve: the number of object-storage lanes a `--object-store`
+   *  WRITER node owns (`serve.ts` threads `--shards`/`STACKBASE_FLEET_SHARDS` in here). Unset / `1`
+   *  → the shipped single-shard path (shard "0"), byte-identical. `> 1` → this node opens+acquires
+   *  all `shardIdList(N)` lanes and composes a `ShardedObjectStoreDocStore`; the runtime's
+   *  `numShards` is sized to N so the `ShardedTransactor` routes writes to the owning lane. Ignored
+   *  for a `--replica` boot (replicas are single-shard) and when `objectStoreUrl` is unset. */
+  objectStoreShards?: number;
   /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
    *  instead of a writer — materializes + tails, NEVER acquires the write lease (every mutation is
    *  rejected with `REPLICA_WRITE_REJECTED_MESSAGE`), and runs no heartbeat/gc drivers. Requires
@@ -736,6 +793,7 @@ export async function bootLoaded(opts: {
           acquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs,
           writerId: opts.objectStoreWriterId,
           gcMs: opts.objectStoreGcMs,
+          ...(opts.objectStoreShards !== undefined ? { shards: opts.objectStoreShards } : {}),
         })
       : undefined;
   const objectStoreReplicaNode =
@@ -772,12 +830,13 @@ export async function bootLoaded(opts: {
   if (opts.fleet) {
     numShards = opts.fleet.numShards ?? 1;
   } else if (objectStoreWriterNode || objectStoreReplicaNode) {
-    // Tier 3 Slice 6/8 scope boundary: single-shard-node only (writer OR replica). The substrate's
-    // own per-shard lease concept ("shard 0" over the bucket) is a DIFFERENT axis from the engine's
-    // ShardedTransactor `numShards` — composing the two (an N-lane ShardedTransactor over one
-    // object-storage shard) is an explicitly deferred follow-on ("multi-shard single node").
+    // Tier 3 multi-shard single-node serve: a `--object-store` WRITER can now own N lanes (each its
+    // own bucket prefix + local + lease/heartbeat/gc, composed behind `ShardedObjectStoreDocStore`)
+    // — the engine's `numShards`-sized `ShardedTransactor` routes each write to its owning lane, and
+    // `buildObjectStoreWriterNode` built exactly `opts.objectStoreShards` lanes to receive them. A
+    // REPLICA stays single-shard (it tails shard "0"; multi-shard replicas are a later follow-on).
     await store.setupSchema();
-    numShards = 1;
+    numShards = objectStoreReplicaNode ? 1 : (opts.objectStoreShards ?? 1);
   } else {
     await store.setupSchema();
     numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
@@ -980,6 +1039,8 @@ export async function bootProject(opts: {
   objectStoreAcquirePollIntervalMs?: number;
   objectStoreWriterId?: string;
   objectStoreGcMs?: number;
+  /** Tier 3 multi-shard single-node serve: object-storage writer lane count (see `bootLoaded`). */
+  objectStoreShards?: number;
   /** Tier 3 Slice 8 replica boot wiring (see `bootLoaded`'s matching opts). */
   replica?: boolean;
   objectStoreReplicaConsumerId?: string;
@@ -1009,6 +1070,7 @@ export async function bootProject(opts: {
       : {}),
     ...(opts.objectStoreWriterId !== undefined ? { objectStoreWriterId: opts.objectStoreWriterId } : {}),
     ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
+    ...(opts.objectStoreShards !== undefined ? { objectStoreShards: opts.objectStoreShards } : {}),
     ...(opts.replica !== undefined ? { replica: opts.replica } : {}),
     ...(opts.objectStoreReplicaConsumerId !== undefined
       ? { objectStoreReplicaConsumerId: opts.objectStoreReplicaConsumerId }

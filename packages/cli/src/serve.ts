@@ -141,6 +141,12 @@ export interface ServeOptions {
    *  `STACKBASE_OBJECTSTORE_GC_MS`. Unset → `boot.ts`'s `DEFAULT_OBJECTSTORE_GC_MS` (~60s). Ignored
    *  unless `objectStoreUrl` is set. */
   objectStoreGcMs?: number;
+  /** Tier 3 multi-shard single-node serve: the number of object-storage lanes a `--object-store`
+   *  WRITER owns (`--shards N`, or `STACKBASE_FLEET_SHARDS`). Unset / `1` → single-shard (shard "0"),
+   *  unchanged. `> 1` → this node owns all `shardIdList(N)` lanes. Requires `--object-store`; invalid
+   *  with `--replica` (replicas are single-shard) or `--fleet` (its own shard resolution). Validated
+   *  in `serveCommand`. Flag (`--shards`) wins over `STACKBASE_FLEET_SHARDS` env. */
+  objectStoreShards?: number;
   /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
    *  (materialize + tail, no write lease — every mutation is rejected) instead of a writer. REQUIRES
    *  `objectStoreUrl` (validated in `serveCommand`, before `startServe` is ever called). Optional so
@@ -269,6 +275,12 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   let replica = /^(1|true|yes)$/i.test(process.env.STACKBASE_REPLICA ?? "");
   let writerUrl = process.env.STACKBASE_WRITER_URL;
+  // Tier 3 multi-shard single-node serve: object-storage writer lane count. Set ONLY by the
+  // `--shards` flag here; the `STACKBASE_FLEET_SHARDS` env fallback is applied AFTER the flag loop
+  // and ONLY when `--object-store` is present — otherwise a plain `--fleet` boot (which legitimately
+  // reads `STACKBASE_FLEET_SHARDS` for its OWN shard count via `resolveFleetNumShards`) would trip
+  // the object-store-only `--shards` validation below.
+  let objectStoreShards: number | undefined;
   // Tier 3 Slice 7, Task 7.3: gc-driver cadence — env-only (no CLI flag), mirroring how
   // STACKBASE_FLEET_LEASE_TTL_MS is a pure ops/test tuning knob with no flag equivalent.
   // `parseLeaseTtlMs`'s "positive finite number, else undefined" parse is generic, not lease-specific.
@@ -289,6 +301,12 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i] as string;
     else if (a === "--replica") replica = true;
     else if (a === "--writer-url" && args[i + 1]) writerUrl = args[++i] as string;
+    else if (a === "--shards" && args[i + 1]) objectStoreShards = Number(args[++i]);
+  }
+  // `STACKBASE_FLEET_SHARDS` env fallback — ONLY for an object-store boot (never a fleet boot; see
+  // the `objectStoreShards` declaration above). The `--shards` flag, if given, always wins.
+  if (objectStoreShards === undefined && objectStoreUrl !== undefined) {
+    objectStoreShards = parseNumShards(process.env.STACKBASE_FLEET_SHARDS);
   }
   return {
     convexDir,
@@ -304,6 +322,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     advertiseUrl,
     ...(objectStoreUrl !== undefined ? { objectStoreUrl } : {}),
     ...(objectStoreGcMs !== undefined ? { objectStoreGcMs } : {}),
+    ...(objectStoreShards !== undefined ? { objectStoreShards } : {}),
     replica,
     ...(writerUrl !== undefined ? { writerUrl } : {}),
   };
@@ -376,6 +395,7 @@ export async function startServe(
       ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
       ...(opts.replica ? { replica: opts.replica } : {}),
       ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
+      ...(opts.objectStoreShards !== undefined ? { objectStoreShards: opts.objectStoreShards } : {}),
     });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -469,6 +489,29 @@ export async function serveCommand(args: string[]): Promise<number> {
         "set --object-store <url> (or STACKBASE_OBJECT_STORE).\n",
     );
     return 1;
+  }
+
+  // Tier 3 multi-shard single-node serve: `--shards N` (N>1) is an object-storage WRITER concept —
+  // reject the combinations that can't mean it, rather than silently ignoring it.
+  if (opts.objectStoreShards !== undefined && opts.objectStoreShards > 1) {
+    if (opts.objectStoreUrl === undefined) {
+      process.stderr.write(
+        "✗ --shards N (N>1) requires --object-store — it sizes the object-storage writer's lane count; " +
+          "set --object-store <url>, or drop --shards.\n",
+      );
+      return 1;
+    }
+    if (opts.replica) {
+      process.stderr.write(
+        "✗ --shards cannot be combined with --replica — a replica is single-shard (it tails shard 0); " +
+          "run the multi-shard WRITER with --shards and point replicas at it.\n",
+      );
+      return 1;
+    }
+    if (!Number.isInteger(opts.objectStoreShards)) {
+      process.stderr.write(`✗ --shards must be a positive integer, got "${opts.objectStoreShards}".\n`);
+      return 1;
+    }
   }
 
   // Tier 3 Slice 8 follow-on (replica write-forwarding): `--writer-url` only means something on a

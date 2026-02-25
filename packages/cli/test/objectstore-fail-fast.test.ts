@@ -212,4 +212,48 @@ describe("serveCommand — object-store fail-fast UX (F2)", () => {
       restoreEnv();
     }
   });
+
+  // Tier 3 multi-shard single-node serve: `--shards N` (N>1) validation — an object-store WRITER
+  // concept, rejected clearly for the combinations that can't mean it.
+  async function runServeCapturingStderr(args: string[]): Promise<{ code: number; stderr: string }> {
+    process.env.STACKBASE_ADMIN_KEY = "test-key";
+    let stderr = "";
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string) => ((stderr += chunk), true)) as typeof process.stderr.write;
+    try {
+      const code = await serveCommand([
+        "--dir",
+        makeFixtureConvexDir(),
+        "--data",
+        join(mkdtempSync(join(tmpdir(), "sb-shards-validation-db-")), "db.sqlite"),
+        "--port",
+        "0",
+        "--no-dashboard",
+        ...args,
+      ]);
+      return { code, stderr };
+    } finally {
+      process.stderr.write = origWrite;
+      restoreEnv();
+    }
+  }
+
+  it("--shards N (N>1) without --object-store returns 1 with a clean ✗ message", async () => {
+    const { code, stderr } = await runServeCapturingStderr(["--shards", "3"]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("✗ --shards N (N>1) requires --object-store");
+    expect(stderr).not.toMatch(/\n\s+at /);
+  });
+
+  it("--shards with --replica returns 1 (a replica is single-shard)", async () => {
+    const { code, stderr } = await runServeCapturingStderr([
+      "--object-store",
+      `file://${mkdtempSync(join(tmpdir(), "sb-shards-validation-bucket-"))}`,
+      "--replica",
+      "--shards",
+      "3",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("✗ --shards cannot be combined with --replica");
+  });
 });
