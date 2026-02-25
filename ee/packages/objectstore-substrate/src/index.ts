@@ -1,6 +1,8 @@
 export { encodeSegment, decodeSegment, type SegmentPayload } from "./segment";
 export { readManifest, createManifest, casManifest, type Manifest } from "./manifest";
 export { ObjectStoreDocStore, type ObjectStoreDocStoreOpts, segmentKey } from "./object-doc-store";
+export { ShardedObjectStoreDocStore, type ShardedObjectStoreDocStoreOpts } from "./sharded-object-doc-store";
+export { mergeSortedAsyncGenerators, compareBytesLex, compareBigint } from "./merge-sorted";
 export { FencedError } from "./fenced-error";
 export {
   leaseHeartbeatDriver,
