@@ -66,3 +66,25 @@ export async function ensureGlobals(os: ObjectStore, globals: FleetGlobals): Pro
     return winner;
   }
 }
+
+/**
+ * OVERWRITE the bucket's globals (create if absent). Unlike `ensureGlobals` (adopt-if-present), this
+ * REPLACES the value — used by the offline reshard tool to set the new `numShards` as the linearization
+ * point of a completed reshard. Read the current etag (or null if absent) then `casPut` against it; a
+ * `CasConflict` (a concurrent writer moved the globals) is re-tried a few times. Reshard runs against a
+ * STOPPED deployment, so contention here is not expected — the retry is belt-and-braces.
+ */
+export async function writeGlobals(os: ObjectStore, globals: FleetGlobals): Promise<void> {
+  const bytes = new TextEncoder().encode(JSON.stringify(globals));
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existing = await os.get(GLOBALS_KEY);
+    try {
+      await os.casPut(GLOBALS_KEY, bytes, existing === null ? null : existing.etag);
+      return;
+    } catch (e) {
+      if (!isCasConflict(e)) throw e;
+      // Lost a CAS race (unexpected for a stopped deployment) — re-read the fresh etag and retry.
+    }
+  }
+  throw new Error("objectstore-substrate: writeGlobals exhausted retries on a moving globals object");
+}
