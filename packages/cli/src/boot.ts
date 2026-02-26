@@ -126,6 +126,15 @@ export interface ObjectStoreSubstrateModule {
   }): { stop(): Promise<void> };
   /** Tier 3 Slice 8, Task 8.2: deregister a departed consumer's watermark (shutdown). */
   removeConsumer(objectStore: ObjectStore, shard: string, consumerId: string): Promise<void>;
+  /** Object-storage reshard (offline): change a STOPPED deployment's shard count N→M by physically
+   *  re-partitioning each doc's current state to `shardIdForKeyValue(doc[shardKey], M)`'s lane. */
+  reshardObjectStore(opts: {
+    objectStore: ObjectStore;
+    toShards: number;
+    now: number;
+    shardKeyFor: (tableNumber: number) => string | null;
+    makeLocal: () => SqliteDocStore;
+  }): Promise<{ fromShards: number; toShards: number; movedDocs: number; perLaneCounts: Record<string, number> }>;
 }
 
 export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
@@ -150,7 +159,7 @@ export function isObjectStoreBootFailFast(e: unknown): e is Error {
 
 /** Dynamic-import gate for the ee substrate package (mirrors `serve.ts`'s `@stackbase/fleet` gate:
  *  an indirect (non-literal) specifier so `tsc` never statically resolves the enterprise package). */
-async function loadObjectStoreSubstrateModule(): Promise<ObjectStoreSubstrateModule> {
+export async function loadObjectStoreSubstrateModule(): Promise<ObjectStoreSubstrateModule> {
   try {
     const specifier: string = "@stackbase/objectstore-substrate";
     return (await import(specifier)) as unknown as ObjectStoreSubstrateModule;
@@ -198,6 +207,15 @@ function makeLocalSqliteStore(dataPath: string): SqliteDocStore {
   mkdirSync(dirname(resolve(dataPath)), { recursive: true });
   const adapter =
     detectRuntime() === "bun" ? new BunSqliteAdapter({ path: dataPath }) : new NodeSqliteAdapter({ path: dataPath });
+  return new SqliteDocStore(adapter);
+}
+
+/** A throwaway in-memory `SqliteDocStore` (runtime-appropriate adapter) — the `objectstore reshard`
+ *  tool's per-lane materialization/commit target (`reshardObjectStore`'s `makeLocal`). Exported so the
+ *  reshard command can hand it in without re-deriving the Bun-vs-Node adapter pick. */
+export function makeInMemorySqliteStore(): SqliteDocStore {
+  const adapter =
+    detectRuntime() === "bun" ? new BunSqliteAdapter({ path: ":memory:" }) : new NodeSqliteAdapter({ path: ":memory:" });
   return new SqliteDocStore(adapter);
 }
 
@@ -253,7 +271,7 @@ async function buildObjectStoreWriterNode(opts: {
    *  `ShardedObjectStoreDocStore`; the engine's `numShards`-sized `ShardedTransactor` then routes
    *  each write to its owning lane and reads fan out + merge across all lanes. */
   shards?: number;
-}): Promise<{ store: DocStore; drivers: Driver[]; release: () => Promise<void> }> {
+}): Promise<{ store: DocStore; drivers: Driver[]; release: () => Promise<void>; numShards: number }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
     throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
@@ -269,17 +287,31 @@ async function buildObjectStoreWriterNode(opts: {
   const acquireTimeoutMs = opts.acquireTimeoutMs ?? leaseTtlMs + 5000;
   const gcMs = opts.gcMs ?? DEFAULT_OBJECTSTORE_GC_MS;
 
-  // The lane ids this node owns. Single-shard (the default) keeps the shipped shard "0" prefix
-  // (backward-compatible with every existing single-shard bucket/test); multi-shard uses the
-  // engine's canonical `shardIdList` ids so the `ShardedTransactor`'s `shardIdForKeyValue` routing
-  // agrees with which lane owns a doc. (A `s0` bucket and a `sdefault`/`ss1`/… bucket are distinct
-  // layouts chosen at first boot — moving between them is the deferred object-storage reshard.)
-  const numShards = opts.shards && opts.shards > 1 ? opts.shards : 1;
-  const shardIds: string[] = numShards > 1 ? [...shardIdList(numShards)] : ["0"];
-
   // Slice-4 carried note I1: adopt the bucket's existing deployment identity (never overwrite it) —
-  // a fresh deployment mints one here (non-determinism is fine at this CLI-adjacent layer).
-  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards });
+  // a fresh deployment mints one here (non-determinism is fine at this CLI-adjacent layer). The
+  // `numShards` passed is the DESIRED count for a FRESH bucket (from `--shards`); `ensureGlobals`
+  // ADOPTS an existing bucket's count, so the RETURN value is authoritative below.
+  const desiredShards = opts.shards && opts.shards > 1 ? opts.shards : 1;
+  const globals = await substrate.ensureGlobals(resolved.objectStore, {
+    deploymentId: randomUUID(),
+    numShards: desiredShards,
+  });
+
+  // The bucket's PERSISTED shard count is authoritative — a resharded bucket (its globals set by
+  // `objectstore reshard`) boots the right lanes without the operator re-specifying `--shards`. A
+  // `--shards` that disagrees fails fast (reshard the bucket to change the count, never silently
+  // mis-open lanes against the existing layout). The lane bucket prefixes: `numShards === 1` → the
+  // single "0" lane (born-single-shard OR resharded-to-1 — one unambiguous layout per count);
+  // `> 1` → the canonical `shardIdList` ids (identity with the engine's routing shardIds).
+  const numShards = globals.numShards;
+  if (opts.shards !== undefined && opts.shards !== numShards) {
+    throw new Error(
+      `stackbase: --shards ${opts.shards} disagrees with the bucket's persisted shard count ${numShards} — ` +
+        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <convex> --shards ${opts.shards}\`) ` +
+        `to change it, or drop --shards.`,
+    );
+  }
+  const shardIds: string[] = numShards > 1 ? [...shardIdList(numShards)] : ["0"];
 
   // Build ONE lane: open (materialize its own local SQLite) → seed the runtime's deployment-id
   // global so `createEmbeddedRuntime` adopts the bucket's identity → acquire its lease → arm its
@@ -324,14 +356,14 @@ async function buildObjectStoreWriterNode(opts: {
     await Promise.all(built.map((b) => b.lane.relinquish()));
   };
 
-  if (numShards === 1) return { store: built[0]!.lane, drivers, release };
+  if (numShards === 1) return { store: built[0]!.lane, drivers, release, numShards };
 
   // Multi-shard: compose the lanes behind the routing/merging `ShardedObjectStoreDocStore`. Its
   // default lane ("default") is `shardIdList(N)[0]` — always present — and is where deployment-level
   // globals/receipts resolve (a single source of truth), matching `ensureGlobals`' own default.
   const lanes = new Map<string, DocStore>(built.map((b) => [b.shardId, b.lane]));
   const store = new substrate.ShardedObjectStoreDocStore(lanes, { defaultShard: DEFAULT_SHARD });
-  return { store, drivers, release };
+  return { store, drivers, release, numShards };
 }
 
 // ── Tier 3 Slice 8 (Task 8.2): the object-storage REPLICA node ─────────────────────────────────
@@ -836,7 +868,11 @@ export async function bootLoaded(opts: {
     // `buildObjectStoreWriterNode` built exactly `opts.objectStoreShards` lanes to receive them. A
     // REPLICA stays single-shard (it tails shard "0"; multi-shard replicas are a later follow-on).
     await store.setupSchema();
-    numShards = objectStoreReplicaNode ? 1 : (opts.objectStoreShards ?? 1);
+    // Authoritative count comes from the bucket's persisted globals (resolved inside
+    // `buildObjectStoreWriterNode`, which fails fast on a `--shards` mismatch) — NOT `opts.objectStoreShards`
+    // directly, so a resharded bucket boots the right `numShards` even if `--shards` is omitted. A replica
+    // stays single-shard (multi-shard replicas are a later follow-on).
+    numShards = objectStoreReplicaNode ? 1 : (objectStoreWriterNode?.numShards ?? 1);
   } else {
     await store.setupSchema();
     numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
