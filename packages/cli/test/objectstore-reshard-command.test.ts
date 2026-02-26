@@ -84,6 +84,14 @@ describe("objectstoreCommand — R2a arg parsing / gate (no bucket needed)", () 
     expect(err).toMatch(/positive integer/);
   });
 
+  it("a recognized flag with no trailing value → clean ✗ + exit 1 (never a silent fall-through)", async () => {
+    const { code, err } = await captureRun(() =>
+      objectstoreCommand(["reshard", "--object-store", `file://${ROOT}/x`, "--shards", "3", "--dir"]),
+    );
+    expect(code).toBe(1);
+    expect(err).toMatch(/--dir requires a value/);
+  });
+
   it("reshard against a non-existent bucket → clean ✗ + exit 1 (no `globals` object)", async () => {
     const { code, err } = await captureRun(() =>
       objectstoreCommand(["reshard", "--object-store", `file://${ROOT}/empty-bucket`, "--dir", FIXTURE, "--shards", "3"]),

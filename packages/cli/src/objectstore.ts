@@ -31,11 +31,21 @@ async function reshardCommand(args: string[]): Promise<number> {
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   let dir = "convex";
   let shards: number | undefined;
+  const VALUE_FLAGS = new Set(["--object-store", "--dir", "--shards"]);
   for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--object-store" && args[i + 1]) objectStoreUrl = args[++i];
-    else if (a === "--dir" && args[i + 1]) dir = args[++i] as string;
-    else if (a === "--shards" && args[i + 1]) shards = Number(args[++i]);
+    const a = args[i] as string;
+    if (!VALUE_FLAGS.has(a)) continue;
+    // A recognized flag must be followed by a value — a trailing `--dir` with no value is an error,
+    // not a silent fall-through to the default (which would misroute an operator who fat-fingered it).
+    const val = args[i + 1];
+    if (val === undefined) {
+      process.stderr.write(`✗ ${a} requires a value.\n`);
+      return 1;
+    }
+    i++;
+    if (a === "--object-store") objectStoreUrl = val;
+    else if (a === "--dir") dir = val;
+    else shards = Number(val);
   }
   if (!objectStoreUrl) {
     process.stderr.write("✗ objectstore reshard requires --object-store <url> (or STACKBASE_OBJECT_STORE).\n");

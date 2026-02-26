@@ -56,6 +56,24 @@ current-state only, like a fresh snapshot — a reshard is a compaction point, m
 snapshot semantics). Sharded-table support requires the doc to carry its shard-key field (it does — it's a
 normal field); the default lane always exists in both N and M (`shardIdList(k)[0] === "default"` for k≥1).
 
+**Whole-branch review (opus, 2026-02-20) — adjudicated residuals.** The review confirmed no
+Critical/Important defects; routing is byte-identical to the engine's own `resolveDocMutationShard`,
+`globals` is never in a delete prefix (so a crash can only leave `numShards` stale, never corrupt the
+bucket), and the gate precedes all destruction. Three Minor items, adjudicated:
+- **Live-lease gate is TOCTOU (deferred).** The gate `readManifest`s each source lane once but never
+  *fences* (acquires+holds) them, so a lease that expires between the gate read and the rewrite could let
+  a wrongly-live writer race the destructive phase. Fully covered by the stated OFFLINE/stopped/backed-up
+  contract; a true fix (hold all N source leases across the rewrite) is invasive and changes the
+  operation's shape. Left as a known boundary of the offline contract, not a silent one.
+- **Unknown `tableNumber` → default lane (working as intended, NOT a defect).** The review flagged that
+  `shardKeyFor` returning `null` for an unknown table silently routes to `default`. This is load-bearing:
+  every real bucket contains system/component tables (`_storage`, scheduler internals) absent from the app
+  schema catalog, and those are genuinely unsharded → default is correct. A "refuse on unknown table"
+  guard would break every legitimate reshard. The residual is purely operator error (pointing `--dir` at
+  the wrong schema), the same `--dir` the deployment already runs with; not hardened to avoid false alarms.
+- **Trailing valueless flag (FIXED).** `--dir` as the final token with no value now errors
+  (`✗ --dir requires a value`) instead of silently falling back to the `convex` default.
+
 ## Global constraints
 - ee-gated (`@stackbase/objectstore-substrate` owns the reshard core; the CLI dynamically imports it, gated
   like `serve --object-store`). Engine/CLI never imports an S3 SDK.
