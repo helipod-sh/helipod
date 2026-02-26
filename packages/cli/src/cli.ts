@@ -18,6 +18,7 @@ import { deployCommand } from "./deploy";
 import { buildCommand } from "./build";
 import { migrateCommand } from "./migrate";
 import { fleetCommand } from "./fleet";
+import { objectstoreCommand } from "./objectstore";
 
 function parseFlags(args: string[]): DevOptions {
   const out: DevOptions = {};
@@ -125,6 +126,7 @@ function printHelp(): void {
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  codegen    Regenerate convex/_generated types",
       "  fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count",
+      "  objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count",
       "  help       Show this help",
       "",
       "Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>",
@@ -150,6 +152,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return codegenCommand(rest);
     case "fleet":
       return fleetCommand(rest);
+    case "objectstore":
+      return objectstoreCommand(rest);
     case "help":
     case "--help":
     case "-h":
