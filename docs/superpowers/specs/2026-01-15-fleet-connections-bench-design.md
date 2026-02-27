@@ -114,3 +114,7 @@ fail-fast validation as rung 1.
 - No writer-connection benching (subscribers live on sync nodes by design);
 - No new optimization work — measure first; `hotfan`'s verdict gates whether send-path dedup
   is even needed.
+
+*(post-plan relaxation: one surgical ee/fleet fix — FrontierMonitor notify-on-advance — was
+made in-slice after the bench root-caused the 1s cross-node poll-fallback; taken by default
+while the user was away, ratified at the merge gate; see notify-diagnosis.md)*

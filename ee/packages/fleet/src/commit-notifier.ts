@@ -17,7 +17,10 @@
 import type { PgQuerier } from "@stackbase/docstore-postgres";
 import type { EmbeddedWriteFanoutAdapter, EmbeddedWriteFanoutPayload, FanoutListener } from "@stackbase/runtime-embedded";
 
-const COMMIT_CHANNEL = "stackbase_commits";
+/** Exported (not just module-private) so other in-package NOTIFY senders — e.g. `node.ts`'s
+ *  `FrontierMonitor` notify-on-advance (T3.5) — target the exact same channel a `ReplicaTailer`
+ *  LISTENs on, without re-typing the literal a third time. */
+export const COMMIT_CHANNEL = "stackbase_commits";
 
 /**
  * The narrow slice of `NodePgClient` this module (and `ReplicaTailer`) depends on (LISTEN/NOTIFY
