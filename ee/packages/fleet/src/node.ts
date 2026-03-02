@@ -45,7 +45,7 @@ import { LeaseManager, type TryRunExclusiveOnShard, type IdempotencyReplay } fro
 import { LeaseMonitor } from "./lease-monitor";
 import { ShardLeaseBalancer } from "./balancer";
 import { FencedError } from "./fenced-error";
-import { NotifyingFanoutAdapter } from "./commit-notifier";
+import { NotifyingFanoutAdapter, COMMIT_CHANNEL } from "./commit-notifier";
 import { WriteForwarder } from "./forwarder";
 import { SwitchableDocStore } from "./switchable-store";
 import { ReplicaTailer, type AppliedInvalidation } from "./replica-tailer";
@@ -145,6 +145,20 @@ export class FrontierMonitor {
        * identically whether this monitor is a sync node's or a hybrid writer's (same `beat()` code path).
        */
       tailerWatermark?: () => bigint;
+      /**
+       * T3.5 (the fleet-connections bench's notify-diagnosis fix): fired at most once per beat, only
+       * when this beat's `closeIdleFrontiers`/`bumpOrphanFrontiers` (or a concurrent commit) actually
+       * pushed the fleet ceiling `F = min(frontier_ts)` past what the PRIOR beat observed. Neither
+       * closer NOTIFYs on its own bare `UPDATE` — without this, an idle-shard close that finally
+       * un-pins F is invisible to every `ReplicaTailer`'s LISTEN, and delivery silently falls through
+       * to the tailer's `DEFAULT_POLL_MS` (1000ms) fallback even though NOTIFY itself is wired and
+       * fires within ~1ms of the real commit (see `.superpowers/sdd/notify-diagnosis.md`). Omitted
+       * entirely on a sync node (`closeIdle: false`) — only the writer's own beat performs the
+       * advancing work, so only it needs to announce it. The callback owns its own failure handling
+       * (fire-and-forget, matching `NotifyingFanoutAdapter.publish`'s own NOTIFY) — a rejected notify
+       * must not, and structurally cannot, break the beat.
+       */
+      notifyOnAdvance?: (ceiling: bigint) => void;
     },
   ) {
     this.minSinceMs = (opts.now ?? Date.now)();
@@ -192,10 +206,24 @@ export class FrontierMonitor {
       const min = rows[0]!.frontierTs; // ordered ascending → first row is the pinning shard
       const pinningShard = rows[0]!.shardId;
       const nowMs = this.now();
+      const minBefore = this.lastMin; // snapshot the PRIOR beat's reading before this one overwrites it
       if (this.lastMin === null || min > this.lastMin) {
         this.lastMin = min;
         this.minSinceMs = nowMs;
         this.warned = false;
+        // Notify-on-advance (T3.5): only when (a) this is the writer's own idle-closing beat, and (b)
+        // there WAS a prior beat to compare against (skip the very first/cold-start beat — nothing
+        // "advanced" relative to no baseline) — so this fires at most once per beat, only on a real
+        // advance, never on a no-op close. See the constructor doc comment above for the full story.
+        if (this.opts.closeIdle && minBefore !== null && this.opts.notifyOnAdvance) {
+          try {
+            this.opts.notifyOnAdvance(min);
+          } catch {
+            // A misbehaving callback must not interrupt the rest of THIS beat's bookkeeping (cached
+            // stats, lag warnings below) — narrower than the outer catch-all, which would otherwise
+            // also skip those for the remainder of the beat.
+          }
+        }
       }
       const lagMs = nowMs - this.minSinceMs;
       this.cached = { frontier: min, lagMs, pinningShard };
@@ -1538,6 +1566,14 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // commits to the primary — watch ITS watermark against F too. A non-hybrid writer has no
       // replica (reads the primary directly), so this is omitted there — nothing to lag.
       tailerWatermark: multiWriter ? () => hybridTailer!.watermark() : undefined,
+      // T3.5: wake every follower's LISTEN the instant an idle/orphan shard close (silently, by bare
+      // UPDATE) actually un-pins F — reusing the SAME channel `NotifyingFanoutAdapter` NOTIFYs on a
+      // real commit, so a `ReplicaTailer` armed on either wakes identically. Fire-and-forget +
+      // swallow, exactly like `NotifyingFanoutAdapter.publish`'s own NOTIFY: a transient connection
+      // hiccup here must not break this beat — the poll fallback remains the correctness backstop.
+      notifyOnAdvance: (ceiling) => {
+        void client.notify(COMMIT_CHANNEL, String(ceiling)).catch(() => {});
+      },
     });
     frontierMonitor.start();
     // Coalesced idle-close on each LOCAL commit: a commit on one shard schedules a ~10ms beat so idle
