@@ -888,6 +888,25 @@ export async function bootLoaded(opts: {
     objectStoreReplicaNode?.store ??
     makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
+  // Multi-shard replicas + write-forwarding is NOT yet supported, and fails fast rather than shipping
+  // a latent disappearing-write bug. Write-forwarding relies on the G4 origin-frontier fallback
+  // (`SyncProtocolHandler.pendingFrontiers`/`sweepPendingFrontiers`): a forwarded mutation commits on
+  // the writer, and the replica advances the origin session's observed frontier once its tailer drains
+  // past that commit ts. But a multi-shard replica runs ONE tailer PER LANE, each sweeping pending
+  // frontiers with ITS OWN lane's ts — and per-lane object-store timestamps are independent counters,
+  // not a shared clock. So a fast lane's sweep could satisfy a forwarded frontier owned by a lane that
+  // hasn't applied the write yet → the client drops its optimistic layer while the authoritative row is
+  // still absent from the replica (a transient RYOW/no-flicker violation). The tested + shipped
+  // multi-shard replica config is REJECT-mode (no `--writer-url`); forwarding on a multi-shard bucket
+  // needs a per-lane pending-frontier design (a future slice). Reject-mode single-shard forwarding and
+  // reject-mode multi-shard are both unaffected.
+  if (objectStoreReplicaNode && opts.writerUrl !== undefined && objectStoreReplicaNode.numShards > 1) {
+    throw new Error(
+      `stackbase: --writer-url (replica write-forwarding) is not yet supported on a multi-shard bucket ` +
+        `(this bucket has ${objectStoreReplicaNode.numShards} shards) — run the replica in reject mode (drop --writer-url) ` +
+        `and send writes directly to the writer, or use a single-shard deployment.`,
+    );
+  }
   // Tier 3 Slice 8 follow-on (replica write-forwarding): a replica boot with `--writer-url` set
   // gets a `ReplicaWriteForwarder` wired in as the runtime's `writeRouter` below — every
   // mutation/action forwards to the writer instead of attempting (and failing) a local commit.

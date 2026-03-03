@@ -85,10 +85,22 @@ keep `numShards = 1`, byte-identical to today.
 **In:** multi-shard replica reads (composite) + reactivity (N tailers) + per-lane consumer watermarks;
 the boot/serve wiring; a real-MinIO multi-shard writer+replica E2E.
 
-**Out (nothing newly deferred — this closes the arc):** write-forwarding is already shard-agnostic (it
-forwards the whole mutation to the writer URL regardless of lane count — no change needed). Replica-side
-gc, snapshot creation, and lease acquisition remain writer-only by design (a replica materializes + tails,
-never writes the bucket except its own watermark).
+**Out:** Replica-side gc, snapshot creation, and lease acquisition remain writer-only by design (a
+replica materializes + tails, never writes the bucket except its own watermark).
+
+**Write-forwarding on a multi-shard bucket is FAILED FAST, not supported (whole-branch review correction).**
+The original design claimed forwarding was "already shard-agnostic — no change needed." That is wrong: the
+review found forwarding relies on the G4 origin-frontier fallback (`SyncProtocolHandler.pendingFrontiers`/
+`sweepPendingFrontiers`), where a forwarded mutation commits on the writer and the replica advances the
+origin session's observed frontier once its tailer drains past that commit ts. A multi-shard replica runs
+one tailer PER LANE, each sweeping with its OWN lane's ts — and per-lane object-store timestamps are
+independent counters, not a shared clock — so a fast lane's sweep could prematurely satisfy a forwarded
+frontier owned by a lane that hasn't applied the write yet (a transient RYOW/no-flicker violation). The
+tested + shipped multi-shard config is REJECT-mode; `--writer-url` on a multi-shard bucket now throws a
+clear "not yet supported" error at boot (`bootLoaded`), the same fail-fast discipline as the other
+object-store/fleet mutual-exclusion guards. Proper multi-shard forwarding needs a per-lane pending-frontier
+design — a future slice, out of scope here. Reject-mode multi-shard and single-shard forwarding are both
+unaffected.
 
 ## Test plan
 

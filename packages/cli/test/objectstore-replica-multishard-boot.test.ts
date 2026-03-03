@@ -77,4 +77,37 @@ describe("bootLoaded — multi-shard object-store replica", () => {
       await writer.store.close();
     }
   });
+
+  it("rejects --writer-url (write-forwarding) on a multi-shard bucket — fails fast, not a latent RYOW bug", async () => {
+    const loaded = await loadConvexDir(FIXTURE);
+    const bucket = `file://${ROOT}/fwd-bucket`;
+
+    // Establish a 3-shard bucket (globals.numShards = 3), then relinquish so the replica can materialize.
+    const writer = await bootLoaded({
+      loaded,
+      components: [],
+      dataPath: `${ROOT}/fwd-writer/db.sqlite`,
+      adminKey: "k",
+      objectStoreUrl: bucket,
+      objectStoreWriterId: "w",
+      objectStoreShards: 3,
+    });
+    await writer.objectStoreRelease?.();
+    await writer.runtime.stopDrivers();
+    await writer.store.close();
+
+    // A replica over the multi-shard bucket WITH --writer-url must fail fast (forwarding + multi-shard
+    // is unsupported — see the guard's comment in boot.ts).
+    await expect(
+      bootLoaded({
+        loaded,
+        components: [],
+        dataPath: `${ROOT}/fwd-replica/db.sqlite`,
+        adminKey: "k",
+        objectStoreUrl: bucket,
+        replica: true,
+        writerUrl: "http://127.0.0.1:9999",
+      }),
+    ).rejects.toThrow(/write-forwarding.*not yet supported on a multi-shard bucket/);
+  });
 });
