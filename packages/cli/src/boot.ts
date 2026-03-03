@@ -434,18 +434,27 @@ export const DEFAULT_OBJECTSTORE_REPLICA_POLL_MS = 1000;
 
 /**
  * Build (ee-gate → resolve → adopt globals → materialize, NO acquire) a Tier 3 object-storage
- * REPLICA node's store (Task 8.2, design record §7/§8). Unlike `buildObjectStoreWriterNode`, this
- * never calls `acquire()` — the returned store rejects every mutation for free (the class doc's
+ * REPLICA node's store (Task 8.2, design record §7/§8; multi-shard generalization
+ * `docs/superpowers/plans/2026-02-20-multi-shard-replicas.md`). Unlike `buildObjectStoreWriterNode`,
+ * this never calls `acquire()` — the returned store rejects every mutation for free (the class doc's
  * "the neat part"), surfaced via `wrapReplicaWriteRejection`'s clear DX message.
  *
- * Returns the store to use at `bootLoaded`'s store seam, plus `attachTailer(runtime)` — call this
- * AFTER `createEmbeddedRuntime` builds the replica's own runtime (the tailer's sink needs it; see
- * `replica-wiring.ts`'s module doc for why this can't be a driver passed INTO the runtime itself).
- * `attachTailer` starts `startReplicaReactiveTailer` and returns a `release()` handle that stops
- * the tailer AND `removeConsumer`s this replica's watermark (so a departed replica stops pinning
- * the writer's gc) — the shutdown handle `bootLoaded` threads out as `BootResult.objectStoreRelease`,
- * same field the writer path uses (mutually exclusive by construction — `serve.ts` calls whichever
- * one boot actually built, identically either way).
+ * The lane count is read from the bucket's `globals.numShards` (authoritative — a replica has no
+ * `--shards` flag): `numShards === 1` opens the single "0" lane (byte-identical to the shipped path);
+ * `> 1` opens one materialize-only lane per `shardIdList(numShards)` id and composes them behind the
+ * shipped `ShardedObjectStoreDocStore` read composite. Every mutation is single-lane, so the N lanes
+ * are tailed INDEPENDENTLY (no cross-lane ordering); `observeTimestamp` is monotonic-max so the N
+ * per-lane tailers advancing the same runtime's oracle is safe.
+ *
+ * Returns the store to use at `bootLoaded`'s store seam, its `numShards` (so `bootLoaded` sizes the
+ * runtime's `ShardedTransactor`/composite to match, exactly like the writer path), plus
+ * `attachTailer(runtime)` — call this AFTER `createEmbeddedRuntime` builds the replica's own runtime
+ * (the tailer's sink needs it; see `replica-wiring.ts`'s module doc for why this can't be a driver
+ * passed INTO the runtime itself). `attachTailer` starts one `startReplicaReactiveTailer` PER LANE and
+ * returns a `release()` handle that stops every tailer AND `removeConsumer`s every lane's watermark
+ * (so a departed replica stops pinning ANY lane's writer gc) — the shutdown handle `bootLoaded` threads
+ * out as `BootResult.objectStoreRelease`, same field the writer path uses (mutually exclusive by
+ * construction — `serve.ts` calls whichever one boot actually built, identically either way).
  */
 async function buildObjectStoreReplicaNode(opts: {
   objectStoreUrl: string;
@@ -456,6 +465,7 @@ async function buildObjectStoreReplicaNode(opts: {
   pollMs?: number;
 }): Promise<{
   store: DocStore;
+  numShards: number;
   attachTailer: (runtime: EmbeddedRuntime) => () => Promise<void>;
 }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
@@ -465,29 +475,63 @@ async function buildObjectStoreReplicaNode(opts: {
   await resolved.objectStore.assertCasSupported();
 
   const substrate = await loadObjectStoreSubstrateModule();
+  const objectStore = resolved.objectStore;
 
   // Same adopt-not-mint identity discipline as the writer path (see `RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY`'s
-  // doc comment) — a replica must NEVER mint a fresh deploymentId; it always adopts whatever the
-  // bucket (established by the writer, or an earlier node) already carries.
-  const globals = await substrate.ensureGlobals(resolved.objectStore, { deploymentId: randomUUID(), numShards: 1 });
+  // doc comment) — a replica must NEVER mint a fresh deploymentId; it always adopts whatever the bucket
+  // (established by the writer, or an earlier node) already carries. The RETURNED count is authoritative:
+  // a multi-shard bucket (writer `--shards N`, or `objectstore reshard`) boots the right lanes here.
+  const globals = await substrate.ensureGlobals(objectStore, { deploymentId: randomUUID(), numShards: 1 });
+  const numShards = globals.numShards;
+  const shardIds: string[] = numShards > 1 ? [...shardIdList(numShards)] : ["0"];
 
-  const local = makeLocalSqliteStore(opts.dataPath);
-  // NO acquire() — a replica only MATERIALIZES (Tier 3 Slice 4's `open()` claims no ownership).
-  const rawStore = await substrate.ObjectStoreDocStore.open({ objectStore: resolved.objectStore, shard: "0", local });
-  await rawStore.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+  // Open + MATERIALIZE each lane (NO acquire — Tier 3 Slice 4's `open()` claims no ownership). Each lane
+  // gets its own local SQLite file: `<dataPath>.<shardId>` for multi-shard; the bare `dataPath` for the
+  // byte-identical single "0" lane.
+  const lanes: Array<{ shardId: string; store: DocStore; local: SqliteDocStore }> = [];
+  for (const shardId of shardIds) {
+    const laneDataPath = numShards > 1 ? `${opts.dataPath}.${shardId}` : opts.dataPath;
+    const local = makeLocalSqliteStore(laneDataPath);
+    const laneStore = await substrate.ObjectStoreDocStore.open({ objectStore, shard: shardId, local });
+    await laneStore.writeGlobalIfAbsent(RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY, globals.deploymentId);
+    lanes.push({ shardId, store: laneStore, local });
+  }
 
-  const store = wrapReplicaWriteRejection(rawStore);
-  const consumerId = opts.consumerId ?? defaultReplicaConsumerId();
+  // Single lane → the store directly (byte-identical). Multi-shard → the shipped fan-out+merge composite,
+  // whose default lane is `shardIdList(N)[0] === "default"` (where deployment-level globals resolve).
+  const composite: DocStore =
+    numShards === 1
+      ? lanes[0]!.store
+      : new substrate.ShardedObjectStoreDocStore(new Map(lanes.map((l) => [l.shardId, l.store])), {
+          defaultShard: DEFAULT_SHARD,
+        });
+  const store = wrapReplicaWriteRejection(composite);
+
+  const baseConsumerId = opts.consumerId ?? defaultReplicaConsumerId();
   const pollMs = opts.pollMs ?? DEFAULT_OBJECTSTORE_REPLICA_POLL_MS;
-  const objectStore = resolved.objectStore;
+  // Per-lane watermark id: the BARE `baseConsumerId` for the single "0" lane (byte-compat — the shipped
+  // replica E2E asserts `s0/consumers/<id>`); `${baseConsumerId}:${shardId}` per lane for multi-shard,
+  // so each lane's watermark lives under its own `s{shard}/consumers/` and floors only THAT lane's gc.
+  const laneConsumerId = (shardId: string): string => (numShards === 1 ? baseConsumerId : `${baseConsumerId}:${shardId}`);
 
   return {
     store,
+    numShards,
     attachTailer: (runtime: EmbeddedRuntime) => {
-      const handle = substrate.startReplicaReactiveTailer({ runtime, objectStore, shard: "0", local, consumerId, pollMs });
+      // One tailer per lane, all driving the SAME runtime's reactive fan-out.
+      const handles = lanes.map((l) =>
+        substrate.startReplicaReactiveTailer({
+          runtime,
+          objectStore,
+          shard: l.shardId,
+          local: l.local,
+          consumerId: laneConsumerId(l.shardId),
+          pollMs,
+        }),
+      );
       return async () => {
-        await handle.stop();
-        await substrate.removeConsumer(objectStore, "0", consumerId);
+        await Promise.all(handles.map((h) => h.stop()));
+        await Promise.all(lanes.map((l) => substrate.removeConsumer(objectStore, l.shardId, laneConsumerId(l.shardId))));
       };
     },
   };
@@ -771,7 +815,8 @@ export async function bootLoaded(opts: {
    *  → the shipped single-shard path (shard "0"), byte-identical. `> 1` → this node opens+acquires
    *  all `shardIdList(N)` lanes and composes a `ShardedObjectStoreDocStore`; the runtime's
    *  `numShards` is sized to N so the `ShardedTransactor` routes writes to the owning lane. Ignored
-   *  for a `--replica` boot (replicas are single-shard) and when `objectStoreUrl` is unset. */
+   *  for a `--replica` boot (a replica reads its lane count from the bucket's `globals.numShards`, not
+   *  this flag — it has no `--shards` of its own) and when `objectStoreUrl` is unset. */
   objectStoreShards?: number;
   /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
    *  instead of a writer — materializes + tails, NEVER acquires the write lease (every mutation is
@@ -843,6 +888,25 @@ export async function bootLoaded(opts: {
     objectStoreReplicaNode?.store ??
     makeStore({ dataPath: opts.dataPath, databaseUrl: opts.databaseUrl });
 
+  // Multi-shard replicas + write-forwarding is NOT yet supported, and fails fast rather than shipping
+  // a latent disappearing-write bug. Write-forwarding relies on the G4 origin-frontier fallback
+  // (`SyncProtocolHandler.pendingFrontiers`/`sweepPendingFrontiers`): a forwarded mutation commits on
+  // the writer, and the replica advances the origin session's observed frontier once its tailer drains
+  // past that commit ts. But a multi-shard replica runs ONE tailer PER LANE, each sweeping pending
+  // frontiers with ITS OWN lane's ts — and per-lane object-store timestamps are independent counters,
+  // not a shared clock. So a fast lane's sweep could satisfy a forwarded frontier owned by a lane that
+  // hasn't applied the write yet → the client drops its optimistic layer while the authoritative row is
+  // still absent from the replica (a transient RYOW/no-flicker violation). The tested + shipped
+  // multi-shard replica config is REJECT-mode (no `--writer-url`); forwarding on a multi-shard bucket
+  // needs a per-lane pending-frontier design (a future slice). Reject-mode single-shard forwarding and
+  // reject-mode multi-shard are both unaffected.
+  if (objectStoreReplicaNode && opts.writerUrl !== undefined && objectStoreReplicaNode.numShards > 1) {
+    throw new Error(
+      `stackbase: --writer-url (replica write-forwarding) is not yet supported on a multi-shard bucket ` +
+        `(this bucket has ${objectStoreReplicaNode.numShards} shards) — run the replica in reject mode (drop --writer-url) ` +
+        `and send writes directly to the writer, or use a single-shard deployment.`,
+    );
+  }
   // Tier 3 Slice 8 follow-on (replica write-forwarding): a replica boot with `--writer-url` set
   // gets a `ReplicaWriteForwarder` wired in as the runtime's `writeRouter` below — every
   // mutation/action forwards to the writer instead of attempting (and failing) a local commit.
@@ -862,17 +926,16 @@ export async function bootLoaded(opts: {
   if (opts.fleet) {
     numShards = opts.fleet.numShards ?? 1;
   } else if (objectStoreWriterNode || objectStoreReplicaNode) {
-    // Tier 3 multi-shard single-node serve: a `--object-store` WRITER can now own N lanes (each its
-    // own bucket prefix + local + lease/heartbeat/gc, composed behind `ShardedObjectStoreDocStore`)
-    // — the engine's `numShards`-sized `ShardedTransactor` routes each write to its owning lane, and
-    // `buildObjectStoreWriterNode` built exactly `opts.objectStoreShards` lanes to receive them. A
-    // REPLICA stays single-shard (it tails shard "0"; multi-shard replicas are a later follow-on).
+    // Tier 3 multi-shard serve: a `--object-store` WRITER owns N lanes (each its own bucket prefix +
+    // local + lease/heartbeat/gc, composed behind `ShardedObjectStoreDocStore`); a `--replica` now
+    // MATERIALIZES + tails the same N lanes behind the same read composite (one tailer per lane). The
+    // engine's `numShards`-sized `ShardedTransactor` routes/reads over exactly the lanes each built.
     await store.setupSchema();
-    // Authoritative count comes from the bucket's persisted globals (resolved inside
-    // `buildObjectStoreWriterNode`, which fails fast on a `--shards` mismatch) — NOT `opts.objectStoreShards`
-    // directly, so a resharded bucket boots the right `numShards` even if `--shards` is omitted. A replica
-    // stays single-shard (multi-shard replicas are a later follow-on).
-    numShards = objectStoreReplicaNode ? 1 : (objectStoreWriterNode?.numShards ?? 1);
+    // Authoritative count comes from the bucket's persisted globals (resolved inside the writer/replica
+    // build, which for the writer fails fast on a `--shards` mismatch) — NOT `opts.objectStoreShards`
+    // directly, so a resharded bucket boots the right `numShards` on both roles even if `--shards` is
+    // omitted. Whichever role this boot built reports its lane count here.
+    numShards = objectStoreWriterNode?.numShards ?? objectStoreReplicaNode?.numShards ?? 1;
   } else {
     await store.setupSchema();
     numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
