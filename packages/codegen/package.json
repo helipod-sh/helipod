@@ -2,7 +2,7 @@
   "name": "@stackbase/codegen",
   "version": "0.0.0",
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",

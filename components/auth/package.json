@@ -2,6 +2,7 @@
   "name": "@stackbase/auth",
   "version": "0.0.0",
   "private": true,
+  "license": "FSL-1.1-Apache-2.0",
   "type": "module",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "main": "./dist/index.js",

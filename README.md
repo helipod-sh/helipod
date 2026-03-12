@@ -126,4 +126,6 @@ STACKBASE_STORAGE_BUCKET=my-app-uploads stackbase serve
 
 ## License
 
-MIT.
+[**FSL-1.1-Apache-2.0**](LICENSE) (the Functional Source License, the same license Convex uses): free to use, modify, and self-host — including commercially — but you may not offer Stackbase itself as a competing hosted service. Each release automatically converts to **Apache 2.0 two years** after it ships. Single-node self-hosting and deploy-anywhere are free forever.
+
+The one exception is the [`ee/`](ee/) directory (scale/enterprise modules), which is source-available under a separate [commercial license](ee/LICENSE) and does not convert. See [docs/dev/business-model-and-licensing.md](docs/dev/business-model-and-licensing.md) for the full model.

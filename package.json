@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Stackbase \u2014 a Convex-compatible, self-hostable reactive backend. Lightweight by default, scalable on demand.",
-  "license": "MIT",
+  "license": "FSL-1.1-Apache-2.0",
   "packageManager": "bun@1.3.11",
   "engines": {
     "node": ">=22",
