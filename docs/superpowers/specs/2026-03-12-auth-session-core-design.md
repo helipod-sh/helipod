@@ -50,6 +50,37 @@ in-place upgrade, and a single internal `mintSession` chokepoint. Plus: correct 
 10. **Config via `defineAuth(options?)`**, following the component convention
     (`defineScheduler`). The existing `auth` export becomes `defineAuth()` with defaults —
     no breaking change for `stackbase.config.ts` files that compose `auth`.
+11. **Absolute session-lifetime ceiling** (adopted from Convex Auth's total-duration cap):
+    `absoluteExpiresAt = mintTime + sessionTotalTtlMs` (default 90 days) is fixed at mint and
+    NEVER slides — `refresh` rejects past it with `REFRESH_EXPIRED` regardless of activity.
+    Without it, a continuously-active session would never force re-authentication.
+12. **Anonymous sign-in guards** (adopted from Better Auth's anon plugin behavior):
+    `signInAnonymously` rejects when the caller's ambient identity already resolves to ANY
+    user (prevents anon churn from signed-in callers), and a **global throttle** caps
+    anonymous user creation per deployment (`anonymousSignInsPerMinute`, default 60,
+    `0` disables) — anonymous sign-up is unauthenticated write amplification and we carry no
+    per-IP identifiers by design, so the throttle is deployment-global (a single counter row;
+    the single-writer transactor makes contention a non-issue).
+13. **Constant-time comparison** for the `prevRefreshTokenHash` check inside `refresh` (the
+    one token comparison that happens in app code rather than via index lookup).
+
+## Reference implementations consulted
+
+`.reference/convex-auth` (Apache-2.0) and `.reference/better-auth` (MIT) were studied for
+this design; test-suite cases were adapted (marked in Testing). Both validate the locked
+decisions by contrast: Convex Auth's non-erroring refresh-race replay depends on its
+refresh secret being the row's own unhashed primary key (the leak surface decision #2
+closes), and Better Auth's unhashed tokens force its list-sessions API to return raw bearer
+credentials as revoke keys. Neither hashes tokens at rest; neither ships in-place anonymous
+upgrade (Better Auth mints a NEW userId and deletes the old row — integrators must copy data
+in an `onLinkAccount` callback, with an acknowledged partial-state bug; Convex Auth leaves
+upgrade to userland and its own anonymous-conversion test is an unimplemented `test.todo`).
+Deliberately NOT adopted, as conscious decisions: Better Auth's freshness gate on
+device-management ops (our 1h access TTL already bounds the exposure a freshness gate would
+close), per-IP rate limiting and server-side IP/UA capture (no transport identifiers by
+design), an anonymous-upgrade hook (YAGNI — in-place upgrade means there is no data to
+migrate), and Convex Auth's surgical subtree invalidation (our session row IS the family;
+whole-session death on theft is simpler and stricter).
 
 ## Schema (component tables, additive)
 
@@ -64,6 +95,7 @@ additivity):
   refreshTokenHash,     // SHA-256(current refresh token), index byRefreshTokenHash
   prevRefreshTokenHash, // SHA-256(previous refresh token) — reuse detection
   refreshExpiresAt,     // sliding: reset to now + refreshTtlMs on each rotation
+  absoluteExpiresAt,    // fixed at mint: mintTime + sessionTotalTtlMs — never slides
   deviceLabel,          // optional client-supplied string (e.g. "Chrome on macOS")
   createdAt,
   lastRefreshAt,
@@ -81,7 +113,8 @@ those expire. New mints are always hashed pairs.
 ## Component surface
 
 Config: `defineAuth({ accessTtlMs = 60*60*1000, refreshTtlMs = 30*24*60*60*1000,
-refreshGraceMs = 30_000 })`; `export const auth = defineAuth()`.
+refreshGraceMs = 30_000, sessionTotalTtlMs = 90*24*60*60*1000,
+anonymousSignInsPerMinute = 60 })`; `export const auth = defineAuth()`.
 
 Internal chokepoint (not a public function): `mintSession(ctx, userId, deviceLabel?)` →
 generates both raw tokens, stores hashes, returns
@@ -97,6 +130,8 @@ Public functions (all component-namespaced, callable like today's `auth:signIn`)
 - `signIn(email, password, deviceLabel?)` → mint result. Lockout behavior unchanged
   (5 attempts / 15 min, commit-then-throw counter durability).
 - `signInAnonymously(deviceLabel?)` → creates `{ anonymous: true }` user + mint result.
+  Rejects if the caller is already authenticated (any user); subject to the global
+  `anonymousSignInsPerMinute` throttle (typed `ANONYMOUS_THROTTLED`).
 - `refresh(refreshToken)` → mint-shaped result for the SAME sessionId (rotation in place):
   new access + refresh tokens, `prevRefreshTokenHash` ← old hash, sliding
   `refreshExpiresAt`, `lastRefreshAt = now`. Reuse detection + grace per locked decisions
@@ -153,10 +188,17 @@ the anonymous→upgrade flow).
 
 - Component-level via `@stackbase/test` (`createTestStackbase` over the real engine):
   rotation happy path; reuse-outside-grace revokes; reuse-inside-grace returns
-  `REFRESH_STALE` without revoking; expired refresh; hashed-at-rest (no raw token appears in
-  any stored row); legacy-token fallback resolution; anonymous upgrade preserves userId and
-  clears the flag; listSessions/revoke ownership checks; revokeOtherSessions keeps the
-  current session.
+  `REFRESH_STALE` without revoking; expired refresh (sliding AND the absolute
+  `absoluteExpiresAt` ceiling — an actively-refreshing session still dies at the cap);
+  hashed-at-rest (no raw token appears in any stored row); legacy-token fallback resolution;
+  anonymous upgrade preserves userId and clears the flag; repeat `signInAnonymously` while
+  authenticated is rejected; the anonymous global throttle trips and recovers;
+  listSessions/revoke ownership checks; revokeOtherSessions keeps the current session.
+  Divergence-pinning tests (adapted from the reference suites): theft response kills the
+  WHOLE session — assert no surviving usable token after reuse-outside-grace (the opposite
+  of Convex Auth's surgical subtree survival, so nobody "fixes" it toward their behavior);
+  and the racing loser receives `REFRESH_STALE` — never a fresh usable pair (the opposite of
+  Convex Auth's fork/replay branches, foreclosed by hashed-at-rest).
 - E2E through the real `stackbase dev` server (`packages/cli/test/auth-session-e2e.test.ts`,
   the e2e-through-shipped-entrypoint rule): a live subscription reading
   `ctx.auth.getUserId()` sees revocation fan out reactively when another connection calls
