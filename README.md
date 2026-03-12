@@ -16,6 +16,16 @@ A Convex-compatible, self-hostable reactive backend. Write TypeScript query/muta
 - **File storage** — always-on (not opt-in): a `_storage` system table + `Id<"_storage">` + `ctx.storage`, on a pluggable `BlobStore` seam (**embedded filesystem**, zero-config default, or **S3-compatible object storage** for scale). Two-phase uploads (proxied through the engine on FS, presigned direct-to-bucket on S3), private-by-default bearer-token serving, and a background reaper that reclaims abandoned/deleted blobs. See [docs/enduser/files.md](docs/enduser/files.md).
 - **Self-host** — `docker compose up` brings up the engine + dashboard on a persistent volume; a single-binary build embeds everything but the database file.
 
+## Measured performance
+
+A single **1-vCPU / 512MB container of the shipped image serves 2,000 live reactive subscribers at ~12% CPU** (~102ms hot-push p50, ~21KB RSS per connection, disconnect-storm recovery in the reconnect window), and fleet nodes add horizontally with proven cgroup isolation (hammering one node moves its neighbors by −0.7%) and 15–16ms cross-node propagation. Measured, not estimated — the numbers come from a committed benchmark suite that boots the repo's own `Dockerfile` image under enforced cpu/memory budgets, and each finding documents its own limits (the capacity run hit Docker Desktop's port-forward ceiling before the node's; all containers shared one host — no multi-machine claim is made).
+
+- [benchmarks/docs/docker-fleet-findings.md](benchmarks/docs/docker-fleet-findings.md) — the budget capacity table, isolation proof, and WAN-latency multipliers
+- [benchmarks/docs/connections-findings.md](benchmarks/docs/connections-findings.md) — single-node connection scale (10,000 subscribers/node measured clean)
+- [benchmarks/docs/fleet-connections-findings.md](benchmarks/docs/fleet-connections-findings.md) — multi-node fleet behavior: cross-node latency, failover, parallelization
+
+Reproduce with `bun run bench:dockerfleet` (requires Docker); baselines are committed under [benchmarks/baselines/](benchmarks/baselines/).
+
 ## Repository layout
 
 ```
