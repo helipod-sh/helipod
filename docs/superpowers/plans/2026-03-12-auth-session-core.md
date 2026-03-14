@@ -16,7 +16,7 @@ Binding values copied verbatim from the design spec (`docs/superpowers/specs/202
 - **Hashing:** tokens are hashed at rest with **SHA-256, base64url** (`createHash("sha256").update(token).digest("base64url")`). The DB stores only hashes after A1; raw tokens exist only in the client's hands. Legacy rows keep `{ token, expiresAt }` and resolve until natural expiry.
 - **Rotation + reuse detection, per-session (the session row IS the family).** `refresh` rotates both hashes in place, remembers the previous refresh hash in `prevRefreshTokenHash`, slides `refreshExpiresAt = now + refreshTtlMs`, and updates `lastRefreshAt = now`. `absoluteExpiresAt` is fixed at mint (`mintTime + sessionTotalTtlMs`) and **NEVER slides**.
 - **Grace window:** presented refresh == `prevRefreshTokenHash` AND `now - lastRefreshAt <= refreshGraceMs` → typed soft error `REFRESH_STALE`, **no revocation**. presented == `prevRefreshTokenHash` OUTSIDE the grace window → `REFRESH_REUSED`, thrown **after** the whole session row is deleted (**commit-then-throw** — the same mechanism the lockout counter uses; the theft response commits even though the call fails). Refresh presented with `now > refreshExpiresAt` → `REFRESH_EXPIRED`. Refresh presented with `now > absoluteExpiresAt` → `REFRESH_EXPIRED` (the ceiling, regardless of activity). Presented token matching NEITHER current nor previous hash → plain invalid (`invalid refresh token`).
-- **Constant-time prev-hash compare:** the one `prevRefreshTokenHash` comparison that runs in app code (not via index lookup) uses `constantTimeEqual` (`node:crypto` `timingSafeEqual`, length-guarded).
+- **Constant-time prev-hash compare — satisfied by construction:** spec decision 13's mandate covered "the one token comparison that happens in app code rather than via index lookup." In this plan reuse detection is a `byPrevRefreshTokenHash` **index equality lookup** (identical timing surface to the existing `byRefreshTokenHash` lookup), so no token comparison happens in app code at all and no `constantTimeEqual` helper ships. A full-table scan alternative was rejected: it would make every garbage-refresh presentation an O(all-sessions) read inside the single-writer mutation and widen its OCC conflict range to the entire table (a DoS lever).
 - **Revoke = DELETE the session row** — no `revokedAt` tombstone. Delete is what keeps revocation reactive through the existing read-set.
 - **`lastRefreshAt` updates only on refresh, never per-request** — per-request session writes would turn every authenticated query into write amplification.
 - **Anonymous throttle:** `signInAnonymously` rejects when the caller's ambient identity already resolves to ANY user; global (deployment-wide) throttle via a **single counter row** capped at `anonymousSignInsPerMinute`, typed `ANONYMOUS_THROTTLED`.
@@ -43,7 +43,7 @@ bun run --filter @stackbase/cli test
 
 ## Task 1 — Session model core
 
-Schema (new optional session fields incl. `absoluteExpiresAt`, `users.anonymous` + optional `email`, throttle table), crypto additions (`sha256base64url`, `constantTimeEqual`), typed auth errors, `defineAuth(options?)` config following `defineScheduler`, internal `mintSession` chokepoint, `signUp`/`signIn` switched to mint pairs, `authContext.getUserId` + `auth:getUserId` byTokenHash with legacy byToken fallback, `signOut` accepting both token shapes.
+Schema (new optional session fields incl. `absoluteExpiresAt`, four new sessions indexes, `users.anonymous` + optional `email`, throttle table), crypto addition (`sha256base64url`), typed auth errors, `defineAuth(options?)` config following `defineScheduler`, internal `mintSession` chokepoint, `signUp`/`signIn` switched to mint pairs, `authContext.getUserId` + `auth:getUserId` byTokenHash with legacy byToken fallback, `signOut` accepting both token shapes.
 
 ### Files
 - **Modify** `components/auth/src/schema.ts`
@@ -58,7 +58,7 @@ Schema (new optional session fields incl. `absoluteExpiresAt`, `users.anonymous`
 - **Create** `components/auth/test/session-core.test.ts`
 
 ### Interfaces
-- **Produces** `sha256base64url(input: string): string`; `constantTimeEqual(a: string, b: string): boolean` (in `crypto.ts`).
+- **Produces** `sha256base64url(input: string): string` (in `crypto.ts`).
 - **Produces** `AuthConfig` and `resolveAuthConfig(opts?: AuthOptions): AuthConfig` (in `config.ts`).
 - **Produces** `RefreshStaleError`, `RefreshExpiredError`, `AnonymousThrottledError` (in `errors.ts`, all `extends UserError`).
 - **Produces** `makeAuthModules(config: AuthConfig): Record<string, RegisteredFunction>` and `mintSession(ctx, config, userId, deviceLabel?): Promise<MintResult>` (in `functions.ts`). `MintResult = { token: string; refreshToken: string; sessionId: string; userId: string; expiresAt: number }`.
@@ -105,7 +105,14 @@ export const authSchema = defineSchema({
   })
     .index("byToken", ["token"])
     .index("byTokenHash", ["tokenHash"])
-    .index("byRefreshTokenHash", ["refreshTokenHash"]),
+    .index("byRefreshTokenHash", ["refreshTokenHash"])
+    // Reuse detection is an INDEX lookup, never a table scan: a scan would make every garbage
+    // refresh presentation an O(all-sessions) read inside the single-writer mutation AND widen its
+    // OCC conflict range to the whole table — a DoS lever.
+    .index("byPrevRefreshTokenHash", ["prevRefreshTokenHash"])
+    // Per-user session ops (listSessions/revokeOtherSessions/upgrade) range over this, keeping the
+    // reactive read-set scoped to ONE user's sessions instead of the whole table.
+    .index("byUserId", ["userId"]),
   // Global anonymous-sign-in throttle (spec §12): a SINGLE counter row keyed by `name`. The
   // single-writer transactor makes contention a non-issue; a deployment-global window is used
   // because we carry no per-IP identifiers by design.
@@ -113,7 +120,7 @@ export const authSchema = defineSchema({
 });
 ```
 
-- [ ] **Append to `components/auth/src/crypto.ts`** the two hashing helpers (`timingSafeEqual` is already imported at the top; add `createHash` to the existing `node:crypto` import). Change the import line and append at the end:
+- [ ] **Append to `components/auth/src/crypto.ts`** the hashing helper (add `createHash` to the existing `node:crypto` import; `timingSafeEqual` stays imported — `verifyScryptLegacy` still uses it). No `constantTimeEqual` helper is added: reuse detection resolves via the `byPrevRefreshTokenHash` index equality lookup (see Task 2), so there is no token comparison in app code at all — spec decision 13's constant-time mandate is satisfied by construction. Change the import line and append at the end:
 
 Old (line 2):
 ```ts
@@ -129,16 +136,6 @@ Append after `generateToken`:
 /** SHA-256 of `input`, base64url-encoded — how session tokens are hashed at rest (spec decision 2). */
 export function sha256base64url(input: string): string {
   return createHash("sha256").update(input).digest("base64url");
-}
-
-/** Constant-time string equality (length-guarded) — for the in-app `prevRefreshTokenHash` compare in
- *  `refresh` (spec decision 13). Distinct lengths short-circuit (both are fixed-width SHA-256 hashes,
- *  so a length mismatch is a non-secret bug, not a timing oracle). */
-export function constantTimeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
 }
 ```
 
@@ -563,7 +560,7 @@ git commit -m "feat(auth): A1 session model core — hashed pairs, mintSession c
 
 ## Task 2 — refresh (rotation + reuse detection)
 
-Add the `refresh` module to `makeAuthModules`: rotation in place, `prevRefreshTokenHash` reuse detection with constant-time compare, 30s grace → `REFRESH_STALE`, outside-grace → `REFRESH_REUSED` via commit-then-throw whole-session delete, sliding `refreshExpiresAt`, `absoluteExpiresAt` ceiling → `REFRESH_EXPIRED`.
+Add the `refresh` module to `makeAuthModules`: rotation in place, `prevRefreshTokenHash` reuse detection via a `byPrevRefreshTokenHash` index equality lookup (constant-time by construction — no app-code compare), 30s grace → `REFRESH_STALE`, outside-grace → `REFRESH_REUSED` via commit-then-throw whole-session delete, sliding `refreshExpiresAt`, `absoluteExpiresAt` ceiling → `REFRESH_EXPIRED`.
 
 ### Files
 - **Modify** `components/auth/src/functions.ts`
@@ -571,7 +568,7 @@ Add the `refresh` module to `makeAuthModules`: rotation in place, `prevRefreshTo
 
 ### Interfaces
 - **Produces** `auth:refresh` module — `refresh(refreshToken: string): MintResult` (mint-shaped, SAME `sessionId`).
-- **Consumes** `RefreshStaleError`/`RefreshExpiredError` (`./errors`), `constantTimeEqual`/`sha256base64url` (`./crypto`), `commitThenThrow` (already imported), `mintSession` (Task 1).
+- **Consumes** `RefreshStaleError`/`RefreshExpiredError` (`./errors`), `sha256base64url` (`./crypto`), the `byPrevRefreshTokenHash` index (Task 1 schema), `commitThenThrow` (already imported), `mintSession` (Task 1).
 
 Note: `refresh` rotates the EXISTING row (never inserts a new one), so it does NOT go through `mintSession` (which inserts). It generates a fresh pair inline and `replace`s the row, then returns the mint-shaped result for the same `sessionId`.
 
@@ -586,7 +583,7 @@ import type { AuthConfig } from "./config";
 ```
 New:
 ```ts
-import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url, constantTimeEqual } from "./crypto";
+import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url } from "./crypto";
 import type { AuthConfig } from "./config";
 import { RefreshStaleError, RefreshExpiredError } from "./errors";
 ```
@@ -633,16 +630,13 @@ import { RefreshStaleError, RefreshExpiredError } from "./errors";
     }
 
     // Not the current token: is it the PREVIOUS refresh token of some session? (reuse detection)
-    // `byRefreshTokenHash` only indexes the CURRENT hash, so scan for a matching prev via a
-    // constant-time compare (spec decision 13) over the (small) candidate set. In practice the
-    // reuse candidate is found by scanning sessions whose prevRefreshTokenHash could match; we read
-    // the full sessions table's by_creation and constant-time compare each prev hash. The session
-    // count per deployment is bounded by active devices, so this scan is acceptable for A1.
-    const all = await ctx.db.query("sessions", "by_creation").collect();
-    const reused = all.find((s) => {
-      const prev = s.prevRefreshTokenHash as string | undefined;
-      return typeof prev === "string" && constantTimeEqual(prev, presentedHash);
-    });
+    // A single `byPrevRefreshTokenHash` INDEX equality lookup — never a table scan. A full scan
+    // would make every garbage-refresh presentation an O(all-sessions) read inside the single-writer
+    // mutation AND widen its OCC conflict range to the entire table — a DoS lever. The index lookup
+    // has the identical timing surface as the `byRefreshTokenHash` lookup above, so spec decision
+    // 13's constant-time mandate (which covered "the one token comparison in app code") is
+    // satisfied by construction: with the index there IS no app-code compare.
+    const [reused] = await ctx.db.query("sessions", "byPrevRefreshTokenHash").eq("prevRefreshTokenHash", presentedHash).collect();
     if (reused) {
       const lastRefreshAt = (reused.lastRefreshAt as number | undefined) ?? 0;
       if (now - lastRefreshAt <= config.refreshGraceMs) {
@@ -963,9 +957,11 @@ import { mutation, query, commitThenThrow, type ComponentContext, type MutationC
     const current = await currentSessionOf(ctx as unknown as FacadeCtx);
     if (!current) return [];
     const userId = current.userId as string;
-    const rows = await ctx.db.query("sessions", "by_creation").collect();
+    // `byUserId` range, never a table scan: this is a reactive QUERY — a full-table read-set would
+    // make every subscribed device list re-run on EVERY sign-in in the deployment; the index range
+    // keeps invalidation scoped to this one user's sessions.
+    const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
     return rows
-      .filter((s) => (s.userId as string) === userId)
       .map((s) => ({
         sessionId: s._id as string,
         deviceLabel: (s.deviceLabel as string | undefined) ?? null,
@@ -989,9 +985,11 @@ import { mutation, query, commitThenThrow, type ComponentContext, type MutationC
     const current = await currentSessionOf(ctx as unknown as FacadeCtx);
     if (!current) throw new Error("not authenticated");
     const userId = current.userId as string;
-    const rows = await ctx.db.query("sessions", "by_creation").collect();
+    // `byUserId` range, never a table scan — reads (and OCC conflict range) stay scoped to this
+    // one user's sessions.
+    const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
     for (const s of rows) {
-      if ((s.userId as string) === userId && (s._id as string) !== (current._id as string)) {
+      if ((s._id as string) !== (current._id as string)) {
         await ctx.db.delete(s._id as string);
       }
     }
@@ -1040,8 +1038,10 @@ New:
         // `compact` strips `anonymous: undefined` — omitting the key is what clears the flag
         // (the syscall codec rejects `undefined` values).
         await ctx.db.replace(userId, compact({ ...user, email: normEmail, anonymous: undefined }));
-        const rows = await ctx.db.query("sessions", "by_creation").collect();
-        for (const s of rows) if ((s.userId as string) === userId) await ctx.db.delete(s._id as string);
+        // Delete ALL of the user's sessions via the `byUserId` range (an upgrade is a credential
+        // boundary) — never a table scan.
+        const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
+        for (const s of rows) await ctx.db.delete(s._id as string);
       } else {
         userId = (await ctx.db.insert("users", { email: normEmail })) as string; // authed non-anon caller: new account
       }
