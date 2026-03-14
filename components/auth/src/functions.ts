@@ -1,7 +1,7 @@
-import { mutation, query, commitThenThrow, type ComponentContext, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, commitThenThrow, type ComponentContext, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
 import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url } from "./crypto";
 import type { AuthConfig } from "./config";
-import { RefreshStaleError, RefreshExpiredError } from "./errors";
+import { RefreshStaleError, RefreshExpiredError, AnonymousThrottledError } from "./errors";
 
 export const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -82,6 +82,29 @@ export async function resolveSession(
   return (legacy as Record<string, unknown>) ?? null;
 }
 
+/** A session as surfaced to `listSessions` — NEVER any hash/token material (spec "Component surface"). */
+export interface SessionSummary {
+  sessionId: string;
+  deviceLabel: string | null;
+  createdAt: number | null;
+  lastRefreshAt: number | null;
+  current: boolean;
+}
+
+/** The `ctx.auth` facade as visible from inside auth's own modules (context providers are attached
+ *  to every function's ctx — including a component's own). Absent when no providers were composed
+ *  (bare EmbeddedRuntime unit setups) → treated as unauthenticated. */
+type FacadeCtx = { db: MutationCtx["db"] | QueryCtx["db"]; auth?: { getSessionId(): Promise<string | null> } };
+
+/** The ambient caller's own session row, or null when unauthenticated/expired. Resolves the id via
+ *  the `ctx.auth` facade (the only channel the ambient identity reaches user code), then reads the
+ *  row through the module's own db so the read lands in the calling function's read-set. */
+async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown> | null> {
+  const sessionId = await ctx.auth?.getSessionId();
+  if (!sessionId) return null;
+  return ((await ctx.db.get(sessionId)) as Record<string, unknown> | null) ?? null;
+}
+
 /** Build the auth module set closing over `config`. `defineAuth` calls this (spec decision 10). */
 export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFunction> {
   const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult> => {
@@ -89,7 +112,32 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
     // Duplicate guard relies on single-writer OCC serialization — see schema.ts comment.
     const existing = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
     if (existing.length > 0) throw new Error("an account with that email already exists");
-    const userId = await ctx.db.insert("users", { email: normEmail }) as string;
+
+    // Upgrade path (spec §8 / "Component surface"): if the caller currently holds an ANONYMOUS
+    // session, attach the email+password account to that SAME userId, clear `anonymous`, and delete
+    // ALL of that user's sessions (an upgrade is a credential boundary), then mint fresh. Every row
+    // the anonymous user created survives (same userId). This is the in-place upgrade convex-auth
+    // leaves to userland and better-auth implements by minting a NEW userId + copy-callback.
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    let userId: string;
+    if (current) {
+      const user = await ctx.db.get(current.userId as string);
+      if (user && user.anonymous === true) {
+        userId = current.userId as string;
+        // `compact` strips `anonymous: undefined` — omitting the key is what clears the flag
+        // (the syscall codec rejects `undefined` values).
+        await ctx.db.replace(userId, compact({ ...user, email: normEmail, anonymous: undefined }));
+        // Delete ALL of the user's sessions via the `byUserId` range (an upgrade is a credential
+        // boundary) — never a table scan.
+        const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
+        for (const s of rows) await ctx.db.delete(s._id as string);
+      } else {
+        userId = (await ctx.db.insert("users", { email: normEmail })) as string; // authed non-anon caller: new account
+      }
+    } else {
+      userId = (await ctx.db.insert("users", { email: normEmail })) as string;
+    }
+
     await ctx.db.insert("accounts", {
       userId, provider: "password", accountId: normEmail,
       secret: await hashSecret(password),
@@ -201,5 +249,79 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
     throw new Error("invalid refresh token");
   });
 
-  return { signUp, signIn, signOut, getUserId, refresh };
+  const signInAnonymously = mutation(async (ctx, { deviceLabel }: { deviceLabel?: string }): Promise<MintResult> => {
+    // Reject if the caller already resolves to ANY user (spec §12 — prevents anon churn from
+    // signed-in callers). Adapted from better-auth anon.test.ts "should reject subsequent anonymous
+    // sign-in attempts once signed in".
+    const existing = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (existing) throw new Error("already authenticated — sign out before signing in anonymously");
+
+    // Deployment-global throttle via a single counter row (spec §12). `0` disables.
+    if (config.anonymousSignInsPerMinute > 0) {
+      const now = ctx.now();
+      const [counter] = await ctx.db.query("authCounters", "byName").eq("name", "anonymousSignIns").collect();
+      const windowMs = 60_000;
+      if (!counter) {
+        await ctx.db.insert("authCounters", { name: "anonymousSignIns", windowStart: now, count: 1 });
+      } else {
+        const windowStart = counter.windowStart as number;
+        const count = counter.count as number;
+        if (now - windowStart >= windowMs) {
+          await ctx.db.replace(counter._id as string, { ...counter, windowStart: now, count: 1 }); // new window
+        } else if (count >= config.anonymousSignInsPerMinute) {
+          throw new AnonymousThrottledError();                                                     // over cap
+        } else {
+          await ctx.db.replace(counter._id as string, { ...counter, count: count + 1 });
+        }
+      }
+    }
+
+    const userId = (await ctx.db.insert("users", { anonymous: true })) as string; // real user, no email
+    return mintSession(ctx, config, userId, deviceLabel);
+  });
+
+  const listSessions = query(async (ctx): Promise<SessionSummary[]> => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) return [];
+    const userId = current.userId as string;
+    // `byUserId` range, never a table scan: this is a reactive QUERY — a full-table read-set would
+    // make every subscribed device list re-run on EVERY sign-in in the deployment; the index range
+    // keeps invalidation scoped to this one user's sessions.
+    const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
+    return rows
+      .map((s) => ({
+        sessionId: s._id as string,
+        deviceLabel: (s.deviceLabel as string | undefined) ?? null,
+        createdAt: (s.createdAt as number | undefined) ?? null,
+        lastRefreshAt: (s.lastRefreshAt as number | undefined) ?? null,
+        current: (s._id as string) === (current._id as string),
+      }));
+  });
+
+  const revokeSession = mutation(async (ctx, { sessionId }: { sessionId: string }) => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) throw new Error("not authenticated");
+    const target = await ctx.db.get(sessionId);
+    // Ownership check: only the owner may revoke; a missing/foreign row is a silent no-op-ish reject.
+    if (!target || (target.userId as string) !== (current.userId as string)) throw new Error("session not found");
+    await ctx.db.delete(sessionId);
+    return null;
+  });
+
+  const revokeOtherSessions = mutation(async (ctx) => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) throw new Error("not authenticated");
+    const userId = current.userId as string;
+    // `byUserId` range, never a table scan — reads (and OCC conflict range) stay scoped to this
+    // one user's sessions.
+    const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
+    for (const s of rows) {
+      if ((s._id as string) !== (current._id as string)) {
+        await ctx.db.delete(s._id as string);
+      }
+    }
+    return null;
+  });
+
+  return { signUp, signIn, signOut, getUserId, refresh, signInAnonymously, listSessions, revokeSession, revokeOtherSessions };
 }

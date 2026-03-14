@@ -3,7 +3,7 @@ export * from "./schema";
 export * from "./errors";
 export type { AuthConfig, AuthOptions } from "./config";
 export { resolveAuthConfig } from "./config";
-export type { MintResult } from "./functions";
+export type { MintResult, SessionSummary } from "./functions";
 export { makeAuthModules, mintSession, resolveSession, normalizeEmail } from "./functions";
 export { auth, defineAuth } from "./component";
 export { authContext } from "./context";
