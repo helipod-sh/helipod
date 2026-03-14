@@ -242,6 +242,15 @@ export class StackbaseClient {
    *  none/empty) — see `setAuth()` below and spec §(k)7. Stamped synchronously onto every entry;
    *  computed asynchronously (SubtleCrypto) whenever `setAuth` is called with a real token. */
   private outboxFingerprint = "anon";
+  /** When true, a managed `createAuthClient` owns the outbox fingerprint (derived from the stable
+   *  `sessionId`, not the rotating token) — `setAuth`'s token-hash recompute is suppressed so
+   *  rotation never orphans queued offline mutations mid-drain (spec decision 9). The raw
+   *  `setAuth(token)` path (no `createAuthClient`) leaves this false and keeps token-hash
+   *  fingerprinting byte-for-byte unchanged. */
+  private sessionFingerprintActive = false;
+  /** The `session:<sessionId>` key whose SHA-256 is the active managed fingerprint — guards a stale
+   *  async digest from overwriting a newer session's fingerprint. */
+  private sessionFingerprintKey: string | null = null;
   /** The S4 swap's capability flag (verdict §(d) "S4 swap, feature-detected") — flipped by
    *  `setOutboxArmed()`, which T3's Connect handshake calls once a `ConnectAck` proves server-side
    *  receipt dedup exists for this session. Defaults `false`: today's fail-fast, byte-for-byte,
@@ -699,10 +708,12 @@ export class StackbaseClient {
     this.hasSetAuth = true;
     this.lastAuthToken = token;
     this.transport.send({ type: "SetAuth", token });
-    if (this.outbox) {
+    if (this.outbox && !this.sessionFingerprintActive) {
       // `identityFingerprint` cache (verdict §(d) hazard 9 / spec §(k)7): SHA-256 of the token, or
       // "anon" for none/empty — computed here (async, SubtleCrypto) so `mutation()` can stamp the
       // cached value synchronously. Guarded against a stale resolution racing a LATER setAuth call.
+      // Suppressed when a managed auth client owns the fingerprint (derived from sessionId instead —
+      // see `setSessionFingerprint`), so token rotation never re-fingerprints queued mutations.
       if (!token) {
         this.outboxFingerprint = "anon";
       } else {
@@ -712,6 +723,29 @@ export class StackbaseClient {
         });
       }
     }
+  }
+
+  /** Managed-session fingerprinting (spec decision 9): a `createAuthClient` calls this so the durable
+   *  outbox's `identityFingerprint` derives from the STABLE `sessionId`, not the rotating access
+   *  token — otherwise a rotation mid-drain would orphan queued offline mutations under a new
+   *  fingerprint. Pass `null` to hand the fingerprint back to the raw `setAuth` token-hash path
+   *  (e.g. on sign-out). No-op when no outbox is configured. */
+  setSessionFingerprint(sessionId: string | null): void {
+    this.sessionFingerprintActive = sessionId !== null;
+    if (sessionId === null) {
+      this.sessionFingerprintKey = null;
+      // Fall back to the current token's fingerprint (or "anon"): re-run setAuth's cache path.
+      if (this.outbox) {
+        const token = this.lastAuthToken;
+        if (!token) this.outboxFingerprint = "anon";
+        else void sha256Hex(token).then((hex) => { if (this.lastAuthToken === token && !this.sessionFingerprintActive) this.outboxFingerprint = hex; });
+      }
+      return;
+    }
+    if (!this.outbox) return;
+    const key = `session:${sessionId}`;
+    this.sessionFingerprintKey = key;
+    void sha256Hex(key).then((hex) => { if (this.sessionFingerprintKey === key) this.outboxFingerprint = hex; });
   }
 
   /** Publish an ephemeral event (presence/typing) — bypasses the engine. */

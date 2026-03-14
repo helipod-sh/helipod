@@ -46,6 +46,19 @@ export { buildConnectMessage, outboxAckedThrough, outboxHeldFromLog, outboxHeldF
 export type { HeadlessDrainOptions } from "./headless-drain";
 export { drainOutboxOnce } from "./headless-drain";
 
+// Auth slice A1 — the token-lifecycle manager over a `StackbaseClient` (rotation, refresh
+// scheduling, single-refresher, cross-tab pair broadcast, sessionId-based outbox fingerprint).
+export type {
+  AuthClient,
+  AuthManagedClient,
+  CreateAuthClientOptions,
+  PairBroadcast,
+  RefreshLock,
+  SessionInfo,
+  SessionStorage,
+} from "./auth-client";
+export { createAuthClient, localStorageSession, memorySession } from "./auth-client";
+
 /** Untyped core of client-side id minting — prefer the codegen-typed `mintId` from your app's
  *  `_generated/ids`. Exists for hosts without codegen output at hand. */
 export { mintEncodedDocumentId as mintDocumentId } from "@stackbase/id-codec";
