@@ -1,5 +1,5 @@
 import { argon2id, argon2Verify } from "hash-wasm";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
 const ARGON = { parallelism: 1, iterations: 3, memorySize: 19456, hashLength: 32, outputType: "encoded" as const };
 
@@ -34,4 +34,9 @@ function verifyScryptLegacy(password: string, stored: string): boolean {
 /** A url-safe session token (256 bits). */
 export function generateToken(): string {
   return randomBytes(32).toString("base64url");
+}
+
+/** SHA-256 of `input`, base64url-encoded — how session tokens are hashed at rest (spec decision 2). */
+export function sha256base64url(input: string): string {
+  return createHash("sha256").update(input).digest("base64url");
 }

@@ -18,6 +18,7 @@
   "devDependencies": {
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
+    "@stackbase/test": "workspace:*",
     "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:"
   }
 }
