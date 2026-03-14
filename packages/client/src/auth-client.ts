@@ -148,8 +148,12 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
   let info: SessionInfo | null = storage.load();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  /** Consecutive generic (non-STALE, non-terminal) refresh failures — drives `scheduleBackoff()`'s
+   *  exponential delay. Reset by `apply()` on any successful refresh or adopted pair. */
+  let refreshFailureCount = 0;
 
   function apply(next: SessionInfo | null): void {
+    refreshFailureCount = 0;
     info = next;
     if (next) {
       storage.save(next);
@@ -175,15 +179,42 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
     timer = setTimeout(() => { void doRefresh(); }, delay);
   }
 
+  const backoffBaseMs = 1000;
+  const backoffCapMs = 60_000;
+
+  /** Exponential backoff for a transient (non-STALE, non-terminal) refresh failure: 1s, 2s, 4s, … up
+   *  to `backoffCapMs`. This is distinct from `schedule()`'s TTL-based delay, which is derived from
+   *  `expiresAt - now()` and collapses to ~0 once `now() >= expiresAt` — using `schedule()` here would
+   *  spin in a tight zero-delay retry loop for the rest of a server outage. `refreshFailureCount` is
+   *  reset by `apply()` on the next successful refresh or adopted pair. */
+  function scheduleBackoff(): void {
+    if (timer) clearTimeout(timer);
+    if (!info || closed) return;
+    refreshFailureCount++;
+    const delay = Math.min(backoffCapMs, backoffBaseMs * 2 ** (refreshFailureCount - 1));
+    timer = setTimeout(() => { void doRefresh(); }, delay);
+  }
+
+  /** `expiresAt` moves strictly forward on every rotation (it's the new access token's absolute
+   *  expiry), so it doubles as a monotonic generation marker. A foreign pair (re-read under the lock,
+   *  or delivered via broadcast) must only be adopted when it is STRICTLY NEWER than our current one —
+   *  adopting an older/foreign pair regresses our state and shared storage, which can cascade into a
+   *  spurious `REFRESH_REUSED` forced sign-out (using a since-superseded refresh token) or a zero-delay
+   *  retry loop (a stale `expiresAt` already in the past). */
+  function isNewer(candidate: SessionInfo, currentInfo: SessionInfo): boolean {
+    return candidate.refreshToken !== currentInfo.refreshToken && candidate.expiresAt > currentInfo.expiresAt;
+  }
+
   async function doRefresh(): Promise<void> {
     if (!info || closed) return;
     const before = info;
     try {
       const result = await lock.run(async () => {
         // Another tab may have rotated (and broadcast) while we queued for the lock: re-read storage
-        // and, if a newer pair is present, adopt it instead of refreshing again.
+        // and, if a newer pair is present, adopt it instead of refreshing again. See `isNewer` — a
+        // naive refreshToken-diff check would also match an OLDER foreign pair.
         const latest = storage.load();
-        if (latest && latest.refreshToken !== before.refreshToken) return { adopted: latest };
+        if (latest && isNewer(latest, before)) return { adopted: latest };
         const next = (await client.mutation(refreshPath, { refreshToken: before.refreshToken })) as SessionInfo;
         return { minted: next };
       });
@@ -198,11 +229,12 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
       const code = codeOf(err);
       if (code === "REFRESH_STALE") {
         // Honest race: the winner's broadcast should arrive shortly. Wait briefly, then re-read
-        // storage; if a newer pair landed, adopt it — otherwise reschedule and try again.
+        // storage; if a newer pair landed, adopt it (see `isNewer`) — otherwise reschedule and try
+        // again.
         setTimeout(() => {
           if (closed) return;
           const latest = storage.load();
-          if (latest && latest.refreshToken !== before.refreshToken) apply(latest);
+          if (latest && isNewer(latest, before)) apply(latest);
           else schedule();
         }, 250);
         return;
@@ -212,15 +244,17 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
         opts.onSignedOut?.();
         return;
       }
-      // Transient/unknown: reschedule a retry.
-      schedule();
+      // Transient/unknown (e.g. a network blip or server outage): back off exponentially rather than
+      // `schedule()`'s TTL-based delay (see `scheduleBackoff`'s doc comment).
+      scheduleBackoff();
     }
   }
 
-  // Adopt a pair broadcast by another tab (it already committed the rotation server-side).
+  // Adopt a pair broadcast by another tab (it already committed the rotation server-side). Guarded by
+  // `isNewer` (see its doc comment) so a stale/out-of-order/foreign broadcast can never regress us.
   broadcast.onMessage((incoming) => {
     if (closed || !info) return;
-    if (incoming.refreshToken !== info.refreshToken) apply(incoming);
+    if (isNewer(incoming, info)) apply(incoming);
   });
 
   // Re-apply a persisted session on construction (reload continuity).
@@ -229,7 +263,7 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
   return {
     setSession(next) { apply(next); },
     clearSession() { apply(null); opts.onSignedOut?.(); },
-    getSessionInfo() { return info; },
+    getSessionInfo() { return info ? { ...info } : null; }, // shallow copy — never hand out the live internal object
     close() {
       closed = true;
       if (timer) clearTimeout(timer);

@@ -101,7 +101,10 @@ describe("createAuthClient", () => {
     const cA = stubClient();
     const cB = stubClient();
     let refreshCalls = 0;
-    const winner = mint(9, start + 3_600_000);
+    // `expiresAt` must be STRICTLY greater than `initial`'s below — the recency guard (`isNewer`)
+    // only adopts a foreign/re-read pair when it's newer, and a real rotation always mints a later
+    // `expiresAt`, so this reflects reality rather than the coincidental same-TTL pair from before.
+    const winner = mint(9, start + 3_600_000 + 60_000);
     cA.onRefresh = async () => { refreshCalls++; storage.save(winner); return winner; };
     cB.onRefresh = async () => { refreshCalls++; storage.save(winner); return winner; };
 
@@ -115,13 +118,12 @@ describe("createAuthClient", () => {
     // NOTE (deviation from the task-4 brief's literal test body): the brief's snippet followed this
     // with an additional `await vi.runOnlyPendingTimersAsync();`. That call fires EVERY timer already
     // registered regardless of how far out its delay is — including the *next* refresh cycle's timer
-    // that `apply(winner)` schedules for both tabs once they adopt the winning pair (since `winner`
-    // here reuses the same `expiresAt` as `initial`, the post-adoption `schedule()` delay is short
-    // relative to the full TTL). That flush was firing two more genuine refresh cycles (refreshCalls
-    // observed at 3, not 1) — a real behavior of the "reschedule after every apply" design, not a bug
-    // in it. It's dropped here because it's incidental to what this test is asserting: exactly one
-    // network refresh happens for the ORIGINAL rotation race. Confirmed by isolated run that dropping
-    // it alone (no other change) yields refreshCalls === 1 with both tabs on "at9".
+    // that `apply(winner)` schedules for both tabs once they adopt the winning pair. That flush was
+    // firing an extra genuine refresh cycle — a real behavior of the "reschedule after every apply"
+    // design, not a bug in it. It's dropped here because it's incidental to what this test is
+    // asserting: exactly one network refresh happens for the ORIGINAL rotation race. Confirmed by
+    // isolated run that dropping it alone (no other change) yields refreshCalls === 1 with both tabs
+    // on "at9".
     // The lock + storage re-read means only ONE network refresh actually happened; the other tab
     // adopted the winning pair (via storage re-read under the lock and/or the broadcast).
     expect(refreshCalls).toBe(1);
@@ -147,13 +149,30 @@ describe("createAuthClient", () => {
     auth.close();
   });
 
+  it("REFRESH_REUSED (same terminal branch as REFRESH_EXPIRED) clears storage and fires onSignedOut", async () => {
+    const c = stubClient();
+    const start = 3_100_000;
+    vi.setSystemTime(start);
+    const storage = memorySession();
+    const signedOut = vi.fn();
+    c.onRefresh = async () => { const e = new Error("REFRESH_REUSED"); (e as Error & { code?: string }).code = "REFRESH_REUSED"; throw e; };
+    const auth = createAuthClient(c, { storage, now: () => Date.now(), lock: { run: (f) => f() }, broadcast: { post() {}, onMessage() {}, close() {} }, onSignedOut: signedOut });
+    auth.setSession(mint(1, start + 3_600_000));
+    await vi.advanceTimersByTimeAsync(3_600_000 * 0.8 + 5);
+    expect(signedOut).toHaveBeenCalledTimes(1);
+    expect(storage.load()).toBeNull();
+    expect(c.auths.at(-1)).toBeNull();
+    auth.close();
+  });
+
   it("REFRESH_STALE waits for the broadcast winner instead of signing out", async () => {
     const c = stubClient();
     const start = 4_000_000;
     vi.setSystemTime(start);
     const storage = memorySession();
     const signedOut = vi.fn();
-    const winner = mint(7, start + 3_600_000);
+    // Strictly newer than the initial pair's `expiresAt` below — required by the recency guard.
+    const winner = mint(7, start + 3_600_000 + 60_000);
     c.onRefresh = async () => { const e = new Error("REFRESH_STALE"); (e as Error & { code?: string }).code = "REFRESH_STALE"; throw e; };
     const auth = createAuthClient(c, { storage, now: () => Date.now(), lock: { run: (f) => f() }, broadcast: { post() {}, onMessage() {}, close() {} }, onSignedOut: signedOut });
     auth.setSession(mint(1, start + 3_600_000));
@@ -162,6 +181,107 @@ describe("createAuthClient", () => {
     await vi.advanceTimersByTimeAsync(300);                  // the 250ms wait-for-broadcast elapses
     expect(signedOut).not.toHaveBeenCalled();
     expect(c.auths.at(-1)).toBe("at7");                      // adopted the winner
+    auth.close();
+  });
+
+  it("broadcast: an OLDER incoming pair (lower expiresAt) is ignored — no regression", async () => {
+    // The recency guard (`isNewer`): an older/foreign pair delivered via broadcast must never
+    // regress the current pair — that can cascade into a spurious REFRESH_REUSED forced sign-out
+    // (using a since-superseded refresh token) or a zero-delay retry loop.
+    const c = stubClient();
+    const start = 4_500_000;
+    vi.setSystemTime(start);
+    const storage = memorySession();
+    let deliver: ((info: SessionInfo) => void) | undefined;
+    const broadcast: PairBroadcast = {
+      post() {},
+      onMessage(cb) { deliver = cb; },
+      close() {},
+    };
+    const auth = createAuthClient(c, { storage, now: () => Date.now(), lock: { run: (f) => f() }, broadcast });
+    const current = mint(5, start + 3_600_000);
+    auth.setSession(current);
+    const authsBefore = c.auths.length;
+    const fpsBefore = c.fps.length;
+
+    const older = mint(4, start + 1_800_000); // lower expiresAt = an OLDER generation
+    deliver?.(older);
+
+    expect(auth.getSessionInfo()).toEqual(current); // untouched in memory
+    expect(storage.load()).toEqual(current);        // untouched in storage
+    expect(c.auths.length).toBe(authsBefore);        // no additional setAuth call
+    expect(c.fps.length).toBe(fpsBefore);            // no additional fingerprint call either
+    auth.close();
+  });
+
+  it("generic refresh errors back off exponentially (capped at 60s), and the failure count resets on success", async () => {
+    const c = stubClient();
+    const start = 4_700_000;
+    vi.setSystemTime(start);
+    const storage = memorySession();
+    const callTimes: number[] = [];
+    let mode: "fail" | "succeed" = "fail";
+    c.onRefresh = async () => {
+      callTimes.push(Date.now());
+      if (mode === "fail") throw new Error("ECONNRESET"); // generic/transient — no `.code`
+      return mint(99, Date.now() + 2000);                 // short TTL: next cycle arrives quickly
+    };
+    const auth = createAuthClient(c, { storage, now: () => Date.now(), lock: { run: (f) => f() }, broadcast: { post() {}, onMessage() {}, close() {} } });
+    auth.setSession(mint(1, start + 3_600_000));
+
+    await vi.advanceTimersByTimeAsync(3_600_000 * 0.8 + 5); // call #1 fails → backoff 1s scheduled
+    await vi.advanceTimersByTimeAsync(1000 + 5);             // call #2 fails → backoff 2s scheduled
+    await vi.advanceTimersByTimeAsync(2000 + 5);             // call #3 fails → backoff 4s scheduled
+    expect(callTimes.length).toBe(3);
+    expect(callTimes[1]! - callTimes[0]!).toBe(1000);        // grew 1s → 2s
+    expect(callTimes[2]! - callTimes[1]!).toBe(2000);        // grew 2s → 4s
+
+    mode = "succeed";
+    await vi.advanceTimersByTimeAsync(4000 + 5);             // call #4 succeeds → counter resets;
+                                                              // schedule()s next cycle at 80% of 2000ms
+    expect(callTimes.length).toBe(4);
+    expect(c.auths.at(-1)).toBe("at99");
+
+    mode = "fail";
+    await vi.advanceTimersByTimeAsync(1600 + 5);             // call #5 fails → backoff restarts at 1s
+    expect(callTimes.length).toBe(5);
+    await vi.advanceTimersByTimeAsync(1000 + 5);             // if reset: call #6 at +1000ms (not +8000ms)
+    expect(callTimes.length).toBe(6);
+    auth.close();
+  });
+
+  it("zero-config defaults (no lock/broadcast override) still complete a refresh rotation", async () => {
+    // `defaultLock()`/`defaultBroadcast()` are otherwise untested — every other test injects fakes.
+    // This must pass whether the runtime provides Web Locks/BroadcastChannel or falls back to the
+    // in-process serializer/no-op — assert only that the refresh happened and state advanced.
+    const c = stubClient();
+    const start = 4_900_000;
+    vi.setSystemTime(start);
+    const storage = memorySession();
+    const onSignedOut = vi.fn();
+    let refreshed = false;
+    c.onRefresh = async () => { refreshed = true; return mint(2, Date.now() + 3_600_000); };
+    const auth = createAuthClient(c, { storage, onSignedOut });
+    auth.setSession(mint(1, start + 3_600_000));
+    await vi.advanceTimersByTimeAsync(3_600_000 * 0.8 + 5);
+    expect(refreshed).toBe(true);
+    expect(c.auths.at(-1)).toBe("at2");
+    expect(auth.getSessionInfo()?.refreshToken).toBe("rt2");
+    expect(onSignedOut).not.toHaveBeenCalled();
+    auth.close();
+  });
+
+  it("getSessionInfo returns a shallow copy, not the live internal object", () => {
+    const c = stubClient();
+    const storage = memorySession();
+    const auth = createAuthClient(c, { storage, now: () => Date.now(), lock: { run: (f) => f() }, broadcast: { post() {}, onMessage() {}, close() {} } });
+    const session = mint(1, 123);
+    auth.setSession(session);
+    const got = auth.getSessionInfo();
+    expect(got).toEqual(session);
+    expect(got).not.toBe(session); // not the caller's own object identity
+    if (got) got.token = "tampered";
+    expect(auth.getSessionInfo()?.token).toBe("at1"); // mutating the returned copy didn't touch internal state
     auth.close();
   });
 
