@@ -24,6 +24,8 @@ const api = anyApi as {
     signUp: { __path: string };
     signIn: { __path: string };
     signOut: { __path: string };
+    signInAnonymously: { __path: string };
+    revokeSession: { __path: string };
   };
   whoami: { get: { __path: string } };
 };
@@ -189,5 +191,39 @@ describe("auth-demo — reactive auth flow", () => {
     expect(typeof token2).toBe("string");
     expect(token2.length).toBeGreaterThan(0);
     expect(userId2).toBe(userId);
+  });
+
+  it("anonymous → signUp upgrade preserves the userId", async () => {
+    const c = new StackbaseClient(loopbackTransport(runtime.connect("anon1")));
+    const anon = await c.mutation(api.auth.signInAnonymously, {}) as { userId: string; token: string; sessionId: string };
+    c.setAuth(anon.token);
+    const seen: Array<string | null> = [];
+    c.subscribe(api.whoami.get, {}, (v) => seen.push(v as string | null));
+    await waitFor(() => seen.some((v) => v === anon.userId));
+    const up = await c.mutation(api.auth.signUp, { email: "up@example.com", password: "hunter2!" }) as { userId: string; token: string };
+    expect(up.userId).toBe(anon.userId);
+  });
+
+  it("revokeSession on one connection flips another connection's whoami subscription to null", async () => {
+    const c = new StackbaseClient(loopbackTransport(runtime.connect("revoke1")));
+    const admin = new StackbaseClient(loopbackTransport(runtime.connect("revoke2")));
+
+    const s = await c.mutation(api.auth.signUp, {
+      email: "erin@example.com",
+      password: "hunter2!",
+    }) as { token: string; userId: string; sessionId: string };
+
+    c.setAuth(s.token);
+    const seen: Array<string | null> = [];
+    c.subscribe(api.whoami.get, {}, (v) => seen.push(v as string | null));
+    await waitFor(() => seen.some((v) => v === s.userId));
+
+    // A second connection, holding the same token, revokes the session.
+    admin.setAuth(s.token);
+    await admin.mutation(api.auth.revokeSession, { sessionId: s.sessionId });
+
+    // The first connection's live subscription reactively flips to null.
+    await waitFor(() => seen.at(-1) === null);
+    expect(seen.at(-1)).toBeNull();
   });
 });

@@ -17,6 +17,14 @@ export type Api = {
 
   };
   "whoami": {
+    add: FunctionReference<"mutation", "public", any, any>;
     get: FunctionReference<"query", "public", any, any>;
+    myNotes: FunctionReference<"query", "public", any, any>;
   };
 };
+
+export type UdfPathOf<A> = {
+  [M in keyof A & string]: {
+    [F in keyof A[M] & string]: `${M}:${F}`;
+  }[keyof A[M] & string];
+}[keyof A & string];
