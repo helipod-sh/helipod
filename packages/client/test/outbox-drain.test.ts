@@ -17,6 +17,7 @@ import {
   memoryOutbox,
   OUTBOX_VERSION,
   OFFLINE_IDENTITY_CHANGED,
+  NON_REPLAYABLE_MUTATION_DROPPED,
   computeDrainBackoff,
   type ClientResetInfo,
   type ClientTransport,
@@ -656,6 +657,51 @@ describe("OutboxDrain — dead-clientId meta rows are pruned at hydrate (T4 / T1
     expect(metas).toContain("live-tab"); // has a live entry → kept
     expect(metas).toContain(currentId); // the current session → kept
     expect(metas).not.toContain("dead-tab"); // no entries, not current → pruned
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* auth:refresh hydrate-time drop (final-review fix wave, defense-in-depth)      */
+/* -------------------------------------------------------------------------- */
+
+describe("OutboxDrain — a hand-crafted auth:refresh entry is dropped at hydrate, not executed", () => {
+  it("never adds it to the drainable log (never sent), and settles the durable row `failed` with NON_REPLAYABLE_MUTATION_DROPPED, while a sibling entry drains normally", async () => {
+    const outbox = memoryOutbox();
+    // A pre-fix client version's durable row — exactly what `client.ts#mutation`'s `{transient: true}`
+    // escape hatch now prevents from ever being written again, but an OLD queue might still hold one.
+    await seedOutbox(outbox, "old-tab", [
+      { seq: 0, order: 10, udfPath: "auth:refresh", body: "stolen-refresh-token" },
+      { seq: 1, order: 20, udfPath: "messages:send", body: "normal" },
+    ]);
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    client.setOutboxArmed(true);
+
+    await waitFor(() => t.batches().length > 0);
+    const batch = t.batches()[0]!;
+    // ONLY the sibling entry is ever sent — the refresh entry never touches the wire.
+    expect(batch.entries).toHaveLength(1);
+    expect(batch.entries[0]!.seq).toBe(1);
+    expect(batch.entries[0]!.udfPath).toBe("messages:send");
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("auth:refresh"));
+
+    applyBatch(t, batch);
+    await tick();
+
+    // The refresh row is settled `failed` with the dedicated code — DROPPED, not silently vanished.
+    const remaining = (await outbox.loadAll()).entries;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({
+      clientId: "old-tab",
+      seq: 0,
+      udfPath: "auth:refresh",
+      status: "failed",
+      error: { code: NON_REPLAYABLE_MUTATION_DROPPED },
+    });
+    errSpy.mockRestore();
+    client.close();
   });
 });
 

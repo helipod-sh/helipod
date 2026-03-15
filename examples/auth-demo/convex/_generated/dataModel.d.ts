@@ -3,6 +3,7 @@ import type { GenericId } from "@stackbase/values";
 
 export interface DataModel {
   _storage: { document: { _id: Id<"_storage">; _creationTime: number; status: ("pending" | "ready"); key: string; size: (number | null); contentType: (string | null); sha256: (string | null); visibility: ("private" | "public"); expiresAt: (number | null) } };
+  notes: { document: { _id: Id<"notes">; _creationTime: number; userId: string; body: string } };
 }
 
 export type TableNames = keyof DataModel;

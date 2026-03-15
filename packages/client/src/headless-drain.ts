@@ -37,9 +37,10 @@
 import type { ServerMessage } from "@stackbase/sync";
 import type { PendingMutation } from "./mutation-log";
 import { buildConnectMessage, outboxHeldFromStore } from "./connect-handshake";
-import { OutboxDrain, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
+import { OutboxDrain, dropIfNonReplayable, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
 import { type ClientTransport, webSocketTransport } from "./transport";
 import { OUTBOX_VERSION, defaultMintClientId, indexedDBOutbox, type OutboxEntry, type OutboxStorage } from "./outbox-storage";
+import { sha256Hex, sessionFingerprintKey } from "./identity-fingerprint";
 
 export interface HeadlessDrainOptions {
   /** The ws(s) sync endpoint. Ignored when `_transport` is injected (tests). */
@@ -55,6 +56,21 @@ export interface HeadlessDrainOptions {
    *  constraint, it does not build one). Replayed as `SetAuth` BEFORE `Connect`, exactly as a
    *  reconnecting `StackbaseClient` replays its last-set token. */
   getAuthToken?: () => Promise<string | null>;
+  /** For a `createAuthClient`-managed session (spec decision 9): resolve the PERSISTED
+   *  `SessionInfo.sessionId` so this drain computes the outbox `identityFingerprint` the exact same
+   *  way a live tab's `setSessionFingerprint` does (`sha256Hex(sessionFingerprintKey(sessionId))`,
+   *  never a token hash) — otherwise every entry a managed session stamped looks "foreign" here and
+   *  terminal-fails with `OFFLINE_IDENTITY_CHANGED` on every headless drain, composition the live
+   *  client never hits. Read the SAME storage row the auth client persists to — by default
+   *  `SESSION_STORAGE_KEY` (`"stackbase.session"`, exported from `auth-client.ts`) in `localStorage`,
+   *  or wherever a custom `SessionStorage`/`localStorageSession(key)` was configured to write it; a
+   *  Service Worker reads it via `clients.matchAll()`-relayed message, a mirrored IndexedDB copy, or
+   *  any other SW-reachable channel the app wires up — this function only documents the contract, it
+   *  does not build the plumbing. When this resolves to a non-null id, it takes priority over
+   *  `getAuthToken`'s token-hash fingerprint (which still governs `SetAuth` on the wire); omit it (or
+   *  resolve `null`) for a client that never adopted a managed session — the token-hash fingerprint
+   *  (or `"anon"`) applies exactly as before this option existed. */
+  getSessionId?: () => Promise<string | null>;
   /** How a coded (terminal, server-recorded) failure is handled — `"skip"` (default: settle
    *  terminally and continue) or `"pause"` (halt the whole drain and surface via `onPause`).
    *
@@ -86,17 +102,6 @@ export interface HeadlessDrainOptions {
 function originTag(): string {
   const loc = (globalThis as { location?: { origin?: string } }).location;
   return loc?.origin ?? "app";
-}
-
-/** SHA-256 hex digest — a local mirror of `client.ts#sha256Hex` (same duplication discipline as
- *  `outbox-drain.ts`'s `computeDrainBackoff`: a browser SDK file must not grow a cross-file runtime
- *  dependency for one six-line hash, but the TWO copies must stay byte-identical). */
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 /** Probe the ambient `navigator.locks`, wrapped into the seam — a local mirror of
@@ -195,6 +200,16 @@ export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ dra
       authToken = await opts.getAuthToken();
       if (authToken) fingerprint = await sha256Hex(authToken);
     }
+    if (opts.getSessionId) {
+      // A managed session's fingerprint (see `HeadlessDrainOptions.getSessionId`'s doc) takes
+      // priority over the token-hash computed above whenever it resolves non-null — the SAME
+      // `sessionFingerprintKey` format `client.ts#setSessionFingerprint` hashes, through the SAME
+      // shared `sha256Hex`, so the two can never disagree on what a managed entry's
+      // `identityFingerprint` should be. `getAuthToken`'s token (if any) still governs `SetAuth`
+      // below regardless — only the FINGERPRINT is switched.
+      const sessionId = await opts.getSessionId();
+      if (sessionId) fingerprint = await sha256Hex(sessionFingerprintKey(sessionId));
+    }
 
     transport = transport ?? webSocketTransport(opts.url, { reconnect: false });
     // SetAuth BEFORE Connect (mirrors `client.ts#onTransportReopened`'s "SetAuth replay first"):
@@ -234,6 +249,10 @@ async function runDrain(
   const heldAtConnect = outboxHeldFromStore(initialEntries);
 
   function addHydrated(e: OutboxEntry): void {
+    // Defense-in-depth (see `dropIfNonReplayable`'s doc) — the SAME check `client.ts#addHydratedEntry`
+    // and `OutboxDrain#hydrateOnce` apply; this store-only host has its own separate `addHydrated`,
+    // so the check is repeated here rather than shared code that doesn't exist between the two.
+    if (dropIfNonReplayable(outbox, e)) return;
     for (const existing of log.values()) {
       if (existing.clientId === e.clientId && existing.seq === e.seq) return;
     }

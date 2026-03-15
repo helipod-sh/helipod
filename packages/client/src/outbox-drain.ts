@@ -161,6 +161,45 @@ export interface DrainHost {
 /** Terminal code for the flush-time identity gate (hazard 9). */
 export const OFFLINE_IDENTITY_CHANGED = "OFFLINE_IDENTITY_CHANGED";
 
+/** The auth-refresh mutation's canonical udf path — mirrors `auth-client.ts`'s default `refreshPath`
+ *  convention (`"auth:refresh"`). A durable entry hydrated under this path is DROPPED at hydrate
+ *  time (see `hydrateOnce` below) rather than resent — defense-in-depth for a row a PRE-FIX client
+ *  version already durably enqueued, before `client.ts#mutation`'s `{transient: true}` escape hatch
+ *  existed. Replaying a refresh mutation is never safe: there is no live promise awaiter for the
+ *  mint result across a reload, and blindly resending a stale refresh token risks tripping the
+ *  session's reuse-detection and force-signing-out an honest user (`auth-client.ts`'s file doc,
+ *  `REFRESH_REUSED`). A fixed client never durably enqueues this path in the first place, so this
+ *  should only ever match a row a stale/pre-fix build left behind. */
+export const AUTH_REFRESH_UDF_PATH = "auth:refresh";
+
+/** Terminal code stamped on a hydrate-time-dropped refresh entry — see {@link AUTH_REFRESH_UDF_PATH}. */
+export const NON_REPLAYABLE_MUTATION_DROPPED = "NON_REPLAYABLE_MUTATION_DROPPED";
+
+/** Defense-in-depth (see {@link AUTH_REFRESH_UDF_PATH}'s doc): if `entry.udfPath` names the
+ *  non-replayable auth-refresh mutation, settle its durable row terminally `"failed"` (never
+ *  silently dequeued — visible via `pendingMutations()`/`dismiss()` like any other terminal
+ *  outcome) and return `true`; the caller must skip adding it to a live log. EVERY path a durable
+ *  `OutboxEntry` can enter a live reconciler log through must call this FIRST: `hydrateOnce` below,
+ *  `client.ts`'s `addHydratedEntry` (itself the chokepoint for BOTH `OutboxDrain#hydrateOnce`'s
+ *  `DrainHost.addHydrated` call and the separate `mirrorFromStore`/cross-tab-backstop path), and the
+ *  headless drain's own store-only `addHydrated` — a single shared check so none of those three
+ *  independent ingestion paths can forget it or drift out of sync. */
+export function dropIfNonReplayable(outbox: OutboxStorage, entry: OutboxEntry): boolean {
+  if (entry.udfPath !== AUTH_REFRESH_UDF_PATH) return false;
+  console.error(
+    `[stackbase] outbox: dropping a queued "${entry.udfPath}" entry at hydrate — replaying an auth ` +
+      "refresh is never safe (a stale rotation would trip reuse-detection and force-sign-out an " +
+      "honest user); this entry predates the client's transient-mutation fix",
+  );
+  void outbox
+    .updateStatus(entry.clientId, entry.seq, "failed", {
+      message: `mutation "${entry.udfPath}" dropped at hydrate: durable auth-refresh replay is never safe`,
+      code: NON_REPLAYABLE_MUTATION_DROPPED,
+    })
+    .catch(() => {});
+  return true;
+}
+
 export interface OutboxDrainOptions {
   /** The Web Locks lock name — `stackbase:outbox:<origin>:<deployment>`. */
   lockName: string;
@@ -353,7 +392,11 @@ export class OutboxDrain {
     this.hydrated = true;
     const { entries } = await this.host.outbox.loadAll();
     for (const e of entries) {
-      if (e.status === "unsent" || e.status === "inflight" || e.status === "parked") this.host.addHydrated(e);
+      if (e.status !== "unsent" && e.status !== "inflight" && e.status !== "parked") continue;
+      // Defense-in-depth (see `dropIfNonReplayable`'s doc): DROP rather than resend — settle, don't
+      // execute. Never added to the drainable log in the first place.
+      if (dropIfNonReplayable(this.host.outbox, e)) continue;
+      this.host.addHydrated(e);
     }
     await this.pruneDeadMeta();
   }

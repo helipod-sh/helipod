@@ -1,4 +1,5 @@
-import { defineSchema } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@stackbase/values";
 
-// Empty app schema — auth component owns its tables.
-export default defineSchema({});
+export default defineSchema({
+  notes: defineTable({ userId: v.string(), body: v.string() }).index("byUser", ["userId"]),
+});

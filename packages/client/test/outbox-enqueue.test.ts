@@ -344,3 +344,52 @@ describe("StackbaseClient — the S4 park swap (Task 2)", () => {
     void first;
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* the `transient` escape hatch (final-review fix wave — auth-refresh exemption) */
+/* -------------------------------------------------------------------------- */
+
+describe("StackbaseClient.mutation — the `{ transient: true }` escape hatch", () => {
+  it("direct-sends with no (clientId, seq) and NEVER lands in the durable outbox, while a plain mutation on the same client still does", async () => {
+    const t = new MockTransport();
+    const outbox = memoryOutbox();
+    const client = new StackbaseClient(t, { outbox });
+
+    void client.mutation("auth:refresh", { refreshToken: "rt-1" }, { transient: true });
+    await flushMicrotasks();
+
+    const sent = t.mutations();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.clientId).toBeUndefined(); // no outbox identity stamped at all
+    expect(sent[0]!.seq).toBeUndefined();
+    expect((await outbox.loadAll()).entries).toHaveLength(0); // never durably appended
+    expect(client.__pending[0]!.clientId).toBeUndefined();
+    expect(client.__pending[0]!.durable).toBeUndefined(); // append() was never even called
+
+    // A normal (non-transient) mutation on the SAME client still durably enqueues as before.
+    void client.mutation("messages:send", { body: "hi" });
+    await flushMicrotasks();
+    const entries = (await outbox.loadAll()).entries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.udfPath).toBe("messages:send");
+  });
+
+  it("is a no-op for a client constructed with no outbox at all — byte-identical wire shape either way", () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t); // no `outbox` option
+    void client.mutation("messages:send", { body: "hi" }, { transient: true });
+    const sent = t.mutations();
+    expect(sent).toHaveLength(1);
+    expect(Object.keys(sent[0]!).sort()).toEqual(["args", "requestId", "type", "udfPath"]);
+  });
+
+  it("offline (transport closed): a transient mutation still queues `unsent` with the promise pending — normal, non-durable semantics", () => {
+    const t = new MockTransport();
+    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    t.emitClose();
+    void client.mutation("auth:refresh", { refreshToken: "rt-1" }, { transient: true });
+    expect(client.__pending).toHaveLength(1);
+    expect(client.__pending[0]!.status.type).toBe("unsent");
+    expect(client.__pending[0]!.clientId).toBeUndefined();
+  });
+});
