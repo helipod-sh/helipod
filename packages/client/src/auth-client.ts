@@ -28,7 +28,11 @@ export interface SessionInfo {
 export interface AuthManagedClient {
   setAuth(token: string | null): void;
   setSessionFingerprint(sessionId: string | null): void;
-  mutation(ref: string, args?: Record<string, unknown>): Promise<unknown>;
+  /** `opts.transient` is threaded straight to `StackbaseClient.mutation`'s own escape hatch — the
+   *  refresh call below always passes `{ transient: true }` so a refresh mutation never durably
+   *  enqueues, even when the app configured an `outbox` (see the file doc's outbox-fingerprint
+   *  paragraph and `client.ts#mutation`'s doc for why replaying a refresh is never safe). */
+  mutation(ref: string, args?: Record<string, unknown>, opts?: { transient?: boolean }): Promise<unknown>;
 }
 
 /** Pluggable synchronous session store (same shape idea as the outbox storage seam). */
@@ -72,6 +76,15 @@ export interface AuthClient {
 }
 
 const KEY = "stackbase.session";
+
+/** The default `localStorage` key `localStorageSession()` persists under — a `SessionInfo` JSON
+ *  blob, `.sessionId` being the field a headless host needs for `headless-drain.ts`'s `getSessionId`
+ *  option (mirroring the SAME managed-session fingerprint a live tab's `setSessionFingerprint`
+ *  computes). Exported so a Service Worker (which shares `localStorage`'s *origin* but typically not
+ *  a synchronous API to it) or any other headless host can name the same storage row without
+ *  hand-copying the string literal. A custom `storage`/key (via `localStorageSession(key)` or a
+ *  fully custom `SessionStorage`) is, of course, this app's own convention to document instead. */
+export const SESSION_STORAGE_KEY = KEY;
 
 /** localStorage-backed store with an in-memory fallback wherever localStorage is unavailable/throws. */
 export function localStorageSession(key = KEY): SessionStorage {
@@ -215,7 +228,10 @@ export function createAuthClient(client: AuthManagedClient, opts: CreateAuthClie
         // naive refreshToken-diff check would also match an OLDER foreign pair.
         const latest = storage.load();
         if (latest && isNewer(latest, before)) return { adopted: latest };
-        const next = (await client.mutation(refreshPath, { refreshToken: before.refreshToken })) as SessionInfo;
+        // `{ transient: true }` — never durably enqueue a refresh call (see `AuthManagedClient.mutation`'s
+        // doc): a drain-replayed stale refresh after a reload has no live awaiter for the mint result
+        // and risks rotating the session blind, tripping reuse-detection into a force sign-out.
+        const next = (await client.mutation(refreshPath, { refreshToken: before.refreshToken }, { transient: true })) as SessionInfo;
         return { minted: next };
       });
       if (closed) return;

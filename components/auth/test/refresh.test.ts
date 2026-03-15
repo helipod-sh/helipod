@@ -103,6 +103,27 @@ describe("auth A1: refresh rotation + reuse detection", () => {
     }
   });
 
+  // Final-review fix wave: pins the whole-branch review's legacy-seam analysis — a legacy pre-A1
+  // session row `{ userId, token, expiresAt }` carries no `refreshTokenHash`/`prevRefreshTokenHash`
+  // at all, so presenting its raw (unhashed) `token` to `auth:refresh` can never match either the
+  // current- or reuse-detection lookup; it must fall through to the plain "invalid refresh token"
+  // rejection — never a minted pair (there is nothing hashed to rotate) and never a crash on a
+  // missing field.
+  it("a legacy pre-A1 row's raw token, presented to auth:refresh, plainly fails — never mints, never crashes", async () => {
+    const t = await harness();
+    try {
+      const r = (await t.mutation("auth:signUp", { email: "a@b.co", password: "pw" })) as MintResult;
+      const legacyToken = "legacy-raw-token-refresh-pin";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await t.run(async (ctx: any) => {
+        await ctx.db.insert("auth/sessions", { userId: r.userId, token: legacyToken, expiresAt: ctx.now() + 60_000 });
+      });
+      await expect(t.mutation("auth:refresh", { refreshToken: legacyToken })).rejects.toThrow(/invalid refresh token/);
+    } finally {
+      await t.close();
+    }
+  });
+
   it("absolute ceiling: an actively-refreshing session still dies at absoluteExpiresAt (spec decision 11)", async () => {
     // 90d ceiling; keep refreshing every ~29d so the sliding window never lapses — the absolute cap
     // must still terminate the session.

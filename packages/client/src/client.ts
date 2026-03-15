@@ -41,8 +41,9 @@ import {
   type OutboxEntryStatus,
   type OutboxStorage,
 } from "./outbox-storage";
-import { OutboxDrain, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
+import { OutboxDrain, dropIfNonReplayable, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
 import { buildConnectMessage, outboxHeldFromLog } from "./connect-handshake";
+import { sha256Hex, sessionFingerprintKey } from "./identity-fingerprint";
 import type { MutationBatchEntry } from "@stackbase/sync";
 
 export type { QueryListener, QueryErrorListener };
@@ -169,17 +170,6 @@ function probeBroadcastChannel(name: string): OutboxBroadcastLike | undefined {
 let entropyCounter = 0;
 function makeEntropy(): string {
   return `${Date.now().toString(36)}-${(entropyCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/** SHA-256 hex digest of `input` — the durable outbox's `identityFingerprint` (verdict §(d) hazard
- *  9 / spec §(k)7). Async (`SubtleCrypto`), so `setAuth` computes-and-caches it; `mutation()` (which
- *  must stay synchronous) only ever reads the cache. */
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 export class StackbaseClient {
@@ -542,29 +532,38 @@ export class StackbaseClient {
    * enriches the raw internal view into an `OptimisticLocalStore` before calling `entry.update`,
    * regardless of entry point; the cast to the internal `OptimisticUpdate` shape below is safe for
    * exactly that reason.
+   *
+   * `{ transient: true }` (internal escape hatch, e.g. `auth-client.ts`'s refresh call) skips the
+   * durable outbox entirely for THIS call — wire-send-only, normal promise semantics — even when an
+   * `outbox` is configured. It exists for mutations that must never be durably replayed after a
+   * reload (an auth-refresh call: replaying a stale refresh token blind, with no live awaiter for
+   * the mint result, trips reuse-detection and force-signs-out an honest user). A non-outbox client
+   * is unaffected either way (`useOutbox` is already false whenever `this.outbox` is unset).
    */
   mutation<Q extends AnyFunctionReference<any, any>>(
     ref: Q,
     args?: FunctionArgs<Q>,
-    opts?: { optimisticUpdate?: (store: OptimisticLocalStore, args: FunctionArgs<Q>) => void },
+    opts?: { optimisticUpdate?: (store: OptimisticLocalStore, args: FunctionArgs<Q>) => void; transient?: boolean },
   ): Promise<FunctionReturnType<Q>>;
   mutation(
     ref: FunctionReference | string,
     args?: Record<string, Value>,
-    opts?: { optimisticUpdate?: OptimisticUpdate },
+    opts?: { optimisticUpdate?: OptimisticUpdate; transient?: boolean },
   ): Promise<Value>;
   mutation(
     ref: AnyFunctionRef,
     args: Record<string, Value> = {},
-    opts: { optimisticUpdate?: OptimisticUpdate } = {},
+    opts: { optimisticUpdate?: OptimisticUpdate; transient?: boolean } = {},
   ): Promise<Value> {
     const path = getFunctionPath(ref);
     // Encodability triage (verdict §(d) "Drain", applied at enqueue time too): an unencodable
     // `args` throws HERE, synchronously — before any requestId/seq/entry exists — so a bad call
     // never occupies a durable outbox slot (a seq, once minted, is never reused).
     const argsJson = convexToJson(args as Value);
+    // `transient: true` opts THIS call out of the durable outbox entirely — see the method doc.
+    const useOutbox = this.outbox !== undefined && opts.transient !== true;
 
-    if (this.outbox && this.outboxQueueDepth() >= this.outboxMaxQueueSize) {
+    if (useOutbox && this.outboxQueueDepth() >= this.outboxMaxQueueSize) {
       // Overflow: reject the NEW enqueue, coded (verdict §(d) "Enqueue") — nothing was created,
       // no seq was consumed, no optimistic layer was touched.
       return Promise.reject(new OutboxOverflowError());
@@ -580,7 +579,7 @@ export class StackbaseClient {
       touched: new Set(),
       status: { type: "unsent" },
     };
-    if (this.outbox) {
+    if (useOutbox) {
       // Stamped synchronously — the durable-outbox identity (verdict §(d) "Identity"/"Enqueue").
       // Carried on the wire whenever an outbox is configured, not only once the S4 swap is armed
       // (see `mutationMessage` below) — "for park-safety... exactly as today otherwise".
@@ -593,7 +592,7 @@ export class StackbaseClient {
     // "While the queue is non-empty, new mutations enqueue behind it; when empty, live sends go
     // direct" (verdict §(d) "Enqueue") — computed BEFORE `initiate()` adds this entry to the log,
     // so it only ever sees OTHER entries' backlog.
-    const queueBusy = this.outbox !== undefined && this.hasOutboxBacklog();
+    const queueBusy = useOutbox && this.hasOutboxBacklog();
 
     // Event 1 — apply at initiation. A throwing updater rethrows here, synchronously, before any
     // promise is created or anything is sent.
@@ -609,13 +608,13 @@ export class StackbaseClient {
         entry.status = { type: "inflight" };
         this.transport.send(this.mutationMessage(entry));
       }
-      if (this.outbox) {
+      if (useOutbox) {
         // Write-behind: durably append WITHOUT awaiting — "the send never waits for it" (verdict
         // §(d) "Enqueue"). `entry.durable` flips once this resolves; `delivery-policy.ts`'s
         // `closeDisposition` reads it at close ("park eligibility requires durability"). A rejected
         // append (e.g. a fail-stopped `fsOutbox` after a disk error) must NOT become an unhandled
         // rejection — see `handleOutboxWriteError`.
-        void this.outbox
+        void this.outbox!
           .append(this.toOutboxEntry(entry))
           .then(() => {
             entry.durable = true;
@@ -743,7 +742,7 @@ export class StackbaseClient {
       return;
     }
     if (!this.outbox) return;
-    const key = `session:${sessionId}`;
+    const key = sessionFingerprintKey(sessionId);
     this.sessionFingerprintKey = key;
     void sha256Hex(key).then((hex) => { if (this.sessionFingerprintKey === key) this.outboxFingerprint = hex; });
   }
@@ -1303,6 +1302,10 @@ export class StackbaseClient {
    *  entry); a registry miss is layerless (no `update` at all), a clean drop under the baseline-gated
    *  drop rule exactly as T4 shipped it. */
   private addHydratedEntry(e: OutboxEntry): void {
+    // Defense-in-depth (see `dropIfNonReplayable`'s doc): the SAME check `OutboxDrain#hydrateOnce`
+    // applies, repeated here because this is ALSO the chokepoint `mirrorFromStore` (the T-crosstab
+    // backstop) routes through directly, bypassing `hydrateOnce` entirely.
+    if (dropIfNonReplayable(this.outbox!, e)) return;
     for (const existing of this.reconciler.entries()) {
       if (existing.clientId === e.clientId && existing.seq === e.seq) return;
     }

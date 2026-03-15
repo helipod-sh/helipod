@@ -36,7 +36,19 @@ export type { ClientResetInfo } from "./client";
 
 // Task 4 — the drain: the poison policy, the Web Locks seam (fake-able), and the backoff mirror.
 export type { DrainHost, OutboxDrainOptions, OutboxLockManager, PoisonPolicy } from "./outbox-drain";
-export { DEFAULT_DRAIN_CHUNK_SIZE, DEFAULT_DRAIN_INTERVAL_MS, OFFLINE_IDENTITY_CHANGED, OutboxDrain, computeDrainBackoff } from "./outbox-drain";
+export {
+  AUTH_REFRESH_UDF_PATH,
+  DEFAULT_DRAIN_CHUNK_SIZE,
+  DEFAULT_DRAIN_INTERVAL_MS,
+  NON_REPLAYABLE_MUTATION_DROPPED,
+  OFFLINE_IDENTITY_CHANGED,
+  OutboxDrain,
+  computeDrainBackoff,
+} from "./outbox-drain";
+
+// Shared identity-fingerprint primitives (`client.ts` and `headless-drain.ts` both route through
+// these — see the file doc for why a single copy matters).
+export { sha256Hex, sessionFingerprintKey } from "./identity-fingerprint";
 
 // The Connect-handshake helpers shared between `StackbaseClient` and the headless drain below.
 export { buildConnectMessage, outboxAckedThrough, outboxHeldFromLog, outboxHeldFromStore } from "./connect-handshake";
@@ -57,7 +69,7 @@ export type {
   SessionInfo,
   SessionStorage,
 } from "./auth-client";
-export { createAuthClient, localStorageSession, memorySession } from "./auth-client";
+export { createAuthClient, localStorageSession, memorySession, SESSION_STORAGE_KEY } from "./auth-client";
 
 /** Untyped core of client-side id minting — prefer the codegen-typed `mintId` from your app's
  *  `_generated/ids`. Exists for hosts without codegen output at hand. */

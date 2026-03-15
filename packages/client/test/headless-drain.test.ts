@@ -5,7 +5,16 @@
  * only the store-only host + the shared `OutboxDrain`.
  */
 import { describe, it, expect } from "vitest";
-import { drainOutboxOnce, memoryOutbox, OUTBOX_VERSION, type OutboxEntry, type OutboxLockManager, type OutboxStorage } from "../src/index";
+import {
+  drainOutboxOnce,
+  memoryOutbox,
+  OUTBOX_VERSION,
+  sha256Hex,
+  sessionFingerprintKey,
+  type OutboxEntry,
+  type OutboxLockManager,
+  type OutboxStorage,
+} from "../src/index";
 import type { ClientMessage, ServerMessage } from "@stackbase/sync";
 import type { ClientTransport } from "../src/transport";
 
@@ -347,5 +356,74 @@ describe("drainOutboxOnce — timeoutMs", () => {
     expect(result.failed).toBe(0);
     expect(result.remaining).toBe(1);
     expect(t.closedCount).toBe(1); // closed cleanly on timeout
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* getSessionId — managed-session fingerprint (final-review fix wave)          */
+/* -------------------------------------------------------------------------- */
+
+describe("drainOutboxOnce — getSessionId (managed-session fingerprint composition)", () => {
+  /** A live tab's `setSessionFingerprint` stamps entries with `sha256Hex(sessionFingerprintKey(id))`
+   *  (`client.ts`), never a raw token hash — this is that SAME format, computed the SAME way, so a
+   *  headless drain configured with the matching `getSessionId` recognizes the entry as its own. */
+  async function seedManagedEntry(outbox: OutboxStorage, sessionId: string): Promise<void> {
+    const fingerprint = await sha256Hex(sessionFingerprintKey(sessionId));
+    const entry: OutboxEntry = {
+      clientId: "old",
+      seq: 0,
+      requestId: "old-0",
+      udfPath: "messages:send",
+      args: { body: "managed" },
+      seed: { entropy: "e0", now: 1000 },
+      order: 1,
+      status: "unsent",
+      identityFingerprint: fingerprint,
+      outboxVersion: OUTBOX_VERSION,
+      enqueuedAt: 1000,
+    };
+    await outbox.append(entry);
+  }
+
+  it("drains successfully when getSessionId resolves the SAME sessionId the entry was stamped under", async () => {
+    const outbox = memoryOutbox();
+    await seedManagedEntry(outbox, "sess-1");
+    const t = new MockTransport();
+    const resultPromise = drainOutboxOnce({
+      url: "ws://ignored",
+      outbox,
+      locks: null,
+      _transport: t,
+      getSessionId: async () => "sess-1",
+    });
+
+    await waitFor(() => t.connects().length === 1);
+    t.emit({ type: "ConnectAck", known: true, results: [], deploymentId: "dep-1" });
+    await waitFor(() => t.batches().length > 0);
+    applyBatch(t, t.batches()[0]!);
+
+    const result = await resultPromise;
+    expect(result).toEqual({ drained: 1, failed: 0, remaining: 0 });
+  });
+
+  it("without getSessionId, the SAME managed entry terminal-fails OFFLINE_IDENTITY_CHANGED even with a getAuthToken (the composition gap this fixes)", async () => {
+    const outbox = memoryOutbox();
+    await seedManagedEntry(outbox, "sess-1");
+    const t = new MockTransport();
+    const resultPromise = drainOutboxOnce({
+      url: "ws://ignored",
+      outbox,
+      locks: null,
+      _transport: t,
+      getAuthToken: async () => "some-raw-access-token",
+    });
+
+    await waitFor(() => t.connects().length === 1);
+    t.emit({ type: "ConnectAck", known: true, results: [], deploymentId: "dep-1" });
+
+    const result = await resultPromise;
+    expect(result).toEqual({ drained: 0, failed: 1, remaining: 0 });
+    const remaining = (await outbox.loadAll()).entries;
+    expect(remaining[0]).toMatchObject({ status: "failed", error: { code: "OFFLINE_IDENTITY_CHANGED" } });
   });
 });
