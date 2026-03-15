@@ -52,11 +52,20 @@ sends, deterministic mutations, and abuse defenses that work without transport i
 9. **Cross-account guard**: a code row records the email it was issued for; every redeem
    asserts the presented email matches the row (a reset code can never act on a different
    account) — the convex-auth `Password.ts:196` guard, adopted as a correctness requirement.
-10. **Unverified-account adoption clears the password** (better-auth's correctness rule,
-    adopted): when magic-link/OTP sign-in adopts a pre-existing password account whose email
-    was never verified, the password credential is deleted — otherwise an attacker who
-    pre-registered the victim's email with a password keeps a backdoor into the account the
-    victim now legitimately owns.
+10. **Unverified-account adoption clears the password, and first mailbox proof is a
+    credential boundary** (better-auth's correctness rule, adopted and extended after
+    plan-stage adjudication): when magic-link/OTP sign-in adopts a pre-existing password
+    account whose email was never verified, the password credential is deleted — otherwise
+    an attacker who pre-registered the victim's email keeps a password backdoor. AND: any
+    flow that flips `users.emailVerified` from unset/false to true (verifyEmail,
+    signInWithMagicLink, signInWithOtp) deletes ALL of that user's existing sessions before
+    minting — an attacker who pre-created the unverified account and parked a live session
+    would otherwise keep that session after the true owner proves mailbox control (the
+    password-clear alone leaves a parked-session backdoor; better-auth's
+    revokeUnprovenAccountAccess revokes sessions for the same reason). Already-verified
+    users signing in via magic/OTP are NOT wiped — normal multi-device sign-in. This rule
+    also serves as the deferred credential boundary for the gated anonymous upgrade (the
+    anon session survives `needsVerification` and dies at the verify mint).
 11. **Policy flags are first-class config, not hard-coded** (the references disagree on both,
     so both are options):
     - `requireEmailVerification` (default **false** — existing apps unaffected): when true,
