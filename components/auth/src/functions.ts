@@ -346,7 +346,9 @@ function ttlFor(config: AuthConfig, flow: Flow): number {
   return flow === "otp" ? e.otpTtlMs : flow === "magic" ? e.magicLinkTtlMs : flow === "reset" ? e.resetTtlMs : e.verifyTtlMs;
 }
 
-// Whether a row is written at all for this (email, flow) given account existence + flags (decision 7/11).
+// Whether this (email, flow) gets a REAL, redeemable code + an actual send, given account
+// existence + flags (decision 7/11). `false` still results in a cooldown-tracking sentinel row
+// being written (see `_issueCode`) — this only gates the SEND/real-code path, not row presence.
 async function shouldIssue(ctx: MutationCtx, config: AuthConfig, email: string, flow: Flow): Promise<boolean> {
   const [user] = await ctx.db.query("users", "byEmail").eq("email", email).collect();
   if (flow === "otp" || flow === "magic") {
@@ -382,13 +384,40 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
       }
     }
 
-    // Anti-enumeration: decide whether to write/send at all, per flow + flags.
-    if (!(await shouldIssue(ctx, config, normEmail, flow))) return { send: false, email: normEmail };
-
-    // Per-(email, flow) cooldown against the existing row's createdAt (decision 6).
+    // Per-(email, flow) cooldown against the existing row's createdAt (decision 6) — checked
+    // UNIFORMLY for every (email, flow), BEFORE the account-existence/send decision below, and
+    // regardless of it (fix for the review's Critical account-enumeration leak). Previously this
+    // check ran only after `shouldIssue` gated it to known accounts, so an unknown email never hit
+    // it: a known email's rapid 2nd request threw EMAIL_COOLDOWN while an unknown email's 2nd
+    // request sailed through to `{ sent: true }` — a deterministic two-request account-existence
+    // oracle that defeats decision 7. Reading `existing` here (rather than after the send decision)
+    // and throwing before ever branching on account existence makes the two cases indistinguishable
+    // to the caller: 1st request → `{ sent: true }`; immediate 2nd request → `EMAIL_COOLDOWN`,
+    // identically whether or not an account exists.
     const [existing] = await ctx.db.query("authCodes", "byEmailFlow").eq("email", normEmail).eq("flow", flow).collect();
     if (existing && now - (existing.createdAt as number) < config.email.requestCooldownMs) {
       throw new EmailCooldownError();
+    }
+
+    // Anti-enumeration: decide whether to actually SEND (and issue a real, redeemable code), per
+    // flow + flags. This decision is unchanged from before the fix — only the cooldown check above
+    // was moved ahead of it and made unconditional.
+    if (!(await shouldIssue(ctx, config, normEmail, flow))) {
+      // No account to issue a real code for (or createUsersOnEmailSignIn:false for an unknown
+      // sign-in email). We still WRITE a cooldown-tracking row for this (email, flow) — with NO
+      // usable code — so the NEXT request against this same (email, flow) finds it and cools down
+      // exactly like a known email's would (this row's `createdAt` is what the check above reads).
+      // `codeHash: ""` is a SENTINEL that can never match a redeem: a real code hash is always a
+      // 43-char SHA-256-base64url string (see `sha256base64url`), never empty — Task 3's redeem
+      // lookup MUST NOT treat an empty/falsy `codeHash` as a match against any presented code (an
+      // empty presented code should already be rejected by input validation before ever reaching a
+      // hash compare, but the invariant here is: this row is structurally unmatchable). We also pin
+      // `expiresAt: now` (already-expired) as defense in depth. No email is sent — the send
+      // decision on the SEND path is unchanged by this fix.
+      const sentinelRow = { email: normEmail, flow, codeHash: "", expiresAt: now, attempts: 0, createdAt: now };
+      if (existing) await ctx.db.replace(existing._id as string, sentinelRow);
+      else await ctx.db.insert("authCodes", sentinelRow);
+      return { send: false, email: normEmail };
     }
 
     // Generate raw code INSIDE the mutation (A1 mintSession precedent), hash, overwrite prior row.

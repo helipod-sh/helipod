@@ -42,6 +42,13 @@ const _readAuthCode = query(async (ctx: QueryCtx, { email, flow }: { email: stri
   return row ?? null;
 });
 
+// Same `byEmailFlow` range, but returns EVERY matching row rather than just the first — used to
+// assert the "exactly one row per (email, flow)" invariant directly (review Minor: the overwrite
+// test previously only compared hashes, never actually counted rows).
+const _readAllAuthCodes = query(async (ctx: QueryCtx, { email, flow }: { email: string; flow: string }) => {
+  return ctx.db.query("auth/authCodes", "byEmailFlow").eq("email", email).eq("flow", flow).collect();
+});
+
 async function makeRuntime(authOpts: AuthOptions, now: () => number) {
   const { catalog, moduleMap, componentNames, contextProviders } = composeComponents(
     { schemaJson: defineSchema({}).export(), moduleMap: {} },
@@ -53,13 +60,17 @@ async function makeRuntime(authOpts: AuthOptions, now: () => number) {
     modules: moduleMap,
     componentNames,
     contextProviders,
-    systemModules: { "_test:readAuthCode": _readAuthCode },
+    systemModules: { "_test:readAuthCode": _readAuthCode, "_test:readAllAuthCodes": _readAllAuthCodes },
     now,
   });
 }
 
 async function readAuthCode(r: EmbeddedRuntime, email: string, flow: string): Promise<Record<string, unknown> | null> {
   return (await r.runSystem<Record<string, unknown> | null>("_test:readAuthCode", { email, flow })).value;
+}
+
+async function readAllAuthCodes(r: EmbeddedRuntime, email: string, flow: string): Promise<Record<string, unknown>[]> {
+  return (await r.runSystem<Record<string, unknown>[]>("_test:readAllAuthCodes", { email, flow })).value;
 }
 
 describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
@@ -122,9 +133,11 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
 
     const row = await readAuthCode(r, "a@b.co", "otp");
     expect(row).not.toBeNull();
-    // Only ONE row exists (verified via readAuthCode returning the single byEmailFlow match), and its
-    // hash matches ONLY the second code — the first is no longer the one on file (Task 3's redeem
-    // proves it no longer verifies; here we prove the overwrite at the hash layer).
+    // Exactly ONE row exists per (email, flow) — asserted directly via the full byEmailFlow range,
+    // not merely inferred from readAuthCode returning a single match (review Minor fix).
+    expect((await readAllAuthCodes(r, "a@b.co", "otp")).length).toBe(1);
+    // Its hash matches ONLY the second code — the first is no longer the one on file (Task 3's
+    // redeem proves it no longer verifies; here we prove the overwrite at the hash layer).
     expect(row!.codeHash).toBe(sha256base64url(second));
     expect(row!.codeHash).not.toBe(sha256base64url(first));
   });
@@ -144,6 +157,40 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
     nowMs += 60_000; // exactly the cooldown boundary
     await r.run("auth:requestOtp", { email: "a@b.co" });
     expect(sent.length).toBe(2);
+  });
+
+  // REGRESSION PIN — fix for the review's Critical account-enumeration leak: `_issueCode` used to
+  // only track/check the cooldown row for accounts `shouldIssue` decided to actually issue a code
+  // for, so an UNKNOWN email's cooldown row was never written and never checked. That meant a
+  // rapid 2nd requestPasswordReset/requestEmailVerification for a KNOWN email threw EMAIL_COOLDOWN,
+  // while the same 2nd request for an UNKNOWN email sailed through to `{ sent: true }` every time —
+  // a deterministic two-request account-existence oracle that defeated decision 7's anti-enumeration
+  // guarantee. The fix (see `_issueCode` in src/functions.ts) moves the cooldown check ahead of, and
+  // makes it unconditional on, the account-existence/send decision, and writes an unmatchable
+  // sentinel row for the "no account" case so the next request finds it and cools down identically.
+  // This test asserts the two cases are now byte-for-byte indistinguishable to the caller.
+  it("enumeration parity: a known email's and an unknown email's 2nd requestPasswordReset both reject EMAIL_COOLDOWN identically (regression pin for the account-enumeration Critical)", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", requestCooldownMs: 60_000 } }, () => nowMs);
+    await r.run("auth:signUp", { email: "known@x.co", password: "pw" });
+
+    // KNOWN email: 1st request sends, 2nd (immediate) rejects EMAIL_COOLDOWN.
+    const known1 = (await r.run<{ sent: true }>("auth:requestPasswordReset", { email: "known@x.co" })).value;
+    expect(known1).toEqual({ sent: true });
+    expect(sent.length).toBe(1);
+    await expect(r.run("auth:requestPasswordReset", { email: "known@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
+
+    // UNKNOWN email: 1st request ALSO returns { sent: true } (anti-enum, decision 7) but sends
+    // nothing; 2nd (immediate) request MUST reject EMAIL_COOLDOWN identically — not sail through.
+    const unknown1 = (await r.run<{ sent: true }>("auth:requestPasswordReset", { email: "unknown@x.co" })).value;
+    expect(unknown1).toEqual({ sent: true });
+    expect(sent.length).toBe(1); // still just the one real send, from the known-email path
+    await expect(r.run("auth:requestPasswordReset", { email: "unknown@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
+
+    // Zero-send invariant holds throughout — the unknown-email path never sent an email, only the
+    // known-email path did.
+    expect(sent.length).toBe(1);
   });
 
   it("global throttle: emailSendsPerMinute trips at the cap and recovers after the 60s window (attribution: convex-auth rateLimit.test.ts)", async () => {
@@ -167,7 +214,7 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
     expect(sent.length).toBe(3);
   });
 
-  it("anti-enumeration: requestPasswordReset for an unknown email returns { sent: true } but sends nothing and writes no row", async () => {
+  it("anti-enumeration: requestPasswordReset for an unknown email returns { sent: true }, sends nothing, and writes only an unmatchable sentinel row (never a real code)", async () => {
     let nowMs = 1_000_000_000_000;
     const { sent, provider } = captureProvider();
     const r = await makeRuntime({ email: { provider, from: "noreply@app.co" } }, () => nowMs);
@@ -175,10 +222,14 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
     const result = (await r.run<{ sent: true }>("auth:requestPasswordReset", { email: "unknown@x.co" })).value;
     expect(result).toEqual({ sent: true });
     expect(sent.length).toBe(0);
-    expect(await readAuthCode(r, "unknown@x.co", "reset")).toBeNull();
+    // A cooldown-tracking sentinel row IS written (fix for the enumeration Critical — see below),
+    // but it is structurally unusable as a code: empty codeHash can never match a redeem hash.
+    const row = await readAuthCode(r, "unknown@x.co", "reset");
+    expect(row).not.toBeNull();
+    expect(row!.codeHash).toBe("");
   });
 
-  it("anti-enumeration: requestEmailVerification for an unknown email returns { sent: true } but sends nothing and writes no row", async () => {
+  it("anti-enumeration: requestEmailVerification for an unknown email returns { sent: true }, sends nothing, and writes only an unmatchable sentinel row (never a real code)", async () => {
     let nowMs = 1_000_000_000_000;
     const { sent, provider } = captureProvider();
     const r = await makeRuntime({ email: { provider, from: "noreply@app.co" } }, () => nowMs);
@@ -186,10 +237,12 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
     const result = (await r.run<{ sent: true }>("auth:requestEmailVerification", { email: "unknown@x.co" })).value;
     expect(result).toEqual({ sent: true });
     expect(sent.length).toBe(0);
-    expect(await readAuthCode(r, "unknown@x.co", "verify")).toBeNull();
+    const row = await readAuthCode(r, "unknown@x.co", "verify");
+    expect(row).not.toBeNull();
+    expect(row!.codeHash).toBe("");
   });
 
-  it("createUsersOnEmailSignIn:false — an unknown email's requestMagicLink/requestOtp returns { sent: true } but sends nothing and writes no row", async () => {
+  it("createUsersOnEmailSignIn:false — an unknown email's requestMagicLink/requestOtp returns { sent: true }, sends nothing, and writes only an unmatchable sentinel row", async () => {
     let nowMs = 1_000_000_000_000;
     const { sent, provider } = captureProvider();
     const r = await makeRuntime({ email: { provider, from: "noreply@app.co", createUsersOnEmailSignIn: false } }, () => nowMs);
@@ -197,12 +250,16 @@ describe("auth A2: authCodes core (_issueCode + request* actions)", () => {
     const magicResult = (await r.run<{ sent: true }>("auth:requestMagicLink", { email: "unknown@x.co" })).value;
     expect(magicResult).toEqual({ sent: true });
     expect(sent.length).toBe(0);
-    expect(await readAuthCode(r, "unknown@x.co", "magic")).toBeNull();
+    const magicRow = await readAuthCode(r, "unknown@x.co", "magic");
+    expect(magicRow).not.toBeNull();
+    expect(magicRow!.codeHash).toBe("");
 
     const otpResult = (await r.run<{ sent: true }>("auth:requestOtp", { email: "unknown2@x.co" })).value;
     expect(otpResult).toEqual({ sent: true });
     expect(sent.length).toBe(0);
-    expect(await readAuthCode(r, "unknown2@x.co", "otp")).toBeNull();
+    const otpRow = await readAuthCode(r, "unknown2@x.co", "otp");
+    expect(otpRow).not.toBeNull();
+    expect(otpRow!.codeHash).toBe("");
   });
 
   it("createUsersOnEmailSignIn:true (default) — an unknown email's requestMagicLink writes a row and sends", async () => {
