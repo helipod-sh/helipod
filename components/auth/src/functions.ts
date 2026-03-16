@@ -323,5 +323,13 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
     return null;
   });
 
-  return { signUp, signIn, signOut, getUserId, refresh, signInAnonymously, listSessions, revokeSession, revokeOtherSessions };
+  const base = { signUp, signIn, signOut, getUserId, refresh, signInAnonymously, listSessions, revokeSession, revokeOtherSessions };
+  if (!config.email) return base;                       // email absent ⇒ surface stays EXACTLY A1's
+  return { ...base, ...makeEmailModules(config) };       // Tasks 2–4 provide makeEmailModules
+}
+
+/** A2 email-flow modules (verify/reset/magic/otp). Stubbed empty in Task 1 — kept behind the
+ *  `if (!config.email)` guard above so the "surface unchanged" test passes now; Tasks 2–4 grow this. */
+function makeEmailModules(_config: AuthConfig): Record<string, RegisteredFunction> {
+  return {};
 }

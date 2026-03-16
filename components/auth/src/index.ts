@@ -1,8 +1,12 @@
 export * from "./crypto";
 export * from "./schema";
 export * from "./errors";
-export type { AuthConfig, AuthOptions } from "./config";
+export type { AuthConfig, AuthOptions, EmailConfig, EmailOptions } from "./config";
 export { resolveAuthConfig } from "./config";
+export type { EmailMessage, EmailProvider } from "./email/provider";
+export { consoleEmail, resendEmail } from "./email/provider";
+export type { Flow, TemplateArgs, RenderedEmail, TemplateFn, EmailTemplates } from "./email/templates";
+export { defaultTemplates, resolveTemplates } from "./email/templates";
 export type { MintResult, SessionSummary } from "./functions";
 export { makeAuthModules, mintSession, resolveSession, normalizeEmail } from "./functions";
 export { auth, defineAuth } from "./component";
