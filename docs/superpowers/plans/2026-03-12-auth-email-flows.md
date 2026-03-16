@@ -27,6 +27,7 @@ Binding values copied verbatim from the design spec (`docs/superpowers/specs/202
 - **Password reset is a credential boundary (decision 8).** `resetPassword` revokes ALL of the user's sessions (delete over the `byUserId` range) and mints a fresh one in the same transaction. Cross-account guard applies (decision 9).
 - **Cross-account guard (decision 9).** A code row records the `email` it was issued for; every redeem asserts the presented (normalized) email matches the row — a reset code can never act on a different account. Adopted from convex-auth `Password.ts:196`.
 - **Unverified-account adoption clears the password (decision 10).** When magic-link/OTP sign-in adopts a pre-existing PASSWORD account whose `users.emailVerified` was never true, the password credential (the `accounts` row) is DELETED — otherwise a pre-registrant keeps a backdoor into the account the mailbox owner now legitimately controls. Adopted from better-auth `magic-link.test.ts:268`.
+- **First mailbox proof is a credential boundary (adjudicated amendment, extends decision 10).** ANY flow that flips `users.emailVerified` from unset/false to true (`verifyEmail`, `signInWithMagicLink`, `signInWithOtp`) must DELETE ALL of that user's existing sessions (over the `byUserId` range) before minting the new one — not only clear an unverified adopted account's password. Rationale: an attacker who pre-created the unverified account (gated anon-upgrade or plain unverified signUp) and parked a live session would otherwise KEEP that session after the true mailbox owner proves control — better-auth's `revokeUnprovenAccountAccess` revokes sessions for exactly this reason; clearing only the password leaves the parked-session backdoor open. The wipe is gated on the false→true FLIP: an already-verified user signing in via magic/OTP from a second device is normal multi-device sign-in and is NOT wiped. This uniform rule also subsumes the gated-anon-upgrade deferred wipe (resolution 5): `verifyEmail`'s mint-time revocation IS the deferred credential boundary — no special-casing needed. `resetPassword` already revokes all sessions (decision 8), so its `emailVerified: true` composes trivially.
 - **verifyEmail ALWAYS mints (decision 12).** Successful `verifyEmail` sets `users.emailVerified: true` and mints a session (mint-shaped result) — proof of mailbox control is sign-in-grade proof, identical to the magic-link posture, with no path-dependence on how the caller arrived.
 - **Successful magic-link/OTP sign-in AND successful verifyEmail set `users.emailVerified: true`** (decision 12).
 - **`requireEmailVerification` (default FALSE).** When true AND email configured, password `signUp`/`signIn` of an unverified account returns `{ needsVerification: true }` (NO tokens, no I/O in the mutation) and the CLIENT drives the resend by calling the `requestEmailVerification` action. Default false leaves A1 `signUp`/`signIn` behavior byte-identical. Anonymous upgrade (A1) composes: an anonymous user upgrading via `signUp` under the gate gets `needsVerification` and keeps working anonymously until verified.
@@ -515,7 +516,24 @@ async function peekCode(ctx: MutationCtx, email: string, flow: Flow, presented: 
 const INVALID = "invalid code";   // generic, used for wrong/expired/consumed/no-such-account alike (decision 7)
 ```
 
-**`verifyEmail(email, code, deviceLabel?)`** — always mints (decision 12):
+**Shared first-proof credential-boundary helper** (the adjudicated uniform rule — every false→true flip revokes all pre-existing sessions before its mint):
+```ts
+/** First mailbox proof is a credential boundary: when `emailVerified` flips false→true, DELETE ALL
+ *  the user's existing sessions (byUserId) — a pre-registrant's PARKED SESSION must not survive the
+ *  true mailbox owner proving control (better-auth revokeUnprovenAccountAccess rationale). Gated on
+ *  the FLIP: an already-verified user's magic/otp sign-in is normal multi-device and wipes nothing. */
+async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: Record<string, unknown>): Promise<void> {
+  const userId = user._id as string;
+  if (user.emailVerified !== true) {
+    for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) {
+      await ctx.db.delete(s._id as string);
+    }
+  }
+  await ctx.db.replace(userId, { ...user, emailVerified: true });
+}
+```
+
+**`verifyEmail(email, code, deviceLabel?)`** — always mints (decision 12); first proof revokes parked sessions (uniform rule):
 ```ts
 const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }) => {
   if (!config.email) throw new EmailNotConfiguredError();
@@ -524,7 +542,7 @@ const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: 
   await ctx.db.delete(row!._id as string);                                                      // consume-before-validate winner
   const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
   if (!user) throw new Error(INVALID);                                                           // verify targets an existing account
-  await ctx.db.replace(user._id as string, { ...user, emailVerified: true });
+  await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>);                  // flip + credential boundary
   return mintSession(ctx, config, user._id as string, deviceLabel);
 });
 ```
@@ -547,7 +565,7 @@ const resetPassword = mutation(async (ctx, { email, code, newPassword }: { email
   return mintSession(ctx, config, userId);
 });
 ```
-> Setting `emailVerified: true` on reset is consistent with decision 12's "proof of mailbox control is proof of mailbox control" and harmless (reset already requires the mailbox). If a reviewer prefers to leave `emailVerified` untouched on reset, that is acceptable — the spec only mandates it for magic/otp/verify. **Flag for adjudication** (listed below).
+> Setting `emailVerified: true` on reset is consistent with decision 12's "proof of mailbox control is proof of mailbox control" — **adjudicated: accepted.** It composes trivially with the uniform first-proof rule because reset ALREADY revokes all sessions unconditionally (decision 8): the credential boundary the flip demands is satisfied by the wipe reset performs anyway, so `resetPassword` needs no `markVerifiedRevokingIfFirstProof` call (its own delete-all + plain `emailVerified: true` replace, as written above, is exactly equivalent).
 
 **`signInWithMagicLink(email, token, deviceLabel?)`** — create-per-flag, adopt-clears-password (decisions 10/11/12):
 ```ts
@@ -569,14 +587,18 @@ async function adoptOrCreateThenMint(ctx: MutationCtx, config: AuthConfig, normE
     const id = (await ctx.db.insert("users", { email: normEmail, emailVerified: true })) as string;
     return mintSession(ctx, config, id, deviceLabel);
   }
-  // Adopt an existing account. If it had a PASSWORD credential and was NEVER verified, delete that
-  // credential (decision 10 — a pre-registrant's backdoor). Attribution: better-auth magic-link.test.ts:268.
+  // Adopt an existing account. If it was NEVER verified, this is the FIRST mailbox proof — a
+  // credential boundary: delete any PASSWORD credential (decision 10 — a pre-registrant's password
+  // backdoor; attribution: better-auth magic-link.test.ts:268) AND, via the uniform rule, ALL
+  // pre-existing sessions (the pre-registrant's PARKED-SESSION backdoor; better-auth
+  // revokeUnprovenAccountAccess rationale). An already-verified user skips both — normal
+  // multi-device sign-in.
   if (user.emailVerified !== true) {
     for (const a of await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect()) {
       await ctx.db.delete(a._id as string);
     }
   }
-  await ctx.db.replace(user._id as string, { ...user, emailVerified: true });
+  await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>);   // session wipe on the flip + set true
   return mintSession(ctx, config, user._id as string, deviceLabel);
 }
 ```
@@ -611,6 +633,8 @@ const signInWithOtp = mutation(async (ctx, { email, code, deviceLabel }: { email
 - **reset:** old password dead (A1 `signIn` rejects), new password works, ALL other sessions revoked (open a second session first, assert it's gone via `getUserId`), a fresh session minted; cross-account guard (reset code for A cannot reset B). Attribution: convex-auth passwords.test.ts (reset section) + Password.ts:196.
 - **magic/otp create-on-first-use:** unknown email (default flags) → user created, `emailVerified: true`; with `createUsersOnEmailSignIn: false` → generic invalid, no user created.
 - **unverified-adoption-clears-password:** password-signUp an unverified account, then magic-link sign-in the same email → the `accounts` password row is gone (A1 `signIn` now rejects with invalid credentials), the user is adopted (same userId). Attribution: better-auth magic-link.test.ts:268.
+- **first-proof revokes the parked session (the attack scenario, uniform rule):** attacker password-signUps with the VICTIM's email (unverified) and holds the minted session; victim then requests + redeems a magic link for that email → the attacker's session no longer resolves (`auth:getUserId` with the attacker's token → null), the victim's fresh mint works. Repeat via `verifyEmail` and `signInWithOtp` (all three flip paths enforce the boundary). Rationale attribution: better-auth `revokeUnprovenAccountAccess`.
+- **benign inverse — already-verified multi-device sign-in survives:** an `emailVerified: true` user with a live session magic-links (or OTPs) in from a "second device" → the FIRST device's session still resolves (`getUserId` non-null) — no wipe on an already-true `emailVerified` (the rule gates on the false→true flip).
 
 ### Verification
 ```bash
@@ -648,7 +672,7 @@ export type SignInResult = MintResult | NeedsVerification | ReturnType<typeof co
     }
     return mintSession(ctx, config, userId, deviceLabel);
 ```
-> **Anonymous-upgrade + gate interaction (flag for adjudication):** A1's `signUp` upgrade path deletes ALL the anon user's sessions BEFORE minting. Under the gate we return `needsVerification` without minting — but the sessions were already deleted, so the user would be signed OUT, contradicting "keeps working anonymously until verified" (spec §"signUp/signIn integration"). **Resolution:** when `requireEmailVerification` is on AND we're on the anon-upgrade branch, do NOT delete the anon sessions until verification completes (or defer the whole credential-boundary revocation to `verifyEmail`). The cleanest implementation: in the gate branch, skip the session-wipe for the anon-upgrade case (the anon session must survive) and let `verifyEmail`'s `mintSession` be the point the credential boundary is enforced. Implementer should special-case this; see the test below. This is the one genuinely subtle interaction in the slice.
+> **Anonymous-upgrade + gate interaction (ADJUDICATED — handled by the uniform first-proof rule):** A1's `signUp` upgrade path deletes ALL the anon user's sessions BEFORE minting. Under the gate we return `needsVerification` without minting — so the anon-session wipe must NOT run on the gated anon-upgrade branch (the user "keeps working anonymously until verified", spec §"signUp/signIn integration"). Implementation: when `config.email?.requireEmailVerification` is true and the account will be unverified, SKIP the upgrade branch's session-wipe loop; NO deferred-wipe bookkeeping is needed, because `verifyEmail`'s uniform first-proof rule (`markVerifiedRevokingIfFirstProof`, Task 3) deletes ALL the user's sessions — including the surviving anon session — at the moment the mailbox is proven, then mints. The credential boundary is enforced exactly once, at the flip, by one shared code path. This also closes the parked-session hole: if an ATTACKER did the gated signUp with the victim's email, the attacker's still-live anon-upgrade session dies when the victim verifies.
 
 `signIn` — **new code** (after successful password verification, before minting):
 ```ts
@@ -664,7 +688,7 @@ export type SignInResult = MintResult | NeedsVerification | ReturnType<typeof co
 - **gate off (default):** `signUp`/`signIn` return a full mint result (byte-identical A1) — no `needsVerification` key. Reuse the A1 assertions.
 - **gate on, signUp:** unverified `signUp` → `{ needsVerification: true }`, NO token; then `requestEmailVerification` + `verifyEmail` → mints; a subsequent `signIn` (now `emailVerified`) → mints directly. Attribution: convex-auth passwords.test.ts:68-113.
 - **gate on, signIn of unverified existing account:** → `needsVerification`, no token.
-- **anon-upgrade under the gate:** anon sign-in → write a row → `signUp` (gate on) → `needsVerification`; the anon session STILL resolves (`getUserId` non-null) and the anon-written row still reads; after `verifyEmail` the session mints and the row survives under the same userId.
+- **anon-upgrade under the gate (uniform rule end-to-end):** anon sign-in → write a row → `signUp` (gate on) → `needsVerification`; the anon session SURVIVES the gate (`getUserId` non-null, anon-written row still reads); then `verifyEmail` mints AND the old anon session DIES at that mint (`getUserId` with the old anon token → null — `markVerifiedRevokingIfFirstProof`'s wipe), while the row survives under the same userId with the fresh session.
 
 ### Verification
 ```bash
@@ -715,7 +739,7 @@ bun run --filter auth-demo test
 - **Setup:** the `email` block on `defineAuth`; `consoleEmail()` as the zero-config default (codes print to the server console); `resendEmail({ apiKey, from })` for production; the SMTP recipe as a ~15-line custom `{ send }` using `nodemailer` (documented, not a built-in — decision 14).
 - **Each flow's client-side usage** (native `@stackbase/*` imports, NOT `convex/*`): verify (`needsVerification` → `requestEmailVerification` → `verifyEmail`), password reset (`requestPasswordReset` → `resetPassword`), magic-link (`requestMagicLink` → `signInWithMagicLink`), OTP (`requestOtp` → `signInWithOtp`). Each redeem returns a mint result the app hands to `createAuthClient.setSession()`.
 - **Policy flags:** `requireEmailVerification` (default false), `createUsersOnEmailSignIn` (default true) — what each does, when to flip it.
-- **Abuse-defense table:** attempt counter (`otpAttempts` 5), cooldown (`requestCooldownMs` 60s → `EMAIL_COOLDOWN`), global throttle (`emailSendsPerMinute` 100, 0 disables → `EMAIL_THROTTLED`), anti-enumeration (`{ sent: true }` always; generic invalid at redeem). Note the deliberate absence of per-IP limits (no transport identifiers by design).
+- **Abuse-defense table:** attempt counter (`otpAttempts` 5), cooldown (`requestCooldownMs` 60s → `EMAIL_COOLDOWN`), global throttle (`emailSendsPerMinute` 100, 0 disables → `EMAIL_THROTTLED`), anti-enumeration (`{ sent: true }` always; generic invalid at redeem), first-mailbox-proof session revocation (the first time an account's email is proven — verify/magic/OTP — all pre-existing sessions are revoked, so a pre-registrant's parked session can't survive; already-verified sign-ins are normal multi-device and keep other sessions). Note the deliberate absence of per-IP limits (no transport identifiers by design).
 - **Code shapes / TTLs table:** OTP 8 digits / 10min; magic 32-char / 1h; reset 32-char / 1h; verify 32-char / 24h.
 
 ### README re-baseline
@@ -736,6 +760,8 @@ bun run build && bun run typecheck && bun run test
 
 3. **Component test harness — using the SHIPPED A1 idiom (`composeComponents` + `EmbeddedRuntime.create` + `r.run`), NOT `createTestStackbase`.** The spec's Testing section says "`@stackbase/test`," but every shipped A1 auth component test (`lockout.test.ts`, `sign-up-in.test.ts`, etc.) uses `composeComponents([auth]) → EmbeddedRuntime.create → r.run("auth:…")`. A2 needs to inject a capture provider, which is trivial with `defineAuth({ email: { provider: capture, from } })` composed the same way. Following the proven, consistent idiom; noted so the controller can redirect to `createTestStackbase` if desired (no behavioral difference).
 
-4. **`emailVerified` on password reset — set to `true` (minor divergence, flagged).** Spec decision 12 mandates `emailVerified: true` for magic/otp/verify but is silent on reset. This plan sets it true on `resetPassword` too (a reset proves mailbox control identically). Harmless and consistent; a reviewer may prefer to leave it untouched — either is spec-compliant. Flagged for a one-line ruling.
+4. **`emailVerified` on password reset — set to `true`. ADJUDICATED: accepted.** Spec decision 12 mandates `emailVerified: true` for magic/otp/verify and is silent on reset; the plan sets it on `resetPassword` too (a reset proves mailbox control identically). Composes trivially with the uniform first-proof rule (5a below) because reset already revokes ALL sessions unconditionally (decision 8) — the boundary the flip demands is satisfied by reset's own wipe.
 
-5. **Anonymous-upgrade + verification-gate session survival (the one subtle interaction).** A1's `signUp` upgrade path deletes all anon sessions before minting. Under `requireEmailVerification`, the gate returns `needsVerification` without minting — so the pre-existing anon-session deletion would sign the user OUT, contradicting the spec's "keeps working anonymously until verified." Resolution baked into Task 4: skip the anon-session wipe on the gated anon-upgrade branch (the anon session must survive until `verifyEmail` mints and enforces the credential boundary). Called out explicitly with a dedicated test; flagged because it is the one place the plan adds behavior the spec only implies.
+5. **Anonymous-upgrade + verification-gate session survival. ADJUDICATED: accepted, and generalized into a uniform rule (5a).** A1's `signUp` upgrade path deletes all anon sessions before minting; under `requireEmailVerification` the gate returns `needsVerification` without minting, so Task 4 SKIPS the anon-session wipe on the gated branch (the user keeps working anonymously) — with NO deferred-wipe special-casing, because the boundary is enforced by 5a at `verifyEmail`'s mint.
+
+5a. **Uniform rule (adjudicated amendment): "first mailbox proof is a credential boundary."** ANY flow that flips `users.emailVerified` false→true (`verifyEmail`, `signInWithMagicLink`, `signInWithOtp`) deletes ALL the user's existing sessions (byUserId) before minting — extending spec decision 10 (which only cleared the password). Closes the parked-session backdoor: an attacker who pre-created the unverified account (gated anon-upgrade or plain unverified signUp) and parked a live session would otherwise keep it after the true mailbox owner proves control (better-auth's `revokeUnprovenAccountAccess` revokes sessions for exactly this reason). Gated on the FLIP, so an already-verified user's magic/OTP sign-in from a second device is normal multi-device and wipes nothing. Implemented as one shared helper (`markVerifiedRevokingIfFirstProof`, Task 3) used by all three flip paths; tested by the attack-scenario + benign-inverse pair (Task 3) and the gated-anon end-to-end test (Task 4).
