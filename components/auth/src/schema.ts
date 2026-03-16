@@ -3,7 +3,11 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
 export const authSchema = defineSchema({
   // `email` is optional now: anonymous users have none (spec §8). `anonymous` is a new optional
   // flag. The `byEmail` index remains for real (password) users.
-  users: defineTable({ email: v.optional(v.string()), anonymous: v.optional(v.boolean()) }).index("byEmail", ["email"]),
+  users: defineTable({
+    email: v.optional(v.string()),
+    anonymous: v.optional(v.boolean()),
+    emailVerified: v.optional(v.boolean()),    // A2: set true by magic/otp sign-in + verifyEmail
+  }).index("byEmail", ["email"]),
   // Uniqueness of (provider, accountId) is enforced by the application-level duplicate guard
   // in signUp, which relies on single-writer OCC serialization. A multi-writer engine (Tier 2+)
   // will require a storage-level unique index on accounts(provider, accountId) to remain race-free.
@@ -45,4 +49,14 @@ export const authSchema = defineSchema({
   // single-writer transactor makes contention a non-issue; a deployment-global window is used
   // because we carry no per-IP identifiers by design.
   authCounters: defineTable({ name: v.string(), windowStart: v.number(), count: v.number() }).index("byName", ["name"]),
+  // A2 (spec "Schema"): one active hashed code per (email, flow). `byEmailFlow` is the natural key —
+  // `_issueCode` overwrites the prior row through it (decision 2), redeems consume-before-validate.
+  authCodes: defineTable({
+    email: v.string(),      // normalized; the identity the code was issued for (cross-account guard, decision 9)
+    flow: v.string(),       // "verify" | "reset" | "magic" | "otp"
+    codeHash: v.string(),   // SHA-256 base64url of the raw code — never the raw code
+    expiresAt: v.number(),
+    attempts: v.number(),   // wrong-guess counter (OTP defense; commit-then-throw increments)
+    createdAt: v.number(),  // also drives the request cooldown
+  }).index("byEmailFlow", ["email", "flow"]),
 });

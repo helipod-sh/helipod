@@ -1,7 +1,16 @@
-import { mutation, query, commitThenThrow, type ComponentContext, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, action, commitThenThrow, type ActionCtx, type ComponentContext, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
 import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url } from "./crypto";
 import type { AuthConfig } from "./config";
-import { RefreshStaleError, RefreshExpiredError, AnonymousThrottledError } from "./errors";
+import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
+import type { Flow } from "./email/templates";
+import {
+  RefreshStaleError,
+  RefreshExpiredError,
+  AnonymousThrottledError,
+  EmailNotConfiguredError,
+  EmailCooldownError,
+  EmailThrottledError,
+} from "./errors";
 
 export const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -328,8 +337,95 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
   return { ...base, ...makeEmailModules(config) };       // Tasks 2–4 provide makeEmailModules
 }
 
-/** A2 email-flow modules (verify/reset/magic/otp). Stubbed empty in Task 1 — kept behind the
- *  `if (!config.email)` guard above so the "surface unchanged" test passes now; Tasks 2–4 grow this. */
-function makeEmailModules(_config: AuthConfig): Record<string, RegisteredFunction> {
-  return {};
+/** The decision `_issueCode` returns to its calling action: whether to send at all, the raw code
+ *  (generated inside the mutation — never elsewhere), and the normalized email to send to. */
+type SendDecision = { send: boolean; code?: string; email: string };
+
+function ttlFor(config: AuthConfig, flow: Flow): number {
+  const e = config.email!;
+  return flow === "otp" ? e.otpTtlMs : flow === "magic" ? e.magicLinkTtlMs : flow === "reset" ? e.resetTtlMs : e.verifyTtlMs;
+}
+
+// Whether a row is written at all for this (email, flow) given account existence + flags (decision 7/11).
+async function shouldIssue(ctx: MutationCtx, config: AuthConfig, email: string, flow: Flow): Promise<boolean> {
+  const [user] = await ctx.db.query("users", "byEmail").eq("email", email).collect();
+  if (flow === "otp" || flow === "magic") {
+    // Sign-in flows: issue for a known user always; for an unknown email only if createUsersOnEmailSignIn.
+    return !!user || config.email!.createUsersOnEmailSignIn;
+  }
+  // verify/reset: only for an existing account (unknown email → silent no-send, decision 7).
+  return !!user;
+}
+
+/** A2 email-flow modules (verify/reset/magic/otp). `_issueCode` is the internal mutation the four
+ *  `request*` actions call via `ctx.runMutation("auth:_issueCode", …)` (the `scheduler:_enqueue`
+ *  convention — `_`-prefixed, non-client-callable, but reachable from an action's runMutation). */
+function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction> {
+  const _issueCode = mutation(async (ctx, { email, flow }: { email: string; flow: Flow }): Promise<SendDecision> => {
+    if (!config.email) throw new EmailNotConfiguredError();
+    const normEmail = normalizeEmail(email);
+    const now = ctx.now();
+
+    // Global send throttle FIRST (protects the bill + caps enumeration even for no-send emails). Same
+    // single-windowed-row pattern as A1's anonymousSignIns (spec decision 6). `0` disables.
+    if (config.email.emailSendsPerMinute > 0) {
+      const [counter] = await ctx.db.query("authCounters", "byName").eq("name", "emailSends").collect();
+      const windowMs = 60_000;
+      if (!counter) {
+        await ctx.db.insert("authCounters", { name: "emailSends", windowStart: now, count: 1 });
+      } else if (now - (counter.windowStart as number) >= windowMs) {
+        await ctx.db.replace(counter._id as string, { ...counter, windowStart: now, count: 1 });
+      } else if ((counter.count as number) >= config.email.emailSendsPerMinute) {
+        throw new EmailThrottledError();
+      } else {
+        await ctx.db.replace(counter._id as string, { ...counter, count: (counter.count as number) + 1 });
+      }
+    }
+
+    // Anti-enumeration: decide whether to write/send at all, per flow + flags.
+    if (!(await shouldIssue(ctx, config, normEmail, flow))) return { send: false, email: normEmail };
+
+    // Per-(email, flow) cooldown against the existing row's createdAt (decision 6).
+    const [existing] = await ctx.db.query("authCodes", "byEmailFlow").eq("email", normEmail).eq("flow", flow).collect();
+    if (existing && now - (existing.createdAt as number) < config.email.requestCooldownMs) {
+      throw new EmailCooldownError();
+    }
+
+    // Generate raw code INSIDE the mutation (A1 mintSession precedent), hash, overwrite prior row.
+    const code = isTokenFlow(flow) ? generateLinkToken() : generateOtp();
+    const row = { email: normEmail, flow, codeHash: sha256base64url(code), expiresAt: now + ttlFor(config, flow), attempts: 0, createdAt: now };
+    if (existing) await ctx.db.replace(existing._id as string, { ...row });   // one active row (decision 2)
+    else await ctx.db.insert("authCodes", row);
+
+    return { send: true, code, email: normEmail };   // raw code returned to the action, never logged/stored
+  });
+
+  // One action factory per flow — each: runMutation _issueCode → (if send) build template + provider.send → { sent: true }.
+  // `ctx` arrives typed `unknown` by the `action()` overload (actions carry provider-attached fields
+  // `mutation`/`query` ctx types don't) — cast to the base `ActionCtx` shape, same idiom as
+  // `currentSessionOf`'s `ctx as unknown as FacadeCtx` above.
+  function requestAction(flow: Flow) {
+    return action(async (ctx, { email }: { email: string }): Promise<{ sent: true }> => {
+      if (!config.email) throw new EmailNotConfiguredError();
+      const decision = await (ctx as ActionCtx).runMutation<SendDecision>("auth:_issueCode", { email, flow });
+      if (decision.send && decision.code) {
+        const e = config.email;
+        const url = isTokenFlow(flow) && e.baseUrl
+          ? `${e.baseUrl.replace(/\/$/, "")}/auth/${flow}?token=${decision.code}&email=${encodeURIComponent(decision.email)}`
+          : undefined;
+        const rendered = e.templates[flow]({ appName: e.appName, email: decision.email, code: isTokenFlow(flow) ? undefined : decision.code, url, ttlMs: ttlFor(config, flow) });
+        await e.provider.send({ to: decision.email, from: e.from, ...rendered });
+      }
+      return { sent: true };   // ALWAYS — anti-enumeration (decision 7)
+    });
+  }
+
+  return {
+    _issueCode,
+    requestEmailVerification: requestAction("verify"),
+    requestPasswordReset: requestAction("reset"),
+    requestMagicLink: requestAction("magic"),
+    requestOtp: requestAction("otp"),
+    // Task 3 adds the redeem mutations to this object.
+  };
 }
