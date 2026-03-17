@@ -449,12 +449,160 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     });
   }
 
+  const INVALID = "invalid code"; // generic, used for wrong/expired/consumed/no-such-account alike (decision 7)
+
+  /** Shared read+guard (no delete yet — the redeem decides consume vs. count, Task 3 brief). Looks up
+   *  the ONE active `(email, flow)` row and reports whether the presented raw code matches it.
+   *
+   *  SENTINEL INVARIANT (T2, functions.ts's `_issueCode` "no account" branch, ~line 410): an unknown
+   *  email still gets a cooldown-tracking row with `codeHash: ""` so cooldown can't be used as an
+   *  account-existence oracle. `""` is never a real SHA-256/base64url hash (always 43 chars), so
+   *  `sha256base64url(presented)` — always non-empty for any non-empty presented code — can never
+   *  equal it: the sentinel is unmatchable BY CONSTRUCTION. The explicit `row.codeHash !== ""` guard
+   *  below is defense-in-depth on top of that structural guarantee (Task 3 brief invariant (b)) —
+   *  belt-and-suspenders against a future refactor accidentally weakening the equality check (e.g. to
+   *  a prefix/fuzzy match) into something a `""` could pass. A redeem against a sentinel row (or any
+   *  nonexistent-account row) therefore always falls through to the same generic `INVALID` every other
+   *  failure mode uses — the row's presence never signals account existence to the caller.
+   */
+  async function peekCode(
+    ctx: MutationCtx,
+    email: string,
+    flow: Flow,
+    presented: string,
+  ): Promise<{ row: Record<string, unknown> | null; normEmail: string; matches: boolean }> {
+    const normEmail = normalizeEmail(email);
+    const [row] = await ctx.db.query("authCodes", "byEmailFlow").eq("email", normEmail).eq("flow", flow).collect();
+    const codeHash = row ? (row.codeHash as string) : "";
+    const matches = !!row
+      && (row.email as string) === normEmail                        // cross-account guard (belt: key already scopes)
+      && ctx.now() <= (row.expiresAt as number)
+      && codeHash !== ""                                             // sentinel guard (b): never treat "" as a match
+      && codeHash === sha256base64url(presented);                    // index-equality-grade constant-time
+    return { row: (row as Record<string, unknown> | undefined) ?? null, normEmail, matches };
+  }
+
+  /** The generic `!matches` failure path shared by `verifyEmail`/`resetPassword`/
+   *  `signInWithMagicLink` (OTP has its own attempt-counting variant, below). A plain `throw` inside
+   *  a mutation handler discards ALL of that handler's staged writes — only a returned
+   *  `CommitThenThrow` survives to commit (see `packages/transactor/src/shard-writer.ts`'s
+   *  `runInTransactionSingle`: the handler's return value, not a thrown error, is what reaches
+   *  `this.commit`). So consuming a wrong/expired code on the failure path — same as OTP's
+   *  attempt-counter bump — needs `commitThenThrow`, not a bare `throw`, or the "cleanup" delete
+   *  would silently never happen. When there's no row to begin with, there's nothing to commit, so a
+   *  plain throw is fine (and avoids a needless empty transaction). */
+  async function failInvalidConsuming(ctx: MutationCtx, row: Record<string, unknown> | null): Promise<ReturnType<typeof commitThenThrow>> {
+    if (!row) throw new Error(INVALID);
+    await ctx.db.delete(row._id as string);
+    return commitThenThrow(INVALID);
+  }
+
+  /** First mailbox proof is a credential boundary: when `emailVerified` flips false→true, DELETE ALL
+   *  the user's existing sessions (byUserId) — a pre-registrant's PARKED SESSION must not survive the
+   *  true mailbox owner proving control (better-auth `revokeUnprovenAccountAccess` rationale). Gated
+   *  on the FLIP: an already-verified user's magic/otp sign-in is normal multi-device and wipes
+   *  nothing. */
+  async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: Record<string, unknown>): Promise<void> {
+    const userId = user._id as string;
+    if (user.emailVerified !== true) {
+      for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) {
+        await ctx.db.delete(s._id as string);
+      }
+    }
+    await ctx.db.replace(userId, { ...user, emailVerified: true });
+  }
+
+  /** Shared by `signInWithMagicLink`/`signInWithOtp`: adopt an existing user or create one (per
+   *  `createUsersOnEmailSignIn`), then mint. */
+  async function adoptOrCreateThenMint(
+    ctx: MutationCtx,
+    normEmail: string,
+    deviceLabel?: string,
+  ): Promise<MintResult> {
+    let [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
+    if (!user) {
+      if (!config.email!.createUsersOnEmailSignIn) throw new Error(INVALID); // unknown email, creation off → generic (decision 11)
+      const id = (await ctx.db.insert("users", { email: normEmail, emailVerified: true })) as string;
+      return mintSession(ctx, config, id, deviceLabel);
+    }
+    // Adopt an existing account. If it was NEVER verified, this is the FIRST mailbox proof — a
+    // credential boundary: delete any PASSWORD credential (decision 10 — a pre-registrant's password
+    // backdoor; attribution: better-auth magic-link.test.ts:268) AND, via the uniform rule, ALL
+    // pre-existing sessions (the pre-registrant's PARKED-SESSION backdoor; better-auth
+    // revokeUnprovenAccountAccess rationale). An already-verified user skips both — normal
+    // multi-device sign-in.
+    if (user.emailVerified !== true) {
+      for (const a of await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect()) {
+        await ctx.db.delete(a._id as string);
+      }
+    }
+    await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>); // session wipe on the flip + set true
+    return mintSession(ctx, config, user._id as string, deviceLabel);
+  }
+
+  const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    if (!config.email) throw new EmailNotConfiguredError();
+    const { row, normEmail, matches } = await peekCode(ctx, email, "verify", code);
+    if (!matches) return failInvalidConsuming(ctx, row);          // expired/wrong/sentinel → consume (if any) + generic, durably
+    await ctx.db.delete(row!._id as string);                      // consume-before-validate winner
+    const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
+    if (!user) throw new Error(INVALID);                          // verify targets an existing account
+    await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>); // flip + credential boundary
+    return mintSession(ctx, config, user._id as string, deviceLabel);
+  });
+
+  const resetPassword = mutation(async (ctx, { email, code, newPassword }: { email: string; code: string; newPassword: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    if (!config.email) throw new EmailNotConfiguredError();
+    const { row, normEmail, matches } = await peekCode(ctx, email, "reset", code);
+    if (!matches) return failInvalidConsuming(ctx, row);
+    await ctx.db.delete(row!._id as string);
+    const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
+    if (!account) throw new Error(INVALID);
+    await ctx.db.replace(account._id as string, { ...account, secret: await hashSecret(newPassword), failedAttempts: 0, lockedUntil: 0 });
+    const userId = account.userId as string;
+    const user = await ctx.db.get(userId);
+    if (user) await ctx.db.replace(userId, { ...user, emailVerified: true }); // a reset proves mailbox control too
+    // Revoke ALL sessions (byUserId range, credential boundary — decision 8), then mint fresh. This
+    // composes trivially with the uniform first-proof rule: the wipe below already satisfies the
+    // credential boundary an emailVerified false→true flip would separately demand, so no additional
+    // `markVerifiedRevokingIfFirstProof` call is needed here (see the design spec's amendment note).
+    for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) await ctx.db.delete(s._id as string);
+    return mintSession(ctx, config, userId);
+  });
+
+  const signInWithMagicLink = mutation(async (ctx, { email, token, deviceLabel }: { email: string; token: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    if (!config.email) throw new EmailNotConfiguredError();
+    const { row, normEmail, matches } = await peekCode(ctx, email, "magic", token);
+    if (!matches) return failInvalidConsuming(ctx, row);
+    await ctx.db.delete(row!._id as string);
+    return adoptOrCreateThenMint(ctx, normEmail, deviceLabel); // shared with OTP
+  });
+
+  const signInWithOtp = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    if (!config.email) throw new EmailNotConfiguredError();
+    const { row, normEmail, matches } = await peekCode(ctx, email, "otp", code);
+    if (!row) throw new Error(INVALID); // no row at all → generic (no counter to bump)
+    if (!matches) {
+      // Wrong (or expired) guess: bump attempts; at the cap DELETE the row (lockout). commit-then-throw
+      // so the increment/delete COMMITS despite the throw (same mechanism as A1's lockout).
+      const attempts = (row.attempts as number) + 1;
+      if (attempts >= config.email.otpAttempts) await ctx.db.delete(row._id as string);
+      else await ctx.db.replace(row._id as string, { ...row, attempts });
+      return commitThenThrow(INVALID);
+    }
+    await ctx.db.delete(row._id as string); // consume-before-validate winner
+    return adoptOrCreateThenMint(ctx, normEmail, deviceLabel);
+  });
+
   return {
     _issueCode,
     requestEmailVerification: requestAction("verify"),
     requestPasswordReset: requestAction("reset"),
     requestMagicLink: requestAction("magic"),
     requestOtp: requestAction("otp"),
-    // Task 3 adds the redeem mutations to this object.
+    verifyEmail,
+    resetPassword,
+    signInWithMagicLink,
+    signInWithOtp,
   };
 }
