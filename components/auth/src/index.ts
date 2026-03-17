@@ -7,7 +7,7 @@ export type { EmailMessage, EmailProvider } from "./email/provider";
 export { consoleEmail, resendEmail } from "./email/provider";
 export type { Flow, TemplateArgs, RenderedEmail, TemplateFn, EmailTemplates } from "./email/templates";
 export { defaultTemplates, resolveTemplates } from "./email/templates";
-export type { MintResult, SessionSummary } from "./functions";
+export type { MintResult, SessionSummary, NeedsVerification, SignInResult } from "./functions";
 export { makeAuthModules, mintSession, resolveSession, normalizeEmail } from "./functions";
 export { auth, defineAuth } from "./component";
 export { authContext } from "./context";

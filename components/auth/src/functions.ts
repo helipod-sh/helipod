@@ -28,6 +28,15 @@ export interface MintResult {
   expiresAt: number;
 }
 
+/** Verification-gate sentinel (Task 4): `signUp`/`signIn` return this — NO tokens, NO I/O beyond
+ *  what already ran — when `requireEmailVerification` is on and the account isn't verified yet. The
+ *  client responds by calling `requestEmailVerification`; `verifyEmail` (Task 3) then mints. */
+export type NeedsVerification = { needsVerification: true };
+
+/** The gated `signUp`/`signIn` return type: additive over `MintResult` — existing callers (gate off,
+ *  the default) keep getting a bare `MintResult`/`commitThenThrow` result, byte-identical to A1. */
+export type SignInResult = MintResult | NeedsVerification | ReturnType<typeof commitThenThrow>;
+
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -116,7 +125,7 @@ async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown>
 
 /** Build the auth module set closing over `config`. `defineAuth` calls this (spec decision 10). */
 export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFunction> {
-  const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult> => {
+  const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult | NeedsVerification> => {
     const normEmail = normalizeEmail(email);
     // Duplicate guard relies on single-writer OCC serialization — see schema.ts comment.
     const existing = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
@@ -133,13 +142,23 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
       const user = await ctx.db.get(current.userId as string);
       if (user && user.anonymous === true) {
         userId = current.userId as string;
+        // Verification-gate composition (ADJUDICATED, decision 11 + the uniform first-proof rule):
+        // when the gate is on and this upgrade will come out unverified (always true here — an anon
+        // user never has `emailVerified`), do NOT wipe the anon session now. The user keeps working
+        // anonymously (spec "signUp/signIn integration") until `verifyEmail`'s
+        // `markVerifiedRevokingIfFirstProof` performs the deferred wipe at the mailbox-proof moment —
+        // one shared credential-boundary code path, no separate bookkeeping. Ungated (or an
+        // already-verified anon user, which cannot occur today) upgrades wipe immediately, unchanged.
+        const deferWipe = config.email?.requireEmailVerification === true && user.emailVerified !== true;
         // `compact` strips `anonymous: undefined` — omitting the key is what clears the flag
         // (the syscall codec rejects `undefined` values).
         await ctx.db.replace(userId, compact({ ...user, email: normEmail, anonymous: undefined }));
-        // Delete ALL of the user's sessions via the `byUserId` range (an upgrade is a credential
-        // boundary) — never a table scan.
-        const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
-        for (const s of rows) await ctx.db.delete(s._id as string);
+        if (!deferWipe) {
+          // Delete ALL of the user's sessions via the `byUserId` range (an upgrade is a credential
+          // boundary) — never a table scan.
+          const rows = await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect();
+          for (const s of rows) await ctx.db.delete(s._id as string);
+        }
       } else {
         userId = (await ctx.db.insert("users", { email: normEmail })) as string; // authed non-anon caller: new account
       }
@@ -147,15 +166,19 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
       userId = (await ctx.db.insert("users", { email: normEmail })) as string;
     }
 
-    await ctx.db.insert("accounts", {
-      userId, provider: "password", accountId: normEmail,
-      secret: await hashSecret(password),
-      failedAttempts: 0, lockedUntil: 0,
-    });
+    await ctx.db.insert("accounts", { userId, provider: "password", accountId: normEmail, secret: await hashSecret(password), failedAttempts: 0, lockedUntil: 0 });
+    // Verification gate (decision 11): only when configured on AND the account isn't already verified.
+    // No tokens, no send here — the CLIENT responds to needsVerification by calling requestEmailVerification.
+    // Anonymous-upgrade composes: the upgrade above already ran (userId/rows preserved); the user keeps
+    // working anonymously (their old anon session still lives) until verifyEmail mints.
+    if (config.email?.requireEmailVerification) {
+      const user = await ctx.db.get(userId);
+      if (user?.emailVerified !== true) return { needsVerification: true } as NeedsVerification;
+    }
     return mintSession(ctx, config, userId, deviceLabel);
   });
 
-  const signIn = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  const signIn = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<SignInResult> => {
     const normEmail = normalizeEmail(email);
     const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
     if (!account) throw new Error("invalid credentials");
@@ -178,6 +201,13 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
     if (needsRehash(account.secret as string)) next.secret = await hashSecret(password);
     await ctx.db.replace(account._id as string, next);
 
+    // Verification gate (decision 11): an unverified account gets no tokens — no I/O beyond the
+    // counter reset/rehash above, which already happened. The already-verified case (or the gate
+    // off) falls through to a normal mint.
+    if (config.email?.requireEmailVerification) {
+      const user = await ctx.db.get(account.userId as string);
+      if (user?.emailVerified !== true) return { needsVerification: true } as NeedsVerification;
+    }
     return mintSession(ctx, config, account.userId as string, deviceLabel);
   });
 
