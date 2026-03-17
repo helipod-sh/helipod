@@ -3,9 +3,9 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema } from "@stackbase/values";
-import { query, type QueryCtx } from "@stackbase/executor";
+import { query, mutation, type QueryCtx, type MutationCtx } from "@stackbase/executor";
 import { defineAuth } from "../src/component";
-import type { AuthOptions, EmailMessage, EmailProvider, MintResult } from "../src";
+import { sha256base64url, type AuthOptions, type EmailMessage, type EmailProvider, type MintResult } from "../src";
 
 /** A capture provider (per the Task 2 brief, reused here): records every send, never delivers
  *  anything. Tests extract the raw code/token from `sent[i].text` — exactly what a real user would
@@ -40,6 +40,22 @@ const _readAccountsByEmail = query(async (ctx: QueryCtx, { email }: { email: str
   return ctx.db.query("auth/accounts", "byAccount").eq("provider", "password").eq("accountId", email).collect();
 });
 
+// Test-only privileged WRITE (same raw-physical-table idiom as the reads above): directly seeds a
+// real, redeemable `authCodes` row for (email, flow), bypassing `_issueCode`/`shouldIssue` entirely.
+// Used by the resetPassword regression pin below: fix #2 (shouldIssue now gates reset issuance on a
+// PASSWORD account, not just a `users` row) means the request/issue path can no longer produce a
+// redeemable reset code against a passwordless account — so the only way left to exercise
+// resetPassword's own redeem-side handling of that exact row shape (fix #1) is to seed it directly.
+// This pins fix #1 independent of fix #2 ever holding (a future shouldIssue regression, a race, etc.)
+const _writeRawAuthCode = mutation(async (
+  ctx: MutationCtx,
+  { email, flow, code, ttlMs }: { email: string; flow: string; code: string; ttlMs: number },
+) => {
+  const now = ctx.now();
+  await ctx.db.insert("auth/authCodes", { email, flow, codeHash: sha256base64url(code), expiresAt: now + ttlMs, attempts: 0, createdAt: now });
+  return null;
+});
+
 async function makeRuntime(authOpts: AuthOptions, now: () => number) {
   const { catalog, moduleMap, componentNames, contextProviders } = composeComponents(
     { schemaJson: defineSchema({}).export(), moduleMap: {} },
@@ -55,6 +71,7 @@ async function makeRuntime(authOpts: AuthOptions, now: () => number) {
       "_test:readAuthCode": _readAuthCode,
       "_test:readUser": _readUser,
       "_test:readAccountsByEmail": _readAccountsByEmail,
+      "_test:writeRawAuthCode": _writeRawAuthCode,
     },
     now,
   });
@@ -329,5 +346,92 @@ describe("auth A2: redeem mutations (verifyEmail / signInWithOtp / signInWithMag
     }
     expect(await readUser(rNoCreate, "ghost-magic@x.co")).toBeNull();
     expect(await readUser(rNoCreate, "ghost-otp@x.co")).toBeNull();
+  });
+
+  // REGRESSION PIN — the reproduced Critical. A user who signed up via magic-link/OTP (default
+  // createUsersOnEmailSignIn:true) has a `users` row but NO password `accounts` row. Before this
+  // fix wave, `shouldIssue` gated reset issuance on `!!user` alone, so such a user COULD get a
+  // redeemable reset code; on redeem, resetPassword deleted the winning code row, THEN found no
+  // `accounts` row and threw a PLAIN `throw new Error(INVALID)` — which discards ALL of the
+  // mutation's staged writes (only a RETURNED `commitThenThrow` survives to commit), silently
+  // undoing the delete. The reset code stayed live/replayable until its TTL, breaking the
+  // single-use invariant. Fix #2 (see the enumeration-parity test below) now closes the only known
+  // path that could ISSUE such a code, so this test seeds the row directly (bypassing
+  // `_issueCode`/`shouldIssue` via the privileged `_test:writeRawAuthCode`) to pin resetPassword's
+  // own redeem-side fix (#1) independent of that gate ever holding.
+  it("REGRESSION PIN: resetPassword against a passwordless (magic-link-created) account fails generically AND consumes the code — the delete must survive the post-delete `!account` throw", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+
+    // Create the user via signInWithMagicLink — no password `accounts` row is ever created.
+    const token = await issueLink(r, sent, "passwordless@x.co", "magic");
+    await r.run("auth:signInWithMagicLink", { email: "passwordless@x.co", token });
+    expect(await readAccountsByEmail(r, "passwordless@x.co")).toEqual([]);
+    expect(await readUser(r, "passwordless@x.co")).not.toBeNull();
+
+    // Seed a REAL, redeemable reset code for this passwordless account directly (see the comment
+    // on `_writeRawAuthCode` above for why this bypasses the normal request/issue path).
+    const rawCode = "regression-pin-raw-reset-code-000";
+    await r.runSystem("_test:writeRawAuthCode", { email: "passwordless@x.co", flow: "reset", code: rawCode, ttlMs: 60 * 60 * 1000 });
+    expect(await readAuthCode(r, "passwordless@x.co", "reset")).not.toBeNull();
+
+    // Redeem with the CORRECT code: matches → row deleted → `!account` → must commitThenThrow
+    // (post-fix), not a plain throw, or the delete would be silently discarded.
+    await expect(
+      r.run("auth:resetPassword", { email: "passwordless@x.co", code: rawCode, newPassword: "new-pw" }),
+    ).rejects.toThrow(/invalid code/);
+
+    // THE pin: the delete SURVIVED the throw — privileged read shows ZERO rows for (email, "reset").
+    expect(await readAuthCode(r, "passwordless@x.co", "reset")).toBeNull();
+
+    // Single-use held: a second redeem with the SAME code also fails (nothing left to match against
+    // — proving the code is truly consumed, not merely still valid-but-rejected-for-other-reasons).
+    await expect(
+      r.run("auth:resetPassword", { email: "passwordless@x.co", code: rawCode, newPassword: "new-pw-2" }),
+    ).rejects.toThrow(/invalid code/);
+
+    // No password account was ever created by this failed redeem sequence.
+    expect(await readAccountsByEmail(r, "passwordless@x.co")).toEqual([]);
+  });
+
+  // Fix #2's own behavior test: requestPasswordReset for a passwordless (magic-link-created) user
+  // must now be indistinguishable from an unknown email — the enabling condition for the Critical
+  // above (shouldIssue gating reset on `!!user` alone) is closed at the SOURCE, not just patched at
+  // the redeem site.
+  it("fix #2: requestPasswordReset for a passwordless (magic-link-created) user behaves EXACTLY like an unknown email — { sent: true }, zero sends, sentinel row, EMAIL_COOLDOWN parity", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com", requestCooldownMs: 60_000 } }, () => nowMs);
+
+    // A real (magic-link-created) user — NOT unknown — but with no password account.
+    const token = await issueLink(r, sent, "nopw@x.co", "magic");
+    await r.run("auth:signInWithMagicLink", { email: "nopw@x.co", token });
+    expect(await readUser(r, "nopw@x.co")).not.toBeNull();
+    expect(await readAccountsByEmail(r, "nopw@x.co")).toEqual([]);
+    const sendsBeforeReset = sent.length;
+
+    // requestPasswordReset for this passwordless user: { sent: true } (anti-enum), but no real send.
+    const result = (await r.run<{ sent: true }>("auth:requestPasswordReset", { email: "nopw@x.co" })).value;
+    expect(result).toEqual({ sent: true });
+    expect(sent.length).toBe(sendsBeforeReset); // zero NEW sends from the reset request itself
+
+    // Only a sentinel-shaped cooldown row exists — never a real redeemable code.
+    const row = await readAuthCode(r, "nopw@x.co", "reset");
+    expect(row).not.toBeNull();
+    expect(row!.codeHash).toBe("");
+
+    // Enumeration parity: a 2nd rapid request rejects EMAIL_COOLDOWN identically to a known-with-
+    // password or unknown email (same cooldown-row mechanism, decision 6/7).
+    await expect(r.run("auth:requestPasswordReset", { email: "nopw@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
+
+    // Cross-check against a genuinely unknown email: byte-for-byte identical shape.
+    const { sent: sent2, provider: provider2 } = captureProvider();
+    const rUnknown = await makeRuntime({ email: { provider: provider2, from: "noreply@app.co", baseUrl: "https://app.example.com", requestCooldownMs: 60_000 } }, () => nowMs);
+    const unknownResult = (await rUnknown.run<{ sent: true }>("auth:requestPasswordReset", { email: "totally-unknown@x.co" })).value;
+    expect(unknownResult).toEqual({ sent: true });
+    expect(sent2.length).toBe(0);
+    expect((await readAuthCode(rUnknown, "totally-unknown@x.co", "reset"))!.codeHash).toBe("");
+    await expect(rUnknown.run("auth:requestPasswordReset", { email: "totally-unknown@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
   });
 });

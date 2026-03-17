@@ -355,7 +355,21 @@ async function shouldIssue(ctx: MutationCtx, config: AuthConfig, email: string, 
     // Sign-in flows: issue for a known user always; for an unknown email only if createUsersOnEmailSignIn.
     return !!user || config.email!.createUsersOnEmailSignIn;
   }
-  // verify/reset: only for an existing account (unknown email → silent no-send, decision 7).
+  if (flow === "reset") {
+    // Reset targets a PASSWORD credential, not merely a `users` row: a passwordless user (created via
+    // magic-link/OTP sign-in with the default createUsersOnEmailSignIn:true) has no password to reset.
+    // Gating only on `!!user` was the enabling condition for a Critical: such a user WOULD get a
+    // redeemable reset code, and resetPassword's `!account` branch ran AFTER the winning code row was
+    // already deleted — a plain throw there discarded that delete, leaving the code live/replayable
+    // until TTL (see resetPassword's `!account` handling below, now routed through `commitThenThrow`
+    // as defense-in-depth too). Anti-enumeration is preserved here: a user-with-no-password-account
+    // falls through to `return false` exactly like an unknown email does — same sentinel/no-send path,
+    // same `{ sent: true }`, no distinguishable outcome (decision 7).
+    if (!user) return false;
+    const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", email).collect();
+    return !!account;
+  }
+  // verify: only for an existing account (unknown email → silent no-send, decision 7).
   return !!user;
 }
 
@@ -518,10 +532,18 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     ctx: MutationCtx,
     normEmail: string,
     deviceLabel?: string,
-  ): Promise<MintResult> {
+  ): Promise<MintResult | ReturnType<typeof commitThenThrow>> {
     let [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
     if (!user) {
-      if (!config.email!.createUsersOnEmailSignIn) throw new Error(INVALID); // unknown email, creation off → generic (decision 11)
+      // LATENT instance of the same consume-before-validate footgun the resetPassword Critical
+      // reproduced: this runs from signInWithMagicLink/signInWithOtp, both AFTER the winning code
+      // row has already been deleted by the caller. Currently unreachable in practice — shouldIssue
+      // already gates magic/otp issuance on `createUsersOnEmailSignIn` for an unknown email, so a
+      // redeemable code should never exist here with the flag off — but a plain `throw` would
+      // silently discard that delete if this branch were ever reached (future shouldIssue drift,
+      // flag flipped between issuance and redeem, etc.). commitThenThrow makes the consume durable
+      // regardless of reachability.
+      if (!config.email!.createUsersOnEmailSignIn) return commitThenThrow(INVALID); // unknown email, creation off → generic (decision 11)
       const id = (await ctx.db.insert("users", { email: normEmail, emailVerified: true })) as string;
       return mintSession(ctx, config, id, deviceLabel);
     }
@@ -546,7 +568,12 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     if (!matches) return failInvalidConsuming(ctx, row);          // expired/wrong/sentinel → consume (if any) + generic, durably
     await ctx.db.delete(row!._id as string);                      // consume-before-validate winner
     const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
-    if (!user) throw new Error(INVALID);                          // verify targets an existing account
+    // LATENT instance of the same consume-before-validate footgun the resetPassword Critical
+    // reproduced: this runs AFTER the winning code row was already deleted above. Currently
+    // unreachable — shouldIssue already gates verify issuance on `!!user`, so a redeemable verify
+    // code should never exist for a nonexistent user — but commitThenThrow (not a plain throw) makes
+    // the consume durable regardless of reachability, rather than relying on that invariant holding.
+    if (!user) return commitThenThrow(INVALID);                   // verify targets an existing account
     await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>); // flip + credential boundary
     return mintSession(ctx, config, user._id as string, deviceLabel);
   });
@@ -557,7 +584,16 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     if (!matches) return failInvalidConsuming(ctx, row);
     await ctx.db.delete(row!._id as string);
     const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
-    if (!account) throw new Error(INVALID);
+    // THE Critical this fix wave closes: a user who signed up via magic-link/OTP (default
+    // createUsersOnEmailSignIn:true) has a `users` row but NO password `accounts` row. Before this
+    // fix wave, shouldIssue gated reset issuance on `!!user` alone, so such a user COULD get a
+    // redeemable reset code; on redeem, `matches` was true, the winning code row was already deleted
+    // above, and this branch's plain `throw new Error(INVALID)` discarded that delete — the code
+    // stayed live/replayable until its TTL, breaking the single-use invariant. shouldIssue now also
+    // gates reset on account existence (see above), so this branch should be unreachable — but
+    // commitThenThrow makes the consume durable regardless, the same defense-in-depth reasoning as
+    // the other two post-delete branches this wave fixed.
+    if (!account) return commitThenThrow(INVALID);
     await ctx.db.replace(account._id as string, { ...account, secret: await hashSecret(newPassword), failedAttempts: 0, lockedUntil: 0 });
     const userId = account.userId as string;
     const user = await ctx.db.get(userId);
