@@ -3,9 +3,12 @@
 First-party authentication for Stackbase: email + password accounts (argon2id hashing, per-call
 random salt, constant-time verification, legacy-scrypt migration), a hardened session model (short
 access tokens + rotating refresh tokens with reuse detection, all hashed at rest), device
-management (`listSessions`/`revokeSession`/`revokeOtherSessions`), and anonymous sign-in with
-in-place upgrade. `ctx.auth.getUserId()` resolves identity inside the transaction, so session
-revocation is reactive. Runtime-agnostic (`node:crypto`) — Node.js and Bun.
+management (`listSessions`/`revokeSession`/`revokeOtherSessions`), anonymous sign-in with
+in-place upgrade, and a full email-flows surface — email verification, password reset, magic-link
+sign-in, and one-time-code (OTP) sign-in, opt-in via `defineAuth({ email: {...} })`, with
+`consoleEmail()`/`resendEmail()` provider adapters and a documented SMTP recipe. `ctx.auth.getUserId()`
+resolves identity inside the transaction, so session revocation is reactive. Runtime-agnostic
+(`node:crypto`) — Node.js and Bun.
 
 Configure via `defineAuth(options?)`; `export const auth = defineAuth()` uses the defaults.
 Session/token details and the client `createAuthClient` are documented in
@@ -24,5 +27,11 @@ attribution, never copied.
 3. **No httpOnly-cookie / CSRF mode** — Stackbase is WebSocket-first; identity flows over `SetAuth`,
    not headers. The session model (short access TTL + rotation + reuse detection) is the theft
    mitigation. See the auth doc's "localStorage vs. cookies" note.
-4. **Email flows (verification / reset / magic-link / OTP) and external identity (OAuth, JWKS/OIDC)
-   are not implemented** — deferred to the A2 (email) and A3 (external identity) slices.
+4. **External identity (OAuth, JWKS/OIDC) is not implemented** — deferred to the A3 (external
+   identity) slice. When it lands, JWT verification applies to third-party issuers only; Stackbase's
+   own sessions stay DB rows so revocation stays reactive.
+5. **No SMS-based OTP** — the OTP flow is email-only; there's no phone/SMS channel.
+6. **No email-change flow** — `users.email` has no first-party "change my email" mutation; a project
+   composing its own would need to handle re-verification itself.
+7. **No per-IP rate limiting** on the email flows — abuse defense is per-`(email, flow)` cooldown
+   plus a deployment-global send throttle, not per-source; see the auth doc's "Abuse defense" table.
