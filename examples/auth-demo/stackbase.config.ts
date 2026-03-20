@@ -1,5 +1,5 @@
 import { defineConfig } from "@stackbase/component";
-import { auth } from "@stackbase/auth";
+import { defineAuth, consoleEmail } from "@stackbase/auth";
 import { defineScheduler } from "@stackbase/scheduler";
 import { defineWorkflow, workflow } from "@stackbase/workflow";
 
@@ -10,6 +10,22 @@ import { defineWorkflow, workflow } from "@stackbase/workflow";
 // from this template gets `ctx.scheduler`/`cronJobs()` and `ctx.workflow`/durable multi-step
 // workflows for free, Convex-parity, out of the box. `defineWorkflow` `requires: ["scheduler"]`
 // (workflow runs are dispatched through the scheduler's job queue), so it's listed after it.
+
+// `auth`'s `email` block turns on the A2 flows (email verification, password reset, magic-link
+// and OTP sign-in — `web/main.tsx` exercises all of them). `consoleEmail()` is the zero-config dev
+// provider (decision 14, `components/auth/src/email/provider.ts`): it does NOT deliver anything —
+// every verification/reset/magic-link code or link is printed to the `stackbase dev` SERVER
+// console (the terminal running `bun run dev`, not the browser). Watch that terminal for the code
+// to paste into the demo's UI. Swap `consoleEmail()` for `resendEmail({ apiKey, from })` (or a
+// custom `{ send }` provider) to actually deliver mail in a real deployment.
+const auth = defineAuth({
+  email: {
+    provider: consoleEmail(),
+    from: "no-reply@demo.test",
+    appName: "Auth Demo",
+    baseUrl: "http://localhost:5173",
+  },
+});
 
 // A minimal illustrative workflow — the reference pattern real projects extend: a single
 // `step.runQuery` against this project's own `whoami:get` (`convex/whoami.ts`), referenced by its
