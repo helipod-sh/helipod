@@ -25,3 +25,19 @@ export class AnonymousThrottledError extends UserError {
     super("ANONYMOUS_THROTTLED");
   }
 }
+
+/** `request*` re-requested inside `requestCooldownMs` of the last issue for this (email, flow). */
+export class EmailCooldownError extends UserError {
+  override readonly code = "EMAIL_COOLDOWN";
+  constructor() { super("EMAIL_COOLDOWN"); }
+}
+/** Deployment-global `emailSendsPerMinute` cap tripped (spec decision 6). */
+export class EmailThrottledError extends UserError {
+  override readonly code = "EMAIL_THROTTLED";
+  constructor() { super("EMAIL_THROTTLED"); }
+}
+/** An A2 function invoked while `email` config is absent — defensive; normally unregistered. */
+export class EmailNotConfiguredError extends UserError {
+  override readonly code = "EMAIL_NOT_CONFIGURED";
+  constructor() { super("EMAIL_NOT_CONFIGURED"); }
+}

@@ -1,7 +1,12 @@
+// This demo composes `@stackbase/auth` with an `email` block whose provider is `consoleEmail()`
+// (see `../stackbase.config.ts`) — a ZERO-CONFIG dev provider that never actually delivers mail.
+// Every verification/reset/magic-link code or link is printed to the `stackbase dev` SERVER
+// console (the terminal running `bun run dev`), not shown anywhere in this browser UI. Watch that
+// terminal, then paste the code/token into the matching field below.
 import { StrictMode, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { StackbaseClient, webSocketTransport, createAuthClient, anyApi, type SessionInfo } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
+import { StackbaseProvider, useQuery, useMutation, useAction } from "@stackbase/client/react";
 
 const api = anyApi as {
   auth: {
@@ -12,9 +17,25 @@ const api = anyApi as {
     listSessions: { __path: string };
     revokeSession: { __path: string };
     revokeOtherSessions: { __path: string };
+    requestEmailVerification: { __path: string };
+    verifyEmail: { __path: string };
+    requestPasswordReset: { __path: string };
+    resetPassword: { __path: string };
+    requestMagicLink: { __path: string };
+    signInWithMagicLink: { __path: string };
+    requestOtp: { __path: string };
+    signInWithOtp: { __path: string };
   };
   whoami: { get: { __path: string }; myNotes: { __path: string }; add: { __path: string } };
 };
+
+/** `signUp`/`signIn`'s gated return shape (component `SignInResult`, narrowed to the two outcomes
+ *  the client ever actually sees — a thrown error covers the `commitThenThrow` case). */
+type SignInOutcome = SessionInfo | { needsVerification: true };
+
+function isNeedsVerification(v: unknown): v is { needsVerification: true } {
+  return !!v && typeof v === "object" && (v as { needsVerification?: unknown }).needsVerification === true;
+}
 
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
@@ -102,25 +123,239 @@ function NotesPanel() {
   );
 }
 
+/** Shown when a gated `signUp`/`signIn` returns `{ needsVerification: true }` (Task 4's
+ *  `requireEmailVerification` gate). "Resend" calls the `requestEmailVerification` action; the code
+ *  field redeems via `verifyEmail`, which mints exactly like a normal sign-in. */
+function VerifyBanner({ email, onVerified }: { email: string; onVerified: (result: SessionInfo) => void }) {
+  const resend = useAction(api.auth.requestEmailVerification);
+  const verifyEmailMut = useMutation<SessionInfo>(api.auth.verifyEmail);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [resent, setResent] = useState(false);
+
+  async function handleResend() {
+    setError(null);
+    setBusy(true);
+    try {
+      await resend({ email });
+      setResent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleVerify(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      onVerified(await verifyEmailMut({ email, code: code.trim() }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Verify your email</legend>
+      <p>
+        A verification code was sent to <strong>{email}</strong> — codes print to the{" "}
+        <code>stackbase dev</code> server console (the zero-config console provider), never here.
+      </p>
+      <form onSubmit={handleVerify}>
+        <label>Verification code</label>
+        <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste the code" required />
+        <div className="btn-row">
+          <button type="submit" disabled={busy}>{busy ? "…" : "Verify"}</button>
+          <button type="button" className="secondary" disabled={busy} onClick={() => void handleResend()}>
+            {resent ? "Resent" : "Resend verification"}
+          </button>
+        </div>
+      </form>
+      {error && <div className="error">{error}</div>}
+    </fieldset>
+  );
+}
+
+/** `requestPasswordReset` → a reset-code field → `resetPassword` (mints a fresh session — a reset
+ *  revokes every OTHER session on that account too, see `functions.ts#resetPassword`). */
+function ForgotPasswordPanel({ onReset }: { onReset: (result: SessionInfo) => void }) {
+  const requestReset = useAction(api.auth.requestPasswordReset);
+  const resetPasswordMut = useMutation<SessionInfo>(api.auth.resetPassword);
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState(false);
+  const [code, setCode] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function handleRequest(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await requestReset({ email: email.trim() });
+      setSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReset(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      onReset(await resetPasswordMut({ email: email.trim(), code: code.trim(), newPassword }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Forgot password?</legend>
+      {!sent ? (
+        <form onSubmit={handleRequest}>
+          <label>Email</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required />
+          <div className="btn-row">
+            <button type="submit" disabled={busy}>{busy ? "…" : "Send reset code"}</button>
+          </div>
+        </form>
+      ) : (
+        <form onSubmit={handleReset}>
+          <p>
+            A reset code for <strong>{email}</strong> printed to the <code>stackbase dev</code> console.
+          </p>
+          <label>Reset code</label>
+          <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste the code" required />
+          <label>New password</label>
+          <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={6} />
+          <div className="btn-row">
+            <button type="submit" disabled={busy}>{busy ? "…" : "Reset password"}</button>
+          </div>
+        </form>
+      )}
+      {error && <div className="error">{error}</div>}
+    </fieldset>
+  );
+}
+
+/** Passwordless sign-in: `requestMagicLink`/`requestOtp` (actions) → paste-code field →
+ *  `signInWithMagicLink`/`signInWithOtp` (mutations, mint exactly like `signIn`). Both flows share
+ *  one email field and one paste-code field — only the request/redeem pair differs. */
+function PasswordlessPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) => void }) {
+  const requestMagicLink = useAction(api.auth.requestMagicLink);
+  const requestOtp = useAction(api.auth.requestOtp);
+  const signInWithMagicLinkMut = useMutation<SessionInfo>(api.auth.signInWithMagicLink);
+  const signInWithOtpMut = useMutation<SessionInfo>(api.auth.signInWithOtp);
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState<"magic" | "otp" | null>(null);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function send(flow: "magic" | "otp") {
+    setError(null);
+    setBusy(true);
+    try {
+      if (flow === "magic") await requestMagicLink({ email: email.trim() });
+      else await requestOtp({ email: email.trim() });
+      setSent(flow);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function redeem(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const result = sent === "magic"
+        ? await signInWithMagicLinkMut({ email: email.trim(), token: code.trim() })
+        : await signInWithOtpMut({ email: email.trim(), code: code.trim() });
+      onSignedIn(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Sign in without a password</legend>
+      {!sent ? (
+        <>
+          <label>Email</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" required />
+          <div className="btn-row">
+            <button type="button" disabled={busy || !email.trim()} onClick={() => void send("magic")}>Email me a link</button>
+            <button type="button" className="secondary" disabled={busy || !email.trim()} onClick={() => void send("otp")}>Email me a code</button>
+          </div>
+        </>
+      ) : (
+        <form onSubmit={redeem}>
+          <p>
+            {sent === "magic" ? "A magic-link token" : "An OTP code"} for <strong>{email}</strong> printed
+            to the <code>stackbase dev</code> console.
+          </p>
+          <label>{sent === "magic" ? "Token" : "Code"}</label>
+          <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste it here" required />
+          <div className="btn-row">
+            <button type="submit" disabled={busy}>{busy ? "…" : "Sign in"}</button>
+            <button type="button" className="secondary" disabled={busy} onClick={() => { setSent(null); setCode(""); }}>Back</button>
+          </div>
+        </form>
+      )}
+      {error && <div className="error">{error}</div>}
+    </fieldset>
+  );
+}
+
 function AuthDemo() {
   const [session, setSession] = useState<SessionInfo | null>(() => authClient.getSessionInfo());
+  // Set when signUp/signIn comes back gated (`{ needsVerification: true }` — only possible if a
+  // deployment turns on `requireEmailVerification`; this demo's default config leaves it off, so
+  // this banner is reachable code but won't trigger with the config as shipped in this example).
+  const [pendingVerifyEmail, setPendingVerifyEmail] = useState<string | null>(null);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
   const whoami = useQuery<string | null>(api.whoami.get, {});
-  const signUpMut = useMutation<SessionInfo>(api.auth.signUp);
-  const signInMut = useMutation<SessionInfo>(api.auth.signIn);
+  const signUpMut = useMutation<SignInOutcome>(api.auth.signUp);
+  const signInMut = useMutation<SignInOutcome>(api.auth.signIn);
   const signInAnonMut = useMutation<SessionInfo>(api.auth.signInAnonymously);
   const signOutMut = useMutation(api.auth.signOut);
 
   function adopt(result: SessionInfo) {
     authClient.setSession(result);   // persist + setAuth + schedule refresh + sessionId fingerprint
     setSession(result);
+    setPendingVerifyEmail(null);
+    setShowForgotPassword(false);
   }
 
   async function handleSignUp(email: string, password: string) {
-    adopt(await signUpMut({ email, password, deviceLabel: navigator.userAgent.slice(0, 60) }));
+    const result = await signUpMut({ email, password, deviceLabel: navigator.userAgent.slice(0, 60) });
+    if (isNeedsVerification(result)) setPendingVerifyEmail(email);
+    else adopt(result);
   }
 
   async function handleSignIn(email: string, password: string) {
-    adopt(await signInMut({ email, password, deviceLabel: navigator.userAgent.slice(0, 60) }));
+    const result = await signInMut({ email, password, deviceLabel: navigator.userAgent.slice(0, 60) });
+    if (isNeedsVerification(result)) setPendingVerifyEmail(email);
+    else adopt(result);
   }
 
   async function handleTryAnonymously() {
@@ -151,7 +386,9 @@ function AuthDemo() {
         )}
       </div>
 
-      {signedIn ? (
+      {pendingVerifyEmail ? (
+        <VerifyBanner email={pendingVerifyEmail} onVerified={adopt} />
+      ) : signedIn ? (
         <>
           <NotesPanel />
           <DevicesPanel />
@@ -176,7 +413,14 @@ function AuthDemo() {
           <fieldset>
             <legend>Sign in</legend>
             <AuthForm label="Sign in" onSubmit={handleSignIn} />
+            <div className="btn-row">
+              <button type="button" className="secondary" onClick={() => setShowForgotPassword((v) => !v)}>
+                {showForgotPassword ? "Hide forgot-password" : "Forgot password?"}
+              </button>
+            </div>
           </fieldset>
+          {showForgotPassword && <ForgotPasswordPanel onReset={adopt} />}
+          <PasswordlessPanel onSignedIn={adopt} />
         </>
       )}
 
