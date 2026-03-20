@@ -24,6 +24,10 @@ const auth = defineAuth({
     from: "no-reply@demo.test",
     appName: "Auth Demo",
     baseUrl: "http://localhost:5173",
+    // On so the demo's verify banner is actually reachable: signUp/signIn of an unverified
+    // account return `{ needsVerification: true }` (no session), and `web/main.tsx`'s
+    // VerifyBanner drives `requestEmailVerification` → `verifyEmail` to complete sign-in.
+    requireEmailVerification: true,
   },
 });
 
