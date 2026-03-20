@@ -138,7 +138,7 @@ describe("auth A2: redeem mutations (verifyEmail / signInWithOtp / signInWithMag
     expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/invalid code/);
   });
 
-  it("expiry: a redeem past the code's TTL is generic invalid and cleans up the row", async () => {
+  it("expiry: a redeem past the code's TTL is generic invalid; the row is left in place, not deleted (final-review fix — token-flow non-match no longer consumes the row; an already-expired row is harmless left in place, and overwritten by the next issuance)", async () => {
     let nowMs = 1_000_000_000_000;
     const { sent, provider } = captureProvider();
     const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
@@ -146,7 +146,12 @@ describe("auth A2: redeem mutations (verifyEmail / signInWithOtp / signInWithMag
 
     nowMs += 60 * 60 * 1000 + 1; // past the 1h default magicLinkTtlMs
     await expect(r.run("auth:signInWithMagicLink", { email: "exp@x.co", token })).rejects.toThrow(/invalid code/);
-    expect(await readAuthCode(r, "exp@x.co", "magic")).toBeNull(); // cleaned up, not left dangling
+    // Post-fix: the non-match path never deletes a token-flow row. The row survives, still expired
+    // (so still unredeemable — see the next assertion), until TTL/overwrite naturally retires it.
+    expect(await readAuthCode(r, "exp@x.co", "magic")).not.toBeNull();
+    // The same (already-expired) token still fails identically on a second try — no functional
+    // regression, just no eager cleanup.
+    await expect(r.run("auth:signInWithMagicLink", { email: "exp@x.co", token })).rejects.toThrow(/invalid code/);
   });
 
   it("OTP brute force: otpAttempts wrong guesses deletes the row; attempts survives each failed call (commit-then-throw); the (previously correct) code then also fails (attribution: better-auth email-otp.test.ts; theirs 3, ours 5)", async () => {
@@ -433,5 +438,112 @@ describe("auth A2: redeem mutations (verifyEmail / signInWithOtp / signInWithMag
     expect(sent2.length).toBe(0);
     expect((await readAuthCode(rUnknown, "totally-unknown@x.co", "reset"))!.codeHash).toBe("");
     await expect(rUnknown.run("auth:requestPasswordReset", { email: "totally-unknown@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
+  });
+
+  // ── FINAL-REVIEW FIX WAVE ──────────────────────────────────────────────────────────────────────
+  // These pin the final whole-branch review's Important finding: the three TOKEN-flow redeems
+  // (verifyEmail/resetPassword/signInWithMagicLink) used to call `failInvalidConsuming` on a
+  // wrong/garbage presented code, which DELETED the single active `authCodes` row — the SAME row
+  // `_issueCode` reads as the 60s-per-(email,flow) cooldown anchor. An attacker who knows only a
+  // victim's email could (a) unthrottled-delete the victim's live code at wire speed (a
+  // recovery-denial DoS: the victim's real emailed link intermittently reads back "invalid code"),
+  // and (b) immediately re-request with no row left to cool down against (a per-email cooldown
+  // bypass — email-bombing bounded only by the global send throttle). The fix: a token-flow
+  // non-match no longer deletes the row (32-char/192-bit tokens can't be brute-forced, so there's
+  // no security reason to consume on a miss); OTP is untouched (its 8-digit code IS guessable, so
+  // its attempt-counter-then-delete-at-cap behavior stays exactly as-is).
+
+  it("FINAL-REVIEW FIX pin — recovery-denial DoS closed: a wrong resetPassword guess against a live code does NOT destroy it; the victim's real code still works afterward", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+    await r.run("auth:signUp", { email: "recoverdos@x.co", password: "old-pw" });
+
+    const resetCode = await issueLink(r, sent, "recoverdos@x.co", "reset");
+
+    // Attacker — knows only the victim's email, guesses garbage. Must fail generically...
+    await expect(
+      r.run("auth:resetPassword", { email: "recoverdos@x.co", code: "attacker-garbage-guess", newPassword: "hijack" }),
+    ).rejects.toThrow(/invalid code/);
+
+    // ...and must NOT have destroyed the victim's live code (the pre-fix bug): privileged read
+    // shows the row survives the wrong guess.
+    expect(await readAuthCode(r, "recoverdos@x.co", "reset")).not.toBeNull();
+
+    // The victim's REAL code — the one actually emailed to them — still redeems successfully.
+    // Recovery was never denied.
+    const fresh = (await r.run<MintResult>("auth:resetPassword", { email: "recoverdos@x.co", code: resetCode, newPassword: "new-pw" })).value;
+    expect(typeof fresh.token).toBe("string");
+    await expect(r.run("auth:signIn", { email: "recoverdos@x.co", password: "old-pw" })).rejects.toThrow(/invalid credentials/);
+    const signedIn = (await r.run<MintResult>("auth:signIn", { email: "recoverdos@x.co", password: "new-pw" })).value;
+    expect(typeof signedIn.token).toBe("string");
+  });
+
+  it("FINAL-REVIEW FIX pin — cooldown-bypass DoS closed: a wrong signInWithMagicLink guess does NOT clear the cooldown anchor; an immediate re-request still hits EMAIL_COOLDOWN", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+
+    await r.run("auth:requestMagicLink", { email: "cooldowndos@x.co" });
+    expect(sent.length).toBe(1);
+
+    // Attacker submits garbage against the live magic-link code.
+    await expect(
+      r.run("auth:signInWithMagicLink", { email: "cooldowndos@x.co", token: "attacker-garbage-guess" }),
+    ).rejects.toThrow(/invalid code/);
+
+    // The cooldown anchor (the row's `createdAt`) survived the wrong guess: an immediate re-request
+    // still hits EMAIL_COOLDOWN instead of sailing through with a fresh code + a second send (the
+    // pre-fix bypass — the row would have been deleted, so `_issueCode` would see no `existing` row
+    // and skip the cooldown check entirely).
+    await expect(r.run("auth:requestMagicLink", { email: "cooldowndos@x.co" })).rejects.toThrow(/EMAIL_COOLDOWN/);
+    expect(sent.length).toBe(1); // no second send slipped through
+  });
+
+  it("FINAL-REVIEW FIX pin — wrong-then-correct survival via verifyEmail: a garbage guess doesn't destroy the live code; the real one still verifies afterward", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+    await r.run("auth:signUp", { email: "verifydos@x.co", password: "pw" });
+
+    const token = await issueLink(r, sent, "verifydos@x.co", "verify");
+
+    await expect(r.run("auth:verifyEmail", { email: "verifydos@x.co", code: "attacker-garbage-guess" })).rejects.toThrow(/invalid code/);
+    expect(await readAuthCode(r, "verifydos@x.co", "verify")).not.toBeNull(); // survives the wrong guess
+
+    const result = (await r.run<MintResult>("auth:verifyEmail", { email: "verifydos@x.co", code: token })).value;
+    expect(typeof result.token).toBe("string");
+    expect(await readUser(r, "verifydos@x.co")).toMatchObject({ emailVerified: true });
+  });
+
+  it("FINAL-REVIEW FIX pin — wrong-then-correct survival via signInWithMagicLink: a garbage token guess doesn't destroy the live code; the real one still signs in afterward", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+
+    const token = await issueLink(r, sent, "magicdos@x.co", "magic");
+
+    await expect(r.run("auth:signInWithMagicLink", { email: "magicdos@x.co", token: "attacker-garbage-guess" })).rejects.toThrow(/invalid code/);
+    expect(await readAuthCode(r, "magicdos@x.co", "magic")).not.toBeNull(); // survives the wrong guess
+
+    const result = (await r.run<MintResult>("auth:signInWithMagicLink", { email: "magicdos@x.co", token })).value;
+    expect(typeof result.token).toBe("string");
+  });
+
+  it("OTP unaffected by this fix wave: otpAttempts wrong guesses still deletes the row at the cap (attempt-counter path, not the token-flow non-match path)", async () => {
+    let nowMs = 1_000_000_000_000;
+    const { sent, provider } = captureProvider();
+    const r = await makeRuntime({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } }, () => nowMs);
+    await r.run("auth:signUp", { email: "otpunaffected@x.co", password: "pw" });
+    const realCode = await issueOtp(r, sent, "otpunaffected@x.co");
+
+    for (let i = 0; i < 4; i++) {
+      await expect(r.run("auth:signInWithOtp", { email: "otpunaffected@x.co", code: "00000000" })).rejects.toThrow(/invalid code/);
+    }
+    // 5th wrong guess reaches the cap → the row IS deleted (OTP's attempt-counter lockout, untouched
+    // by this fix wave — its 8-digit code is guessable, so consuming at the cap remains correct).
+    await expect(r.run("auth:signInWithOtp", { email: "otpunaffected@x.co", code: "00000000" })).rejects.toThrow(/invalid code/);
+    expect(await readAuthCode(r, "otpunaffected@x.co", "otp")).toBeNull();
+    await expect(r.run("auth:signInWithOtp", { email: "otpunaffected@x.co", code: realCode })).rejects.toThrow(/invalid code/);
   });
 });

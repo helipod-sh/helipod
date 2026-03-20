@@ -526,20 +526,28 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     return { row: (row as Record<string, unknown> | undefined) ?? null, normEmail, matches };
   }
 
-  /** The generic `!matches` failure path shared by `verifyEmail`/`resetPassword`/
-   *  `signInWithMagicLink` (OTP has its own attempt-counting variant, below). A plain `throw` inside
-   *  a mutation handler discards ALL of that handler's staged writes — only a returned
-   *  `CommitThenThrow` survives to commit (see `packages/transactor/src/shard-writer.ts`'s
-   *  `runInTransactionSingle`: the handler's return value, not a thrown error, is what reaches
-   *  `this.commit`). So consuming a wrong/expired code on the failure path — same as OTP's
-   *  attempt-counter bump — needs `commitThenThrow`, not a bare `throw`, or the "cleanup" delete
-   *  would silently never happen. When there's no row to begin with, there's nothing to commit, so a
-   *  plain throw is fine (and avoids a needless empty transaction). */
-  async function failInvalidConsuming(ctx: MutationCtx, row: Record<string, unknown> | null): Promise<ReturnType<typeof commitThenThrow>> {
-    if (!row) throw new Error(INVALID);
-    await ctx.db.delete(row._id as string);
-    return commitThenThrow(INVALID);
-  }
+  /** FINAL-REVIEW FIX (Important — token-flow delete-on-non-match cooldown/DoS): the non-match path
+   *  for the three TOKEN-flow redeems below (`verifyEmail`/`resetPassword`/`signInWithMagicLink`) no
+   *  longer deletes the active `authCodes` row. Those flows present a 32-char/192-bit unguessable
+   *  token — a wrong presented value can NEVER be brute-forced or replayed, so there is no security
+   *  reason to consume the row on a miss, and doing so was actively harmful: that SAME row is also
+   *  `_issueCode`'s cooldown anchor (its `createdAt` is what the 60s-per-(email,flow) check reads,
+   *  ~line 441). Deleting it on every wrong guess let an attacker who knows only a victim's email (a)
+   *  unthrottled-delete the victim's live code at wire speed — the victim's real emailed link
+   *  intermittently reads back "invalid code" while under attack (a recovery-denial DoS with no rate
+   *  limit of its own), and (b) immediately re-request with no existing row left to cool down
+   *  against — bypassing the per-email 60s cooldown entirely (email-bombing, bounded only by the
+   *  global send throttle).
+   *
+   *  Previously this ran through a shared `failInvalidConsuming(ctx, row)` helper (delete the row +
+   *  `commitThenThrow`, mirroring OTP's attempt-counter bump) — removed. A plain `throw new
+   *  Error(INVALID)` is correct in its place: each of the three handlers' non-match check runs
+   *  BEFORE any write, so there is nothing staged to lose. The row survives to its own TTL or a
+   *  legitimate successful redeem, which still consumes it exactly as before (see each handler's
+   *  `matches` branch, unchanged).
+   *
+   *  OTP (`signInWithOtp`, below) is UNCHANGED: its 8-digit code IS guessable, so its
+   *  attempt-counter-then-delete-at-cap behavior remains correct and necessary. */
 
   /** First mailbox proof is a credential boundary: when `emailVerified` flips false→true, DELETE ALL
    *  the user's existing sessions (byUserId) — a pre-registrant's PARKED SESSION must not survive the
@@ -595,7 +603,9 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
   const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "verify", code);
-    if (!matches) return failInvalidConsuming(ctx, row);          // expired/wrong/sentinel → consume (if any) + generic, durably
+    // Final-review fix (see the comment block above): expired/wrong/sentinel → generic, WITHOUT
+    // consuming the row — nothing is staged yet, so a plain throw discards nothing.
+    if (!matches) throw new Error(INVALID);
     await ctx.db.delete(row!._id as string);                      // consume-before-validate winner
     const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
     // LATENT instance of the same consume-before-validate footgun the resetPassword Critical
@@ -611,7 +621,9 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
   const resetPassword = mutation(async (ctx, { email, code, newPassword }: { email: string; code: string; newPassword: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "reset", code);
-    if (!matches) return failInvalidConsuming(ctx, row);
+    // Final-review fix (see the comment block above `verifyEmail`): expired/wrong/sentinel →
+    // generic, WITHOUT consuming the row — nothing is staged yet, so a plain throw discards nothing.
+    if (!matches) throw new Error(INVALID);
     await ctx.db.delete(row!._id as string);
     const [account] = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
     // THE Critical this fix wave closes: a user who signed up via magic-link/OTP (default
@@ -639,7 +651,9 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
   const signInWithMagicLink = mutation(async (ctx, { email, token, deviceLabel }: { email: string; token: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "magic", token);
-    if (!matches) return failInvalidConsuming(ctx, row);
+    // Final-review fix (see the comment block above `verifyEmail`): expired/wrong/sentinel →
+    // generic, WITHOUT consuming the row — nothing is staged yet, so a plain throw discards nothing.
+    if (!matches) throw new Error(INVALID);
     await ctx.db.delete(row!._id as string);
     return adoptOrCreateThenMint(ctx, normEmail, deviceLabel); // shared with OTP
   });
