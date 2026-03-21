@@ -113,6 +113,12 @@ user is in the middle of completing. Only a one-time code transits the URL; toke
 - **Consume-before-validate** at the callback and the handoff exchange (single winner under
   single-writer OCC).
 - **No token in URL**: only the one-time handoff code transits, in the fragment.
+- **`allowInsecureRequests` is test-only and cannot weaken production**: oauth4webapi refuses
+  `http://` endpoints by default (MITM protection). The E2E's loopback mock needs `http://`, so
+  an `allowInsecureRequests` path exists — but it MUST be gated so a real deployment can never
+  enable it against a non-loopback issuer: honor it only when the provider's endpoints are
+  loopback (`127.0.0.1`/`localhost`), never from public config. A production OAuth provider on
+  `http://` is rejected regardless. (Task 1 pins the exact gate.)
 
 ## Part 2 — Third-party JWT / OIDC (Clerk / Auth0 / any OIDC issuer)
 
@@ -164,13 +170,20 @@ The single resolution path both the OAuth callback and `signInWithIdToken` deleg
 2. **New identity, caller already signed in with `linkUserId`** — attach the `accounts` row to
    `linkUserId` (the caller proved they hold both the session and the external identity). Mint.
 3. **New identity, provider asserts a VERIFIED email that matches an existing user** — **link**:
-   add the `accounts` row to that user, AND treat it as a **first-mailbox-proof** (A2's amended
-   decision 10): delete ALL that user's existing sessions before minting, set
-   `emailVerified: true`. This is the takeover defense: if the existing account was an
-   attacker's unverified password registration of the victim's email, a verified Google/Clerk
-   sign-in by the true owner revokes the attacker's parked sessions and binds the account to the
-   real owner. (Already-verified users linking a second provider are still wiped here — a new
-   credential binding is a credential-boundary event, consistent with A2.)
+   add the `accounts` row to that user, AND apply A2's **first-mailbox-proof** helper
+   (`markVerifiedRevokingIfFirstProof`, the FLIP-GATED rule): if this sets the user's
+   `emailVerified` from false/unset → true, delete ALL that user's existing sessions before
+   minting; if the user was ALREADY verified, no wipe. This is the takeover defense AND it is
+   sufficient BECAUSE the takeover only works against an unverified existing account: if the
+   existing account was an attacker's unverified password registration of the victim's email,
+   the verified Google/Clerk sign-in flips false→true and revokes the attacker's parked
+   sessions (the true owner takes over); if the existing account was already verified (the
+   legitimate owner just adding a second login method), there is no flip, no wipe, and they stay
+   signed in on their other devices — better UX, still safe, since an already-verified account
+   was already proven to belong to whoever verified it. (This is the SAME flip-gated helper A2's
+   verifyEmail/magic/OTP use — NOT an unconditional wipe. Adjudicated at plan stage: an
+   unconditional wipe would needlessly log out legitimate users adding a provider, and the
+   flip-gate already covers every attack case.)
 4. **New identity, provider does NOT assert a verified email (or gives none)** — **never
    auto-link.** Create a NEW user + the `accounts` row. (An unverified external email is not
    proof of anything; auto-linking on it is the exact attack vector.)
