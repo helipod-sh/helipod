@@ -18,7 +18,8 @@ For agentic workers: this plan is designed to be executed with the `superpowers:
 - **The handoff AUTHORIZES A MINT, never stores tokens.** `oauthHandoff` holds NO session token. The mint happens at `completeOAuthSignIn` (raw tokens returned directly to the app, never written to a row) — A1's hashed-at-rest invariant preserved end to end.
 - **Consume-before-validate + commitThenThrow on every post-consume throw** (the A2 lesson): at the callback (`_consumeOAuthState`) and the handoff exchange (`_consumeHandoff`), the ephemeral row is DELETED first (consume — single winner under single-writer OCC), THEN validated; EVERY throw after a consume MUST route through `commitThenThrow` so the consume commits even when the call fails.
 - **Open-redirect allowlist.** `redirectTo` MUST match `oauth.redirectAllowlist` (exact origin + path-prefix match); a non-allowlisted `redirectTo` is rejected at `/start` BEFORE any state write or redirect.
-- **Account-linking safety.** Verified-email-required-for-autolink; an unverified external email NEVER autolinks (creates a separate user — that is the exact attack vector); link-while-signed-in is trusted (the caller proved both the session and the external identity); a verified-email link is a **first-mailbox-proof** → revoke all that user's sessions before minting + set `emailVerified: true` (takeover defense; an already-verified user linking a second provider is still wiped — a new credential binding is a credential-boundary event).
+- **Insecure-http is loopback-derived, never an app flag (spec-amended security requirement).** oauth4webapi's `allowInsecureRequests` is set ONLY for a loopback endpoint (`127.0.0.1`/`localhost`/`::1`), derived from the URL being requested — the public `defineAuth({ oauth })` surface exposes NO "allow insecure" boolean a production deployment could flip. A non-loopback http:// provider endpoint is rejected at config-resolution time (`assertProviderEndpointsSecure`): a plain-http OAuth issuer is a MITM vector — a path attacker could forge the token/id_token. https always fine; loopback http tolerated only for local testing (this is what makes the E2E mock work).
+- **Account-linking safety.** Verified-email-required-for-autolink; an unverified external email NEVER autolinks (creates a separate user — that is the exact attack vector); link-while-signed-in is trusted (the caller proved both the session and the external identity); a verified-email link is a **first-mailbox-proof** → `markVerifiedRevokingIfFirstProof` (**flip-gated**: wipes the user's sessions only on the `emailVerified` false→true flip, then sets `emailVerified: true` — this covers every attack case, since the takeover only works against an *unverified* existing account, which is exactly when the flip fires; an already-verified user legitimately adding a second provider has no flip → no wipe → stays signed in on their other devices, better UX and still safe). This is the SAME helper A2 uses (spec amended `44314f9`).
 - **Third-party JWT = `signInWithIdToken` ACTION** (jose live JWKS verify — signature + `iss` allowlist + `aud` + `exp`/`nbf`) → internal provision+mint mutation (JIT-provision as `accounts` `provider:"oidc:<issuer>"`; an external identity becomes a first-class local `userId`). **Per-request-stateless-JWT is a NON-GOAL** (fights write-in-query / no-I/O-in-query; the exchange model is the native fit — documented divergence from Convex Auth).
 - **Conditional registration.** When `oauth`/`jwt` are absent from `defineAuth`, NONE of the A3 functions/routes are registered — the surface stays EXACTLY A1+A2 (same discipline A2 used for `email`; a test proves it).
 - **Generic auth errors — no enumeration.** Code-as-message (A1/A2 convention). Generic auth failures never distinguish sub-cases that could leak account existence (unknown-kid / bad-signature / wrong-aud / expired / state-mismatch / unknown-provider all surface as generic).
@@ -52,14 +53,14 @@ Concrete mechanism (exact code in Task 1):
 - Process (unified): `const result = await oauth.processAuthorizationCodeResponse(as, client, resp, { expectedNonce })` — pass `expectedNonce: nonce` for OIDC; omit for OAuth2 (defaults to `oauth.expectNoNonce`). Returns `TokenEndpointResponse` (`access_token`, optional `id_token`).
 - OIDC identity: `const claims = oauth.getValidatedIdTokenClaims(result)` → `IDToken | undefined` (`sub`, `email`, `email_verified`, `name`).
 - GitHub identity: raw `fetch(provider.userinfoEndpoint, { headers: { authorization: 'Bearer '+result.access_token, accept: 'application/vnd.github+json', 'user-agent': 'stackbase' } })` for `/user`, and `provider.emailsEndpoint` for `/user/emails` (pick `primary && verified`).
-- `opts` = `{ [oauth.allowInsecureRequests]: config.oauth.allowInsecureRequests }` (a config flag, default `false`, documented dev/test-only — lets the E2E point providers at an http:// loopback mock).
+- `opts` = `{ [oauth.allowInsecureRequests]: allowInsecureForUrl(<the endpoint being requested>) }` — **DERIVED** from whether the URL being hit is loopback http:// (`127.0.0.1`/`localhost`/`::1`), NOT a config flag. A public http:// provider is **rejected at config-resolution time** (`assertProviderEndpointsSecure`): a plain-http OAuth issuer is a MITM vector — a path attacker could forge the token/id_token. https is always fine. There is deliberately NO app-settable "allow insecure" boolean in the public `defineAuth({ oauth })` surface that a production deployment could flip to weaken itself; the loopback mock in the E2E works purely because its endpoints resolve to `127.0.0.1`.
 - jose: `const jwks = createRemoteJWKSet(new URL(jwksUrl))` (in-process cached per issuer in a module Map); `const { payload } = await jwtVerify(idToken, jwks, { issuer, audience })` (validates signature + `iss` + `aud` + `exp`/`nbf`; throws on any failure → caught → generic). Extract `payload.sub/email/email_verified/name`. E2E mock issuer uses jose `generateKeyPair("RS256")`, `exportJWK(publicKey)` (served at the mock `jwks_uri`), and `new SignJWT(claims).setProtectedHeader({alg:"RS256",kid}).setIssuedAt().setIssuer().setAudience().setExpirationTime("5m").sign(privateKey)`.
 
-**(3) E2E mock of a provider + OIDC issuer without live network.** Two plain `http.createServer` instances on `127.0.0.1:0` (loopback, ephemeral ports, closed in `afterAll`); the real `startDevServer` boots `defineAuth({ oauth: { providers: { mock: oauthProvider({ kind:"oidc", issuer: mockUrl, clientId, clientSecret }) }, redirectAllowlist:[...], allowInsecureRequests: true }, jwt: { issuers:[{ issuer: mockUrl, audience, jwksUrl }] } })`. The **mock OIDC provider** serves `/.well-known/openid-configuration` (endpoints point at itself), `/jwks` (`{ keys:[exportJWK(pub)] }`), `POST /token` (returns `{ access_token, id_token, token_type:"bearer" }` where `id_token` is jose-signed), and (GitHub variant) `/user` + `/user/emails`. The **nonce trick** (makes it work without a real browser/authorize step): the test drives `GET /api/auth/oauth/mock/start` with `redirect:"manual"`, reads the 302 `Location` (the authorize URL), parses `state` + `nonce`, sets the mock token endpoint to echo that exact `nonce` (and `aud=clientId`, `iss=mockUrl`, `sub`, `email`, `email_verified:true`) into the id_token it will mint, then drives `GET /api/auth/oauth/mock/callback?code=mockcode&state=<state>` (`redirect:"manual"`) — the server's oauth4webapi POSTs to the mock `/token` over loopback (`allowInsecureRequests`), validates the nonce, resolves+links, writes the handoff, and 302s to `redirectTo#code=<handoff>`; the test parses the fragment and calls `client.action(api.auth.completeOAuthSignIn, { handoffCode })` → `MintResult` → `client.setAuth(token)` → the pre-opened `whoami` subscription sees the identity (waitFor). The **third-party-JWT** half needs no provider server: the test mints a JWT with jose (signed by the test keypair whose public JWK the mock `/jwks` serves), calls `client.action(api.auth.signInWithIdToken, { idToken })`, and asserts whoami sees the `oidc:<issuer>` identity; negative cases (wrong-aud / expired / wrong-iss) assert the action rejects generically.
+**(3) E2E mock of a provider + OIDC issuer without live network.** Two plain `http.createServer` instances on `127.0.0.1:0` (loopback, ephemeral ports, closed in `afterAll`); the real `startDevServer` boots `defineAuth({ oauth: { providers: { mock: oauthProvider({ kind:"oidc", issuer: mockUrl, clientId, clientSecret }) }, redirectAllowlist:[...] }, jwt: { issuers:[{ issuer: mockUrl, audience, jwksUrl }] } })` — `mockUrl` is `http://127.0.0.1:<port>`, so insecure-http is auto-allowed by the loopback derivation (no flag). The **mock OIDC provider** serves `/.well-known/openid-configuration` (endpoints point at itself), `/jwks` (`{ keys:[exportJWK(pub)] }`), `POST /token` (returns `{ access_token, id_token, token_type:"bearer" }` where `id_token` is jose-signed), and (GitHub variant) `/user` + `/user/emails`. The **nonce trick** (makes it work without a real browser/authorize step): the test drives `GET /api/auth/oauth/mock/start` with `redirect:"manual"`, reads the 302 `Location` (the authorize URL), parses `state` + `nonce`, sets the mock token endpoint to echo that exact `nonce` (and `aud=clientId`, `iss=mockUrl`, `sub`, `email`, `email_verified:true`) into the id_token it will mint, then drives `GET /api/auth/oauth/mock/callback?code=mockcode&state=<state>` (`redirect:"manual"`) — the server's oauth4webapi POSTs to the mock `/token` over loopback (insecure-http auto-allowed because the endpoint host is `127.0.0.1`), validates the nonce, resolves+links, writes the handoff, and 302s to `redirectTo#code=<handoff>`; the test parses the fragment and calls `client.action(api.auth.completeOAuthSignIn, { handoffCode })` → `MintResult` → `client.setAuth(token)` → the pre-opened `whoami` subscription sees the identity (waitFor). The **third-party-JWT** half needs no provider server: the test mints a JWT with jose (signed by the test keypair whose public JWK the mock `/jwks` serves), calls `client.action(api.auth.signInWithIdToken, { idToken })`, and asserts whoami sees the `oidc:<issuer>` identity; negative cases (wrong-aud / expired / wrong-iss) assert the action rejects generically.
 
 **(4) Minor resolutions.**
 - **`accounts.secret` is required `v.string()` — NO schema change.** OAuth/OIDC accounts have no password; they insert `secret: ""` (an empty-string sentinel that `v.string()` accepts and D5 runtime validation passes) plus `failedAttempts: 0, lockedUntil: 0`. Password `signIn` only queries `provider:"password"`, so it never reads an OAuth account's sentinel. This keeps `accounts` additive-safe (no field changes).
-- **The verified-email LINK (Part-3 case 3) wipes UNCONDITIONALLY, not via the flip-gated `markVerifiedRevokingIfFirstProof`.** The constraint text says "via `markVerifiedRevokingIfFirstProof`", but that helper wipes sessions ONLY on the `emailVerified` false→true flip; the spec prose is explicit that an *already-verified* user linking a second provider is *also* wiped ("a new credential binding is a credential-boundary event"). So case 3 performs an **unconditional** `byUserId` session wipe (reusing the helper's byUserId-range delete PATTERN, not its flip gate) then sets `emailVerified: true` — a strict superset of the helper. Flagged so the controller can confirm the stronger-than-the-helper reading.
+- **The verified-email LINK (Part-3 case 3) is FLIP-GATED via `markVerifiedRevokingIfFirstProof` — the SAME helper A2 uses (spec amended `44314f9`).** It wipes the user's sessions ONLY on the `emailVerified` false→true flip, then sets `emailVerified: true`. This covers every attack case: the takeover only works against an *unverified* existing account (an attacker's parked unverified password registration of the victim's email), which is exactly when the flip fires and kills the attacker's sessions. An already-verified user legitimately adding a second provider has no flip → no wipe → they stay signed in on their other devices (better UX, still safe — an already-verified account was already proven to belong to whoever verified it). Because the helper is a closure-local in `makeEmailModules` today, Task 4 **hoists it to module scope in `functions.ts` and exports it** (it closes over nothing — only `ctx` + `user`), so both `makeEmailModules` and `external.ts` share one definition.
 - **`oauthState`/`oauthHandoff` tables are ALWAYS present in `authSchema`** (schema is static; conditional registration governs MODULES/ROUTES, not tables — two unused tables on an auth-without-oauth deployment are harmless and additive). Only the functions/routes are conditionally registered.
 - **The `/start` and `/callback` "two routes" are backed by ONE httpAction** (`oauthHttp`) mounted at the single prefix `/api/auth/oauth/`, which parses `<provider>/<phase>` from the path suffix — this repo's `matchRoute`/route shape has no named path params (storage's `handleServe` parses its id from the suffix the same way), and a single `/api/auth/oauth/` prefix can't discriminate the `start`-vs-`callback` suffix via prefix matching. Documented as one httpAction backing both logical routes.
 
@@ -430,18 +431,17 @@ export function githubProvider(opts: { clientId: string; clientSecret: string; s
 ```
 
 **2.2 `config.ts` — oauth/jwt blocks.** Add resolved + user-facing shapes and fold them into `resolveAuthConfig`.
-- Import at top: `import type { OAuthProvider } from "./oauth";`
+- Import at top: `import type { OAuthProvider } from "./oauth";` and `import { assertProviderEndpointsSecure } from "./oauth";`
 - Add resolved types (after `EmailConfig`):
 ```ts
-/** Resolved OAuth config (defaults applied). Present iff `defineAuth({ oauth })` was passed. */
+/** Resolved OAuth config (defaults applied). Present iff `defineAuth({ oauth })` was passed. There is
+ *  NO `allowInsecureRequests` field — insecure-http is derived per-endpoint (loopback-only) at request
+ *  time, and a non-loopback http:// provider is rejected in `resolveOAuthConfig`. */
 export interface OAuthConfig {
   providers: Record<string, OAuthProvider>;
   redirectAllowlist: string[];
   stateTtlMs: number;
   handoffTtlMs: number;
-  /** Dev/test-only escape hatch: allow http:// provider endpoints (oauth4webapi `allowInsecureRequests`).
-   *  Default false — production uses https. The E2E sets it true to point at an http:// loopback mock. */
-  allowInsecureRequests: boolean;
 }
 /** Resolved third-party-JWT config. Present iff `defineAuth({ jwt })` was passed. */
 export interface JwtConfig {
@@ -452,7 +452,6 @@ export interface OAuthOptions {
   redirectAllowlist: string[];
   stateTtlMs?: number;
   handoffTtlMs?: number;
-  allowInsecureRequests?: boolean;
 }
 export interface JwtOptions {
   issuers: Array<{ issuer: string; audience: string; jwksUrl?: string }>;
@@ -475,18 +474,22 @@ export type AuthOptions = Partial<Omit<AuthConfig, "email" | "oauth" | "jwt">> &
 ```
 - Add defaults + resolvers, and extend `resolveAuthConfig`:
 ```ts
-const OAUTH_DEFAULTS = { stateTtlMs: 10 * 60 * 1000, handoffTtlMs: 2 * 60 * 1000, allowInsecureRequests: false };
+const OAUTH_DEFAULTS = { stateTtlMs: 10 * 60 * 1000, handoffTtlMs: 2 * 60 * 1000 };
 
 function resolveOAuthConfig(opts: OAuthOptions): OAuthConfig {
   if (!opts.redirectAllowlist || opts.redirectAllowlist.length === 0) {
     throw new Error("defineAuth({ oauth }) requires a non-empty redirectAllowlist (open-redirect guard)");
   }
+  // Reject a non-loopback http:// provider endpoint at config time (MITM risk on OAuth — a path
+  // attacker could forge the token/id_token). https always fine; http tolerated ONLY on loopback
+  // (127.0.0.1/localhost/::1). Insecure-http is DERIVED per-endpoint at request time — there is no
+  // app-settable flag to weaken this.
+  for (const [name, p] of Object.entries(opts.providers)) assertProviderEndpointsSecure(name, p);
   return {
     providers: opts.providers,
     redirectAllowlist: opts.redirectAllowlist,
     stateTtlMs: opts.stateTtlMs ?? OAUTH_DEFAULTS.stateTtlMs,
     handoffTtlMs: opts.handoffTtlMs ?? OAUTH_DEFAULTS.handoffTtlMs,
-    allowInsecureRequests: opts.allowInsecureRequests ?? OAUTH_DEFAULTS.allowInsecureRequests,
   };
 }
 ```
@@ -574,7 +577,7 @@ import { describe, it, expect } from "vitest";
 import { defineAuth } from "../src/component";
 import { makeAuthModules } from "../src/functions";
 import { resolveAuthConfig } from "../src/config";
-import { googleProvider } from "../src/oauth";
+import { googleProvider, oauthProvider } from "../src/oauth";
 import { consoleEmail } from "../src/email/provider";
 
 const A1_KEYS = ["signUp","signIn","signOut","getUserId","refresh","signInAnonymously","listSessions","revokeSession","revokeOtherSessions"].sort();
@@ -604,6 +607,19 @@ it("jwt present ⇒ signInWithIdToken registered (+ shared _resolveExternalIdent
 
 it("oauth without redirectAllowlist throws", () => {
   expect(() => resolveAuthConfig({ oauth: { providers: {}, redirectAllowlist: [] } })).toThrow(/redirectAllowlist/);
+});
+
+it("a non-loopback http:// provider endpoint is REJECTED at config time (MITM guard); loopback + https are allowed", () => {
+  const allow = ["http://localhost:5173"];
+  // Public http:// issuer → refused (a prod app can't weaken itself; there is no allow-insecure flag).
+  expect(() => resolveAuthConfig({ oauth: { providers: { bad: oauthProvider({ kind: "oidc", issuer: "http://issuer.example.com", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }))
+    .toThrow(/non-loopback http/);
+  // A non-loopback http token endpoint on an oauth2 provider → refused too.
+  expect(() => resolveAuthConfig({ oauth: { providers: { bad: oauthProvider({ kind: "oauth2", authorizationEndpoint: "https://ok/authorize", tokenEndpoint: "http://ok/token", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }))
+    .toThrow(/non-loopback http/);
+  // Loopback http (local testing) → allowed; https → allowed.
+  expect(() => resolveAuthConfig({ oauth: { providers: { local: oauthProvider({ kind: "oidc", issuer: "http://127.0.0.1:8080", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } })).not.toThrow();
+  expect(() => resolveAuthConfig({ oauth: { providers: { g: oauthProvider({ kind: "oidc", issuer: "https://accounts.google.com", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } })).not.toThrow();
 });
 ```
 
@@ -660,8 +676,9 @@ import * as oauth from "oauth4webapi";
 const asCache = new Map<string, oauth.AuthorizationServer>();
 
 /** Resolve the `AuthorizationServer` for a provider: OIDC → discovery (cached); oauth2 → an explicit
- *  literal from the provider's endpoints. `allowInsecure` threads oauth4webapi's http:// escape hatch. */
-export async function authorizationServerFor(p: OAuthProvider, allowInsecure: boolean): Promise<oauth.AuthorizationServer> {
+ *  literal from the provider's endpoints. Insecure-http is DERIVED per-URL (loopback-only) — never a
+ *  flag; a public http:// endpoint was already rejected in `resolveOAuthConfig`. */
+export async function authorizationServerFor(p: OAuthProvider): Promise<oauth.AuthorizationServer> {
   if (p.kind === "oidc") {
     const key = p.issuer!;
     const cached = asCache.get(key);
@@ -669,7 +686,7 @@ export async function authorizationServerFor(p: OAuthProvider, allowInsecure: bo
     const issuerUrl = new URL(p.issuer!);
     const as = await oauth.processDiscoveryResponse(
       issuerUrl,
-      await oauth.discoveryRequest(issuerUrl, { [oauth.allowInsecureRequests]: allowInsecure }),
+      await oauth.discoveryRequest(issuerUrl, { [oauth.allowInsecureRequests]: allowInsecureForUrl(p.issuer!) }),
     );
     asCache.set(key, as);
     return as;
@@ -680,6 +697,34 @@ export async function authorizationServerFor(p: OAuthProvider, allowInsecure: bo
     token_endpoint: p.tokenEndpoint!,
     ...(p.userinfoEndpoint ? { userinfo_endpoint: p.userinfoEndpoint } : {}),
   };
+}
+
+/** True iff `raw` is a loopback http:// URL — the ONLY case oauth4webapi's `allowInsecureRequests` is
+ *  set. https:// → false (the flag isn't needed). A public http:// endpoint is rejected upstream by
+ *  `assertProviderEndpointsSecure`, so this only ever sees loopback http here. */
+export function allowInsecureForUrl(raw: string): boolean {
+  let u: URL; try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== "http:") return false;
+  const h = u.hostname;
+  return h === "127.0.0.1" || h === "::1" || h === "[::1]" || h === "localhost";
+}
+
+/** Reject a non-loopback http:// (or non-http(s)) provider endpoint at config time — a plain-http OAuth
+ *  issuer is a MITM vector (a path attacker could forge the token/id_token). https always fine; http
+ *  tolerated only on loopback for local testing. Called by `resolveOAuthConfig` for every provider. */
+export function assertProviderEndpointsSecure(name: string, p: OAuthProvider): void {
+  const endpoints = [p.issuer, p.authorizationEndpoint, p.tokenEndpoint, p.userinfoEndpoint, p.emailsEndpoint]
+    .filter((e): e is string => typeof e === "string" && e.length > 0);
+  for (const e of endpoints) {
+    let u: URL;
+    try { u = new URL(e); } catch { throw new Error(`defineAuth oauth provider "${name}" has an unparseable endpoint: ${e}`); }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      throw new Error(`defineAuth oauth provider "${name}" endpoint must be http(s): ${e}`);
+    }
+    if (u.protocol === "http:" && !allowInsecureForUrl(e)) {
+      throw new Error(`defineAuth oauth provider "${name}" uses a non-loopback http:// endpoint (${e}) — refused (MITM risk on OAuth). Use https://, or a loopback (127.0.0.1/localhost) endpoint for local testing.`);
+    }
+  }
 }
 
 /** Build the provider authorization URL (oauth4webapi ships no builder — construct it, as the panva
@@ -725,7 +770,7 @@ import { mutation, action, httpAction, commitThenThrow, type ActionCtx, type Mut
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
 import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri } from "./oauth";
-import { mintSession, normalizeEmail, resolveSession, type MintResult } from "./functions";
+import { mintSession, normalizeEmail, resolveSession, markVerifiedRevokingIfFirstProof, type MintResult } from "./functions";
 import { generateToken, sha256base64url } from "./crypto";
 
 const GENERIC = "authentication failed"; // no enumeration — every OAuth/JWT failure surfaces as this
@@ -820,7 +865,7 @@ async function oauthStart(ctx: ActionCtx, config: AuthConfig, request: Request, 
   const codeChallenge = await oauthRandom.challenge(codeVerifier);
   const nonce = p.kind === "oidc" ? oauthRandom.nonce() : undefined;
 
-  const as = await authorizationServerFor(p, config.oauth!.allowInsecureRequests);
+  const as = await authorizationServerFor(p);
   const redirectUri = callbackUri(request.url, provider);
 
   const callerToken = bearerOf(request);
@@ -889,7 +934,7 @@ afterEach(async () => { await new Promise<void>((r) => mock.close(() => r())); }
 
 it("/start allowlisted ⇒ writes a hashed state row + 302s to the authorize URL with S256 + nonce", async () => {
   await startMock();
-  const comp = defineAuth({ oauth: { providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) }, redirectAllowlist: ["http://localhost:5173"], allowInsecureRequests: true } });
+  const comp = defineAuth({ oauth: { providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) }, redirectAllowlist: ["http://localhost:5173"] } });
   const { catalog, moduleMap, componentNames, contextProviders, tableNumbers } = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {} }, [comp]);
   const rt = await EmbeddedRuntime.create({ store: new SqliteDocStore(new NodeSqliteAdapter()), catalog, modules: moduleMap, componentNames, contextProviders, tableNumbers });
 
@@ -911,7 +956,7 @@ it("/start allowlisted ⇒ writes a hashed state row + 302s to the authorize URL
 
 it("/start with a non-allowlisted redirectTo ⇒ 400, no state row written", async () => {
   await startMock();
-  const comp = defineAuth({ oauth: { providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) }, redirectAllowlist: ["http://localhost:5173"], allowInsecureRequests: true } });
+  const comp = defineAuth({ oauth: { providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) }, redirectAllowlist: ["http://localhost:5173"] } });
   const { catalog, moduleMap, componentNames, contextProviders, tableNumbers } = composeComponents({ schemaJson: defineSchema({}).export(), moduleMap: {} }, [comp]);
   const rt = await EmbeddedRuntime.create({ store: new SqliteDocStore(new NodeSqliteAdapter()), catalog, modules: moduleMap, componentNames, contextProviders, tableNumbers });
   const res = await rt.runHttpAction("auth:oauthHttp", new Request("http://127.0.0.1:1/api/auth/oauth/mock/start?redirectTo=http://evil.example/x"), { identity: null });
@@ -930,10 +975,25 @@ it("/start with a non-allowlisted redirectTo ⇒ 400, no state row written", asy
 **Deliverable:** the shared resolution mutation (returning / link-while-signed-in / verified-autolink-with-first-proof / unverified-no-autolink), consumed by both the OAuth callback (Task 5) and `signInWithIdToken` (Task 6). Fully unit-tested independent of transport.
 
 ### Files
-- `components/auth/src/external.ts` (replace `resolveExternalIdentityMutation`)
+- `components/auth/src/functions.ts` (hoist + export `markVerifiedRevokingIfFirstProof`)
+- `components/auth/src/external.ts` (replace `resolveExternalIdentityMutation`; import the helper)
 - `components/auth/test/external-resolve.test.ts` (new — the full matrix)
 
 ### Steps
+
+**4.0 Hoist + export `markVerifiedRevokingIfFirstProof`.** It is currently a closure-local inside `makeEmailModules` (functions.ts ~line 557) but closes over NOTHING — only `ctx` + `user`. Move it verbatim to module scope in `functions.ts` and `export` it (its body is unchanged: wipe the user's `byUserId` sessions only when `user.emailVerified !== true`, then `replace(userId, { ...user, emailVerified: true })`), so both `makeEmailModules` (unchanged call sites) and `external.ts`'s case-3 share ONE definition. Exact signature to preserve:
+```ts
+export async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: Record<string, unknown>): Promise<void> {
+  const userId = user._id as string;
+  if (user.emailVerified !== true) {
+    for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) {
+      await ctx.db.delete(s._id as string);
+    }
+  }
+  await ctx.db.replace(userId, { ...user, emailVerified: true });
+}
+```
+(`makeEmailModules`'s `verifyEmail`/`signInWithMagicLink`/`signInWithOtp`/`adoptOrCreateThenMint` keep calling `markVerifiedRevokingIfFirstProof(ctx, user)` unchanged — the name now resolves to the module-scope export.) Add `markVerifiedRevokingIfFirstProof` to `index.ts`'s `export { … } from "./functions"` line only if a consumer needs it publicly — it does NOT (external.ts imports from `./functions` directly), so keep it out of the public `index.ts` surface.
 
 **4.1 The resolution mutation.** In `external.ts`, implement (replacing the Task-3 placeholder `resolveExternalIdentityMutation`):
 ```ts
@@ -961,8 +1021,8 @@ function resolveExternalIdentityMutation(config: AuthConfig) {
 
 /** The Part-3 decision tree. Returns the resolved `userId`, performing all link/provision/revoke
  *  writes. Attribution: verified-email-required-for-autolink + trusted-link-while-signed-in adapted
- *  from `.reference/convex-auth` (Apache-2.0) + `.reference/better-auth` (MIT); the unconditional
- *  session wipe on a verified-email link is our stronger first-mailbox-proof rule (A1/A2 boundary). */
+ *  from `.reference/convex-auth` (Apache-2.0) + `.reference/better-auth` (MIT); the flip-gated session
+ *  wipe on a verified-email link is A2's first-mailbox-proof rule (the shared `markVerifiedRevokingIfFirstProof`). */
 async function resolveUserId(ctx: MutationCtx, args: { provider: string; accountId: string; email?: string; emailVerified: boolean; linkUserId?: string }): Promise<string> {
   // 1) Returning identity — this external account is already bound.
   const [existing] = await ctx.db.query("accounts", "byAccount").eq("provider", args.provider).eq("accountId", args.accountId).collect();
@@ -977,18 +1037,17 @@ async function resolveUserId(ctx: MutationCtx, args: { provider: string; account
 
   const normEmail = args.email ? normalizeEmail(args.email) : undefined;
 
-  // 3) VERIFIED email that matches an existing user — LINK + first-mailbox-proof. Revoke ALL that
-  //    user's sessions (UNCONDITIONALLY — a new credential binding is a credential boundary, even for
-  //    an already-verified user, per the spec) and set emailVerified:true. Takeover defense: a
-  //    pre-registrant's parked sessions die when the true mailbox owner signs in with a verified provider.
+  // 3) VERIFIED email that matches an existing user — LINK + first-mailbox-proof (FLIP-GATED). Add the
+  //    external account, then `markVerifiedRevokingIfFirstProof` (the SAME helper A2 uses): it wipes the
+  //    user's sessions ONLY on the emailVerified false→true flip, then sets emailVerified:true. Takeover
+  //    defense — a pre-registrant's parked UNVERIFIED account flips here, killing the attacker's parked
+  //    sessions; an already-verified user legitimately adding a second provider has NO flip, so their
+  //    other-device sessions survive (better UX, still safe: the account was already proven to be theirs).
   if (normEmail && args.emailVerified) {
     const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
     if (user) {
       await insertExternalAccount(ctx, user._id as string, args.provider, args.accountId);
-      for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", user._id as string).collect()) {
-        await ctx.db.delete(s._id as string);
-      }
-      if (user.emailVerified !== true) await ctx.db.replace(user._id as string, { ...user, emailVerified: true });
+      await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>);
       return user._id as string;
     }
   }
@@ -1043,13 +1102,19 @@ it("3) VERIFIED email matching a pre-registered UNVERIFIED password account ⇒ 
   expect(user.emailVerified).toBe(true);
 });
 
-it("3b) already-verified user linking a second verified provider ⇒ STILL wipes sessions (credential boundary)", async () => {
+it("3b) already-verified user linking a second verified provider ⇒ NO flip → the user's other sessions SURVIVE (flip-gated UX pin)", async () => {
   t = await createTestStackbase({ modules: {}, components: [defineAuth(OAUTH)], schema: false });
+  // First verified sign-in creates the user + flips emailVerified true (its own session wiped-then-minted).
   const first = await t.mutation("auth:_resolveExternalIdentity", { provider: "google", accountId: "g1", emailVerified: true, email: "u@u.com", outcome: "mint" }) as MintResult;
-  // A second verified provider for the same email links to the same user AND wipes `first`'s session.
+  expect(await t.query("auth:getUserId", { token: first.token })).toBe(first.userId); // `first` is live (already verified)
+  // A SECOND verified provider for the same (now already-verified) user links to the same account with
+  // NO emailVerified flip — so `first`'s session is NOT revoked (this is exactly what distinguishes the
+  // flip-gated helper from an unconditional wipe).
   const second = await t.mutation("auth:_resolveExternalIdentity", { provider: "oidc:https://clerk", accountId: "c1", emailVerified: true, email: "u@u.com", outcome: "mint" }) as MintResult;
   expect(second.userId).toBe(first.userId);
-  expect(await t.query("auth:getUserId", { token: first.token })).toBeNull();
+  expect(await t.query("auth:getUserId", { token: first.token })).toBe(first.userId); // SURVIVES — no flip
+  const accts = await t.run(async (ctx: any) => ctx.db.query("auth/accounts", "byAccount").eq("provider", "oidc:https://clerk").eq("accountId", "c1").collect());
+  expect(accts.length).toBe(1); // the second provider IS linked
 });
 
 it("4) UNVERIFIED external email ⇒ NEVER autolinks; creates a SEPARATE user", async () => {
@@ -1100,13 +1165,13 @@ it("outcome:handoff writes an oauthHandoff row (hashed) and mints NO session", a
  *  with the access token and map the merged object. Throws on any protocol failure (caller → generic). */
 export async function exchangeAndExtractIdentity(args: {
   as: oauth.AuthorizationServer; provider: OAuthProvider; params: URLSearchParams;
-  redirectUri: string; codeVerifier: string; nonce?: string; allowInsecure: boolean;
+  redirectUri: string; codeVerifier: string; nonce?: string;
 }): Promise<ExternalIdentity> {
   const client: oauth.Client = { client_id: args.provider.clientId };
   const clientAuth = oauth.ClientSecretPost(args.provider.clientSecret);
   const resp = await oauth.authorizationCodeGrantRequest(
     args.as, client, clientAuth, args.params, args.redirectUri, args.codeVerifier,
-    { [oauth.allowInsecureRequests]: args.allowInsecure },
+    { [oauth.allowInsecureRequests]: allowInsecureForUrl(args.as.token_endpoint!) },
   );
   const result = await oauth.processAuthorizationCodeResponse(args.as, client, resp,
     args.nonce ? { expectedNonce: args.nonce } : {});
@@ -1151,13 +1216,12 @@ async function oauthCallbackImpl(ctx: ActionCtx, config: AuthConfig, request: Re
   // (processAuthorizationCodeResponse). Any protocol failure → generic (no enumeration).
   let identity;
   try {
-    const as = await authorizationServerFor(p, config.oauth!.allowInsecureRequests);
+    const as = await authorizationServerFor(p);
     const client: oauth.Client = { client_id: p.clientId };
     const params = oauth.validateAuthResponse(as, client, url.searchParams, state);
     identity = await exchangeAndExtractIdentity({
       as, provider: p, params, redirectUri: callbackUri(request.url, provider),
       codeVerifier: recovered.codeVerifier, ...(recovered.nonce ? { nonce: recovered.nonce } : {}),
-      allowInsecure: config.oauth!.allowInsecureRequests,
     });
   } catch { return fail(400); }
 
@@ -1369,7 +1433,7 @@ it("wrong aud / expired / wrong iss ⇒ generic rejection (no enumeration)", asy
 
 **7.1 Mock provider helper** — `packages/cli/test/support/mock-oauth-provider.ts`: a `node:http` server exposing `/.well-known/openid-configuration`, `/jwks`, `POST /token`, `/user`, `/user/emails`, plus a jose keypair and helpers `signIdToken(claims)`/`setNextToken({ nonce, sub, email, emailVerified })`. The `/token` handler returns `{ access_token:"gh-access", id_token: <signed with the pending nonce>, token_type:"bearer" }` for OIDC and `{ access_token:"gh-access", token_type:"bearer" }` for the github variant. Export `{ url, jwksUrl, signIdToken, setNextToken, close }`.
 
-**7.2 E2E** — boot via the `auth-session-e2e.test.ts` idiom (`loadProject([defineAuth({ oauth, jwt, allowInsecureRequests:true })])` → `createEmbeddedRuntime` → `startDevServer({ port:0 })`, **passing `componentRoutes`** built exactly as `boot.ts` does — see Task 1's test for the closure). A `whoami` app query (`ctx.auth.getUserId()`) subscribed over a `StackbaseClient(webSocketTransport(wsUrl))`. Flow:
+**7.2 E2E** — boot via the `auth-session-e2e.test.ts` idiom (`loadProject([defineAuth({ oauth, jwt })])` → `createEmbeddedRuntime` → `startDevServer({ port:0 })`, **passing `componentRoutes`** built exactly as `boot.ts` does — see Task 1's test for the closure). A `whoami` app query (`ctx.auth.getUserId()`) subscribed over a `StackbaseClient(webSocketTransport(wsUrl))`. Flow:
 ```
 1. res = await fetch(`${server.url}/api/auth/oauth/mock/start?redirectTo=${enc("http://localhost:5173/app")}`, { redirect: "manual" });
    loc = new URL(res.headers.get("location")); state = loc.searchParams.get("state"); nonce = loc.searchParams.get("nonce");
