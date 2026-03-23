@@ -5,7 +5,7 @@ import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { query, type QueryCtx } from "@stackbase/executor";
 import { defineAuth } from "../src/component";
-import { oauthProvider } from "../src/oauth";
+import { oauthProvider, githubProvider } from "../src/oauth";
 import { sha256base64url } from "../src/crypto";
 
 // A mock OIDC discovery server so `authorizationServerFor()` resolves without live network.
@@ -165,4 +165,128 @@ it("/start with a live Authorization bearer ⇒ the state row records linkUserId
   expect(rows.length).toBe(1);
   expect(rows[0]!.linkUserId).toBe(userId);
 
+});
+
+// ─────────────────────────── Fix wave regression pins ───────────────────────────
+
+it("/start with a FORGED bearer token ⇒ linkUserId stays UNSET (no pre-seeded link to an arbitrary user)", async () => {
+  await startMock();
+  const comp = defineAuth({
+    oauth: {
+      providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) },
+      redirectAllowlist: ["http://localhost:5173"],
+    },
+  });
+  const rt = await makeRuntime(comp);
+
+  // A victim exists so a would-be attacker has a real userId to try to link against — but the
+  // attacker never actually authenticated as them, only guessed/forged a bearer value.
+  await rt.run<{ token: string; userId: string }>("auth:signUp", { email: "victim@b.co", password: "pw" });
+
+  const start = new Request("http://127.0.0.1:1/api/auth/oauth/mock/start?redirectTo=" + encodeURIComponent("http://localhost:5173/app"), {
+    headers: { authorization: "Bearer not-a-real-session" },
+  });
+  const res = await rt.runHttpAction("auth:oauthHttp", start, { identity: null });
+  expect(res.status).toBe(302);
+
+  const rows = (await rt.runSystem<Record<string, unknown>[]>("_test:allOauthState", {})).value;
+  expect(rows.length).toBe(1);
+  expect(rows[0]!.linkUserId).toBeUndefined();
+});
+
+it("/start with a REVOKED (signed-out) session token ⇒ linkUserId stays UNSET", async () => {
+  await startMock();
+  const comp = defineAuth({
+    oauth: {
+      providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) },
+      redirectAllowlist: ["http://localhost:5173"],
+    },
+  });
+  const rt = await makeRuntime(comp);
+
+  const { token } = (await rt.run<{ token: string; userId: string }>("auth:signUp", { email: "gone@b.co", password: "pw" })).value;
+  await rt.run("auth:signOut", { token }); // the session row backing `token` no longer exists
+
+  const start = new Request("http://127.0.0.1:1/api/auth/oauth/mock/start?redirectTo=" + encodeURIComponent("http://localhost:5173/app"), {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const res = await rt.runHttpAction("auth:oauthHttp", start, { identity: null });
+  expect(res.status).toBe(302);
+
+  const rows = (await rt.runSystem<Record<string, unknown>[]>("_test:allOauthState", {})).value;
+  expect(rows.length).toBe(1);
+  expect(rows[0]!.linkUserId).toBeUndefined();
+});
+
+it("/start for a NON-OIDC (oauth2, github-shaped) provider ⇒ authorize URL has NO nonce param, flow still works", async () => {
+  const comp = defineAuth({
+    oauth: {
+      providers: { gh: githubProvider({ clientId: "cid", clientSecret: "sec" }) },
+      redirectAllowlist: ["http://localhost:5173"],
+    },
+  });
+  const rt = await makeRuntime(comp);
+
+  const start = new Request("http://127.0.0.1:1/api/auth/oauth/gh/start?redirectTo=" + encodeURIComponent("http://localhost:5173/app"));
+  const res = await rt.runHttpAction("auth:oauthHttp", start, { identity: null });
+  expect(res.status).toBe(302);
+  const loc = new URL(res.headers.get("location")!);
+  expect(loc.origin + loc.pathname).toBe("https://github.com/login/oauth/authorize");
+  expect(loc.searchParams.get("response_type")).toBe("code");
+  expect(loc.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(loc.searchParams.has("nonce")).toBe(false); // the oauth2 (non-OIDC) branch — no nonce ever minted
+
+  const rows = (await rt.runSystem<Record<string, unknown>[]>("_test:allOauthState", {})).value;
+  expect(rows.length).toBe(1);
+  expect(rows[0]!.nonce).toBeUndefined();
+  expect(rows[0]!.provider).toBe("gh");
+});
+
+it.each(["__proto__", "constructor", "hasOwnProperty", "toString"])(
+  "/start for prototype-member provider name %s ⇒ clean 404, no internal-error leak (prototype-pollution guard)",
+  async (provider) => {
+    await startMock();
+    const comp = defineAuth({
+      oauth: {
+        providers: { mock: oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "cid", clientSecret: "sec" }) },
+        redirectAllowlist: ["http://localhost:5173"],
+      },
+    });
+    const rt = await makeRuntime(comp);
+
+    const res = await rt.runHttpAction(
+      "auth:oauthHttp",
+      new Request(`http://127.0.0.1:1/api/auth/oauth/${provider}/start?redirectTo=` + encodeURIComponent("http://localhost:5173/app")),
+      { identity: null },
+    );
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).toBe("authentication failed"); // the generic GENERIC fail() shape, not a stack/message leak
+    expect((res.headers.get("content-type") ?? "")).toMatch(/text\/plain/);
+
+    const rows = (await rt.runSystem<Record<string, unknown>[]>("_test:allOauthState", {})).value;
+    expect(rows.length).toBe(0); // never reached the state-write path
+  },
+);
+
+describe("isAllowedRedirect — path-prefix requires a segment boundary", () => {
+  // Imported lazily inside the describe to keep the top-level import list unchanged for the
+  // other tests in this file; oauth.ts already exports `isAllowedRedirect` publicly.
+  it("rejects a same-origin sibling path that merely shares a string prefix", async () => {
+    const { isAllowedRedirect } = await import("../src/oauth");
+    expect(isAllowedRedirect("https://app.com/app-evil/x", ["https://app.com/app"])).toBe(false);
+  });
+
+  it("accepts a true subtree path and the exact allowlisted path itself", async () => {
+    const { isAllowedRedirect } = await import("../src/oauth");
+    expect(isAllowedRedirect("https://app.com/app/sub", ["https://app.com/app"])).toBe(true);
+    expect(isAllowedRedirect("https://app.com/app", ["https://app.com/app"])).toBe(true);
+  });
+
+  it("a trailing-slash allowlist entry behaves the same as its non-slash form", async () => {
+    const { isAllowedRedirect } = await import("../src/oauth");
+    expect(isAllowedRedirect("https://app.com/app/", ["https://app.com/app/"])).toBe(true);
+    expect(isAllowedRedirect("https://app.com/app/sub", ["https://app.com/app/"])).toBe(true);
+    expect(isAllowedRedirect("https://app.com/app-evil/x", ["https://app.com/app/"])).toBe(false);
+  });
 });

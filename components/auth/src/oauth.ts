@@ -198,15 +198,35 @@ export function buildAuthorizeUrl(as: oauth.AuthorizationServer, p: OAuthProvide
   return url.toString();
 }
 
-/** Exact origin + path-prefix allowlist match (open-redirect guard). Rejects on any parse failure. */
+/** Exact origin + path-prefix allowlist match (open-redirect guard). Rejects on any parse failure.
+ *  The path match requires a segment boundary — a raw `startsWith` would let an allowlisted
+ *  "https://app.com/app" match "https://app.com/app-evil-sibling/phish" (same origin, but the
+ *  allowlist entry was meant to scope to the `/app` subtree, not any path that merely shares its
+ *  prefix as a string). Exact-path match is also accepted (so a bare "/app" entry still matches
+ *  "/app" itself, not only "/app/..."). */
 export function isAllowedRedirect(redirectTo: string, allowlist: string[]): boolean {
   let target: URL;
   try { target = new URL(redirectTo); } catch { return false; }
   return allowlist.some((allowed) => {
     let a: URL;
     try { a = new URL(allowed); } catch { return false; }
-    return a.origin === target.origin && target.pathname.startsWith(a.pathname);
+    if (a.origin !== target.origin) return false;
+    if (target.pathname === a.pathname) return true;
+    const prefix = a.pathname.endsWith("/") ? a.pathname : a.pathname + "/";
+    return target.pathname.startsWith(prefix);
   });
+}
+
+/** Resolve a URL-derived provider name against the configured provider map, guarding against
+ *  prototype-pollution lookups (`__proto__`, `constructor`, `hasOwnProperty`, `toString`, ...) — a
+ *  plain `providers[name]` index returns a truthy `Object.prototype` member for those names instead
+ *  of `undefined`, which would let a malformed URL slip past the `if (!p) return fail(404)` guard
+ *  and crash deeper in the flow (e.g. `new URL(p.authorizationEndpoint!)` on `undefined`), leaking
+ *  an internal error where a clean 404 was intended. Shared by both the `/start` (Task 3) and
+ *  `/callback` (Task 5) phases so the guard exists in exactly one place. */
+export function resolveProvider(providers: Record<string, OAuthProvider>, name: string): OAuthProvider | undefined {
+  if (!Object.prototype.hasOwnProperty.call(providers, name)) return undefined;
+  return providers[name];
 }
 
 /** The engine callback URL for a provider — the `redirect_uri` registered with the provider and used

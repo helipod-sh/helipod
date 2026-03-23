@@ -1,7 +1,7 @@
 import { mutation, action, httpAction, type ActionCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
-import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri } from "./oauth";
+import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider } from "./oauth";
 import { resolveSession } from "./functions";
 import { sha256base64url } from "./crypto";
 import * as oauth from "oauth4webapi";
@@ -128,7 +128,7 @@ function oauthHttp(config: AuthConfig) {
     const slash = tail.indexOf("/");
     const provider = slash === -1 ? tail : tail.slice(0, slash);
     const phase = slash === -1 ? "" : tail.slice(slash + 1);
-    const p = config.oauth!.providers[provider];
+    const p = resolveProvider(config.oauth!.providers, provider);
     if (!p) return fail(404);
 
     if (phase === "start") return oauthStart(ctx as ActionCtx, config, request, url, provider, p);
