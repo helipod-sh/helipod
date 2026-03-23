@@ -94,9 +94,15 @@ export function githubProvider(opts: { clientId: string; clientSecret: string; s
   });
 }
 
-/** A request-time endpoint is loopback iff its hostname is `127.0.0.1`, `localhost`, or `::1`
- *  (bracketed as `[::1]` in a URL). This is the ONLY signal that ever permits `http://` — there is no
- *  app-settable "allow insecure" flag anywhere in the public `defineAuth({ oauth })` surface. Used
+/** A request-time endpoint is loopback iff its hostname is `127.0.0.1`, `localhost`, or the IPv6
+ *  loopback `::1`. `URL#hostname` always serializes an IPv6 host WITH brackets (e.g.
+ *  `new URL("http://[::1]:8080").hostname === "[::1]"`, never the bare `"::1"`), so the bracketed
+ *  form is what's actually compared; the bracket-stripped form is also accepted for robustness. This
+ *  is the ONLY signal that ever permits `http://` — there is no app-settable "allow insecure" flag
+ *  anywhere in the public `defineAuth({ oauth })` surface. Every comparison is exact hostname
+ *  equality (never substring/regex) — a MITM-bypass host like `127.0.0.1.evil.com`,
+ *  `localhost.evil.com`, `http://127.0.0.1@evil.com` (userinfo), or `http://evil.com#127.0.0.1`
+ *  (fragment) all parse to a hostname that is NOT one of these exact strings and stay rejected. Used
  *  both at config-resolution time (`assertProviderEndpointsSecure`, reject-at-config) and at request
  *  time (Task 3/5's `allowInsecureForUrl`, to derive oauth4webapi's `allowInsecureRequests` option for
  *  the exact endpoint being hit) — same predicate, two call sites. */
@@ -108,7 +114,7 @@ export function isLoopbackUrl(url: string): boolean {
     return false;
   }
   const host = parsed.hostname;
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
 /** Config-time MITM guard (spec-amended security requirement): a plain-http OAuth issuer/endpoint is

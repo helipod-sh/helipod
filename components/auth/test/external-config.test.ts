@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { defineAuth } from "../src/component";
 import { makeAuthModules } from "../src/functions";
 import { resolveAuthConfig } from "../src/config";
-import { googleProvider, oauthProvider } from "../src/oauth";
+import { googleProvider, oauthProvider, isLoopbackUrl } from "../src/oauth";
 import { consoleEmail } from "../src/email/provider";
 
 const A1_KEYS = ["signUp","signIn","signOut","getUserId","refresh","signInAnonymously","listSessions","revokeSession","revokeOtherSessions"].sort();
@@ -45,4 +45,90 @@ it("a non-loopback http:// provider endpoint is REJECTED at config time (MITM gu
   // Loopback http (local testing) → allowed; https → allowed.
   expect(() => resolveAuthConfig({ oauth: { providers: { local: oauthProvider({ kind: "oidc", issuer: "http://127.0.0.1:8080", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } })).not.toThrow();
   expect(() => resolveAuthConfig({ oauth: { providers: { g: oauthProvider({ kind: "oidc", issuer: "https://accounts.google.com", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } })).not.toThrow();
+});
+
+it("isLoopbackUrl recognizes the bracketed IPv6 loopback ([::1]) — regression pin for the URL.hostname bracket bug", () => {
+  // URL#hostname always serializes IPv6 WITH brackets — new URL("http://[::1]:8080").hostname === "[::1]",
+  // never the bare "::1". A bare-string comparison against "::1" is dead code; this pins the real value.
+  expect(isLoopbackUrl("http://[::1]:8080")).toBe(true);
+  expect(isLoopbackUrl("http://[::1]")).toBe(true);
+  expect(isLoopbackUrl("http://127.0.0.1")).toBe(true);
+  expect(isLoopbackUrl("http://localhost")).toBe(true);
+  // Bypass attempts must stay rejected — exact hostname equality only, never substring/regex.
+  expect(isLoopbackUrl("http://127.0.0.1.evil.com")).toBe(false);
+  expect(isLoopbackUrl("http://localhost.evil.com")).toBe(false);
+  expect(isLoopbackUrl("http://127.0.0.1@evil.com")).toBe(false); // userinfo — hostname is evil.com
+  expect(isLoopbackUrl("http://evil.com#127.0.0.1")).toBe(false); // fragment — hostname is evil.com
+});
+
+it("a genuine http://[::1] provider endpoint (bracketed IPv6 loopback) is accepted at config time — THE regression pin", () => {
+  const allow = ["http://localhost:5173"];
+  expect(() =>
+    resolveAuthConfig({ oauth: { providers: { local6: oauthProvider({ kind: "oidc", issuer: "http://[::1]:8080", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }),
+  ).not.toThrow();
+  expect(() =>
+    resolveAuthConfig({ oauth: { providers: { local6: oauthProvider({ kind: "oidc", issuer: "http://[::1]", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }),
+  ).not.toThrow();
+});
+
+it("a http://localhost provider endpoint is accepted at config time (loopback, not just 127.0.0.1)", () => {
+  const allow = ["http://localhost:5173"];
+  expect(() =>
+    resolveAuthConfig({ oauth: { providers: { localh: oauthProvider({ kind: "oidc", issuer: "http://localhost:9999", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }),
+  ).not.toThrow();
+});
+
+it("the MITM guard rejects a non-loopback http:// endpoint on every endpoint field the config loops over", () => {
+  const allow = ["http://localhost:5173"];
+  // oidc: issuer
+  expect(() =>
+    resolveAuthConfig({ oauth: { providers: { bad: oauthProvider({ kind: "oidc", issuer: "http://evil.example.com", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }),
+  ).toThrow(/non-loopback http/);
+  // oauth2: authorizationEndpoint
+  expect(() =>
+    resolveAuthConfig({
+      oauth: {
+        providers: { bad: oauthProvider({ kind: "oauth2", authorizationEndpoint: "http://evil.example.com/authorize", tokenEndpoint: "https://ok/token", clientId: "i", clientSecret: "s" }) },
+        redirectAllowlist: allow,
+      },
+    }),
+  ).toThrow(/non-loopback http/);
+  // oauth2: tokenEndpoint
+  expect(() =>
+    resolveAuthConfig({
+      oauth: {
+        providers: { bad: oauthProvider({ kind: "oauth2", authorizationEndpoint: "https://ok/authorize", tokenEndpoint: "http://evil.example.com/token", clientId: "i", clientSecret: "s" }) },
+        redirectAllowlist: allow,
+      },
+    }),
+  ).toThrow(/non-loopback http/);
+  // oauth2: userinfoEndpoint
+  expect(() =>
+    resolveAuthConfig({
+      oauth: {
+        providers: {
+          bad: oauthProvider({ kind: "oauth2", authorizationEndpoint: "https://ok/authorize", tokenEndpoint: "https://ok/token", userinfoEndpoint: "http://evil.example.com/user", clientId: "i", clientSecret: "s" }),
+        },
+        redirectAllowlist: allow,
+      },
+    }),
+  ).toThrow(/non-loopback http/);
+  // oauth2: emailsEndpoint
+  expect(() =>
+    resolveAuthConfig({
+      oauth: {
+        providers: {
+          bad: oauthProvider({ kind: "oauth2", authorizationEndpoint: "https://ok/authorize", tokenEndpoint: "https://ok/token", emailsEndpoint: "http://evil.example.com/emails", clientId: "i", clientSecret: "s" }),
+        },
+        redirectAllowlist: allow,
+      },
+    }),
+  ).toThrow(/non-loopback http/);
+});
+
+it("a bypass-style host stays rejected: http://127.0.0.1.evil.com is NOT loopback", () => {
+  const allow = ["http://localhost:5173"];
+  expect(() =>
+    resolveAuthConfig({ oauth: { providers: { bad: oauthProvider({ kind: "oidc", issuer: "http://127.0.0.1.evil.com", clientId: "i", clientSecret: "s" }) }, redirectAllowlist: allow } }),
+  ).toThrow(/non-loopback http/);
 });
