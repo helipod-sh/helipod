@@ -3,6 +3,7 @@ import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url }
 import type { AuthConfig } from "./config";
 import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
 import type { Flow } from "./email/templates";
+import { makeExternalModules } from "./external";
 import {
   RefreshStaleError,
   RefreshExpiredError,
@@ -363,8 +364,10 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
   });
 
   const base = { signUp, signIn, signOut, getUserId, refresh, signInAnonymously, listSessions, revokeSession, revokeOtherSessions };
-  if (!config.email) return base;                       // email absent ⇒ surface stays EXACTLY A1's
-  return { ...base, ...makeEmailModules(config) };       // Tasks 2–4 provide makeEmailModules
+  let modules: Record<string, RegisteredFunction> = base;
+  if (config.email) modules = { ...modules, ...makeEmailModules(config) };            // email absent ⇒ A1's surface
+  if (config.oauth || config.jwt) modules = { ...modules, ...makeExternalModules(config) }; // A3 absent ⇒ A1+A2's surface
+  return modules;
 }
 
 /** The decision `_issueCode` returns to its calling action: whether to send at all, the raw code
