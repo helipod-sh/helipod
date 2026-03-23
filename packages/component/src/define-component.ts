@@ -84,6 +84,23 @@ export interface Driver {
   stop?(): void | Promise<void>;
 }
 
+/**
+ * A reserved engine HTTP route a component contributes (Task A3-1): `{ method, pathPrefix }` mounted
+ * by the boot core at a reserved `/api/…` or `/_…` path (an app `http.ts` may not register these —
+ * the reserved-path guard rejects them), dispatching to `handler`, a bare httpAction module name in
+ * THIS component's `modules`. Collected by `composeComponents` (parallel to `drivers`) and bound to
+ * `runtime.runHttpAction` by the boot core — the generic form of how the always-on storage routes
+ * mount, for opt-in composed components. Matched by longest/any prefix ahead of user routes; the
+ * handler parses any sub-path (`<provider>/<phase>`) itself, as this repo's routes carry no named
+ * params (see `@stackbase/executor`'s `matchRoute`, and storage's `handleServe`).
+ */
+export interface ComponentHttpRoute {
+  method: string;
+  pathPrefix: string;
+  /** Bare httpAction module name within this component's `modules` (namespaced at compose time). */
+  handler: string;
+}
+
 export interface ComponentDefinition {
   name: string;
   schema: SchemaDefinition;
@@ -124,6 +141,8 @@ export interface ComponentDefinition {
   boot?: (ctx: BootContext) => Promise<void>;
   /** A recurring driver, started once after boot; woken by commits and/or timers. */
   driver?: Driver;
+  /** Reserved engine HTTP routes this component contributes — see `ComponentHttpRoute`. */
+  httpRoutes?: ComponentHttpRoute[];
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
@@ -136,6 +155,14 @@ export function defineComponent(def: ComponentDefinition): ComponentDefinition {
     throw new Error(
       `component "${def.name}" declares contextType but no context builder — ctx.${def.name} would be typed but undefined at runtime`,
     );
+  }
+  for (const r of def.httpRoutes ?? []) {
+    if (!(r.pathPrefix.startsWith("/api/") || r.pathPrefix.startsWith("/_"))) {
+      throw new Error(`component "${def.name}" httpRoute pathPrefix "${r.pathPrefix}" must be a reserved path (start with "/api/" or "/_")`);
+    }
+    if (!def.modules[r.handler] || def.modules[r.handler]!.type !== "httpAction") {
+      throw new Error(`component "${def.name}" httpRoute handler "${r.handler}" must name an httpAction in this component's modules`);
+    }
   }
   return def;
 }

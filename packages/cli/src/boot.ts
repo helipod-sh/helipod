@@ -656,6 +656,14 @@ export interface BootResult {
    */
   storageRoutes: StorageRoute[];
   /**
+   * Reserved engine routes contributed by composed components (e.g. `@stackbase/auth`'s
+   * `/api/auth/oauth/*`), each bound to `runtime.runHttpAction` and shaped as an engine-owned
+   * `StorageRoute` `{method,pathPrefix,handler}` so `server.ts` dispatches them exactly like the
+   * always-on storage routes. Fixed at boot (the component set is fixed at boot — only functions/
+   * schema hot-swap), so no `setRoutes` live-swap is needed. Empty when no component declares routes.
+   */
+  componentRoutes: StorageRoute[];
+  /**
    * Set only when `objectStoreUrl` was given — the object-store node's graceful-shutdown handle.
    * `serve.ts`'s shutdown calls this AFTER `server.close()` and BEFORE `store.close()`. Two shapes,
    * mutually exclusive by construction (at most one of `replica`/writer ever built this boot):
@@ -1045,6 +1053,20 @@ export async function bootLoaded(opts: {
   };
   const routes = storageRoutes(blobStore, storageRouteDeps);
 
+  // Component-contributed reserved routes (Task A3-1): bind each declared httpAction to the runtime
+  // and shape it as an engine-owned `StorageRoute`. The raw `Authorization: Bearer <token>` is passed
+  // straight through as `identity` (no resolution — same convention `httpAction`/storage use).
+  const bearerOf = (request: Request): string | null => {
+    const h = request.headers.get("authorization");
+    const m = h ? /^Bearer\s+(.+)$/.exec(h) : null;
+    return m ? (m[1] ?? null) : null;
+  };
+  const componentRoutes: StorageRoute[] = project.componentRoutes.map((r) => ({
+    method: r.method,
+    pathPrefix: r.pathPrefix,
+    handler: (request: Request) => runtime.runHttpAction(r.handlerPath, request, { identity: bearerOf(request) }),
+  }));
+
   const adminApi = new AdminApi({
     runtime,
     schemaJson: project.schemaJson,
@@ -1063,6 +1085,7 @@ export async function bootLoaded(opts: {
     components: opts.components,
     blobStore,
     storageRoutes: routes,
+    componentRoutes,
     // Mutually exclusive by construction (Task 8.2 guards `objectStoreUrl !== undefined && !replica`
     // vs. `&& replica`) — at most one of these two spreads ever contributes a key, so `serve.ts`'s
     // shutdown can call `objectStoreRelease()` generically without knowing which node type booted.

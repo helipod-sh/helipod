@@ -2,7 +2,7 @@ import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@st
 import { SimpleIndexCatalog } from "@stackbase/executor";
 import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@stackbase/executor";
 import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
-import type { ComponentDefinition, BootContext, Driver } from "./define-component";
+import type { ComponentDefinition, BootContext, Driver, ComponentHttpRoute } from "./define-component";
 
 const DEFAULT_INDEX = "by_creation";
 
@@ -19,6 +19,15 @@ export interface ComposeInput {
    */
   existingTableNumbers?: Record<string, number>;
 }
+
+/** A `ComponentHttpRoute` after compose-time namespacing: `handlerPath` is `"<component>:<handler>"`,
+ *  ready for `runtime.runHttpAction` to look up in `moduleMap`. */
+export interface ResolvedComponentRoute {
+  method: string;
+  pathPrefix: string;
+  handlerPath: string;
+}
+
 export interface ComposedTables {
   tableNumbers: Record<string, number>;
   catalog: SimpleIndexCatalog;
@@ -115,6 +124,7 @@ export interface ComposedProject {
   relationRegistry: RelationRegistry;
   bootSteps: { name: string; run: (ctx: BootContext) => Promise<void> }[];
   drivers: Driver[];
+  componentRoutes: ResolvedComponentRoute[];
 }
 
 function buildRelationRegistry(
@@ -229,5 +239,20 @@ export function composeComponents(
   const relationRegistry = buildRelationRegistry(app.schemaJson, ordered);
   const bootSteps = ordered.filter((c) => c.boot).map((c) => ({ name: c.name, run: c.boot! }));
   const drivers = ordered.filter((c) => c.driver).map((c) => c.driver!);
-  return { catalog, moduleMap, componentNames: new Set(ordered.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps, drivers };
+  const RESERVED_ENGINE_PREFIXES = ["/api/run", "/api/health", "/api/sync", "/api/storage/", "/_admin/", "/_fleet/", "/_dashboard"];
+  const componentRoutes: ResolvedComponentRoute[] = [];
+  const seenRoutePrefixes = new Set<string>();
+  for (const c of ordered) {
+    for (const r of c.httpRoutes ?? []) {
+      if (RESERVED_ENGINE_PREFIXES.some((p) => r.pathPrefix === p || r.pathPrefix.startsWith(p))) {
+        throw new Error(`component "${c.name}" httpRoute "${r.pathPrefix}" collides with a built-in engine prefix`);
+      }
+      if (seenRoutePrefixes.has(`${r.method} ${r.pathPrefix}`)) {
+        throw new Error(`duplicate component httpRoute: ${r.method} ${r.pathPrefix}`);
+      }
+      seenRoutePrefixes.add(`${r.method} ${r.pathPrefix}`);
+      componentRoutes.push({ method: r.method, pathPrefix: r.pathPrefix, handlerPath: `${c.name}:${r.handler}` });
+    }
+  }
+  return { catalog, moduleMap, componentNames: new Set(ordered.map((c) => c.name)), tableNumbers, contextProviders, policyRegistry, policyProviders, relationRegistry, bootSteps, drivers, componentRoutes };
 }
