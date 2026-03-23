@@ -2,7 +2,7 @@ import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@st
 import { SimpleIndexCatalog } from "@stackbase/executor";
 import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@stackbase/executor";
 import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
-import type { ComponentDefinition, BootContext, Driver, ComponentHttpRoute } from "./define-component";
+import { assertValidComponentRoutePrefix, type ComponentDefinition, type BootContext, type Driver, type ComponentHttpRoute } from "./define-component";
 
 const DEFAULT_INDEX = "by_creation";
 
@@ -239,18 +239,27 @@ export function composeComponents(
   const relationRegistry = buildRelationRegistry(app.schemaJson, ordered);
   const bootSteps = ordered.filter((c) => c.boot).map((c) => ({ name: c.name, run: c.boot! }));
   const drivers = ordered.filter((c) => c.driver).map((c) => c.driver!);
-  const RESERVED_ENGINE_PREFIXES = ["/api/run", "/api/health", "/api/sync", "/api/storage/", "/_admin/", "/_fleet/", "/_dashboard"];
   const componentRoutes: ResolvedComponentRoute[] = [];
-  const seenRoutePrefixes = new Set<string>();
   for (const c of ordered) {
     for (const r of c.httpRoutes ?? []) {
-      if (RESERVED_ENGINE_PREFIXES.some((p) => r.pathPrefix === p || r.pathPrefix.startsWith(p))) {
-        throw new Error(`component "${c.name}" httpRoute "${r.pathPrefix}" collides with a built-in engine prefix`);
+      // Defense-in-depth: re-validate here too (see `assertValidComponentRoutePrefix`'s doc comment)
+      // in case a `ComponentDefinition` was ever constructed/composed without going through
+      // `defineComponent`, which already runs this same check.
+      assertValidComponentRoutePrefix(c.name, r.pathPrefix);
+      // Cross-component OVERLAP guard: reject when this route's prefix and an already-accepted
+      // route's prefix (same method) are equal or one is a prefix of the other. Two components each
+      // covering a slice of the same namespace (e.g. "/api/x/" and "/api/x/y/") would otherwise both
+      // compose fine and dispatch by declaration order at `matchComponentRoute` — silently
+      // order-dependent. Rejecting overlap at compose time makes first-match unambiguous instead.
+      for (const existing of componentRoutes) {
+        if (existing.method !== r.method) continue;
+        if (existing.pathPrefix === r.pathPrefix || existing.pathPrefix.startsWith(r.pathPrefix) || r.pathPrefix.startsWith(existing.pathPrefix)) {
+          throw new Error(
+            `component "${c.name}" httpRoute "${r.method} ${r.pathPrefix}" overlaps with "${existing.method} ${existing.pathPrefix}" ` +
+              `(declared by "${existing.handlerPath.split(":")[0]}") — component httpRoute prefixes must be disjoint per method`,
+          );
+        }
       }
-      if (seenRoutePrefixes.has(`${r.method} ${r.pathPrefix}`)) {
-        throw new Error(`duplicate component httpRoute: ${r.method} ${r.pathPrefix}`);
-      }
-      seenRoutePrefixes.add(`${r.method} ${r.pathPrefix}`);
       componentRoutes.push({ method: r.method, pathPrefix: r.pathPrefix, handlerPath: `${c.name}:${r.handler}` });
     }
   }
