@@ -4,6 +4,7 @@
  * is public. `oauth4webapi` protocol wiring lives in the callback/start httpAction (Tasks 3/5); this
  * file is pure config + claim-mapping (unit-testable, no network).
  */
+import * as oauth from "oauth4webapi";
 
 /** The normalized identity both the OAuth callback and `signInWithIdToken` produce and hand to the
  *  shared Part-3 resolution mutation. `emailVerified` is a hard boolean (an unverified/absent email
@@ -148,4 +149,70 @@ export function assertProviderEndpointsSecure(name: string, provider: OAuthProvi
       );
     }
   }
+}
+
+// ─────────────────────────── protocol helpers (Task 3) ───────────────────────────
+
+/** Per-issuer discovery cache — an OIDC `AuthorizationServer` is fetched once per process. */
+const asCache = new Map<string, oauth.AuthorizationServer>();
+
+/** Resolve the `AuthorizationServer` for a provider: OIDC → discovery (cached); oauth2 → an explicit
+ *  literal from the provider's endpoints. Insecure-http is DERIVED per-URL via the shared
+ *  `isLoopbackUrl` predicate (loopback-only) — never a flag; a public http:// endpoint was already
+ *  rejected in `resolveOAuthConfig` (`assertProviderEndpointsSecure`). */
+export async function authorizationServerFor(p: OAuthProvider): Promise<oauth.AuthorizationServer> {
+  if (p.kind === "oidc") {
+    const key = p.issuer!;
+    const cached = asCache.get(key);
+    if (cached) return cached;
+    const issuerUrl = new URL(p.issuer!);
+    const as = await oauth.processDiscoveryResponse(
+      issuerUrl,
+      await oauth.discoveryRequest(issuerUrl, { [oauth.allowInsecureRequests]: isLoopbackUrl(p.issuer!) }),
+    );
+    asCache.set(key, as);
+    return as;
+  }
+  return {
+    issuer: p.issuer ?? new URL(p.authorizationEndpoint!).origin,
+    authorization_endpoint: p.authorizationEndpoint!,
+    token_endpoint: p.tokenEndpoint!,
+    ...(p.userinfoEndpoint ? { userinfo_endpoint: p.userinfoEndpoint } : {}),
+  };
+}
+
+/** Build the provider authorization URL (oauth4webapi ships no builder — construct it, as the panva
+ *  examples do). `nonce` only for OIDC. */
+export function buildAuthorizeUrl(as: oauth.AuthorizationServer, p: OAuthProvider, args: {
+  redirectUri: string; state: string; codeChallenge: string; nonce?: string;
+}): string {
+  const url = new URL(as.authorization_endpoint!);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", p.clientId);
+  url.searchParams.set("redirect_uri", args.redirectUri);
+  url.searchParams.set("scope", p.scopes.join(" "));
+  url.searchParams.set("state", args.state);
+  url.searchParams.set("code_challenge", args.codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  if (args.nonce) url.searchParams.set("nonce", args.nonce);
+  return url.toString();
+}
+
+/** Exact origin + path-prefix allowlist match (open-redirect guard). Rejects on any parse failure. */
+export function isAllowedRedirect(redirectTo: string, allowlist: string[]): boolean {
+  let target: URL;
+  try { target = new URL(redirectTo); } catch { return false; }
+  return allowlist.some((allowed) => {
+    let a: URL;
+    try { a = new URL(allowed); } catch { return false; }
+    return a.origin === target.origin && target.pathname.startsWith(a.pathname);
+  });
+}
+
+/** The engine callback URL for a provider — the `redirect_uri` registered with the provider and used
+ *  identically at `/start` and token exchange (they MUST match). Derived from the inbound request's
+ *  own origin so it works under any host/port without extra config. */
+export function callbackUri(requestUrl: string, provider: string): string {
+  const u = new URL(requestUrl);
+  return `${u.origin}/api/auth/oauth/${provider}/callback`;
 }
