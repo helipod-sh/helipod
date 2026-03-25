@@ -118,6 +118,13 @@ export function isLoopbackUrl(url: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
+/** A readable alias over `isLoopbackUrl` for the request-time call sites (Task 3's discovery/JWKS
+ *  fetch, Task 5's token exchange): derives oauth4webapi's `[oauth.allowInsecureRequests]` option
+ *  from the URL actually being requested. Same predicate, never reimplemented. */
+export function allowInsecureForUrl(url: string): boolean {
+  return isLoopbackUrl(url);
+}
+
 /** Config-time MITM guard (spec-amended security requirement): a plain-http OAuth issuer/endpoint is
  *  a MITM vector — a path attacker could forge the token/id_token in transit. `https://` is always
  *  fine. `http://` is tolerated ONLY when the endpoint's own host is loopback (local testing / the
@@ -235,4 +242,41 @@ export function resolveProvider(providers: Record<string, OAuthProvider>, name: 
 export function callbackUri(requestUrl: string, provider: string): string {
   const u = new URL(requestUrl);
   return `${u.origin}/api/auth/oauth/${provider}/callback`;
+}
+
+// ─────────────────────────── token exchange + identity extraction (Task 5) ───────────────────────────
+
+/** Exchange the callback code for tokens and produce the normalized `ExternalIdentity`. OIDC → verify
+ *  the id_token (nonce-bound) and map its claims; oauth2 (github) → fetch `/user` + `/user/emails`
+ *  with the access token and map the merged object. Throws on any protocol failure (caller → generic). */
+export async function exchangeAndExtractIdentity(args: {
+  as: oauth.AuthorizationServer; provider: OAuthProvider; params: URLSearchParams;
+  redirectUri: string; codeVerifier: string; nonce?: string;
+}): Promise<ExternalIdentity> {
+  const client: oauth.Client = { client_id: args.provider.clientId };
+  const clientAuth = oauth.ClientSecretPost(args.provider.clientSecret);
+  const resp = await oauth.authorizationCodeGrantRequest(
+    args.as, client, clientAuth, args.params, args.redirectUri, args.codeVerifier,
+    { [oauth.allowInsecureRequests]: allowInsecureForUrl(args.as.token_endpoint!) },
+  );
+  const result = await oauth.processAuthorizationCodeResponse(args.as, client, resp,
+    args.nonce ? { expectedNonce: args.nonce } : {});
+
+  if (args.provider.kind === "oidc") {
+    const claims = oauth.getValidatedIdTokenClaims(result);
+    if (!claims) throw new Error("no id_token");
+    return args.provider.mapClaims(claims as unknown as Record<string, unknown>);
+  }
+  // github (oauth2): fetch /user + /user/emails with the access token.
+  const accessToken = result.access_token;
+  const ghHeaders = { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json", "user-agent": "stackbase" };
+  const user = (await (await fetch(args.provider.userinfoEndpoint!, { headers: ghHeaders })).json()) as Record<string, unknown>;
+  let email = typeof user.email === "string" ? (user.email as string) : undefined;
+  let emailVerified = false;
+  if (args.provider.emailsEndpoint) {
+    const emails = (await (await fetch(args.provider.emailsEndpoint, { headers: ghHeaders })).json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
+    const primary = emails.find((e) => e.primary && e.verified) ?? emails.find((e) => e.verified);
+    if (primary) { email = primary.email; emailVerified = true; }
+  }
+  return args.provider.mapClaims({ ...user, email, emailVerified });
 }

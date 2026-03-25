@@ -1,9 +1,9 @@
-import { mutation, action, httpAction, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, action, httpAction, commitThenThrow, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
-import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider } from "./oauth";
+import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider, exchangeAndExtractIdentity } from "./oauth";
 import { resolveSession, mintSession, normalizeEmail, markVerifiedRevokingIfFirstProof, type MintResult } from "./functions";
-import { sha256base64url } from "./crypto";
+import { sha256base64url, generateToken } from "./crypto";
 import * as oauth from "oauth4webapi";
 
 /**
@@ -67,15 +67,9 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
 
   if (config.oauth) {
     modules._startOAuth = _startOAuth(config);
-    modules._consumeOAuthState = mutation(async (): Promise<never> => {
-      throw new Error(NOT_IMPLEMENTED); // Task 5
-    });
-    modules._consumeHandoff = mutation(async (): Promise<never> => {
-      throw new Error(NOT_IMPLEMENTED); // Task 5
-    });
-    modules.completeOAuthSignIn = action(async (): Promise<never> => {
-      throw new Error(NOT_IMPLEMENTED); // Task 5
-    });
+    modules._consumeOAuthState = _consumeOAuthState();
+    modules._consumeHandoff = _consumeHandoff(config);
+    modules.completeOAuthSignIn = completeOAuthSignIn();
     modules.oauthHttp = oauthHttp(config);
   }
 
@@ -206,7 +200,7 @@ function oauthHttp(config: AuthConfig) {
     if (!p) return fail(404);
 
     if (phase === "start") return oauthStart(ctx as ActionCtx, config, request, url, provider, p);
-    if (phase === "callback") return fail(501); // Task 5
+    if (phase === "callback") return oauthCallback(ctx as ActionCtx, config, request, url, provider, p);
     return fail(404);
   });
 }
@@ -230,4 +224,100 @@ async function oauthStart(ctx: ActionCtx, config: AuthConfig, request: Request, 
   });
 
   return redirect(buildAuthorizeUrl(as, p, { redirectUri, state, codeChallenge, ...(nonce ? { nonce } : {}) }));
+}
+
+// ─────────────────────────── OAuth `/callback` + handoff + completeOAuthSignIn (Task 5) ───────────────────────────
+
+/** The `callback` phase of `oauthHttp`: consume state (single-use), exchange the code, extract the
+ *  normalized identity, resolve/link/provision/revoke via the shared Part-3 core, then authorize a
+ *  mint via a fresh `oauthHandoff` row and 302 to `redirectTo#code=<handoff>` (fragment, never query —
+ *  fragments aren't sent to servers or logged in Referer). Every failure surfaces generic (no
+ *  enumeration): a missing/tampered/replayed `state`, a provider protocol failure, or an exchange
+ *  error all collapse to the same `fail(400)`. */
+async function oauthCallback(ctx: ActionCtx, config: AuthConfig, request: Request, url: URL, provider: string, p: OAuthProvider): Promise<Response> {
+  const state = url.searchParams.get("state");
+  if (!state) return fail(400);
+
+  // Consume-before-validate: `_consumeOAuthState` deletes the row FIRST, then validates provider/expiry
+  // (commitThenThrow on any post-consume throw). A miss/mismatch → generic (this also makes a REPLAYED
+  // callback with the same state 400, since the row is already gone on the second attempt).
+  let recovered: { codeVerifier: string; nonce?: string; redirectTo: string; linkUserId?: string };
+  try {
+    recovered = await ctx.runMutation("auth:_consumeOAuthState", { provider, stateHash: sha256base64url(state) });
+  } catch { return fail(400); }
+
+  // Re-validate redirectTo against the allowlist (defense in depth — it was already checked at
+  // `/start` before the state row was ever written, but this re-check costs nothing and means a
+  // corrupted/legacy row can never carry us to an unvalidated redirect target). Checked BEFORE the
+  // exchange/resolve below so an invalid target short-circuits before any account/session writes.
+  if (!isAllowedRedirect(recovered.redirectTo, config.oauth!.redirectAllowlist)) return fail(400);
+
+  // Exchange + extract identity. oauth4webapi validates state (validateAuthResponse) + nonce
+  // (processAuthorizationCodeResponse). Any protocol failure → generic (no enumeration).
+  let identity;
+  try {
+    const as = await authorizationServerFor(p);
+    const client: oauth.Client = { client_id: p.clientId };
+    const params = oauth.validateAuthResponse(as, client, url.searchParams, state);
+    identity = await exchangeAndExtractIdentity({
+      as, provider: p, params, redirectUri: callbackUri(request.url, provider),
+      codeVerifier: recovered.codeVerifier, ...(recovered.nonce ? { nonce: recovered.nonce } : {}),
+    });
+  } catch { return fail(400); }
+
+  // Resolve + link + revoke, and authorize a mint via a fresh handoff (holds NO token). `emailVerified`
+  // is ALREADY a strict boolean by construction (every `mapClaims` — default/google/github — computes
+  // it via `=== true`, never a truthy/string coercion; see `ExternalIdentity`), so it is passed straight
+  // through to the T4 core, which itself re-asserts `=== true` at the gate (defense in depth).
+  const handoff = generateToken();
+  await ctx.runMutation("auth:_resolveExternalIdentity", {
+    provider, accountId: identity.accountId,
+    ...(identity.email ? { email: identity.email } : {}), emailVerified: identity.emailVerified === true,
+    ...(recovered.linkUserId ? { linkUserId: recovered.linkUserId } : {}),
+    outcome: "handoff", handoffHash: sha256base64url(handoff),
+  });
+
+  // 302 to redirectTo with the one-time handoff in the FRAGMENT (never the query — fragments aren't
+  // sent to servers or logged in Referer). Only a one-time code transits; tokens never do.
+  const target = new URL(recovered.redirectTo);
+  target.hash = `code=${handoff}`;
+  return redirect(target.toString());
+}
+
+/** Consume-before-validate the state row. Miss → plain throw (nothing consumed). Found → delete
+ *  (consume), then validate provider + expiry; any failure after the delete → commitThenThrow so the
+ *  consume commits (single-winner under single-writer OCC). */
+function _consumeOAuthState() {
+  return mutation(async (ctx, { provider, stateHash }: { provider: string; stateHash: string }): Promise<{ codeVerifier: string; nonce?: string; redirectTo: string; linkUserId?: string } | ReturnType<typeof commitThenThrow>> => {
+    const [row] = await ctx.db.query("oauthState", "byStateHash").eq("stateHash", stateHash).collect();
+    if (!row) throw new Error(GENERIC);                       // nothing consumed
+    await ctx.db.delete(row._id as string);                   // consume
+    if ((row.provider as string) !== provider || ctx.now() > (row.expiresAt as number)) return commitThenThrow(GENERIC);
+    return {
+      codeVerifier: row.codeVerifier as string,
+      ...(row.nonce !== undefined ? { nonce: row.nonce as string } : {}),
+      redirectTo: row.redirectTo as string,
+      ...(row.linkUserId !== undefined ? { linkUserId: row.linkUserId as string } : {}),
+    };
+  });
+}
+
+/** Exchange the handoff for the mint — consume-before-validate, then mint (A1 chokepoint). */
+function _consumeHandoff(config: AuthConfig) {
+  return mutation(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    const handoffHash = sha256base64url(handoffCode);
+    const [row] = await ctx.db.query("oauthHandoff", "byHandoffHash").eq("handoffHash", handoffHash).collect();
+    if (!row) throw new Error(GENERIC);
+    await ctx.db.delete(row._id as string);                   // consume
+    if (ctx.now() > (row.expiresAt as number)) return commitThenThrow(GENERIC);
+    return mintSession(ctx, config, row.userId as string, row.deviceLabelHint as string | undefined);
+  });
+}
+
+/** The app calls this after reading `#code=<handoff>` off the redirect fragment. Mints THEN (tokens
+ *  returned directly, never stored). */
+function completeOAuthSignIn() {
+  return action(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult> => {
+    return (ctx as ActionCtx).runMutation<MintResult>("auth:_consumeHandoff", { handoffCode });
+  });
 }
