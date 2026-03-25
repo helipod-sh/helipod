@@ -103,10 +103,14 @@ function resolveExternalIdentityMutation(config: AuthConfig) {
     const userId = await resolveUserId(ctx, args);
     if (args.outcome === "mint") return mintSession(ctx, config, userId, args.deviceLabel);
     // outcome === "handoff": authorize a mint for `userId` (holds NO token); the httpAction has the raw code.
+    // Invariant: "handoff" is OAuth-only (JWT's `signInWithIdToken` only ever sends "mint"). Guard the
+    // non-null assertion below with a clear internal error instead of letting a JWT-only deployment
+    // (config.oauth undefined) hit a raw TypeError if this invariant is ever broken by a future caller.
+    if (!config.oauth) throw new Error("_resolveExternalIdentity: outcome:\"handoff\" requires config.oauth (JWT-only deployments must only send outcome:\"mint\")");
     await ctx.db.insert("oauthHandoff", compact({
       handoffHash: args.handoffHash!, userId,
       deviceLabelHint: args.deviceLabel,
-      expiresAt: now + config.oauth!.handoffTtlMs, createdAt: now,
+      expiresAt: now + config.oauth.handoffTtlMs, createdAt: now,
     }));
     return { userId };
   });
@@ -136,7 +140,7 @@ async function resolveUserId(ctx: MutationCtx, args: { provider: string; account
   //    defense — a pre-registrant's parked UNVERIFIED account flips here, killing the attacker's parked
   //    sessions; an already-verified user legitimately adding a second provider has NO flip, so their
   //    other-device sessions survive (better UX, still safe: the account was already proven to be theirs).
-  if (normEmail && args.emailVerified) {
+  if (normEmail && args.emailVerified === true) {
     const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
     if (user) {
       await insertExternalAccount(ctx, user._id as string, args.provider, args.accountId);

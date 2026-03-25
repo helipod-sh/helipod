@@ -73,6 +73,34 @@ describe("auth A3 Part 3: _resolveExternalIdentity — the account-resolution/li
     expect(accts.length).toBe(1); // the second provider IS linked
   });
 
+  // Attribution: T4 review's Important — the case-3 autolink gate (`args.emailVerified` alone) was
+  // truthy-loose, so a non-boolean truthy `emailVerified` (e.g. the STRING "false", emitted by some
+  // IdPs' `email_verified` JWT claim) wrongly took case 3 (autolink + flip-gated session wipe) instead
+  // of case 4. Reproduced by the reviewer against a pre-registered UNVERIFIED account; pinned here
+  // permanently. The gate is now strict (`=== true`), matching case 4's own `=== true` storage check
+  // and the `markVerifiedRevokingIfFirstProof` helper's own strict `!== true` read.
+  it.each([
+    ["the string \"false\"", "false"],
+    ["the number 1", 1],
+    ["the string \"0\"", "0"],
+  ])("3-regression) non-boolean truthy emailVerified (%s) ⇒ STRICT gate takes case 4, no autolink, no session wipe", async (_label, badValue) => {
+    t = await createTestStackbase({ modules: testModules, components: [defineAuth({ ...OAUTH, email: undefined })], schema: false });
+    // Attacker pre-registers the victim's email (unverified) and parks a session:
+    const parked = await t.mutation("auth:signUp", { email: "victim@corp.com", password: "attacker-pw" }) as MintResult;
+    // A caller sends a non-boolean truthy emailVerified for the SAME email:
+    const attempt = await resolveExternal({ provider: "google", accountId: "gsub-bad", emailVerified: badValue, email: "victim@corp.com", outcome: "mint" }) as MintResult;
+    // Case 4, NOT case 3: a NEW separate user, never linked to the victim's pre-existing account.
+    expect(attempt.userId).not.toBe(parked.userId);
+    // The victim's account is untouched — no external account was linked to it.
+    const acctsOnVictim = await t.run(async (ctx: any) => ctx.db.query("auth/accounts", "byAccount").eq("provider", "google").eq("accountId", "gsub-bad").collect());
+    expect(acctsOnVictim[0].userId).not.toBe(parked.userId);
+    // The victim's parked session is STILL LIVE — not wiped.
+    expect(await t.query("auth:getUserId", { token: parked.token })).toBe(parked.userId);
+    // The new user's emailVerified is NOT true (case 4's strict `=== true` storage check).
+    const newUser = await t.run(async (ctx: any) => ctx.db.get(attempt.userId));
+    expect(newUser.emailVerified).not.toBe(true);
+  });
+
   it("4) UNVERIFIED external email ⇒ NEVER autolinks; creates a SEPARATE user", async () => {
     t = await createTestStackbase({ modules: testModules, components: [defineAuth(OAUTH)], schema: false });
     const pw = await t.mutation("auth:signUp", { email: "shared@x.com", password: "pw123456" }) as MintResult;
