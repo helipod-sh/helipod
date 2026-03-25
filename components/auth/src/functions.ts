@@ -124,6 +124,26 @@ async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown>
   return ((await ctx.db.get(sessionId)) as Record<string, unknown> | null) ?? null;
 }
 
+/** First mailbox proof is a credential boundary: when `emailVerified` flips false→true, DELETE ALL
+ *  the user's existing sessions (byUserId) — a pre-registrant's PARKED SESSION must not survive the
+ *  true mailbox owner proving control (better-auth `revokeUnprovenAccountAccess` rationale). Gated
+ *  on the FLIP: an already-verified user's magic/otp sign-in (or A3 verified-email link) is normal
+ *  multi-device and wipes nothing.
+ *
+ *  Hoisted to module scope (Task 4, A3): this closes over nothing but `ctx`/`user`, so it is shared
+ *  verbatim by `makeEmailModules` (A2's `verifyEmail`/`signInWithMagicLink`/`signInWithOtp`/
+ *  `adoptOrCreateThenMint`, unchanged call sites) AND `external.ts`'s Part-3 resolution matrix (case
+ *  3, the verified-email-link takeover defense) — ONE definition, not two divergent copies. */
+export async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: Record<string, unknown>): Promise<void> {
+  const userId = user._id as string;
+  if (user.emailVerified !== true) {
+    for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) {
+      await ctx.db.delete(s._id as string);
+    }
+  }
+  await ctx.db.replace(userId, { ...user, emailVerified: true });
+}
+
 /** Build the auth module set closing over `config`. `defineAuth` calls this (spec decision 10). */
 export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFunction> {
   const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult | NeedsVerification> => {
@@ -551,21 +571,6 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
    *
    *  OTP (`signInWithOtp`, below) is UNCHANGED: its 8-digit code IS guessable, so its
    *  attempt-counter-then-delete-at-cap behavior remains correct and necessary. */
-
-  /** First mailbox proof is a credential boundary: when `emailVerified` flips false→true, DELETE ALL
-   *  the user's existing sessions (byUserId) — a pre-registrant's PARKED SESSION must not survive the
-   *  true mailbox owner proving control (better-auth `revokeUnprovenAccountAccess` rationale). Gated
-   *  on the FLIP: an already-verified user's magic/otp sign-in is normal multi-device and wipes
-   *  nothing. */
-  async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: Record<string, unknown>): Promise<void> {
-    const userId = user._id as string;
-    if (user.emailVerified !== true) {
-      for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) {
-        await ctx.db.delete(s._id as string);
-      }
-    }
-    await ctx.db.replace(userId, { ...user, emailVerified: true });
-  }
 
   /** Shared by `signInWithMagicLink`/`signInWithOtp`: adopt an existing user or create one (per
    *  `createUsersOnEmailSignIn`), then mint. */

@@ -1,8 +1,8 @@
-import { mutation, action, httpAction, type ActionCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, action, httpAction, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
 import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider } from "./oauth";
-import { resolveSession } from "./functions";
+import { resolveSession, mintSession, normalizeEmail, markVerifiedRevokingIfFirstProof, type MintResult } from "./functions";
 import { sha256base64url } from "./crypto";
 import * as oauth from "oauth4webapi";
 
@@ -62,9 +62,7 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
 
   // ── Part 3 shared resolution (Task 4) — registered when EITHER oauth or jwt is present ──
   if (config.oauth || config.jwt) {
-    modules._resolveExternalIdentity = mutation(async (): Promise<never> => {
-      throw new Error(NOT_IMPLEMENTED); // Task 4
-    });
+    modules._resolveExternalIdentity = resolveExternalIdentityMutation(config);
   }
 
   if (config.oauth) {
@@ -88,6 +86,78 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
   }
 
   return modules;
+}
+
+// ───────────────────── Part 3: resolution/linking matrix (Task 4) ─────────────────────
+
+/** Part-3 shared resolution + linking + (optional) mint, called by the OAuth callback (mint deferred
+ *  to the handoff → `outcome:"handoff"`) and by `signInWithIdToken` (mint here → `outcome:"mint"`).
+ *  No ephemeral consume happens here, so no commitThenThrow — the consume/validate lives in the
+ *  callers (`_consumeOAuthState`/`_consumeHandoff`). */
+function resolveExternalIdentityMutation(config: AuthConfig) {
+  return mutation(async (ctx, args: {
+    provider: string; accountId: string; email?: string; emailVerified: boolean;
+    linkUserId?: string; deviceLabel?: string; outcome: "handoff" | "mint"; handoffHash?: string;
+  }): Promise<{ userId: string } | MintResult> => {
+    const now = ctx.now();
+    const userId = await resolveUserId(ctx, args);
+    if (args.outcome === "mint") return mintSession(ctx, config, userId, args.deviceLabel);
+    // outcome === "handoff": authorize a mint for `userId` (holds NO token); the httpAction has the raw code.
+    await ctx.db.insert("oauthHandoff", compact({
+      handoffHash: args.handoffHash!, userId,
+      deviceLabelHint: args.deviceLabel,
+      expiresAt: now + config.oauth!.handoffTtlMs, createdAt: now,
+    }));
+    return { userId };
+  });
+}
+
+/** The Part-3 decision tree. Returns the resolved `userId`, performing all link/provision/revoke
+ *  writes. Attribution: verified-email-required-for-autolink + trusted-link-while-signed-in adapted
+ *  from `.reference/convex-auth` (Apache-2.0) + `.reference/better-auth` (MIT); the flip-gated session
+ *  wipe on a verified-email link is A2's first-mailbox-proof rule (the shared `markVerifiedRevokingIfFirstProof`). */
+async function resolveUserId(ctx: MutationCtx, args: { provider: string; accountId: string; email?: string; emailVerified: boolean; linkUserId?: string }): Promise<string> {
+  // 1) Returning identity — this external account is already bound.
+  const [existing] = await ctx.db.query("accounts", "byAccount").eq("provider", args.provider).eq("accountId", args.accountId).collect();
+  if (existing) return existing.userId as string;
+
+  // 2) Link-while-signed-in — the caller proved both the session AND the external identity.
+  if (args.linkUserId) {
+    const u = await ctx.db.get(args.linkUserId);
+    if (u) { await insertExternalAccount(ctx, args.linkUserId, args.provider, args.accountId); return args.linkUserId; }
+    // stale/invalid linkUserId → fall through to email-based resolution
+  }
+
+  const normEmail = args.email ? normalizeEmail(args.email) : undefined;
+
+  // 3) VERIFIED email that matches an existing user — LINK + first-mailbox-proof (FLIP-GATED). Add the
+  //    external account, then `markVerifiedRevokingIfFirstProof` (the SAME helper A2 uses): it wipes the
+  //    user's sessions ONLY on the emailVerified false→true flip, then sets emailVerified:true. Takeover
+  //    defense — a pre-registrant's parked UNVERIFIED account flips here, killing the attacker's parked
+  //    sessions; an already-verified user legitimately adding a second provider has NO flip, so their
+  //    other-device sessions survive (better UX, still safe: the account was already proven to be theirs).
+  if (normEmail && args.emailVerified) {
+    const [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
+    if (user) {
+      await insertExternalAccount(ctx, user._id as string, args.provider, args.accountId);
+      await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>);
+      return user._id as string;
+    }
+  }
+
+  // 4) No verified-email match (or unverified / no email) — NEVER auto-link. Create a NEW user.
+  const userId = (await ctx.db.insert("users", compact({
+    email: normEmail, emailVerified: args.emailVerified === true ? true : undefined,
+  }))) as string;
+  await insertExternalAccount(ctx, userId, args.provider, args.accountId);
+  return userId;
+}
+
+/** Insert an external (`google`/`github`/`oidc:<issuer>`) `accounts` row. `secret:""` is an unused
+ *  sentinel (accounts.secret is a required v.string(); password signIn only ever queries
+ *  provider:"password", so it never reads this) — keeps `accounts` additive with no schema change. */
+async function insertExternalAccount(ctx: MutationCtx, userId: string, provider: string, accountId: string): Promise<void> {
+  await ctx.db.insert("accounts", { userId, provider, accountId, secret: "", failedAttempts: 0, lockedUntil: 0 });
 }
 
 // ─────────────────────────── OAuth `/start` (Task 3) ───────────────────────────
