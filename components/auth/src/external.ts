@@ -4,6 +4,7 @@ import type { OAuthProvider } from "./oauth";
 import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider, exchangeAndExtractIdentity } from "./oauth";
 import { resolveSession, mintSession, normalizeEmail, markVerifiedRevokingIfFirstProof, type MintResult } from "./functions";
 import { sha256base64url, generateToken } from "./crypto";
+import { verifyIdToken } from "./jwt";
 import * as oauth from "oauth4webapi";
 
 /**
@@ -18,7 +19,6 @@ import * as oauth from "oauth4webapi";
  * exist, under which config) does not change.
  */
 
-const NOT_IMPLEMENTED = "not implemented — lands in a later A3 task";
 const GENERIC = "authentication failed"; // no enumeration — every OAuth/JWT failure surfaces as this
 
 /** A tiny 302 helper (browser redirect out of the httpAction). */
@@ -74,12 +74,38 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
   }
 
   if (config.jwt) {
-    modules.signInWithIdToken = action(async (): Promise<never> => {
-      throw new Error(NOT_IMPLEMENTED); // Task 6
-    });
+    modules.signInWithIdToken = signInWithIdToken(config);
   }
 
   return modules;
+}
+
+// ─────────────────────────── Third-party JWT `signInWithIdToken` (Task 6) ───────────────────────────
+
+/** Verify a third-party (Clerk/Auth0/any OIDC issuer) id_token via jose live JWKS fetch (signature +
+ *  `iss` allowlist + `aud` + `exp`/`nbf`), then delegate to the SAME Part-3 core the OAuth callback
+ *  uses (`_resolveExternalIdentity`) with `outcome:"mint"` — this is the exchange model: a short-lived
+ *  third-party token is verified once and traded directly for a Stackbase session (no browser
+ *  redirect/handoff needed, since the client called this action directly and gets the mint result
+ *  back). JIT-provision (a first-sight `oidc:<issuer>` identity becomes a fresh local user) and
+ *  account-linking (a verified-email match) compose automatically since it is the same core Task 4/5
+ *  share. Every verification failure surfaces GENERIC — no unknown-kid/bad-signature/wrong-aud/expired/
+ *  wrong-iss distinction (no enumeration). */
+function signInWithIdToken(config: AuthConfig) {
+  return action(async (ctx, { idToken, deviceLabel }: { idToken: string; deviceLabel?: string }): Promise<MintResult> => {
+    let v;
+    try { v = await verifyIdToken(idToken, config.jwt!); }
+    catch { throw new Error(GENERIC); }
+    if (!v.sub) throw new Error(GENERIC);
+    return (ctx as ActionCtx).runMutation<MintResult>("auth:_resolveExternalIdentity", {
+      provider: `oidc:${v.issuer}`, accountId: v.sub,
+      // `emailVerified` is ALREADY a strict boolean from `verifyIdToken` (`=== true`, never a
+      // truthy/string coercion — the STRICT-BOOLEAN CARRY-FORWARD); passed straight through, and the
+      // T4 core itself re-asserts `=== true` at the gate (defense in depth).
+      ...(v.email ? { email: v.email } : {}), emailVerified: v.emailVerified,
+      ...(deviceLabel ? { deviceLabel } : {}), outcome: "mint",
+    });
+  });
 }
 
 // ───────────────────── Part 3: resolution/linking matrix (Task 4) ─────────────────────
