@@ -125,6 +125,27 @@ export function allowInsecureForUrl(url: string): boolean {
   return isLoopbackUrl(url);
 }
 
+/** Shared MITM guard for a single endpoint URL: reject a non-loopback `http://` URL, accept `https://`
+ *  and loopback `http://` (127.0.0.1/localhost/::1). This is the ONE place the actual check lives —
+ *  `assertProviderEndpointsSecure` below (OAuth) and the third-party-JWT issuer/JWKS-URL guard in
+ *  `config.ts` (`resolveAuthConfig`'s jwt branch) both call this rather than reimplementing it, so the
+ *  MITM gate can never drift between the two config surfaces. `label` is folded into the thrown
+ *  message only (e.g. `oauth provider "google": issuer` or `jwt issuer[0].jwksUrl`). */
+export function assertUrlIsSecure(label: string, value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} is not a valid URL: ${value}`);
+  }
+  if (parsed.protocol === "http:" && !isLoopbackUrl(value)) {
+    throw new Error(
+      `${label} is a non-loopback http:// endpoint (${value}) — a plain-http endpoint is a MITM vector. ` +
+        `Use https://, or a loopback host (127.0.0.1/localhost/::1) for local testing.`,
+    );
+  }
+}
+
 /** Config-time MITM guard (spec-amended security requirement): a plain-http OAuth issuer/endpoint is
  *  a MITM vector — a path attacker could forge the token/id_token in transit. `https://` is always
  *  fine. `http://` is tolerated ONLY when the endpoint's own host is loopback (local testing / the
@@ -143,18 +164,7 @@ export function assertProviderEndpointsSecure(name: string, provider: OAuthProvi
   ];
   for (const [field, value] of endpoints) {
     if (!value) continue;
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      throw new Error(`oauth provider "${name}": ${field} is not a valid URL: ${value}`);
-    }
-    if (parsed.protocol === "http:" && !isLoopbackUrl(value)) {
-      throw new Error(
-        `oauth provider "${name}": ${field} is a non-loopback http:// endpoint (${value}) — a plain-http ` +
-          `OAuth issuer is a MITM vector. Use https://, or a loopback host (127.0.0.1/localhost/::1) for local testing.`,
-      );
-    }
+    assertUrlIsSecure(`oauth provider "${name}": ${field}`, value);
   }
 }
 

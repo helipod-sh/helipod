@@ -1,7 +1,7 @@
 import type { EmailProvider } from "./email/provider";
 import { resolveTemplates, type EmailTemplates } from "./email/templates";
 import type { OAuthProvider } from "./oauth";
-import { assertProviderEndpointsSecure } from "./oauth";
+import { assertProviderEndpointsSecure, assertUrlIsSecure } from "./oauth";
 
 /** Resolved email config (all defaults applied). Present iff a project passed `email` with a provider. */
 export interface EmailConfig {
@@ -150,11 +150,31 @@ function resolveOAuthConfig(opts: OAuthOptions): OAuthConfig {
   };
 }
 
+/** Same MITM class as OAuth (T2), ported to the third-party-JWT config path: a plain-http JWT
+ *  issuer/JWKS endpoint lets a network-position attacker serve a FORGED JWKS (their own public key)
+ *  over the plaintext fetch `verifyIdToken`/`jwksFor` makes, then mint a JWT signed with that key —
+ *  `iss`/`aud` are never secret, so `jwtVerify` accepts it outright. Reject a non-loopback `http://`
+ *  `issuer` AND, if given, `jwksUrl` (the JWKS URL actually fetched — when `jwksUrl` is omitted,
+ *  `verifyIdToken` derives it from `issuer`'s own origin, so validating `issuer` alone already covers
+ *  that case). `https://` is always fine; loopback `http://` (127.0.0.1/localhost/::1) stays allowed
+ *  for the E2E mock issuer + local dev. Reuses `assertUrlIsSecure` — the exact predicate OAuth's
+ *  `assertProviderEndpointsSecure` uses — rather than reimplementing the loopback gate a third time. */
+function resolveJwtConfig(opts: JwtOptions): JwtConfig {
+  if (!opts.issuers || opts.issuers.length === 0) {
+    throw new Error("defineAuth({ jwt }) requires a non-empty issuers array");
+  }
+  opts.issuers.forEach((cfg, i) => {
+    assertUrlIsSecure(`jwt issuers[${i}].issuer`, cfg.issuer);
+    if (cfg.jwksUrl) assertUrlIsSecure(`jwt issuers[${i}].jwksUrl`, cfg.jwksUrl);
+  });
+  return { issuers: opts.issuers };
+}
+
 export function resolveAuthConfig(opts?: AuthOptions): AuthConfig {
   const { email, oauth, jwt, ...rest } = opts ?? {};
   const base: AuthConfig = { ...DEFAULTS, ...rest };
   if (email) base.email = resolveEmailConfig(email);
   if (oauth) base.oauth = resolveOAuthConfig(oauth);
-  if (jwt) base.jwt = { issuers: jwt.issuers };
+  if (jwt) base.jwt = resolveJwtConfig(jwt);
   return base;
 }

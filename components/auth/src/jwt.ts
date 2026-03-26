@@ -4,14 +4,23 @@
  *  per-request-JWT-is-identity model; documented). Per-request stateless JWT is a non-goal. */
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { JwtConfig } from "./config";
+import { assertUrlIsSecure } from "./oauth";
 
 type Jwks = ReturnType<typeof createRemoteJWKSet>;
 const jwksCache = new Map<string, Jwks>();
 
+/** Defense-in-depth (matches OAuth's dual-layer pattern: config-time guard in `resolveAuthConfig` PLUS
+ *  a request-time re-check here): refuse to construct a remote JWKS fetcher for a non-loopback
+ *  `http://` URL, even if a config somehow reached this point unvalidated — the same MITM class T2
+ *  fixed for OAuth (a plaintext JWKS fetch lets a network-position attacker serve a forged key set). */
 function jwksFor(issuer: string, jwksUrl: string): Jwks {
   const key = `${issuer}|${jwksUrl}`;
   let j = jwksCache.get(key);
-  if (!j) { j = createRemoteJWKSet(new URL(jwksUrl)); jwksCache.set(key, j); }
+  if (!j) {
+    assertUrlIsSecure(`jwt issuer "${issuer}": jwksUrl`, jwksUrl);
+    j = createRemoteJWKSet(new URL(jwksUrl));
+    jwksCache.set(key, j);
+  }
   return j;
 }
 
@@ -28,6 +37,10 @@ export async function verifyIdToken(idToken: string, config: JwtConfig): Promise
       const { payload } = await jwtVerify(idToken, jwksFor(cfg.issuer, jwksUrl), { issuer: cfg.issuer, audience: cfg.audience });
       return {
         issuer: cfg.issuer,
+        // Deliberate coercion, not a type-safety shortcut: real OIDC issuers emit `sub` as a
+        // StringOrURI (the JWT spec's own type for it), and by this point `jwtVerify` has already
+        // signature-authenticated the token against `cfg.issuer`'s JWKS — the issuer, not this line,
+        // is the trust boundary.
         sub: String(payload.sub ?? ""),
         email: typeof payload.email === "string" ? payload.email : undefined,
         // STRICT-BOOLEAN CARRY-FORWARD: some IdPs emit `email_verified` as the STRING "false"/"true".
