@@ -7,7 +7,7 @@ import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
 import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
 import type { AnalyzedFunction, AnalyzedFunctionManifest, ShardByDeclaration } from "@stackbase/codegen";
 import { validatorToTsType, assertShardByDeclarations } from "@stackbase/codegen";
-import { composeComponents, type ComponentDefinition, type BootContext, type Driver } from "@stackbase/component";
+import { composeComponents, type ComponentDefinition, type BootContext, type Driver, type ResolvedComponentRoute } from "@stackbase/component";
 import type { SimpleIndexCatalog } from "@stackbase/executor";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@stackbase/storage";
 
@@ -38,6 +38,8 @@ export interface ProjectArtifacts {
   drivers: Driver[];
   /** The app's `http.ts` router, resolved to `path:name` function paths for dispatch. */
   routes: ResolvedRoute[];
+  /** Reserved engine routes contributed by composed components (e.g. auth's `/api/auth/oauth/*`). */
+  componentRoutes: ResolvedComponentRoute[];
 }
 
 /** A single `http.ts` route, with its handler resolved from a `RegisteredFunction` value to the
@@ -162,5 +164,6 @@ export function loadProject(
     bootSteps: composed.bootSteps,
     drivers: composed.drivers,
     routes,
+    componentRoutes: composed.componentRoutes,
   };
 }

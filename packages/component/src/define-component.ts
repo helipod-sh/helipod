@@ -84,6 +84,26 @@ export interface Driver {
   stop?(): void | Promise<void>;
 }
 
+/**
+ * A reserved engine HTTP route a component contributes (Task A3-1): `{ method, pathPrefix }` mounted
+ * by the boot core at a reserved `/api/…` or `/_…` path (an app `http.ts` may not register these —
+ * the reserved-path guard rejects them), dispatching to `handler`, a bare httpAction module name in
+ * THIS component's `modules`. Collected by `composeComponents` (parallel to `drivers`) and bound to
+ * `runtime.runHttpAction` by the boot core — the generic form of how the always-on storage routes
+ * mount, for opt-in composed components. Matched by exact-prefix, in declaration order, ahead of user
+ * routes — overlapping prefixes across components (one a prefix of another, for the same method) are
+ * REJECTED at `composeComponents` time (see `assertValidComponentRoutePrefix`'s caller there), so
+ * first-match-by-order can never be ambiguous. The handler parses any sub-path (`<provider>/<phase>`)
+ * itself, as this repo's routes carry no named params (see `@stackbase/executor`'s `matchRoute`, and
+ * storage's `handleServe`).
+ */
+export interface ComponentHttpRoute {
+  method: string;
+  pathPrefix: string;
+  /** Bare httpAction module name within this component's `modules` (namespaced at compose time). */
+  handler: string;
+}
+
 export interface ComponentDefinition {
   name: string;
   schema: SchemaDefinition;
@@ -124,6 +144,58 @@ export interface ComponentDefinition {
   boot?: (ctx: BootContext) => Promise<void>;
   /** A recurring driver, started once after boot; woken by commits and/or timers. */
   driver?: Driver;
+  /** Reserved engine HTTP routes this component contributes — see `ComponentHttpRoute`. */
+  httpRoutes?: ComponentHttpRoute[];
+}
+
+/**
+ * Engine-owned paths no component `httpRoute` may shadow. Checked BIDIRECTIONALLY by
+ * `assertValidComponentRoutePrefix` below: a component prefix that EQUALS, is MORE SPECIFIC than
+ * (`r.startsWith(p)`), OR is an ANCESTOR of (`p.startsWith(r)`) any entry here is rejected. The
+ * ancestor direction is the one that matters most — without it, a component declaring `pathPrefix:
+ * "/api/"` or `"/_"` would pass this list (neither string equals nor is a substring-prefix of an
+ * entry in the naive one-directional sense) yet would swallow every reserved route beneath it at
+ * dispatch time, since `matchComponentRoute` in `packages/cli/src/server.ts` runs BEFORE the core
+ * `/api/run`, `/_admin/*`, etc. handlers — a silent, no-boot-error shadow of the whole engine API.
+ */
+export const RESERVED_ENGINE_PREFIXES = ["/api/run", "/api/health", "/api/sync", "/api/storage/", "/_admin/", "/_fleet/", "/_dashboard"];
+
+/** Non-empty path segments, e.g. `"/api/auth/oauth/"` -> `["api", "auth", "oauth"]`. */
+function pathSegments(p: string): string[] {
+  return p.split("/").filter(Boolean);
+}
+
+/**
+ * Validate a component's declared `httpRoute.pathPrefix`, throwing a descriptive error if it's
+ * unsafe. Shared by BOTH `defineComponent` (fail fast when a component author writes `httpRoutes`)
+ * and `composeComponents` (defense-in-depth, in case a `ComponentDefinition` object is ever
+ * constructed/composed without going through `defineComponent`) — kept in one place so the two call
+ * sites can't drift out of sync. Three rules, all enforced:
+ *
+ *  1. Must live under a reserved namespace (`/api/` or `/_`) — an app's own `http.ts` mounts
+ *     everywhere else, so a component route can never collide with an app route.
+ *  2. Must have at least 2 non-empty path segments (e.g. `/api/auth/`, NOT `/api/`) — a structural
+ *     floor that makes whole-namespace shadowing impossible BY CONSTRUCTION, even if
+ *     `RESERVED_ENGINE_PREFIXES` above is later incomplete or a new engine route is added without
+ *     updating it.
+ *  3. Must not collide with a `RESERVED_ENGINE_PREFIXES` entry in EITHER direction (see that
+ *     constant's doc comment for why the ancestor direction is the one that was missing).
+ */
+export function assertValidComponentRoutePrefix(componentName: string, pathPrefix: string): void {
+  if (!(pathPrefix.startsWith("/api/") || pathPrefix.startsWith("/_"))) {
+    throw new Error(`component "${componentName}" httpRoute pathPrefix "${pathPrefix}" must be a reserved path (start with "/api/" or "/_")`);
+  }
+  if (pathSegments(pathPrefix).length < 2) {
+    throw new Error(
+      `component "${componentName}" httpRoute pathPrefix "${pathPrefix}" is too shallow — a component pathPrefix must have at ` +
+        `least 2 path segments (e.g. "/api/${componentName}/", not "/api/", and not "/_") so it cannot shadow a whole reserved namespace`,
+    );
+  }
+  for (const r of RESERVED_ENGINE_PREFIXES) {
+    if (pathPrefix === r || r.startsWith(pathPrefix) || pathPrefix.startsWith(r)) {
+      throw new Error(`component "${componentName}" httpRoute "${pathPrefix}" collides with a built-in engine prefix "${r}"`);
+    }
+  }
 }
 
 export function defineComponent(def: ComponentDefinition): ComponentDefinition {
@@ -136,6 +208,12 @@ export function defineComponent(def: ComponentDefinition): ComponentDefinition {
     throw new Error(
       `component "${def.name}" declares contextType but no context builder — ctx.${def.name} would be typed but undefined at runtime`,
     );
+  }
+  for (const r of def.httpRoutes ?? []) {
+    assertValidComponentRoutePrefix(def.name, r.pathPrefix);
+    if (!def.modules[r.handler] || def.modules[r.handler]!.type !== "httpAction") {
+      throw new Error(`component "${def.name}" httpRoute handler "${r.handler}" must name an httpAction in this component's modules`);
+    }
   }
   return def;
 }

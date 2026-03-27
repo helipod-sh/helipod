@@ -380,7 +380,7 @@ export async function startServe(
         })
       : undefined;
 
-  const { runtime, adminApi, project, store, components, storageRoutes, objectStoreRelease, replicaWriterUrl } =
+  const { runtime, adminApi, project, store, components, storageRoutes, componentRoutes, objectStoreRelease, replicaWriterUrl } =
     await bootProject({
       convexDir: opts.convexDir,
       dataPath: opts.dataPath,
@@ -450,6 +450,7 @@ export async function startServe(
       dashboard,
       routes: project.routes,
       storageRoutes,
+      componentRoutes,
       deploy,
       fleet,
       ...(replicaWriterUrl !== undefined ? { replicaWriterUrl } : {}),

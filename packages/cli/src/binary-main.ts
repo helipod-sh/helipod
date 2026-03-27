@@ -75,6 +75,7 @@ export async function startBinaryServer(
     admin: { api: boot.adminApi, key: opts.adminKey },
     routes: boot.project.routes,
     storageRoutes: boot.storageRoutes,
+    componentRoutes: boot.componentRoutes,
     dashboard: dash,
   });
   return { server, store: boot.store, runtime: boot.runtime };

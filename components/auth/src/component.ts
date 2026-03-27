@@ -19,6 +19,7 @@ export function defineAuth(options?: AuthOptions): ComponentDefinition {
     modules: makeAuthModules(config),
     context: authContext,
     contextType: { import: "@stackbase/auth", type: "AuthContext" },
+    ...(config.oauth ? { httpRoutes: [{ method: "GET", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" }] } : {}),
   });
 }
 

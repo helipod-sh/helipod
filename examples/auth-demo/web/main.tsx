@@ -3,7 +3,7 @@
 // Every verification/reset/magic-link code or link is printed to the `stackbase dev` SERVER
 // console (the terminal running `bun run dev`), not shown anywhere in this browser UI. Watch that
 // terminal, then paste the code/token into the matching field below.
-import { StrictMode, useState, type FormEvent } from "react";
+import { StrictMode, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { StackbaseClient, webSocketTransport, createAuthClient, anyApi, type SessionInfo } from "@stackbase/client";
 import { StackbaseProvider, useQuery, useMutation, useAction } from "@stackbase/client/react";
@@ -25,6 +25,9 @@ const api = anyApi as {
     signInWithMagicLink: { __path: string };
     requestOtp: { __path: string };
     signInWithOtp: { __path: string };
+    // A3 (external identity): OAuth handoff exchange + third-party-JWT sign-in.
+    completeOAuthSignIn: { __path: string };
+    signInWithIdToken: { __path: string };
   };
   whoami: { get: { __path: string }; myNotes: { __path: string }; add: { __path: string } };
 };
@@ -326,6 +329,85 @@ function PasswordlessPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) =
   );
 }
 
+/** A3 external identity, part 1: "Sign in with Google/GitHub". Cookie-free (WebSocket-first) means
+ *  the sign-in itself can't happen over this page's live connection — the browser has to leave for
+ *  the provider and come back. So this is a plain full-page redirect to the engine-mounted,
+ *  reserved `/api/auth/oauth/:provider/start` route (see `components/auth/src/component.ts`'s
+ *  `httpRoutes`), never a fetch/XHR. `redirectTo` is THIS page (origin + pathname, no query/hash) —
+ *  it must match `oauth.redirectAllowlist` in `stackbase.config.ts` or `/start` rejects with 400
+ *  before writing any state. The provider then redirects back here with `#code=<handoff>` in the
+ *  URL fragment, picked up by `AuthDemo`'s mount effect below.
+ *
+ *  Needs REAL credentials in `stackbase.config.ts` (`GOOGLE_CLIENT_ID`/`GITHUB_CLIENT_ID` etc.) to
+ *  reach a live provider — with this example's unset-env-var placeholder config, clicking a button
+ *  will redirect out and fail at the provider, which is expected (see that file's comment). */
+function OAuthButtons() {
+  function start(provider: string) {
+    const redirectTo = location.origin + location.pathname;
+    location.href = `/api/auth/oauth/${provider}/start?redirectTo=${encodeURIComponent(redirectTo)}`;
+  }
+  return (
+    <fieldset>
+      <legend>Sign in with a provider</legend>
+      <div className="btn-row">
+        <button type="button" onClick={() => start("google")}>Sign in with Google</button>
+        <button type="button" className="secondary" onClick={() => start("github")}>Sign in with GitHub</button>
+      </div>
+      <p className="hint">
+        Needs real provider credentials in <code>stackbase.config.ts</code> (unset by default in
+        this example — see its comment).
+      </p>
+    </fieldset>
+  );
+}
+
+/** A3 external identity, part 2: `signInWithIdToken` — a third-party (Clerk/Auth0/any OIDC issuer)
+ *  id_token is verified once (jose live JWKS fetch) and traded DIRECTLY for a Stackbase session, no
+ *  redirect/handoff needed (the client already holds the token and calls this action itself). Paste
+ *  an id_token from whatever issuer `stackbase.config.ts`'s `jwt.issuers` names. */
+function JwtSignInPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) => void }) {
+  const signInWithIdToken = useAction<SessionInfo>(api.auth.signInWithIdToken);
+  const [idToken, setIdToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      onSignedIn(await signInWithIdToken({ idToken: idToken.trim() }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <fieldset>
+      <legend>Sign in with a third-party token</legend>
+      <p className="hint">
+        Paste an id_token from a configured issuer (<code>jwt.issuers</code> in{" "}
+        <code>stackbase.config.ts</code>).
+      </p>
+      <form onSubmit={handleSubmit}>
+        <textarea
+          value={idToken}
+          onChange={(e) => setIdToken(e.target.value)}
+          rows={3}
+          placeholder="eyJhbGciOi..."
+          required
+        />
+        <div className="btn-row">
+          <button type="submit" disabled={busy || !idToken.trim()}>{busy ? "…" : "Sign in"}</button>
+        </div>
+      </form>
+      {error && <div className="error">{error}</div>}
+    </fieldset>
+  );
+}
+
 function AuthDemo() {
   const [session, setSession] = useState<SessionInfo | null>(() => authClient.getSessionInfo());
   // Set when signUp/signIn comes back gated (`{ needsVerification: true }` — only possible if a
@@ -338,6 +420,7 @@ function AuthDemo() {
   const signInMut = useMutation<SignInOutcome>(api.auth.signIn);
   const signInAnonMut = useMutation<SessionInfo>(api.auth.signInAnonymously);
   const signOutMut = useMutation(api.auth.signOut);
+  const completeOAuthSignIn = useAction<SessionInfo>(api.auth.completeOAuthSignIn);
 
   function adopt(result: SessionInfo) {
     authClient.setSession(result);   // persist + setAuth + schedule refresh + sessionId fingerprint
@@ -345,6 +428,26 @@ function AuthDemo() {
     setPendingVerifyEmail(null);
     setShowForgotPassword(false);
   }
+
+  // A3 external identity: the OAuth callback 302s back here with `#code=<handoff>` in the URL
+  // FRAGMENT (never a cookie, never the query string — see the plan's cookie-free constraint). On
+  // mount, read it off `location.hash`, exchange it via `completeOAuthSignIn`, adopt the resulting
+  // session exactly like a password/passwordless sign-in, then clear the hash so a reload doesn't
+  // try to redeem the same (already single-use) handoff code again.
+  useEffect(() => {
+    const m = /^#code=(.+)$/.exec(location.hash);
+    if (!m) return;
+    const handoffCode = decodeURIComponent(m[1]!);
+    history.replaceState(null, "", location.pathname + location.search);
+    void completeOAuthSignIn({ handoffCode })
+      .then(adopt)
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("OAuth sign-in failed:", err instanceof Error ? err.message : err);
+      });
+    // Runs once, on mount — the fragment is only ever present on the redirect-back load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleSignUp(email: string, password: string) {
     const result = await signUpMut({ email, password, deviceLabel: navigator.userAgent.slice(0, 60) });
@@ -421,6 +524,8 @@ function AuthDemo() {
           </fieldset>
           {showForgotPassword && <ForgotPasswordPanel onReset={adopt} />}
           <PasswordlessPanel onSignedIn={adopt} />
+          <OAuthButtons />
+          <JwtSignInPanel onSignedIn={adopt} />
         </>
       )}
 

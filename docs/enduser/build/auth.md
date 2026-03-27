@@ -277,9 +277,185 @@ detection — not cookie isolation. httpOnly-cookie mode + CSRF is intentionally
 A1 (it would rearchitect identity transport for marginal gain). If your threat model requires cookie
 isolation, front Stackbase with your own auth-terminating proxy.
 
-## Roadmap — external identity (not yet shipped)
+## External identity
 
-Third-party identity providers (OAuth) and JWT/JWKS/OIDC token verification for issuers like Clerk or
-Auth0 are **planned for the external-identity slice (A3)** and are **not implemented today**. When
-they land, JWT verification will apply to third-party issuers only; Stackbase's own sessions stay DB
-rows so revocation remains reactive. This page will be updated as that ships.
+`@stackbase/auth` also supports signing in via a **third-party OAuth provider** (Google, GitHub, or
+any custom OIDC/OAuth2 provider) and via a **third-party JWT/OIDC issuer** (Clerk, Auth0, or any
+issuer that publishes a JWKS) — both opt-in, both composing through the same account-linking core as
+password/email sign-in. Stackbase's own sessions always stay DB rows: an external identity is
+resolved to (or linked with) a local `userId`, then a normal Stackbase session is minted for it — so
+revocation stays reactive no matter how the user originally signed in.
+
+### OAuth setup
+
+Configure providers and a redirect allowlist on `defineAuth({ oauth })`:
+
+```ts
+import { defineAuth, googleProvider, githubProvider } from "@stackbase/auth";
+
+export const auth = defineAuth({
+  oauth: {
+    providers: {
+      google: googleProvider({ clientId: process.env.GOOGLE_CLIENT_ID!, clientSecret: process.env.GOOGLE_CLIENT_SECRET! }),
+      github: githubProvider({ clientId: process.env.GITHUB_CLIENT_ID!, clientSecret: process.env.GITHUB_CLIENT_SECRET! }),
+    },
+    // REQUIRED — an open-redirect guard. Every `redirectTo` passed to `/start` must match one of
+    // these origin+path-prefix entries (exact-path or subtree match), or `/start` 400s before any
+    // state is written.
+    redirectAllowlist: ["https://app.example.com/auth/callback"],
+  },
+});
+```
+
+`redirectAllowlist` is required and non-empty — `defineAuth` throws at config time otherwise.
+`googleProvider`/`githubProvider` are thin builders over the public `oauthProvider({ kind, ... })`
+seam, so any other OIDC (`kind: "oidc"`, discovery-based) or OAuth2 (`kind: "oauth2"`, explicit
+`authorizationEndpoint`/`tokenEndpoint`/`userinfoEndpoint`, typically with a custom `mapClaims` since
+a generic OAuth2 userinfo response isn't shaped like OIDC claims) provider is a config entry, not a
+code change:
+
+```ts
+import { oauthProvider } from "@stackbase/auth";
+
+const acmeProvider = oauthProvider({
+  kind: "oidc",
+  issuer: "https://auth.acme.com",
+  clientId: "...",
+  clientSecret: "...",
+});
+```
+
+**The engine mounts the OAuth routes for you** — `GET /api/auth/oauth/:provider/start` and
+`GET /api/auth/oauth/:provider/callback` — the moment `oauth` is configured; there's no app code to
+write for them. **Register the *callback* URL** (`https://<your-deployment>/api/auth/oauth/<name>/callback`)
+as the redirect URI with Google/GitHub/your provider, not your app's own URL — the flow always comes
+back through the engine first.
+
+The client-side flow:
+
+```ts
+// 1. Kick off sign-in — a plain navigation (not a fetch), so the browser follows the 302 to the
+//    provider's own consent screen:
+location.href = `${apiUrl}/api/auth/oauth/google/start?redirectTo=${encodeURIComponent("https://app.example.com/auth/callback")}`;
+
+// 2. The provider redirects back through the engine's own /callback, which 302s to `redirectTo`
+//    with a one-time code in the URL FRAGMENT (never the query string — fragments are never sent to
+//    servers or logged in a Referer header): https://app.example.com/auth/callback#code=<handoff>
+//
+// 3. On that page's load, read the fragment and exchange it for a session:
+import { StackbaseClient, webSocketTransport, createAuthClient, anyApi } from "@stackbase/client";
+
+const client = new StackbaseClient(webSocketTransport(url));
+const auth = createAuthClient(client);
+
+const code = new URLSearchParams(location.hash.slice(1)).get("code");
+if (code) {
+  const session = await client.action(anyApi.auth.completeOAuthSignIn, { handoffCode: code });
+  auth.setSession(session);       // same MintResult shape as signUp/signIn — persists + applies the token
+  history.replaceState(null, "", location.pathname); // drop the fragment from the visible URL
+}
+```
+
+The handoff code is **single-use** (consume-before-validate — a second exchange of the same code
+rejects) and short-lived (`handoffTtlMs`, default 2 minutes). It never carries a real session
+token — only `completeOAuthSignIn` (an action, so it can `runMutation` the actual mint) trades it for
+one.
+
+**Link-while-signed-in** ("connect your Google account" from a settings page): if the request that
+hits `/start` carries the current session's access token as `Authorization: Bearer <token>`, a
+successful callback links the external identity to *that* signed-in user instead of resolving by
+email. Because a plain navigation (`location.href = ...`, as in step 1 above) can't attach a custom
+header, this path needs a `fetch("/start?...", { headers: { authorization: \`Bearer ${token}\` } })`
+instead of a bare link/redirect for that specific call.
+
+### Third-party JWT / OIDC setup
+
+For providers that hand your frontend a signed ID token directly (Clerk, Auth0, Supabase Auth, or any
+OIDC issuer) rather than redirecting through your backend, configure `jwt.issuers` and call
+`signInWithIdToken`:
+
+```ts
+export const auth = defineAuth({
+  jwt: {
+    issuers: [
+      { issuer: "https://your-tenant.clerk.accounts.dev", audience: "your-audience" },
+      // jwksUrl is optional — it defaults to `${issuer}/.well-known/jwks.json`; set it explicitly
+      // only when a provider publishes its JWKS somewhere else.
+    ],
+  },
+});
+```
+
+```ts
+const idToken = await clerk.session.getToken(); // however your provider hands you its ID token
+const session = await client.action(anyApi.auth.signInWithIdToken, { idToken });
+auth.setSession(session);
+```
+
+`signInWithIdToken` verifies the token exactly once — signature (via a live JWKS fetch, `jose`),
+`iss`, `aud`, `exp`/`nbf` — against the first matching configured issuer, then resolves/links/mints a
+Stackbase session through the same core the OAuth callback uses. A first-sight identity is
+JIT-provisioned into a brand-new local user; a returning one resolves to its existing `userId`.
+
+**This is an exchange model, not per-request verification** — deliberately diverging from Convex's
+design, where the third-party JWT itself *is* the ambient identity, re-verified on every request.
+Stackbase instead verifies the token **once** and trades it for a normal Stackbase session (its own
+access/refresh token pair, a real DB-backed `sessions` row, a real local `userId`). This is why:
+
+- **Revocation stays reactive.** A DB-backed session can be listed (`listSessions`) and revoked
+  (`revokeSession`) like any other Stackbase session — a bare third-party JWT can't be listed or
+  killed early; you'd have to wait out its `exp`.
+- **`ctx.auth.getUserId()` resolves to a real local `userId`** usable everywhere your schema
+  references a user (foreign keys, ownership checks), rather than a foreign `sub` string your schema
+  would otherwise have to map itself on every request.
+- **No per-request JWKS/verification cost.** Verification happens once, at exchange time; every
+  request after that is an ordinary Stackbase session lookup — the same cost profile as password
+  sign-in.
+
+A stateless per-request-JWT-is-identity model (verify the token fresh on every call, no local session
+row at all) is a deliberate non-goal — it would give up reactive revocation and a real local `userId`
+for no benefit Stackbase's session model doesn't already provide.
+
+### Account linking — the safety rules
+
+Both flows funnel through one shared resolution core, so linking behaves identically whether the
+identity came from OAuth or from `signInWithIdToken`. In order:
+
+1. **Returning identity.** If this exact `(provider, accountId)` pair is already bound to a user,
+   sign in as that user. (`provider` is `"google"`/`"github"`/your custom provider's key for OAuth, or
+   `"oidc:<issuer>"` for `signInWithIdToken`.)
+2. **Link-while-signed-in.** If the caller proved an existing session (the `Bearer` token at
+   `/start`), the new external account is attached to *that* session's user — no email comparison at
+   all.
+3. **Verified-email autolink.** Only if the external identity's email comes back **verified** (a hard
+   boolean from the provider/token, e.g. Google/OIDC's `email_verified`, GitHub's per-address
+   `verified` flag) AND it matches an existing user's email, the external account is linked to that
+   user. Linking a verified email additionally revokes **every** existing session on that account —
+   the same first-mailbox-proof rule A2's email flows use (`markVerifiedRevokingIfFirstProof`): if the
+   matched user was not already `emailVerified` (e.g. a pre-registered, never-verified password
+   account — the classic pre-registration-takeover shape), this is the *first* proof anyone has
+   controlled that mailbox, so every session on the account is killed before the link completes. An
+   **already-verified** user linking a second provider has no flip and keeps their other sessions —
+   normal multi-device use, already proven safe.
+4. **Unverified email NEVER autolinks.** If the email is missing, or present but not verified, step 3
+   is skipped entirely regardless of whether it matches an existing user — an attacker cannot claim
+   someone else's account by presenting an unverified or spoofable email address. A brand-new user is
+   provisioned instead.
+5. **No match at all** — same outcome as step 4: a fresh user is created and the external account is
+   bound to it.
+
+### Security notes
+
+| Concern | Mechanism |
+| --- | --- |
+| CSRF on the OAuth redirect | A random `state`, hashed (SHA-256) before being stored, single-use (consumed — deleted — before it is ever validated, so a replayed callback with the same `state` 400s) |
+| Authorization-code injection | PKCE (`code_verifier`/`code_challenge`, S256) on every OAuth exchange, plus an OIDC `nonce` bound into the `id_token` where applicable |
+| Open redirect | `redirectTo` must match `redirectAllowlist` (origin + path-prefix, segment-boundary-aware) — checked at `/start` *and* re-checked at `/callback` before any account/session write |
+| Cookies | None — no cookie is ever set. OAuth state and the post-callback handoff are ephemeral DB rows keyed by a hash of a random token; the actual credential handoff is the URL fragment, read once by the app and never sent to any server |
+| Tokens in the URL | Never — only a one-time, single-use handoff *code* transits the URL (in the fragment); real session tokens are only ever returned in an RPC response body |
+| At-rest hashing | OAuth `state` and the handoff code are stored hashed (SHA-256/base64url), never raw — with one narrow exception: the PKCE `code_verifier` and OIDC `nonce` are stored in the (short-lived, single-use) state row in recoverable form, because the code itself needs the literal value to complete the token exchange; they are deleted the moment the state row is consumed |
+| Consume-before-validate | Both the OAuth state row and the handoff row are deleted *before* their contents are checked (provider match, expiry) — so a failure after a valid-looking row is found still burns it; nothing is retryable by resubmission |
+| No enumeration | Every OAuth/JWT failure (bad state, expired handoff, failed token exchange, bad signature, wrong issuer/audience, expired token) surfaces as the same generic "authentication failed" — no distinguishable failure modes |
+| Plain-http endpoints | **Loopback only.** A non-loopback (i.e. not `127.0.0.1`/`localhost`/`::1`) `http://` provider endpoint, issuer, or JWKS URL is *rejected at config time* — `defineAuth` throws before the app ever boots. In production, every OAuth provider endpoint and every JWT issuer/JWKS URL **must** be `https://`; plain `http://` is tolerated only for local dev/testing against a loopback mock. There is no config flag to weaken this. |
+
+Native `@stackbase/*` imports throughout — never `convex/*`.

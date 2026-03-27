@@ -31,6 +31,14 @@ function matchStorageRoute(routes: StorageRoute[] | undefined, method: string, p
   return routes.find((r) => r.method === method && path.startsWith(r.pathPrefix));
 }
 
+/** Match an engine-owned component-contributed route (e.g. auth's `/api/auth/oauth/*`) — same
+ *  `{method,pathPrefix}` shape as a storage route but not gated to the storage prefix. Dispatched
+ *  ahead of user `http.ts` routes and the 404, after the storage routes. */
+function matchComponentRoute(routes: StorageRoute[] | undefined, method: string, path: string): StorageRoute | undefined {
+  if (!routes) return undefined;
+  return routes.find((r) => r.method === method && path.startsWith(r.pathPrefix));
+}
+
 /** Methods that carry a request body the server must read (PATCH is used by the admin API). */
 export function hasBody(method: string | undefined): boolean {
   return method === "POST" || method === "PUT" || method === "PATCH";
@@ -72,6 +80,9 @@ export interface DevServerOptions {
   /** Engine-owned `/api/storage/*` handlers (always-on file storage). Reserved — matched before
    *  user routes; stable across reload/deploy (their deps read the never-swapped systemModules). */
   storageRoutes?: StorageRoute[];
+  /** Reserved routes contributed by composed components (e.g. auth's OAuth callbacks). Matched
+   *  after storage routes, before user routes. Engine-owned `{method,pathPrefix,handler}` closures. */
+  componentRoutes?: StorageRoute[];
   /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
   deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
   /** Fleet node handle — present only under `serve --fleet`. Enables `/_fleet/run` and the sync-role
@@ -244,6 +255,22 @@ async function startNodeServer(runtime: EmbeddedRuntime, options: DevServerOptio
           res.end(Buffer.from(await response.arrayBuffer()));
           return;
         }
+        const componentRoute = matchComponentRoute(options.componentRoutes, req.method ?? "GET", path);
+        if (componentRoute) {
+          const compHeaders = new Headers(headers);
+          if (authorization && !compHeaders.has("authorization")) compHeaders.set("authorization", authorization);
+          const request = new Request(`http://${compHeaders.get("host") ?? "localhost"}${rawUrl}`, {
+            method: req.method ?? "GET",
+            headers: compHeaders,
+            ...(needsBody && !isStorageRequest && body !== undefined ? { body } : {}),
+          });
+          const response = await componentRoute.handler(request);
+          const outHeaders: Record<string, string> = {};
+          response.headers.forEach((v, k) => { outHeaders[k] = v; });
+          res.writeHead(response.status, outHeaders);
+          res.end(Buffer.from(await response.arrayBuffer()));
+          return;
+        }
         // Derive server info live per request from the runtime — a boot-time snapshot goes stale
         // after the first setModules hot-swap (dev reload / deploy).
         const info: ServerInfo = { functions: runtime.functionPaths(), tables: runtime.tableNames() };
@@ -393,6 +420,8 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
       // `Response` (streamed bytes / 302 / 206) is returned unchanged by Bun.serve.
       const storageRoute = matchStorageRoute(options.storageRoutes, req.method, path);
       if (storageRoute) return await storageRoute.handler(req);
+      const componentRoute = matchComponentRoute(options.componentRoutes, req.method, path);
+      if (componentRoute) return await componentRoute.handler(req);
       const body = hasBody(req.method) ? await req.text() : undefined;
       const query: Record<string, string> = {};
       url.searchParams.forEach((val, key) => { query[key] = val; });

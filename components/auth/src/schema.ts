@@ -59,4 +59,28 @@ export const authSchema = defineSchema({
     attempts: v.number(),   // wrong-guess counter (OTP defense; commit-then-throw increments)
     createdAt: v.number(),  // also drives the request cooldown
   }).index("byEmailFlow", ["email", "flow"]),
+  // A3 (spec Part 1). Single-use OAuth CSRF/PKCE state, TTL ~10min. `stateHash` = SHA-256(state)
+  // (hashed at rest — we only COMPARE state). `codeVerifier`/`nonce` are stored RECOVERABLE (the
+  // documented PKCE exception): PKCE requires re-sending the original verifier to the token endpoint,
+  // so a hash won't do — safe as single-use, short-TTL, server-only, never-returned transaction secrets.
+  oauthState: defineTable({
+    stateHash: v.string(),
+    provider: v.string(),
+    codeVerifier: v.string(),
+    nonce: v.optional(v.string()),
+    redirectTo: v.string(),
+    linkUserId: v.optional(v.id("users")),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("byStateHash", ["stateHash"]),
+  // A3 (spec Part 1). Single-use mint AUTHORIZATION (holds NO session token), TTL ~2min. `handoffHash`
+  // = SHA-256(handoff). The mint happens in `completeOAuthSignIn` (`_consumeHandoff`), tokens returned
+  // directly to the app — A1's hashed-at-rest invariant preserved (no raw token ever written).
+  oauthHandoff: defineTable({
+    handoffHash: v.string(),
+    userId: v.id("users"),
+    deviceLabelHint: v.optional(v.string()),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("byHandoffHash", ["handoffHash"]),
 });
