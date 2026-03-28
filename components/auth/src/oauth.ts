@@ -29,6 +29,14 @@ export interface OAuthProvider {
   clientId: string;
   clientSecret: string;
   scopes: string[];
+  /** oidc only: relax the id_token `iss` exact-string match (multi-tenant Microsoft — a `common`
+   *  token's `iss` is tenant-specific, e.g. `https://login.microsoftonline.com/<tenantid>/v2.0`).
+   *  Given the decoded (NOT independently signature-verified — see `authorizationServerFor`'s
+   *  `expectedIssuerKey` note) claims, return the issuer string to accept. This hook touches ONLY the
+   *  `validateIssuer` string-equality step of oauth4webapi's existing validation pipeline — it does not
+   *  add, remove, or otherwise change any other check in that pipeline. Unset ⇒ strict A3 exact-match
+   *  against `as.issuer`. */
+  expectedIssuer?: string | ((claims: Record<string, unknown>) => string);
   /** Map the provider's raw claims (`id_token` claims for oidc; the merged `/user`+`/user/emails`
    *  object for github) to the normalized `ExternalIdentity`. */
   mapClaims: (raw: Record<string, unknown>) => ExternalIdentity;
@@ -46,6 +54,7 @@ export function oauthProvider(opts: Partial<OAuthProvider> & Pick<OAuthProvider,
     clientId: opts.clientId,
     clientSecret: opts.clientSecret,
     scopes: opts.scopes ?? ["openid", "email", "profile"],
+    ...(opts.expectedIssuer !== undefined ? { expectedIssuer: opts.expectedIssuer } : {}),
     mapClaims:
       opts.mapClaims ??
       ((c) => ({
@@ -221,34 +230,146 @@ export function facebookProvider(opts: { clientId: string; clientSecret: string;
   });
 }
 
+/** The Microsoft Entra authority host — `microsoftProvider`'s issuer template and the multi-tenant
+ *  issuer-relaxation gate both key off it. */
+const MICROSOFT_AUTHORITY_HOST = "https://login.microsoftonline.com";
+
+/** The templated-issuer resolver for a multi-tenant Microsoft config (`common`/`organizations`/
+ *  `consumers`): accept the token's own `iss` IFF it is a concrete Entra tenant issuer of the exact
+ *  shape `https://login.microsoftonline.com/<tenant>/v2.0` (so we never blanket-accept a non-Microsoft
+ *  issuer); otherwise return a value the token's `iss` will NOT equal, forcing the strict throw. This
+ *  is a shape/pattern check on the CLAIMS ONLY — it narrows which `iss` values the relaxation accepts,
+ *  it does not itself perform or depend on any cryptographic verification (see the ⚠️ note on
+ *  `expectedIssuerKey` below: oauth4webapi's Authorization Code flow does not verify the id_token JWS
+ *  signature by default in this codebase's pipeline; identity trust here rests on the token endpoint
+ *  being fetched over TLS, per OIDC Core §3.1.3.7's TLS-based alternative to signature validation). */
+export function microsoftExpectedIssuer(claims: Record<string, unknown>): string {
+  const iss = claims.iss;
+  if (typeof iss === "string" && /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(iss)) return iss;
+  return `${MICROSOFT_AUTHORITY_HOST}/common/v2.0`; // token's concrete iss will not equal this → strict fail
+}
+
+/** Microsoft (Entra ID) — an OIDC provider (identity from the verified `id_token`). `tenant` selects
+ *  the authority: `common` (default) | `organizations` | `consumers` | a tenant GUID |
+ *  `*.onmicrosoft.com`. For the three multi-tenant authorities the id_token's `iss` is tenant-specific,
+ *  so `expectedIssuer` is set to relax the `iss` string-match — a purely string-level check, unrelated
+ *  to signature verification (see the ⚠️ note on `expectedIssuerKey`); a tenant-PINNED authority (GUID /
+ *  `*.onmicrosoft.com`) needs no relaxation and sets none (strict).
+ *  `accountId` is `<tid>.<oid>` (Entra's stable per-tenant object id; falls back to `sub`).
+ *  `emailVerified` is `xms_edov === true` — Entra emits no `email_verified`; `xms_edov` is the
+ *  integrator-enabled optional claim (an app must add it in the token config for autolinking to work,
+ *  documented). */
+export function microsoftProvider(opts: { clientId: string; clientSecret: string; tenant?: string; scopes?: string[] }): OAuthProvider {
+  const tenant = opts.tenant ?? "common";
+  const multiTenant = tenant === "common" || tenant === "organizations" || tenant === "consumers";
+  return oauthProvider({
+    kind: "oidc",
+    issuer: `${MICROSOFT_AUTHORITY_HOST}/${tenant}/v2.0`,
+    clientId: opts.clientId,
+    clientSecret: opts.clientSecret,
+    scopes: opts.scopes ?? ["openid", "profile", "email"],
+    ...(multiTenant ? { expectedIssuer: microsoftExpectedIssuer } : {}),
+    mapClaims: (c) => {
+      const tid = typeof c.tid === "string" ? c.tid : undefined;
+      const oid = typeof c.oid === "string" ? c.oid : undefined;
+      return {
+        accountId: tid && oid ? `${tid}.${oid}` : String(c.sub ?? ""),
+        email: typeof c.email === "string" ? c.email : undefined,
+        emailVerified: c.xms_edov === true,
+        name: typeof c.name === "string" ? c.name : undefined,
+      };
+    },
+  });
+}
+
 // ─────────────────────────── protocol helpers (Task 3) ───────────────────────────
 
 /** Per-issuer discovery cache — an OIDC `AuthorizationServer` is fetched once per process. */
 const asCache = new Map<string, oauth.AuthorizationServer>();
+
+/** oauth4webapi's `validateIssuer` consults `as[_expectedIssuer]?.(result) ?? as.issuer` when checking
+ *  the id_token's `iss` — assigning a resolver here relaxes ONLY that string comparison; it adds no
+ *  other check and removes no other check from the pipeline `validateJwt`/`validatePresence`/
+ *  `validateIssuer`/`validateAudience` already run.
+ *
+ *  ⚠️  SEPARATE, PRE-EXISTING FACT ABOUT THIS PIPELINE (verified against the pinned oauth4webapi@3.8.6
+ *  source — `build/index.js`'s `processGenericAccessTokenResponse`/`validateJwt`): oauth4webapi's
+ *  Authorization Code flow does NOT cryptographically verify the id_token's JWS signature by default —
+ *  `validateJwt` only decodes and shape-checks the header/claims (exp/iat/nbf/aud/iss types), and
+ *  neither `processAuthorizationCodeResponse` nor `getValidatedIdTokenClaims` fetches `jwks_uri` or
+ *  checks the signature. Signature verification is a SEPARATE, OPT-IN step
+ *  (`oauth.validateApplicationLevelSignature`), which `exchangeAndExtractIdentity` (this file) does NOT
+ *  call for ANY oidc provider (google, microsoft, or any future one) — confirmed by direct probe: a
+ *  garbage/corrupted signature segment is still accepted by `processAuthorizationCodeResponse`. This
+ *  codebase's OIDC identity trust therefore rests on the token endpoint being fetched over TLS (a
+ *  spec-sanctioned alternative to signature verification for the Authorization Code flow — OIDC Core
+ *  §3.1.3.7), NOT on JWKS signature verification. This is PRE-EXISTING to Task 3/A4 (shared by every
+ *  A3 OIDC provider, not introduced or worsened here) — `expectedIssuer` only ever touches the `iss`
+ *  string-equality step of this same (signature-unverified) pipeline, so it does not change this
+ *  picture either way. Flagged in the Task 3 report as a concern for separate follow-up; NOT fixed
+ *  here (fixing it means wiring `validateApplicationLevelSignature` into `exchangeAndExtractIdentity`
+ *  for every OIDC provider, a broader change than this task's scope).
+ *
+ *  ⚠️  `_expectedIssuer` is an UNDOCUMENTED oauth4webapi@3.8.6 INTERNAL: exported at runtime from
+ *  `build/index.js` but OMITTED from the published `.d.ts`, so we reach it through a cast. This is safe
+ *  ONLY because `components/auth/package.json` pins `oauth4webapi` to EXACT `3.8.6`. If a future bump
+ *  removes/renames it, the cast would yield `undefined` and Microsoft multi-tenant relaxation would
+ *  silently degrade to strict matching (mysterious "issuer mismatch" at login). The assertion below
+ *  converts that structural break into a loud, self-describing error at module load — the signal to
+ *  re-verify the internal against the new version (or find its replacement). */
+const maybeExpectedIssuerKey = (oauth as unknown as { _expectedIssuer?: symbol })._expectedIssuer;
+if (typeof maybeExpectedIssuerKey !== "symbol") {
+  throw new Error(
+    "oauth4webapi internal `_expectedIssuer` Symbol is missing — Microsoft multi-tenant issuer " +
+      "relaxation cannot be applied. This is an undocumented internal of the pinned oauth4webapi@3.8.6; " +
+      "check the installed oauth4webapi version and re-verify the internal (components/auth/src/oauth.ts).",
+  );
+}
+/** Re-bound with an EXPLICIT `symbol` annotation so every later use (including inside
+ *  `authorizationServerFor`'s closure) is unconditionally `symbol` — no reliance on control-flow
+ *  narrowing of a module-scope const flowing into a nested function body (which is not guaranteed across
+ *  TS versions). The guard above has already proven it is a symbol. */
+const expectedIssuerKey: symbol = maybeExpectedIssuerKey;
 
 /** Resolve the `AuthorizationServer` for a provider: OIDC → discovery (cached); oauth2 → an explicit
  *  literal from the provider's endpoints. Insecure-http is DERIVED per-URL via the shared
  *  `isLoopbackUrl` predicate (loopback-only) — never a flag; a public http:// endpoint was already
  *  rejected in `resolveOAuthConfig` (`assertProviderEndpointsSecure`). */
 export async function authorizationServerFor(p: OAuthProvider): Promise<oauth.AuthorizationServer> {
+  let as: oauth.AuthorizationServer;
   if (p.kind === "oidc") {
     const key = p.issuer!;
     const cached = asCache.get(key);
-    if (cached) return cached;
-    const issuerUrl = new URL(p.issuer!);
-    const as = await oauth.processDiscoveryResponse(
-      issuerUrl,
-      await oauth.discoveryRequest(issuerUrl, { [oauth.allowInsecureRequests]: isLoopbackUrl(p.issuer!) }),
-    );
-    asCache.set(key, as);
-    return as;
+    if (cached) {
+      as = cached;
+    } else {
+      const issuerUrl = new URL(p.issuer!);
+      as = await oauth.processDiscoveryResponse(
+        issuerUrl,
+        await oauth.discoveryRequest(issuerUrl, { [oauth.allowInsecureRequests]: isLoopbackUrl(p.issuer!) }),
+      );
+      asCache.set(key, as);
+    }
+  } else {
+    as = {
+      issuer: p.issuer ?? new URL(p.authorizationEndpoint!).origin,
+      authorization_endpoint: p.authorizationEndpoint!,
+      token_endpoint: p.tokenEndpoint!,
+      ...(p.userinfoEndpoint ? { userinfo_endpoint: p.userinfoEndpoint } : {}),
+    };
   }
-  return {
-    issuer: p.issuer ?? new URL(p.authorizationEndpoint!).origin,
-    authorization_endpoint: p.authorizationEndpoint!,
-    token_endpoint: p.tokenEndpoint!,
-    ...(p.userinfoEndpoint ? { userinfo_endpoint: p.userinfoEndpoint } : {}),
-  };
+  // A4 (Microsoft): relax ONLY the id_token `iss` string-equality when the provider declares an
+  // `expectedIssuer`. `validateIssuer` reads `as[_expectedIssuer]?.(result)`; the resolver gets the
+  // full result object, so we adapt our public `(claims) => string` hook. This touches only that one
+  // string-comparison step of the pipeline (see the ⚠️ note above `expectedIssuerKey` re: what this
+  // pipeline does and does not verify). Idempotent to set repeatedly on the cached `as` (same provider
+  // ⇒ same issuer key).
+  if (p.kind === "oidc" && p.expectedIssuer !== undefined) {
+    const hook = p.expectedIssuer;
+    (as as unknown as Record<symbol, unknown>)[expectedIssuerKey] = (result: { claims: Record<string, unknown> }) =>
+      typeof hook === "function" ? hook(result.claims) : hook;
+  }
+  return as;
 }
 
 /** Build the provider authorization URL (oauth4webapi ships no builder — construct it, as the panva

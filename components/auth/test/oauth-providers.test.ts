@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { googleProvider, githubProvider, discordProvider, facebookProvider, FACEBOOK_GRAPH_VERSION, oauthProvider } from "../src/oauth";
+import { googleProvider, githubProvider, discordProvider, facebookProvider, FACEBOOK_GRAPH_VERSION, microsoftProvider, microsoftExpectedIssuer, oauthProvider } from "../src/oauth";
 
 it("googleProvider is OIDC with the right issuer + default scopes", () => {
   const p = googleProvider({ clientId: "id", clientSecret: "sec" });
@@ -87,4 +87,41 @@ it("facebookProvider honors a graphVersion override consistently across all thre
   expect(p.authorizationEndpoint).toContain("/v21.0/");
   expect(p.tokenEndpoint).toContain("/v21.0/");
   expect(p.userinfoEndpoint).toContain("/v21.0/");
+});
+
+it("microsoftProvider is OIDC with the common authority + default scopes + multi-tenant issuer relaxation", () => {
+  const p = microsoftProvider({ clientId: "id", clientSecret: "sec" });
+  expect(p.kind).toBe("oidc");
+  expect(p.issuer).toBe("https://login.microsoftonline.com/common/v2.0");
+  expect(p.scopes).toEqual(["openid", "profile", "email"]);
+  expect(typeof p.expectedIssuer).toBe("function"); // common ⇒ relaxed
+});
+
+it("microsoftProvider organizations/consumers relax; a tenant GUID / onmicrosoft.com is STRICT (no relaxation)", () => {
+  expect(typeof microsoftProvider({ clientId: "i", clientSecret: "s", tenant: "organizations" }).expectedIssuer).toBe("function");
+  expect(typeof microsoftProvider({ clientId: "i", clientSecret: "s", tenant: "consumers" }).expectedIssuer).toBe("function");
+  const guid = microsoftProvider({ clientId: "i", clientSecret: "s", tenant: "11111111-2222-3333-4444-555555555555" });
+  expect(guid.expectedIssuer).toBeUndefined();
+  expect(guid.issuer).toBe("https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0");
+  expect(microsoftProvider({ clientId: "i", clientSecret: "s", tenant: "contoso.onmicrosoft.com" }).expectedIssuer).toBeUndefined();
+});
+
+it("microsoftProvider mapClaims: accountId = tid.oid (fallback sub), emailVerified = xms_edov === true", () => {
+  const p = microsoftProvider({ clientId: "id", clientSecret: "sec" });
+  expect(p.mapClaims({ tid: "T", oid: "O", sub: "S", email: "u@ms.com", xms_edov: true, name: "MS User" }))
+    .toEqual({ accountId: "T.O", email: "u@ms.com", emailVerified: true, name: "MS User" });
+  // no oid → fall back to sub; no xms_edov → emailVerified false (never links).
+  expect(p.mapClaims({ tid: "T", sub: "S", email: "u@ms.com" }))
+    .toEqual({ accountId: "S", email: "u@ms.com", emailVerified: false, name: undefined });
+  // xms_edov present but not strictly true → false.
+  expect(p.mapClaims({ sub: "S", email: "u@ms.com", xms_edov: "true" }).emailVerified).toBe(false);
+});
+
+it("microsoftExpectedIssuer accepts any concrete Entra tenant issuer but rejects a non-Microsoft iss (strict-fail fallback)", () => {
+  const good = "https://login.microsoftonline.com/aaaabbbb-cccc-dddd-eeee-ffff00001111/v2.0";
+  expect(microsoftExpectedIssuer({ iss: good })).toBe(good); // expected === actual ⇒ validateIssuer passes
+  // an attacker-controlled iss returns the strict fallback, which will NOT equal the token's iss ⇒ throw.
+  expect(microsoftExpectedIssuer({ iss: "https://evil.example.com/tenant/v2.0" }))
+    .toBe("https://login.microsoftonline.com/common/v2.0");
+  expect(microsoftExpectedIssuer({})).toBe("https://login.microsoftonline.com/common/v2.0");
 });
