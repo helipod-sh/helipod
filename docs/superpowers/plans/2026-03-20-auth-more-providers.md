@@ -402,17 +402,50 @@ Add the `expectedIssuer` passthrough in the `oauthProvider` builder. Change its 
 
 ### Step 3.2 — the `_expectedIssuer` accessor + wire it in `authorizationServerFor` (`oauth.ts`)
 
-Add the typed accessor just above `authorizationServerFor` (after the `asCache` declaration, line 174):
+Add the typed accessor just above `authorizationServerFor` (after the `asCache` declaration, line 174).
+
+**Reaching an undocumented library internal — fail LOUD if it ever disappears.** `_expectedIssuer` is an
+oauth4webapi **@3.8.6 internal** (`export const _expectedIssuer = Symbol()` in `build/index.js`) that is
+**not in the published `.d.ts`** — we access it by name through a cast. It is safe only because the
+version is **pinned exact** (`"oauth4webapi": "3.8.6"` in `components/auth/package.json`). If a future
+bump removes or renames it, a silent cast would resolve to `undefined`, the resolver would never be
+attached, and Microsoft `common`/`organizations`/`consumers` logins would silently fall back to strict
+issuer matching → a mysterious runtime "issuer mismatch" that is hard to diagnose. So we **assert the
+Symbol is present at access time** — a library change surfaces as a clear, self-describing error, not a
+silent Microsoft-login break:
 
 ```ts
-/** oauth4webapi exports this Symbol at RUNTIME (`build/index.js`: `export const _expectedIssuer =
- *  Symbol()`) but OMITS it from its published `.d.ts`, so we reach it through a typed accessor. Its
- *  `validateIssuer` consults `as[_expectedIssuer]?.(result) ?? as.issuer` when checking the id_token's
- *  `iss` — assigning a resolver relaxes ONLY that string comparison. The token's SIGNATURE is still
- *  validated against discovery's `jwks_uri` by `processAuthorizationCodeResponse`, so this is not a
- *  signature bypass (spec decision 6). */
-const expectedIssuerKey = (oauth as unknown as { _expectedIssuer: symbol })._expectedIssuer;
+/** oauth4webapi's `validateIssuer` consults `as[_expectedIssuer]?.(result) ?? as.issuer` when checking
+ *  the id_token's `iss` — assigning a resolver here relaxes ONLY that string comparison. The token's
+ *  SIGNATURE is still validated against discovery's `jwks_uri` by `processAuthorizationCodeResponse`, so
+ *  this is not a signature bypass (spec decision 6).
+ *
+ *  ⚠️  `_expectedIssuer` is an UNDOCUMENTED oauth4webapi@3.8.6 INTERNAL: exported at runtime from
+ *  `build/index.js` but OMITTED from the published `.d.ts`, so we reach it through a cast. This is safe
+ *  ONLY because `components/auth/package.json` pins `oauth4webapi` to EXACT `3.8.6`. If a future bump
+ *  removes/renames it, the cast would yield `undefined` and Microsoft multi-tenant relaxation would
+ *  silently degrade to strict matching (mysterious "issuer mismatch" at login). The assertion below
+ *  converts that structural break into a loud, self-describing error at module load — the signal to
+ *  re-verify the internal against the new version (or find its replacement). */
+const maybeExpectedIssuerKey = (oauth as unknown as { _expectedIssuer?: symbol })._expectedIssuer;
+if (typeof maybeExpectedIssuerKey !== "symbol") {
+  throw new Error(
+    "oauth4webapi internal `_expectedIssuer` Symbol is missing — Microsoft multi-tenant issuer " +
+      "relaxation cannot be applied. This is an undocumented internal of the pinned oauth4webapi@3.8.6; " +
+      "check the installed oauth4webapi version and re-verify the internal (components/auth/src/oauth.ts).",
+  );
+}
+/** Re-bound with an EXPLICIT `symbol` annotation so every later use (including inside
+ *  `authorizationServerFor`'s closure) is unconditionally `symbol` — no reliance on control-flow
+ *  narrowing of a module-scope const flowing into a nested function body (which is not guaranteed across
+ *  TS versions). The guard above has already proven it is a symbol. */
+const expectedIssuerKey: symbol = maybeExpectedIssuerKey;
 ```
+
+The throw runs once, at module evaluation, the moment `@stackbase/auth` is loaded — before any
+deployment can boot with a broken relaxation. `expectedIssuerKey` is then a plain `symbol` at every use
+site, so `(as as Record<symbol, unknown>)[expectedIssuerKey]` below stays type-clean with no further
+cast.
 
 Replace `authorizationServerFor` (lines 180-199) with a version that obtains `as` on either path, then
 sets the resolver when `expectedIssuer` is present:
@@ -1445,8 +1478,14 @@ send users to `GET /api/auth/oauth/<name>/start?redirectTo=…`. Provider-specif
 - **`clientSecret` union:** widened to `string | (() => string | Promise<string>)` only in T4, together
   with the exchange-site resolution (`typeof … === "function" ? await … : …`), so no intermediate task
   leaves `oauth.ClientSecretPost` receiving a non-string. ✓
-- **`_expectedIssuer` accessor:** reached through a single typed accessor (`expectedIssuerKey`), never
-  re-derived; JWKS signature validation untouched (relaxes only the `iss` string compare). ✓
+- **`_expectedIssuer` accessor:** reached through a single accessor (`expectedIssuerKey`), never
+  re-derived; JWKS signature validation untouched (relaxes only the `iss` string compare). **Fail-loud
+  guard:** a module-load `typeof … !== "symbol"` throw converts a future oauth4webapi bump that
+  removes/renames the undocumented internal into a clear self-describing error (not a silent
+  Microsoft-login degradation); the re-bound `const expectedIssuerKey: symbol` is unconditionally
+  `symbol` at every use site, so no closure-narrowing dependence and no cast at the index. Structural
+  break → the guard; behavioral break → the `microsoftExpectedIssuer` unit test (Step 3.5) + the
+  resolver-attachment seam test (Step 3.6); both present. ✓
 - **Route change is auth-component-only:** a second `{ method: "POST", … }` entry; per-method dispatch +
   per-method overlap guard verified; `external-config.test.ts` pinned assertion updated. No engine seam
   change. ✓
