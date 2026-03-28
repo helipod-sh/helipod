@@ -4,7 +4,7 @@ export * from "./errors";
 export type { AuthConfig, AuthOptions, EmailConfig, EmailOptions, OAuthConfig, JwtConfig, OAuthOptions, JwtOptions } from "./config";
 export { resolveAuthConfig } from "./config";
 export type { OAuthProvider, ExternalIdentity } from "./oauth";
-export { googleProvider, githubProvider, oauthProvider } from "./oauth";
+export { googleProvider, githubProvider, discordProvider, oauthProvider } from "./oauth";
 export type { EmailMessage, EmailProvider } from "./email/provider";
 export { consoleEmail, resendEmail } from "./email/provider";
 export type { Flow, TemplateArgs, RenderedEmail, TemplateFn, EmailTemplates } from "./email/templates";

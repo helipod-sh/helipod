@@ -168,6 +168,28 @@ export function assertProviderEndpointsSecure(name: string, provider: OAuthProvi
   }
 }
 
+/** Discord — a NON-OIDC oauth2 provider (no id_token): explicit endpoints + a `/users/@me` mapper.
+ *  `emailVerified` derives from Discord's own `verified` flag on the userinfo object (the oauth2
+ *  callback branch passes `{ ...user, email, emailVerified:false }` for providers with no
+ *  `emailsEndpoint`; this mapper reads `u.verified`, not the injected field). */
+export function discordProvider(opts: { clientId: string; clientSecret: string; scopes?: string[] }): OAuthProvider {
+  return oauthProvider({
+    kind: "oauth2",
+    authorizationEndpoint: "https://discord.com/oauth2/authorize",
+    tokenEndpoint: "https://discord.com/api/oauth2/token",
+    userinfoEndpoint: "https://discord.com/api/users/@me",
+    clientId: opts.clientId,
+    clientSecret: opts.clientSecret,
+    scopes: opts.scopes ?? ["identify", "email"],
+    mapClaims: (u) => ({
+      accountId: String(u.id ?? ""),
+      email: typeof u.email === "string" ? u.email : undefined,
+      emailVerified: u.verified === true,
+      name: typeof u.global_name === "string" ? u.global_name : typeof u.username === "string" ? u.username : undefined,
+    }),
+  });
+}
+
 // ─────────────────────────── protocol helpers (Task 3) ───────────────────────────
 
 /** Per-issuer discovery cache — an OIDC `AuthorizationServer` is fetched once per process. */
