@@ -190,6 +190,37 @@ export function discordProvider(opts: { clientId: string; clientSecret: string; 
   });
 }
 
+/** The pinned Meta Graph API version for `facebookProvider` — one place (spec Part B). Bump
+ *  deliberately; a caller can override per-provider via `facebookProvider({ graphVersion })`. */
+export const FACEBOOK_GRAPH_VERSION = "v25.0";
+
+/** Facebook — a NON-OIDC oauth2 provider (no id_token): Graph `dialog/oauth` + `/me?fields=…`. The
+ *  `fields` query on the userinfo URL is MANDATORY (Graph returns only the requested fields) and rides
+ *  through to the Bearer call unchanged (the oauth2 callback branch fetches `userinfoEndpoint`
+ *  verbatim). `emailVerified` = presence of an email (Facebook returns only confirmed emails; an
+ *  absent email → `false`, never a placeholder). */
+export function facebookProvider(opts: { clientId: string; clientSecret: string; scopes?: string[]; graphVersion?: string }): OAuthProvider {
+  const v = opts.graphVersion ?? FACEBOOK_GRAPH_VERSION;
+  return oauthProvider({
+    kind: "oauth2",
+    authorizationEndpoint: `https://www.facebook.com/${v}/dialog/oauth`,
+    tokenEndpoint: `https://graph.facebook.com/${v}/oauth/access_token`,
+    userinfoEndpoint: `https://graph.facebook.com/${v}/me?fields=id,name,email`,
+    clientId: opts.clientId,
+    clientSecret: opts.clientSecret,
+    scopes: opts.scopes ?? ["email", "public_profile"],
+    mapClaims: (u) => {
+      const email = typeof u.email === "string" && u.email ? u.email : undefined;
+      return {
+        accountId: String(u.id ?? ""),
+        email,
+        emailVerified: !!email,
+        name: typeof u.name === "string" ? u.name : undefined,
+      };
+    },
+  });
+}
+
 // ─────────────────────────── protocol helpers (Task 3) ───────────────────────────
 
 /** Per-issuer discovery cache — an OIDC `AuthorizationServer` is fetched once per process. */

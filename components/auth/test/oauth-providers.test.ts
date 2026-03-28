@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { googleProvider, githubProvider, discordProvider, oauthProvider } from "../src/oauth";
+import { googleProvider, githubProvider, discordProvider, facebookProvider, FACEBOOK_GRAPH_VERSION, oauthProvider } from "../src/oauth";
 
 it("googleProvider is OIDC with the right issuer + default scopes", () => {
   const p = googleProvider({ clientId: "id", clientSecret: "sec" });
@@ -54,4 +54,37 @@ it("discordProvider mapClaims: verified→emailVerified, global_name preferred o
 
 it("discordProvider accepts custom scopes", () => {
   expect(discordProvider({ clientId: "id", clientSecret: "sec", scopes: ["identify"] }).scopes).toEqual(["identify"]);
+});
+
+it("facebookProvider is oauth2 with the pinned Graph version + fields param preserved on the userinfo URL", () => {
+  const p = facebookProvider({ clientId: "id", clientSecret: "sec" });
+  expect(p.kind).toBe("oauth2");
+  expect(p.authorizationEndpoint).toBe(`https://www.facebook.com/${FACEBOOK_GRAPH_VERSION}/dialog/oauth`);
+  expect(p.tokenEndpoint).toBe(`https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/oauth/access_token`);
+  expect(p.userinfoEndpoint).toBe(`https://graph.facebook.com/${FACEBOOK_GRAPH_VERSION}/me?fields=id,name,email`);
+  // the fields query MUST survive (Graph returns only requested fields).
+  expect(new URL(p.userinfoEndpoint!).searchParams.get("fields")).toBe("id,name,email");
+  expect(p.scopes).toEqual(["email", "public_profile"]);
+});
+
+it("facebookProvider mapClaims: emailVerified = email presence, absent email → false + undefined (no placeholder)", () => {
+  const p = facebookProvider({ clientId: "id", clientSecret: "sec" });
+  expect(p.mapClaims({ id: 123, name: "Zuck", email: "z@fb.com" }))
+    .toEqual({ accountId: "123", email: "z@fb.com", emailVerified: true, name: "Zuck" });
+  const noEmail = p.mapClaims({ id: 456, name: "NoMail" });
+  expect(noEmail.email).toBeUndefined();
+  expect(noEmail.emailVerified).toBe(false);
+  // empty-string email is treated as absent.
+  expect(p.mapClaims({ id: 789, name: "Empty", email: "" }).emailVerified).toBe(false);
+  // a non-string email value (e.g. malformed upstream payload) is treated as absent, not coerced.
+  const nonString = p.mapClaims({ id: 999, name: "Weird", email: 12345 as unknown as string });
+  expect(nonString.email).toBeUndefined();
+  expect(nonString.emailVerified).toBe(false);
+});
+
+it("facebookProvider honors a graphVersion override consistently across all three endpoints", () => {
+  const p = facebookProvider({ clientId: "id", clientSecret: "sec", graphVersion: "v21.0" });
+  expect(p.authorizationEndpoint).toContain("/v21.0/");
+  expect(p.tokenEndpoint).toContain("/v21.0/");
+  expect(p.userinfoEndpoint).toContain("/v21.0/");
 });
