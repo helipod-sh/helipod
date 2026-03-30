@@ -261,33 +261,58 @@ async function oauthStart(ctx: ActionCtx, config: AuthConfig, request: Request, 
  *  enumeration): a missing/tampered/replayed `state`, a provider protocol failure, or an exchange
  *  error all collapse to the same `fail(400)`. */
 async function oauthCallback(ctx: ActionCtx, config: AuthConfig, request: Request, url: URL, provider: string, p: OAuthProvider): Promise<Response> {
-  const state = url.searchParams.get("state");
+  // Collect the authorization-response params from EITHER the GET query OR (Apple `form_post`) the
+  // urlencoded POST body. Both converge on a single URLSearchParams handed to `validateAuthResponse`
+  // and the exchange. The POST body is NOT a new trust source: it carries the same code/state/id_token
+  // a GET would, plus a COSMETIC `user` JSON (first-auth display name only — never identity; decision 1).
+  let params: URLSearchParams;
+  let extra: { user?: { name?: { firstName?: string; lastName?: string }; email?: string } } | undefined;
+  if (request.method === "POST") {
+    const ct = request.headers.get("content-type") ?? "";
+    if (!ct.includes("application/x-www-form-urlencoded")) return fail(400);
+    let bodyText: string;
+    try { bodyText = await request.text(); } catch { return fail(400); }
+    params = new URLSearchParams(bodyText);
+    const userRaw = params.get("user");
+    if (userRaw) {
+      // Apple sends `user` ONCE (first authorization). Parse defensively for the cosmetic name only —
+      // a malformed value is ignored, never fatal, and NEVER read for email/identity.
+      try {
+        const parsed = JSON.parse(userRaw) as { name?: { firstName?: string; lastName?: string }; email?: string };
+        extra = { user: parsed };
+      } catch { /* cosmetic-only — ignore */ }
+    }
+  } else {
+    params = url.searchParams;
+  }
+
+  const state = params.get("state");
   if (!state) return fail(400);
 
   // Consume-before-validate: `_consumeOAuthState` deletes the row FIRST, then validates provider/expiry
-  // (commitThenThrow on any post-consume throw). A miss/mismatch → generic (this also makes a REPLAYED
-  // callback with the same state 400, since the row is already gone on the second attempt).
+  // (commitThenThrow on any post-consume throw). A miss/mismatch/replay → generic 400. This CSRF/replay
+  // defense is transport-agnostic — a replayed POST callback with a consumed state 400s exactly like GET.
   let recovered: { codeVerifier: string; nonce?: string; redirectTo: string; linkUserId?: string };
   try {
     recovered = await ctx.runMutation("auth:_consumeOAuthState", { provider, stateHash: sha256base64url(state) });
   } catch { return fail(400); }
 
-  // Re-validate redirectTo against the allowlist (defense in depth — it was already checked at
-  // `/start` before the state row was ever written, but this re-check costs nothing and means a
-  // corrupted/legacy row can never carry us to an unvalidated redirect target). Checked BEFORE the
-  // exchange/resolve below so an invalid target short-circuits before any account/session writes.
+  // Re-validate redirectTo against the allowlist (defense in depth), BEFORE any exchange/resolve write.
   if (!isAllowedRedirect(recovered.redirectTo, config.oauth!.redirectAllowlist)) return fail(400);
 
   // Exchange + extract identity. oauth4webapi validates state (validateAuthResponse) + nonce
-  // (processAuthorizationCodeResponse). Any protocol failure → generic (no enumeration).
+  // (processAuthorizationCodeResponse). Identity derives ONLY from the verified id_token; `extra` (the
+  // cosmetic `user` JSON) is threaded to the mapper for a display name only. Any protocol failure →
+  // generic 400 (no enumeration).
   let identity;
   try {
     const as = await authorizationServerFor(p);
     const client: oauth.Client = { client_id: p.clientId };
-    const params = oauth.validateAuthResponse(as, client, url.searchParams, state);
+    const validated = oauth.validateAuthResponse(as, client, params, state);
     identity = await exchangeAndExtractIdentity({
-      as, provider: p, params, redirectUri: callbackUri(request.url, provider),
+      as, provider: p, params: validated, redirectUri: callbackUri(request.url, provider),
       codeVerifier: recovered.codeVerifier, ...(recovered.nonce ? { nonce: recovered.nonce } : {}),
+      ...(extra ? { extra } : {}),
     });
   } catch { return fail(400); }
 

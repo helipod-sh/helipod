@@ -27,7 +27,10 @@ export interface OAuthProvider {
   userinfoEndpoint?: string;
   emailsEndpoint?: string;
   clientId: string;
-  clientSecret: string;
+  /** A static string OR (Apple) an async minter resolved immediately before the token exchange — Apple
+   *  requires the "secret" to be a freshly-minted ES256 JWT. The function form is resolved in
+   *  `exchangeAndExtractIdentity`; static-string providers are unchanged. */
+  clientSecret: string | (() => string | Promise<string>);
   scopes: string[];
   /** oidc only: relax the id_token `iss` exact-string match (multi-tenant Microsoft — a `common`
    *  token's `iss` is tenant-specific, e.g. `https://login.microsoftonline.com/<tenantid>/v2.0`).
@@ -39,9 +42,17 @@ export interface OAuthProvider {
    *  class of tokens this hook widens acceptance of actually safe to accept. Unset ⇒ strict A3
    *  exact-match against `as.issuer`. */
   expectedIssuer?: string | ((claims: Record<string, unknown>) => string);
+  /** oidc only: `"form_post"` makes `buildAuthorizeUrl` emit `response_mode=form_post` (Apple returns
+   *  the authorization response as an HTTP POST). Default/absent ⇒ `"query"` (A3 behavior). */
+  responseMode?: "query" | "form_post";
   /** Map the provider's raw claims (`id_token` claims for oidc; the merged `/user`+`/user/emails`
-   *  object for github) to the normalized `ExternalIdentity`. */
-  mapClaims: (raw: Record<string, unknown>) => ExternalIdentity;
+   *  object for github) to the normalized `ExternalIdentity`. `extra` carries the FIRST-AUTH `user`
+   *  JSON some providers (Apple form_post) send once, for a COSMETIC display name ONLY — never trusted
+   *  for identity/email/verification (spec decision 1). Existing mappers ignore the second arg. */
+  mapClaims: (
+    claims: Record<string, unknown>,
+    extra?: { user?: { name?: { firstName?: string; lastName?: string }; email?: string } },
+  ) => ExternalIdentity;
 }
 
 /** Generic builder — the public seam for custom providers (and what the E2E uses with a mock issuer). */
@@ -57,6 +68,7 @@ export function oauthProvider(opts: Partial<OAuthProvider> & Pick<OAuthProvider,
     clientSecret: opts.clientSecret,
     scopes: opts.scopes ?? ["openid", "email", "profile"],
     ...(opts.expectedIssuer !== undefined ? { expectedIssuer: opts.expectedIssuer } : {}),
+    ...(opts.responseMode ? { responseMode: opts.responseMode } : {}),
     mapClaims:
       opts.mapClaims ??
       ((c) => ({
@@ -386,6 +398,7 @@ export function buildAuthorizeUrl(as: oauth.AuthorizationServer, p: OAuthProvide
   url.searchParams.set("code_challenge", args.codeChallenge);
   url.searchParams.set("code_challenge_method", "S256");
   if (args.nonce) url.searchParams.set("nonce", args.nonce);
+  if (p.responseMode === "form_post") url.searchParams.set("response_mode", "form_post");
   return url.toString();
 }
 
@@ -436,9 +449,13 @@ export function callbackUri(requestUrl: string, provider: string): string {
 export async function exchangeAndExtractIdentity(args: {
   as: oauth.AuthorizationServer; provider: OAuthProvider; params: URLSearchParams;
   redirectUri: string; codeVerifier: string; nonce?: string;
+  extra?: { user?: { name?: { firstName?: string; lastName?: string }; email?: string } };
 }): Promise<ExternalIdentity> {
   const client: oauth.Client = { client_id: args.provider.clientId };
-  const clientAuth = oauth.ClientSecretPost(args.provider.clientSecret);
+  // A1 seam: `clientSecret` may be an async minter (Apple's ES256 JWT). Resolve to a string immediately
+  // before building the client-auth. Static-string providers are unchanged.
+  const secret = typeof args.provider.clientSecret === "function" ? await args.provider.clientSecret() : args.provider.clientSecret;
+  const clientAuth = oauth.ClientSecretPost(secret);
   const resp = await oauth.authorizationCodeGrantRequest(
     args.as, client, clientAuth, args.params, args.redirectUri, args.codeVerifier,
     { [oauth.allowInsecureRequests]: allowInsecureForUrl(args.as.token_endpoint!) },
@@ -459,7 +476,7 @@ export async function exchangeAndExtractIdentity(args: {
     });
     const claims = oauth.getValidatedIdTokenClaims(result);
     if (!claims) throw new Error("no id_token");
-    return args.provider.mapClaims(claims as unknown as Record<string, unknown>);
+    return args.provider.mapClaims(claims as unknown as Record<string, unknown>, args.extra);
   }
   // github (oauth2): fetch /user + /user/emails with the access token.
   const accessToken = result.access_token;

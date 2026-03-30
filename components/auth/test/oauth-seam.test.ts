@@ -42,3 +42,18 @@ describe("A4 seam: expectedIssuer wires oauth4webapi's _expectedIssuer resolver"
     expect((as as unknown as Record<symbol, unknown>)[expectedIssuerKey]).toBeUndefined();
   });
 });
+
+describe("A2 seam: response_mode=form_post is emitted only when the provider sets responseMode", () => {
+  it("emits response_mode=form_post for a form_post provider, and NOT for a default (query) provider", async () => {
+    await startDiscovery();
+    const args = { redirectUri: "https://app/cb", state: "st", codeChallenge: "cc", nonce: "nn" };
+
+    const formPost = oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "c", clientSecret: "s", responseMode: "form_post" });
+    const asFP = await authorizationServerFor(formPost);
+    expect(new URL(buildAuthorizeUrl(asFP, formPost, args)).searchParams.get("response_mode")).toBe("form_post");
+
+    const query = oauthProvider({ kind: "oidc", issuer: mockUrl, clientId: "c", clientSecret: "s" });
+    const asQ = await authorizationServerFor(query);
+    expect(new URL(buildAuthorizeUrl(asQ, query, args)).searchParams.has("response_mode")).toBe(false);
+  });
+});
