@@ -31,11 +31,13 @@ export interface OAuthProvider {
   scopes: string[];
   /** oidc only: relax the id_token `iss` exact-string match (multi-tenant Microsoft — a `common`
    *  token's `iss` is tenant-specific, e.g. `https://login.microsoftonline.com/<tenantid>/v2.0`).
-   *  Given the decoded (NOT independently signature-verified — see `authorizationServerFor`'s
-   *  `expectedIssuerKey` note) claims, return the issuer string to accept. This hook touches ONLY the
+   *  Given the decoded claims, return the issuer string to accept. This hook touches ONLY the
    *  `validateIssuer` string-equality step of oauth4webapi's existing validation pipeline — it does not
-   *  add, remove, or otherwise change any other check in that pipeline. Unset ⇒ strict A3 exact-match
-   *  against `as.issuer`. */
+   *  add, remove, or otherwise change any other check in that pipeline, and composes with (does not
+   *  substitute for) `exchangeAndExtractIdentity`'s id_token JWS signature verification (see
+   *  `authorizationServerFor`'s `expectedIssuerKey` note) — signature verification is what makes the
+   *  class of tokens this hook widens acceptance of actually safe to accept. Unset ⇒ strict A3
+   *  exact-match against `as.issuer`. */
   expectedIssuer?: string | ((claims: Record<string, unknown>) => string);
   /** Map the provider's raw claims (`id_token` claims for oidc; the merged `/user`+`/user/emails`
    *  object for github) to the normalized `ExternalIdentity`. */
@@ -238,11 +240,13 @@ const MICROSOFT_AUTHORITY_HOST = "https://login.microsoftonline.com";
  *  `consumers`): accept the token's own `iss` IFF it is a concrete Entra tenant issuer of the exact
  *  shape `https://login.microsoftonline.com/<tenant>/v2.0` (so we never blanket-accept a non-Microsoft
  *  issuer); otherwise return a value the token's `iss` will NOT equal, forcing the strict throw. This
- *  is a shape/pattern check on the CLAIMS ONLY — it narrows which `iss` values the relaxation accepts,
- *  it does not itself perform or depend on any cryptographic verification (see the ⚠️ note on
- *  `expectedIssuerKey` below: oauth4webapi's Authorization Code flow does not verify the id_token JWS
- *  signature by default in this codebase's pipeline; identity trust here rests on the token endpoint
- *  being fetched over TLS, per OIDC Core §3.1.3.7's TLS-based alternative to signature validation). */
+ *  is a shape/pattern check on the CLAIMS ONLY — it narrows which `iss` values the relaxation accepts;
+ *  by itself, a string-shape check like this would be necessary but not SUFFICIENT (nothing here stops
+ *  a wrong-tenant, wrong-key-signed token whose `iss` merely matches the pattern). What makes the
+ *  relaxation actually safe is that `exchangeAndExtractIdentity` cryptographically verifies the
+ *  id_token's JWS signature against the AS's `jwks_uri` (see `authorizationServerFor`'s
+ *  `expectedIssuerKey` note) for EVERY oidc provider, composing with this string check — a token whose
+ *  `iss` shape-matches but is signed by the wrong key/tenant is rejected at the signature step. */
 export function microsoftExpectedIssuer(claims: Record<string, unknown>): string {
   const iss = claims.iss;
   if (typeof iss === "string" && /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(iss)) return iss;
@@ -292,23 +296,19 @@ const asCache = new Map<string, oauth.AuthorizationServer>();
  *  other check and removes no other check from the pipeline `validateJwt`/`validatePresence`/
  *  `validateIssuer`/`validateAudience` already run.
  *
- *  ⚠️  SEPARATE, PRE-EXISTING FACT ABOUT THIS PIPELINE (verified against the pinned oauth4webapi@3.8.6
- *  source — `build/index.js`'s `processGenericAccessTokenResponse`/`validateJwt`): oauth4webapi's
- *  Authorization Code flow does NOT cryptographically verify the id_token's JWS signature by default —
+ *  ⚠️  UPDATE (Task 3.5): oauth4webapi's Authorization Code flow is decode-only BY DEFAULT —
  *  `validateJwt` only decodes and shape-checks the header/claims (exp/iat/nbf/aud/iss types), and
- *  neither `processAuthorizationCodeResponse` nor `getValidatedIdTokenClaims` fetches `jwks_uri` or
- *  checks the signature. Signature verification is a SEPARATE, OPT-IN step
- *  (`oauth.validateApplicationLevelSignature`), which `exchangeAndExtractIdentity` (this file) does NOT
- *  call for ANY oidc provider (google, microsoft, or any future one) — confirmed by direct probe: a
- *  garbage/corrupted signature segment is still accepted by `processAuthorizationCodeResponse`. This
- *  codebase's OIDC identity trust therefore rests on the token endpoint being fetched over TLS (a
- *  spec-sanctioned alternative to signature verification for the Authorization Code flow — OIDC Core
- *  §3.1.3.7), NOT on JWKS signature verification. This is PRE-EXISTING to Task 3/A4 (shared by every
- *  A3 OIDC provider, not introduced or worsened here) — `expectedIssuer` only ever touches the `iss`
- *  string-equality step of this same (signature-unverified) pipeline, so it does not change this
- *  picture either way. Flagged in the Task 3 report as a concern for separate follow-up; NOT fixed
- *  here (fixing it means wiring `validateApplicationLevelSignature` into `exchangeAndExtractIdentity`
- *  for every OIDC provider, a broader change than this task's scope).
+ *  neither `processAuthorizationCodeResponse` nor `getValidatedIdTokenClaims` itself fetches `jwks_uri`
+ *  or checks the signature. THIS CODEBASE NO LONGER RELIES ON THAT DEFAULT: `exchangeAndExtractIdentity`
+ *  (this file) explicitly calls the separate `oauth.validateApplicationLevelSignature` step against the
+ *  AS's `jwks_uri` for EVERY oidc provider (google, microsoft, apple, and any future one), right after
+ *  `processAuthorizationCodeResponse` and before the claims are trusted — a missing `jwks_uri` throws
+ *  rather than silently skipping verification. So the id_token's JWS signature IS cryptographically
+ *  verified for every OIDC provider, in addition to (not instead of) the TLS back-channel the token
+ *  endpoint is fetched over. `expectedIssuer` only ever touches the `iss` string-equality step of this
+ *  pipeline and composes WITH the signature check (it does not weaken or bypass it) — see
+ *  `microsoftExpectedIssuer`'s doc comment for why signature verification is what makes that relaxation
+ *  actually safe.
  *
  *  ⚠️  `_expectedIssuer` is an UNDOCUMENTED oauth4webapi@3.8.6 INTERNAL: exported at runtime from
  *  `build/index.js` but OMITTED from the published `.d.ts`, so we reach it through a cast. This is safe
@@ -447,6 +447,16 @@ export async function exchangeAndExtractIdentity(args: {
     args.nonce ? { expectedNonce: args.nonce } : {});
 
   if (args.provider.kind === "oidc") {
+    // id_token JWS signature verification against the AS jwks_uri. oauth4webapi's
+    // processAuthorizationCodeResponse is decode-only (OIDC §3.1.3.7 defers to the TLS
+    // back-channel); we verify explicitly because the Apple form_post path delivers the
+    // id_token via a browser POST where the TLS-back-channel exemption does NOT apply, and
+    // as defense-in-depth for all OIDC providers. `resp` (the RAW token-endpoint Response),
+    // not `result` — validateApplicationLevelSignature keys off a WeakMap set on resp.
+    if (!args.as.jwks_uri) throw new Error("OIDC provider discovery returned no jwks_uri — cannot verify id_token signature");
+    await oauth.validateApplicationLevelSignature(args.as, resp, {
+      [oauth.allowInsecureRequests]: allowInsecureForUrl(args.as.jwks_uri),
+    });
     const claims = oauth.getValidatedIdTokenClaims(result);
     if (!claims) throw new Error("no id_token");
     return args.provider.mapClaims(claims as unknown as Record<string, unknown>);
