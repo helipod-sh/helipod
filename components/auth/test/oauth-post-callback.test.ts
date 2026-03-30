@@ -133,4 +133,30 @@ describe("A2/A1/A3 seam: form_post POST callback + async clientSecret + cosmetic
     const replay = await drivePostCallback(rt, { code: "mockcode", state });
     expect(replay.status).toBe(400);
   });
+
+  it("a POST to /start ⇒ generic 404 (start is GET-only; the POST route entry exists only for /callback)", async () => {
+    mock = await startMockOidcProvider();
+    const comp = defineAuth({
+      oauth: {
+        providers: { mock: oauthProvider({ kind: "oidc", issuer: mock.url, clientId: "cid", clientSecret: async () => "s", responseMode: "form_post" }) },
+        redirectAllowlist: ["http://localhost:5173"],
+      },
+    });
+    const rt = await makeRuntime(comp);
+
+    const postReq = new Request(`http://127.0.0.1:1/api/auth/oauth/mock/start?redirectTo=` + encodeURIComponent("http://localhost:5173/app"), { method: "POST" });
+    const postRes = await rt.runHttpAction("auth:oauthHttp", postReq, { identity: null });
+    expect(postRes.status).toBe(404);
+    expect(await postRes.text()).toBe("authentication failed");
+
+    // GET /start still works (302) — the method gate doesn't collaterally break the normal flow.
+    const { state } = await driveStart(rt, "http://localhost:5173/app");
+    expect(state).toBeTruthy();
+
+    // POST /callback still works (302) — unaffected by the /start gate.
+    const { state: state2, nonce: nonce2 } = await driveStart(rt, "http://localhost:5173/app");
+    mock.setNextIdTokenClaims({ sub: "s2", aud: "cid", email: "u2@icloud.com", email_verified: true, nonce: nonce2 });
+    const callbackRes = await drivePostCallback(rt, { code: "mockcode", state: state2 });
+    expect(callbackRes.status).toBe(302);
+  });
 });

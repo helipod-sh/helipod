@@ -225,7 +225,13 @@ function oauthHttp(config: AuthConfig) {
     const p = resolveProvider(config.oauth!.providers, provider);
     if (!p) return fail(404);
 
-    if (phase === "start") return oauthStart(ctx as ActionCtx, config, request, url, provider, p);
+    if (phase === "start") {
+      // GET-only, defense in depth: the POST route entry exists so `callback` can accept Apple's
+      // form_post, but oauthStart today only reads the query string + Authorization header. A non-GET
+      // here is fully generic (same 404 as an unresolved provider) — no method-specific leak.
+      if (request.method !== "GET") return fail(404);
+      return oauthStart(ctx as ActionCtx, config, request, url, provider, p);
+    }
     if (phase === "callback") return oauthCallback(ctx as ActionCtx, config, request, url, provider, p);
     return fail(404);
   });
