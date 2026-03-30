@@ -5,6 +5,7 @@
  * file is pure config + claim-mapping (unit-testable, no network).
  */
 import * as oauth from "oauth4webapi";
+import { SignJWT, importPKCS8 } from "jose";
 
 /** The normalized identity both the OAuth callback and `signInWithIdToken` produce and hand to the
  *  shared Part-3 resolution mutation. `emailVerified` is a hard boolean (an unverified/absent email
@@ -293,6 +294,70 @@ export function microsoftProvider(opts: { clientId: string; clientSecret: string
         email: typeof c.email === "string" ? c.email : undefined,
         emailVerified: c.xms_edov === true,
         name: typeof c.name === "string" ? c.name : undefined,
+      };
+    },
+  });
+}
+
+/** Apple's issuer / the required `aud` of the client-secret JWT. */
+const APPLE_ISSUER = "https://appleid.apple.com";
+
+/** Mint Apple's OAuth "client secret": a short-lived ES256 JWT signed with your Services-ID `.p8`
+ *  private key (Apple issues no static secret). Cached in-closure and re-minted shortly before `exp`.
+ *  Apple caps `exp` at 6 months; the default window is ~5 months and we refresh 60s early. The private
+ *  key stays in this closure — it is never written to a row and never leaves the server. `nowFn` is
+ *  injectable for deterministic tests (production uses `Date.now()`, allowed in the token-exchange
+ *  action's non-deterministic context — this minter is only ever called from `exchangeAndExtractIdentity`). */
+export function appleClientSecretMinter(opts: {
+  clientId: string; teamId: string; keyId: string; privateKey: string; ttlSec?: number; nowFn?: () => number;
+}): () => Promise<string> {
+  const APPLE_MAX_EXP_SEC = 60 * 60 * 24 * 180; // Apple's hard 6-month ceiling
+  const ttlSec = Math.min(opts.ttlSec ?? 60 * 60 * 24 * 30 * 5, APPLE_MAX_EXP_SEC); // ~5 months, capped
+  const skewSec = 60; // re-mint 60s before expiry
+  let cached: { jwt: string; expSec: number } | null = null;
+  return async () => {
+    const nowSec = Math.floor((opts.nowFn ? opts.nowFn() : Date.now()) / 1000);
+    if (cached && nowSec < cached.expSec - skewSec) return cached.jwt;
+    const key = await importPKCS8(opts.privateKey, "ES256");
+    const expSec = nowSec + ttlSec;
+    const jwt = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: opts.keyId })
+      .setIssuer(opts.teamId)
+      .setIssuedAt(nowSec)
+      .setExpirationTime(expSec)
+      .setAudience(APPLE_ISSUER)
+      .setSubject(opts.clientId)
+      .sign(key);
+    cached = { jwt, expSec };
+    return jwt;
+  };
+}
+
+/** Sign in with Apple — an OIDC provider using ALL of the T4 seam: `form_post` response + POST callback,
+ *  an async ES256 client-secret minter, and the widened `mapClaims` (Apple's `user` JSON display name).
+ *  `clientId` is your Services ID; `teamId`/`keyId`/`privateKey` are the `.p8` key's team, key id, and
+ *  PKCS#8 PEM. Identity (`sub`/`email`/`email_verified`) comes ONLY from the signature-verified
+ *  id_token; the display name is the cosmetic first-auth `user.name` (never `user.email` — decision 1).
+ *  `email_verified` arrives as a string OR boolean — coerced strictly (`=== true || === "true"`). */
+export function appleProvider(opts: {
+  clientId: string; teamId: string; keyId: string; privateKey: string; scopes?: string[];
+}): OAuthProvider {
+  return oauthProvider({
+    kind: "oidc",
+    issuer: APPLE_ISSUER,
+    clientId: opts.clientId,
+    clientSecret: appleClientSecretMinter(opts),
+    scopes: opts.scopes ?? ["name", "email"],
+    responseMode: "form_post",
+    mapClaims: (c, extra) => {
+      const first = extra?.user?.name?.firstName;
+      const last = extra?.user?.name?.lastName;
+      const name = [first, last].filter((s): s is string => typeof s === "string" && s.length > 0).join(" ") || undefined;
+      return {
+        accountId: String(c.sub ?? ""),
+        email: typeof c.email === "string" ? c.email : undefined,
+        emailVerified: c.email_verified === true || c.email_verified === "true",
+        ...(name ? { name } : {}),
       };
     },
   });
