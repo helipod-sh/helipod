@@ -77,5 +77,10 @@ describe("appleProvider", () => {
     expect(withName.email).toBe("real@icloud.com"); // from claims, NOT extra.user.email
     // no extra ⇒ no name (subsequent sign-ins, where Apple sends no user JSON).
     expect(p.mapClaims({ sub: "s", email: "real@icloud.com", email_verified: true }).name).toBeUndefined();
+    // REQUIRED pin (T5 review follow-up): even when the id_token itself carries NO email, the mapper
+    // must NEVER fall back to reading `extra.user.email` for identity — that field is cosmetic-name-only
+    // (decision 1). Without this, a malicious/misbehaving relay that supplies a `user.email` alongside a
+    // no-email id_token could smuggle an attacker-chosen email into the identity.
+    expect(p.mapClaims({ sub: "s" }, { user: { email: "attacker@evil.com" } }).email).toBeUndefined();
   });
 });
