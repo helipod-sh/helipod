@@ -279,8 +279,9 @@ isolation, front Stackbase with your own auth-terminating proxy.
 
 ## External identity
 
-`@stackbase/auth` also supports signing in via a **third-party OAuth provider** (Google, GitHub, or
-any custom OIDC/OAuth2 provider) and via a **third-party JWT/OIDC issuer** (Clerk, Auth0, or any
+`@stackbase/auth` also supports signing in via a **third-party OAuth provider** (Google, GitHub,
+Microsoft, Discord, Facebook, Apple, or any custom OIDC/OAuth2 provider) and via a **third-party
+JWT/OIDC issuer** (Clerk, Auth0, or any
 issuer that publishes a JWKS) — both opt-in, both composing through the same account-linking core as
 password/email sign-in. Stackbase's own sessions always stay DB rows: an external identity is
 resolved to (or linked with) a local `userId`, then a normal Stackbase session is minted for it — so
@@ -291,13 +292,25 @@ revocation stays reactive no matter how the user originally signed in.
 Configure providers and a redirect allowlist on `defineAuth({ oauth })`:
 
 ```ts
-import { defineAuth, googleProvider, githubProvider } from "@stackbase/auth";
+import {
+  defineAuth, googleProvider, githubProvider,
+  microsoftProvider, discordProvider, facebookProvider, appleProvider,
+} from "@stackbase/auth";
 
 export const auth = defineAuth({
   oauth: {
     providers: {
       google: googleProvider({ clientId: process.env.GOOGLE_CLIENT_ID!, clientSecret: process.env.GOOGLE_CLIENT_SECRET! }),
       github: githubProvider({ clientId: process.env.GITHUB_CLIENT_ID!, clientSecret: process.env.GITHUB_CLIENT_SECRET! }),
+      microsoft: microsoftProvider({ clientId: process.env.MS_CLIENT_ID!, clientSecret: process.env.MS_CLIENT_SECRET! }),
+      discord: discordProvider({ clientId: process.env.DISCORD_CLIENT_ID!, clientSecret: process.env.DISCORD_CLIENT_SECRET! }),
+      facebook: facebookProvider({ clientId: process.env.FB_APP_ID!, clientSecret: process.env.FB_APP_SECRET! }),
+      apple: appleProvider({
+        clientId: process.env.APPLE_SERVICES_ID!,   // your Services ID, e.g. com.acme.web
+        teamId: process.env.APPLE_TEAM_ID!,
+        keyId: process.env.APPLE_KEY_ID!,
+        privateKey: process.env.APPLE_PRIVATE_KEY!, // the .p8 PKCS#8 PEM contents
+      }),
     },
     // REQUIRED — an open-redirect guard. Every `redirectTo` passed to `/start` must match one of
     // these origin+path-prefix entries (exact-path or subtree match), or `/start` 400s before any
@@ -308,8 +321,9 @@ export const auth = defineAuth({
 ```
 
 `redirectAllowlist` is required and non-empty — `defineAuth` throws at config time otherwise.
-`googleProvider`/`githubProvider` are thin builders over the public `oauthProvider({ kind, ... })`
-seam, so any other OIDC (`kind: "oidc"`, discovery-based) or OAuth2 (`kind: "oauth2"`, explicit
+`googleProvider`/`githubProvider`/`microsoftProvider`/`discordProvider`/`facebookProvider`/
+`appleProvider` are all thin builders over the public `oauthProvider({ kind, ... })` seam, so any
+other OIDC (`kind: "oidc"`, discovery-based) or OAuth2 (`kind: "oauth2"`, explicit
 `authorizationEndpoint`/`tokenEndpoint`/`userinfoEndpoint`, typically with a custom `mapClaims` since
 a generic OAuth2 userinfo response isn't shaped like OIDC claims) provider is a config entry, not a
 code change:
@@ -325,11 +339,53 @@ const acmeProvider = oauthProvider({
 });
 ```
 
+### Built-in providers
+
+All six builders share the same flow — register the engine's **callback** URL
+(`https://<deployment>/api/auth/oauth/<name>/callback`) as the redirect URI with the provider, then
+send users to `GET /api/auth/oauth/<name>/start?redirectTo=…`. Provider-specific notes:
+
+- **`microsoftProvider({ clientId, clientSecret, tenant?, scopes? })`** — Microsoft Entra ID (OIDC).
+  `tenant` defaults to `"common"` (also `"organizations"`, `"consumers"`, or a tenant GUID /
+  `*.onmicrosoft.com`). For the multi-tenant authorities the id_token's issuer is tenant-specific, so
+  Stackbase relaxes the issuer **string** check while still verifying the token's signature against
+  Microsoft's keys. **Autolinking requires the `xms_edov` optional claim** — Entra emits no
+  `email_verified`; without `xms_edov` a Microsoft sign-in is treated as unverified and never links to
+  an existing account. Enable `xms_edov` (email-domain-owner-verified) in your app's token
+  configuration in the Entra portal.
+
+- **`discordProvider({ clientId, clientSecret, scopes? })`** — Discord (OAuth2, `/users/@me`). Default
+  scopes `identify email`. Email is linked only when Discord reports it as `verified`.
+
+- **`facebookProvider({ clientId, clientSecret, scopes?, graphVersion? })`** — Meta / Facebook Login
+  (OAuth2, Graph `/me`). Graph version is pinned (`v25.0`); override with `graphVersion`. Facebook only
+  returns confirmed emails, and an app may not receive an email at all — an absent email means a
+  separate account, never a placeholder.
+
+- **`appleProvider({ clientId, teamId, keyId, privateKey, scopes? })`** — Sign in with Apple (OIDC,
+  `form_post`). `clientId` is your **Services ID** (not the app bundle id). `teamId`/`keyId`/
+  `privateKey` come from a **Sign-in-with-Apple key** (`.p8`, PKCS#8 PEM). Apple issues no static client
+  secret — Stackbase mints a short-lived **ES256 JWT** from your `.p8` on each token exchange (cached,
+  auto-refreshed); the private key stays on the server and is never stored. Apple returns the response
+  as an HTTP **POST** (`form_post`) and sends the user's **name only on the first authorization**, as a
+  `user` field in the POST body. Stackbase uses that name for a **cosmetic display name only** —
+  identity (the account id, email, and email-verified status) always comes from the signature-verified
+  id_token, never from the POST body. (Apple's `transfer_sub` app-transfer remapping is not handled — a
+  rare migration event.)
+
+**Production issuers/providers must be `https://`.** Stackbase's config-time MITM guard
+(`assertProviderEndpointsSecure`) rejects a non-loopback `http://` issuer or endpoint outright — the
+`http://` exception exists ONLY for a loopback host (`127.0.0.1`/`localhost`/`::1`), for local dev and
+testing. Every provider above (and any custom `oauthProvider`) is subject to this same guard.
+
 **The engine mounts the OAuth routes for you** — `GET /api/auth/oauth/:provider/start` and
-`GET /api/auth/oauth/:provider/callback` — the moment `oauth` is configured; there's no app code to
-write for them. **Register the *callback* URL** (`https://<your-deployment>/api/auth/oauth/<name>/callback`)
-as the redirect URI with Google/GitHub/your provider, not your app's own URL — the flow always comes
-back through the engine first.
+`/api/auth/oauth/:provider/callback` (both `GET` and `POST` — Apple's `form_post` mode delivers the
+authorization response as an HTTP POST, everyone else as a `GET` redirect; the engine handles either
+transparently) — the moment `oauth` is configured; there's no app code to write for them. **Register
+the *callback* URL** (`https://<your-deployment>/api/auth/oauth/<name>/callback`) as the redirect URI
+with each provider (Google/GitHub/Microsoft/Discord/Facebook: the OAuth redirect URI; Apple: the
+Services ID's "Return URL"), not your app's own URL — the flow always comes back through the engine
+first.
 
 The client-side flow:
 
