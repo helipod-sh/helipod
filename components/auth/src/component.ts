@@ -19,7 +19,18 @@ export function defineAuth(options?: AuthOptions): ComponentDefinition {
     modules: makeAuthModules(config),
     context: authContext,
     contextType: { import: "@stackbase/auth", type: "AuthContext" },
-    ...(config.oauth ? { httpRoutes: [{ method: "GET", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" }] } : {}),
+    ...(config.oauth
+      ? {
+          // GET backs `/start` + the query-mode callback (Google/GitHub/Microsoft/Discord/Facebook);
+          // POST backs Apple's `form_post` callback. Per-method dispatch (`matchComponentRoute`) +
+          // per-method overlap guard (`composeComponents`) make the two entries disjoint and
+          // unambiguous — same handler, two methods. No engine seam change is needed.
+          httpRoutes: [
+            { method: "GET", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" },
+            { method: "POST", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" },
+          ],
+        }
+      : {}),
   });
 }
 

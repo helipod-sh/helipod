@@ -4,6 +4,7 @@ import { composeComponents } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { query, type QueryCtx } from "@stackbase/executor";
+import { generateKeyPair, SignJWT } from "jose";
 import { defineAuth } from "../src/component";
 import { oauthProvider } from "../src/oauth";
 import type { MintResult } from "../src/functions";
@@ -163,6 +164,35 @@ describe("A3 Task 5: /callback + token exchange + oauthHandoff + completeOAuthSi
     const req = new Request("http://127.0.0.1:1/api/auth/oauth/__proto__/callback?code=x&state=y");
     const res = await rt.runHttpAction("auth:oauthHttp", req, { identity: null });
     expect(res.status).toBe(404);
+  });
+
+  it("Task 3.5: an id_token signed with a key NOT in the mock's JWKS ⇒ /callback 400, generic, no enumeration (JWS signature verification composes with the existing generic-failure try/catch)", async () => {
+    mock = await startMockOidcProvider();
+    const comp = defineAuth({
+      oauth: {
+        providers: { mock: oauthProvider({ kind: "oidc", issuer: mock.url, clientId: "cid", clientSecret: "sec" }) },
+        redirectAllowlist: ["http://localhost:5173"],
+      },
+    });
+    const rt = await makeRuntime(comp);
+
+    const { state, nonce } = await driveStart(rt, "http://localhost:5173/app");
+    // Mint a claims-valid id_token (right iss/aud/nonce/sub) but signed with a FOREIGN keypair the
+    // mock's own /jwks never serves — the shape a network-position/malicious-AS attacker would forge.
+    const { privateKey: foreignKey } = await generateKeyPair("RS256");
+    const forged = await new SignJWT({ nonce })
+      .setProtectedHeader({ alg: "RS256", kid: "attacker-key" })
+      .setSubject("attacker-controlled-sub")
+      .setIssuedAt()
+      .setIssuer(mock.url)
+      .setAudience("cid")
+      .setExpirationTime("5m")
+      .sign(foreignKey);
+    mock.setNextRawIdToken(forged);
+
+    const res = await driveCallback(rt, "mock", state);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("authentication failed");
   });
 
   it("GitHub (non-OIDC oauth2) round-trip: /user + /user/emails mapped, verified primary email autolinks correctly", async () => {

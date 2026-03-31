@@ -23,6 +23,12 @@ export interface MockOidcProvider {
   /** Controls the claims embedded in the id_token the NEXT `/token` response mints. Must be called
    *  before each `/callback` drive (a fresh `sub`/`nonce`/etc per test case). */
   setNextIdTokenClaims(claims: { sub: string; aud: string; email?: string; email_verified?: boolean; nonce?: string; issuerOverride?: string }): void;
+  /** Override the NEXT `/token` response's `id_token` with a RAW, already-encoded token string —
+   *  bypasses `setNextIdTokenClaims`'s own signing entirely, so a test can hand it a token signed with
+   *  a foreign/unrelated keypair (never in this mock's `/jwks`) or with a corrupted signature segment,
+   *  to prove `exchangeAndExtractIdentity`'s id_token JWS signature verification (Task 3.5) actually
+   *  rejects it. One-shot — cleared after the next `/token` response (or via `setNextIdTokenClaims`). */
+  setNextRawIdToken(idToken: string): void;
   close(): Promise<void>;
 }
 
@@ -33,6 +39,7 @@ export async function startMockOidcProvider(): Promise<MockOidcProvider> {
 
   let url = "";
   let pending: { sub: string; aud: string; email?: string; email_verified?: boolean; nonce?: string; issuerOverride?: string } | null = null;
+  let pendingRaw: string | null = null;
 
   const server: Server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/.well-known/openid-configuration") {
@@ -52,6 +59,13 @@ export async function startMockOidcProvider(): Promise<MockOidcProvider> {
     }
     if (req.method === "POST" && req.url === "/token") {
       void (async () => {
+        if (pendingRaw) {
+          const idToken = pendingRaw;
+          pendingRaw = null;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ access_token: "mock-access-token", token_type: "bearer", id_token: idToken }));
+          return;
+        }
         if (!pending) { res.writeHead(500); res.end(); return; }
         const claims = pending;
         const idToken = await new SignJWT({ email: claims.email, email_verified: claims.email_verified, nonce: claims.nonce })
@@ -77,7 +91,8 @@ export async function startMockOidcProvider(): Promise<MockOidcProvider> {
 
   return {
     url,
-    setNextIdTokenClaims(claims) { pending = claims; },
+    setNextIdTokenClaims(claims) { pending = claims; pendingRaw = null; },
+    setNextRawIdToken(idToken) { pendingRaw = idToken; pending = null; },
     async close() { await new Promise<void>((resolve) => server.close(() => resolve())); },
   };
 }

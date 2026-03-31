@@ -28,6 +28,17 @@
  *      `userId` is the SAME (external identity linked to the pre-existing account, never a fresh
  *      one), and the password session's subscription flips to `null` — the flip-gated
  *      first-mailbox-proof revocation (`markVerifiedRevokingIfFirstProof`) fanning out reactively.
+ *  (4) Apple-shaped `form_post`: an Apple-shaped provider (oidc + `responseMode: "form_post"` + an
+ *      ASYNC `clientSecret` minter + the widened 2-arg `mapClaims`) pointed at the SAME loopback mock
+ *      (whose `/jwks` verifies the id_token's RS256 signature — T3.5 passes on the happy path). The
+ *      `/start` 302 carries `response_mode=form_post`; the callback is driven with a REAL
+ *      `application/x-www-form-urlencoded` **POST** (not a GET) carrying `code`/`state` plus a
+ *      cosmetic Apple-shaped `user` JSON. Security proof: the POST `user` JSON's email
+ *      (`attacker@evil.com`) is DIFFERENT from the id_token's (verified) email — the resulting
+ *      account-link proves identity came from the signature-verified id_token only, never the POST
+ *      body. (A bad-signature/forged-id_token variant is intentionally not re-derived here — see the
+ *      note after test (4) below; it's already covered, transport-agnostically, in
+ *      `components/auth/test/oauth-callback.test.ts`.)
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { defineSchema } from "@stackbase/values";
@@ -79,6 +90,25 @@ async function startServer(mock: MockProvider): Promise<{ server: DevServer; wsU
       oauth: {
         providers: {
           mock: oauthProvider({ kind: "oidc", issuer: mock.url, clientId: DEFAULT_CLIENT_ID, clientSecret: "sec" }),
+          // Apple-shaped: oidc + form_post + an ASYNC clientSecret minter + widened mapClaims (the
+          // cosmetic first-auth `user` JSON → display name), pointed at the loopback mock. Exercises
+          // the whole T4 seam (POST callback + async secret + extra threading) through the REAL server.
+          apple: oauthProvider({
+            kind: "oidc", issuer: mock.url, clientId: DEFAULT_CLIENT_ID,
+            clientSecret: async () => "minted-apple-secret",
+            responseMode: "form_post",
+            mapClaims: (c, extra) => {
+              const first = extra?.user?.name?.firstName;
+              const last = extra?.user?.name?.lastName;
+              const name = [first, last].filter((s): s is string => typeof s === "string" && s.length > 0).join(" ") || undefined;
+              return {
+                accountId: String(c.sub ?? ""),
+                email: typeof c.email === "string" ? c.email : undefined,
+                emailVerified: c.email_verified === true || c.email_verified === "true",
+                ...(name ? { name } : {}),
+              };
+            },
+          }),
         },
         redirectAllowlist: REDIRECT_ALLOWLIST,
       },
@@ -256,4 +286,77 @@ describe("auth A3 external identity — E2E through the real dev server", () => 
       await mock.close();
     }
   });
+
+  it("(4) Apple-shaped form_post: a POST callback with a cosmetic user JSON mints a session; identity is the id_token's email, the POST user email is ignored (autolink proof)", async () => {
+    const mock = await startMockProvider();
+    try {
+      const { server, wsUrl } = await startServer(mock);
+      const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      try {
+        // A password user with the SAME email the id_token will carry — unverified, so the flip-gated
+        // autolink applies. If identity ever leaked from the POST `user` JSON's (different) email, the
+        // OAuth flow would create a SEPARATE user and this linkage assertion would fail.
+        const email = "apple-user@icloud.com";
+        const s = (await a.mutation(api.auth.signUp, { email, password: "pw", deviceLabel: "Chrome" })) as unknown as MintResult;
+        a.setAuth(s.token);
+        const seen: Array<string | null> = [];
+        a.subscribe(api.whoami.get, {}, (v) => seen.push(v as string | null));
+        await waitFor(() => seen.some((v) => v === s.userId), 5000, "password authed");
+
+        const redirectTo = "http://localhost:5173/app";
+        const startRes = await fetch(
+          `${server.url}/api/auth/oauth/apple/start?redirectTo=${encodeURIComponent(redirectTo)}`,
+          { redirect: "manual" },
+        );
+        expect(startRes.status).toBe(302);
+        const loc = new URL(startRes.headers.get("location")!);
+        // form_post is emitted on the authorize URL for the apple provider.
+        expect(loc.searchParams.get("response_mode")).toBe("form_post");
+        const state = loc.searchParams.get("state")!;
+        const nonce = loc.searchParams.get("nonce")!;
+
+        // The id_token carries the TRUE identity email (verified); the POST user JSON carries a DIFFERENT
+        // email that must be ignored for identity.
+        mock.setNextToken({ nonce, sub: "apple-sub", email, emailVerified: true });
+
+        const cb = await fetch(`${server.url}/api/auth/oauth/apple/callback`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code: "mockcode",
+            state,
+            user: JSON.stringify({ name: { firstName: "Ada", lastName: "Lovelace" }, email: "attacker@evil.com" }),
+          }).toString(),
+          redirect: "manual",
+        });
+        expect(cb.status).toBe(302);
+        const cbLoc = new URL(cb.headers.get("location")!);
+        expect(cbLoc.origin + cbLoc.pathname).toBe(redirectTo);
+        expect(cbLoc.search).toBe("");                 // handoff in the fragment, never the query
+        const handoffCode = cbLoc.hash.replace(/^#code=/, "");
+        expect(handoffCode.length).toBeGreaterThan(0);
+
+        const mint = (await b.action(api.auth.completeOAuthSignIn, { handoffCode })) as unknown as MintResult;
+        // SAME userId — the Apple identity LINKED to the pre-existing password user via the id_token's
+        // verified email, proving identity ignored the POST `user` JSON's (different) email.
+        expect(mint.userId).toBe(s.userId);
+
+        // The password session reactively flips to null (flip-gated first-mailbox-proof revocation).
+        await waitFor(() => seen.at(-1) === null, 5000, "reactive apple link-revoke");
+        expect(seen.at(-1)).toBeNull();
+      } finally {
+        a.close();
+        b.close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+  // A bad-signature form_post variant is intentionally NOT duplicated here: signature verification
+  // (T3.5, `exchangeAndExtractIdentity`'s `validateApplicationLevelSignature` call) runs identically
+  // regardless of GET vs POST transport — it is already proven, with a properly forged foreign-keypair
+  // id_token, by `components/auth/test/oauth-callback.test.ts`'s "Task 3.5" test. What THIS file adds
+  // is transport coverage (a real POST callback) and the extra-threading security proof (test 4 above);
+  // re-deriving signature rejection through a second harness would only add cost, not new coverage.
 });

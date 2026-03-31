@@ -18,7 +18,10 @@ it("oauth present ⇒ A3 OAuth modules + the httpRoutes declaration are register
   for (const k of ["oauthHttp", "completeOAuthSignIn", "_startOAuth", "_consumeOAuthState", "_resolveExternalIdentity", "_consumeHandoff"]) expect(keys).toContain(k);
   expect(keys).not.toContain("signInWithIdToken");   // jwt absent
   const comp = defineAuth({ oauth: { providers: { google: googleProvider({ clientId: "i", clientSecret: "s" }) }, redirectAllowlist: ["http://localhost:5173"] } });
-  expect(comp.httpRoutes).toEqual([{ method: "GET", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" }]);
+  expect(comp.httpRoutes).toEqual([
+    { method: "GET", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" },
+    { method: "POST", pathPrefix: "/api/auth/oauth/", handler: "oauthHttp" },
+  ]);
 });
 
 it("jwt present ⇒ signInWithIdToken registered (+ shared _resolveExternalIdentity); no OAuth routes", () => {
