@@ -4,7 +4,7 @@ For agentic workers: use the `superpowers:subagent-driven-development` skill to 
 
 **Goal:** Ship `@stackbase/notifications` — an opt-in component (composed via `stackbase.config.ts`, like scheduler/triggers/workflow) that sends messages across pluggable channels (email, SMS/WhatsApp, in-app) through swappable per-channel provider adapters, with transactional at-most-once delivery and a **reactive in-app inbox** that is nearly free because stored rows are already live-queried.
 
-**Architecture:** `defineNotifications(opts)` (following `defineScheduler`), whose module set is built by `makeSendModules(config)`/`makeInboxModules()` factories closing over the resolved config. A two-layer **Channel × Provider** seam (`EmailProvider`/`SmsProvider`, base `NotificationProvider`) mirrors `DatabaseAdapter`/`BlobStore` — the component never imports a driver. `ctx.notifications.send(...)` runs in a **mutation**: it writes a `messages` row per channel, and for `in_app` also the `notifications` inbox row (the row IS the delivered notification — reactive, no send step), and enqueues email/SMS rows (`status: "queued"`) for a **recurring driver** (the scheduler/reaper pattern — woken by the commit fan-out + a wall-clock timer) to deliver via `provider.send(...)` OUTSIDE the transaction, flipping `queued → sent`/`failed`. At-most-once is a `sendReceipts` row keyed by `idempotencyKey`, recorded transactionally (the scheduler `by_idempotency` insert-or-noop discipline under single-writer OCC), with passthrough to a provider's native `Idempotency-Key`. The reactive inbox is `notifications` + a live `useQuery` feed + `unreadCount` + ownership-checked `markRead`/`markAllRead`, wrapped by a `useNotifications()`/`<Inbox>` React helper.
+**Architecture:** `defineNotifications(opts)` (following `defineScheduler`), whose module set is built by `makeSendModules(config)`/`makeInboxModules()` factories closing over the resolved config. A two-layer **Channel × Provider** seam (`EmailProvider`/`SmsProvider`, base `NotificationProvider`) mirrors `DatabaseAdapter`/`BlobStore` — the component never imports a driver. `ctx.notifications.send(...)` runs in a **mutation**: it writes a `messages` row per channel, and for `in_app` also the `notifications` inbox row (the row IS the delivered notification — reactive, no send step), and enqueues email/SMS rows (`status: "queued"`) for a **recurring driver** (the scheduler/reaper pattern — woken by the commit fan-out + a wall-clock timer) to deliver via `provider.send(...)` OUTSIDE the transaction, flipping `queued → sending → sent`/`failed` (a claim-before-send `"sending"` state makes a single-node crash mid-send non-re-sweepable). At-most-once is a `sendReceipts` row keyed by `idempotencyKey`, recorded transactionally (the scheduler `by_idempotency` insert-or-noop discipline under single-writer OCC), with passthrough to a provider's native `Idempotency-Key`. The reactive inbox is `notifications` + a live `useQuery` feed + `unreadCount` + ownership-checked `markRead`/`markAllRead`, wrapped by a `useNotifications()`/`<Inbox>` React helper.
 
 **Tech Stack:** TypeScript, Bun (runtime/pkg-manager), Turborepo, vitest under Node, `@stackbase/values`/`@stackbase/executor`/`@stackbase/component` engine seams, `@stackbase/test` (`createTestStackbase`) for the E2E, native `fetch` in provider adapters, `@stackbase/client` (+ `/react`) for the inbox hook. No new runtime dependency.
 
@@ -14,7 +14,7 @@ Binding values copied **verbatim** from the design spec (`docs/superpowers/specs
 
 - **Two-layer seam: Channel × Provider** (isomorphic to `DatabaseAdapter`/`BlobStore` — the component never imports a driver). A **channel** is a medium (`"email"`, `"sms"`, `"in_app"`; WhatsApp is an SMS-provider variant addressed by the provider, not a separate channel). A **provider** is a swappable adapter for one channel: base `NotificationProvider { channel; send(msg): Promise<SendResult> }` with per-channel message/result types.
 - **The seam is shaped auth-compatible, but N1 does NOT touch auth.** The `EmailProvider` shape generalizes `components/auth/src/email/provider.ts` (same `send({to, from, subject, text, html?})` contract) so N4 can unify auth onto it — but N1 modifies **nothing** in `components/auth`. Auth keeps its own seam until N4.
-- **Send straddles the mutation/action boundary:** the public `ctx.notifications.send(...)` runs in a MUTATION and (a) writes a `messages` row per channel (`status: "queued"`), (b) for `in_app` the row IS the delivered notification — instantly visible to a live query, no send step, and (c) enqueues the email/SMS rows for a **driver** to actually send via the provider `fetch` OUTSIDE the transaction, updating status `queued → sent`/`failed`. An action-side `ctx.notifications.sendNow(...)` variant sends synchronously (returns the provider result directly).
+- **Send straddles the mutation/action boundary:** the public `ctx.notifications.send(...)` runs in a MUTATION and (a) writes a `messages` row per channel (`status: "queued"`), (b) for `in_app` the row IS the delivered notification — instantly visible to a live query, no send step, and (c) enqueues the email/SMS rows for a **driver** to actually send via the provider `fetch` OUTSIDE the transaction, updating status `queued → sending → sent`/`failed`. An action-side `ctx.notifications.sendNow(...)` variant sends synchronously (returns the provider result directly).
 - **At-most-once via a durable send receipt** (the Receipted-Outbox / scheduler `by_idempotency` discipline): a `sendReceipts` row keyed by `(idempotencyKey)` recorded transactionally before the provider call; a replay short-circuits to the recorded result. Passes the key through to a provider's native `Idempotency-Key` when supported (Resend/Loops) — only 2 of 8 providers have it, so the orchestrator owns dedup. Guarantees an OTP-class message never double-sends when N4 routes auth through here.
 - **The reactive in-app inbox is the flagship:** a `notifications` table + a generated `useQuery`-able inbox feed + an `unreadCount` query + a `markRead`/`markAllRead` mutation, with the delivery-status rows reactive too. Ship a small `<Inbox>` / `useNotifications` helper in the React client.
 - **Inline typed per-channel templates** (not a markup engine): content is authored per channel — `email: (data) => { subject; html?; text }`, `sms: (data) => string`, `in_app: (data) => { title; body; ...structured }`. A `templateId`+`variables` shape is anticipated in the email message type but not required in N1.
@@ -43,7 +43,7 @@ Binding values copied **verbatim** from the design spec (`docs/superpowers/specs
   ```
 - **Context facade (`ctx.notifications`, always-available on every function ctx when composed, like `ctx.scheduler`):** `send({ to, channels, template, data, idempotencyKey? })` — MUTATION-side. `to` = `{ userId?, email?, phone? }`; `channels` = which configured channels to deliver on; `template` = a registered template key or an inline content object; `data` = the template payload. Writes the `messages` rows + (for in_app) the `notifications` row; enqueues email/SMS. Returns `{ messageIds }`. `sendNow(...)` — ACTION-side synchronous variant.
 - **Schema (component tables, namespaced `notifications/*`) — additive:**
-  - `messages`: `{ channel, to, status: "queued"|"sent"|"failed", providerMessageId?, error?, idempotencyKey?, templateKey?, dataHash?, createdAt, sentAt? }`, indexes `byStatus` (driver sweep), `byIdempotencyKey` (dedup). One row per (send × channel).
+  - `messages`: `{ channel, to, status: "queued"|"sent"|"failed", providerMessageId?, error?, idempotencyKey?, templateKey?, dataHash?, createdAt, sentAt? }`, indexes `byStatus` (driver sweep), `byIdempotencyKey` (dedup). One row per (send × channel). *(N1 implementation adds a `"sending"` intermediate status + a transient `payload` field — see Resolved ambiguities #1 and #4.)*
   - `notifications`: the in-app inbox — `{ userId, title, body, data?, read: boolean, readAt?, createdAt, messageId }`, indexes `byUser` (feed / unread count, keeps invalidation scoped to the user), `byUserUnread`. Written synchronously in the send mutation; is the delivered in-app notification.
   - `sendReceipts`: `{ idempotencyKey, messageIds, createdAt }`, index `byKey` — the at-most-once ledger.
 
@@ -56,9 +56,10 @@ Binding values copied **verbatim** from the design spec (`docs/superpowers/specs
 
 ### Resolved spec ambiguities (see §Ambiguities at the end for full rationale)
 
-1. **`messages.payload` field added** (optional, `v.any()`). The verbatim `messages` schema has `templateKey?`/`dataHash?` but no field carrying the content the driver needs to actually send out-of-transaction. Resolution: templates are **pure functions**, so they render inside the mutation (deterministic, no I/O); the rendered per-channel content (`email {subject,text,html?}`, `sms {body,kind?}`) is stored on `messages.payload` for the driver to deliver without re-render and without persisting the raw `data` (possible PII). This is the ONLY field added beyond the verbatim schema.
+1. **`messages.payload` field added** (optional, `v.any()`, **transient — cleared post-delivery**). The verbatim `messages` schema has `templateKey?`/`dataHash?` but no field carrying the content the driver needs to actually send out-of-transaction. Resolution: templates are **pure functions**, so they render inside the mutation (deterministic, no I/O); the rendered per-channel content (`email {subject,text,html?}`, `sms {body,kind?}`) is stored on `messages.payload` for the driver to deliver without re-render and without persisting the raw `data` (possible PII). **`_markResult` NULLs `payload` on the `sent`/`failed` transition** — the rendered body (possibly OTP-class/PII) is delivered or dead, so it is not retained at rest. The in-app `notifications` row keeps its own durable, authz-scoped `title`/`body`; only the outbound `messages.payload` is cleared.
 2. **`in_app` also gets a `messages` row** (`status: "sent"`, `sentAt = now`), alongside the `notifications` inbox row — keeping "one `messages` row per (send × channel)" uniform and letting the delivery-status dashboard reflect in-app too. The `notifications` row is what's reactive/delivered; the `messages` row is the audit/status record.
-3. **`sendNow` uses a two-phase internal path** (`_prepareNow` → live `provider.send` → `_finishNow`) that persists email/SMS rows only as **final** (`sent`/`failed`), never `queued` — so the queued-sweep driver can never double-deliver a `sendNow` message. No claim/lease state is added (N1 has no retries; the driver's single-owner flag serializes its own passes).
+3. **`sendNow` uses a two-phase internal path** (`_prepareNow` → live `provider.send` → `_finishNow`) that persists email/SMS rows only as **final** (`sent`/`failed`), never `queued`/`sending` — so the queued-sweep driver can never double-deliver a `sendNow` message.
+4. **`"sending"` intermediate status closes the single-node crash-double-send gap.** The driver flow is `queued → sending → sent/failed`: a privileged `_claimForSend` mutation flips `queued → sending` (its own txn) BEFORE the `provider.send` network call, and `_peekQueued` selects ONLY `status:"queued"` — never `sending` — so a driver crash between send-returns and `_markResult` leaves the row `sending` and it is **never re-swept → no double-send** (single-node crash-safety). A stuck `sending` row is terminal in N1 (recovery/reclaim is N2; do not auto-retry). `_claimForSend`'s exact `status==="queued"` check under single-writer OCC is the authoritative guard against this node double-claiming; **fleet multi-driver claim/lease** (two drivers racing the same row) stays N2. Defense-in-depth: the provider `Idempotency-Key` is **auto-derived from the message row id** (`msg:<_id>`, stable across any future resend of the same row) and passed to providers that support it (Resend/Loops), independent of the caller's optional `sendReceipts` `idempotencyKey`.
 
 ## Parallelism Map
 
@@ -298,16 +299,24 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  * The `@stackbase/notifications` schema (namespaced `notifications/*` when composed). All additive:
  * a project without `defineNotifications` gets none of these tables.
  *
+ * `status`: `queued → sending → sent`/`failed`. The `"sending"` intermediate (claim-before-send)
+ * makes a single-node crash mid-send non-re-sweepable: `_peekQueued` selects ONLY `"queued"`, so a
+ * row left `"sending"` by a crash is never picked up again (no double-send). A stuck `"sending"` row
+ * is terminal in N1 (recovery is N2). Fleet multi-driver claim/lease is N2.
+ *
  * `messages.payload` (RESOLVED AMBIGUITY, see the plan): the rendered per-channel content the
  * driver delivers out-of-transaction (`email {subject,text,html?}`; `sms {body,kind?}`). Templates
  * are pure functions rendered INSIDE the send mutation (deterministic, no I/O); only the rendered
- * output — never the raw template `data` (possible PII) — is persisted here. Optional/additive.
+ * output — never the raw template `data` (possible PII) — is persisted here. TRANSIENT: `_markResult`
+ * NULLs `payload` on the `sent`/`failed` transition (the rendered body, possibly OTP/PII, is
+ * delivered or dead — not retained at rest). The durable inbox content lives on the `notifications`
+ * row (`title`/`body`), authz-scoped; only this outbound `payload` is cleared. Optional/additive.
  */
 export const notificationsSchema = defineSchema({
   messages: defineTable({
     channel: v.union(v.literal("email"), v.literal("sms"), v.literal("in_app")),
     to: v.string(),
-    status: v.union(v.literal("queued"), v.literal("sent"), v.literal("failed")),
+    status: v.union(v.literal("queued"), v.literal("sending"), v.literal("sent"), v.literal("failed")),
     providerMessageId: v.optional(v.string()),
     error: v.optional(v.string()),
     idempotencyKey: v.optional(v.string()),
@@ -315,9 +324,9 @@ export const notificationsSchema = defineSchema({
     dataHash: v.optional(v.string()),
     createdAt: v.number(),
     sentAt: v.optional(v.number()),
-    payload: v.optional(v.any()),
+    payload: v.optional(v.any()), // transient — cleared by `_markResult` on sent/failed (see doc above)
   })
-    // Driver sweep: scan `status:"queued"` cheaply.
+    // Driver sweep: scan `status:"queued"` cheaply (never `"sending"`/`"sent"`/`"failed"`).
     .index("byStatus", ["status"])
     // Dedup diagnostics / lookups by the caller's idempotency key.
     .index("byIdempotencyKey", ["idempotencyKey"]),
@@ -998,11 +1007,14 @@ async function prepareNow(db: GuestDatabaseWriter, now: number, config: Notifica
 async function finishNow(db: GuestDatabaseWriter, now: number, deliveries: NowDelivery[], idempotencyKey: string | undefined): Promise<{ messageIds: string[] }> {
   const messageIds: string[] = [];
   for (const d of deliveries) {
+    // A `sendNow` row is inserted already-terminal (sent/failed) and never queued, so it carries NO
+    // `payload` — same transient-content policy the driver's `_markResult` enforces (delivered/dead
+    // content is not retained at rest).
     const id = (await db.insert("messages", compact({
       channel: d.channel, to: d.to, status: d.status, createdAt: now,
       sentAt: d.status === "sent" ? now : undefined,
       providerMessageId: d.providerMessageId, error: d.error,
-      idempotencyKey, templateKey: d.templateKey, dataHash: d.dataHash, payload: d.payload,
+      idempotencyKey, templateKey: d.templateKey, dataHash: d.dataHash,
     }))) as string;
     messageIds.push(id);
   }
@@ -1031,8 +1043,11 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
   const _finishNow = mutation(async (ctx: MutationCtx, args: { deliveries: NowDelivery[]; idempotencyKey?: string }): Promise<{ messageIds: string[] }> =>
     finishNow(ctx.db as GuestDatabaseWriter, ctx.now(), args.deliveries, args.idempotencyKey));
 
-  // Driver-facing pair — PRIVILEGED (fully-qualified "notifications/messages"). See the scheduler's
+  // Driver-facing trio — PRIVILEGED (fully-qualified "notifications/messages"). See the scheduler's
   // modules.ts module doc comment: privileged calls bypass namespace prefixing.
+
+  // Selects ONLY `status:"queued"` — never `"sending"`. That exclusion is what makes a single-node
+  // crash mid-send non-re-sweepable (a row left `"sending"` by a crash is never returned here again).
   const _peekQueued = query(async (ctx: QueryCtx): Promise<QueuedMessage[]> => {
     const rows = await ctx.db.query("notifications/messages", "byStatus").eq("status", "queued").take(BATCH_CAP).collect();
     return rows
@@ -1040,19 +1055,34 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
       .map((r) => ({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as EmailContent | SmsPayload, idempotencyKey: r.idempotencyKey as string | undefined }));
   });
 
+  // Claim-before-send: flip `queued → sending` in its OWN transaction BEFORE the network call. The
+  // exact `status==="queued"` check under single-writer OCC is the authoritative once-only guard —
+  // returns false if the row is gone or already claimed (another pass), so the driver skips it. A
+  // crash after this commits but before `_markResult` leaves the row `"sending"` (terminal in N1).
+  const _claimForSend = mutation(async (ctx: MutationCtx, args: { messageId: string }): Promise<boolean> => {
+    const row = await ctx.db.get(args.messageId);
+    if (row === null || row.status !== "queued") return false;
+    await ctx.db.replace(args.messageId, { ...row, status: "sending" });
+    return true;
+  });
+
+  // Finalize a claimed (`"sending"`) row: `sending → sent`/`failed`. Clears the transient `payload`
+  // (rendered body, possibly OTP/PII) either way — delivered or dead, no reason to retain it.
   const _markResult = mutation(async (ctx: MutationCtx, args: { messageId: string; ok: boolean; providerMessageId?: string; error?: string }): Promise<null> => {
     const row = await ctx.db.get(args.messageId);
-    if (row === null || row.status !== "queued") return null; // gone or already finalized — defensive
+    if (row === null || row.status !== "sending") return null; // must be mid-send — defensive
     const now = ctx.now();
     if (args.ok) {
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined }));
+      // `compact` drops the `undefined` keys, so `db.replace` writes a doc with NO `payload`/`error`
+      // key — that absence IS the clear (both are `v.optional`).
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined }));
     } else {
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", error: args.error ?? "send failed" }));
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", error: args.error ?? "send failed", payload: undefined }));
     }
     return null;
   });
 
-  return { _enqueueSend, _prepareNow, _finishNow, _peekQueued, _markResult };
+  return { _enqueueSend, _prepareNow, _finishNow, _peekQueued, _claimForSend, _markResult };
 }
 
 // Re-export the delivery dispatcher + result type so the facade's `sendNow` and the driver share the
@@ -1236,17 +1266,21 @@ export interface NotificationsDriver extends Driver {
 
 /**
  * The queued-send driver — delivers `status:"queued"` email/SMS `messages` rows via the configured
- * provider OUTSIDE any transaction, then flips each `queued → sent`/`failed`. Two wake sources (the
+ * provider OUTSIDE any transaction, via `queued → sending → sent`/`failed`. Two wake sources (the
  * scheduler/reaper pattern): the commit fan-out (`onCommit`, any `notifications/*` write) and a
  * wall-clock timer at `driverIntervalMs`. A single in-process `running` flag serializes passes so a
  * commit racing the timer can't double-dispatch the same row; a wake landing mid-pass sets
  * `pendingWake` so the pass loops once more with a fresh peek instead of stranding a just-enqueued
  * row. `stopped` (set before teardown) prevents any settling pass from re-arming after `stop()`.
  *
- * N1 boundary (per spec): a failed provider send is TERMINAL (`failed`); retries are N2. A driver
- * crash mid-send leaves the row `queued` (re-delivered on restart — "retried once in N2"); a
- * message is marked `sent` only AFTER `provider.send` returns. Fleet multi-driver dedup and mid-send
- * reclaim are N2 (this driver is single-node).
+ * Crash-safety (single-node): each row is CLAIMED (`_claimForSend`, `queued → sending`, its own txn)
+ * BEFORE `provider.send`; `_peekQueued` never returns `"sending"`, so a crash between send-returns
+ * and `_markResult` leaves the row `"sending"` and it is NEVER re-swept → no double-send. A stuck
+ * `"sending"` row is terminal in N1 (recovery/reclaim is N2 — do NOT auto-retry). `_claimForSend`'s
+ * exact `status==="queued"` check under single-writer OCC is the authoritative once-only guard; the
+ * provider `Idempotency-Key` is auto-derived from the row id (`msg:<_id>`) as defense-in-depth for
+ * any future (N2) resend. N1 boundary: a failed provider send is TERMINAL (`failed`); retries and
+ * fleet multi-driver claim/lease are N2 (this driver is single-node).
  */
 export function notificationsDriver(config: NotificationsConfig): NotificationsDriver {
   let ctx: DriverContext;
@@ -1279,11 +1313,18 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
       pendingWake = false;
       const queued = (await ctx.runFunction("notifications:_peekQueued", {})) as QueuedMessage[];
       for (const m of queued) {
+        // Claim BEFORE the network call (queued → sending). Lost the claim (another pass/driver, or
+        // already finalized) → skip. This is what makes a crash mid-send non-re-sweepable.
+        const claimed = (await ctx.runFunction("notifications:_claimForSend", { messageId: m._id })) as boolean;
+        if (!claimed) continue;
         let ok = false;
         let providerMessageId: string | undefined;
         let error: string | undefined;
         try {
-          const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: m.idempotencyKey });
+          // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: an N2
+          // retry of the same row reuses it, so a supporting provider dedups). Independent of the
+          // caller's optional `sendReceipts` idempotencyKey.
+          const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
           ok = true;
           providerMessageId = res.providerMessageId;
         } catch (e) {
@@ -1369,9 +1410,12 @@ describe("notifications driver — queued-send delivery", () => {
     await (built.driver as { __tick: () => Promise<void> }).__tick();
 
     expect(captured.sent.length).toBe(1);
+    // Auto-derived provider Idempotency-Key = `msg:<rowId>` (defense-in-depth).
+    expect(captured.sent[0]!.idempotencyKey).toMatch(/^msg:/);
     expect(captured.sent[0]).toMatchObject({ to: "u@test", from: "no-reply@test", subject: "S", text: "T" });
     const rows = await built.readTable("notifications/messages");
     expect(rows[0]).toMatchObject({ status: "sent", providerMessageId: "cap-1" });
+    expect(rows[0]!.payload).toBeUndefined(); // transient payload cleared on delivery
   });
 
   it("marks the row failed (terminal in N1) when the provider throws", async () => {
@@ -1383,6 +1427,7 @@ describe("notifications driver — queued-send delivery", () => {
     const rows = await built.readTable("notifications/messages");
     expect(rows[0]!.status).toBe("failed");
     expect(String(rows[0]!.error)).toContain("forced failure");
+    expect(rows[0]!.payload).toBeUndefined(); // transient payload cleared on failure too
   });
 
   it("a second tick does not re-deliver an already-sent row", async () => {
@@ -1828,8 +1873,8 @@ Per-task local runs: T2a/b/c run `vitest run test/provider-*.test.ts` (self-cont
 
 1. **`messages.payload` (schema extension).** The verbatim `messages` schema names `templateKey?`/`dataHash?` but carries no field for the content the driver must send out-of-transaction. Resolution: render the pure per-channel template functions INSIDE the send mutation (deterministic, no I/O — the correct place per "no `Date.now()`/side effects in a mutation") and store the rendered content on an added optional `messages.payload` (`v.any()`), so the driver delivers without re-render and without persisting the raw `data` (PII). `dataHash` remains a hash of the raw `data` for dedup diagnostics. This is the only field added beyond the verbatim schema; additive, so the additive-schema gate accepts it.
 2. **`in_app` also gets a `messages` row** (`status:"sent"`, `sentAt=now`) beside the `notifications` inbox row — honoring "one row per (send × channel)" and "the delivery-status rows reactive too" (a status dashboard sees in-app too). The `notifications` row is the reactive/delivered artifact; the `messages` row is the audit/status record.
-3. **How the driver does I/O in this component model.** Exactly the scheduler/reaper pattern: `defineNotifications` sets `driver: notificationsDriver(config)`; `composeComponents` collects it into `ComposedProject.drivers`; the runtime `start()`s it with a `DriverContext`. The driver taps `ctx.onCommit` (wakes on any `notifications/*` write) + a `ctx.setTimer(now + driverIntervalMs)` fallback, coalescing overlapping wakes with a single `running` flag (+ `pendingWake`, + `stopped`). Each pass: `ctx.runFunction("notifications:_peekQueued", {})` (a QUERY, privileged/fully-qualified, returns queued email/SMS rows with their `payload`), then for each row `await deliverOutbound(config, …)` (**the network `provider.send` — outside any transaction, allowed in the driver's action context**), then `ctx.runFunction("notifications:_markResult", { messageId, ok, providerMessageId?, error? })` (a MUTATION flipping `queued → sent`/`failed`). `_peekQueued`/`_markResult` run privileged (fully-qualified `notifications/messages`); the send/enqueue path runs namespaced (bare names). N1: a failed send is terminal; no claim/lease (retries + reclaim are N2). This matches the spec's stated N1 boundary exactly.
+3. **How the driver does I/O in this component model.** Exactly the scheduler/reaper pattern: `defineNotifications` sets `driver: notificationsDriver(config)`; `composeComponents` collects it into `ComposedProject.drivers`; the runtime `start()`s it with a `DriverContext`. The driver taps `ctx.onCommit` (wakes on any `notifications/*` write) + a `ctx.setTimer(now + driverIntervalMs)` fallback, coalescing overlapping wakes with a single `running` flag (+ `pendingWake`, + `stopped`). Each pass: `ctx.runFunction("notifications:_peekQueued", {})` (a QUERY, privileged/fully-qualified, returns `status:"queued"` email/SMS rows with their `payload`), then for each row `_claimForSend` (MUTATION, `queued → sending`, own txn — skip if the claim is lost), `await deliverOutbound(config, …)` (**the network `provider.send` — outside any transaction, allowed in the driver's action context**, with an auto-derived `msg:<id>` Idempotency-Key), then `ctx.runFunction("notifications:_markResult", { messageId, ok, providerMessageId?, error? })` (a MUTATION flipping `sending → sent`/`failed` and NULLing the transient `payload`). `_peekQueued`/`_claimForSend`/`_markResult` run privileged (fully-qualified `notifications/messages`); the send/enqueue path runs namespaced (bare names). N1 crash-safety: `_peekQueued` never returns `"sending"`, so a crash mid-send leaves the row `"sending"` and it is never re-swept (no double-send); a failed send is terminal. Fleet multi-driver claim/lease + `"sending"`-reclaim are N2.
 4. **How `ctx.notifications` is attached.** Via `ComponentDefinition.context: (cctx) => notificationsContext(cctx, config)` + `contextWrite: true` (so `cctx.db` is a `GuestDatabaseWriter` scoped to the `notifications` namespace during a mutation — `send` writes rows inside the calling mutation's transaction, exactly like `ctx.scheduler.runAfter`). `composeComponents` turns every `context` into a `ContextProvider` attached as `ctx[name]` to every function's ctx (`InlineUdfExecutor`'s `guestCtx` loop). `buildAction: (api) => notificationsActionContext(api, config)` provides the action-mode `ctx.notifications` (no `db` → `send` delegates to `api.runMutation("notifications:_enqueueSend")`, `sendNow` delivers live via `_prepareNow`/`_finishNow`) — the same facade-delegates-to-internal-mutation pattern the scheduler established. Typed for consumers via `contextType: { import: "@stackbase/notifications", type: "NotificationsContext" }`, which codegen turns into the `declare module "@stackbase/executor" { interface MutationCtx { notifications: … } }` augmentation.
 5. **The in-app row + inbox codegen typing.** `send` writes the `notifications` row synchronously in the mutation — it IS the delivered in-app notification, so it's live to any `useQuery("notifications:inbox")` with **no send step**. The inbox query resolves the caller server-side (`ctx.auth?.getUserId()` when auth is composed, else `ctx.notifications.identity()` = the ambient token — both facades are attached to the handler ctx), scoped to `byUser`/`byUserUnread`, so a user only ever sees their own inbox and `markRead` is ownership-checked. **Codegen typing:** component functions are NOT in an app's generated `Api` (the manifest analyzes app modules only — the E2E casts `anyApi` for the well-known paths, exactly as `auth-email-e2e` does). So the inbox's client-facing type lives in the hand-written `useNotifications()`/`<Inbox>` helper in `@stackbase/client/react` (typed `InboxNotification[]`, over the well-known `notifications:inbox`/`unreadCount`/`markRead`/`markAllRead` paths) — no per-app codegen change needed. The server-side `ctx.notifications.send` is the piece codegen types, via the `contextType` module augmentation.
 6. **`sendNow` scope.** Spec decision 3 defines it; testing/non-goals are silent. Included, implemented correctly (two-phase, dedup-before-send, never a driver-visible queued row). Kept minimal; the primary path remains the transactional `send` + driver, which is what N4 will route auth through.
-7. **Fleet/crash caveats.** Multi-driver (fleet) double-send and mid-send-crash re-send are explicitly N1-out-of-scope (single-node; retries/reclaim are N2), consistent with the spec's driver section. The driver's `running` flag serializes a single node's own passes; `sendNow` avoids the queue entirely, so it never races the driver.
+7. **Fleet/crash caveats.** Single-node mid-send-crash double-send is CLOSED in N1 by the `"sending"` claim state (`_claimForSend` before the network call + `_peekQueued` excluding `"sending"` → a crashed row is never re-swept). What remains N2: FLEET multi-driver races (two nodes' drivers claiming the same row — needs a lease/owner check beyond a single process) and RECLAIM of a stuck `"sending"` row (retry). The driver's `running` flag serializes a single node's own passes; `_claimForSend`'s exact `status==="queued"` check under single-writer OCC is the authoritative once-only guard; `sendNow` avoids the queue entirely, so it never races the driver.
