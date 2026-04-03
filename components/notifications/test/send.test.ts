@@ -76,6 +76,31 @@ describe("ctx.notifications.send — record path", () => {
     expect((await built.readTable("notifications/sendReceipts")).length).toBe(1);
   });
 
+  it("idempotency under concurrency: two same-key sends race to ONE winner (single-writer OCC)", async () => {
+    const { component } = sendOnlyComponent();
+    built = await makeNotifRuntime(component, appModules);
+    const args = { to: { userId: "u1", email: "u1@test" }, channels: ["email"], template: "welcome", idempotencyKey: "otp-race" };
+    const [a, b] = await Promise.all([
+      built.runtime.run("app:send", args).then((r) => r.value as { messageIds: string[] }),
+      built.runtime.run("app:send", args).then((r) => r.value as { messageIds: string[] }),
+    ]);
+    // Both callers observe the SAME single winning message id; the loser re-validated its stale
+    // empty `sendReceipts` read under OCC and dedup'd rather than writing a second row.
+    expect(a.messageIds).toEqual(b.messageIds);
+    expect((await built.readTable("notifications/messages")).length).toBe(1);
+    expect((await built.readTable("notifications/sendReceipts")).length).toBe(1);
+  });
+
+  it("dedupes duplicate channels — [\"email\",\"email\"] is one logical send, one row", async () => {
+    const { component } = sendOnlyComponent();
+    built = await makeNotifRuntime(component, appModules);
+    const res = (await built.runtime.run("app:send", {
+      to: { userId: "u1", email: "u1@test" }, channels: ["email", "email"], template: "welcome",
+    })).value as { messageIds: string[] };
+    expect(res.messageIds.length).toBe(1);
+    expect((await built.readTable("notifications/messages")).length).toBe(1);
+  });
+
   it("rejects a channel that is not configured", async () => {
     const { component } = sendOnlyComponent(); // no sms channel
     built = await makeNotifRuntime(component, appModules);
