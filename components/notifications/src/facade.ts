@@ -3,6 +3,7 @@ import type { NotificationsConfig, SendArgs } from "./config";
 import type { SendResult } from "./provider";
 import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
+import { compact } from "./render";
 
 /** `ctx.notifications` in a MUTATION (and query, for `identity()`). `send` writes the messages/inbox/
  *  receipt rows through the calling mutation's own transaction (contextWrite). `identity()` exposes
@@ -64,7 +65,9 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         } catch (e) {
           error = String(e);
         }
-        await api.runMutation("notifications:_markResult", { messageId: m._id, ok, providerMessageId, error } as unknown as Record<string, unknown>);
+        // Strip undefined keys — `runMutation`'s arg codec rejects an undefined-valued key (same
+        // `jsonToConvex` the driver's `_markResult` call must `compact` around).
+        await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as Record<string, unknown>);
       }
       return { messageIds: r.messageIds, results };
     },
