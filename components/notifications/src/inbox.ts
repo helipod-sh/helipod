@@ -19,8 +19,16 @@ export const DEFAULT_INBOX_LIMIT = 50;
 /**
  * Resolve the caller's own user id for in-app authorization: `ctx.auth.getUserId()` when auth is
  * composed (the facade is attached to every ctx), else the raw ambient identity via THIS component's
- * own `ctx.notifications.identity()` facade (also attached to every ctx). A user can therefore only
- * ever read/mutate their own inbox — the recipient id is never a client-supplied argument.
+ * own `ctx.notifications.identity()` facade (also attached to every ctx). The recipient id is never a
+ * client-supplied ARGUMENT — it's always the resolved caller — so a user cannot name another user's
+ * inbox in a query/mutation arg.
+ *
+ * BOUNDARY: per-user isolation is only as strong as the identity is trustworthy. With `@stackbase/
+ * auth` composed (or an upstream token-verifying proxy), `getUserId()` is a verified id and isolation
+ * is enforced. WITHOUT either, the fallback `identity()` is the raw, client-asserted `setAuth(...)`
+ * bearer token — an unauthenticated client could assert any user id and read/mutate that inbox. This
+ * is the platform's identity model (same as scheduler/authz), not a notifications-specific gap; the
+ * mechanism here is correct given a trustworthy identity. Compose auth to make the isolation real.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function callerId(ctx: any): Promise<string | null> {
@@ -54,6 +62,10 @@ export function makeInboxModules(): Record<string, RegisteredFunction> {
     })) as InboxItem[];
   });
 
+  // N1 scale boundary: `unreadCount` (and `markAllRead` below) scan the caller's whole unread set
+  // via `.collect()` — no cap. Fine for typical inboxes; at very large unread backlogs the reactive
+  // read-set and the markAllRead transaction grow with it. N2: a maintained counter row + paginated
+  // clear. (The `inbox` feed IS bounded, by `limit`/DEFAULT_INBOX_LIMIT.)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const unreadCount = query(async (ctx: any): Promise<number> => {
     const userId = await callerId(ctx);

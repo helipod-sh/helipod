@@ -7,7 +7,9 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  * `status`: `queued → sending → sent`/`failed`. The `"sending"` intermediate (claim-before-send)
  * makes a single-node crash mid-send non-re-sweepable: `_peekQueued` selects ONLY `"queued"`, so a
  * row left `"sending"` by a crash is never picked up again (no double-send). A stuck `"sending"` row
- * is terminal in N1 (recovery is N2). Fleet multi-driver claim/lease is N2.
+ * is terminal in N1 (recovery is N2). Fleet multi-driver claim/lease is N2. PRIVACY NOTE: a stuck
+ * `"sending"` row keeps its `payload` (rendered content, possibly OTP/PII) at rest — the N2 reclaim
+ * reaper is also responsible for redacting/clearing it.
  *
  * `messages.payload` (RESOLVED AMBIGUITY, see the plan): the rendered per-channel content the
  * driver delivers out-of-transaction (`email {subject,text,html?}`; `sms {body,kind?}`). Templates

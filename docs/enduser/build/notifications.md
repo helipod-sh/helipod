@@ -83,6 +83,9 @@ export const welcome = mutation({
   `phone` for `sms`. The recipient is always chosen by your server code, never by the client.
 - **`template`** is either a **registered key** (as above) or an **inline content object** for
   one-off content — `{ in_app: { title, body }, email: { subject, text, html? }, sms: "…" }`.
+  Return only the fields you have — omit an optional field (e.g. `html`) rather than setting it to
+  `undefined`; a rendered field whose value is explicitly `undefined` is rejected when the row is
+  written.
 - **`in_app` is instant**: the send writes the inbox row synchronously in your transaction, so it is
   live to any inbox subscription the moment the mutation commits — no send step.
 - **email/SMS are queued**: the send writes a `queued` row (with the rendered content), and a
@@ -156,8 +159,11 @@ function InboxBell() {
   Both are reactive — a new notification or a `markRead` updates every subscribed component with no
   polling.
 - `markRead(id)` / `markAllRead()` are ownership-checked on the server: the caller's user id is
-  resolved server-side (from the auth component when composed, otherwise the ambient identity), so a
-  user can only ever read or mutate their own inbox — the recipient id is never a client argument.
+  resolved server-side, never taken as a client argument, so no caller can name another user's inbox.
+  **Per-user isolation requires a verified identity.** With `@stackbase/auth` composed (or an upstream
+  token-verifying proxy), the resolved id is trustworthy and isolation is enforced. Without either,
+  the identity falls back to the raw `setAuth(...)` bearer token, which an unauthenticated client can
+  set to any value — so compose auth (or verify the token upstream) before relying on inbox isolation.
 - For custom markup, `<Inbox>` is a headless render-prop version:
   `<Inbox>{({ notifications, markRead }) => …}</Inbox>`.
 

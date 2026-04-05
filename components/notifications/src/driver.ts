@@ -62,27 +62,35 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
       pendingWake = false;
       const queued = (await ctx.runFunction("notifications:_peekQueued", {})) as QueuedMessage[];
       for (const m of queued) {
-        // Claim BEFORE the network call (queued → sending). Lost the claim (another pass/driver, or
-        // already finalized) → skip. This is what makes a crash mid-send non-re-sweepable.
-        const claimed = (await ctx.runFunction("notifications:_claimForSend", { messageId: m._id })) as boolean;
-        if (!claimed) continue;
-        let ok = false;
-        let providerMessageId: string | undefined;
-        let error: string | undefined;
+        // Per-message isolation (the scheduler driver's discipline): a `_claimForSend`/`_markResult`
+        // failure for THIS row must not strand its batch siblings — log and move on; the row waits
+        // for the next wake. (If it was delivered but `_markResult` threw, it stays "sending" —
+        // terminal in N1, reclaim is N2.)
         try {
-          // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: an N2
-          // retry of the same row reuses it, so a supporting provider dedups). Independent of the
-          // caller's optional `sendReceipts` idempotencyKey.
-          const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
-          ok = true;
-          providerMessageId = res.providerMessageId;
+          // Claim BEFORE the network call (queued → sending). Lost the claim (another pass/driver, or
+          // already finalized) → skip. This is what makes a crash mid-send non-re-sweepable.
+          const claimed = (await ctx.runFunction("notifications:_claimForSend", { messageId: m._id })) as boolean;
+          if (!claimed) continue;
+          let ok = false;
+          let providerMessageId: string | undefined;
+          let error: string | undefined;
+          try {
+            // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: an N2
+            // retry of the same row reuses it, so a supporting provider dedups). Independent of the
+            // caller's optional `sendReceipts` idempotencyKey.
+            const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
+            ok = true;
+            providerMessageId = res.providerMessageId;
+          } catch (e) {
+            error = String(e);
+          }
+          // `providerMessageId`/`error` may be undefined. `runFunction`'s arg codec (`jsonToConvex`)
+          // REJECTS an undefined-valued key (it does NOT drop it) — so strip them with `compact` before
+          // the call, exactly as the insert path does; `_markResult` reads the absent keys as undefined.
+          await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as JSONValue);
         } catch (e) {
-          error = String(e);
+          console.error(`[notifications] driver: message ${m._id} failed mid-pass:`, e);
         }
-        // `providerMessageId`/`error` may be undefined. `runFunction`'s arg codec (`jsonToConvex`)
-        // REJECTS an undefined-valued key (it does NOT drop it) — so strip them with `compact` before
-        // the call, exactly as the insert path does; `_markResult` reads the absent keys as undefined.
-        await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as JSONValue);
       }
     } while (pendingWake);
     armTimer();

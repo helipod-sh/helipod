@@ -7,13 +7,13 @@ import { compact, stableHash, renderEmail, renderSms, renderInApp, deliverOutbou
 /** Cap on queued rows a single driver pass drains (bounded work per iteration). */
 export const BATCH_CAP = 64;
 
-/** A queued email/SMS row the driver delivers (returned by `_peekQueued`). */
+/** A queued email/SMS row the driver / `sendNow` delivers (returned by `_peekQueued` / `recordSend`).
+ *  The provider Idempotency-Key is derived from `_id` (`msg:<_id>`) at delivery, not carried here. */
 export interface QueuedMessage {
   _id: string;
   channel: "email" | "sms";
   to: string;
   payload: EmailContent | SmsPayload;
-  idempotencyKey?: string;
 }
 
 function resolveAddress(channel: Channel, to: SendArgs["to"]): string {
@@ -80,7 +80,7 @@ export async function recordSend(db: GuestDatabaseWriter, now: number, config: N
         channel, to, status: "queued", createdAt: now, idempotencyKey: args.idempotencyKey, templateKey, dataHash, payload: payload as unknown as Value,
       }))) as string;
       messageIds.push(messageId);
-      queued.push({ _id: messageId, channel, to, payload, idempotencyKey: args.idempotencyKey });
+      queued.push({ _id: messageId, channel, to, payload });
     }
   }
 
@@ -113,7 +113,7 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
     const rows = await ctx.db.query("notifications/messages", "byStatus").eq("status", "queued").take(BATCH_CAP).collect();
     return rows
       .filter((r) => r.channel === "email" || r.channel === "sms") // defensive: in_app is never queued
-      .map((r) => ({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as unknown as EmailContent | SmsPayload, idempotencyKey: r.idempotencyKey as string | undefined }));
+      .map((r) => ({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as unknown as EmailContent | SmsPayload }));
   });
 
   // Claim-before-send: flip `queued → sending` in its OWN transaction BEFORE the network call. The
