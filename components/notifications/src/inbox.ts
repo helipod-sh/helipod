@@ -40,7 +40,9 @@ export function makeInboxModules(): Record<string, RegisteredFunction> {
       .order("desc")
       .take(args?.limit ?? DEFAULT_INBOX_LIMIT)
       .collect();
-    return rows.map((r) => ({
+    // `compact` drops undefined-valued keys (`data`/`readAt` when absent): the WIRE result codec
+    // rejects an undefined value ("Cannot encode value of type undefined"), and these are optional.
+    return rows.map((r) => compact({
       _id: r._id as string,
       title: r.title as string,
       body: r.body as string,
@@ -49,7 +51,7 @@ export function makeInboxModules(): Record<string, RegisteredFunction> {
       readAt: r.readAt as number | undefined,
       createdAt: r.createdAt as number,
       messageId: r.messageId as string,
-    }));
+    })) as InboxItem[];
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

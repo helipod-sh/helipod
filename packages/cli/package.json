@@ -55,6 +55,7 @@
     "@stackbase/auth": "workspace:*",
     "@stackbase/client": "workspace:*",
     "@stackbase/fleet": "workspace:*",
+    "@stackbase/notifications": "workspace:*",
     "@stackbase/objectstore-substrate": "workspace:*",
     "@stackbase/scheduler": "workspace:*",
     "@stackbase/triggers": "workspace:*",
