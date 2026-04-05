@@ -147,3 +147,7 @@ export function usePendingMutations(): PendingMutationEntry[] {
 
   return entries;
 }
+
+// Reactive in-app inbox helper (@stackbase/notifications) — see ./notifications.
+export { useNotifications, Inbox } from "./notifications";
+export type { InboxNotification, UseNotificationsResult, InboxProps } from "./notifications";

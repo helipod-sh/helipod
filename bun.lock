@@ -118,6 +118,23 @@
         "vitest": "catalog:",
       },
     },
+    "components/notifications": {
+      "name": "@stackbase/notifications",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/component": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/values": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "components/scheduler": {
       "name": "@stackbase/scheduler",
       "version": "0.0.0",
@@ -429,6 +446,7 @@
         "@stackbase/auth": "workspace:*",
         "@stackbase/client": "workspace:*",
         "@stackbase/fleet": "workspace:*",
+        "@stackbase/notifications": "workspace:*",
         "@stackbase/objectstore-substrate": "workspace:*",
         "@stackbase/scheduler": "workspace:*",
         "@stackbase/triggers": "workspace:*",
@@ -1108,6 +1126,8 @@
     "@stackbase/id-codec": ["@stackbase/id-codec@workspace:packages/id-codec"],
 
     "@stackbase/index-key-codec": ["@stackbase/index-key-codec@workspace:packages/index-key-codec"],
+
+    "@stackbase/notifications": ["@stackbase/notifications@workspace:components/notifications"],
 
     "@stackbase/objectstore": ["@stackbase/objectstore@workspace:packages/objectstore"],
 
