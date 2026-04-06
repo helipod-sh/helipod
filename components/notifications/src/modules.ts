@@ -111,6 +111,18 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
   // Selects ONLY `status:"queued"` rows that are eligible NOW (nextAttemptAt null or <= now). Returns
   // the earliest FUTURE nextAttemptAt among skipped (backed-off) rows so the driver can arm a precise
   // wake instead of only the interval timer. `now` is passed in (a query has no wall-clock).
+  //
+  // N2 SCALE BOUNDARY (single-node, moderate volume — deferred, not a correctness issue): this scans
+  // the first BATCH_CAP `queued` rows in index order (oldest-first) then splits ready/deferred in
+  // memory. Under a sustained retry storm (>= BATCH_CAP simultaneously backed-off rows, which sort
+  // ahead as older), the batch can fill with not-yet-eligible rows and delay genuinely-ready fresh
+  // messages until the backlog clears — nothing is lost or double-sent, only delayed. The fix is a
+  // composite `["status","nextAttemptAt"]` index + range query (needs the engine's optional-index-
+  // field semantics pinned down); an N2 follow-up, disproportionate to build for this single-node
+  // slice. Relatedly, a same-pass-requeued row with a ~0 backoff is skipped via the driver's
+  // `attemptedThisPass` guard but is NOT counted in `earliestDeferredAt` (it's eligible, not deferred),
+  // so its precise re-wake falls back to the interval timer — irrelevant at production backoff
+  // defaults (250ms+), only visible with a deliberately-zero backoff config.
   const _peekQueued = query(async (ctx: QueryCtx, args: { now: number }): Promise<{ ready: QueuedMessage[]; earliestDeferredAt: number | null }> => {
     const rows = await ctx.db.query("notifications/messages", "byStatus").eq("status", "queued").take(BATCH_CAP).collect();
     const ready: QueuedMessage[] = [];
