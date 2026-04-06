@@ -3,6 +3,7 @@ import type { Value } from "@stackbase/values";
 import type { NotificationsConfig, SendArgs, Channel } from "./config";
 import type { EmailContent, SmsPayload, SendResult } from "./provider";
 import { compact, stableHash, renderEmail, renderSms, renderInApp, deliverOutbound, type DeliverEntry } from "./render";
+import { computeBackoff } from "./backoff";
 
 /** Cap on queued rows a single driver pass drains (bounded work per iteration). */
 export const BATCH_CAP = 64;
@@ -107,43 +108,90 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
   // Driver-facing trio — PRIVILEGED (fully-qualified "notifications/messages"). See the scheduler's
   // modules.ts module doc comment: privileged calls bypass namespace prefixing.
 
-  // Selects ONLY `status:"queued"` — never `"sending"`. That exclusion is what makes a single-node
-  // crash mid-send non-re-sweepable (a row left `"sending"` by a crash is never returned here again).
-  const _peekQueued = query(async (ctx: QueryCtx): Promise<QueuedMessage[]> => {
+  // Selects ONLY `status:"queued"` rows that are eligible NOW (nextAttemptAt null or <= now). Returns
+  // the earliest FUTURE nextAttemptAt among skipped (backed-off) rows so the driver can arm a precise
+  // wake instead of only the interval timer. `now` is passed in (a query has no wall-clock).
+  const _peekQueued = query(async (ctx: QueryCtx, args: { now: number }): Promise<{ ready: QueuedMessage[]; earliestDeferredAt: number | null }> => {
     const rows = await ctx.db.query("notifications/messages", "byStatus").eq("status", "queued").take(BATCH_CAP).collect();
-    return rows
-      .filter((r) => r.channel === "email" || r.channel === "sms") // defensive: in_app is never queued
-      .map((r) => ({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as unknown as EmailContent | SmsPayload }));
+    const ready: QueuedMessage[] = [];
+    let earliestDeferredAt: number | null = null;
+    for (const r of rows) {
+      if (r.channel !== "email" && r.channel !== "sms") continue; // defensive: in_app is never queued
+      const next = r.nextAttemptAt as number | undefined;
+      if (next == null || next <= args.now) {
+        ready.push({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as unknown as EmailContent | SmsPayload });
+      } else if (earliestDeferredAt === null || next < earliestDeferredAt) {
+        earliestDeferredAt = next;
+      }
+    }
+    return { ready, earliestDeferredAt };
   });
 
   // Claim-before-send: flip `queued → sending` in its OWN transaction BEFORE the network call. The
   // exact `status==="queued"` check under single-writer OCC is the authoritative once-only guard —
   // returns false if the row is gone or already claimed (another pass), so the driver skips it. A
-  // crash after this commits but before `_markResult` leaves the row `"sending"` (terminal in N1).
+  // crash after this commits but before `_markResult` leaves the row `"sending"` (recovered by N2's
+  // `_reclaimStuck`). `claimedAt` is the lease start the reclaim sweep measures against.
   const _claimForSend = mutation(async (ctx: MutationCtx, args: { messageId: string }): Promise<boolean> => {
     const row = await ctx.db.get(args.messageId);
     if (row === null || row.status !== "queued") return false;
-    await ctx.db.replace(args.messageId, { ...row, status: "sending" });
+    await ctx.db.replace(args.messageId, { ...row, status: "sending", claimedAt: ctx.now() });
     return true;
   });
 
-  // Finalize a claimed (`"sending"`) row: `sending → sent`/`failed`. Clears the transient `payload`
-  // (rendered body, possibly OTP/PII) either way — delivered or dead, no reason to retain it.
-  const _markResult = mutation(async (ctx: MutationCtx, args: { messageId: string; ok: boolean; providerMessageId?: string; error?: string }): Promise<null> => {
+  // Finalize a claimed (`"sending"`) row: `sending → sent`/`queued` (retry)/`failed` (dead-letter).
+  // `retryable` (undefined → treated as retryable) and `config.retry.maxAttempts` decide whether a
+  // failure retries with a jittered backoff or dead-letters. Clears the transient `payload` (rendered
+  // body, possibly OTP/PII) on sent/dead-letter; KEEPS it across a retry (needed to resend).
+  const _markResult = mutation(async (ctx: MutationCtx, args: { messageId: string; ok: boolean; providerMessageId?: string; error?: string; retryable?: boolean }): Promise<null> => {
     const row = await ctx.db.get(args.messageId);
     if (row === null || row.status !== "sending") return null; // must be mid-send — defensive
     const now = ctx.now();
     if (args.ok) {
       // `compact` drops the `undefined` keys, so `db.replace` writes a doc with NO `payload`/`error`
       // key — that absence IS the clear (both are `v.optional`).
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined }));
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined, claimedAt: undefined }));
+      return null;
+    }
+    const attempts = ((row.attempts as number | undefined) ?? 0) + 1;
+    if (args.retryable !== false && attempts < config.retry.maxAttempts) {
+      // Retry: back to queued with a backoff delay. KEEP payload (needed for the resend). Clear claimedAt.
+      const nextAttemptAt = now + computeBackoff(attempts, ctx.random, { initialBackoffMs: config.retry.initialBackoffMs, base: config.retry.base });
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "queued", attempts, nextAttemptAt, error: args.error, claimedAt: undefined }));
     } else {
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", error: args.error ?? "send failed", payload: undefined }));
+      // Dead-letter: terminal failed. Clear payload (delivered/dead content not retained).
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", attempts, error: args.error ?? "send failed", payload: undefined, claimedAt: undefined }));
     }
     return null;
   });
 
-  return { _enqueueSend, _peekQueued, _claimForSend, _markResult };
+  // Reclaim: a row stuck `sending` past the lease (a crash between claim and _markResult) is swept
+  // back to `queued`, counting an attempt so a perpetually-crashing row eventually dead-letters
+  // instead of looping. Single-node (wall-clock lease). Bounded batch.
+  const _reclaimStuck = mutation(async (ctx: MutationCtx): Promise<number> => {
+    const now = ctx.now();
+    const rows = await ctx.db.query("notifications/messages", "byStatus").eq("status", "sending").take(BATCH_CAP).collect();
+    let reclaimed = 0;
+    for (const row of rows) {
+      const claimedAt = row.claimedAt as number | undefined;
+      // Reclaim once the lease has ELAPSED (`now - claimedAt >= reclaimLeaseMs`), i.e. skip only while
+      // still within the lease window. Written as an elapsed-time check (not `claimedAt + lease >= now`)
+      // so `reclaimLeaseMs: 0` reclaims unconditionally rather than racing an exact-millisecond tie
+      // between `claimedAt` and `now` (both real wall-clock reads, easily equal in a fast in-memory run).
+      if (claimedAt === undefined || now - claimedAt < config.reclaimLeaseMs) continue;
+      const attempts = ((row.attempts as number | undefined) ?? 0) + 1;
+      if (attempts >= config.retry.maxAttempts) {
+        await ctx.db.replace(row._id as string, compact({ ...row, status: "failed", attempts, error: "reclaim: stuck sending, max attempts", payload: undefined, claimedAt: undefined }));
+      } else {
+        const nextAttemptAt = now + computeBackoff(attempts, ctx.random, { initialBackoffMs: config.retry.initialBackoffMs, base: config.retry.base });
+        await ctx.db.replace(row._id as string, compact({ ...row, status: "queued", attempts, nextAttemptAt, claimedAt: undefined }));
+      }
+      reclaimed++;
+    }
+    return reclaimed;
+  });
+
+  return { _enqueueSend, _peekQueued, _claimForSend, _markResult, _reclaimStuck };
 }
 
 // Re-export the delivery dispatcher + result type so the facade's `sendNow` and the driver share the

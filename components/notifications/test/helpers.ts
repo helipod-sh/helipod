@@ -2,8 +2,8 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { composeComponents, type ComponentDefinition, type Driver } from "@stackbase/component";
 import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { defineSchema, type SchemaDefinitionJSON } from "@stackbase/values";
-import { query, type RegisteredFunction } from "@stackbase/executor";
-import type { EmailProvider, SmsProvider, EmailMessage, SmsMessage } from "../src/provider";
+import { mutation, query, type RegisteredFunction } from "@stackbase/executor";
+import { NotificationSendError, type EmailProvider, type SmsProvider, type EmailMessage, type SmsMessage } from "../src/provider";
 
 /** A privileged raw-table scan so tests can assert on the component's own namespaced tables
  *  (e.g. "notifications/messages"). Mirrors `components/scheduler/test/helpers.ts`. */
@@ -11,6 +11,15 @@ function systemModules(): Record<string, RegisteredFunction> {
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     "_system:scan": query(async (ctx: any, args: { table: string }) => await ctx.db.query(args.table, "by_creation").collect()),
+    // N2 retry-reclaim test seam: claim a `queued` row WITHOUT calling `_markResult`, so a test can
+    // simulate a crash between claim and mark (a stuck "sending" row) and assert reclaim behavior.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    "_system:claim": mutation(async (ctx: any, a: { messageId: string }) => {
+      const row = await ctx.db.get(a.messageId);
+      if (!row || row.status !== "queued") return false;
+      await ctx.db.replace(a.messageId, { ...row, status: "sending", claimedAt: ctx.now() });
+      return true;
+    }),
   };
 }
 
@@ -55,7 +64,11 @@ export async function makeNotifRuntime(
   };
 }
 
-/** In-memory capture email provider (never delivers). Records every `send` for assertions. */
+/** In-memory capture email provider (never delivers). Records every `send` for assertions.
+ *  A forced failure is thrown as a non-retryable `NotificationSendError` (N2) — the N1 driver test
+ *  using `{fail:true}` asserts an IMMEDIATE terminal `"failed"` after one delivery attempt, which
+ *  requires `retryable:false` under N2's retry-by-default `_markResult` (a plain `Error` would retry
+ *  up to `config.retry.maxAttempts` before dead-lettering instead). */
 export function captureEmail(opts?: { fail?: boolean }): { sent: EmailMessage[]; provider: EmailProvider } {
   const sent: EmailMessage[] = [];
   return {
@@ -64,14 +77,14 @@ export function captureEmail(opts?: { fail?: boolean }): { sent: EmailMessage[];
       channel: "email",
       async send(m) {
         sent.push(m);
-        if (opts?.fail) throw new Error("capture-email forced failure");
+        if (opts?.fail) throw new NotificationSendError("capture-email forced failure", { retryable: false });
         return { providerMessageId: `cap-${sent.length}` };
       },
     },
   };
 }
 
-/** In-memory capture SMS provider. */
+/** In-memory capture SMS provider. Same non-retryable forced-failure choice as `captureEmail` above. */
 export function captureSms(opts?: { fail?: boolean }): { sent: SmsMessage[]; provider: SmsProvider } {
   const sent: SmsMessage[] = [];
   return {
@@ -80,7 +93,7 @@ export function captureSms(opts?: { fail?: boolean }): { sent: SmsMessage[]; pro
       channel: "sms",
       async send(m) {
         sent.push(m);
-        if (opts?.fail) throw new Error("capture-sms forced failure");
+        if (opts?.fail) throw new NotificationSendError("capture-sms forced failure", { retryable: false });
         return { providerMessageId: `sms-${sent.length}` };
       },
     },
