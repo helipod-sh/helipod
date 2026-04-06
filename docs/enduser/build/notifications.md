@@ -9,12 +9,13 @@ count update in real time with no dedicated realtime service.
 Both your app code and (in a later release) the auth component send through the same seam, so an
 OTP email and a marketing blast share one delivery path with the same at-most-once guarantee.
 
-> **N1 scope (what this release is).** Sending across email/SMS/in-app, transactional at-most-once
-> delivery, and the reactive inbox. **Deferred:** delivery webhooks + status normalization
-> (delivered/bounced/opened) and retries (N2); per-user preferences, routing/fallback, and topics
-> (N3); digest/batching and the auth-unification (N4); a push channel (FCM/APNs/Expo) and a
-> markup/visual template registry (post-arc). A failed send is terminal in N1 — it is marked
-> `failed`, not retried.
+> **Scope (N1 + N2, what this release is).** Sending across email/SMS/in-app, transactional
+> at-most-once delivery, the reactive inbox (N1); automatic retry-with-backoff on a transient
+> send failure, stuck-send reclaim, and inbound delivery webhooks with cross-provider status
+> normalization (delivered/bounced/opened/…) (N2 — see [Delivery reliability](#delivery-reliability)
+> below). **Deferred:** per-user preferences, routing/fallback, and topics (N3); digest/batching and
+> the auth-unification (N4); a push channel (FCM/APNs/Expo) and a markup/visual template registry
+> (post-arc).
 
 ## Setup
 
@@ -208,10 +209,109 @@ export function myEmail(opts: { apiKey: string }): EmailProvider {
 Credentials live in the provider closure, never in a message row. The SMS seam (`SmsProvider`) is
 the same shape with an `SmsMessage` (`to`, `from`, `body`, `kind?`).
 
+## Delivery reliability
+
+Email/SMS sends are automatically retried on a transient failure, a crashed in-flight send is
+recovered, and — once you wire the provider's webhook — the message row picks up a second,
+normalized delivery status as the provider reports it. **This section applies to `email`/`sms`
+only.** `in_app` has no queue or send step (it's written `sent` synchronously in your transaction),
+so there's nothing to retry, reclaim, or hear back about via webhook.
+
+### Retries
+
+A queued email/SMS send that throws is retried with exponential backoff (jittered 50–100%) rather
+than immediately failing. Configure it under `retry` on `defineNotifications`:
+
+```ts
+defineNotifications({
+  channels: { /* … */ },
+  retry: {
+    maxAttempts: 4,          // total delivery attempts (first send + retries) before dead-lettering
+    initialBackoffMs: 250,   // first retry's base delay
+    base: 2,                 // exponential multiplier
+  },
+});
+```
+
+Whether a failure is retried depends on how the provider's `send` throws:
+
+- A **plain `Error`** (or any throw that isn't a `NotificationSendError`) is treated as
+  **retryable** — a transient 5xx/network blip. The row goes back to `queued` with a
+  backed-off `nextAttemptAt` and its `attempts` count incremented.
+- Throwing `new NotificationSendError(message, { retryable: false })` — e.g. for a 4xx
+  bad-recipient response — is a **permanent** failure: the driver dead-letters the message to
+  `status: "failed"` immediately, no retry. The shipped `resendEmail`/`twilioSms` adapters already
+  classify their own send errors this way (4xx-except-429 → non-retryable, 5xx/429 → retryable).
+
+Once a row's `attempts` reaches `maxAttempts`, it dead-letters to `failed` regardless of
+retryability.
+
+### Reclaim (crash recovery)
+
+If the server crashes between claiming a message (`queued → sending`) and recording the send's
+outcome, the row would otherwise be stuck `sending` forever. A background reclaim sweep recovers
+any `sending` row older than `reclaimLeaseMs` (default 60000) back to `queued` (counting an
+attempt, so a row that keeps crashing still eventually dead-letters instead of looping):
+
+```ts
+defineNotifications({
+  channels: { /* … */ },
+  reclaimLeaseMs: 60_000,
+});
+```
+
+This is a **single-node** reclaim (a wall-clock lease, one writer) — a multi-node/fleet driver
+reclaim is out of scope for this release.
+
+### Delivery webhooks + normalized status
+
+Point your provider's delivery-webhook (Resend, Twilio) at your deployment, and Stackbase will
+verify its signature and reactively update the message row with a normalized `deliveryStatus` as
+the provider reports what happened after the send — bounces, opens, clicks, complaints:
+
+- **Endpoint URL:** `https://<your-host>/api/notifications/webhooks/email` for Resend,
+  `https://<your-host>/api/notifications/webhooks/sms` for Twilio. Configure this URL in the
+  provider's dashboard (Resend: Webhooks; Twilio: the number's Messaging status callback URL).
+- **Signing secret:** set `webhookSecret` on the email channel so the route can verify the
+  provider's signature (Resend uses Svix — a `whsec_…` secret from the Resend webhook settings
+  page). Twilio's webhook is verified with the SMS provider's own `authToken` — no separate secret
+  needed.
+
+```ts
+defineNotifications({
+  channels: {
+    email: {
+      provider: resendEmail({ apiKey: process.env.RESEND_KEY! }),
+      from: "no-reply@app.test",
+      webhookSecret: process.env.RESEND_WEBHOOK_SECRET,   // Resend's whsec_… Svix signing secret
+    },
+    sms: {
+      provider: twilioSms({ accountSid: process.env.TWILIO_SID!, authToken: process.env.TWILIO_TOKEN! }),
+      from: "+15550000000",
+      // No webhookSecret — Twilio's status-callback signature is verified with authToken above.
+    },
+  },
+});
+```
+
+A signature failure is rejected `401` **before any row is read or written**. A verified event is
+correlated to its message row by the provider's own message id and applied as a normalized
+`deliveryStatus`:
+
+```
+"delivered" | "bounced" | "complained" | "opened" | "clicked" | "dropped" | "failed_permanent"
+```
+
+`deliveryStatus` is a **second, independent axis** from the send-lifecycle `status`
+(`queued`/`sending`/`sent`/`failed`) — a message can be `status: "sent"` and later pick up
+`deliveryStatus: "delivered"`, then `"opened"`, then `"clicked"` as the provider's webhooks arrive.
+It's written **monotonically** by lifecycle rank, so a redelivered or out-of-order webhook event is
+a no-op rather than regressing a later status back to an earlier one. Because it's an ordinary
+field on the `messages` row, subscribing to a query over that row (or your own status view) sees
+it update reactively — no polling.
+
 ## What's deferred
 
-- **N2** — delivery webhook ingestion + cross-provider status normalization (delivered/bounced/
-  opened); retries on failed sends.
 - **N3** — per-user channel/category preferences + critical-bypass; multi-channel routing/fallback;
   topics/groups.
 - **N4** — digest/batching; routing the auth component's OTP/magic-link/verification emails through
