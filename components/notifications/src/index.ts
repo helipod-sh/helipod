@@ -4,6 +4,7 @@ import { resolveNotificationsConfig, type NotificationsOptions } from "./config"
 import { notificationsContext, notificationsActionContext } from "./facade";
 import { makeSendModules } from "./modules";
 import { makeInboxModules } from "./inbox";
+import { makeWebhookModules } from "./webhook";
 import { notificationsDriver } from "./driver";
 
 // Seam + config + content types (for adapter authors and N4 auth reuse).
@@ -11,7 +12,9 @@ export * from "./schema";
 export type {
   SendResult, EmailMessage, SmsMessage, EmailProvider, SmsProvider, NotificationProvider,
   EmailContent, SmsPayload, InAppContent,
+  DeliveryStatus, WebhookEvent, WebhookVerifyArgs, ProviderWebhook,
 } from "./provider";
+export { NotificationSendError } from "./provider";
 export type {
   NotificationsOptions, NotificationsConfig, NotificationChannels,
   EmailChannelConfig, SmsChannelConfig, InAppChannelConfig,
@@ -48,14 +51,16 @@ export { twilioSms } from "./provider-twilio";
  */
 export function defineNotifications(opts: NotificationsOptions): ComponentDefinition {
   const config = resolveNotificationsConfig(opts);
+  const hasWebhook = !!(config.channels.email?.provider.webhook || config.channels.sms?.provider.webhook);
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,
-    modules: { ...makeSendModules(config), ...makeInboxModules() },
+    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
     contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
     contextWrite: true,
     buildAction: (api) => notificationsActionContext(api, config),
     driver: notificationsDriver(config),
+    ...(hasWebhook ? { httpRoutes: [{ method: "POST", pathPrefix: "/api/notifications/webhooks/", handler: "webhookHttp" }] } : {}),
   });
 }
