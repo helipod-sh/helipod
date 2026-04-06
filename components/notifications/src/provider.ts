@@ -39,11 +39,13 @@ export interface SmsMessage {
 export interface EmailProvider {
   channel: "email";
   send(m: EmailMessage): Promise<SendResult>;
+  webhook?: ProviderWebhook;
 }
 
 export interface SmsProvider {
   channel: "sms";
   send(m: SmsMessage): Promise<SendResult>;
+  webhook?: ProviderWebhook;
 }
 
 /** The base seam: any per-channel provider. `in_app` has no provider — the engine writes the row. */
@@ -67,4 +69,47 @@ export interface InAppContent {
   body: string;
   /** Extra structured fields land on the inbox row's `data`. */
   [key: string]: unknown;
+}
+
+/** Thrown by a provider `send` to signal whether the failure should be retried. A plain `Error`
+ *  throw is treated as retryable by default; throw `new NotificationSendError(msg, {retryable:false})`
+ *  for a permanent failure (e.g. a 4xx bad-recipient) so the driver dead-letters immediately. */
+export class NotificationSendError extends Error {
+  readonly retryable: boolean;
+  constructor(message: string, opts?: { retryable?: boolean }) {
+    super(message);
+    this.name = "NotificationSendError";
+    this.retryable = opts?.retryable ?? true;
+  }
+}
+
+/** The normalized, cross-provider delivery status (axis 2 — provider-reported via webhooks). */
+export type DeliveryStatus =
+  | "delivered" | "bounced" | "complained" | "opened" | "clicked" | "dropped" | "failed_permanent";
+
+/** One normalized delivery event parsed from a provider webhook payload. */
+export interface WebhookEvent {
+  providerMessageId: string;
+  deliveryStatus: DeliveryStatus;
+  /** Provider event time (ms), if present. */
+  at?: number;
+  /** Optional detail (bounce reason, etc.). */
+  detail?: string;
+}
+
+/** Inputs to a provider's webhook signature verification. */
+export interface WebhookVerifyArgs {
+  headers: Headers;
+  rawBody: string;
+  url: string;
+  /** The configured signing secret for this channel (e.g. Resend `whsec_…`); may be undefined. */
+  secret?: string;
+}
+
+/** Optional per-provider delivery-webhook support. `verify` MUST return false on any missing/invalid
+ *  signature (the route rejects with 401 before any write); `parse` maps the provider's payload to
+ *  normalized events (throw on a malformed body → the route answers 400). */
+export interface ProviderWebhook {
+  verify(args: WebhookVerifyArgs): boolean | Promise<boolean>;
+  parse(rawBody: string): WebhookEvent[];
 }
