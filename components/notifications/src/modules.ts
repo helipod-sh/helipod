@@ -162,7 +162,7 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
     if (args.ok) {
       // `compact` drops the `undefined` keys, so `db.replace` writes a doc with NO `payload`/`error`
       // key — that absence IS the clear (both are `v.optional`).
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined, claimedAt: undefined }));
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
       return null;
     }
     const attempts = ((row.attempts as number | undefined) ?? 0) + 1;
@@ -171,8 +171,9 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
       const nextAttemptAt = now + computeBackoff(attempts, ctx.random, { initialBackoffMs: config.retry.initialBackoffMs, base: config.retry.base });
       await ctx.db.replace(args.messageId, compact({ ...row, status: "queued", attempts, nextAttemptAt, error: args.error, claimedAt: undefined }));
     } else {
-      // Dead-letter: terminal failed. Clear payload (delivered/dead content not retained).
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", attempts, error: args.error ?? "send failed", payload: undefined, claimedAt: undefined }));
+      // Dead-letter: terminal failed. Clear payload (delivered/dead content not retained) + the stale
+      // retry cursor.
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", attempts, error: args.error ?? "send failed", payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
     }
     return null;
   });
@@ -193,7 +194,7 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
       if (claimedAt === undefined || now - claimedAt < config.reclaimLeaseMs) continue;
       const attempts = ((row.attempts as number | undefined) ?? 0) + 1;
       if (attempts >= config.retry.maxAttempts) {
-        await ctx.db.replace(row._id as string, compact({ ...row, status: "failed", attempts, error: "reclaim: stuck sending, max attempts", payload: undefined, claimedAt: undefined }));
+        await ctx.db.replace(row._id as string, compact({ ...row, status: "failed", attempts, error: "reclaim: stuck sending, max attempts", payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
       } else {
         const nextAttemptAt = now + computeBackoff(attempts, ctx.random, { initialBackoffMs: config.retry.initialBackoffMs, base: config.retry.base });
         await ctx.db.replace(row._id as string, compact({ ...row, status: "queued", attempts, nextAttemptAt, claimedAt: undefined }));

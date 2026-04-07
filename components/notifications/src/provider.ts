@@ -91,8 +91,6 @@ export type DeliveryStatus =
 export interface WebhookEvent {
   providerMessageId: string;
   deliveryStatus: DeliveryStatus;
-  /** Provider event time (ms), if present. */
-  at?: number;
   /** Optional detail (bounce reason, etc.). */
   detail?: string;
 }

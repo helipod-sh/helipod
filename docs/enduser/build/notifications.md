@@ -310,6 +310,17 @@ a no-op rather than regressing a later status back to an earlier one. Because it
 field on the `messages` row, subscribing to a query over that row (or your own status view) sees
 it update reactively — no polling.
 
+**Spam complaints** are recorded on a separate `complainedAt` timestamp field, not on
+`deliveryStatus`. A complaint always arrives *after* `delivered`, so folding it into the monotonic
+`deliveryStatus` would drop it; instead it's captured unconditionally on `complainedAt` (the
+compliance/suppression signal — check it to stop mailing an address that reported you as spam).
+
+**Behind a reverse proxy (Twilio):** Twilio computes its signature over the exact public
+`https://…` URL you configured in its console, but Stackbase serves plain HTTP behind your
+TLS-terminating proxy (nginx/Caddy/Traefik). Ensure the proxy forwards `X-Forwarded-Proto` and
+`X-Forwarded-Host` (the common default) — Stackbase reconstructs the public URL from them to verify
+the signature. Resend/Svix signs the request body, not the URL, so it needs no such configuration.
+
 ## What's deferred
 
 - **N3** — per-user channel/category preferences + critical-bypass; multi-channel routing/fallback;

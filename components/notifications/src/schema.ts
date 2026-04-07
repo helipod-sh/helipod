@@ -36,11 +36,16 @@ export const notificationsSchema = defineSchema({
     attempts: v.optional(v.number()),        // retryable-failure count (absent = 0)
     nextAttemptAt: v.optional(v.number()),   // earliest sweep time for a backed-off `queued` row (absent = now)
     claimedAt: v.optional(v.number()),       // set on queued→sending; drives stuck-row reclaim
-    deliveryStatus: v.optional(v.union(      // axis 2: provider-reported (webhooks), monotonic
+    deliveryStatus: v.optional(v.union(      // axis 2: provider-reported delivery/engagement, monotonic
       v.literal("delivered"), v.literal("bounced"), v.literal("complained"),
       v.literal("opened"), v.literal("clicked"), v.literal("dropped"), v.literal("failed_permanent"),
     )),
     deliveryDetail: v.optional(v.string()),  // optional provider detail (bounce reason, etc.)
+    // Spam-complaint signal — ORTHOGONAL to `deliveryStatus`: a complaint always arrives AFTER
+    // `delivered`, so it can't ride the monotonic delivery rank (it would be dropped as lower-rank).
+    // Recorded unconditionally here (the compliance/suppression signal). `v.literal("complained")`
+    // stays in the deliveryStatus union only for the pre-delivery no-`delivered`-yet edge.
+    complainedAt: v.optional(v.number()),
   })
     // Driver sweep: scan `status:"queued"` cheaply (never `"sending"`/`"sent"`/`"failed"`).
     .index("byStatus", ["status"])

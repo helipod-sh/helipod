@@ -52,6 +52,14 @@ export { twilioSms } from "./provider-twilio";
 export function defineNotifications(opts: NotificationsOptions): ComponentDefinition {
   const config = resolveNotificationsConfig(opts);
   const hasWebhook = !!(config.channels.email?.provider.webhook || config.channels.sms?.provider.webhook);
+  // DX: an email provider with a webhook but no signing secret verifies every callback as invalid
+  // (svixVerify returns false without a secret → 401), which is fail-closed but silent. Warn loudly.
+  if (config.channels.email?.provider.webhook && !config.channels.email.webhookSecret) {
+    console.warn(
+      "[notifications] the email provider defines a delivery webhook but no `channels.email.webhookSecret` is set — " +
+      "every inbound email webhook will be rejected (401). Configure the provider's signing secret to enable delivery status.",
+    );
+  }
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,

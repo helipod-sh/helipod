@@ -77,6 +77,22 @@ describe("notifications N2 — webhook apply (status normalization)", () => {
     expect((await built.readTable("notifications/messages"))[0]!.deliveryStatus).toBe("opened");
   });
 
+  it("records a spam complaint that arrives AFTER delivered (not dropped by the monotonic rank)", async () => {
+    built = await makeNotifRuntime(comp(provider({ verifyOk: true, events: [] })), appModules);
+    await seed(built);
+    await built.runtime.runAction("app:applyEvent", { providerMessageId: "re_1", deliveryStatus: "delivered" });
+    // A complaint (rank 2 < delivered 3) would be lost under a pure monotonic rank — it must be
+    // captured in its own `complainedAt` field, unconditionally, without regressing deliveryStatus.
+    await built.runtime.runAction("app:applyEvent", { providerMessageId: "re_1", deliveryStatus: "complained" });
+    const row = (await built.readTable("notifications/messages"))[0]!;
+    expect(row.deliveryStatus).toBe("delivered");            // delivery status unchanged…
+    expect(typeof row.complainedAt).toBe("number");          // …but the complaint IS recorded.
+    // Idempotent: a redelivered complaint doesn't rewrite it.
+    const first = row.complainedAt;
+    await built.runtime.runAction("app:applyEvent", { providerMessageId: "re_1", deliveryStatus: "complained" });
+    expect((await built.readTable("notifications/messages"))[0]!.complainedAt).toBe(first);
+  });
+
   it("_applyWebhookEvent is a no-op for an unknown providerMessageId", async () => {
     built = await makeNotifRuntime(comp(provider({ verifyOk: true, events: [] })), appModules);
     await seed(built);
@@ -104,5 +120,26 @@ describe("notifications N2 — webhook apply (status normalization)", () => {
     );
     expect(res.status).toBe(200);
     expect((await built.readTable("notifications/messages"))[0]).toMatchObject({ deliveryStatus: "delivered" });
+  });
+
+  it("verifies against the proxy-forwarded PUBLIC url (URL-signing providers behind TLS termination)", async () => {
+    let seenUrl = "";
+    const capturing: EmailProvider = {
+      channel: "email",
+      async send() { return { providerMessageId: "re_1" }; },
+      webhook: { verify: (a) => { seenUrl = a.url; return true; }, parse: () => [] },
+    };
+    built = await makeNotifRuntime(comp(capturing), appModules);
+    await seed(built);
+    const res = await built.runtime.runHttpAction(
+      "notifications:webhookHttp",
+      new Request("http://internal-host:8080/api/notifications/webhooks/email", {
+        method: "POST", body: "{}",
+        headers: { "x-forwarded-proto": "https", "x-forwarded-host": "app.example.com" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    // Twilio signs over the PUBLIC https URL, not the internal http one the proxy forwards to.
+    expect(seenUrl).toBe("https://app.example.com/api/notifications/webhooks/email");
   });
 });

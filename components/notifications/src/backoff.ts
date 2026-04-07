@@ -14,7 +14,7 @@ export interface BackoffOptions {
  *  retry (attempts=1) backs off `initialBackoffMs * base^2`, jittered to 50–100%. */
 export function computeBackoff(
   attempts: number,
-  rng: () => number = Math.random,
+  rng: () => number,
   o: BackoffOptions,
 ): number {
   const raw = o.initialBackoffMs * o.base ** (attempts + 1);

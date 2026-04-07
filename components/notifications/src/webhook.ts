@@ -19,6 +19,28 @@ function resolveWebhookProvider(config: NotificationsConfig, channel: string): {
   return {};
 }
 
+/** Reconstruct the PUBLIC URL a URL-signing provider (Twilio) signed over, honoring a TLS-terminating
+ *  reverse proxy. Stackbase serves plain HTTP and is fronted by nginx/Caddy/Traefik (a locked deploy
+ *  decision), which set `X-Forwarded-Proto`/`X-Forwarded-Host`. Twilio's `X-Twilio-Signature` is
+ *  computed over the exact PUBLIC `https://…` URL configured in its console, which differs in scheme
+ *  (and often host) from the internal `request.url` behind the proxy — so without this reconstruction
+ *  every Twilio callback would 401 in the documented topology. Svix (Resend) signs the body, not the
+ *  URL, so it is unaffected either way. Falls back to `request.url` when no forwarded headers are set
+ *  (direct exposure / dev). Forging these headers cannot make verification PASS — the HMAC still needs
+ *  the provider's secret — it can only cause an attacker's own forged callback to fail. */
+function publicUrlOf(request: Request): string {
+  const url = new URL(request.url);
+  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  if (!proto && !host) return url.toString();
+  // String-build the authority (not the URL `.host`/`.protocol` setters, whose port-retention quirk
+  // would leave a stale internal port on the public URL). A forwarded host WITHOUT a port yields an
+  // authority without a port — exactly the URL the provider was configured to sign over.
+  const scheme = proto ?? url.protocol.replace(/:$/, "");
+  const authority = host ?? url.host;
+  return `${scheme}://${authority}${url.pathname}${url.search}`;
+}
+
 export function makeWebhookModules(config: NotificationsConfig): Record<string, RegisteredFunction> {
   // Reachable from the webhookHttp httpAction via `ctx.runMutation` — a NON-privileged action-to-
   // mutation invoke (unlike the driver's `ctx.runFunction`, which runs privileged), so this uses the
@@ -29,6 +51,14 @@ export function makeWebhookModules(config: NotificationsConfig): Record<string, 
   const _applyWebhookEvent = mutation(async (ctx: MutationCtx, args: { providerMessageId: string; deliveryStatus: DeliveryStatus; detail?: string }): Promise<null> => {
     const [row] = await ctx.db.query("messages", "byProviderMessageId").eq("providerMessageId", args.providerMessageId).take(1).collect();
     if (!row) return null; // foreign / out-of-order delivery — drop (the row may not exist yet or ever)
+    if (args.deliveryStatus === "complained") {
+      // Compliance signal (spam complaint) — ALWAYS arrives after `delivered`, so it must NOT be gated
+      // by the monotonic delivery rank (which would drop it as lower-rank than `delivered`). Recorded
+      // unconditionally in its own orthogonal field; idempotent (a redelivered complaint is a no-op).
+      if (row.complainedAt !== undefined) return null;
+      await ctx.db.replace(row._id as string, compact({ ...row, complainedAt: ctx.now() }));
+      return null;
+    }
     const cur = row.deliveryStatus as DeliveryStatus | undefined;
     if (cur && RANK[cur] >= RANK[args.deliveryStatus]) return null; // monotonic: redelivered/older event → no-op
     await ctx.db.replace(row._id as string, compact({ ...row, deliveryStatus: args.deliveryStatus, deliveryDetail: args.detail }));
@@ -41,7 +71,9 @@ export function makeWebhookModules(config: NotificationsConfig): Record<string, 
     const { provider, secret } = resolveWebhookProvider(config, channel);
     if (!provider?.webhook) return new Response("unknown webhook channel", { status: 404 });
     const rawBody = await request.text();
-    const ok = await provider.webhook.verify({ headers: request.headers, rawBody, url: request.url, secret });
+    // Sign-check against the PUBLIC url (proxy-forwarded), so URL-signing providers (Twilio) verify
+    // behind the documented TLS-terminating proxy. Verify strictly BEFORE any read/write.
+    const ok = await provider.webhook.verify({ headers: request.headers, rawBody, url: publicUrlOf(request), secret });
     if (!ok) return new Response("invalid signature", { status: 401 }); // BEFORE any write
     let events;
     try { events = provider.webhook.parse(rawBody); } catch { return new Response("bad payload", { status: 400 }); }
