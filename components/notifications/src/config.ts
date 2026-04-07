@@ -13,7 +13,19 @@ export interface EmailChannelConfig {
   provider: EmailProvider;
   from: string;
   templates?: EmailTemplates;
+  /** Signing secret for this provider's inbound delivery webhook (e.g. Resend `whsec_…`). */
+  webhookSecret?: string;
 }
+
+/** Retry policy for a failed email/SMS send (N2). `maxAttempts` counts total delivery attempts
+ *  (the first send + retries) before dead-lettering to `failed`. */
+export interface RetryOptions {
+  maxAttempts: number;
+  initialBackoffMs: number;
+  base: number;
+}
+export const DEFAULT_RETRY: RetryOptions = { maxAttempts: 4, initialBackoffMs: 250, base: 2 };
+export const DEFAULT_RECLAIM_LEASE_MS = 60_000;
 export interface SmsChannelConfig {
   provider: SmsProvider;
   from: string;
@@ -34,12 +46,17 @@ export interface NotificationsOptions {
   channels: NotificationChannels;
   /** Queued-send sweep cadence (ms); the driver also wakes on the commit fan-out. Default 5000. */
   driverIntervalMs?: number;
+  retry?: Partial<RetryOptions>;
+  /** A `"sending"` row older than this (ms) is reclaimed to `queued` (crash recovery). Default 60000. */
+  reclaimLeaseMs?: number;
 }
 
 /** Resolved config (driverIntervalMs defaulted) — closed over by the facade, modules, and driver. */
 export interface NotificationsConfig {
   channels: NotificationChannels;
   driverIntervalMs: number;
+  retry: RetryOptions;
+  reclaimLeaseMs: number;
 }
 
 export const DEFAULT_DRIVER_INTERVAL_MS = 5000;
@@ -48,6 +65,12 @@ export function resolveNotificationsConfig(opts: NotificationsOptions): Notifica
   return {
     channels: opts.channels,
     driverIntervalMs: opts.driverIntervalMs ?? DEFAULT_DRIVER_INTERVAL_MS,
+    retry: {
+      maxAttempts: opts.retry?.maxAttempts ?? DEFAULT_RETRY.maxAttempts,
+      initialBackoffMs: opts.retry?.initialBackoffMs ?? DEFAULT_RETRY.initialBackoffMs,
+      base: opts.retry?.base ?? DEFAULT_RETRY.base,
+    },
+    reclaimLeaseMs: opts.reclaimLeaseMs ?? DEFAULT_RECLAIM_LEASE_MS,
   };
 }
 

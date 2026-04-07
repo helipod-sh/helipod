@@ -3,6 +3,7 @@ import type { JSONValue } from "@stackbase/values";
 import type { NotificationsConfig } from "./config";
 import { compact, deliverOutbound } from "./render";
 import type { QueuedMessage } from "./modules";
+import { NotificationSendError } from "./provider";
 
 /** `notificationsDriver()` exposes `__tick` — a deterministic test seam: one drain pass, awaiting
  *  its real completion, errors propagating (unlike the timer/onCommit path, which swallows+logs).
@@ -22,14 +23,18 @@ export interface NotificationsDriver extends Driver {
  *
  * Crash-safety (single-node): each row is CLAIMED (`_claimForSend`, `queued → sending`, its own txn)
  * BEFORE `provider.send`; `_peekQueued` never returns `"sending"`, so a crash between send-returns
- * and `_markResult` leaves the row `"sending"` and it is NEVER re-swept → no double-send. A stuck
- * `"sending"` row is terminal in N1 (recovery/reclaim is N2 — do NOT auto-retry). `_claimForSend`'s
- * exact `status==="queued"` check under single-writer OCC is the authoritative once-only guard; the
- * provider `Idempotency-Key` is auto-derived from the row id (`msg:<_id>`) as defense-in-depth for
- * any future (N2) resend. N1 boundary: a failed provider send is TERMINAL (`failed`); retries and
- * fleet multi-driver claim/lease are N2 (this driver is single-node). The action-mode `sendNow`
- * drains through the SAME `_claimForSend`/`_markResult` guard, so driver-vs-inline delivery of a
- * `sendNow` row is mutually exclusive (whichever claims first delivers; the other skips).
+ * and `_markResult` leaves the row `"sending"` and it is NEVER re-swept by the normal peek — it is
+ * instead recovered by `_reclaimStuck` (N2), a wall-clock lease sweep run at the top of every pass that
+ * requeues a row stuck past `config.reclaimLeaseMs`, counting an attempt so a perpetually-crashing row
+ * still dead-letters eventually. `_claimForSend`'s exact `status==="queued"` check under single-writer
+ * OCC is the authoritative once-only guard; the provider `Idempotency-Key` is auto-derived from the
+ * row id (`msg:<_id>`) as defense-in-depth for a retry/resend of the same row. N2: a retryable failed
+ * send (per `NotificationSendError.retryable`, default true for a plain `Error`) goes back to `queued`
+ * with a jittered exponential backoff (`nextAttemptAt`) until `config.retry.maxAttempts`, then
+ * dead-letters to `failed`; a non-retryable failure dead-letters immediately. Fleet multi-driver
+ * claim/lease remains out of scope (this driver is single-node). The action-mode `sendNow` drains
+ * through the SAME `_claimForSend`/`_markResult` guard, so driver-vs-inline delivery of a `sendNow` row
+ * is mutually exclusive (whichever claims first delivers; the other skips).
  */
 export function notificationsDriver(config: NotificationsConfig): NotificationsDriver {
   let ctx: DriverContext;
@@ -58,24 +63,43 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
   }
 
   async function runPass(): Promise<void> {
+    let earliestDeferredAt: number | null = null;
+    // A row this PASS already SUCCESSFULLY claimed (and is therefore about to deliver) is never
+    // reattempted again within the SAME pass, even if `_markResult` requeues it with an
+    // already-elapsed `nextAttemptAt` (e.g. `retry.initialBackoffMs: 0`, or a backoff shorter than
+    // this pass's own wall-clock stride). Without this, `_markResult`'s own commit re-fires `onCommit`
+    // (it touches `notifications/*`) synchronously mid-await, setting `pendingWake` and causing the
+    // `do…while` below to immediately re-peek and re-claim the just-requeued row — cascading every
+    // retry of a message into ONE external wake instead of one attempt per wake. Only marked AFTER a
+    // successful claim (not on every `peek.ready` sighting) — a row whose claim this pass LOSES (e.g.
+    // another concurrent claimant, or a test harness racing a simulated crash) must remain eligible for
+    // a later same-pass reprocessing (a `_reclaimStuck` requeue included), or it would wedge un-marked
+    // FOREVER until the next external wake.
+    const attemptedThisPass = new Set<string>();
     do {
       pendingWake = false;
-      const queued = (await ctx.runFunction("notifications:_peekQueued", {})) as QueuedMessage[];
-      for (const m of queued) {
+      await ctx.runFunction("notifications:_reclaimStuck", {});
+      const now = ctx.now();
+      const peek = (await ctx.runFunction("notifications:_peekQueued", { now })) as { ready: QueuedMessage[]; earliestDeferredAt: number | null };
+      earliestDeferredAt = peek.earliestDeferredAt;
+      for (const m of peek.ready) {
+        if (attemptedThisPass.has(m._id)) continue;
         // Per-message isolation (the scheduler driver's discipline): a `_claimForSend`/`_markResult`
         // failure for THIS row must not strand its batch siblings — log and move on; the row waits
         // for the next wake. (If it was delivered but `_markResult` threw, it stays "sending" —
-        // terminal in N1, reclaim is N2.)
+        // recovered by the next pass's `_reclaimStuck` once the lease expires.)
         try {
           // Claim BEFORE the network call (queued → sending). Lost the claim (another pass/driver, or
-          // already finalized) → skip. This is what makes a crash mid-send non-re-sweepable.
+          // already finalized) → skip WITHOUT marking attempted — see the Set's doc comment above.
           const claimed = (await ctx.runFunction("notifications:_claimForSend", { messageId: m._id })) as boolean;
           if (!claimed) continue;
+          attemptedThisPass.add(m._id); // claimed — about to deliver; guard against a same-pass re-entry
           let ok = false;
           let providerMessageId: string | undefined;
           let error: string | undefined;
+          let retryable: boolean | undefined;
           try {
-            // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: an N2
+            // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: a
             // retry of the same row reuses it, so a supporting provider dedups). Independent of the
             // caller's optional `sendReceipts` idempotencyKey.
             const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
@@ -83,23 +107,28 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
             providerMessageId = res.providerMessageId;
           } catch (e) {
             error = String(e);
+            retryable = e instanceof NotificationSendError ? e.retryable : true; // plain Error → retryable
           }
-          // `providerMessageId`/`error` may be undefined. `runFunction`'s arg codec (`jsonToConvex`)
-          // REJECTS an undefined-valued key (it does NOT drop it) — so strip them with `compact` before
-          // the call, exactly as the insert path does; `_markResult` reads the absent keys as undefined.
-          await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as JSONValue);
+          // `providerMessageId`/`error`/`retryable` may be undefined. `runFunction`'s arg codec
+          // (`jsonToConvex`) REJECTS an undefined-valued key (it does NOT drop it) — so strip them with
+          // `compact` before the call, exactly as the insert path does; `_markResult` reads the absent
+          // keys as undefined.
+          await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error, retryable }) as unknown as JSONValue);
         } catch (e) {
           console.error(`[notifications] driver: message ${m._id} failed mid-pass:`, e);
         }
       }
     } while (pendingWake);
-    armTimer();
+    armTimer(earliestDeferredAt);
   }
 
-  function armTimer(): void {
+  function armTimer(earliestDeferredAt: number | null = null): void {
     if (stopped) return;
     if (timer !== null) { ctx.clearTimer(timer); timer = null; }
-    timer = ctx.setTimer(ctx.now() + config.driverIntervalMs, wake);
+    // Wake at the interval, OR sooner if a backed-off row becomes eligible before then.
+    const intervalAt = ctx.now() + config.driverIntervalMs;
+    const at = earliestDeferredAt !== null && earliestDeferredAt < intervalAt ? earliestDeferredAt : intervalAt;
+    timer = ctx.setTimer(at, wake);
   }
 
   return {
