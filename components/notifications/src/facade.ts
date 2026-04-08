@@ -4,7 +4,7 @@ import type { SendResult } from "./provider";
 import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
 import { applySetPreference } from "./preferences";
-import { subscribeImpl, unsubscribeImpl } from "./topics";
+import { subscribeImpl, unsubscribeImpl, type RecordSendBatchResult } from "./topics";
 import { compact } from "./render";
 
 /**
@@ -72,6 +72,19 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
 export interface NotificationsActionContext {
   send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
   sendNow(args: SendArgs): Promise<{ messageIds: string[]; results: SendResult[]; suppressed: Channel[] }>;
+  /** Fan out a send to every `topic` subscriber, preference-aware for free (each subscriber routes
+   *  through `recordSend`, the single gate). Paginates `_recordSendBatch` (`topics.ts`) to
+   *  completion — one page per call — so an arbitrarily large subscriber set never blows one
+   *  transaction. A supplied `idempotencyKey` is broadcast-scoped: `_recordSendBatch` derives a
+   *  per-subscriber key from it, so a re-run with the same key is a no-op per subscriber. */
+  sendToTopic(args: {
+    topic: string;
+    channels: Channel[];
+    template: SendArgs["template"];
+    data?: SendArgs["data"];
+    category?: string;
+    idempotencyKey?: string;
+  }): Promise<{ recipientCount: number; sentCount: number; suppressedCount: number }>;
 }
 
 export function notificationsActionContext(api: ActionApi, config: NotificationsConfig): NotificationsActionContext {
@@ -107,6 +120,26 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as Record<string, unknown>);
       }
       return { messageIds: r.messageIds, results, suppressed: r.suppressed };
+    },
+    async sendToTopic(args) {
+      let cursor: string | null = null;
+      let recipientCount = 0;
+      let sentCount = 0;
+      let suppressedCount = 0;
+      do {
+        const page: RecordSendBatchResult = await api.runMutation<RecordSendBatchResult>(
+          "notifications:_recordSendBatch",
+          compact({
+            topic: args.topic, channels: args.channels, template: args.template, data: args.data,
+            category: args.category, idempotencyKey: args.idempotencyKey, cursor, pageSize: 100,
+          }) as unknown as Record<string, unknown>,
+        );
+        recipientCount += page.count;
+        sentCount += page.sentCount;
+        suppressedCount += page.suppressedCount;
+        cursor = page.hasMore ? page.nextCursor : null;
+      } while (cursor !== null);
+      return { recipientCount, sentCount, suppressedCount };
     },
   };
 }

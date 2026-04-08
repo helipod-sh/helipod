@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
-import { mutation, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, action, type RegisteredFunction } from "@stackbase/executor";
 import { notificationsSchema } from "../src/schema";
 import { resolveNotificationsConfig } from "../src/config";
 import { makeSendModules } from "../src/modules";
 import { makeTopicModules } from "../src/topics";
-import { notificationsContext } from "../src/facade";
+import { makePreferenceModules } from "../src/preferences";
+import { notificationsContext, notificationsActionContext } from "../src/facade";
 import { makeNotifRuntime, type BuiltNotifRuntime } from "./helpers";
 
 function comp(): ComponentDefinition {
@@ -41,5 +42,39 @@ describe("notifications N3 — topics subscription", () => {
     built = await makeNotifRuntime(comp(), appModules);
     await built.runtime.run("app:sub", { topic: "news" }, { identity: "u9" });
     expect((await built.readTable("notifications/topicSubscriptions"))[0]).toMatchObject({ topic: "news", userId: "u9" });
+  });
+});
+
+describe("notifications N3 — sendToTopic fan-out", () => {
+  it("fans out to subscribers, honors preferences, dedups on re-run", async () => {
+    const config = resolveNotificationsConfig({ channels: { in_app: { enabled: true, templates: { hi: () => ({ title: "T", body: "B" }) } } } });
+    const component = defineComponent({
+      name: "notifications", schema: notificationsSchema,
+      modules: { ...makeSendModules(config), ...makeTopicModules(config), ...makePreferenceModules(config) },
+      context: (cctx) => notificationsContext(cctx, config), contextWrite: true,
+      buildAction: (api) => notificationsActionContext(api, config),
+    });
+    built = await makeNotifRuntime(component, {
+      ...appModules,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:setPref": mutation(async (ctx: any, a: any) => ctx.notifications.setPreference(a)),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:topicSend": action(async (ctx: any, a: any) => ctx.notifications.sendToTopic(a)),
+    });
+    for (const u of ["u1", "u2", "u3"]) await built.runtime.run("app:sub", { topic: "news", userId: u });
+    await built.runtime.run("app:setPref", { category: "marketing", channel: "in_app", enabled: false }, { identity: "u2" });
+
+    const r1 = (await built.runtime.runAction("app:topicSend", {
+      topic: "news", channels: ["in_app"], template: "hi", category: "marketing", idempotencyKey: "b1",
+    })).value as { recipientCount: number; sentCount: number; suppressedCount: number };
+    expect(r1).toEqual({ recipientCount: 3, sentCount: 2, suppressedCount: 1 });
+    const inbox = await built.readTable("notifications/notifications");
+    expect(inbox.map((r) => r.userId).sort()).toEqual(["u1", "u3"]);
+
+    // Re-run same key → per-subscriber dedup, no new rows.
+    await built.runtime.runAction("app:topicSend", {
+      topic: "news", channels: ["in_app"], template: "hi", category: "marketing", idempotencyKey: "b1",
+    });
+    expect((await built.readTable("notifications/notifications")).length).toBe(2);
   });
 });
