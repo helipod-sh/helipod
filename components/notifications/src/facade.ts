@@ -1,15 +1,32 @@
 import type { ComponentContext, ActionApi, GuestDatabaseWriter } from "@stackbase/executor";
-import type { NotificationsConfig, SendArgs } from "./config";
+import type { NotificationsConfig, SendArgs, Channel } from "./config";
 import type { SendResult } from "./provider";
 import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
+import { applySetPreference } from "./preferences";
 import { compact } from "./render";
+
+/**
+ * Resolve the ambient caller's user id for a facade write, mirroring `inbox.ts`'s `callerId`: prefer
+ * a composed `@stackbase/auth`'s verified `getUserId()` (available via `cctx.components.auth` when
+ * auth is composed before notifications), else fall back to the raw ambient identity. A component
+ * facade only ever sees `cctx`, never the full guest ctx `callerId` reads from — this is the
+ * facade-side equivalent, kept in sync so `ctx.notifications.setPreference` (this file) and the
+ * registered `notifications:setPreference` module (`preferences.ts`) can never resolve differently.
+ */
+async function facadeCallerId(cctx: ComponentContext): Promise<string | null> {
+  const authFacade = cctx.components.auth as { getUserId?: () => Promise<string | null> } | undefined;
+  const viaAuth = authFacade?.getUserId ? await authFacade.getUserId() : null;
+  return viaAuth ?? cctx.identity;
+}
 
 /** `ctx.notifications` in a MUTATION (and query, for `identity()`). `send` writes the messages/inbox/
  *  receipt rows through the calling mutation's own transaction (contextWrite). `identity()` exposes
- *  the ambient caller token as the inbox fallback recipient id (see `inbox.ts`). */
+ *  the ambient caller token as the inbox fallback recipient id (see `inbox.ts`). `setPreference`
+ *  upserts the CALLER's own preference row (server-resolved identity, never a client arg). */
 export interface NotificationsContext {
-  send(args: SendArgs): Promise<{ messageIds: string[] }>;
+  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
+  setPreference(args: { category: string; channel?: Channel; enabled: boolean }): Promise<null>;
   identity(): string | null;
 }
 
@@ -17,7 +34,12 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
   return {
     async send(args) {
       const r = await recordSend(cctx.db as GuestDatabaseWriter, cctx.now, config, args);
-      return { messageIds: r.messageIds };
+      return { messageIds: r.messageIds, suppressed: r.suppressed };
+    },
+    async setPreference(args) {
+      const userId = await facadeCallerId(cctx);
+      if (!userId) throw new Error("not authenticated");
+      return applySetPreference(cctx.db as GuestDatabaseWriter, cctx.now, config, userId, args);
     },
     identity: () => cctx.identity,
   };
@@ -33,18 +55,18 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
  *  them — no channel is ever silently dropped, and the claim guard makes driver-vs-inline delivery
  *  mutually exclusive (exactly-once). Portable method signatures mirror `NotificationsContext`. */
 export interface NotificationsActionContext {
-  send(args: SendArgs): Promise<{ messageIds: string[] }>;
-  sendNow(args: SendArgs): Promise<{ messageIds: string[]; results: SendResult[] }>;
+  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
+  sendNow(args: SendArgs): Promise<{ messageIds: string[]; results: SendResult[]; suppressed: Channel[] }>;
 }
 
 export function notificationsActionContext(api: ActionApi, config: NotificationsConfig): NotificationsActionContext {
   return {
     async send(args) {
-      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
-      return { messageIds: r.messageIds };
+      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
+      return { messageIds: r.messageIds, suppressed: r.suppressed };
     },
     async sendNow(args) {
-      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
+      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
       const results: SendResult[] = [];
       for (const m of r.queued) {
         // Claim BEFORE the network call (queued → sending). Lost the claim (the driver raced us and
@@ -69,7 +91,7 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         // `jsonToConvex` the driver's `_markResult` call must `compact` around).
         await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as Record<string, unknown>);
       }
-      return { messageIds: r.messageIds, results };
+      return { messageIds: r.messageIds, results, suppressed: r.suppressed };
     },
   };
 }
