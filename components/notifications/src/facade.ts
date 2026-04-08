@@ -4,6 +4,7 @@ import type { SendResult } from "./provider";
 import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
 import { applySetPreference } from "./preferences";
+import { subscribeImpl, unsubscribeImpl } from "./topics";
 import { compact } from "./render";
 
 /**
@@ -23,10 +24,14 @@ async function facadeCallerId(cctx: ComponentContext): Promise<string | null> {
 /** `ctx.notifications` in a MUTATION (and query, for `identity()`). `send` writes the messages/inbox/
  *  receipt rows through the calling mutation's own transaction (contextWrite). `identity()` exposes
  *  the ambient caller token as the inbox fallback recipient id (see `inbox.ts`). `setPreference`
- *  upserts the CALLER's own preference row (server-resolved identity, never a client arg). */
+ *  upserts the CALLER's own preference row (server-resolved identity, never a client arg).
+ *  `subscribe`/`unsubscribe` maintain a topic's subscriber set; `userId` is server-controlled (the
+ *  app decides who), defaulting to the ambient caller when omitted. */
 export interface NotificationsContext {
   send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
   setPreference(args: { category: string; channel?: Channel; enabled: boolean }): Promise<null>;
+  subscribe(args: { topic: string; userId?: string }): Promise<null>;
+  unsubscribe(args: { topic: string; userId?: string }): Promise<null>;
   identity(): string | null;
 }
 
@@ -40,6 +45,16 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
       const userId = await facadeCallerId(cctx);
       if (!userId) throw new Error("not authenticated");
       return applySetPreference(cctx.db as GuestDatabaseWriter, cctx.now, config, userId, args);
+    },
+    async subscribe(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return subscribeImpl(cctx.db as GuestDatabaseWriter, cctx.now, userId, args.topic);
+    },
+    async unsubscribe(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return unsubscribeImpl(cctx.db as GuestDatabaseWriter, userId, args.topic);
     },
     identity: () => cctx.identity,
   };

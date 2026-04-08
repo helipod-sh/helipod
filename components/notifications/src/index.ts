@@ -6,6 +6,7 @@ import { makeSendModules } from "./modules";
 import { makeInboxModules } from "./inbox";
 import { makeWebhookModules } from "./webhook";
 import { makePreferenceModules } from "./preferences";
+import { makeTopicModules } from "./topics";
 import { notificationsDriver } from "./driver";
 
 // Seam + config + content types (for adapter authors and N4 auth reuse).
@@ -64,7 +65,7 @@ export function defineNotifications(opts: NotificationsOptions): ComponentDefini
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,
-    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config) },
+    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
     contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
     contextWrite: true,
