@@ -43,6 +43,22 @@ describe("notifications N3 — topics subscription", () => {
     await built.runtime.run("app:sub", { topic: "news" }, { identity: "u9" });
     expect((await built.readTable("notifications/topicSubscriptions"))[0]).toMatchObject({ topic: "news", userId: "u9" });
   });
+
+  it("the client-callable subscribe/unsubscribe modules are SELF-ONLY — a forged userId arg is ignored (IDOR guard)", async () => {
+    built = await makeNotifRuntime(comp(), appModules);
+    // A client calls the REGISTERED module directly (`notifications:subscribe` is client-callable) with
+    // a forged userId; it must subscribe the CALLER, never the arg'd victim (the userId override is
+    // facade-only, reachable only from server-side app code).
+    await built.runtime.run("notifications:subscribe", { topic: "news", userId: "victim" } as never, { identity: "attacker" });
+    let rows = await built.readTable("notifications/topicSubscriptions");
+    expect(rows.map((r) => r.userId)).toEqual(["attacker"]); // NOT "victim"
+    // Seed victim (via the server facade) then try to unsubscribe them with a forged userId — must fail
+    // to touch victim's row (it unsubscribes the caller instead).
+    await built.runtime.run("app:sub", { topic: "news", userId: "victim" });
+    await built.runtime.run("notifications:unsubscribe", { topic: "news", userId: "victim" } as never, { identity: "attacker" });
+    rows = await built.readTable("notifications/topicSubscriptions");
+    expect(rows.map((r) => r.userId)).toEqual(["victim"]); // attacker removed self; victim untouched
+  });
 });
 
 describe("notifications N3 — sendToTopic fan-out", () => {

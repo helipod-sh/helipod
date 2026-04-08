@@ -35,27 +35,34 @@ export interface RecordSendBatchResult {
 }
 
 /**
- * `subscribe`/`unsubscribe` — maintain a topic's subscriber set. `userId` is server-controlled
- * (the app decides who gets subscribed), defaulting to the caller when omitted. `_recordSendBatch`
- * (T4) is the fan-out mutation: it paginates ONE page of a topic's subscribers (`byTopic`) and, for
- * each, calls `recordSend` — THE single preference-aware chokepoint (`modules.ts`) — so the fan-out
- * is preference-aware for free; no second gate is added here. It is reached ONLY from an action's
- * `api.runMutation` (the action facade's `sendToTopic`, `facade.ts`), never directly by a client —
- * hence the `_`-prefix — so it runs NAMESPACED: bare table names ("topicSubscriptions") resolve
- * under the component's own namespace, exactly like `recordSend` itself and the N2
- * `_applyWebhookEvent` lesson (a fully-qualified name here would double-prefix and 404).
+ * `subscribe`/`unsubscribe` — maintain a topic's subscriber set. These REGISTERED modules
+ * (`notifications:subscribe`/`unsubscribe`) are CLIENT-CALLABLE (not `_`-prefixed), so they are
+ * strictly SELF-ONLY: the subscriber is `callerId(ctx)` and a client-supplied `userId` arg is NOT
+ * accepted — otherwise a client could subscribe/unsubscribe ANY user (IDOR). The server-controlled
+ * `userId?` override (the app decides who) lives ONLY on the facade `ctx.notifications.subscribe`
+ * (`facade.ts`), which is reachable exclusively from server-side app-authored mutations, never
+ * directly from a client. Both paths funnel through the shared `subscribeImpl`/`unsubscribeImpl`.
+ *
+ * `_recordSendBatch` (T4) is the fan-out mutation: it paginates ONE page of a topic's subscribers
+ * (`byTopic`) and, for each, calls `recordSend` — THE single preference-aware chokepoint
+ * (`modules.ts`) — so the fan-out is preference-aware for free; no second gate is added here. It is
+ * reached ONLY from an action's `api.runMutation` (the action facade's `sendToTopic`, `facade.ts`),
+ * never directly by a client — hence the `_`-prefix — so it runs NAMESPACED: bare table names
+ * ("topicSubscriptions") resolve under the component's own namespace, exactly like `recordSend`
+ * itself and the N2 `_applyWebhookEvent` lesson (a fully-qualified name here would double-prefix + 404).
  */
 export function makeTopicModules(config: NotificationsConfig): Record<string, RegisteredFunction> {
+  // Client-callable → SELF-ONLY: derive the subscriber from the caller, never a client arg (IDOR guard).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const subscribe = mutation(async (ctx: any, args: { topic: string; userId?: string }): Promise<null> => {
-    const userId = args.userId ?? (await callerId(ctx));
+  const subscribe = mutation(async (ctx: any, args: { topic: string }): Promise<null> => {
+    const userId = await callerId(ctx);
     if (!userId) throw new Error("not authenticated");
     return subscribeImpl((ctx as MutationCtx).db as GuestDatabaseWriter, (ctx as MutationCtx).now(), userId, args.topic);
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const unsubscribe = mutation(async (ctx: any, args: { topic: string; userId?: string }): Promise<null> => {
-    const userId = args.userId ?? (await callerId(ctx));
+  const unsubscribe = mutation(async (ctx: any, args: { topic: string }): Promise<null> => {
+    const userId = await callerId(ctx);
     if (!userId) throw new Error("not authenticated");
     return unsubscribeImpl((ctx as MutationCtx).db as GuestDatabaseWriter, userId, args.topic);
   });
