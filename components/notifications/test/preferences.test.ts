@@ -74,3 +74,36 @@ describe("notifications N3 — preference gate", () => {
     expect((await built.readTable("notifications/messages")).length).toBe(1);
   });
 });
+
+describe("notifications N3 — preference API", () => {
+  it("getPreferences returns only the caller's own rows", async () => {
+    built = await makeNotifRuntime(comp(), appModules);
+    await runAs(built, "u1", "app:setPref", { category: "marketing", channel: "sms", enabled: false });
+    await runAs(built, "u2", "app:setPref", { category: "marketing", channel: "email", enabled: false });
+
+    const u1Prefs = (await runAs(built, "u1", "notifications:getPreferences", {})) as Array<{ category: string; channel?: string; enabled: boolean }>;
+    expect(u1Prefs).toEqual([{ category: "marketing", channel: "sms", enabled: false }]);
+
+    const u2Prefs = (await runAs(built, "u2", "notifications:getPreferences", {})) as Array<{ category: string; channel?: string; enabled: boolean }>;
+    expect(u2Prefs).toEqual([{ category: "marketing", channel: "email", enabled: false }]);
+  });
+
+  it("setting a critical category disabled throws", async () => {
+    built = await makeNotifRuntime(comp(), appModules);
+    await expect(runAs(built, "u1", "app:setPref", { category: "security", enabled: false })).rejects.toThrow(/critical/);
+  });
+
+  it("a channel-specific opt-out overrides a category-wide allow", async () => {
+    built = await makeNotifRuntime(comp(), appModules);
+    // Category-wide allow for marketing (explicit true), but email is specifically opted out.
+    await runAs(built, "u1", "app:setPref", { category: "marketing", enabled: true });
+    await runAs(built, "u1", "app:setPref", { category: "marketing", channel: "email", enabled: false });
+
+    const res = (await runAs(built, "u1", "app:send", {
+      to: { userId: "u1", email: "u1@test" }, channels: ["in_app", "email"], template: "hi", category: "marketing",
+    })) as { messageIds: string[]; suppressed: string[] };
+    expect(res.suppressed).toEqual(["email"]);
+    const rows = await built.readTable("notifications/messages");
+    expect(rows.map((r) => r.channel).sort()).toEqual(["in_app"]);
+  });
+});

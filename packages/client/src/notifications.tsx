@@ -8,6 +8,7 @@
  * augmentation.
  */
 import type { ReactNode } from "react";
+import type { Value } from "@stackbase/values";
 import { useQuery, useMutation } from "./react";
 
 /** An inbox row as delivered to the UI (mirrors the server `InboxItem`). */
@@ -58,4 +59,33 @@ export interface InboxProps {
 /** A headless `<Inbox>` render helper: `<Inbox>{({ notifications, unreadCount, markRead }) => …}</Inbox>`. */
 export function Inbox(props: InboxProps): ReactNode {
   return props.children(useNotifications({ limit: props.limit }));
+}
+
+/** N3 — a caller's own `(category, channel|category-wide)` preference row, as delivered to the UI
+ *  (mirrors the server `getPreferences` return; `channel` absent = category-wide). */
+export interface NotificationPreference {
+  category: string;
+  channel?: "email" | "sms" | "in_app";
+  enabled: boolean;
+}
+
+export interface UseNotificationPreferencesResult {
+  preferences: NotificationPreference[];
+  setPreference: (args: NotificationPreference) => Promise<void>;
+}
+
+const PREFS_GET = "notifications:getPreferences";
+const PREFS_SET = "notifications:setPreference";
+
+/** N3 — live view of the caller's own notification preferences + a setter. Server-resolved identity
+ *  (same ownership model as `useNotifications`'s inbox) — there is no `userId` arg to pass. */
+export function useNotificationPreferences(): UseNotificationPreferencesResult {
+  const preferences = useQuery<NotificationPreference[]>(PREFS_GET, {}) ?? [];
+  const setFn = useMutation<null>(PREFS_SET);
+  return {
+    preferences,
+    setPreference: async (args: NotificationPreference) => {
+      await setFn(args as unknown as Record<string, Value>);
+    },
+  };
 }
