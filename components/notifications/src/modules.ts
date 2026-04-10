@@ -4,6 +4,7 @@ import type { NotificationsConfig, SendArgs, Channel } from "./config";
 import type { EmailContent, SmsPayload, SendResult } from "./provider";
 import { compact, stableHash, renderEmail, renderSms, renderInApp, deliverOutbound, type DeliverEntry } from "./render";
 import { computeBackoff } from "./backoff";
+import { resolvePreference, isCritical } from "./preferences";
 
 /** Cap on queued rows a single driver pass drains (bounded work per iteration). */
 export const BATCH_CAP = 64;
@@ -49,20 +50,30 @@ function assertConfigured(config: NotificationsConfig, channel: Channel): void {
  * writer OCC catch a concurrent duplicate: the second committer re-validates a now-stale empty read
  * and retries, seeing the winner's receipt (the scheduler `by_idempotency` insert-or-noop discipline).
  */
-export async function recordSend(db: GuestDatabaseWriter, now: number, config: NotificationsConfig, args: SendArgs): Promise<{ messageIds: string[]; deduped: boolean; queued: QueuedMessage[] }> {
+export async function recordSend(db: GuestDatabaseWriter, now: number, config: NotificationsConfig, args: SendArgs): Promise<{ messageIds: string[]; deduped: boolean; queued: QueuedMessage[]; suppressed: Channel[] }> {
   if (args.idempotencyKey !== undefined) {
     const [existing] = await db.query("sendReceipts", "byKey").eq("idempotencyKey", args.idempotencyKey).take(1).collect();
-    if (existing) return { messageIds: existing.messageIds as string[], deduped: true, queued: [] };
+    if (existing) return { messageIds: existing.messageIds as string[], deduped: true, queued: [], suppressed: [] };
   }
   const dataHash = stableHash(args.data);
   const templateKey = typeof args.template === "string" ? args.template : undefined;
+  const category = args.category ?? config.defaultCategory;
   const messageIds: string[] = [];
   const queued: QueuedMessage[] = [];
+  const suppressed: Channel[] = [];
 
   // Dedupe channels so `["email","email"]` is one logical send (one row, one delivery), never two.
   for (const channel of [...new Set(args.channels)]) {
     assertConfigured(config, channel);
     const to = resolveAddress(channel, args.to);
+    // N3 preference gate — the SINGLE consent chokepoint. A recipient with a `userId` who opted out
+    // of (category, channel) is suppressed, UNLESS the category is critical (OTP/security). No
+    // `userId` → no preference identity → send proceeds. Read runs in the calling mutation's txn.
+    const userId = args.to.userId;
+    if (userId !== undefined && !isCritical(config, category) && !(await resolvePreference(db, userId, category, channel))) {
+      suppressed.push(channel);
+      continue;
+    }
     if (channel === "in_app") {
       const content = renderInApp(config, args.template, args.data);
       const { title, body, ...structured } = content;
@@ -88,7 +99,7 @@ export async function recordSend(db: GuestDatabaseWriter, now: number, config: N
   if (args.idempotencyKey !== undefined) {
     await db.insert("sendReceipts", { idempotencyKey: args.idempotencyKey, messageIds, createdAt: now });
   }
-  return { messageIds, deduped: false, queued };
+  return { messageIds, deduped: false, queued, suppressed };
 }
 
 /**
@@ -100,9 +111,9 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
   // Action-facade `send`/`sendNow` delegate — namespaced, bare tables (recordSend). Returns the
   // just-written `queued` email/SMS rows so `sendNow` can drain them synchronously (via the shared
   // `_claimForSend`/`_markResult` guard); the action-facade `send` ignores `queued`.
-  const _enqueueSend = mutation(async (ctx: MutationCtx, args: SendArgs): Promise<{ messageIds: string[]; queued: QueuedMessage[] }> => {
+  const _enqueueSend = mutation(async (ctx: MutationCtx, args: SendArgs): Promise<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[] }> => {
     const r = await recordSend(ctx.db as GuestDatabaseWriter, ctx.now(), config, args);
-    return { messageIds: r.messageIds, queued: r.queued };
+    return { messageIds: r.messageIds, queued: r.queued, suppressed: r.suppressed };
   });
 
   // Driver-facing trio — PRIVILEGED (fully-qualified "notifications/messages"). See the scheduler's

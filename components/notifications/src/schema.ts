@@ -74,4 +74,22 @@ export const notificationsSchema = defineSchema({
     messageIds: v.array(v.string()),
     createdAt: v.number(),
   }).index("byKey", ["idempotencyKey"]),
+
+  notificationPreferences: defineTable({
+    userId: v.string(),
+    category: v.string(),
+    channel: v.optional(v.union(v.literal("email"), v.literal("sms"), v.literal("in_app"))), // absent = category-wide
+    enabled: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index("byUser", ["userId"])           // getPreferences: all of a user's rows
+    .index("byUserCategory", ["userId", "category"]), // the gate: a user's rows for one category
+
+  topicSubscriptions: defineTable({
+    topic: v.string(),
+    userId: v.string(),
+    createdAt: v.number(),
+  })
+    .index("byTopic", ["topic"])           // fan-out scan
+    .index("byUserTopic", ["userId", "topic"]), // dedup on subscribe / unsubscribe lookup
 });

@@ -49,6 +49,10 @@ export interface NotificationsOptions {
   retry?: Partial<RetryOptions>;
   /** A `"sending"` row older than this (ms) is reclaimed to `queued` (crash recovery). Default 60000. */
   reclaimLeaseMs?: number;
+  /** The category a send uses when it names none. Default "default". */
+  defaultCategory?: string;
+  /** Per-category config; a `critical` category bypasses preferences and can't be opted out. */
+  categories?: Record<string, { critical?: boolean }>;
 }
 
 /** Resolved config (driverIntervalMs defaulted) — closed over by the facade, modules, and driver. */
@@ -57,6 +61,8 @@ export interface NotificationsConfig {
   driverIntervalMs: number;
   retry: RetryOptions;
   reclaimLeaseMs: number;
+  defaultCategory: string;
+  categories: Record<string, { critical?: boolean }>;
 }
 
 export const DEFAULT_DRIVER_INTERVAL_MS = 5000;
@@ -71,6 +77,8 @@ export function resolveNotificationsConfig(opts: NotificationsOptions): Notifica
       base: opts.retry?.base ?? DEFAULT_RETRY.base,
     },
     reclaimLeaseMs: opts.reclaimLeaseMs ?? DEFAULT_RECLAIM_LEASE_MS,
+    defaultCategory: opts.defaultCategory ?? "default",
+    categories: opts.categories ?? {},
   };
 }
 
@@ -98,4 +106,5 @@ export interface SendArgs {
   template: string | InlineTemplate;
   data?: Record<string, unknown>;
   idempotencyKey?: string;
+  category?: string;   // N3 — preferences/criticality key; defaults to config.defaultCategory
 }

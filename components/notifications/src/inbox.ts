@@ -31,7 +31,7 @@ export const DEFAULT_INBOX_LIMIT = 50;
  * mechanism here is correct given a trustworthy identity. Compose auth to make the isolation real.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function callerId(ctx: any): Promise<string | null> {
+export async function callerId(ctx: any): Promise<string | null> {
   const viaAuth = ctx.auth ? await ctx.auth.getUserId() : null;
   if (viaAuth) return viaAuth as string;
   return (ctx.notifications?.identity?.() as string | null) ?? null;
