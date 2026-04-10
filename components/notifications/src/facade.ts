@@ -18,7 +18,11 @@ import { compact } from "./render";
 async function facadeCallerId(cctx: ComponentContext): Promise<string | null> {
   const authFacade = cctx.components.auth as { getUserId?: () => Promise<string | null> } | undefined;
   const viaAuth = authFacade?.getUserId ? await authFacade.getUserId() : null;
-  return viaAuth ?? cctx.identity;
+  // Truthy (not nullish) check, matching `inbox.ts`'s `callerId` EXACTLY — so an auth `getUserId()`
+  // returning `""` falls through to `identity()` on BOTH paths and the two never resolve a different
+  // id for the same caller (the two-transports-one-core invariant, airtight).
+  if (viaAuth) return viaAuth;
+  return cctx.identity;
 }
 
 /** `ctx.notifications` in a MUTATION (and query, for `identity()`). `send` writes the messages/inbox/
@@ -79,7 +83,10 @@ export interface NotificationsActionContext {
    *  per-subscriber key from it, so a re-run with the same key is a no-op per subscriber. */
   sendToTopic(args: {
     topic: string;
-    channels: Channel[];
+    /** N3: `in_app` ONLY. A topic subscription stores just a `userId`, never an email/phone, so
+     *  email/SMS fan-out can't resolve an address — send those directly with `send`/`sendNow`, or
+     *  await the deferred per-subscriber address-resolution seam. */
+    channels: Array<"in_app">;
     template: SendArgs["template"];
     data?: SendArgs["data"];
     category?: string;
@@ -122,6 +129,12 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
       return { messageIds: r.messageIds, results, suppressed: r.suppressed };
     },
     async sendToTopic(args) {
+      // Fail fast BEFORE any page/DB work: topics only know a subscriber's `userId`, not their
+      // email/phone, so email/SMS fan-out can't resolve an address (`resolveAddress` would throw
+      // per-subscriber, rolling back the whole page incl. the in_app sends). in_app only in N3.
+      if (args.channels.some((c) => c !== "in_app")) {
+        throw new Error('sendToTopic supports only the "in_app" channel (a topic knows a subscriber\'s userId, not their email/phone — send email/SMS directly with send/sendNow)');
+      }
       let cursor: string | null = null;
       let recipientCount = 0;
       let sentCount = 0;

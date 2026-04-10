@@ -84,11 +84,13 @@ export function makeTopicModules(config: NotificationsConfig): Record<string, Re
     let suppressedCount = 0;
     for (const sub of res.page) {
       const userId = sub.userId as string;
-      // Per-subscriber idempotency: `${idempotencyKey}:${userId}` — only derived when a broadcast
+      // Per-subscriber idempotency: derived from the broadcast key + userId, only when a broadcast
       // key is set (else `undefined`, dropped by `compact` below), so a `sendToTopic` re-run with the
       // same key dedups per-subscriber via `recordSend`'s own `sendReceipts` short-circuit — no new
       // rows on replay — while an un-keyed fan-out sends fresh every call, same as a plain `send`.
-      const idempotencyKey = args.idempotencyKey !== undefined ? `${args.idempotencyKey}:${userId}` : undefined;
+      // LENGTH-PREFIXED (`<len>:<key>:<userId>`) so it can't collide across broadcasts even when a
+      // userId contains `:` — `("a","b:c")` → "1:a:b:c" vs `("a:b","c")` → "3:a:b:c".
+      const idempotencyKey = args.idempotencyKey !== undefined ? `${args.idempotencyKey.length}:${args.idempotencyKey}:${userId}` : undefined;
       const sendArgs = compact({
         to: { userId }, channels: args.channels, template: args.template, data: args.data,
         category: args.category, idempotencyKey,

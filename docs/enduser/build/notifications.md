@@ -441,7 +441,7 @@ same as any bulk read) that sends to every current subscriber of a topic:
 export const announce = action({
   handler: async (ctx, { message }) => {
     return ctx.notifications.sendToTopic({
-      topic: "news", channels: ["in_app", "email"], template: "announcement",
+      topic: "news", channels: ["in_app"], template: "announcement",
       data: { message }, category: "marketing",
     });
   },
@@ -455,16 +455,23 @@ large):
 { recipientCount: number; sentCount: number; suppressedCount: number }
 ```
 
+- **`in_app` only.** A topic subscription stores just a subscriber's `userId`, not their email or
+  phone, so `sendToTopic` supports only the **`in_app`** channel — an email/SMS channel is rejected
+  fast (before any partial send), since there's no address to resolve. To email/SMS a group, send to
+  each recipient directly with `send`/`sendNow`.
 - **Preference-aware for free.** Each subscriber's send routes through the exact same
   `recordSend` gate a direct `ctx.notifications.send` uses — a subscriber who's opted the category/
   channel out is silently skipped and counted in `suppressedCount`, with no second preference check
   to keep in sync.
 - **Per-subscriber idempotency.** Pass `idempotencyKey` to make a re-run of the same broadcast a
-  no-op: internally it's namespaced per subscriber (`` `${idempotencyKey}:${userId}` ``), so retrying
-  a `sendToTopic` call (e.g. after a timeout) never double-sends to anyone, exactly like a single
-  `send`'s own idempotency key.
+  no-op: internally it's namespaced per subscriber, so retrying a `sendToTopic` call (e.g. after a
+  timeout) never double-sends to anyone, exactly like a single `send`'s own idempotency key. (The
+  returned counts reflect the *first* execution; a keyed retry reports the recorded no-op, not fresh
+  work, so don't treat a retry's counts as authoritative.)
 - **Paginated internally.** An arbitrarily large subscriber list is processed in bounded pages under
-  the hood — you never need to page it yourself.
+  the hood — you never need to page it yourself. Because pages are separate transactions, a
+  subscribe/unsubscribe landing mid-broadcast may include or skip that one subscriber; a keyed
+  broadcast stays safe against a double either way.
 
 ## What's deferred
 

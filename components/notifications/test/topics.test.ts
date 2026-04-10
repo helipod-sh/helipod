@@ -93,4 +93,24 @@ describe("notifications N3 — sendToTopic fan-out", () => {
     });
     expect((await built.readTable("notifications/notifications")).length).toBe(2);
   });
+
+  it("rejects an email/SMS topic send fast (topics only know a userId, not an address) — no partial work", async () => {
+    const config = resolveNotificationsConfig({ channels: { in_app: { enabled: true, templates: { hi: () => ({ title: "T", body: "B" }) } }, email: { provider: { channel: "email", async send() { return {}; } }, from: "x@test", templates: { hi: () => ({ subject: "S", text: "T" }) } } } });
+    const component = defineComponent({
+      name: "notifications", schema: notificationsSchema,
+      modules: { ...makeSendModules(config), ...makeTopicModules(config) },
+      context: (cctx) => notificationsContext(cctx, config), contextWrite: true,
+      buildAction: (api) => notificationsActionContext(api, config),
+    });
+    built = await makeNotifRuntime(component, {
+      ...appModules,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:topicSend": action(async (ctx: any, a: any) => ctx.notifications.sendToTopic(a)),
+    });
+    await built.runtime.run("app:sub", { topic: "news", userId: "u1" });
+    // Fails BEFORE any page/DB write (the guard is at the top of sendToTopic).
+    await expect(built.runtime.runAction("app:topicSend", { topic: "news", channels: ["email"], template: "hi" }))
+      .rejects.toThrow(/only the "in_app" channel/);
+    expect((await built.readTable("notifications/messages")).length).toBe(0); // no partial work
+  });
 });
