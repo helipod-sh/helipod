@@ -9,13 +9,15 @@ count update in real time with no dedicated realtime service.
 Both your app code and (in a later release) the auth component send through the same seam, so an
 OTP email and a marketing blast share one delivery path with the same at-most-once guarantee.
 
-> **Scope (N1 + N2, what this release is).** Sending across email/SMS/in-app, transactional
+> **Scope (N1 + N2 + N3, what this release is).** Sending across email/SMS/in-app, transactional
 > at-most-once delivery, the reactive inbox (N1); automatic retry-with-backoff on a transient
 > send failure, stuck-send reclaim, and inbound delivery webhooks with cross-provider status
 > normalization (delivered/bounced/opened/…) (N2 — see [Delivery reliability](#delivery-reliability)
-> below). **Deferred:** per-user preferences, routing/fallback, and topics (N3); digest/batching and
-> the auth-unification (N4); a push channel (FCM/APNs/Expo) and a markup/visual template registry
-> (post-arc).
+> below); per-user channel/category preferences with a critical-bypass, and topics/groups fan-out
+> (N3 — see [Preferences](#preferences) and [Topics](#topics) below). **Deferred:**
+> digest/batching and the auth-unification (N4); multi-channel provider fallback and time-based
+> routing (post-arc delivery-mechanics); a push channel (FCM/APNs/Expo) and a markup/visual
+> template registry (post-arc).
 
 ## Setup
 
@@ -321,11 +323,154 @@ TLS-terminating proxy (nginx/Caddy/Traefik). Ensure the proxy forwards `X-Forwar
 `X-Forwarded-Host` (the common default) — Stackbase reconstructs the public URL from them to verify
 the signature. Resend/Svix signs the request body, not the URL, so it needs no such configuration.
 
+## Preferences
+
+Every `send` is tagged with a **category** (a free-form string you choose — `"marketing"`,
+`"security"`, `"comments"`, …; a send that names none uses `defaultCategory`, `"default"` unless
+configured otherwise). A user can opt a `(category, channel)` pair out, and a suppressed send is
+skipped **before** it ever writes a row or reaches a provider.
+
+**Default-allow.** With no preference row at all, every category/channel is enabled — preferences
+are opt-*out*, not opt-*in*. A category-wide opt-out (`channel` omitted) is overridden by a
+channel-specific row for the same category, if one exists (most-specific wins).
+
+```ts
+await ctx.notifications.send({
+  to: { userId, email }, channels: ["in_app", "email"], template: "digest",
+  category: "marketing",   // ← gated by the recipient's own preference for (marketing, in_app)/(marketing, email)
+});
+```
+
+The return value reports which requested channels were suppressed, so you can distinguish "sent" from
+"skipped by preference" without a second query:
+
+```ts
+const { messageIds, suppressed } = await ctx.notifications.send({ /* … */ });
+// suppressed: Channel[] — e.g. ["email"] if the recipient opted email out for this category
+```
+
+### Critical categories (can't be opted out)
+
+Mark a category `critical` in config to make it bypass preferences entirely — the archetypal case is
+account-security mail (password reset, new-device login, suspicious-activity alerts) that must always
+reach the user regardless of their marketing preferences:
+
+```ts
+defineNotifications({
+  channels: { /* … */ },
+  categories: {
+    security: { critical: true },   // always delivered; setPreference rejects an attempt to disable it
+  },
+});
+```
+
+A `setPreference` call trying to disable a critical category throws rather than silently no-opping.
+
+### Reading and setting preferences
+
+`ctx.notifications.setPreference(...)` (mutation-only; also a registered `notifications:setPreference`
+module reachable directly from the client) upserts the **caller's own** preference row —
+server-resolved identity, never a client-supplied user id:
+
+```ts
+await ctx.notifications.setPreference({ category: "marketing", channel: "email", enabled: false });
+// channel omitted → a category-wide row (applies to every channel not overridden more specifically)
+await ctx.notifications.setPreference({ category: "marketing", enabled: false });
+```
+
+`notifications:getPreferences` is a live query returning the caller's own preference rows
+(`{ category, channel?, enabled }[]`) — reactive, so a `setPreference` from any tab is reflected
+everywhere immediately. From React, `useNotificationPreferences()` wraps both:
+
+```tsx
+import { useNotificationPreferences } from "@stackbase/client/react";
+
+function PreferencesPanel() {
+  const { preferences, setPreference } = useNotificationPreferences();
+  return (
+    <label>
+      <input
+        type="checkbox"
+        checked={!preferences.some((p) => p.category === "marketing" && p.enabled === false)}
+        onChange={(e) => setPreference({ category: "marketing", channel: "email", enabled: e.target.checked })}
+      />
+      Marketing email
+    </label>
+  );
+}
+```
+
+## Topics
+
+A **topic** is a named subscriber list (`"news"`, `"team:42:updates"`, …) you fan a single send out
+to — the mechanism behind broadcasts, digests-to-a-group, and per-resource watchers, without
+looping over recipients yourself.
+
+### Subscribing
+
+`ctx.notifications.subscribe({ topic })` / `unsubscribe({ topic })` are available on every mutation
+context and are also registered, client-callable modules (`notifications:subscribe`/`unsubscribe`).
+**The client-callable path is self-only**: it always subscribes the caller's own resolved identity —
+there is no way for a client to pass a `userId` and subscribe a different user (that would be an
+IDOR). Idempotent either way: subscribing twice, or unsubscribing when not subscribed, is a no-op.
+
+```ts
+// From the client (or a plain mutation): subscribes the CALLER.
+await ctx.notifications.subscribe({ topic: "news" });
+```
+
+To subscribe a **different** user — e.g. auto-subscribing every member of a team to that team's
+topic — call the facade from your own server-side mutation with an explicit `userId`; this
+server-controlled override is only reachable from app code, never from a client argument:
+
+```ts
+export const joinTeam = mutation({
+  handler: async (ctx, { teamId, userId }) => {
+    // … add userId to the team …
+    await ctx.notifications.subscribe({ topic: `team:${teamId}`, userId });
+  },
+});
+```
+
+### Sending to a topic
+
+`ctx.notifications.sendToTopic(...)` is an **action-only** method (fan-out pages through subscribers,
+same as any bulk read) that sends to every current subscriber of a topic:
+
+```ts
+export const announce = action({
+  handler: async (ctx, { message }) => {
+    return ctx.notifications.sendToTopic({
+      topic: "news", channels: ["in_app", "email"], template: "announcement",
+      data: { message }, category: "marketing",
+    });
+  },
+});
+```
+
+It returns a count summary rather than per-recipient message ids (a broadcast can be arbitrarily
+large):
+
+```ts
+{ recipientCount: number; sentCount: number; suppressedCount: number }
+```
+
+- **Preference-aware for free.** Each subscriber's send routes through the exact same
+  `recordSend` gate a direct `ctx.notifications.send` uses — a subscriber who's opted the category/
+  channel out is silently skipped and counted in `suppressedCount`, with no second preference check
+  to keep in sync.
+- **Per-subscriber idempotency.** Pass `idempotencyKey` to make a re-run of the same broadcast a
+  no-op: internally it's namespaced per subscriber (`` `${idempotencyKey}:${userId}` ``), so retrying
+  a `sendToTopic` call (e.g. after a timeout) never double-sends to anyone, exactly like a single
+  `send`'s own idempotency key.
+- **Paginated internally.** An arbitrarily large subscriber list is processed in bounded pages under
+  the hood — you never need to page it yourself.
+
 ## What's deferred
 
-- **N3** — per-user channel/category preferences + critical-bypass; multi-channel routing/fallback;
-  topics/groups.
 - **N4** — digest/batching; routing the auth component's OTP/magic-link/verification emails through
   this seam.
+- **Post-arc delivery-mechanics** — multi-channel provider fallback (e.g. retry a failed email send
+  over SMS) and time-of-day/quiet-hours-aware routing.
 - **Post-arc** — a push channel (FCM/APNs/Expo); a markup/visual template registry (Liquid/MJML).
   Inline typed template functions are the v1 authoring model.
