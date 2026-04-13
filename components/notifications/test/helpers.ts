@@ -20,6 +20,15 @@ function systemModules(): Record<string, RegisteredFunction> {
       await ctx.db.replace(a.messageId, { ...row, status: "sending", claimedAt: ctx.now() });
       return true;
     }),
+    // N4 digest test seam: backdate every un-flushed `digestBuffer` row's `createdAt` to 0, so any
+    // `now` the driver ticks with is past a digest category's rolling window — test-only, no wire
+    // path exercises "time travel" for a digest window.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    "_system:backdateDigest": mutation(async (ctx: any) => {
+      const rows = await ctx.db.query("notifications/digestBuffer", "byUnflushed").collect();
+      for (const r of rows) await ctx.db.replace(r._id, { ...r, createdAt: 0 });
+      return null;
+    }),
   };
 }
 

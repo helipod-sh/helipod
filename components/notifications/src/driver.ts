@@ -79,6 +79,19 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
     do {
       pendingWake = false;
       await ctx.runFunction("notifications:_reclaimStuck", {});
+      // N4 digest flush: bounded, no-ops when no digest categories are due. A flush's `recordSend`
+      // writes a queued `messages` row in the SAME transaction as the claim — this pass's own
+      // peek/claim/deliver loop below picks it up without a separate wake. `_flushDue` is registered
+      // only when `defineNotifications` composes `makeDigestModules` (always, in production — see
+      // index.ts); a bare component assembled from just `makeSendModules` + this driver (as several
+      // pre-N4 driver/retry/webhook tests do) has no digest module at all, so `runFunction` throws
+      // "unknown function" for the path — caught and treated as inert, so this driver behaves exactly
+      // as before N4 for a digest-less composition (never a hard dependency on the digest module).
+      try {
+        await ctx.runFunction("notifications:_flushDue", compact({ now: ctx.now() }));
+      } catch (e) {
+        if (!(e instanceof Error) || !e.message.includes("unknown function")) throw e;
+      }
       const now = ctx.now();
       const peek = (await ctx.runFunction("notifications:_peekQueued", { now })) as { ready: QueuedMessage[]; earliestDeferredAt: number | null };
       earliestDeferredAt = peek.earliestDeferredAt;
