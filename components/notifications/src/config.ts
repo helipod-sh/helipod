@@ -107,4 +107,8 @@ export interface SendArgs {
   data?: Record<string, unknown>;
   idempotencyKey?: string;
   category?: string;   // N3 — preferences/criticality key; defaults to config.defaultCategory
+  /** SERVER-AUTHORITY preference-bypass for a transactional send (OTP/security). When true the send
+   *  is delivered regardless of the recipient's preferences, exactly like a config-critical category.
+   *  Set ONLY by server code (never forward it from client input — same trust boundary as `to`). */
+  critical?: boolean;
 }

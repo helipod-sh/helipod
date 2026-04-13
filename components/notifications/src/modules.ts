@@ -70,7 +70,7 @@ export async function recordSend(db: GuestDatabaseWriter, now: number, config: N
     // of (category, channel) is suppressed, UNLESS the category is critical (OTP/security). No
     // `userId` → no preference identity → send proceeds. Read runs in the calling mutation's txn.
     const userId = args.to.userId;
-    if (userId !== undefined && !isCritical(config, category) && !(await resolvePreference(db, userId, category, channel))) {
+    if (userId !== undefined && !isCritical(config, category) && args.critical !== true && !(await resolvePreference(db, userId, category, channel))) {
       suppressed.push(channel);
       continue;
     }
