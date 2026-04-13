@@ -92,4 +92,23 @@ export const notificationsSchema = defineSchema({
   })
     .index("byTopic", ["topic"])           // fan-out scan
     .index("byUserTopic", ["userId", "topic"]), // dedup on subscribe / unsubscribe lookup
+
+  // N4 digest: a non-critical EMAIL send on a digest-configured category buffers here (instead of
+  // enqueuing a `messages` row) until the category's rolling window elapses, at which point the
+  // digest driver claims (`flushedAt`) and combines a recipient's buffered items into ONE email
+  // via `recordSend`. Additive/optional throughout — a project with no digest categories never
+  // writes here.
+  digestBuffer: defineTable({
+    recipientKey: v.string(),       // grouping key = to.email (email digest)
+    email: v.string(),              // the address the flushed digest is sent to
+    userId: v.optional(v.string()), // for the preference re-check at flush
+    category: v.string(),
+    subject: v.string(),
+    text: v.string(),
+    html: v.optional(v.string()),
+    createdAt: v.number(),
+    flushedAt: v.optional(v.number()), // set when the digest driver claims+flushes it
+  })
+    .index("byUnflushed", ["flushedAt"])                    // driver scans flushedAt = undefined
+    .index("byRecipientCategory", ["recipientKey", "category"]),
 });

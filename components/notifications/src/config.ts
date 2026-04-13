@@ -36,6 +36,20 @@ export interface InAppChannelConfig {
   templates?: InAppTemplates;
 }
 
+/** How often a digest-configured category's buffered email items are combined and flushed. */
+export type DigestFrequency = "hourly" | "daily" | "weekly";
+
+/** One buffered send's rendered content, as handed to a `DigestTemplateFn` at flush time. */
+export interface DigestItem {
+  subject: string;
+  text: string;
+  html?: string;
+  createdAt: number;
+}
+
+/** A category's digest renderer: combine a recipient's buffered items into one email. */
+export type DigestTemplateFn = (items: DigestItem[]) => EmailContent;
+
 export interface NotificationChannels {
   email?: EmailChannelConfig;
   sms?: SmsChannelConfig;
@@ -51,8 +65,13 @@ export interface NotificationsOptions {
   reclaimLeaseMs?: number;
   /** The category a send uses when it names none. Default "default". */
   defaultCategory?: string;
-  /** Per-category config; a `critical` category bypasses preferences and can't be opted out. */
-  categories?: Record<string, { critical?: boolean }>;
+  /** Per-category config; a `critical` category bypasses preferences and can't be opted out.
+   *  `digest` buffers a non-critical EMAIL send on this category into a combined periodic email
+   *  (in_app is never digested; a critical send is never digested — see `digestWindowMs`). */
+  categories?: Record<string, { critical?: boolean; digest?: DigestFrequency }>;
+  /** Per-category digest renderer (category → combine buffered items into one email). A category
+   *  with `digest` set but no template here uses the built-in `defaultDigestTemplate`. */
+  digestTemplates?: Record<string, DigestTemplateFn>;
 }
 
 /** Resolved config (driverIntervalMs defaulted) — closed over by the facade, modules, and driver. */
@@ -62,7 +81,8 @@ export interface NotificationsConfig {
   retry: RetryOptions;
   reclaimLeaseMs: number;
   defaultCategory: string;
-  categories: Record<string, { critical?: boolean }>;
+  categories: Record<string, { critical?: boolean; digest?: DigestFrequency }>;
+  digestTemplates: Record<string, DigestTemplateFn>;
 }
 
 export const DEFAULT_DRIVER_INTERVAL_MS = 5000;
@@ -79,7 +99,16 @@ export function resolveNotificationsConfig(opts: NotificationsOptions): Notifica
     reclaimLeaseMs: opts.reclaimLeaseMs ?? DEFAULT_RECLAIM_LEASE_MS,
     defaultCategory: opts.defaultCategory ?? "default",
     categories: opts.categories ?? {},
+    digestTemplates: opts.digestTemplates ?? {},
   };
+}
+
+const DIGEST_WINDOW_MS: Record<DigestFrequency, number> = { hourly: 3_600_000, daily: 86_400_000, weekly: 604_800_000 };
+
+/** The rolling-window ms for a category's digest, or null if the category doesn't digest. */
+export function digestWindowMs(config: NotificationsConfig, category: string): number | null {
+  const f = config.categories[category]?.digest;
+  return f ? DIGEST_WINDOW_MS[f] : null;
 }
 
 /** A channel medium. */
