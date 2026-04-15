@@ -85,4 +85,36 @@ describe("notifications N4 — digest flush", () => {
     await (built.driver as { __tick: () => Promise<void> }).__tick();
     expect(captured.length).toBe(1);
   });
+
+  it("a POISON digest group (throwing template) is isolated — it never blocks other delivery", async () => {
+    const captured: Array<{ subject: string }> = [];
+    const config = resolveNotificationsConfig({
+      channels: { email: { provider: { channel: "email", async send(m) { captured.push({ subject: m.subject }); return { providerMessageId: `cap-${captured.length}` }; } }, from: "x@test", templates: { hi: () => ({ subject: "REGULAR", text: "t" }) } } },
+      categories: { updates: { digest: "hourly" } },
+      digestTemplates: { updates: () => { throw new Error("poison template"); } },  // throws for the due group
+      driverIntervalMs: 10_000,
+    });
+    const component = defineComponent({
+      name: "notifications", schema: notificationsSchema,
+      modules: { ...makeSendModules(config), ...makeDigestModules(config) },
+      context: (cctx) => notificationsContext(cctx, config), contextWrite: true,
+      driver: notificationsDriver(config),
+    });
+    built = await makeNotifRuntime(component, {
+      ...appModules,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:digest": mutation(async (ctx: any) => ctx.notifications.send({ to: { email: "poison@test" }, channels: ["email"], template: "hi", category: "updates" })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:regular": mutation(async (ctx: any) => ctx.notifications.send({ to: { email: "ok@test" }, channels: ["email"], template: "hi", category: "default" })),
+    });
+    await built.runtime.run("app:digest", {});                 // buffers the poison-template digest
+    await built.runtime.run("app:regular", {});                // a normal queued email (category "default")
+    await built.runtime.runSystem("_system:backdateDigest", {}); // make the digest group due
+    // The pass flushes the due group (its template throws — caught+isolated) AND still delivers the
+    // regular queued email. Without per-group isolation the throw would abort the whole pass.
+    await (built.driver as { __tick: () => Promise<void> }).__tick();
+    expect(captured.map((c) => c.subject)).toEqual(["REGULAR"]); // the regular email WAS delivered
+    // The poison group's buffered item stays un-flushed (its txn rolled back) — never claimed-and-dropped.
+    expect((await built.readTable("notifications/digestBuffer")).every((r) => r.flushedAt == null)).toBe(true);
+  });
 });
