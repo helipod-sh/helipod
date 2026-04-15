@@ -7,6 +7,7 @@ import { makeInboxModules } from "./inbox";
 import { makeWebhookModules } from "./webhook";
 import { makePreferenceModules } from "./preferences";
 import { makeTopicModules } from "./topics";
+import { makeDigestModules } from "./digest";
 import { notificationsDriver } from "./driver";
 
 // Seam + config + content types (for adapter authors and N4 auth reuse).
@@ -23,8 +24,12 @@ export type {
   EmailTemplates, SmsTemplates, InAppTemplates,
   EmailTemplateFn, SmsTemplateFn, InAppTemplateFn,
   Channel, Recipient, InlineTemplate, SendArgs,
+  DigestFrequency, DigestItem, DigestTemplateFn,
 } from "./config";
 export { resolveNotificationsConfig, DEFAULT_DRIVER_INTERVAL_MS } from "./config";
+
+// Digest (N4): the driver-invoked flush module + the built-in combining renderer.
+export { defaultDigestTemplate } from "./digest";
 
 // Facade types (contextType target + action facade).
 export type { NotificationsContext, NotificationsActionContext } from "./facade";
@@ -65,7 +70,7 @@ export function defineNotifications(opts: NotificationsOptions): ComponentDefini
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,
-    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config) },
+    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
     contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
     contextWrite: true,

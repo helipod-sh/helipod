@@ -37,6 +37,11 @@ export interface NotificationsDriver extends Driver {
  * is mutually exclusive (whichever claims first delivers; the other skips).
  */
 export function notificationsDriver(config: NotificationsConfig): NotificationsDriver {
+  // Only run the digest flush when a category actually configures `digest` — a config-gate (not a
+  // string-matched try/catch) that also skips the digest module entirely for a digest-less or a bare
+  // test composition (`makeSendModules`-only, no `makeDigestModules`), so the driver never depends on
+  // the digest module being present unless the app opted into digest.
+  const hasDigest = Object.values(config.categories).some((c) => c.digest !== undefined);
   let ctx: DriverContext;
   let running = false;
   let pendingWake = false;
@@ -79,6 +84,23 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
     do {
       pendingWake = false;
       await ctx.runFunction("notifications:_reclaimStuck", {});
+      // N4 digest flush — PER-GROUP ISOLATION: peek the due `(recipient, category)` groups, then flush
+      // each in its OWN transaction (`_flushGroup`) inside a `try/catch`. A poison group (an app
+      // `digestTemplate` that throws) can ONLY fail its own group — it can never abort this pass and
+      // wedge delivery of every OTHER queued notification (incl. critical auth OTPs) on the node. A
+      // flush's `recordSend` writes a queued `messages` row this same pass's peek/deliver loop then
+      // picks up. Config-gated (`hasDigest`) so a digest-less/bare composition never calls the module.
+      if (hasDigest) {
+        const dnow = ctx.now();
+        const due = (await ctx.runFunction("notifications:_peekDueGroups", { now: dnow })) as Array<{ recipientKey: string; category: string }>;
+        for (const g of due) {
+          try {
+            await ctx.runFunction("notifications:_flushGroup", { recipientKey: g.recipientKey, category: g.category, now: dnow });
+          } catch (e) {
+            console.error(`[notifications] driver: digest flush for ${g.recipientKey}/${g.category} failed (isolated):`, e);
+          }
+        }
+      }
       const now = ctx.now();
       const peek = (await ctx.runFunction("notifications:_peekQueued", { now })) as { ready: QueuedMessage[]; earliestDeferredAt: number | null };
       earliestDeferredAt = peek.earliestDeferredAt;

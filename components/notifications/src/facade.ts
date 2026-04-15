@@ -32,7 +32,7 @@ async function facadeCallerId(cctx: ComponentContext): Promise<string | null> {
  *  `subscribe`/`unsubscribe` maintain a topic's subscriber set; `userId` is server-controlled (the
  *  app decides who), defaulting to the ambient caller when omitted. */
 export interface NotificationsContext {
-  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
+  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[]; deferred: Channel[] }>;
   setPreference(args: { category: string; channel?: Channel; enabled: boolean }): Promise<null>;
   subscribe(args: { topic: string; userId?: string }): Promise<null>;
   unsubscribe(args: { topic: string; userId?: string }): Promise<null>;
@@ -43,7 +43,7 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
   return {
     async send(args) {
       const r = await recordSend(cctx.db as GuestDatabaseWriter, cctx.now, config, args);
-      return { messageIds: r.messageIds, suppressed: r.suppressed };
+      return { messageIds: r.messageIds, suppressed: r.suppressed, deferred: r.deferred };
     },
     async setPreference(args) {
       const userId = await facadeCallerId(cctx);
@@ -74,8 +74,8 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
  *  them — no channel is ever silently dropped, and the claim guard makes driver-vs-inline delivery
  *  mutually exclusive (exactly-once). Portable method signatures mirror `NotificationsContext`. */
 export interface NotificationsActionContext {
-  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[] }>;
-  sendNow(args: SendArgs): Promise<{ messageIds: string[]; results: SendResult[]; suppressed: Channel[] }>;
+  send(args: SendArgs): Promise<{ messageIds: string[]; suppressed: Channel[]; deferred: Channel[] }>;
+  sendNow(args: SendArgs): Promise<{ messageIds: string[]; results: SendResult[]; suppressed: Channel[]; deferred: Channel[] }>;
   /** Fan out a send to every `topic` subscriber, preference-aware for free (each subscriber routes
    *  through `recordSend`, the single gate). Paginates `_recordSendBatch` (`topics.ts`) to
    *  completion — one page per call — so an arbitrarily large subscriber set never blows one
@@ -97,11 +97,11 @@ export interface NotificationsActionContext {
 export function notificationsActionContext(api: ActionApi, config: NotificationsConfig): NotificationsActionContext {
   return {
     async send(args) {
-      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
-      return { messageIds: r.messageIds, suppressed: r.suppressed };
+      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[]; deferred: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
+      return { messageIds: r.messageIds, suppressed: r.suppressed, deferred: r.deferred };
     },
     async sendNow(args) {
-      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
+      const r = await api.runMutation<{ messageIds: string[]; queued: QueuedMessage[]; suppressed: Channel[]; deferred: Channel[] }>("notifications:_enqueueSend", args as unknown as Record<string, unknown>);
       const results: SendResult[] = [];
       for (const m of r.queued) {
         // Claim BEFORE the network call (queued → sending). Lost the claim (the driver raced us and
@@ -126,7 +126,7 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         // `jsonToConvex` the driver's `_markResult` call must `compact` around).
         await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as Record<string, unknown>);
       }
-      return { messageIds: r.messageIds, results, suppressed: r.suppressed };
+      return { messageIds: r.messageIds, results, suppressed: r.suppressed, deferred: r.deferred };
     },
     async sendToTopic(args) {
       // Fail fast BEFORE any page/DB work: topics only know a subscriber's `userId`, not their
