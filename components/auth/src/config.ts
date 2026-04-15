@@ -19,6 +19,10 @@ export interface EmailConfig {
   requireEmailVerification: boolean;
   createUsersOnEmailSignIn: boolean;
   templates: EmailTemplates;
+  /** N4 auth-unification: the `category` passed to a composed `@stackbase/notifications`' `send`
+   *  (preferences/criticality key on that side). Defaults to `"auth"`. Irrelevant when no
+   *  notifications component is composed (the `e.provider.send` fallback ignores it). */
+  notificationCategory: string;
 }
 
 /** Resolved OAuth config (defaults applied). Present iff `defineAuth({ oauth })` was passed. There is
@@ -60,6 +64,10 @@ export interface EmailOptions {
   requireEmailVerification?: boolean;
   createUsersOnEmailSignIn?: boolean;
   templates?: Partial<EmailTemplates>;
+  /** N4 auth-unification: the `category` auth passes to a composed `@stackbase/notifications`'
+   *  `send` when routing through it (default `"auth"`). Has no effect on the no-notifications
+   *  fallback (`e.provider.send` doesn't take a category). */
+  notificationCategory?: string;
 }
 
 /** Auth component configuration (spec "Component surface"). All fields have defaults; a project
@@ -128,6 +136,7 @@ function resolveEmailConfig(opts: EmailOptions): EmailConfig {
     requireEmailVerification: opts.requireEmailVerification ?? EMAIL_DEFAULTS.requireEmailVerification,
     createUsersOnEmailSignIn: opts.createUsersOnEmailSignIn ?? EMAIL_DEFAULTS.createUsersOnEmailSignIn,
     templates: resolveTemplates(opts.templates), // merge partial overrides onto defaults
+    notificationCategory: opts.notificationCategory ?? "auth",
   };
 }
 

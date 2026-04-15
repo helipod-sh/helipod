@@ -4,6 +4,7 @@ import type { AuthConfig } from "./config";
 import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
 import type { Flow } from "./email/templates";
 import { makeExternalModules } from "./external";
+import type { NotificationsSendFacade } from "./notifications-facade";
 import {
   RefreshStaleError,
   RefreshExpiredError,
@@ -510,7 +511,23 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
           ? `${e.baseUrl.replace(/\/$/, "")}/auth/${flow}?token=${decision.code}&email=${encodeURIComponent(decision.email)}`
           : undefined;
         const rendered = e.templates[flow]({ appName: e.appName, email: decision.email, code: isTokenFlow(flow) ? undefined : decision.code, url, ttlMs: ttlFor(config, flow) });
-        await e.provider.send({ to: decision.email, from: e.from, ...rendered });
+        const notifications = (ctx as unknown as { notifications?: NotificationsSendFacade }).notifications;
+        if (notifications) {
+          // UNIFIED PATH: send through the one notification delivery path — N2 retries + reclaim, the
+          // shared provider, a unified sender. `critical: true` so the OTP is never suppressed by a
+          // recipient's notification preferences. Auth's own rate-limit/anti-enumeration guards
+          // already ran in `_issueCode` above.
+          await notifications.send({
+            to: { email: decision.email },
+            channels: ["email"],
+            template: { email: rendered },
+            category: e.notificationCategory,
+            critical: true,
+          });
+        } else {
+          // FALLBACK (no notifications composed): auth's own EmailProvider — byte-identical to before.
+          await e.provider.send({ to: decision.email, from: e.from, ...rendered });
+        }
       }
       return { sent: true };   // ALWAYS — anti-enumeration (decision 7)
     });
