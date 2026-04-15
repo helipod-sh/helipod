@@ -6,18 +6,23 @@ provider adapters (Resend, Twilio, or your own). Its headline feature is a **rea
 inbox**: an in-app notification is just a row in a live-queried table, so a user's inbox and unread
 count update in real time with no dedicated realtime service.
 
-Both your app code and (in a later release) the auth component send through the same seam, so an
-OTP email and a marketing blast share one delivery path with the same at-most-once guarantee.
+Both your app code **and** the auth component (`@stackbase/auth`, when composed alongside) send
+through the same seam, so an OTP email and a marketing blast share one delivery path with the same
+at-most-once guarantee — see [Auth unification](#auth-unification) below.
 
-> **Scope (N1 + N2 + N3, what this release is).** Sending across email/SMS/in-app, transactional
-> at-most-once delivery, the reactive inbox (N1); automatic retry-with-backoff on a transient
-> send failure, stuck-send reclaim, and inbound delivery webhooks with cross-provider status
-> normalization (delivered/bounced/opened/…) (N2 — see [Delivery reliability](#delivery-reliability)
-> below); per-user channel/category preferences with a critical-bypass, and topics/groups fan-out
-> (N3 — see [Preferences](#preferences) and [Topics](#topics) below). **Deferred:**
-> digest/batching and the auth-unification (N4); multi-channel provider fallback and time-based
-> routing (post-arc delivery-mechanics); a push channel (FCM/APNs/Expo) and a markup/visual
-> template registry (post-arc).
+> **Scope (N1 + N2 + N3 + N4 — the notification arc is COMPLETE).** Sending across email/SMS/in-app,
+> transactional at-most-once delivery, the reactive inbox (N1); automatic retry-with-backoff on a
+> transient send failure, stuck-send reclaim, and inbound delivery webhooks with cross-provider
+> status normalization (delivered/bounced/opened/…) (N2 — see
+> [Delivery reliability](#delivery-reliability) below); per-user channel/category preferences with a
+> critical-bypass, and topics/groups fan-out (N3 — see [Preferences](#preferences) and
+> [Topics](#topics) below); an email digest that combines a category's buffered sends into one
+> periodic message, and routing `@stackbase/auth`'s transactional emails through this same delivery
+> path (N4 — see [Digest](#digest) and [Auth unification](#auth-unification) below). This closes the
+> planned notification arc (N1 substrate → N2 reliability → N3 preferences/topics → N4
+> digest/auth-unify). **Deferred** (post-arc, see [What's deferred](#whats-deferred)): SMS/in_app
+> digest, per-user digest frequency, threshold batching, a crash-orphan digest reaper, multi-channel
+> provider fallback, and time-of-day-aware routing.
 
 ## Setup
 
@@ -366,6 +371,23 @@ defineNotifications({
 
 A `setPreference` call trying to disable a critical category throws rather than silently no-opping.
 
+**Per-send override.** A single `send` can also bypass preferences without a config-level category
+by passing `critical: true` directly:
+
+```ts
+await ctx.notifications.send({
+  to: { userId, email }, channels: ["email"], template: "passwordReset",
+  category: "security", critical: true,   // delivered regardless of this recipient's preferences
+});
+```
+
+`critical` is a **server-authority** flag: it must be set only by server code (a mutation/action
+handler you write, or a composed component like `@stackbase/auth` — see
+[Auth unification](#auth-unification)), never forwarded straight from client-supplied arguments —
+the same trust boundary as `to`. It's how a single transactional send (a password-reset link, a
+new-device alert) guarantees delivery without requiring every such category be marked `critical` in
+config up front.
+
 ### Reading and setting preferences
 
 `ctx.notifications.setPreference(...)` (mutation-only; also a registered `notifications:setPreference`
@@ -473,11 +495,105 @@ large):
   subscribe/unsubscribe landing mid-broadcast may include or skip that one subscriber; a keyed
   broadcast stays safe against a double either way.
 
+## Digest
+
+A category can be configured to **digest**: instead of sending each `email` immediately, matching
+sends are buffered and combined into one periodic email per recipient — the mechanism behind a
+"daily updates" or "weekly summary" email that doesn't spam a user once per event.
+
+```ts
+defineNotifications({
+  channels: { /* … */ },
+  categories: {
+    updates: { digest: "daily" },   // "hourly" | "daily" | "weekly"
+  },
+  digestTemplates: {
+    // Combine a recipient's buffered items into one email. Falls back to a built-in plain-text
+    // concatenation (`defaultDigestTemplate`) for a digest category with no template here.
+    updates: (items) => ({
+      subject: `You have ${items.length} update${items.length === 1 ? "" : "s"}`,
+      text: items.map((i) => `• ${i.subject}\n${i.text}`).join("\n\n"),
+    }),
+  },
+});
+```
+
+- **Email-only.** Digest applies only to the `email` channel. `in_app` is never digested — the inbox
+  is already the live, immediate view of what happened, so batching it would just add lag. A
+  **`critical` send is never digested** either (config-critical category or the per-send `critical`
+  flag) — a transactional email always goes out immediately, digest or not.
+- **Rolling window.** Each buffered item's own age (not a fixed wall-clock boundary) determines when
+  a recipient's group is due: the driver flushes a `(recipient, category)` group once its *oldest*
+  buffered item has waited out the configured window (`"hourly"` = 1h, `"daily"` = 24h, `"weekly"` =
+  7d) — the same recurring driver that delivers queued sends and reclaims stuck ones (see
+  [Delivery reliability](#delivery-reliability)) also flushes due digests on every pass.
+- **Preferences are re-checked at flush**, not at buffer time — an opt-out recorded anytime before
+  the flush suppresses the whole combined digest for that recipient/category, through the exact same
+  `recordSend` gate every other send uses.
+- **The send return tells you it was buffered.** A `send` on a digest-configured category returns
+  `deferred: Channel[]` alongside `messageIds`/`suppressed` — `["email"]` means that channel was
+  buffered rather than queued for immediate delivery:
+
+  ```ts
+  const { messageIds, suppressed, deferred } = await ctx.notifications.send({
+    to: { userId, email }, channels: ["email"], template: "weeklyDigest", category: "updates",
+  });
+  // deferred: ["email"] — buffered into the digest; nothing was sent (and nothing was suppressed)
+  ```
+
+## Auth unification
+
+When you compose **both** `@stackbase/auth` and `@stackbase/notifications` in the same
+`stackbase.config.ts`, auth's own transactional emails — email verification, password reset, magic
+link, and OTP codes — automatically route through the notifications delivery path instead of auth's
+own standalone `EmailProvider`. You get this for free just by composing both; there's no extra
+wiring:
+
+```ts
+export default defineConfig({
+  components: [
+    defineNotifications({ channels: { email: { provider: resendEmail(RESEND_KEY), from: "no-reply@app.test" } } }),
+    defineAuth({ /* … */ }),   // auth's OTP/reset/magic-link emails now flow through notifications
+  ],
+});
+```
+
+- **What you get.** Auth's emails inherit N2's retry-with-backoff and stuck-send reclaim, whichever
+  provider you've wired notifications to (so one Resend/Twilio-style adapter serves both auth and
+  your own app sends), and a single unified `from` address for every outbound email your app sends —
+  one delivery path, one place to reason about deliverability.
+- **Always delivered — the `critical` flag.** Every auth email is sent with `critical: true`, the
+  same server-authority preference-bypass flag described in
+  [Critical categories](#critical-categories-cant-be-opted-out) above — a password-reset or OTP
+  email can never be silently dropped by a recipient's notification preferences. This flag is set
+  only by auth's own server-side code; it is never something a client can trigger.
+- **The category.** Auth's emails use the `"auth"` category by default — configurable per email
+  channel:
+
+  ```ts
+  defineAuth({
+    email: { provider: /* … */, from: "auth@app.test", notificationCategory: "security" },
+  });
+  ```
+
+- **Graceful fallback — auth stays independent.** `@stackbase/auth` does not depend on
+  `@stackbase/notifications`; it duck-types a minimal `ctx.notifications` shape at runtime. If
+  notifications isn't composed in your project, auth silently falls back to its own `EmailProvider`
+  — byte-identical to how it behaved before this feature existed. Composing notifications is purely
+  additive: nothing breaks, and nothing else needs to change, if you add or remove it later.
+
 ## What's deferred
 
-- **N4** — digest/batching; routing the auth component's OTP/magic-link/verification emails through
-  this seam.
-- **Post-arc delivery-mechanics** — multi-channel provider fallback (e.g. retry a failed email send
-  over SMS) and time-of-day/quiet-hours-aware routing.
-- **Post-arc** — a push channel (FCM/APNs/Expo); a markup/visual template registry (Liquid/MJML).
-  Inline typed template functions are the v1 authoring model.
+The planned notification arc (N1 substrate → N2 reliability → N3 preferences/topics → N4
+digest/auth-unify) is **complete**. What remains is explicitly **post-arc**, not a gap in this
+release:
+
+- **Digest scope** — SMS/in_app digest (email-only today), per-user digest frequency (today's
+  frequency is a fixed per-category config, not user-selectable), threshold-based batching (e.g.
+  "digest after N items" rather than purely time-windowed), and a crash-orphan digest reaper (a
+  `flushedAt`-claimed-but-never-delivered row is not yet automatically recovered, unlike the queued-
+  message reclaim in [Delivery reliability](#delivery-reliability)).
+- **Delivery-mechanics** — multi-channel provider fallback (e.g. retry a failed email send over SMS)
+  and time-of-day/quiet-hours-aware routing.
+- **Beyond the arc** — a push channel (FCM/APNs/Expo); a markup/visual template registry
+  (Liquid/MJML). Inline typed template functions are the v1 authoring model.
