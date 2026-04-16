@@ -249,7 +249,11 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
   function armBeat(): void {
     if (stopped) return;
     if (beatTimer !== null) ctx.clearTimer(beatTimer);
-    beatTimer = ctx.setTimer(ctx.now() + BEAT_MS, () => {
+    // `backstopMs` (not `BEAT_MS` raw): the beat is a pure backstop poll, never next-work — the call
+    // site is how a driver declares that, so a host where every wake costs a cold start can stretch
+    // it. The documented cost there: an external `triggers:resume` is noticed on the STRETCHED
+    // cadence, not within ~30s.
+    beatTimer = ctx.setTimer(ctx.now() + ctx.backstopMs(BEAT_MS), () => {
       wakeAll();
       armBeat();
     });

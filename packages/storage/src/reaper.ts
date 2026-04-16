@@ -71,7 +71,11 @@ export function storageReaper(blobStore: BlobStore, opts?: { sweepMs?: number })
       ctx.clearTimer(timer);
       timer = null;
     }
-    timer = ctx.setTimer(ctx.now() + sweepMs, wake);
+    // `backstopMs` (not `sweepMs` raw): this sweep is a pure backstop poll, never next-work — the
+    // call site is how a driver declares that, so a host where every wake costs a cold start can
+    // stretch it. Reaping stays correct at any cadence (`onCommit` still runs a pass immediately on
+    // an `_storage` write; the sweep only bounds how long an ORPHANED row's bytes linger).
+    timer = ctx.setTimer(ctx.now() + ctx.backstopMs(sweepMs), wake);
   }
 
   // The timer/onCommit entry point: fire-and-forget, since both callback shapes are `() => void`

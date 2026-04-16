@@ -32,6 +32,8 @@ function makeFakeCtx(runFn: (path: string) => Promise<unknown>): { ctx: DriverCo
       if (t) t.cleared = true;
     },
     now: () => 1000,
+    // Identity, like the runtime's own default — this fake is a long-lived-host stand-in.
+    backstopMs: (d: number) => d,
     readLog: async () => ({ changes: [], maxScannedTs: 0 }),
   };
   return { ctx, timers };
