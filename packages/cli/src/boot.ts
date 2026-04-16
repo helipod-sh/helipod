@@ -1167,6 +1167,11 @@ export async function bootProject(opts: {
   objectStoreReplicaPollMs?: number;
   /** Tier 3 Slice 8 follow-on (replica write-forwarding — see `bootLoaded`'s matching opt). */
   writerUrl?: string;
+  /** The wake seam (see `bootLoaded`'s matching opts) — `serve --wake-url` builds the `WakeHost`
+   *  (`httpWakeHost`) and `--backstop-min-ms` the cadence floor; both are pure pass-throughs to
+   *  `bootLoaded` -> `createEmbeddedRuntime`. Absent (every existing deployment) → `setTimeout`. */
+  wakeHost?: WakeHost;
+  backstopMs?: (defaultMs: number) => number;
 }): Promise<BootResult> {
   const loaded = await loadConvexDir(opts.convexDir);
   const config = await loadConfig(dirname(opts.convexDir));
@@ -1197,6 +1202,12 @@ export async function bootProject(opts: {
       : {}),
     ...(opts.objectStoreReplicaPollMs !== undefined ? { objectStoreReplicaPollMs: opts.objectStoreReplicaPollMs } : {}),
     ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
+    // The wake seam. `bootProject` forwards every key EXPLICITLY (never `...opts`), so a key added to
+    // `bootLoaded` alone silently stops here — which is exactly how `serve --wake-url` shipped
+    // building a `WakeHost` that nothing ever received. `serve` passes these via a conditional
+    // spread, and TS does NOT excess-property-check spreads, so the drop was invisible to tsc.
+    ...(opts.wakeHost ? { wakeHost: opts.wakeHost } : {}),
+    ...(opts.backstopMs ? { backstopMs: opts.backstopMs } : {}),
   });
 }
 
