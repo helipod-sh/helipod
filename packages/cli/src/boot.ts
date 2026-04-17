@@ -20,7 +20,7 @@ import {
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
 import type { GeneratedBundle } from "@stackbase/codegen";
-import type { ComponentDefinition, Driver } from "@stackbase/component";
+import type { ComponentDefinition, Driver, WakeHost } from "@stackbase/component";
 import type { RegisteredFunction } from "@stackbase/executor";
 import type { JSONValue } from "@stackbase/values";
 import type { BlobStore } from "@stackbase/blobstore";
@@ -839,6 +839,21 @@ export async function bootLoaded(opts: {
    * `REPLICA_WRITE_REJECTED_MESSAGE` behavior.
    */
   writerUrl?: string;
+  /**
+   * The wake seam: the host's single alarm, for a host that STOPS THE PROCESS between requests (so
+   * `setTimeout` never fires and every driver silently goes dead). `serve.ts` builds this from
+   * `--wake-url`/`STACKBASE_WAKE_URL` (`httpWakeHost`); the runtime then multiplexes every driver
+   * timer down to one arm. Threaded straight into `createEmbeddedRuntime`. Unset (every existing
+   * deployment) → plain `setTimeout`, byte-for-byte unchanged.
+   */
+  wakeHost?: WakeHost;
+  /**
+   * The wake seam's other half: answers `DriverContext.backstopMs`, the floor/stretch applied to a
+   * driver's BACKSTOP poll cadence only (never a next-work wake). `serve.ts` builds this from
+   * `--backstop-min-ms`/`STACKBASE_BACKSTOP_MIN_MS`. Threaded straight into `createEmbeddedRuntime`.
+   * Unset → identity (the drivers' own 30s/60s), byte-for-byte unchanged.
+   */
+  backstopMs?: (defaultMs: number) => number;
 }): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
@@ -1024,6 +1039,12 @@ export async function bootLoaded(opts: {
     // Fleet B4 (T4): route every shard's commits through the group-commit committer loop — resolved
     // above (fleet: threaded in already-resolved; non-fleet: read from STACKBASE_GROUP_COMMIT).
     groupCommit,
+    // The wake seam (`serve --wake-url` / `--backstop-min-ms`): a host that stops the process between
+    // requests fires driver timers via `runtime.fireDueTimers()` instead of `setTimeout`, and can
+    // stretch the pure-backstop cadences so an idle app isn't cold-started every 30s. Both absent →
+    // today's `setTimeout` + 30s/60s behavior, unchanged.
+    ...(opts.wakeHost ? { wakeHost: opts.wakeHost } : {}),
+    ...(opts.backstopMs ? { backstopMs: opts.backstopMs } : {}),
   });
 
   // Tier 3 Slice 8, Task 8.2: NOW that the replica's own runtime exists, start the reactive-tailer

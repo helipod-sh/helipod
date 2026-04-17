@@ -30,6 +30,22 @@ export interface LogChange {
   changeId: string;
 }
 
+/**
+ * A host's ability to wake the process at a wall-clock instant. The runtime multiplexes ALL driver
+ * timers down to ONE pending wake, so a host implements exactly one alarm — which is all a Durable
+ * Object has.
+ *
+ * Absolute, never a delay: a delay forces the runtime to compute `T - now()` and the host to add it
+ * back, across two clocks that disagree (a hibernating host's process clock may have skipped hours),
+ * and it would restart the countdown on every cold boot — so repeated sleeps could defer a job
+ * forever. An absolute instant keeps one source of truth, and a timer armed by yesterday's process
+ * is correctly already-overdue when today's process re-peeks.
+ */
+export interface WakeHost {
+  /** Arm a single wake at absolute `atMs`, replacing any prior. `null` = nothing pending. */
+  armWake(atMs: number | null): void;
+}
+
 /** The capabilities a `Driver` gets to wake on commits/timers and act outside a request. */
 export interface DriverContext {
   /** Runs a registered fn privileged + namespaced, outside a request. */
@@ -40,6 +56,12 @@ export interface DriverContext {
   setTimer(atMs: number, cb: () => void): number;
   clearTimer(handle: number): void;
   now(): number;
+  /**
+   * Cadence for a PURE BACKSTOP poll (not a next-work wake). A long-lived host returns `defaultMs`
+   * unchanged; a host where every wake costs a cold start may stretch it. The CALL SITE is the tag:
+   * calling this is how a driver declares "this timer is a backstop, not real work".
+   */
+  backstopMs(defaultMs: number): number;
   /**
    * Read committed changes from the MVCC log after `afterTs`, in ascending ts order — the durable
    * change feed (`@stackbase/triggers`). `limit` bounds the number of SCANNED revisions (not matched
