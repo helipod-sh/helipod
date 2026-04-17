@@ -1,10 +1,16 @@
 ---
 title: DevTools
+status: planned
 ---
 
 # DevTools
 
 > In-app overlay for high-signal debugging of operations, subscriptions, logs, and performance.
+
+> 🚧 **Planned — not yet shipped.** This page describes the intended design. The `@stackbase/devtools`
+> package **does not exist yet** and the code on this page will not run. For debugging today, use the
+> **dashboard** at `http://localhost:3000/_dashboard` ([Dashboard](/local/dashboard)) — it has a live
+> data browser, logs viewer, and function runner.
 
 The DevTools overlay provides real-time visibility into your app's Stackbase activity during development.
 

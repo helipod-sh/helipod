@@ -4,141 +4,126 @@ title: Dev Server
 
 # Dev Server
 
-> Local dev workflow with Bun, Node, or Cloudflare dev.
+> Local dev workflow with `stackbase dev`.
 
-Day-to-day development workflows: start the dev server, generate types, run functions, and inspect data.
+Day-to-day development: start the dev server, generate types, run functions, and inspect data.
 
 ## Start dev server
 
 ```bash
-# Auto-detect bun or node
 stackbase dev
-
-# Force runtime
-stackbase dev --bun
-stackbase dev --node
-stackbase dev --cf
 ```
 
-Notes:
-- Bun/Node dev uses local SQLite + filesystem blobstore in `./.stackbase/local`.
-- Cloudflare dev uses `wrangler dev` under the hood.
+Defaults:
 
----
+| Option | Default | Flag |
+|---|---|---|
+| Port | `3000` | `--port <n>` |
+| Hostname | `127.0.0.1` (localhost only) | `--ip <addr>` |
+| Function directory | `convex/` | `--dir <path>` |
+| Database | SQLite at `.stackbase/data.db` | `--data <path>` |
 
-## Runtime selection
+`stackbase dev` watches your functions, re-runs codegen, hot-reloads on change, and serves the sync
+WebSocket, `/api/*`, your `httpAction` routes, and the dashboard.
 
-| Runtime | Best for | Requirements |
-|---------|----------|--------------|
-| **Bun** (default) | Fast local dev | Bun installed |
-| **Node.js** | Node-only environments | Node.js 22.5+ with flags |
-| **Cloudflare** | Testing CF behavior | Wrangler installed |
+Other flags: `--web <dir>` (serve a static web UI alongside the API), `--database-url <url>`
+(Postgres instead of SQLite), `--storage-bucket` / `--storage-endpoint` (S3-compatible file
+storage).
 
-### Hostname defaults
+### Runtime selection
 
-Each runtime has different default binding behavior:
+The runtime is **auto-detected** — Bun if you're running under Bun, otherwise Node. There are no
+`--bun`, `--node`, or `--cf` flags; run the CLI with the runtime you want:
 
-| Runtime | Default hostname | Accessible from |
-|---------|------------------|-----------------|
-| **Bun** | `0.0.0.0` | All network interfaces (LAN accessible) |
-| **Node.js** | `127.0.0.1` | Localhost only |
-| **Cloudflare** | N/A | Via wrangler |
+```bash
+bun stackbase dev     # Bun (primary)
+node stackbase dev    # Node
+```
 
-> **Security note**: Bun's default (`0.0.0.0`) makes the server accessible from other devices on your network. For local-only development, use `--ip 127.0.0.1` or set `ip: "127.0.0.1"` in your config.
+Bun is the primary runtime. There is no Cloudflare dev mode — see
+[Cloudflare](/deploy/cloudflare) for what that (experimental) deployment path actually looks like.
 
 ### Node.js requirements
 
-> **Node.js 22.5+ required**: The Node.js runtime uses the built-in `node:sqlite` module, which requires Node.js version 22.5 or higher with experimental flags.
+> **Node.js 22.5+ required**: The Node.js path uses the built-in `node:sqlite` module, which
+> requires Node.js 22.5 or higher with experimental flags.
 
-Node.js SQLite support requires:
-
-1. Node.js version **22.5 or higher**
-2. Experimental flags when running:
-
-```bash
-# The CLI handles this automatically, but for manual runs:
-node --experimental-sqlite --experimental-vm-modules server.js
-```
-
-If you see `Cannot find module 'node:sqlite'`, check your Node.js version.
+If you see `Cannot find module 'node:sqlite'`, check your Node.js version and that you're running
+with `--experimental-sqlite`.
 
 ---
 
 ## Generate types
 
 ```bash
-# Runtime analysis (preferred)
 stackbase codegen
-
-# Static fallback
-stackbase codegen --static
+stackbase codegen --dir convex   # if your functions aren't in ./convex
 ```
+
+Writes `convex/_generated/`. `stackbase dev` does this automatically on change; you need the
+explicit command before [`stackbase serve`](/self-hosting), which never runs codegen.
 
 ---
 
 ## Run functions
 
+There is no `stackbase run` command. Use the **dashboard's function runner**
+(`http://localhost:3000/_dashboard`), or `POST /api/run`:
+
 ```bash
-stackbase run messages:list
-stackbase run users:create '{"name":"Alice"}'
+curl -X POST http://localhost:3000/api/run \
+  -H 'content-type: application/json' \
+  -d '{"path": "messages:list", "args": {"limit": 5}}'
 ```
+
+The response is `{"value": …, "committed": …, "commitTs": "…"}`.
 
 ---
 
 ## Browse data
 
-```bash
-stackbase data
-stackbase data users --limit 50
-```
-
-Or use the dashboard at `http://localhost:3000/_dashboard`.
+There is no `stackbase data` command. Use the dashboard at
+`http://localhost:3000/_dashboard` — it has a live data browser with cursor pagination and
+structured filters.
 
 ---
 
 ## CLI commands reference
 
+`stackbase help` is the source of truth:
+
 | Command | Description |
 |---------|-------------|
-| `stackbase init` | Initialize a new Stackbase project with starter files |
-| `stackbase dev` | Start the development server |
-| `stackbase codegen` | Generate TypeScript types from your functions |
-| `stackbase run <fn> [args]` | Execute a function from the command line |
-| `stackbase data [table]` | Browse database contents |
-| `stackbase deploy` | Deploy to Cloudflare Workers |
-| `stackbase components` | Manage Convex components (experimental) |
+| `stackbase dev` | Run the engine with hot reload + dashboard |
+| `stackbase serve` | Run the production server (requires `STACKBASE_ADMIN_KEY`) |
+| `stackbase deploy` | Push `convex/` to a running `serve --allow-deploy` and hot-swap it live |
+| `stackbase build` | Compile the app to a self-contained executable |
+| `stackbase migrate` | Migrate a Convex project into Stackbase (imports + report) |
+| `stackbase codegen` | Regenerate `convex/_generated` types |
+| `stackbase fleet reshard` | Change a stopped fleet's shard count |
+| `stackbase objectstore reshard` | Change a stopped object-storage deployment's shard count |
+| `stackbase help` | Show help |
 
-### stackbase init
+> 🚧 **Planned, not built:** `stackbase init` (project scaffolding), `stackbase run` (invoke a
+> function from the shell), and `stackbase data` (browse tables from the shell). Today, create
+> projects by hand ([Quickstart](/quickstart)) and use the dashboard or `/api/run`.
 
-Creates a new Stackbase project with starter files:
+### Components
 
-```bash
-stackbase init
-```
-
-This creates:
-- `convex/` directory with a sample function
-- `convex/_generated/` for generated types
-- Basic project structure
-
-### stackbase components
-
-Experimental support for Convex components:
-
-```bash
-stackbase components
-```
-
-> **Note**: Full component support is not yet implemented. This command provides basic component management for early adopters.
+Components (`@stackbase/scheduler`, `@stackbase/workflow`, `@stackbase/triggers`,
+`@stackbase/auth`, `@stackbase/authz`) are **opt-in per project via `stackbase.config.ts`** — there
+is no `stackbase components` command and no auto-install. See
+[`examples/chat/stackbase.config.ts`](../../examples/chat) for the reference pattern.
 
 ---
 
 ## Common questions
 
-- **Where is local data stored?** `./.stackbase/local/` (SQLite database and file storage).
-- **How do I change the port?** `stackbase dev --port 4000` or set `port` in config.
-- **How do I switch runtimes?** Use `--bun`, `--node`, or `--cf`.
-- **Can I clear my local data?** Delete the `.stackbase/local/` directory and restart.
+- **Where is local data stored?** `.stackbase/data.db` by default (`--data` to change it).
+- **How do I change the port?** `stackbase dev --port 4000`.
+- **How do I switch runtimes?** Run the CLI under Bun or Node; it auto-detects.
+- **Can I clear my local data?** Delete `.stackbase/` and restart.
+- **Is the server reachable from my LAN?** Not by default — it binds `127.0.0.1`. Use
+  `--ip 0.0.0.0` to expose it.
 
 ---
-

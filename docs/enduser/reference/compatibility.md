@@ -101,9 +101,9 @@ All supported features work consistently across runtimes:
 
 | Runtime | Status | Notes |
 |---------|--------|-------|
-| Cloudflare Workers | Production | Primary deployment target |
-| Bun | Production | Self-hosting and local dev |
+| Bun | Production | Self-hosting and local dev. The primary runtime. |
 | Node.js | Production | Self-hosting (requires 22.5+, experimental flags) |
+| Cloudflare | Experimental | Not a Workers-native build — Cloudflare runs the shipped `stackbase serve` image on **Workers + Containers + R2**. Works, scales to zero, but **scheduled functions, crons, triggers, and the storage reaper do not fire** (the container stops between requests). See [Cloudflare](/deploy/cloudflare). |
 
 ---
 

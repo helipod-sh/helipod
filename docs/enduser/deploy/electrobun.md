@@ -1,10 +1,19 @@
 ---
 title: Electrobun
+status: planned
 ---
 
 # Electrobun
 
 > Embed Stackbase in an Electrobun desktop app with Bun and bun:sqlite for lightweight, local-first storage.
+
+> 🚧 **Planned — not yet shipped.** This page describes the intended design. The `createStackbase`
+> API and the `@stackbase/runtime-bun` package below **do not exist** — the code will not run.
+>
+> **What works today:** [`stackbase build`](/deploy/standalone-binary) compiles your app into a
+> self-contained executable (embedding Bun and `bun:sqlite`) that you can ship as a sidecar. It
+> prints a machine-readable `{"ready":true,"port":N,"url":"…"}` line on stdout for parent-process
+> integration.
 
 Run Stackbase inside Electrobun's Bun main process for lightweight, offline-capable desktop apps. Uses the system WebView instead of bundled Chromium — ~14 MB bundles, sub-50ms cold starts.
 

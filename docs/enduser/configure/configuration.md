@@ -1,12 +1,39 @@
 ---
 title: Configuration & Extensibility
+status: planned
 ---
 
 # Configuration & Extensibility
 
 > stackbase.config.ts plus custom adapters.
 
-Customize Stackbase configuration, use it as a library, and plug in custom adapters when needed.
+> 🚧 **Planned — not yet shipped.** This page describes an intended configuration and
+> adapter-composition model. **Almost none of it exists**, and the code below will not run:
+> `createStackbase`, `StackbaseServer`, `StackbaseOptions`, `defineStackbaseRuntime`, the
+> `@stackbase/core` interfaces, and the per-runtime adapter packages
+> (`@stackbase/docstore-bun-sqlite`, `@stackbase/blobstore-cf-r2`, …) are all fictional. So is
+> every `stackbase.config.ts` field shown here except `components`.
+>
+> **The reality is much smaller.** `stackbase.config.ts` exists, but its only field is
+> `components`:
+>
+> ```ts
+> // stackbase.config.ts — the REAL shape
+> import type { StackbaseConfig } from "@stackbase/cli";
+> import { defineScheduler } from "@stackbase/scheduler";
+>
+> const config: StackbaseConfig = {
+>   components: [defineScheduler()],
+> };
+> export default config;
+> ```
+>
+> **Everything else is a CLI flag or environment variable**, not a config field — `--port`, `--ip`,
+> `--dir`, `--data`, `--database-url`, `--object-store`, `--storage-bucket`,
+> `--storage-endpoint`, `--allow-deploy`. See [Dev Server](/local/dev-server) and
+> [Docker self-hosting](/self-hosting) for the real surface. Real adapter packages are
+> `@stackbase/docstore-sqlite`, `@stackbase/docstore-postgres`, `@stackbase/blobstore-fs`, and
+> `@stackbase/blobstore-s3` — selected by flag, never imported by your app.
 
 ## CLI config file
 
