@@ -5,6 +5,12 @@
       "source": "bun.sh",
       "sourceType": "well-known",
       "computedHash": "9458294734e42da6b2445af25ef5b0b6aaa349c6f75db4ea4cd423e83b5b8620"
+    },
+    "cloudflare": {
+      "source": "cloudflare/skills",
+      "sourceType": "github",
+      "skillPath": "skills/cloudflare/SKILL.md",
+      "computedHash": "a1646a6a2fb7cc683de5bf8357e5d6ae02db6fd0bf771d633c1890318e25bff2"
     }
   }
 }
