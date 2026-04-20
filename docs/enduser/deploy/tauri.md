@@ -1,10 +1,22 @@
 ---
 title: Tauri
+status: planned
 ---
 
 # Tauri
 
 > Run Stackbase sidecar-less inside a Tauri webview using embedded runtime + SQL plugin.
+
+> 🚧 **Planned — not yet shipped.** This page describes the intended design. The
+> `@stackbase/docstore-tauri-sql` package below **does not exist**, and the sidecar-less
+> in-webview path is not built — the code will not run. (`@stackbase/runtime-embedded` *is* real,
+> but it is not wired to a Tauri SQL plugin.)
+>
+> **What works today:** [`stackbase build`](/deploy/standalone-binary) compiles your app into a
+> self-contained executable you can ship as a Tauri **sidecar** — cross-compilable to
+> `linux-x64`/`linux-arm64`/`darwin-x64`/`darwin-arm64`/`windows-x64`, and it prints a
+> machine-readable `{"ready":true,"port":N,"url":"…"}` line on stdout for parent-process
+> integration.
 
 Stackbase can run fully in Tauri's JavaScript context. This removes localhost sidecars and uses `@tauri-apps/plugin-sql` for SQLite persistence.
 

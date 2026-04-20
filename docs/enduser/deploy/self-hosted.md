@@ -10,80 +10,58 @@ Run Stackbase on any platform that supports Bun or Node with persistent storage 
 
 ## The model
 
-Any platform that can run a long-lived HTTP server with WebSocket support can host the Bun or Node runtime. You'll need persistent disk for SQLite and blob storage.
+Any platform that can run a long-lived HTTP server with WebSocket support can host Stackbase. You
+run the **`stackbase serve` CLI** — there is no server to write. You'll need persistent disk for
+SQLite and blob storage.
 
 ## Quick start
 
-### Bun runtime
-
-```ts
-import { createStackbase } from "@stackbase/runtime-bun";
-
-const server = createStackbase({
-  convexDir: "./convex",
-});
-await server.listen({ port: 3000 });
-
-console.log(`Server running at ${server.url}`);
+```bash
+STACKBASE_ADMIN_KEY=$(openssl rand -hex 32) \
+  stackbase serve --dir ./convex --data ./data/db.sqlite --port 3000
 ```
 
-### Node runtime
+`serve` binds `0.0.0.0`, requires `STACKBASE_ADMIN_KEY` (it refuses to start without one), never
+runs codegen (commit your `convex/_generated/` first), and shuts down gracefully on
+`SIGTERM`/`SIGINT`. It serves the sync WebSocket, `/api/*`, your `httpAction` routes, and the
+dashboard at `/_dashboard` on the same port.
 
-```ts
-import { createStackbase } from "@stackbase/runtime-node";
+**Node note:** Bun is the primary runtime. On Node, use 22.5+ with the `--experimental-sqlite` flag.
 
-const server = createStackbase({
-  convexDir: "./convex",
-});
-await server.listen({ port: 3000, hostname: "127.0.0.1" });
+## Storage backends
 
-console.log(`Server running at ${server.url}`);
+Storage is selected by flag or environment variable — not by composing adapters in code. The
+engine never imports a driver directly.
+
+```bash
+# SQLite on local disk (default — no flag needed)
+stackbase serve --dir ./convex --data ./data/db.sqlite
+
+# Postgres (or STACKBASE_DATABASE_URL)
+stackbase serve --dir ./convex --database-url postgres://user:pass@host:5432/db
 ```
 
-**Node note:** Run with `--experimental-sqlite` flag (Node 22.5+).
+### S3-compatible blob storage
 
-## Advanced configuration
+File storage ([`ctx.storage`](/files)) uses local disk by default. Point it at any S3-compatible
+bucket (AWS S3, MinIO, R2) with `--storage-bucket` / `--storage-endpoint` (or
+`STACKBASE_STORAGE_BUCKET` / `STACKBASE_STORAGE_ENDPOINT`); credentials come from
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`:
 
-For more control, pass explicit adapters:
-
-```ts
-import { createStackbase, SqliteDocStore, FsBlobStore } from "@stackbase/runtime-bun";
-
-const server = createStackbase({
-  convexDir: "./convex",
-  docstore: ({ runtime }) => new SqliteDocStore(`./data/${runtime}.sqlite`),
-  blobstore: () => new FsBlobStore("./data/files"),
-  schema: "auto", // or "skip" to avoid schema.ts loading at boot
-});
-await server.listen({ port: 8080, hostname: "0.0.0.0" });
-```
-
-### Custom storage backends
-
-Use S3-compatible storage for blobs:
-
-```ts
-import { createStackbase, S3BlobStore } from "@stackbase/runtime-bun";
-
-const server = createStackbase({
-  convexDir: "./convex",
-  blobstore: () =>
-    new S3BlobStore({
-      bucket: "my-bucket",
-      endpoint: "https://s3.us-east-1.amazonaws.com",
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    }),
-});
+```bash
+stackbase serve --dir ./convex --data ./data/db.sqlite \
+  --storage-bucket my-bucket \
+  --storage-endpoint https://s3.us-east-1.amazonaws.com
 ```
 
 ## Deployment checklist
 
-1. **Persist data directory** - SQLite database and blob files must survive restarts
-2. **Expose HTTP + WebSocket** - Both protocols on the same port
-3. **Set environment variables** - Any secrets your app needs
-4. **Configure health checks** - Use `GET /health`
-5. **Set up reverse proxy** - For TLS termination if needed
+1. **Commit `convex/_generated/`** - `serve` fails fast if it's missing
+2. **Set `STACKBASE_ADMIN_KEY`** - required; `serve` won't start without it
+3. **Persist data directory** - SQLite database and blob files must survive restarts
+4. **Expose HTTP + WebSocket** - Both protocols on the same port
+5. **Configure health checks** - Use `GET /api/health`
+6. **Set up reverse proxy** - Stackbase serves plain HTTP; front it with nginx/Caddy/Traefik for TLS
 
 ## Platform guides
 
@@ -95,8 +73,8 @@ const server = createStackbase({
 builder = "nixpacks"
 
 [deploy]
-startCommand = "bun run server.ts"
-healthcheckPath = "/health"
+startCommand = "stackbase serve --dir ./convex --data /app/data/db.sqlite"
+healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 
 [[mounts]]
@@ -125,33 +103,25 @@ force_https = true
 [[http_service.checks]]
 interval = "10s"
 timeout = "2s"
-path = "/health"
+path = "/api/health"
 ```
+
+Set `STACKBASE_ADMIN_KEY` as a secret (`fly secrets set` / Railway variables), never in the file.
 
 ### Docker
 
-```dockerfile
-FROM oven/bun:1
-
-WORKDIR /app
-COPY package.json bun.lockb ./
-RUN bun install --frozen-lockfile
-
-COPY . .
-
-VOLUME /app/data
-EXPOSE 3000
-
-CMD ["bun", "run", "server.ts"]
-```
+The repo ships a `Dockerfile` whose `runner` stage already runs `stackbase serve` as its
+entrypoint — see [Docker self-hosting](/self-hosting) for the `docker compose up` path and the
+bake-into-image alternative for immutable deploys.
 
 ## Environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PORT` | Server port | `3000` |
+| `STACKBASE_ADMIN_KEY` | **Required.** `serve` refuses to start without it. | none |
+| `STACKBASE_DATABASE_URL` | Postgres connection string (equivalent to `--database-url`) | unset → SQLite |
+| `STACKBASE_STORAGE_BUCKET` / `STACKBASE_STORAGE_ENDPOINT` | S3-compatible blob storage (if used) | unset → local disk |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credentials for S3 blobstore (if used) | none |
-| `AWS_REGION` | Region for S3-compatible endpoints (if used) | none |
 
 ---
 
@@ -159,43 +129,38 @@ CMD ["bun", "run", "server.ts"]
 
 ### Current limitations
 
-The Bun and Node.js runtimes are designed for **single-instance deployments**:
+A default `stackbase serve` node is a **single-instance deployment**:
 
 | Constraint | Reason | Impact |
 |------------|--------|--------|
-| Single instance | SQLite requires exclusive file access | No horizontal scaling |
-| Stateful server | WebSocket connections are per-server | Can't load balance connections |
-| Local storage | Blobs stored on disk by default | Requires persistent volume |
+| Single writer | SQLite needs exclusive file access; Postgres enforces it with an advisory lock | A second node against the same database fails fast rather than corrupting state |
+| Stateful server | WebSocket connections are per-server | Can't naively load balance connections |
+| Local storage | Blobs stored on disk by default | Requires a persistent volume (or use S3-compatible storage) |
 
 ### Scaling options
 
 **For higher load:**
-1. **Vertical scaling** - Use a larger instance (more CPU, RAM)
-2. **Cloudflare deployment** - DO-based architecture scales automatically
-3. **Custom docstore adapter** - Implement with Postgres for multi-instance support
+1. **Vertical scaling** - Use a larger instance (more CPU, RAM). This goes further than you'd expect.
+2. **Postgres** - `--database-url` moves durability off local disk. Still a single writer.
+3. **Object-storage substrate** - `--object-store` puts an S3-compatible bucket at the root of truth.
 
-For a full target architecture (router + sync shards + transactor + change stream) on Fly.io/Railway and similar platforms, see the [Scaling blueprint](/deploy/scaling).
-
-**For high availability:**
-1. **Cloudflare Workers** - Built-in redundancy and edge distribution
-2. **Database replication** - Use Hyperdrive adapter with replicated Postgres
-
-### When to use Cloudflare instead
-
-Consider Cloudflare Workers deployment when:
-- You need horizontal scaling
-- You want edge distribution
-- You need high availability without managing infrastructure
-- Traffic exceeds what a single instance can handle
+For a full target architecture (router + sync shards + transactor + change stream), see the
+[Scaling blueprint](/deploy/scaling).
 
 ---
 
 ## Common questions
 
-- **Is this officially supported?** Cloudflare Workers is the primary target; self-hosting works via Bun/Node runtimes.
+- **Is this officially supported?** Yes — self-hosting is the baseline deployment story, and
+  single-node self-host is free forever.
 - **Which platform should I pick?** Any that supports persistent disks and WebSockets.
-- **Can I use managed databases?** Not yet for the docstore; SQLite is required. Blob storage can use S3.
-- **How do I handle multiple instances?** Single-instance only; the SQLite docstore doesn't support multi-node deployments. For scaling, use Cloudflare Workers or implement a custom Postgres-backed docstore.
+- **Can I use managed databases?** Yes — Postgres is supported via `--database-url` /
+  `STACKBASE_DATABASE_URL`. There are no app-level migrations; the schema is physically schemaless.
+  Blob storage can use any S3-compatible bucket.
+- **How do I handle multiple instances?** A plain `serve` node is single-writer by design. See the
+  [Scaling blueprint](/deploy/scaling).
+- **Do I need to write a server file?** No. `stackbase serve` is the entrypoint; there is no
+  `createStackbase` API.
 
 ---
 

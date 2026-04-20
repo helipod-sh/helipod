@@ -4,50 +4,25 @@ title: Testing
 
 # Testing
 
-> Test your Convex functions using convex-test or against a running Stackbase server.
+> Test your functions with `@stackbase/test`, or end-to-end against a running server.
 
-Test your backend functions using the standard Convex testing tools or by running tests against a Stackbase server.
+> **The full, accurate testing guide is [Testing](/testing).** This page is a short orientation;
+> that one is written against the shipped harness.
 
-## Convex documentation
+## The real harness: `@stackbase/test`
 
-For testing patterns and the `convex-test` library:
-
-- [Testing](https://docs.convex.dev/testing) - Overview
-- [convex-test](https://docs.convex.dev/testing/convex-test) - Unit testing library
-
----
-
-## Running functions from CLI
-
-Use `stackbase run` to execute functions directly:
-
-```bash
-# Run a query
-npx stackbase run tasks:list
-
-# Run with arguments
-npx stackbase run tasks:create '{"title": "Test task"}'
-
-# Run against a specific server
-npx stackbase run --url http://localhost:3000 tasks:list
-```
-
----
-
-## Unit testing with convex-test
-
-The `convex-test` library works with Stackbase since it tests your Convex functions in isolation:
+Stackbase ships its own test harness, `@stackbase/test`, which runs your functions against the
+**real engine** (real transactor, real query engine, real reactivity) rather than a simulation:
 
 ```ts
 import { describe, it, expect } from "vitest";
-import { convexTest } from "convex-test";
+import { createTestStackbase } from "@stackbase/test";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
 describe("tasks", () => {
-  const t = convexTest(schema);
-
   it("creates a task", async () => {
+    const t = createTestStackbase({ schema });
     const taskId = await t.mutation(api.tasks.create, { title: "Test" });
     const task = await t.query(api.tasks.get, { id: taskId });
     expect(task?.title).toBe("Test");
@@ -55,112 +30,46 @@ describe("tasks", () => {
 });
 ```
 
-This uses an in-memory backend, not Stackbase, but validates your function logic.
+It also supports `t.subscribe(...)` for asserting reactive behavior — a capability a
+logic-only unit harness can't offer. See [Testing](/testing) for the full API, the conformance
+suite, and the documented divergences from Convex's harness.
+
+### Migrating from `convex-test`
+
+If you're coming from Convex, you may be using
+[`convex-test`](https://docs.convex.dev/testing/convex-test). It is **not** the Stackbase harness —
+use `@stackbase/test` instead. `stackbase migrate` handles your import rewrites; see
+[Convex Compatibility](/reference/compatibility).
 
 ---
 
-## E2E testing against Stackbase
+## E2E testing against a running server
 
-For integration tests against a real Stackbase server:
+For integration tests against a real server, start `stackbase dev` (or a
+[compiled binary](/deploy/standalone-binary)) and drive it with `@stackbase/client` over a real
+WebSocket, or call `POST /api/run` over HTTP. This is exactly how Stackbase's own end-to-end tests
+work — see `packages/cli/test/` in the repo for worked examples.
 
-```ts
-// tests/e2e.test.ts
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createStackbase, SqliteDocStore } from "@stackbase/runtime-bun";
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { api } from "../convex/_generated/api";
-
-let server: ReturnType<typeof createStackbase>;
-let client: StackbaseClient;
-
-beforeAll(async () => {
-  server = createStackbase({
-    convexDir: "./convex",
-    docstore: new SqliteDocStore(":memory:"), // In-memory for tests
-    schema: "skip",
-  });
-  await server.listen({ port: 3999, hostname: "127.0.0.1" });
-  client = new StackbaseClient(webSocketTransport("ws://localhost:3999/api/sync"));
-});
-
-afterAll(async () => {
-  client.close();
-  await server.close();
-});
-
-describe("E2E: Tasks", () => {
-  it("creates and retrieves a task", async () => {
-    const taskId = await client.mutation(api.tasks.create, {
-      title: "E2E Test",
-    });
-
-    const task = await client.query(api.tasks.get, { id: taskId });
-    expect(task?.title).toBe("E2E Test");
-  });
-});
-```
-
-For Node.js, use `@stackbase/runtime-node` with the same API.
+> There is **no `stackbase run` command** and **no `createStackbase` API**. Earlier versions of this
+> page described both; neither exists. Use `POST /api/run`, the dashboard's function runner, or the
+> client SDK.
 
 ---
 
 ## Testing strategy
 
-### When to use each approach
-
 | Approach | Speed | Coverage | Best for |
 |----------|-------|----------|----------|
-| `convex-test` | Fast | Logic only | Unit tests, TDD |
-| E2E (single runtime) | Medium | Runtime behavior | Integration tests |
-| Cross-runtime E2E | Slow | Full compatibility | Pre-deploy verification |
+| `@stackbase/test` | Fast | Real engine semantics, incl. reactivity | Unit tests, TDD |
+| E2E vs. a running server | Medium | Full transport + server behavior | Integration tests |
 
 ### Cross-runtime testing
 
-To ensure your app works across all runtimes, run E2E tests against each:
+> 🚧 **Planned — not yet shipped.** A turnkey cross-runtime test matrix (asserting your app behaves
+> identically under Bun and Node) is intended but not built. Today you can approximate it by running
+> your E2E suite twice, once under each runtime.
 
-```ts
-// tests/cross-runtime.test.ts
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { api } from "../convex/_generated/api";
-
-const runtimes = [
-  { name: "bun", module: "@stackbase/runtime-bun" },
-  { name: "node", module: "@stackbase/runtime-node" },
-];
-
-for (const runtime of runtimes) {
-  describe(`E2E: ${runtime.name}`, () => {
-    let server: any;
-    let client: StackbaseClient;
-    const port = 3900 + runtimes.indexOf(runtime);
-
-    beforeAll(async () => {
-      const { createStackbase, SqliteDocStore } = await import(runtime.module);
-      server = createStackbase({
-        convexDir: "./convex",
-        docstore: new SqliteDocStore(":memory:"),
-        schema: "skip",
-      });
-      await server.listen({ port, hostname: "127.0.0.1" });
-      client = new StackbaseClient(webSocketTransport(`ws://localhost:${port}/api/sync`));
-    });
-
-    afterAll(async () => {
-      client.close();
-      await server.close();
-    });
-
-    it("creates and retrieves documents", async () => {
-      const id = await client.mutation(api.tasks.create, { title: "Test" });
-      const task = await client.query(api.tasks.get, { id });
-      expect(task?.title).toBe("Test");
-    });
-  });
-}
-```
-
-**Note**: Node.js tests require `--experimental-sqlite` flag. Add to your test script:
+**Note**: Node.js tests require the `--experimental-sqlite` flag:
 
 ```json
 {
@@ -187,23 +96,16 @@ jobs:
       - uses: oven-sh/setup-bun@v1
       - run: bun install
       - run: bun test
-
-  e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v1
-      - run: bun install
-      - run: bun test:e2e
 ```
 
 ---
 
 ## Common questions
 
-- **Should I use convex-test or E2E tests?** Use `convex-test` for fast unit tests; E2E for runtime-specific behavior.
-- **Can I test Cloudflare Workers locally?** Yes, use `wrangler dev` or the Miniflare simulator.
-- **How do I reset the database between tests?** Use `:memory:` for SQLite, or truncate tables in a `beforeEach` hook.
+- **Which harness should I use?** `@stackbase/test` for unit tests; E2E against a running server
+  for transport-level behavior.
+- **Does `convex-test` work?** It's Convex's harness, not ours — use `@stackbase/test`.
+- **How do I reset the database between tests?** `createTestStackbase()` gives each test a fresh
+  in-memory engine.
 
 ---
-

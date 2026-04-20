@@ -1,12 +1,28 @@
 ---
 title: Data Storage & Search
+status: planned
 ---
 
 # Data Storage & Search
 
 > Storage adapters and search capabilities for your Stackbase deployment.
 
-Stackbase uses pluggable adapters for document storage (docstore) and file storage (blobstore). The database and storage APIs work identically to Convex.
+> 🚧 **Planned — not yet shipped.** This page describes an intended adapter-composition model and a
+> search feature set. **Neither exists as described**, and the code below will not run.
+>
+> - **Search is not built.** Full-text search and vector search have **no implementation** —
+>   `.searchIndex()` parses in `schema.ts` but nothing executes it. Ignore both sections below.
+> - **Adapters are not composed in app code.** The page's premise — passing `docstore:`/`blobstore:`
+>   to `createStackbase` — inverts the real architecture. `createStackbase` doesn't exist, and every
+>   adapter package named here (`@stackbase/docstore-bun-sqlite`, `@stackbase/docstore-cf-d1`,
+>   `@stackbase/blobstore-cf-r2`, …) is fictional. Real backends are picked with **CLI flags/env**:
+>   `--database-url` (Postgres), `--object-store` (S3-compatible), `--storage-bucket` (file
+>   storage). Real packages: `@stackbase/docstore-sqlite`, `@stackbase/docstore-postgres`,
+>   `@stackbase/blobstore-fs`, `@stackbase/blobstore-s3`.
+>
+> **What works today:** `ctx.db` (reading/writing data, indexes) and `ctx.storage` file storage are
+> fully shipped. See **[Files](/files)** for the real file-storage guide, and
+> [Docker self-hosting](/self-hosting) for choosing a backend.
 
 This page covers:
 - **Storage Adapters** - Pluggable backends for documents and files
