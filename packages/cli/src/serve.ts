@@ -115,6 +115,11 @@ export interface ServeOptions {
   ip: string;
   port: number;
   dashboard: boolean;
+  /** A static web UI directory to serve at the site root (`index.html` + assets), exactly as `dev`'s
+   *  `--web` does. Unset → no web UI (today's behavior). Lets a self-hosted `serve` host an app's own
+   *  frontend on the SAME origin as its sync WebSocket, so a `location.host`-relative client needs no
+   *  backend-URL config and never makes a cross-origin `/api/sync` connection. */
+  webDir?: string;
   /** Enable `POST /_admin/deploy` (`stackbase deploy`'s hot-swap target). Off by default — a running
    * `serve` only accepts live code changes when explicitly opted in. */
   allowDeploy: boolean;
@@ -279,6 +284,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
   let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
   let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
+  let webDir = process.env.STACKBASE_WEB_DIR;
   let databaseUrl = process.env.STACKBASE_DATABASE_URL;
   let storageBucket: string | undefined;
   let storageEndpoint: string | undefined;
@@ -320,6 +326,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--shards" && args[i + 1]) objectStoreShards = Number(args[++i]);
     else if (a === "--wake-url" && args[i + 1]) wakeUrl = args[++i] as string;
     else if (a === "--backstop-min-ms" && args[i + 1]) backstopMinMs = parseLeaseTtlMs(args[++i]);
+    else if (a === "--web" && args[i + 1]) webDir = args[++i] as string;
   }
   // `STACKBASE_FLEET_SHARDS` env fallback — ONLY for an object-store boot (never a fleet boot; see
   // the `objectStoreShards` declaration above). The `--shards` flag, if given, always wins.
@@ -332,6 +339,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     ip,
     port,
     dashboard,
+    ...(webDir !== undefined ? { webDir } : {}),
     allowDeploy,
     databaseUrl,
     storageBucket,
@@ -475,6 +483,7 @@ export async function startServe(
     {
       port: opts.port,
       ip: opts.ip,
+      ...(opts.webDir !== undefined ? { webDir: opts.webDir } : {}),
       admin: { api: adminApi, key: opts.adminKey },
       dashboard,
       routes: project.routes,
