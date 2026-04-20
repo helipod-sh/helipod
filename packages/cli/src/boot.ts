@@ -730,7 +730,13 @@ function ensureStorageDirWritable(dir: string): void {
   }
 }
 
-export async function bootLoaded(opts: {
+/**
+ * Every input the boot core takes. `bootProject` DERIVES its own options from this type (rather than
+ * re-declaring them) and forwards them with a spread — see `BootProjectOptions`'s doc for why that
+ * matters. Adding an option here therefore reaches `bootProject`'s public surface automatically; the
+ * only keys that don't are the two `bootProject` produces itself (`loaded`/`components`).
+ */
+export interface BootLoadedOptions {
   loaded: LoadedProject;
   components: ComponentDefinition[];
   dataPath: string;
@@ -854,7 +860,9 @@ export async function bootLoaded(opts: {
    * Unset → identity (the drivers' own 30s/60s), byte-for-byte unchanged.
    */
   backstopMs?: (defaultMs: number) => number;
-}): Promise<BootResult> {
+}
+
+export async function bootLoaded(opts: BootLoadedOptions): Promise<BootResult> {
   const { project, generated } = push(opts.loaded, opts.components);
   const logSink = new InMemoryLogSink();
 
@@ -1114,90 +1122,40 @@ function makeStorageCheckRead(
   return undefined;
 }
 
-export async function bootProject(opts: {
-  convexDir: string;
-  dataPath: string;
-  adminKey: string;
-  databaseUrl?: string;
-  storage?: StorageConfig;
-  storageUploadTtlMs?: number;
-  storageReaperSweepMs?: number;
-  /** Tier 2 fleet wiring (see `bootLoaded`'s `fleet`). Absent for dev / non-fleet serve. */
-  fleet?: {
-    store: DocStore;
-    writeRouter?: WriteRouter;
-    deferDrivers?: boolean;
-    fanoutAdapter?: EmbeddedWriteFanoutAdapter;
-    /** Shards B2a: shard count — >1 builds a ShardedTransactor (per-shard parallel commits). */
-    numShards?: number;
-    /** Fleet B3 hybrid (multi-writer): the replica-backed query store (queries route here; mutations
-     *  commit to `store`). Threaded straight into `createEmbeddedRuntime`. */
-    queryStore?: DocStore;
-    /** Receipted Outbox (verdict §(c) placement): the authoritative receipts store the Connect handshake
-     *  classifies/prunes against — the PRIMARY on a sync node (whose `store` is the receipt-less replica),
-     *  so the handshake never spuriously resets. Threaded straight into `createEmbeddedRuntime`. */
-    receiptsStore?: DocStore;
-    /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
-    beforeNotify?: (commitTs: bigint) => Promise<void>;
-    /** Fleet B4: group commit — resolved fleet-side, threaded straight into `createEmbeddedRuntime`. */
-    groupCommit?: boolean;
-    /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
-     *  in a fleet). Threaded straight into `createEmbeddedRuntime`; absent outside a fleet. */
-    stablePrefix?: () => Promise<bigint | null>;
-    /** Receipted Outbox: fleet owns the `clientReceiptsGuard()` registration on the concrete Postgres
-     *  store (in `armWriter`, before the fence) — so `createEmbeddedRuntime` must SKIP its own, which
-     *  would land on a sync node's `SwitchableDocStore` and vanish on the promotion swapTo. Threaded
-     *  straight into `createEmbeddedRuntime`; absent outside a fleet (the runtime owns it there). */
-    externalReceiptsGuard?: boolean;
-  };
-  /** Tier 3 Slice 6 object-storage writer node wiring (see `bootLoaded`'s matching opts). */
-  objectStoreUrl?: string;
-  objectStoreOnFenced?: (e: Error) => void;
-  objectStoreLeaseTtlMs?: number;
-  objectStoreHeartbeatMs?: number;
-  objectStoreAcquireTimeoutMs?: number;
-  objectStoreAcquirePollIntervalMs?: number;
-  objectStoreWriterId?: string;
-  objectStoreGcMs?: number;
-  /** Tier 3 multi-shard single-node serve: object-storage writer lane count (see `bootLoaded`). */
-  objectStoreShards?: number;
-  /** Tier 3 Slice 8 replica boot wiring (see `bootLoaded`'s matching opts). */
-  replica?: boolean;
-  objectStoreReplicaConsumerId?: string;
-  objectStoreReplicaPollMs?: number;
-  /** Tier 3 Slice 8 follow-on (replica write-forwarding — see `bootLoaded`'s matching opt). */
-  writerUrl?: string;
-}): Promise<BootResult> {
-  const loaded = await loadConvexDir(opts.convexDir);
-  const config = await loadConfig(dirname(opts.convexDir));
-  return bootLoaded({
-    loaded,
-    components: config.components,
-    dataPath: opts.dataPath,
-    adminKey: opts.adminKey,
-    databaseUrl: opts.databaseUrl,
-    storage: opts.storage,
-    ...(opts.storageUploadTtlMs !== undefined ? { storageUploadTtlMs: opts.storageUploadTtlMs } : {}),
-    ...(opts.storageReaperSweepMs !== undefined ? { storageReaperSweepMs: opts.storageReaperSweepMs } : {}),
-    ...(opts.fleet ? { fleet: opts.fleet } : {}),
-    ...(opts.objectStoreUrl !== undefined ? { objectStoreUrl: opts.objectStoreUrl } : {}),
-    ...(opts.objectStoreOnFenced ? { objectStoreOnFenced: opts.objectStoreOnFenced } : {}),
-    ...(opts.objectStoreLeaseTtlMs !== undefined ? { objectStoreLeaseTtlMs: opts.objectStoreLeaseTtlMs } : {}),
-    ...(opts.objectStoreHeartbeatMs !== undefined ? { objectStoreHeartbeatMs: opts.objectStoreHeartbeatMs } : {}),
-    ...(opts.objectStoreAcquireTimeoutMs !== undefined ? { objectStoreAcquireTimeoutMs: opts.objectStoreAcquireTimeoutMs } : {}),
-    ...(opts.objectStoreAcquirePollIntervalMs !== undefined
-      ? { objectStoreAcquirePollIntervalMs: opts.objectStoreAcquirePollIntervalMs }
-      : {}),
-    ...(opts.objectStoreWriterId !== undefined ? { objectStoreWriterId: opts.objectStoreWriterId } : {}),
-    ...(opts.objectStoreGcMs !== undefined ? { objectStoreGcMs: opts.objectStoreGcMs } : {}),
-    ...(opts.objectStoreShards !== undefined ? { objectStoreShards: opts.objectStoreShards } : {}),
-    ...(opts.replica !== undefined ? { replica: opts.replica } : {}),
-    ...(opts.objectStoreReplicaConsumerId !== undefined
-      ? { objectStoreReplicaConsumerId: opts.objectStoreReplicaConsumerId }
-      : {}),
-    ...(opts.objectStoreReplicaPollMs !== undefined ? { objectStoreReplicaPollMs: opts.objectStoreReplicaPollMs } : {}),
-    ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
-  });
+/**
+ * `bootProject`'s options: everything `bootLoaded` takes, MINUS the two things `bootProject` exists
+ * to produce itself, PLUS the `convexDir` it produces them from. Derived deliberately — never
+ * re-declared.
+ *
+ * WHY (a trap this has already cost a full debug cycle — do not re-introduce it): `bootProject` used to
+ * re-declare its own option type and forward every key BY HAND into a fresh object literal. That
+ * shape drops options SILENTLY. TypeScript's excess-property check does not apply through a spread,
+ * and every caller passes optional options via conditional spread
+ * (`...(x !== undefined ? { k: v } : {})`, see `serve.ts`) — so a caller could hand `bootProject` a
+ * key its type never declared, get ZERO diagnostics, and have the value vanish before it ever
+ * reached `createEmbeddedRuntime`. That is exactly how the wake seam shipped dead: `serve.ts` built
+ * a valid `httpWakeHost(--wake-url)`, `bootProject` dropped it, the runtime silently took the
+ * `setTimeout` branch, and scheduled work never fired on a host that stops the process between
+ * requests — with the whole suite green, because nothing type-checked or tested the seam BETWEEN
+ * the two functions.
+ *
+ * Deriving from `BootLoadedOptions` + forwarding with a spread makes the drop structurally
+ * impossible rather than merely caught: a new `bootLoaded` option is part of this type, and is
+ * forwarded, the moment it is declared. The `Omit` is the ONLY exclusion list, and it is deliberate:
+ * `loaded`/`components` are `bootProject`'s own outputs (`loadConvexDir`/`loadConfig`), so accepting
+ * them from a caller would be meaningless. Anything else belongs here automatically.
+ */
+export type BootProjectOptions = Omit<BootLoadedOptions, "loaded" | "components"> & { convexDir: string };
+
+export async function bootProject(opts: BootProjectOptions): Promise<BootResult> {
+  // Destructure off ONLY what `bootProject` itself consumes/produces; `forwarded` is by construction
+  // every remaining `BootLoadedOptions` key, so no option can be left behind. Keep this a spread —
+  // re-introducing a hand-enumerated forward re-opens the silent-drop trap documented above (and
+  // `boot-options-forwarding.test.ts` is what fails if you do).
+  const { convexDir, ...forwarded } = opts;
+  const loaded = await loadConvexDir(convexDir);
+  const config = await loadConfig(dirname(convexDir));
+  return bootLoaded({ ...forwarded, loaded, components: config.components });
 }
 
 /**
