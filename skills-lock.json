@@ -12,6 +12,12 @@
       "skillPath": "skills/cloudflare/SKILL.md",
       "computedHash": "a1646a6a2fb7cc683de5bf8357e5d6ae02db6fd0bf771d633c1890318e25bff2"
     },
+    "durable-objects": {
+      "source": "cloudflare/skills",
+      "sourceType": "github",
+      "skillPath": "skills/durable-objects/SKILL.md",
+      "computedHash": "72efa2277fea08f43b393c74abaacc9fa575e20bc63bdc9d46829b8a39352852"
+    },
     "workers-best-practices": {
       "source": "cloudflare/skills",
       "sourceType": "github",
