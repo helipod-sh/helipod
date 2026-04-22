@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
-import { startDevServer } from "./server";
+import { ProcessRuntimeHost } from "./server";
 import {
   bootProject,
   isPostgresUrl,
@@ -455,7 +455,7 @@ export async function startServe(
         })
       : undefined;
 
-  // `server` is assigned below by `startDevServer`; `setRoutes` only runs on a LATER deploy
+  // `server` is assigned below by `host.serve`; `setRoutes` only runs on a LATER deploy
   // request, by which time it is set. `current` reads AdminApi's live schema — no serve-side
   // bookkeeping to keep in sync.
   let server: DevServer;
@@ -478,7 +478,8 @@ export async function startServe(
           ),
       }
     : undefined;
-  server = await startDevServer(
+  // Reach serving through the RuntimeHost seam (Slice 1) — serve() never touches Bun.serve/node:http.
+  server = await new ProcessRuntimeHost().serve(
     runtime,
     {
       port: opts.port,

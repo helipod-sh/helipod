@@ -11,7 +11,7 @@ import { loadConvexDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { bootProject, loadDashboard, withStorageModules } from "./boot";
-import { startDevServer } from "./server";
+import { ProcessRuntimeHost } from "./server";
 import { createWatchLoop } from "./watch";
 import { serveCommand } from "./serve";
 import { deployCommand } from "./deploy";
@@ -64,7 +64,9 @@ export async function devCommand(args: string[]): Promise<number> {
   // loopback bind — never embed a persistent STACKBASE_ADMIN_KEY where any network client can read
   // it. Otherwise serve the SPA without a key so it prompts the operator (stored client-side).
   const dashboard = loadDashboard(ephemeralKey && loopback ? adminKey : undefined);
-  const server = await startDevServer(
+  // Reach serving through the RuntimeHost seam (Slice 1) — the CLI never touches Bun.serve/node:http.
+  const host = new ProcessRuntimeHost();
+  const server = await host.serve(
     runtime,
     { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes, storageRoutes },
   );

@@ -9,7 +9,7 @@ import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { DocStore } from "@stackbase/docstore";
 import type { LoadedProject } from "./project";
 import { bootLoaded } from "./boot";
-import { startDevServer, type DevServer } from "./server";
+import { ProcessRuntimeHost, type DevServer } from "./server";
 
 export interface BinaryOptions {
   port: number;
@@ -69,7 +69,7 @@ export async function startBinaryServer(
     const html = await bun.file(indexPath).text();
     dash = { html, assets: dashboard };
   }
-  const server = await startDevServer(boot.runtime, {
+  const server = await new ProcessRuntimeHost().serve(boot.runtime, {
     port: opts.port,
     ip: opts.ip,
     admin: { api: boot.adminApi, key: opts.adminKey },

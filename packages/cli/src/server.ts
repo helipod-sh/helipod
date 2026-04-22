@@ -8,7 +8,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import type { EmbeddedRuntime, RuntimeHost, ServeOptions, ServerHandle } from "@stackbase/runtime-embedded";
 import type { SyncWebSocket } from "@stackbase/sync";
 import type { AdminApi } from "@stackbase/admin";
 import type { StorageRoute } from "@stackbase/storage";
@@ -46,42 +46,12 @@ const CONTENT_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-export interface DevServer {
-  url: string;
-  port: number;
-  close(): Promise<void>;
-  /** Replace the httpAction route table, e.g. after a hot reload re-resolves `http.ts`. */
-  setRoutes(routes: ResolvedRoute[]): void;
-}
-
-export interface DevServerOptions {
-  port: number;
-  ip: string;
-  webDir?: string;
-  admin?: { api: AdminApi; key: string };
-  /**
-   * The dashboard SPA. Two variants:
-   *  - `dev`/`serve`: `{ distDir, html }` — dist dir (hashed Vite assets) + key-injected index.html,
-   *    served under `/_dashboard*` via `resolveStatic`.
-   *  - a compiled `stackbase build` binary: `{ assets, html }` — a urlPath→embedded-`$bunfs`-path
-   *    map (see `binary-main.ts`'s `EmbeddedDashboard`), served at the site root via `Bun.file`.
-   */
-  dashboard?: { distDir: string; html: string } | { assets: Record<string, string>; html: string };
-  /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
-  routes?: ResolvedRoute[];
-  /** Engine-owned `/api/storage/*` handlers (always-on file storage). Reserved — matched before
-   *  user routes; stable across reload/deploy (their deps read the never-swapped systemModules). */
-  storageRoutes?: StorageRoute[];
-  /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
-  deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> };
-  /** Fleet node handle — present only under `serve --fleet`. Enables `/_fleet/run` and the sync-role
-   *  httpAction proxy. Absent → byte-for-byte the non-fleet behavior. */
-  fleet?: FleetHandles;
-  /** Tier 3 Slice 8 follow-on (replica write-forwarding): present only when THIS node is itself a
-   *  `--replica` configured with `--writer-url` — enables `/api/run`'s single-hop defensive guard
-   *  (`handleHttpRequest`'s `replicaWriterUrl` param). Absent → byte-for-byte unchanged behavior. */
-  replicaWriterUrl?: string;
-}
+// `DevServer`/`DevServerOptions` are the process host's concrete instantiations of the neutral
+// `ServerHandle`/`ServeOptions` seam (in `@stackbase/runtime-embedded`), pinning its generic
+// parameters to the CLI's own types. The seam carries the per-field docs (lifted verbatim from
+// here); the names are kept so every existing importer (tests, benches, `binary-main`) is unchanged.
+export type DevServer = ServerHandle<ResolvedRoute>;
+export type DevServerOptions = ServeOptions<ResolvedRoute, AdminApi, StorageRoute, DeployResult, FleetHandles>;
 
 /** Content-type for an embedded dashboard asset, derived from its extension. */
 const EMBEDDED_CONTENT_TYPES: Record<string, string> = {
@@ -464,4 +434,20 @@ async function startBunServer(runtime: EmbeddedRuntime, options: DevServerOption
 /** Start the dev server using the best backend for the current runtime. */
 export function startDevServer(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
   return detectRuntime() === "bun" ? startBunServer(runtime, options) : startNodeServer(runtime, options);
+}
+
+/**
+ * The process {@link RuntimeHost}: binds a runtime to a real TCP port via `Bun.serve` (primary) or
+ * `node:http` + `ws`. This class is the ONLY place in the CLI that owns those host primitives — the
+ * `detectRuntime()` bun/node split is its private internal (in {@link startDevServer}). Production
+ * entrypoints (`dev`/`serve`/`binary`) reach serving exclusively through `host.serve(...)`; a
+ * Durable Object host (Slice 3) will implement the same seam without touching any of the above.
+ * `serve` is a thin delegation to {@link startDevServer}, which stays exported for tests/benches.
+ */
+export class ProcessRuntimeHost
+  implements RuntimeHost<ResolvedRoute, AdminApi, StorageRoute, DeployResult, FleetHandles>
+{
+  serve(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
+    return startDevServer(runtime, options);
+  }
 }
