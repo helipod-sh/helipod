@@ -519,6 +519,23 @@
         "vitest": "catalog:",
       },
     },
+    "packages/docstore-do-sqlite": {
+      "name": "@stackbase/docstore-do-sqlite",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/docstore-sqlite": "workspace:*",
+      },
+      "devDependencies": {
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
+        "@stackbase/values": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/docstore-postgres": {
       "name": "@stackbase/docstore-postgres",
       "version": "0.0.0",
@@ -1089,6 +1106,8 @@
     "@stackbase/dashboard": ["@stackbase/dashboard@workspace:apps/dashboard"],
 
     "@stackbase/docstore": ["@stackbase/docstore@workspace:packages/docstore"],
+
+    "@stackbase/docstore-do-sqlite": ["@stackbase/docstore-do-sqlite@workspace:packages/docstore-do-sqlite"],
 
     "@stackbase/docstore-postgres": ["@stackbase/docstore-postgres@workspace:packages/docstore-postgres"],
 

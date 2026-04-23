@@ -1,0 +1,36 @@
+{
+  "name": "@stackbase/docstore-do-sqlite",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@stackbase/docstore-sqlite": "workspace:*"
+  },
+  "devDependencies": {
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/values": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
