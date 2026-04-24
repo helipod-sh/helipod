@@ -178,6 +178,15 @@ export interface EmbeddedRuntimeOptions {
    * completely idle app, which would destroy scale-to-zero.
    */
   backstopMs?: (defaultMs: number) => number;
+  /**
+   * Disarm the sync handler's process-shaped background timers (its `setInterval` flush/resume sweep
+   * and every per-session ping heartbeat). Defaults to `false` — every long-lived process host is
+   * byte-for-byte unchanged. Set ONLY by the Cloudflare Durable Object host (Slice 3), where those
+   * timers are actively harmful (a `setInterval` is lost on hibernation; an app-level ping would wake
+   * the hibernated object every beat, defeating scale-to-zero). Just a boolean — no host type crosses
+   * this seam. See `SyncProtocolHandlerOptions.disableBackgroundTimers`.
+   */
+  disableSyncBackgroundTimers?: boolean;
   /** Component boot steps to run once at create, namespaced + non-user (before serving traffic). */
   bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
   /** Component drivers to start once at create, after boot steps + the commit fan-out are wired. */
@@ -648,7 +657,13 @@ export class EmbeddedRuntime {
     // commit from ANY path — WebSocket mutation OR `runtime.run()` / HTTP `/api/run` —
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
-    const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false, verifyAdmin: options.verifyAdmin });
+    const handler = new SyncProtocolHandler(syncExecutor, {
+      autoNotifyOnMutation: false,
+      verifyAdmin: options.verifyAdmin,
+      // The DO host (Slice 3) sets this so the handler arms no `setInterval` sweep / ping heartbeat;
+      // unset everywhere else (byte-identical to before this option existed).
+      disableBackgroundTimers: options.disableSyncBackgroundTimers,
+    });
     const queue: Array<{
       tables: string[];
       ranges: import("@stackbase/index-key-codec").SerializedKeyRange[];

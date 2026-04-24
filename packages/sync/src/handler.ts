@@ -148,6 +148,23 @@ export interface SyncProtocolHandlerOptions {
   backpressure?: BackpressureOptions;
   /** Per-session ping/pong liveness reaping. Defaults apply if omitted. */
   heartbeat?: HeartbeatOptions;
+  /**
+   * Disarm the handler's process-shaped background timers: the periodic `setInterval` flush/resume
+   * sweep AND every per-session heartbeat ping. Defaults to `false` — the long-lived process host
+   * (`Bun.serve`/`node:http`) is byte-for-byte unchanged.
+   *
+   * WHY (the Cloudflare Durable Object host, Slice 3): a DO **hibernates after ~seconds idle** to
+   * scale to zero, keeping its WebSockets alive while discarding in-memory state. On a DO these
+   * timers are actively harmful, not merely useless: (a) a `setInterval` sweep does not keep a DO
+   * alive and is silently lost on hibernation — dead weight; (b) an app-level `socket.ping` heartbeat
+   * would **wake the DO on every ping**, destroying the scale-to-zero economics that are the entire
+   * point of the DO host. Keepalive on a DO instead moves to the runtime-level
+   * `setWebSocketAutoResponse` (a ping/pong the runtime answers WITHOUT waking the object). So the DO
+   * host constructs the handler with this set; the process host never does. Additive + off by default
+   * so nothing but the DO host observes any change. See
+   * `docs/superpowers/specs/2026-03-20-do-host-slice3-design.md` §8.1.
+   */
+  disableBackgroundTimers?: boolean;
 }
 
 interface Session {
@@ -279,15 +296,21 @@ export class SyncProtocolHandler {
     private readonly options: SyncProtocolHandlerOptions = {},
   ) {
     this.verifyAdmin = options.verifyAdmin ?? (() => false);
-    this.sweepTimer = setInterval(() => {
-      for (const session of this.sessions.values()) session.bp.flush();
-      // DLR Stage 3: also sweep expired resume-registry entries here, not only on commit
-      // (`doNotifyWrites`) — otherwise a fully IDLE server (no commits) never evicts a released
-      // entry past its TTL. Bounded, memory-only cleanup; the on-commit sweep still handles the busy case.
-      this.resumeRegistry.sweep(Date.now());
-    }, FLUSH_SWEEP_MS);
-    // Don't keep the process alive for the sweep (Node); loopback-only usage exits cleanly.
-    (this.sweepTimer as { unref?: () => void }).unref?.();
+    // A DO host disarms this sweep (`disableBackgroundTimers`) — a `setInterval` is lost on
+    // hibernation and can't keep a DO alive, so it's pure dead weight there; the DO drives the same
+    // per-session flush inline on each `webSocketMessage`/fan-out turn instead. Every process host
+    // leaves it on (the default), byte-for-byte unchanged.
+    if (!options.disableBackgroundTimers) {
+      this.sweepTimer = setInterval(() => {
+        for (const session of this.sessions.values()) session.bp.flush();
+        // DLR Stage 3: also sweep expired resume-registry entries here, not only on commit
+        // (`doNotifyWrites`) — otherwise a fully IDLE server (no commits) never evicts a released
+        // entry past its TTL. Bounded, memory-only cleanup; the on-commit sweep still handles the busy case.
+        this.resumeRegistry.sweep(Date.now());
+      }, FLUSH_SWEEP_MS);
+      // Don't keep the process alive for the sweep (Node); loopback-only usage exits cleanly.
+      (this.sweepTimer as { unref?: () => void }).unref?.();
+    }
   }
 
   connect(sessionId: string, socket: SyncWebSocket): void {
@@ -297,7 +320,12 @@ export class SyncProtocolHandler {
     const bp = new SessionBackpressureController(socket, this.options.backpressure, undefined, () => this.reap(sessionId));
     const hb = new SessionHeartbeatController(socket, () => this.reap(sessionId), this.options.heartbeat);
     this.sessions.set(sessionId, { sessionId, socket, version: { ...INITIAL_VERSION }, identity: null, privileged: false, bp, hb, supportsQueryDiff: false });
-    hb.start();
+    // `disableBackgroundTimers` (the DO host) skips the per-session ping heartbeat: an app-level ping
+    // would wake a hibernated DO on every beat, defeating scale-to-zero (runtime-level
+    // `setWebSocketAutoResponse` handles keepalive there instead). A DO socket also omits `ping`
+    // entirely, so `start()` is already a no-op for it — this makes the intent explicit and holds
+    // even if a DO socket ever gained a `ping`. Every process host leaves it armed (the default).
+    if (!this.options.disableBackgroundTimers) hb.start();
   }
 
   disconnect(sessionId: string): void {
