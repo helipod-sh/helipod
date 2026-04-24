@@ -1,0 +1,43 @@
+{
+  "name": "@stackbase/runtime-cloudflare",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@stackbase/admin": "workspace:*",
+    "@stackbase/cli": "workspace:*",
+    "@stackbase/component": "workspace:*",
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-do-sqlite": "workspace:*",
+    "@stackbase/docstore-sqlite": "workspace:*",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/runtime-embedded": "workspace:*",
+    "@stackbase/sync": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@stackbase/docstore": "workspace:*",
+    "@stackbase/values": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

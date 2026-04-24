@@ -56,11 +56,16 @@ describe("host.ts is import-neutral (RuntimeHost seam)", () => {
     }
   });
 
-  it("no DurableObjectNamespace type anywhere under packages/ or components/", () => {
+  it("no DurableObjectNamespace type anywhere under packages/ or components/ (except the DO host)", () => {
+    // The Cloudflare DO host (Slice 3) is the ONE package allowed to name the DO namespace — that is
+    // the whole point of isolating Cloudflare in a leaf host package. The gate is that it leaks
+    // NOWHERE ELSE (the engine, every other package, every component).
+    const HOST_PKG = join(repoRoot, "packages", "runtime-cloudflare");
     const offenders: string[] = [];
     for (const dir of ["packages", "components"]) {
       scanTs(join(repoRoot, dir), (file, text) => {
         if (file === SELF_PATH) return; // this test necessarily names the token it searches for
+        if (file.startsWith(HOST_PKG)) return; // the DO host + rig legitimately name it
         if (stripComments(text).includes("DurableObjectNamespace")) offenders.push(file);
       });
     }

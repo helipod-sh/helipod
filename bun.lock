@@ -695,6 +695,30 @@
         "vitest": "catalog:",
       },
     },
+    "packages/runtime-cloudflare": {
+      "name": "@stackbase/runtime-cloudflare",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/admin": "workspace:*",
+        "@stackbase/cli": "workspace:*",
+        "@stackbase/component": "workspace:*",
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-do-sqlite": "workspace:*",
+        "@stackbase/docstore-sqlite": "workspace:*",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/sync": "workspace:*",
+      },
+      "devDependencies": {
+        "@cloudflare/workers-types": "^4.20241127.0",
+        "@stackbase/docstore": "workspace:*",
+        "@stackbase/values": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/runtime-embedded": {
       "name": "@stackbase/runtime-embedded",
       "version": "0.0.0",
@@ -910,6 +934,8 @@
     "@base-ui-components/react": ["@base-ui-components/react@1.0.0-rc.0", "", { "dependencies": { "@babel/runtime": "^7.28.4", "@base-ui-components/utils": "0.2.2", "@floating-ui/react-dom": "^2.1.6", "@floating-ui/utils": "^0.2.10", "reselect": "^5.1.1", "tabbable": "^6.3.0", "use-sync-external-store": "^1.6.0" }, "peerDependencies": { "@types/react": "^17 || ^18 || ^19", "react": "^17 || ^18 || ^19", "react-dom": "^17 || ^18 || ^19" }, "optionalPeers": ["@types/react"] }, "sha512-9lhUFbJcbXvc9KulLev1WTFxS/alJRBWDH/ibKSQaNvmDwMFS2gKp1sTeeldYSfKuS/KC1w2MZutc0wHu2hRHQ=="],
 
     "@base-ui-components/utils": ["@base-ui-components/utils@0.2.2", "", { "dependencies": { "@babel/runtime": "^7.28.4", "@floating-ui/utils": "^0.2.10", "reselect": "^5.1.1", "use-sync-external-store": "^1.6.0" }, "peerDependencies": { "@types/react": "^17 || ^18 || ^19", "react": "^17 || ^18 || ^19", "react-dom": "^17 || ^18 || ^19" }, "optionalPeers": ["@types/react"] }, "sha512-rNJCD6TFy3OSRDKVHJDzLpxO3esTV1/drRtWNUpe7rCpPN9HZVHUCuP+6rdDYDGWfXnQHbqi05xOyRP2iZAlkw=="],
+
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260702.1", "", {}, "sha512-mOhf5TUEB1m2vPrxtqoIGfz0fUC9xyxRDx5gWHy5s+OCo6dcV+g7wI1R7gYCMFohhqF/2y2xeKVwMwCJjfn/WA=="],
 
     "@csstools/color-helpers": ["@csstools/color-helpers@5.1.0", "", {}, "sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA=="],
 
@@ -1136,6 +1162,8 @@
     "@stackbase/query-engine": ["@stackbase/query-engine@workspace:packages/query-engine"],
 
     "@stackbase/receipts": ["@stackbase/receipts@workspace:packages/receipts"],
+
+    "@stackbase/runtime-cloudflare": ["@stackbase/runtime-cloudflare@workspace:packages/runtime-cloudflare"],
 
     "@stackbase/runtime-embedded": ["@stackbase/runtime-embedded@workspace:packages/runtime-embedded"],
 
