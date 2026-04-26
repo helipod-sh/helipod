@@ -11,9 +11,13 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./test-support": {
+      "types": "./test/memory-sql-storage.ts",
+      "default": "./test/memory-sql-storage.ts"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "test/memory-sql-storage.ts"],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",

@@ -17,7 +17,8 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
@@ -32,8 +33,11 @@
     "@stackbase/sync": "workspace:*"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.5.40",
     "@cloudflare/workers-types": "^4.20241127.0",
     "@stackbase/docstore": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*",
     "@stackbase/values": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",

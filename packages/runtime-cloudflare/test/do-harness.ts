@@ -10,7 +10,7 @@
  * real hibernation eviction, `WebSocketPair`, or `setWebSocketAutoResponse` — those are the province
  * of the deferred `vitest-pool-workers` run and the real-Cloudflare E2E.
  */
-import { MemorySqlStorage } from "../../docstore-do-sqlite/test/memory-sql-storage";
+import { MemorySqlStorage } from "@stackbase/docstore-do-sqlite/test-support";
 import type { DurableObjectStateLike, DoWebSocketLike, DurableObjectStorageLike } from "../src/cf-types";
 
 /** A fake hibernatable WebSocket: records sent frames and round-trips a serialized attachment (a
