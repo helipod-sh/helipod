@@ -13,7 +13,7 @@ const noopExecutor: SyncUdfExecutor = {
     return { value: null, tables: [], readRanges: [] };
   },
   async runMutation() {
-    return { value: null, tables: [], ranges: [], commitTs: 1, writtenDocs: [] };
+    return { value: null, tables: [], writeRanges: [], commitTs: 1 };
   },
   async runAdminQuery() {
     return { value: null, tables: [], readRanges: [] };
