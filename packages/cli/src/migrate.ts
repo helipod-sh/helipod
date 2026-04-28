@@ -12,6 +12,7 @@ import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { resolveSource, type MigrationSource, type ReportEntry } from "./migrate/source";
 import { convexSource } from "./migrate/convex-source";
+import { migrateExportCommand, migrateImportCommand } from "./migrate/data";
 
 const SOURCES: Record<string, MigrationSource> = { convex: convexSource };
 
@@ -58,6 +59,12 @@ function gitDirty(dir: string): boolean | null {
 }
 
 export async function migrateCommand(args: string[]): Promise<number> {
+  // Data-migration verbs (Slice 5) — `migrate export`/`migrate import` move an app's DATA between the
+  // portable and DO-native topologies. Kept under `migrate` (a sibling of the bare-`migrate` Convex
+  // codemod, which is unchanged) so `stackbase migrate` stays one coherent command.
+  if (args[0] === "export") return migrateExportCommand(args.slice(1));
+  if (args[0] === "import") return migrateImportCommand(args.slice(1));
+
   const opts = parse(args);
   const appDir = resolve(opts.appDir);
   const projectRoot = dirname(appDir);

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@stackbase/docstore": "workspace:*",
     "@stackbase/errors": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/id-codec": "workspace:*",

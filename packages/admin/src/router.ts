@@ -62,6 +62,15 @@ export async function handleAdminRequest(api: AdminApi, adminKey: string, req: A
       const fields = JSON.parse(req.body ?? "{}") as Record<string, JSONValue>;
       return { status: 200, body: await api.createDocument(decodeURIComponent(seg[1]!), fields) };
     }
+    // Data migration (Slice 5) — export/import the app's full materialized state. Works on both the
+    // container `serve` path and the Cloudflare DO host (both route `/_admin/*` through here). The DO's
+    // store is writable only from inside the DO, and this runs inside it.
+    if (req.method === "GET" && seg.length === 1 && seg[0] === "export") {
+      return { status: 200, body: (await api.exportDump()) as unknown as JSONValue };
+    }
+    if (req.method === "POST" && seg.length === 1 && seg[0] === "import") {
+      return { status: 200, body: (await api.importDump(req.body ?? "")) as unknown as JSONValue };
+    }
     return { status: 404, body: { error: "not found" } };
   } catch (e) {
     return { status: 400, body: { error: e instanceof Error ? e.message : String(e) } };

@@ -335,6 +335,7 @@
       "name": "@stackbase/admin",
       "version": "0.0.0",
       "dependencies": {
+        "@stackbase/docstore": "workspace:*",
         "@stackbase/errors": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",

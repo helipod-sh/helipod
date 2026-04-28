@@ -126,6 +126,8 @@ function printHelp(): void {
       "  deploy     Push convex/ to a running `serve --allow-deploy` and hot-swap it live",
       "  build      Compile the app to a self-contained executable (bun build --compile)",
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
+      "  migrate export --url <src> --out dump.json   Export app data to a portable dump",
+      "  migrate import --url <dst> --in  dump.json   Import a dump into a deployment",
       "  codegen    Regenerate convex/_generated types",
       "  fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count",
       "  objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count",

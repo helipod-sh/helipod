@@ -1,5 +1,12 @@
 import { encodeStorageTableId } from "@stackbase/id-codec";
 import { convexToJson, type JSONValue, type Value, type ValidatorJSON } from "@stackbase/values";
+import {
+  applyDumpToStore,
+  exportDumpFromStore,
+  parseDump,
+  type ImportableDocStore,
+  type MigrationDump,
+} from "@stackbase/docstore";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { ExecutionLogEntry, IndexCatalog, LogFilter, LogSink } from "@stackbase/executor";
 import type { FilterCond } from "./browse";
@@ -130,5 +137,38 @@ export class AdminApi {
   /** The live schema + tableNumbers — a deploy diffs its new schema against this. */
   getSchema(): { schemaJson: AdminDeps["schemaJson"]; tableNumbers: Record<string, number> } {
     return { schemaJson: this.deps.schemaJson, tableNumbers: this.deps.tableNumbers };
+  }
+
+  // ── Data migration (Slice 5 — portable ⇄ DO-native) ───────────────────────────────────────────
+
+  /**
+   * Export this deployment's full current materialized state to a portable {@link MigrationDump}
+   * (every live document + every current index row + the table-number map). Reachable via
+   * `GET /_admin/export` on BOTH the container `serve` path AND the Cloudflare DO host (both funnel
+   * `/_admin/*` through the same handler). Uses the store's `dumpCurrentState()` primitive — the same
+   * one the R2 snapshot mechanism uses — so ids and `_creationTime` round-trip verbatim.
+   */
+  async exportDump(): Promise<MigrationDump> {
+    const deploymentId = (await this.deps.runtime.store.getGlobal("fleet:deploymentId")) as string | null;
+    return exportDumpFromStore(this.deps.runtime.store, { tableNumbers: this.deps.tableNumbers, deploymentId });
+  }
+
+  /**
+   * Import a {@link MigrationDump} into this deployment. Runs the table-number collision guard FIRST
+   * (refuses a dump whose numbers would serve rows under the wrong table), applies the rows via the
+   * store's `write(..., "Overwrite")` overlay, then advances the runtime's timestamp oracle to the
+   * new high-water mark — without which a freshly-booted runtime keeps reading at `ts <= 0` and sees
+   * nothing. Intended for a FRESH target deployment (see `applyDumpToStore`'s note on merge semantics).
+   */
+  async importDump(dumpJson: string | unknown): Promise<{ ok: true; imported: { documents: number; indexUpdates: number } }> {
+    const dump = parseDump(dumpJson);
+    const imported = await applyDumpToStore(
+      this.deps.runtime.store as unknown as ImportableDocStore,
+      dump,
+      this.deps.tableNumbers,
+    );
+    // Re-floor the read/write snapshot at the imported high-water mark (the same seeding a boot does).
+    this.deps.runtime.observeTimestamp(await this.deps.runtime.store.maxTimestamp());
+    return { ok: true, imported };
   }
 }
