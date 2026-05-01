@@ -226,6 +226,26 @@
         "vitest": "catalog:",
       },
     },
+    "ee/packages/runtime-cloudflare-shard": {
+      "name": "@stackbase/runtime-cloudflare-shard",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/cli": "workspace:*",
+        "@stackbase/id-codec": "workspace:*",
+        "@stackbase/index-key-codec": "workspace:*",
+        "@stackbase/runtime-cloudflare": "workspace:*",
+      },
+      "devDependencies": {
+        "@cloudflare/vitest-pool-workers": "0.5.40",
+        "@cloudflare/workers-types": "^4.20241127.0",
+        "@stackbase/executor": "workspace:*",
+        "@stackbase/values": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "examples/auth-demo": {
       "name": "@stackbase/example-auth-demo",
       "version": "0.0.0",
@@ -1190,6 +1210,8 @@
     "@stackbase/receipts": ["@stackbase/receipts@workspace:packages/receipts"],
 
     "@stackbase/runtime-cloudflare": ["@stackbase/runtime-cloudflare@workspace:packages/runtime-cloudflare"],
+
+    "@stackbase/runtime-cloudflare-shard": ["@stackbase/runtime-cloudflare-shard@workspace:ee/packages/runtime-cloudflare-shard"],
 
     "@stackbase/runtime-embedded": ["@stackbase/runtime-embedded@workspace:packages/runtime-embedded"],
 
