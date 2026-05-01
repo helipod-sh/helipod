@@ -63,6 +63,7 @@ describe("stackbase migrate export/import — end-to-end through the real serve 
         port: 0,
         adminKey: "src-key",
         dashboard: false,
+        allowDeploy: false,
       });
       await run(source.server.url, "app:seed");
       const srcMessages = await run(source.server.url, "app:allMessages");
@@ -92,6 +93,7 @@ describe("stackbase migrate export/import — end-to-end through the real serve 
         port: 0,
         adminKey: "dst-key",
         dashboard: false,
+        allowDeploy: false,
       });
       expect((await run(target.server.url, "app:allMessages") as unknown[]).length).toBe(0);
 
