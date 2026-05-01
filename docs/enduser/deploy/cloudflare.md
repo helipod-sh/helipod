@@ -115,6 +115,37 @@ taken. (The 1.2s/op figure from the R2 conformance run was WAN from a laptop and
 representative of a container sitting next to R2.) If write latency matters to your app, measure it
 on your own deployment before committing.
 
+## Moving data between hosts
+
+The portable host (container + R2 / SQLite / Postgres) and the Durable-Object-native host store the
+same data in **different physical topologies** — data does not teleport between them. To move an app,
+export a portable dump from one and import it into the other:
+
+```bash
+# Export the full current state of a running source deployment to a file.
+STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://source.example.com --out dump.json
+
+# Import that dump into a running target deployment (fresh).
+STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.com --in dump.json
+```
+
+Both commands talk to the deployment's admin API (`GET /_admin/export` / `POST /_admin/import`),
+bearer-authenticated with `STACKBASE_ADMIN_KEY` (or `--admin-key`). The dump is a JSON file: a
+point-in-time image of every live document and index, plus the table-number map. Because every
+Stackbase store shares one logical shape (the MVCC log), the round trip reproduces your rows
+**exactly** — same ids, same `_creationTime`.
+
+What to know:
+
+- **Deploy the matching schema on the target first.** Import refuses (rather than silently serving
+  rows under the wrong table) if the target's table numbers don't match the dump's — a deliberate
+  guard. Import into a fresh deployment of the *same* app.
+- **Import targets a fresh deployment.** It is not a merge; importing over divergent existing data is
+  unsupported.
+- **Single-shard only.** Multi-shard migration isn't built yet.
+- The dump is a point-in-time snapshot, not a live/streaming copy — stop writes to the source (or
+  accept that writes after the export aren't carried) for a clean cutover.
+
 ## Should you use this?
 
 **Good fit:** a request-driven app that idles a lot, where scale-to-zero economics and Cloudflare's
