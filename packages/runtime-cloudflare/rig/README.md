@@ -46,6 +46,17 @@ node e2e.mjs --url https://stackbase-do-fixture.<subdomain>.workers.dev
 npx wrangler delete
 ```
 
+## Placement (optional): pin the DO's home region
+
+A Durable Object is **single-homed** — pinned to one data center at creation, and it never moves; by
+default it lands near whoever **first** `get()`s it. To pin this single DO to a specific region, set
+`STACKBASE_DO_LOCATION_HINT` (e.g. `enam`) as a container/Worker env var (alongside
+`STACKBASE_ADMIN_KEY`). The Worker threads it into `get(id, { locationHint })`; only the **first**
+`get()` is honored (pinned thereafter). Unset ⇒ no hint (placed near the first requester — today's
+behavior). An invalid hint fails loudly (500). Valid hints: `wnam enam sam weur eeur apac apac-ne
+apac-se oc afr me`. This is one DO in one region — placing *many* shard-DOs near their own audiences is
+the paid [`@stackbase/runtime-cloudflare-shard`](../../../ee/packages/runtime-cloudflare-shard) router.
+
 ## What each assertion proves
 
 | Step | Proves |

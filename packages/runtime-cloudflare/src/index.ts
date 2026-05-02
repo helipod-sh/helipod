@@ -8,7 +8,22 @@
  * call and the engine's shipped G1/G4 ordering guarantees survive by construction (decision 1).
  */
 export { StackbaseDurableObject, type DurableObjectAppConfig } from "./durable-object";
-export { createWorkerHandler, DEFAULT_SHARD_NAME, type WorkerHandler, type DurableObjectNamespaceLike, type DurableObjectStubLike } from "./worker";
+export {
+  createWorkerHandler,
+  DEFAULT_SHARD_NAME,
+  type WorkerHandler,
+  type DurableObjectNamespaceLike,
+  type DurableObjectStubLike,
+  type DurableObjectIdLike,
+  type DurableObjectGetOptions,
+} from "./worker";
+export {
+  DEPLOYMENT_LOCATION_HINT_ENV,
+  LOCATION_HINTS,
+  KNOWN_LOCATION_HINTS,
+  isValidLocationHint,
+  type LocationHint,
+} from "./location";
 export { DurableObjectRuntimeHost, type DurableObjectServeOptions, type DurableObjectServerHandle } from "./host";
 export { bootDurableObjectRuntime, type DurableObjectBootInput, type DurableObjectBoot } from "./boot";
 export { DoAlarmWakeHost } from "./wake";

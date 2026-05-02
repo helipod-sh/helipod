@@ -8,13 +8,21 @@
  * This mirrors Concave's `getConcaveNamespace`/`getSyncNamespace` binding shape collapsed to a single
  * namespace — the transactor-DO/sync-DO split is deferred to Slice 6 (decision 1).
  */
+import { DEPLOYMENT_LOCATION_HINT_ENV, isValidLocationHint, LOCATION_HINTS } from "./location";
 
 /** The minimal structural surface of a `DurableObjectNamespace` binding the router drives. A real
  *  workerd `DurableObjectNamespace` satisfies this by width — declared inline so the package needs no
  *  `@cloudflare/workers-types` runtime dependency (same discipline as `cf-types.ts`). */
 export interface DurableObjectNamespaceLike {
   idFromName(name: string): DurableObjectIdLike;
-  get(id: DurableObjectIdLike): DurableObjectStubLike;
+  /** `get(id)` returns the stub for the object; the optional options bag carries `locationHint` to
+   *  place a NEWLY-created DO near a region (honored only on the FIRST `get()` for that id — a DO is
+   *  single-homed and pinned thereafter). Omitting the bag is byte-identical to the pre-hint call. */
+  get(id: DurableObjectIdLike, options?: DurableObjectGetOptions): DurableObjectStubLike;
+}
+/** The options bag `DurableObjectNamespace.get(id, opts)` accepts. Only `locationHint` is used here. */
+export interface DurableObjectGetOptions {
+  locationHint?: string;
 }
 export interface DurableObjectIdLike {
   toString(): string;
@@ -34,19 +42,44 @@ export interface WorkerHandler {
  * Build the stateless Worker `fetch` handler. `bindingName` is the `durable_objects` binding declared
  * in `wrangler.jsonc` (e.g. `"STACKBASE_DO"`). Every request — HTTP and WS upgrade alike — forwards
  * to the single DO instance.
+ *
+ * Placement: the deployment can pin its ONE DO's home region with `STACKBASE_DO_LOCATION_HINT` (e.g.
+ * a US-centric app sets `enam`). The hint is read from `env` per request and passed to `get(id, …)` —
+ * only the FIRST `get()` for the `"default"` id is honored (the DO is single-homed thereafter), so a
+ * stable env value places the DO deterministically. Unset ⇒ no options bag, byte-identical to the
+ * pre-hint behavior (Cloudflare places the DO near the first requester). An INVALID hint is a loud 500
+ * at the edge, never silently passed — a bad hint would mis-place the DO permanently.
  */
 export function createWorkerHandler(bindingName: string): WorkerHandler {
   return {
     async fetch(request: Request, env: Record<string, unknown>): Promise<Response> {
       const ns = env[bindingName] as DurableObjectNamespaceLike | undefined;
       if (!ns || typeof ns.idFromName !== "function") {
-        return new Response(
-          JSON.stringify({ error: `stackbase: Durable Object binding "${bindingName}" is not configured in wrangler.jsonc` }),
-          { status: 500, headers: { "content-type": "application/json" } },
-        );
+        return jsonError(500, `stackbase: Durable Object binding "${bindingName}" is not configured in wrangler.jsonc`);
       }
-      const stub = ns.get(ns.idFromName(DEFAULT_SHARD_NAME));
+      const rawHint = env[DEPLOYMENT_LOCATION_HINT_ENV];
+      let locationHint: string | undefined;
+      if (typeof rawHint === "string" && rawHint.length > 0) {
+        if (!isValidLocationHint(rawHint)) {
+          return jsonError(
+            500,
+            `stackbase: ${DEPLOYMENT_LOCATION_HINT_ENV}="${rawHint}" is not a valid Durable Object location hint. ` +
+              `Valid hints: ${LOCATION_HINTS.join(", ")}.`,
+          );
+        }
+        locationHint = rawHint;
+      }
+      const id = ns.idFromName(DEFAULT_SHARD_NAME);
+      // Byte-identical to the pre-hint call when there is no hint (no options bag at all).
+      const stub = locationHint ? ns.get(id, { locationHint }) : ns.get(id);
       return stub.fetch(request);
     },
   };
+}
+
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }

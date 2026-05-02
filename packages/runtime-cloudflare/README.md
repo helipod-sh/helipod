@@ -25,6 +25,22 @@ export class StackbaseDO extends StackbaseDurableObject {
 export default createWorkerHandler("STACKBASE_DO");
 ```
 
+## Placement: pin your one DO's home region
+
+A Durable Object is **single-homed** — pinned to one data center at creation, and it **never moves**.
+By default it lands near whoever **first** `get()`s it. A US-centric app can instead pin its one DO
+explicitly with the **`STACKBASE_DO_LOCATION_HINT`** env var (e.g. `enam`): the Worker reads it per
+request and passes it to `get(id, { locationHint })`. Only the **first** `get()` for the `"default"` id
+is honored (the DO is pinned thereafter), so a stable env value places it deterministically. **Unset ⇒
+no hint** — byte-identical to the pre-hint behavior (Cloudflare places the DO near the first requester).
+An **invalid** hint is a loud 500 at the edge, never silently passed (a bad hint would mis-place the DO
+permanently). Valid hints are the 11 Cloudflare region codes (`wnam enam sam weur eeur apac apac-ne
+apac-se oc afr me`) — jurisdictions (`eu`/`fedramp`) are a *separate* mechanism, not a `locationHint`.
+
+This is a single DO in a single region: it is **not** geographic scale-out. Placing *many* shard-DOs
+near *their own* audiences is the paid-tier
+[`@stackbase/runtime-cloudflare-shard`](../../ee/packages/runtime-cloudflare-shard) router (Slice 6, M1).
+
 ## Load-bearing decisions
 
 - **16 KB attachment stores the subscription DEFINITION, not the read-set** (decision 2). On revival
