@@ -176,6 +176,21 @@ export abstract class StackbaseDurableObject {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // Diagnostic: which datacenter does THIS Durable Object physically run in? A DO is single-homed,
+    // and its OUTBOUND request originates from its own colo — so `/cdn-cgi/trace` reveals the DO's
+    // real location, independent of client latency. Used to VERIFY `locationHint` placement: route
+    // `/api/_whereami?shard=<k>&region=<hint>` and check the returned colo matches the hinted region.
+    if (path === "/api/_whereami") {
+      let colo = "unknown";
+      try {
+        const trace = await fetch("https://workers.cloudflare.com/cdn-cgi/trace");
+        colo = (await trace.text()).match(/^colo=(.+)$/m)?.[1] ?? "unparsed";
+      } catch (e) {
+        colo = `trace-failed: ${String(e)}`;
+      }
+      return jsonResponse(200, { colo, doId: String((this.ctx as { id?: unknown }).id ?? "") });
+    }
+
     // WebSocket upgrade → the reactive sync socket. Handled by the DO directly (WebSocketPair +
     // hibernation), never by `handleHttpRequest`.
     if (path === SYNC_PATH && (request.headers.get("Upgrade") ?? "").toLowerCase() === "websocket") {
