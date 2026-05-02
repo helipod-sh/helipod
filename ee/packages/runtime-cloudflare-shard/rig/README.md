@@ -42,6 +42,27 @@ npx wrangler deploy
 node e2e.mjs --url https://stackbase-do-shard-fixture.<subdomain>.workers.dev
 ```
 
+## Geographic placement — the point of per-shard DOs
+
+A Durable Object is **single-homed**: pinned to one data center at creation, it **never moves**, and
+by default lands near whoever **first** `get()`s it. Because each shard key is a **distinct DO**, each
+shard can be placed near **its own** audience via `get(id, { locationHint })` — `roomTokyo` in
+`apac-ne`, `roomBerlin` in `weur`, at the same time. **Only the first `get()` for a given DO is
+honored** (it is pinned thereafter), so the router derives a **stable-per-key** hint where possible.
+Placement precedence (see the package README for detail):
+
+1. **Explicit** `?region=<hint>` / `X-Stackbase-Region: <hint>` — deterministic, app-controlled;
+   an invalid hint is a hard `INVALID_REGION_HINT` 400 (never mis-places a DO permanently).
+2. **Region-prefixed key** (`regionPrefixedKeys: true`) — `"enam:room123"` → `enam` (opt-in; the full
+   value still names the DO).
+3. **Auto from `request.cf.continent`** — places a new shard near its first requester (also CF's own
+   default; first-requester-wins).
+4. **Default** — no hint (byte-identical forward).
+
+The **reactive/write path always routes to the DO's home**, so place a shard near where most of its
+traffic originates. Routing is a stateless **O(1)** name derivation — no shard map, no coordinator, no
+lock — so it stays constant regardless of shard count (the no-shared-bottleneck property).
+
 ## What the E2E proves (and what it can't)
 
 **Proves, on real Cloudflare:**
@@ -56,6 +77,11 @@ node e2e.mjs --url https://stackbase-do-shard-fixture.<subdomain>.workers.dev
 **Cannot cover without a paid multi-region setup:** true cross-datacenter DO placement latency per
 shard, and hibernation eviction timing across many shards. Those are observational, not correctness —
 the isolation and reactivity correctness are fully covered by the real-workerd tier + this script.
+**Placement in particular is deploy-pending to *measure*:** the real-workerd tier proves a `?region=`
+hint is threaded into `get(id, { locationHint })` and that routing is O(1), but a single vantage cannot
+observe which data center a DO landed in — the true cross-region latency delta needs a **distributed
+load test against this real deploy** (issue requests to the same shard from several regions and compare
+round-trip against an unhinted baseline).
 
 ## Non-goals (M1 — enforced, documented, not silently broken)
 

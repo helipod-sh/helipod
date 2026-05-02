@@ -27,7 +27,15 @@
  */
 import type { LoadedProject } from "@stackbase/cli/project";
 import { shardDoName, DEFAULT_SHARD_DO_NAME, type ShardRoutingMode } from "./canonical";
-import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED, routingError, type ShardRoutingErrorBody } from "./errors";
+import {
+  SHARD_KEY_REQUIRED,
+  CROSS_SHARD_UNSUPPORTED,
+  INVALID_REGION_HINT,
+  routingError,
+  type ShardRoutingErrorBody,
+} from "./errors";
+import { deriveLocationHint } from "./location";
+import { LOCATION_HINTS } from "@stackbase/runtime-cloudflare";
 
 export interface ShardRoutingOptions {
   /** Routing mode: "key" (A, default — one DO per key) or "hash" (B — fixed-N jump-hash). §1.1. */
@@ -40,10 +48,24 @@ export interface ShardRoutingOptions {
    * derivation is a convenience so a client need not know each mutation's shard-key field name).
    */
   loaded?: LoadedProject;
+  /**
+   * Opt-in placement source (b): read a `"<hint>:<rest>"` region prefix off the shard-key value to
+   * derive the DO's `locationHint` (e.g. `"enam:room123"` → `enam`). OFF by default — an app that does
+   * not want a key format is never forced into one. The prefix is only READ for placement; the full
+   * key value still names the DO.
+   */
+  regionPrefixedKeys?: boolean;
 }
 
 export type ShardResolution =
-  | { kind: "shard"; name: string }
+  | {
+      kind: "shard";
+      name: string;
+      /** The geographic `locationHint` to place a NEWLY-created shard-DO near its audience (source
+       *  a/b/c). Absent ⇒ the router forwards with NO options bag (byte-identical to the pre-hint
+       *  behavior; Cloudflare places the DO near the first requester). */
+      locationHint?: string;
+    }
   | { kind: "error"; status: number; body: ShardRoutingErrorBody };
 
 const SHARD_HEADER = "x-stackbase-shard";
@@ -119,6 +141,32 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
   const numShards = opts.numShards ?? 1;
   const url = new URL(request.url);
   const headers = request.headers;
+  const cf = (request as { cf?: { continent?: string } }).cf;
+
+  /** Attach the placement hint (sources a/b/c) to a resolved shard name, or surface an invalid explicit
+   *  region as a typed 400. `shardKeyValue` feeds the opt-in region-prefix source; `undefined` on the
+   *  default DO. Kept as a single tail so every shard branch derives the hint identically. */
+  const finish = (name: string, shardKeyValue: unknown): ShardResolution => {
+    const derived = deriveLocationHint({
+      url,
+      headers,
+      cf,
+      shardKeyValue,
+      regionPrefixedKeys: opts.regionPrefixedKeys,
+    });
+    if (!derived.ok) {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          INVALID_REGION_HINT,
+          `region hint "${derived.invalidRegion}" is not a valid Durable Object location hint. ` +
+            `Use one of: ${LOCATION_HINTS.join(", ")}.`,
+        ),
+      };
+    }
+    return derived.hint !== undefined ? { kind: "shard", name, locationHint: derived.hint } : { kind: "shard", name };
+  };
 
   // Fan-out / cross-shard is refused up front (M1 non-goal). A caller that wants to span shards gets a
   // clear code, never a silently-partial merge.
@@ -149,7 +197,7 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
         ),
       };
     }
-    return { kind: "shard", name: shardDoName(explicit, mode, numShards) };
+    return finish(shardDoName(explicit, mode, numShards), explicit);
   }
 
   // (2) Derive from a POST /api/run body when we have the bundled app to consult.
@@ -174,11 +222,11 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
             ),
           };
         }
-        return { kind: "shard", name: shardDoName(derived.value, mode, numShards) };
+        return finish(shardDoName(derived.value, mode, numShards), derived.value);
       }
     }
   }
 
   // (3) Default DO — unsharded / no-`shardBy` / non-run requests.
-  return { kind: "shard", name: DEFAULT_SHARD_DO_NAME };
+  return finish(DEFAULT_SHARD_DO_NAME, undefined);
 }

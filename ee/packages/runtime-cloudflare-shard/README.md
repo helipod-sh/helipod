@@ -38,6 +38,43 @@ The licensing switch is the app's Worker entry: a single-shard app `export defau
 createWorkerHandler(...)` (free package); a multi-shard app `export default createShardWorkerHandler(...)`
 (this package). Nothing in the free package imports this one.
 
+## Geographic placement — this is why sharding scales *geographically*
+
+A Durable Object is **single-homed**: it is pinned to **one** data center at creation and **never
+moves**. By default it lands near whoever **first** `get()`s it. `get(id, { locationHint })` overrides
+that placement — but **only the first `get()` for a given DO is honored** (the DO is pinned
+thereafter; see the [data-location reference](https://developers.cloudflare.com/durable-objects/reference/data-location/)).
+
+This is *why* multi-shard is the unit of geographic scale-out: each shard-DO is a distinct object, so
+**each can be placed near its own audience** — `roomTokyo` in `apac-ne`, `roomBerlin` in `weur` — at the
+same time, with no shared bottleneck between them. The router derives that hint per request, from the
+envelope, in precedence order (each **stable per shard key** where possible, so the one `get()` that
+counts is deterministic):
+
+1. **Explicit** — `?region=<hint>` param or `X-Stackbase-Region: <hint>` header. App-controlled and
+   fully deterministic (mirrors `?shard=`). An invalid explicit hint is a hard `INVALID_REGION_HINT`
+   400 at the edge — never passed to `get()`, because a bad hint would mis-place the DO **permanently**.
+2. **Region-prefixed key (opt-in)** — with `regionPrefixedKeys: true`, a shard-key value of the form
+   `"<hint>:<rest>"` (e.g. `"enam:room123"`) derives its hint from the prefix. Off by default (no app is
+   forced into a key format); the **full** key value still names the DO — the prefix is read for
+   placement only.
+3. **Auto from origin** — `request.cf.continent` mapped to the nearest hint, placing a **new** shard
+   near the user who first creates it. This is *also* Cloudflare's own default, so it is a made-explicit
+   convenience, not a new guarantee — and it is **first-requester-wins** (not stable across requesters).
+4. **Default** — no hint. The router forwards with **no options bag** — byte-identical to the pre-hint
+   behavior.
+
+Valid hints are the 11 Cloudflare region codes (`wnam enam sam weur eeur apac apac-ne apac-se oc afr
+me`); jurisdictions (`eu`/`fedramp`) are a **separate** mechanism, not a `locationHint` value.
+
+**Honest boundary:** the **reactive/write path always routes to the DO's home** — a subscriber and a
+committer for `roomTokyo` both reach the Tokyo-placed DO wherever *they* are. Placement optimizes for
+the **audience of a shard**, so place a shard near where most of its traffic originates. Routing itself
+is a stateless, **O(1)** name derivation (no shard map, no coordinator, no lock) — so it stays constant
+regardless of how many shards exist. True cross-region latency improvement can only be *measured* from a
+distributed load test against a real deploy (see [`rig/README.md`](./rig/README.md)); the real-workerd
+suite proves the hint is threaded and the routing is O(1), not the latency delta.
+
 ## Non-goals (M1 — enforced with a typed error, never silently broken)
 
 - A **reactive** query/mutation spanning **multiple shards** → rejected with

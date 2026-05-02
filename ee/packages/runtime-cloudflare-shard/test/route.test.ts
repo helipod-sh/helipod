@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import type { LoadedProject } from "@stackbase/cli/project";
 import { resolveShard } from "../src/route";
 import { shardDoName, DEFAULT_SHARD_DO_NAME } from "../src/canonical";
-import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED } from "../src/errors";
+import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED, INVALID_REGION_HINT } from "../src/errors";
 
 // A minimal LoadedProject whose only job is to expose function metadata to the derive path. `schema`
 // is unused by routing, so a cast is honest here.
@@ -133,5 +133,76 @@ describe("resolveShard — mode 'hash'", () => {
   it("resolves to the portable ShardId string", async () => {
     const r = await resolveShard(get("/api/sync?shard=roomA"), { mode: "hash", numShards: 8 });
     expect((r as { name: string }).name).toBe(shardDoName("roomA", "hash", 8));
+  });
+});
+
+describe("resolveShard — geographic placement hint (locationHint threading)", () => {
+  it("threads an explicit ?region= hint onto the shard resolution, next to the (unchanged) name", async () => {
+    const r = await resolveShard(get("/api/sync?shard=roomA&region=enam"));
+    expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "enam" });
+  });
+
+  it("threads the X-Stackbase-Region header hint", async () => {
+    const r = await resolveShard(get("/api/sync?shard=roomA", { "x-stackbase-region": "weur" }));
+    expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "weur" });
+  });
+
+  it("rejects an INVALID explicit region hint (never mis-places a DO permanently)", async () => {
+    const r = await resolveShard(get("/api/sync?shard=roomA&region=nowhere"));
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.status).toBe(400);
+      expect(r.body.error.code).toBe(INVALID_REGION_HINT);
+    }
+  });
+
+  it("no region signal ⇒ NO locationHint key on the resolution (byte-identical to pre-hint)", async () => {
+    const r = await resolveShard(get("/api/sync?shard=roomA"));
+    expect(r).toEqual({ kind: "shard", name: shardDoName("roomA") });
+    expect("locationHint" in r).toBe(false);
+  });
+
+  it("derives the hint from a region-prefixed key ONLY when opted in — key name unchanged either way", async () => {
+    const req = () => get("/api/sync?shard=enam:roomA");
+    const off = await resolveShard(req());
+    expect(off).toEqual({ kind: "shard", name: shardDoName("enam:roomA") });
+
+    const on = await resolveShard(req(), { regionPrefixedKeys: true });
+    expect(on).toEqual({ kind: "shard", name: shardDoName("enam:roomA"), locationHint: "enam" });
+    // The DO NAME is the full key value in both cases — the prefix is read for placement only.
+    expect((on as { name: string }).name).toBe((off as { name: string }).name);
+  });
+
+  it("places the DERIVE-from-args path too (explicit region + a POST /api/run mutation)", async () => {
+    const r = await resolveShard(
+      run({ path: "messages:send", args: { roomId: "roomA" } }, { "x-stackbase-region": "apac-se" }),
+      { loaded },
+    );
+    expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "apac-se" });
+  });
+
+  it("a cf-origin continent places a NEW shard when no explicit/prefix hint", async () => {
+    // Simulate workerd's request.cf by attaching it to the Request object the router reads.
+    const req = get("/api/sync?shard=roomA");
+    Object.defineProperty(req, "cf", { value: { continent: "EU" }, configurable: true });
+    const r = await resolveShard(req);
+    expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "weur" });
+  });
+});
+
+describe("resolveShard — O(1) statelessness (no shared shard bottleneck)", () => {
+  it("resolving a key is independent of how many other keys were resolved before it", async () => {
+    // The router holds NO shard map / coordinator / lock: the name is a pure function of the key. So the
+    // resolution for a key must be identical whether it is the 1st or the 10,001st key routed — proving
+    // routing cost does not grow with shard count (the no-shared-bottleneck guarantee).
+    const alone = await resolveShard(get("/api/sync?shard=target"));
+    const names = new Set<string>();
+    for (let i = 0; i < 10_000; i++) {
+      const r = await resolveShard(get(`/api/sync?shard=k${i}`));
+      names.add((r as { name: string }).name);
+    }
+    expect(names.size).toBe(10_000); // every distinct key ⇒ a distinct DO, no collisions/coalescing
+    const afterMany = await resolveShard(get("/api/sync?shard=target"));
+    expect(afterMany).toEqual(alone); // identical resolution — no accumulated per-shard state
   });
 });

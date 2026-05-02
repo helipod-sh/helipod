@@ -105,6 +105,23 @@ describe("M1 multi-shard on REAL workerd", () => {
     ws.close();
   });
 
+  it("accepts an explicit ?region= placement hint end-to-end (the DO still serves correctly)", async () => {
+    // A single vantage cannot OBSERVE which data center workerd placed the DO in, so this proves what
+    // IS provable in real workerd: a hinted request threads through the router → get(id, {locationHint})
+    // → the owning shard-DO and serves correctly. (The router-called-get-with-{locationHint} assertion
+    // itself is pinned by the Node spy suite; true cross-region latency needs the deploy-pending rig.)
+    expect((await SELF.fetch(post("/api/run?region=enam", { path: "messages:send", args: { roomId: "roomHinted", body: "hi-hinted" } }))).status).toBe(200);
+    expect(await bodies(await SELF.fetch(list("roomHinted", "roomHinted")))).toEqual(["hi-hinted"]);
+  });
+
+  it("rejects an INVALID region hint at the edge (400), serving no data", async () => {
+    const res = await SELF.fetch(post("/api/run?region=atlantis", { path: "messages:send", args: { roomId: "roomBad", body: "x" } }));
+    expect(res.status).toBe(400);
+    const j = (await res.json()) as { error?: { code?: string }; value?: unknown };
+    expect(j.error?.code).toBe("INVALID_REGION_HINT");
+    expect(j.value).toBeUndefined();
+  });
+
   it("commits two different shard keys independently (separate single-threaded DOs = N× scale-out)", async () => {
     // Fire both concurrently: they hit two distinct DOs, each its own single thread, so neither
     // serializes behind the other. Both must commit and be independently readable.

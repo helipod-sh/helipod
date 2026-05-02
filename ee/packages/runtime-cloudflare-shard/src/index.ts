@@ -21,10 +21,18 @@ export { shardDoName, DEFAULT_SHARD_DO_NAME, type ShardRoutingMode } from "./can
 export {
   SHARD_KEY_REQUIRED,
   CROSS_SHARD_UNSUPPORTED,
+  INVALID_REGION_HINT,
   routingError,
   type ShardRoutingErrorCode,
   type ShardRoutingErrorBody,
 } from "./errors";
+export {
+  deriveLocationHint,
+  continentToHint,
+  CONTINENT_TO_HINT,
+  type HintDerivation,
+  type DeriveLocationHintInput,
+} from "./location";
 export { generateShardWorkerEntrySource, type ShardWorkerEntryInputs } from "./worker-entry";
 
 // Re-export the FREE DO host class so an app imports ONE package at its Worker entry. This is a plain

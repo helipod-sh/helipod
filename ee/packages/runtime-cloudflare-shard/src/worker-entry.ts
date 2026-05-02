@@ -24,6 +24,9 @@ export interface ShardWorkerEntryInputs {
   mode?: "key" | "hash";
   /** For mode "hash": the fixed shard count N. */
   numShards?: number;
+  /** Opt-in geographic placement source (b): derive a shard-DO's `locationHint` from a `"<hint>:<rest>"`
+   *  prefix on the shard-key value. Off by default. */
+  regionPrefixedKeys?: boolean;
   /** The env var the admin key is read from at DO boot (default `STACKBASE_ADMIN_KEY`). */
   adminKeyEnvVar?: string;
   /** Override the free host package import specifier (the in-repo fixture uses this). */
@@ -55,9 +58,11 @@ export function generateShardWorkerEntrySource(inp: ShardWorkerEntryInputs): str
   L.push(`}`);
   L.push("");
   // `loaded` is passed to the router so a POST /api/run can DERIVE a mutation's shard key from its args.
+  // `regionPrefixedKeys` (opt-in) enables the `"<hint>:<rest>"`-prefix placement source.
+  const rpk = inp.regionPrefixedKeys ? ", regionPrefixedKeys: true" : "";
   const routeOpts = mode === "hash"
-    ? `{ mode: "hash", numShards: ${JSON.stringify(inp.numShards ?? 1)}, loaded }`
-    : `{ mode: "key", loaded }`;
+    ? `{ mode: "hash", numShards: ${JSON.stringify(inp.numShards ?? 1)}, loaded${rpk} }`
+    : `{ mode: "key", loaded${rpk} }`;
   L.push(`export default createShardWorkerHandler(${JSON.stringify(inp.bindingName)}, ${routeOpts});`);
   return L.join("\n") + "\n";
 }

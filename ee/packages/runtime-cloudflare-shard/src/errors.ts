@@ -18,7 +18,17 @@ export const SHARD_KEY_REQUIRED = "SHARD_KEY_REQUIRED";
  *  rather than fanned out and merged, so no caller ever receives a silently-partial result. */
 export const CROSS_SHARD_UNSUPPORTED = "CROSS_SHARD_UNSUPPORTED";
 
-export type ShardRoutingErrorCode = typeof SHARD_KEY_REQUIRED | typeof CROSS_SHARD_UNSUPPORTED;
+/** An EXPLICIT region hint (`?region=` / `X-Stackbase-Region`) was supplied but is not one of
+ *  Cloudflare's 11 `locationHint` region codes. Rejected LOUDLY at the edge rather than passed to
+ *  `get(id, { locationHint })`: a bad hint would place the shard-DO in an unintended data center
+ *  PERMANENTLY (a DO is single-homed and pinned on its first `get()`), so we refuse it up front and
+ *  name the fix, exactly the same discipline the shard guards use. */
+export const INVALID_REGION_HINT = "INVALID_REGION_HINT";
+
+export type ShardRoutingErrorCode =
+  | typeof SHARD_KEY_REQUIRED
+  | typeof CROSS_SHARD_UNSUPPORTED
+  | typeof INVALID_REGION_HINT;
 
 export interface ShardRoutingErrorBody {
   error: { code: ShardRoutingErrorCode; message: string };

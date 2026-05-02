@@ -45,7 +45,14 @@ export function createShardWorkerHandler(bindingName: string, opts: ShardRouting
       if (resolution.kind === "error") {
         return json(resolution.status, resolution.body);
       }
-      const stub = ns.get(ns.idFromName(resolution.name));
+      const id = ns.idFromName(resolution.name);
+      // Place a NEWLY-created shard-DO near its audience (source a/b/c). Only the FIRST `get()` for this
+      // id honors the hint — a DO is single-homed and pinned thereafter — so the router derives the SAME
+      // hint per key where possible (explicit/prefix are stable; cf-origin is first-requester-wins). No
+      // hint ⇒ `get(id)` with no options bag: byte-identical to the pre-hint forward.
+      const stub = resolution.locationHint
+        ? ns.get(id, { locationHint: resolution.locationHint })
+        : ns.get(id);
       return stub.fetch(request);
     },
   };
