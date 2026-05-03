@@ -13,6 +13,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./http-handler": {
+      "types": "./dist/http-handler.d.ts",
+      "default": "./dist/http-handler.js"
+    },
+    "./project": {
+      "types": "./dist/project.d.ts",
+      "default": "./dist/project.js"
     }
   },
   "files": [

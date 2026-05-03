@@ -29,3 +29,26 @@ export type {
 export { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "./types";
 
 export { MonotonicTimestampOracle } from "./timestamp-oracle";
+
+export type {
+  MigrationDump,
+  WireDocumentLogEntry,
+  WireIndexWrite,
+  DumpableDocStore,
+  ImportableDocStore,
+  ExportDumpMeta,
+} from "./migration-dump";
+export {
+  MIGRATION_DUMP_FORMAT,
+  MIGRATION_DUMP_VERSION,
+  exportDumpFromStore,
+  serializeDump,
+  parseDump,
+  decodeDumpRows,
+  isDumpable,
+  assertImportableTableNumbers,
+  applyDumpToStore,
+  DumpUnsupportedError,
+  InvalidDumpError,
+  TableNumberMismatchError,
+} from "./migration-dump";

@@ -14,8 +14,8 @@ export { resolveDevOptions, detectRuntime } from "./dev-options";
 export type { HttpRequest, HttpResponse, ServerInfo } from "./http-handler";
 export { handleHttpRequest } from "./http-handler";
 
-export type { DevServer } from "./server";
-export { startDevServer } from "./server";
+export type { DevServer, DevServerOptions } from "./server";
+export { startDevServer, ProcessRuntimeHost } from "./server";
 
 export type { WatchLoop, WatchLoopOptions, WatchTriggerReason } from "./watch";
 export { createWatchLoop } from "./watch";

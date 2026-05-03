@@ -152,7 +152,7 @@ This consistency means you can develop locally with Bun and deploy to Cloudflare
 ## Common questions
 
 - **Are there any function API differences from Convex?** No, the API is identical.
-- **How do I test functions?** Use `stackbase run` from CLI or `convex-test` for unit tests.
+- **How do I test functions?** Use `@stackbase/test` for unit tests (see [Testing](/testing)), or the dashboard's function runner / `POST /api/run` to invoke one ad hoc. There is no `stackbase run` command.
 - **Can I use internal functions?** Yes, `internalQuery`, `internalMutation`, and `internalAction` work the same.
 
 ---

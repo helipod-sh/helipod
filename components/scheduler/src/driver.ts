@@ -204,7 +204,11 @@ export function schedulerDriver(): SchedulerDriver {
       ctx.clearTimer(sweepTimer);
       sweepTimer = null;
     }
-    sweepTimer = ctx.setTimer(ctx.now() + SWEEP_MS, () => {
+    // `backstopMs` (not `SWEEP_MS` raw): this sweep is a pure infra-kill backstop, never next-work —
+    // the call site is how a driver declares that, so a host where every wake costs a cold start can
+    // stretch it. The due-job `timer` above deliberately does NOT go through it: an `earliestFutureTs`
+    // wake is the real work.
+    sweepTimer = ctx.setTimer(ctx.now() + ctx.backstopMs(SWEEP_MS), () => {
       void sweepOnce();
     });
   }

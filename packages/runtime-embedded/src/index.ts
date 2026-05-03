@@ -12,6 +12,10 @@ export { EmbeddedRuntime, createEmbeddedRuntime } from "./runtime";
 // on. See `EmbeddedRuntimeOptions.externalReceiptsGuard`.
 export { clientReceiptsGuard } from "./client-dedup";
 
+// The neutral serving seam (Slice 1). Types only — the process host implementation lives in
+// `@stackbase/cli`; a Durable Object host (Slice 3) will implement the same interface.
+export type { RuntimeHost, ServerHandle, ServeOptions } from "./host";
+
 export type { LoopbackConnection, ServerMessageListener, LoopbackHandler } from "./loopback";
 export { createLoopbackConnection } from "./loopback";
 

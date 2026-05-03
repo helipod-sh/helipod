@@ -4,9 +4,12 @@ title: API Compatibility
 
 # API Compatibility
 
-> Stackbase implements the full Convex server API.
+> Stackbase's function-authoring API is Convex-compatible in shape.
 
-Stackbase implements the Convex server API. Use the official Convex documentation as the API reference.
+Stackbase's server API is **Convex-compatible in shape**, so Convex's documentation is a useful
+reference for the handler surface below. It is not a complete match — full-text and vector search
+are not built, and the canonical import surface is `@stackbase/*`, never `convex/*`
+(see [Convex Compatibility](/reference/compatibility)).
 
 ## Server API
 
@@ -28,17 +31,26 @@ For `query`, `mutation`, `action`, and `internalQuery/Mutation/Action`:
 
 ## Client libraries
 
-Use the standard Convex client libraries:
+Stackbase ships its own client — **`@stackbase/client`** (with `@stackbase/client/react` for
+`useQuery`/`useMutation`). Use it in place of `convex/react` / `convex/browser`;
+`stackbase migrate` rewrites those imports for you.
 
-- [React](https://docs.convex.dev/client/react)
-- [JavaScript/TypeScript](https://docs.convex.dev/client/javascript)
-- [Python](https://docs.convex.dev/client/python)
-
-Point them at your Stackbase URL instead of Convex Cloud.
+> 🚧 **Planned:** a Python client. Today the client SDK is TypeScript/JavaScript only.
 
 ---
 
 ## Stackbase-specific APIs
+
+> 🚧 **Planned — not yet shipped.** Everything in this section (the `createStackbase` runtime
+> factories, `StackbaseServer`, `StackbaseOptions`, and the `@stackbase/core` adapter interfaces)
+> describes an intended programmatic-embedding API that **does not exist**. The code below will not
+> run.
+>
+> **What works today:** the [`stackbase dev`](/local/dev-server) and
+> [`stackbase serve`](/self-hosting) CLI entrypoints, plus
+> [`stackbase build`](/deploy/standalone-binary) to compile a self-contained binary. Storage
+> backends are chosen with flags/env (`--database-url`, `--object-store`, `--storage-bucket`), not
+> by composing adapters in code. The only runtime package is `@stackbase/runtime-embedded`.
 
 ### Runtime factory functions
 
@@ -146,13 +158,14 @@ See [Data & Storage Adapters](/build/data-search) for details.
 | Queries, mutations, actions | Full support |
 | `ctx.db` (CRUD, queries, indexes) | Full support |
 | `ctx.auth` | Full support |
-| `ctx.storage` | Full support |
-| `ctx.scheduler` | Full support |
-| Search indexes | Full support |
-| Vector indexes | Full support |
+| `ctx.storage` | Full support — see [Files](/files) |
+| `ctx.scheduler` | Full support (`@stackbase/scheduler`) |
 | HTTP actions | Full support |
-| Crons | Planned |
-| Components | Not yet supported |
-| Convex Auth | Not yet supported |
+| Crons | Full support (`cronJobs()`, `@stackbase/scheduler`) |
+| Components | Full support — `@stackbase/scheduler`, `@stackbase/workflow`, `@stackbase/triggers`, `@stackbase/auth`, `@stackbase/authz` |
+| Durable workflows + saga | Full support (`@stackbase/workflow`) — beyond Convex's built-ins |
+| Search indexes | 🚧 **Not built** — `.searchIndex()` parses in `schema.ts` but has no execution path |
+| Vector indexes | 🚧 **Not built** — no `vectorSearch` implementation |
+| Convex Auth | Not supported — use `@stackbase/auth` |
 
 ---

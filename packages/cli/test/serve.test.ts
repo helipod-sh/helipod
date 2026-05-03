@@ -89,3 +89,71 @@ describe("startServe", () => {
     }
   });
 });
+
+/**
+ * `serve --web <dir>` — serve a static app frontend at the site root, same as `dev`'s `--web`.
+ * The point is a SINGLE ORIGIN: an app served here reaches its sync WebSocket at `location.host`
+ * with no backend-URL config and no cross-origin `/api/sync`. Proven by serving a real file and,
+ * as a control, showing the same path 404s when `webDir` is unset (so a pass can't be vacuous).
+ */
+function makeWebDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "sbweb-"));
+  writeFileSync(join(dir, "index.html"), "<!doctype html><title>packlist</title><div id=root>");
+  writeFileSync(join(dir, "main.js"), "export const marker = 'WEB_BUNDLE_OK';");
+  return dir;
+}
+
+describe("startServe --web", () => {
+  it("serves index.html at / and static assets, on the same origin as /api/sync", async () => {
+    const fixtureDir = makeFixtureConvexDir(true);
+    const webDir = makeWebDir();
+    const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
+    const { server, store } = await startServe({
+      convexDir: fixtureDir,
+      dataPath: tmpDbPath,
+      ip: "127.0.0.1",
+      port: 0,
+      adminKey: "k",
+      dashboard: false,
+      allowDeploy: false,
+      webDir,
+    });
+    try {
+      // `/` → the app's index.html (the static fallback, since no route/handler claims `/`).
+      const root = await fetch(`${server.url}/`);
+      expect(root.status).toBe(200);
+      expect(await root.text()).toContain("<title>packlist</title>");
+
+      // A static asset alongside it — same origin, so the client's `location.host` WS just works.
+      const js = await fetch(`${server.url}/main.js`);
+      expect(js.status).toBe(200);
+      expect(await js.text()).toContain("WEB_BUNDLE_OK");
+
+      // The API is unshadowed by the web fallback (the fallback only fires on an otherwise-404 GET).
+      expect((await fetch(`${server.url}/api/health`)).status).toBe(200);
+    } finally {
+      await server.close();
+      store.close();
+    }
+  });
+
+  it("without --web, an app path 404s (the control — proves the test above isn't vacuous)", async () => {
+    const fixtureDir = makeFixtureConvexDir(true);
+    const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
+    const { server, store } = await startServe({
+      convexDir: fixtureDir,
+      dataPath: tmpDbPath,
+      ip: "127.0.0.1",
+      port: 0,
+      adminKey: "k",
+      dashboard: false,
+      allowDeploy: false,
+    });
+    try {
+      expect((await fetch(`${server.url}/main.js`)).status).toBe(404);
+    } finally {
+      await server.close();
+      store.close();
+    }
+  });
+});

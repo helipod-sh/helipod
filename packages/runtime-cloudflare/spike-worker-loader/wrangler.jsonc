@@ -1,0 +1,14 @@
+{
+  // THROWAWAY SPIKE config (Slice 4). Deploys `worker.ts` to a PAID Cloudflare account with a
+  // wrangler/workerd >= 2026-03 (when Worker Loader / Dynamic Workers reached open beta). It will
+  // NOT run on this repo's pinned Dec-2024 toolchain — see ./README.md.
+  "name": "stackbase-spike-worker-loader",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-24",
+  // `enable_ctx_exports` is required for ctx.exports loopback bindings (the SyscallHost stub);
+  // `nodejs_compat` matches the rest of the DO host (the real slice runs the engine's node:crypto).
+  "compatibility_flags": ["enable_ctx_exports", "nodejs_compat"],
+  // The Worker Loader binding — provides env.LOADER. Unlike most bindings it points at no external
+  // resource; it just grants access to the Dynamic Workers API.
+  "worker_loaders": [{ "binding": "LOADER" }]
+}

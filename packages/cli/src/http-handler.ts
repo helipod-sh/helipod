@@ -311,6 +311,17 @@ export async function handleHttpRequest(
     const result = await deploy.apply(files);
     return json(result.ok ? 200 : result.kind === "schema-incompatible" ? 409 : 400, result);
   }
+  // The wake seam's firing half (`serve --wake-url`): the host's alarm went off and is telling this
+  // process to run whatever driver timers are due. It CAN'T be a direct call — the alarm lives in the
+  // host (a Durable Object), across a network boundary from this process — and the same request that
+  // fires the timers is also what BOOTS a stopped container: one mechanism, both jobs. Admin-key
+  // gated like every other `/_admin/*` route (it drives privileged driver work), and registered
+  // unconditionally: without a `wakeHost` nothing ever arms a wake, and `fireDueTimers()` is a no-op.
+  if (admin && req.method === "POST" && req.path === "/_admin/wake") {
+    if (!verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { ok: false, error: "unauthorized" });
+    runtime.fireDueTimers();
+    return json(200, { ok: true });
+  }
   if (admin && req.path.startsWith("/_admin/")) {
     const res = await handleAdminRequest(admin.api, admin.key, {
       method: req.method,

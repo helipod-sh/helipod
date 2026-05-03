@@ -1,0 +1,13 @@
+{
+  // Deploy config for the REAL-Cloudflare multi-shard E2E (human-run — this worktree has no CF login).
+  // ONE DO class; the multi-shard router addresses N instances of it by shard-key name. `nodejs_compat`
+  // for the handler's node:crypto fingerprint; a `new_sqlite_classes` migration (DO-SQLite storage).
+  "name": "stackbase-do-shard-fixture",
+  "main": "fixture/worker.ts",
+  "compatibility_date": "2024-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StackbaseDO"] }]
+}

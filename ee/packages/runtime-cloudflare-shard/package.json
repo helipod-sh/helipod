@@ -1,0 +1,40 @@
+{
+  "name": "@stackbase/runtime-cloudflare-shard",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@stackbase/runtime-cloudflare": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/cli": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.5.40",
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/values": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

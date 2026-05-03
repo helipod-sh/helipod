@@ -7,7 +7,7 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
-import { namespaceForPath, type Driver, type DriverContext, type LogChange } from "@stackbase/component";
+import { namespaceForPath, type Driver, type DriverContext, type LogChange, type WakeHost } from "@stackbase/component";
 import { FunctionNotFoundError } from "@stackbase/errors";
 import { decodeStorageTableId, decodeDocumentId, encodeInternalDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
@@ -158,6 +158,35 @@ export interface EmbeddedRuntimeOptions {
   relationRegistry?: RelationRegistry;
   /** Wall-clock source; defaults to `Date.now`. Injected for deterministic testing. */
   now?: () => number;
+  /**
+   * The host's single alarm, for a host that STOPS THE PROCESS between requests (Cloudflare
+   * Containers: stopped ~5s after the last incoming request; internal timer activity does not keep
+   * it alive, so `setTimeout` silently never fires and every driver goes dead). Set → this runtime
+   * multiplexes every live driver timer down to ONE pending wake and hands the minimum to
+   * `armWake`; the host is then the SOLE thing that fires them, via `fireDueTimers()` (the engine
+   * arms no `setTimeout` of its own — two schedulers would double-fire the same callback).
+   *
+   * UNSET (the default, and every existing deployment — Docker/VPS/Fly/Railway/single-binary): the
+   * plain `setTimeout` path below, byte-for-byte unchanged.
+   */
+  wakeHost?: WakeHost;
+  /**
+   * Answers `DriverContext.backstopMs` — a driver's declared cadence for a PURE BACKSTOP poll
+   * (scheduler lease-reclaim sweep, triggers beat, storage reaper). Defaults to IDENTITY (the
+   * driver's own 30s/60s constants, unchanged). A host where every wake costs a cold start stretches
+   * it: on Cloudflare a 30s backstop is a container boot every 30s forever — a ~15% duty cycle for a
+   * completely idle app, which would destroy scale-to-zero.
+   */
+  backstopMs?: (defaultMs: number) => number;
+  /**
+   * Disarm the sync handler's process-shaped background timers (its `setInterval` flush/resume sweep
+   * and every per-session ping heartbeat). Defaults to `false` — every long-lived process host is
+   * byte-for-byte unchanged. Set ONLY by the Cloudflare Durable Object host (Slice 3), where those
+   * timers are actively harmful (a `setInterval` is lost on hibernation; an app-level ping would wake
+   * the hibernated object every beat, defeating scale-to-zero). Just a boolean — no host type crosses
+   * this seam. See `SyncProtocolHandlerOptions.disableBackgroundTimers`.
+   */
+  disableSyncBackgroundTimers?: boolean;
   /** Component boot steps to run once at create, namespaced + non-user (before serving traffic). */
   bootSteps?: { name: string; run: (ctx: { db: GuestDatabaseWriter; now: number }) => Promise<void> }[];
   /** Component drivers to start once at create, after boot steps + the commit fan-out are wired. */
@@ -280,6 +309,18 @@ interface TimestampObserver {
   observeTimestamp(ts: bigint): void;
 }
 
+/**
+ * One live `DriverContext.setTimer` handle. `atMs` is retained (not just handed to `setTimeout`)
+ * because the wake seam multiplexes every live timer down to the ONE alarm a host offers — that
+ * needs `min(atMs)`, which a `setTimeout` handle can't be asked for. `timeout` is set only on the
+ * default (no `wakeHost`) path; under a host, the host fires them via `fireDueTimers()`.
+ */
+interface DriverTimer {
+  atMs: number;
+  cb: () => void;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
 export class EmbeddedRuntime {
   private sessionCounter = 0;
 
@@ -297,7 +338,10 @@ export class EmbeddedRuntime {
     private readonly policyProviders: ReadonlyArray<PolicyContextProvider>,
     private readonly relationRegistry: RelationRegistry | undefined,
     private readonly drivers: ReadonlyArray<Driver>,
-    private readonly timers: Map<number, ReturnType<typeof setTimeout>>,
+    private readonly timers: Map<number, DriverTimer>,
+    /** Threaded from `create()` (like `driverCtx`) so the public `fireDueTimers()` below runs against
+     *  the SAME timer map + wake-arming closures the `DriverContext` writes to. */
+    private readonly fireDue: () => void,
     /**
      * Inverse of `tableNumbers` (tableNumber → fullTableName). Mutable (not `readonly`) so
      * `setTableNumbers` can rebuild it in place after an additive deploy — the very same `Map`
@@ -613,7 +657,13 @@ export class EmbeddedRuntime {
     // commit from ANY path — WebSocket mutation OR `runtime.run()` / HTTP `/api/run` —
     // invalidates live subscriptions. The async drain serializes notifies and runs them after
     // the current call stack (so a MutationResponse is sent before its Transition).
-    const handler = new SyncProtocolHandler(syncExecutor, { autoNotifyOnMutation: false, verifyAdmin: options.verifyAdmin });
+    const handler = new SyncProtocolHandler(syncExecutor, {
+      autoNotifyOnMutation: false,
+      verifyAdmin: options.verifyAdmin,
+      // The DO host (Slice 3) sets this so the handler arms no `setInterval` sweep / ping heartbeat;
+      // unset everywhere else (byte-identical to before this option existed).
+      disableBackgroundTimers: options.disableSyncBackgroundTimers,
+    });
     const queue: Array<{
       tables: string[];
       ranges: import("@stackbase/index-key-codec").SerializedKeyRange[];
@@ -653,8 +703,61 @@ export class EmbeddedRuntime {
     // runtime, not just their own tables — a driver decides for itself what it cares about)
     // and/or on wall-clock timers. Wired to the SAME commit fan-out as `notifyWrites`, below.
     const commitSubs = new Set<(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }) => void>();
-    const timers = new Map<number, ReturnType<typeof setTimeout>>();
+    const timers = new Map<number, DriverTimer>();
     let timerSeq = 0;
+    const wakeHost = options.wakeHost;
+    // The instant currently armed on the host (`null` = nothing armed) — mirrors the host's ONE alarm
+    // slot, so an arm only crosses the seam when the minimum actually MOVES. A driver arming
+    // far-future timers (the scheduler re-arms its sweep every pass) must not thrash the host's
+    // schedule: on Cloudflare each arm is a `fetch` out of the container. Starts `null` because a
+    // fresh host has nothing armed.
+    let armedAt: number | null = null;
+    /** Recompute `min(atMs)` across live handles and push it to the host — only if it moved. */
+    const rearm = (): void => {
+      if (!wakeHost) return;
+      let min: number | null = null;
+      for (const t of timers.values()) if (min === null || t.atMs < min) min = t.atMs;
+      if (min === armedAt) return;
+      armedAt = min;
+      wakeHost.armWake(min);
+    };
+    const fireDueTimers = (): void => {
+      const t0 = options.now?.() ?? Date.now();
+      // The wake that brought us here CONSUMED the host's alarm (a fired alarm doesn't re-arm
+      // itself), so forget what we thought was armed BEFORE running anything: a callback's own
+      // `setTimer` then arms correctly, and a wake that finds nothing due (an early/stale wake, or
+      // the common Cloudflare case where this very request COLD-BOOTED the process and the drivers'
+      // `start()` already re-derived everything) still re-arms the unchanged minimum rather than
+      // silently losing it.
+      armedAt = null;
+      const due: DriverTimer[] = [];
+      for (const [h, t] of timers) {
+        if (t.atMs <= t0) {
+          due.push(t);
+          timers.delete(h);
+        }
+      }
+      // Drop every due timer BEFORE running any callback: a callback re-arming its own handle (the
+      // scheduler's `armSweep`, the triggers beat) must not have its fresh timer swept by this pass.
+      try {
+        for (const t of due) {
+          // Per-callback catch, and a `finally` re-arm below. On the `setTimeout` path each callback
+          // is its own macrotask, so a throw can only kill its own timer; here they share one call
+          // stack, and an escaping throw would strand every LATER due callback AND skip the re-arm —
+          // leaving the host with no alarm at all (`armedAt` was just cleared), i.e. drivers dead
+          // forever. Every driver callback already swallows+logs internally, so this is
+          // defense-in-depth against exactly the silent-death class this seam exists to fix.
+          try {
+            t.cb();
+          } catch (e) {
+            console.error("[runtime] driver timer callback threw:", e);
+          }
+        }
+      } finally {
+        rearm();
+      }
+    };
+    const backstopMs = options.backstopMs ?? ((d: number) => d);
     const driverCtx: DriverContext = {
       runFunction: async (path, args) => {
         const fn = modules[path];
@@ -684,17 +787,31 @@ export class EmbeddedRuntime {
       },
       setTimer: (atMs, cb) => {
         const h = ++timerSeq;
-        timers.set(h, setTimeout(cb, Math.max(0, atMs - (options.now?.() ?? Date.now()))));
+        const t: DriverTimer = { atMs, cb };
+        // Only the DEFAULT (no `wakeHost`) path arms a real `setTimeout` — with a host, the host's
+        // single alarm is the sole firing mechanism (`fireDueTimers`), and a `setTimeout` alongside
+        // it would run the same callback twice. The self-delete keeps `min(atMs)` honest: a fired
+        // handle left in the map would pin the minimum in the past forever.
+        if (!wakeHost) {
+          t.timeout = setTimeout(() => {
+            timers.delete(h);
+            cb();
+          }, Math.max(0, atMs - (options.now?.() ?? Date.now())));
+        }
+        timers.set(h, t);
+        rearm();
         return h;
       },
       clearTimer: (h) => {
         const t = timers.get(h);
         if (t) {
-          clearTimeout(t);
+          if (t.timeout !== undefined) clearTimeout(t.timeout);
           timers.delete(h);
+          rearm();
         }
       },
       now: () => options.now?.() ?? Date.now(),
+      backstopMs,
       // Same resolver as `create()`'s local `functionKind` closure (used elsewhere for
       // `ComponentContext.functionKind`) — reused here, not recomputed, so a driver's path
       // validation (e.g. `@stackbase/triggers`' boot-time handler check) and every other kind
@@ -865,7 +982,7 @@ export class EmbeddedRuntime {
 
     return new EmbeddedRuntime(
       options.store, executor, handler, adapter, modules, systemModules, adminModules, componentNames,
-      contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, tableNumberToName,
+      contextProviders, policyRegistry, policyProviders, relationRegistry, drivers, timers, fireDueTimers, tableNumberToName,
       oracle, queryOracle, transactor, driverCtx, driversStarted, options.writeRouter, numShards, options.catalog,
       commitSubs,
     );
@@ -1172,14 +1289,40 @@ export class EmbeddedRuntime {
   }
 
   /**
+   * Run every driver timer that is due (`atMs <= now()`), drop it, and re-arm the host to the new
+   * minimum — the firing half of the `EmbeddedRuntimeOptions.wakeHost` seam, called when the host's
+   * alarm goes off (`serve`'s `POST /_admin/wake`). It cannot be a direct call: the alarm lives in
+   * the host (a Durable Object), across a network boundary from this process.
+   *
+   * Safe and cheap on both paths through it, so a host never branches:
+   *  - the process was STOPPED (the common case) — the wake request BOOTS it, the drivers' own
+   *    `start()` re-derives everything from committed state, and this finds nothing due: a no-op.
+   *  - the process was RUNNING — this runs the actual pending callback.
+   *
+   * Also a no-op without a `wakeHost` (nothing arms a wake, and `setTimeout` already fired
+   * everything due), so the route being registered on every deployment costs nothing.
+   */
+  fireDueTimers(): void {
+    this.fireDue();
+  }
+
+  /**
    * Stop the component drivers and clear their pending timers, resetting `driversStarted` so a later
    * `startDrivers()` can bring them back up. Shared by the driver-only `stopDriversOnly()` (B2b, D5)
    * and the full-shutdown `stopDrivers()` — the ONLY difference is whether the sync handler is also
    * disposed, so the two can never drift on how a driver is torn down.
    */
   private async stopDriversInternal(): Promise<void> {
-    for (const t of this.timers.values()) clearTimeout(t);
+    for (const t of this.timers.values()) if (t.timeout !== undefined) clearTimeout(t.timeout);
     this.timers.clear();
+    // Deliberately does NOT `armWake(null)` under a `wakeHost`: the host's alarm is DURABLE and
+    // outlives this process — that is the entire point of the seam. A graceful shutdown that
+    // cancelled it would leave a Cloudflare deployment with no way to ever wake again (the container
+    // stops within seconds of every shutdown). Nothing is lost by leaving it armed: next-wake is
+    // re-derived from committed table state on the next `start()`, and an early wake that finds
+    // nothing due is a cheap no-op (`fireDueTimers`). The in-process `armedAt` mirror is likewise
+    // left alone, so a stop→start cycle that re-derives the SAME minimum correctly skips a re-arm
+    // the host doesn't need.
     for (const d of this.drivers) await d.stop?.();
     // Reset the flag (NOT one-way): a stop→start cycle must actually restart the drivers. The shipped
     // `driversStarted` flag was write-once (only ever flipped true), so a fleet node that relinquished

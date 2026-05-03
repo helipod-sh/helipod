@@ -69,6 +69,8 @@ function makeFakeDriverContext(): {
       timers.delete(h);
     },
     now: () => clock,
+    // Identity, like the runtime's own default — this fake is a long-lived-host stand-in.
+    backstopMs: (d: number) => d,
     readLog: async () => ({ changes: [], maxScannedTs: 0 }),
   };
 

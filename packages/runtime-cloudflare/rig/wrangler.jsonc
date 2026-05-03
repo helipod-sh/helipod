@@ -1,0 +1,30 @@
+{
+  // The deploy rig for the single-shard Durable Object host (Slice 3). `wrangler deploy` (from this
+  // dir) builds `fixture/worker.ts` into a Worker whose `StackbaseDO` Durable Object owns the writer +
+  // DO-SQLite + WebSockets + subscription index. See ./README.md for the exact human-run commands.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stackbase-do-fixture",
+  "main": "fixture/worker.ts",
+  // Serve the Packlist SPA at the edge; /api/* has no matching asset so it falls to the Worker→DO.
+  "assets": { "directory": "./public" },
+  "compatibility_date": "2024-11-27",
+  // `node:crypto` (handler.ts's `createHash` for the drift/resume fingerprint) is available only under
+  // `nodejs_compat` (§8.2). Without it the DO throws at import.
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
+  },
+  "migrations": [
+    {
+      // DO-SQLite needs the SQLite-backed class migration tag — `new_sqlite_classes`, NOT
+      // `new_classes` (§6.1). Without it `ctx.storage.sql` is unavailable.
+      "tag": "v1",
+      "new_sqlite_classes": ["StackbaseDO"]
+    }
+  ],
+  "vars": {
+    // Placeholder — set the real value with `wrangler secret put STACKBASE_ADMIN_KEY` (do NOT commit a
+    // real key). Required: the DO fail-fasts an empty admin key.
+    "STACKBASE_ADMIN_KEY": "dev-placeholder-set-a-real-secret"
+  }
+}

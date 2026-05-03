@@ -871,6 +871,13 @@ export class ObjectStoreDocStore implements DocStore {
     return this.local.write(documents, indexUpdates, conflictStrategy, shardId);
   }
 
+  /** The materialized current state (Slice 5 — migration export). Delegates to the local SQLite
+   *  store, which already holds the full materialized image the object log reduces to — the same
+   *  source `snapshot()` dumps from. */
+  dumpCurrentState(): Promise<{ documents: DocumentLogEntry[]; indexUpdates: IndexWrite[] }> {
+    return this.local.dumpCurrentState();
+  }
+
   addCommitGuard(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- store-specific querier type, mirrors DocStore's own signature
     guard: (q: any, units: readonly CommitGuardUnit[], shardId: ShardId) => void | Promise<void>,

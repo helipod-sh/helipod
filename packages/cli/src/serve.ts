@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
-import { startDevServer } from "./server";
+import { ProcessRuntimeHost } from "./server";
 import {
   bootProject,
   isPostgresUrl,
@@ -17,6 +17,7 @@ import {
   parseNumShards,
 } from "./boot";
 import { applyDeploy } from "./deploy-apply";
+import { httpWakeHost } from "./wake-host";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
 import type { DocStore } from "@stackbase/docstore";
@@ -114,6 +115,11 @@ export interface ServeOptions {
   ip: string;
   port: number;
   dashboard: boolean;
+  /** A static web UI directory to serve at the site root (`index.html` + assets), exactly as `dev`'s
+   *  `--web` does. Unset → no web UI (today's behavior). Lets a self-hosted `serve` host an app's own
+   *  frontend on the SAME origin as its sync WebSocket, so a `location.host`-relative client needs no
+   *  backend-URL config and never makes a cross-origin `/api/sync` connection. */
+  webDir?: string;
   /** Enable `POST /_admin/deploy` (`stackbase deploy`'s hot-swap target). Off by default — a running
    * `serve` only accepts live code changes when explicitly opted in. */
   allowDeploy: boolean;
@@ -157,6 +163,17 @@ export interface ServeOptions {
    *  `--replica` boot, every mutation/action FORWARDS here instead of being rejected. Ignored
    *  unless `replica` is also set. Flag (`--writer-url`) wins over `STACKBASE_WRITER_URL` env. */
   writerUrl?: string;
+  /** The wake seam's host endpoint (`--wake-url`, wins over `STACKBASE_WAKE_URL`) — for a host that
+   *  STOPS THE PROCESS between requests, so `setTimeout` never fires and every driver goes dead.
+   *  Set → `serve` builds an HTTP `WakeHost` that POSTs the next wake's absolute `atMs` here (on
+   *  Cloudflare, the container's Outbound-Worker hostname, which the Worker turns into a Durable
+   *  Object alarm). Unset (every existing deployment) → no wake host, plain `setTimeout`. */
+  wakeUrl?: string;
+  /** Floor for every driver's BACKSTOP poll cadence, ms (`--backstop-min-ms`, wins over
+   *  `STACKBASE_BACKSTOP_MIN_MS`) — `backstopMs = (d) => Math.max(d, n)`. Unset → identity (the
+   *  drivers' own 30s/60s). Set where each wake costs a cold start: on Cloudflare a 30s backstop is
+   *  a container boot every 30s forever. */
+  backstopMinMs?: number;
 }
 
 /**
@@ -267,6 +284,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
   let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
   let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
+  let webDir = process.env.STACKBASE_WEB_DIR;
   let databaseUrl = process.env.STACKBASE_DATABASE_URL;
   let storageBucket: string | undefined;
   let storageEndpoint: string | undefined;
@@ -275,6 +293,10 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
   let replica = /^(1|true|yes)$/i.test(process.env.STACKBASE_REPLICA ?? "");
   let writerUrl = process.env.STACKBASE_WRITER_URL;
+  // The wake seam (both env-or-flag, flag wins — `objectStoreUrl`'s exact shape above). Unset →
+  // no wake host + identity backstops, i.e. byte-for-byte today's behavior.
+  let wakeUrl = process.env.STACKBASE_WAKE_URL;
+  let backstopMinMs = parseLeaseTtlMs(process.env.STACKBASE_BACKSTOP_MIN_MS);
   // Tier 3 multi-shard single-node serve: object-storage writer lane count. Set ONLY by the
   // `--shards` flag here; the `STACKBASE_FLEET_SHARDS` env fallback is applied AFTER the flag loop
   // and ONLY when `--object-store` is present — otherwise a plain `--fleet` boot (which legitimately
@@ -302,6 +324,9 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--replica") replica = true;
     else if (a === "--writer-url" && args[i + 1]) writerUrl = args[++i] as string;
     else if (a === "--shards" && args[i + 1]) objectStoreShards = Number(args[++i]);
+    else if (a === "--wake-url" && args[i + 1]) wakeUrl = args[++i] as string;
+    else if (a === "--backstop-min-ms" && args[i + 1]) backstopMinMs = parseLeaseTtlMs(args[++i]);
+    else if (a === "--web" && args[i + 1]) webDir = args[++i] as string;
   }
   // `STACKBASE_FLEET_SHARDS` env fallback — ONLY for an object-store boot (never a fleet boot; see
   // the `objectStoreShards` declaration above). The `--shards` flag, if given, always wins.
@@ -314,6 +339,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     ip,
     port,
     dashboard,
+    ...(webDir !== undefined ? { webDir } : {}),
     allowDeploy,
     databaseUrl,
     storageBucket,
@@ -325,6 +351,8 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     ...(objectStoreShards !== undefined ? { objectStoreShards } : {}),
     replica,
     ...(writerUrl !== undefined ? { writerUrl } : {}),
+    ...(wakeUrl !== undefined ? { wakeUrl } : {}),
+    ...(backstopMinMs !== undefined ? { backstopMinMs } : {}),
   };
 }
 
@@ -368,6 +396,10 @@ export async function startServe(
    *  driver) and BEFORE `store.close()` — see `serveCommand`'s shutdown. */
   objectStoreRelease?: () => Promise<void>;
 }> {
+  // The wake seam's backstop policy, resolved once here so the closure captures a plain number
+  // rather than re-reading (and re-narrowing) `opts` on every driver call.
+  const backstopFloorMs = opts.backstopMinMs;
+
   // Fleet: decide writer-vs-sync via ONE lease tryAcquire BEFORE the runtime is built — its result
   // (writable store, fan-out adapter, deferred drivers, forwarder role) are createEmbeddedRuntime inputs.
   const prep =
@@ -396,6 +428,11 @@ export async function startServe(
       ...(opts.replica ? { replica: opts.replica } : {}),
       ...(opts.writerUrl !== undefined ? { writerUrl: opts.writerUrl } : {}),
       ...(opts.objectStoreShards !== undefined ? { objectStoreShards: opts.objectStoreShards } : {}),
+      // The wake seam (`--wake-url`/`--backstop-min-ms`): a host that stops the process between
+      // requests. Both unset (every existing deployment) → no keys, plain `setTimeout` + the drivers'
+      // own 30s/60s backstops.
+      ...(opts.wakeUrl !== undefined ? { wakeHost: httpWakeHost(opts.wakeUrl) } : {}),
+      ...(backstopFloorMs !== undefined ? { backstopMs: (d: number) => Math.max(d, backstopFloorMs) } : {}),
     });
   // No embedded key (0.0.0.0 bind): the dashboard SPA prompts the operator for the admin key.
   const dashboard = opts.dashboard ? loadDashboard(undefined) : undefined;
@@ -418,7 +455,7 @@ export async function startServe(
         })
       : undefined;
 
-  // `server` is assigned below by `startDevServer`; `setRoutes` only runs on a LATER deploy
+  // `server` is assigned below by `host.serve`; `setRoutes` only runs on a LATER deploy
   // request, by which time it is set. `current` reads AdminApi's live schema — no serve-side
   // bookkeeping to keep in sync.
   let server: DevServer;
@@ -441,11 +478,13 @@ export async function startServe(
           ),
       }
     : undefined;
-  server = await startDevServer(
+  // Reach serving through the RuntimeHost seam (Slice 1) — serve() never touches Bun.serve/node:http.
+  server = await new ProcessRuntimeHost().serve(
     runtime,
     {
       port: opts.port,
       ip: opts.ip,
+      ...(opts.webDir !== undefined ? { webDir: opts.webDir } : {}),
       admin: { api: adminApi, key: opts.adminKey },
       dashboard,
       routes: project.routes,

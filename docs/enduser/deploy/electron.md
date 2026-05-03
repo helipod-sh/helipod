@@ -1,10 +1,20 @@
 ---
 title: Electron
+status: planned
 ---
 
 # Electron
 
 > Embed Stackbase in an Electron desktop app with local-first SQLite storage.
+
+> 🚧 **Planned — not yet shipped.** This page describes the intended design. The `createStackbase`
+> API and the `@stackbase/runtime-node` / `@stackbase/blobstore-node-fs` packages below **do not
+> exist** — the code will not run.
+>
+> **What works today:** [`stackbase build`](/deploy/standalone-binary) compiles your app into a
+> self-contained executable that you can ship as an Electron **sidecar**. It prints a
+> machine-readable `{"ready":true,"port":N,"url":"…"}` line on stdout precisely so a parent process
+> can wait for startup and learn the port.
 
 Run Stackbase inside Electron's main process for fully offline-capable desktop apps. Data is stored locally in SQLite — no server required.
 

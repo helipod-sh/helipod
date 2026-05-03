@@ -19,6 +19,7 @@ import type {
   CommitGuardUnit,
   CommitUnit,
   ConflictStrategy,
+  DatabaseIndexUpdate,
   DocStore,
   DocumentLogEntry,
   DocumentValue,
@@ -580,6 +581,56 @@ export class PostgresDocStore implements DocStore {
     const rows = await this.db.query(`SELECT MAX(ts) AS m FROM documents`);
     const m = rows[0]?.m;
     return m === null || m === undefined ? 0n : asBigInt(m);
+  }
+
+  /**
+   * The store's CURRENT materialized state (Slice 5 — migration export), the Postgres mirror of
+   * `SqliteDocStore.dumpCurrentState()`: the newest non-tombstone revision of every document across
+   * every table, plus the current row of every index entry (deletion markers included — the dump must
+   * reproduce the index table's own rows exactly, not the documents they resolve to). Real ts/prev_ts,
+   * not renumbered — restoring via `write(..., "Overwrite")` reproduces this exact state.
+   */
+  async dumpCurrentState(): Promise<{ documents: DocumentLogEntry[]; indexUpdates: IndexWrite[] }> {
+    const docRows = await this.db.query(
+      `SELECT table_id, internal_id, ts, prev_ts, value FROM (
+         SELECT DISTINCT ON (table_id, internal_id) table_id, internal_id, ts, prev_ts, value
+         FROM documents ORDER BY table_id ASC, internal_id ASC, ts DESC
+       ) latest WHERE value IS NOT NULL ORDER BY table_id ASC, internal_id ASC`,
+    );
+    const documents: DocumentLogEntry[] = docRows.map((row) => {
+      const id: InternalDocumentId = {
+        tableNumber: decodeStorageTableId(row.table_id as string),
+        internalId: row.internal_id as Uint8Array,
+      };
+      return {
+        ts: asBigInt(row.ts),
+        id,
+        value: { id, value: this.parseValue(row.value as string) },
+        prev_ts: asBigIntOrNull(row.prev_ts),
+      };
+    });
+
+    const idxRows = await this.db.query(
+      `SELECT index_id, key, ts, table_id, internal_id, deleted FROM (
+         SELECT DISTINCT ON (index_id, key) index_id, key, ts, table_id, internal_id, deleted
+         FROM indexes ORDER BY index_id ASC, key ASC, ts DESC
+       ) latest ORDER BY index_id ASC, key ASC`,
+    );
+    const indexUpdates: IndexWrite[] = idxRows.map((row) => {
+      const deleted = row.deleted === true || Number(row.deleted) === 1;
+      const value: DatabaseIndexUpdate["value"] = deleted
+        ? { type: "Deleted" }
+        : {
+            type: "NonClustered",
+            docId: {
+              tableNumber: decodeStorageTableId(row.table_id as string),
+              internalId: row.internal_id as Uint8Array,
+            },
+          };
+      return { ts: asBigInt(row.ts), update: { indexId: row.index_id as string, key: row.key as Uint8Array, value } };
+    });
+
+    return { documents, indexUpdates };
   }
 
   async getGlobal(key: string): Promise<JSONValue | null> {
