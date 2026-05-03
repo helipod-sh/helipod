@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stackbase — live-reactive, inside a Cloudflare Durable Object</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,sans-serif; background:#0b0c10; color:#e6e7eb;
+    display:flex; justify-content:center; }
+  .app { width:100%; max-width:640px; min-height:100dvh; display:flex; flex-direction:column;
+    padding:1.25rem; gap:.75rem; }
+  header h1 { font-size:1.15rem; margin:0 0 .15rem; }
+  header p { margin:0; color:#9aa0ad; font-size:.82rem; }
+  .badge { display:inline-block; padding:.1rem .5rem; border-radius:999px; font-size:.72rem;
+    background:#10321c; border:1px solid #1f6f3d; color:#7ee2a8; }
+  #conn { color:#7ee2a8; font-size:.75rem; }
+  .stat { color:#6b6f7a; font-size:.78rem; font-variant-numeric:tabular-nums; }
+  #log { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:.35rem;
+    background:#14161d; border:1px solid #232734; border-radius:12px; padding:.75rem; }
+  .msg { padding:.4rem .6rem; background:#1c2030; border-radius:8px; }
+  .msg .b { color:#e6e7eb; } .msg .t { color:#6b6f7a; font-size:.72rem; }
+  form { display:flex; gap:.5rem; }
+  input { flex:1; padding:.55rem .7rem; border-radius:8px; border:1px solid #2a2f3d;
+    background:#0f1117; color:inherit; font:inherit; }
+  button { padding:.55rem 1rem; border:0; border-radius:8px; background:#2563eb; color:#fff;
+    font:inherit; cursor:pointer; } button:hover{ background:#1d4ed8; }
+  footer { color:#4b4f5a; font-size:.72rem; text-align:center; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Stackbase <span class="badge">inside a Durable Object</span></h1>
+    <p>Served from Cloudflare's edge; live over a WebSocket to a Durable Object running DO-SQLite
+       (the ~133&nbsp;ms write path). <span id="conn">● connecting…</span> · <span id="stat" class="stat"></span></p>
+  </header>
+  <div id="log"></div>
+  <form id="f">
+    <input id="i" placeholder="Type a message and press Enter…" autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+  <footer>Open a second tab — a message appears in both instantly (server push, no poll). Reload persists (durable). Cold start ~a few seconds after idle.</footer>
+</div>
+<script type="module" src="/main.js"></script>
+</body>
+</html>

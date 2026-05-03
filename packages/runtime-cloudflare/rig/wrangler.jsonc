@@ -5,6 +5,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "stackbase-do-fixture",
   "main": "fixture/worker.ts",
+  // Serve the Packlist SPA at the edge; /api/* has no matching asset so it falls to the Worker→DO.
+  "assets": { "directory": "./public" },
   "compatibility_date": "2024-11-27",
   // `node:crypto` (handler.ts's `createHash` for the drift/resume fingerprint) is available only under
   // `nodejs_compat` (§8.2). Without it the DO throws at import.
