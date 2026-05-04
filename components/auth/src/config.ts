@@ -2,6 +2,7 @@ import type { EmailProvider } from "./email/provider";
 import { resolveTemplates, type EmailTemplates } from "./email/templates";
 import type { OAuthProvider } from "./oauth";
 import { assertProviderEndpointsSecure, assertUrlIsSecure } from "./oauth";
+import { decodeKeyMaterial, type MfaKey } from "./mfa/secret-crypto";
 
 /** Resolved email config (all defaults applied). Present iff a project passed `email` with a provider. */
 export interface EmailConfig {
@@ -48,6 +49,35 @@ export interface JwtOptions {
   issuers: Array<{ issuer: string; audience: string; jwksUrl?: string }>;
 }
 
+/** Resolved MFA config. Present iff `defineAuth({ mfa })` was passed with a usable key —
+ *  absence of a valid 32-byte key FAILS FAST in `resolveAuthConfig` (never silently at first
+ *  use). `keyring[0]` is the primary key (used for new encryptions); decryption dispatches on
+ *  the envelope's stored `keyId` against the whole keyring (rotation support). */
+export interface MfaConfig {
+  keyring: MfaKey[];
+  issuer: string;
+  recoveryCodeCount: number;
+  challengeTtlMs: number;
+  mfaAttempts: number;
+  window: number;
+  /** Fixed in the v1 config surface (spec decision 1) — stored per-enrollment, not an app knob. */
+  algorithm: "SHA1";
+  digits: number;
+  period: number;
+}
+/** The user-facing `mfa` block. Exactly one key source is required — `encryptionKey` (a single
+ *  32-byte key, base64 or hex) or `encryptionKeys` (an ordered keyring for rotation, `[0]`
+ *  primary). Everything else is optional-with-defaults. */
+export interface MfaOptions {
+  encryptionKey?: string;
+  encryptionKeys?: Array<{ id: string; key: string }>;
+  issuer?: string;
+  recoveryCodeCount?: number;
+  challengeTtlMs?: number;
+  mfaAttempts?: number;
+  window?: number;
+}
+
 /** The user-facing `email` block: `provider` + `from` required, everything else optional-with-defaults. */
 export interface EmailOptions {
   provider: EmailProvider;
@@ -91,12 +121,16 @@ export interface AuthConfig {
   oauth?: OAuthConfig;
   /** Present iff a project configured `jwt` — absent ⇒ `signInWithIdToken` is unregistered. */
   jwt?: JwtConfig;
+  /** Present iff a project configured `mfa` with a usable key — absent ⇒ MFA is fully unregistered
+   *  and every gated first-factor path mints directly (byte-identical to a pre-MFA deployment). */
+  mfa?: MfaConfig;
 }
 
-export type AuthOptions = Partial<Omit<AuthConfig, "email" | "oauth" | "jwt">> & {
+export type AuthOptions = Partial<Omit<AuthConfig, "email" | "oauth" | "jwt" | "mfa">> & {
   email?: EmailOptions;
   oauth?: OAuthOptions;
   jwt?: JwtOptions;
+  mfa?: MfaOptions;
 };
 
 const DEFAULTS: Omit<AuthConfig, "email"> = {
@@ -179,11 +213,51 @@ function resolveJwtConfig(opts: JwtOptions): JwtConfig {
   return { issuers: opts.issuers };
 }
 
+const MFA_DEFAULTS = {
+  issuer: "Stackbase",
+  recoveryCodeCount: 10,
+  challengeTtlMs: 5 * 60 * 1000,
+  mfaAttempts: 5,
+  window: 1,
+  // Fixed in v1 (spec decision 1) — not app-configurable knobs, just the shared default stamped
+  // onto every new enrollment's `algorithm`/`digits`/`period` fields.
+  algorithm: "SHA1" as const,
+  digits: 6,
+  period: 30,
+};
+
+/** Decode + validate the MFA key source into an ordered keyring (`[0]` primary) and apply
+ *  defaults. Throws (fail-fast, called from `resolveAuthConfig` — never deferred to first use)
+ *  when `mfa` is configured but no usable 32-byte key is present, or when a given key is the
+ *  wrong length (via `decodeKeyMaterial`, which throws its own message). */
+export function resolveMfaConfig(opts: MfaOptions): MfaConfig {
+  let keyring: MfaKey[];
+  if (opts.encryptionKeys && opts.encryptionKeys.length > 0) {
+    keyring = opts.encryptionKeys.map((k) => ({ id: k.id, key: decodeKeyMaterial(k.key) }));
+  } else if (opts.encryptionKey) {
+    keyring = [{ id: "1", key: decodeKeyMaterial(opts.encryptionKey) }];
+  } else {
+    throw new Error("defineAuth({ mfa }) requires a 32-byte encryptionKey or encryptionKeys");
+  }
+  return {
+    keyring,
+    issuer: opts.issuer ?? MFA_DEFAULTS.issuer,
+    recoveryCodeCount: opts.recoveryCodeCount ?? MFA_DEFAULTS.recoveryCodeCount,
+    challengeTtlMs: opts.challengeTtlMs ?? MFA_DEFAULTS.challengeTtlMs,
+    mfaAttempts: opts.mfaAttempts ?? MFA_DEFAULTS.mfaAttempts,
+    window: opts.window ?? MFA_DEFAULTS.window,
+    algorithm: MFA_DEFAULTS.algorithm,
+    digits: MFA_DEFAULTS.digits,
+    period: MFA_DEFAULTS.period,
+  };
+}
+
 export function resolveAuthConfig(opts?: AuthOptions): AuthConfig {
-  const { email, oauth, jwt, ...rest } = opts ?? {};
+  const { email, oauth, jwt, mfa, ...rest } = opts ?? {};
   const base: AuthConfig = { ...DEFAULTS, ...rest };
   if (email) base.email = resolveEmailConfig(email);
   if (oauth) base.oauth = resolveOAuthConfig(oauth);
   if (jwt) base.jwt = resolveJwtConfig(jwt);
+  if (mfa) base.mfa = resolveMfaConfig(mfa);
   return base;
 }

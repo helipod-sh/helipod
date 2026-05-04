@@ -41,3 +41,19 @@ export class EmailNotConfiguredError extends UserError {
   override readonly code = "EMAIL_NOT_CONFIGURED";
   constructor() { super("EMAIL_NOT_CONFIGURED"); }
 }
+
+/** An A4 (MFA) function invoked while `mfa` config is absent — defensive; normally unregistered. */
+export class MfaNotConfiguredError extends UserError {
+  override readonly code = "MFA_NOT_CONFIGURED";
+  constructor() { super("MFA_NOT_CONFIGURED"); }
+}
+/** `startMfaEnrollment` called while a CONFIRMED enrollment already exists (must `disableMfa` first). */
+export class MfaAlreadyEnrolledError extends UserError {
+  override readonly code = "MFA_ALREADY_ENROLLED";
+  constructor() { super("MFA_ALREADY_ENROLLED"); }
+}
+/** `confirmMfaEnrollment`/`disableMfa`/`regenerateRecoveryCodes` called with no enrollment row present. */
+export class MfaNotEnrolledError extends UserError {
+  override readonly code = "MFA_NOT_ENROLLED";
+  constructor() { super("MFA_NOT_ENROLLED"); }
+}
