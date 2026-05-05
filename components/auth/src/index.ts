@@ -11,6 +11,7 @@ export type { Flow, TemplateArgs, RenderedEmail, TemplateFn, EmailTemplates } fr
 export { defaultTemplates, resolveTemplates } from "./email/templates";
 export type { MintResult, SessionSummary, NeedsVerification, SignInResult } from "./functions";
 export { makeAuthModules, mintSession, resolveSession, normalizeEmail } from "./functions";
+export { makeMfaModules } from "./mfa/functions";
 export { auth, defineAuth } from "./component";
 export { authContext } from "./context";
 export type { AuthContext } from "./context";
