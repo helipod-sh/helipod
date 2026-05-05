@@ -139,7 +139,13 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
       adminKey: "k",
       objectStoreUrl: `file://${bucketDir}`,
       objectStoreWriterId: "node-gc",
-      objectStoreGcMs: 200, // short cadence — observable within the test's timescale
+      // Effectively disable the timer-driven sweep (1h cadence) so it can NEVER fire during the
+      // commit loop below — the `preSweepSegCount === 16` assertion asserts a mid-flight "nothing
+      // reclaimed yet" state, which races a short-cadence background sweep under parallel load (the
+      // driver would reclaim early segments before we measure). We instead trigger the sweep
+      // DETERMINISTICALLY via `store.gc()` after the pre-measurement — same as `gc-driver.test.ts`
+      // drives its fake `fireDueTimers()` rather than waiting on wall-clock.
+      objectStoreGcMs: 3_600_000,
     });
     try {
       // SNAPSHOT_EVERY is 8 (object-doc-store.ts) — mirrors gc-driver.test.ts's own note. Drive two
@@ -161,8 +167,9 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
       expect(preSweepSegCount).toBe(2 * SNAPSHOT_EVERY); // nothing reclaimed yet
       expect(preSweepSnapCount).toBe(2); // both snapshots still present (stale + current)
 
-      // Wait past the gc-driver's cadence (armed on boot, no up-front sweep) for a real sweep to fire.
-      await new Promise<void>((r) => setTimeout(r, 500));
+      // Trigger the sweep DETERMINISTICALLY (the timer above is armed 1h out and will never fire in
+      // the test) — `store.gc()` is the exact call the gc-driver makes on its cadence. No wall-clock.
+      await (boot.store as unknown as { gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }> }).gc();
 
       const postSweepSegCount = (await inspector.list(segPrefix)).length;
       const postSweepSnapCount = (await inspector.list(snapPrefix)).length;
