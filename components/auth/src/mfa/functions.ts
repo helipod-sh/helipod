@@ -1,10 +1,15 @@
-import { mutation, query, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, commitThenThrow, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { AuthConfig } from "../config";
 import { sha256base64url } from "../crypto";
 import { generateTotpSecret, verifyTotp, buildOtpauthUri } from "./totp";
 import { encryptSecret, decryptSecret } from "./secret-crypto";
 import { generateRecoveryCodes } from "./recovery";
 import { MfaNotConfiguredError, MfaAlreadyEnrolledError, MfaNotEnrolledError } from "../errors";
+// `completeMfaSignIn` is the ONLY new (Task 5) direct `mintSession` caller — every gated first-factor
+// path routes through `../functions`'s `finishSignIn` instead (see that function's doc comment + the
+// gate-invariant test in `test/mfa-gate.test.ts`). This import is deliberately the ONE place in this
+// file that reaches for `mintSession`.
+import { mintSession, type MintResult } from "../functions";
 
 /** Generic, used for every second-factor / enrollment-confirm failure (wrong/expired/consumed/
  *  replayed — never distinguished, spec "Typed error codes"). */
@@ -241,5 +246,49 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
     return { enrolled, confirmed, recoveryCodesRemaining };
   });
 
-  return { startMfaEnrollment, confirmMfaEnrollment, disableMfa, regenerateRecoveryCodes, getMfaStatus };
+  /**
+   * The second-factor gate's completion (Task 5 / design spec "Component surface",
+   * "Security / correctness"). Public — the caller is NOT yet signed in; a `pendingToken` from
+   * `finishSignIn` is the only credential presented. Consume-before-validate on the challenge row:
+   * a missing challenge is a plain throw (nothing staged yet, so nothing to lose); once found, every
+   * subsequent failure path uses `commitThenThrow` so its write (attempt-counter bump / lockout
+   * delete) commits despite the throw — the same discipline A1's lockout counter and A2's OTP
+   * attempts use. Success deletes the challenge and is the ONLY new (Task 5) direct `mintSession`
+   * call in the whole component — `finishSignIn` is the sole interposition point on the minting side,
+   * and this is the sole exit on the completing side.
+   */
+  const completeMfaSignIn = mutation(async (
+    ctx: MutationCtx,
+    { pendingToken, code }: { pendingToken: string; code: string },
+  ): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+    if (!config.mfa) throw new MfaNotConfiguredError();
+    const mfa = config.mfa;
+
+    const challengeHash = sha256base64url(pendingToken);
+    const [challenge] = await ctx.db.query("mfaChallenges", "byChallengeHash").eq("challengeHash", challengeHash).collect();
+    if (!challenge) throw new Error(INVALID); // no such pending token — nothing consumed, plain throw is safe
+
+    // Expired: always invalid regardless of the presented code, and — critically — we must NOT call
+    // `verifyUserSecondFactor` on an expired challenge (that would burn a live TOTP step / consume a
+    // recovery code against a window that should already be dead). No write needed either: the row
+    // just sits there (same "linger until superseded/TTL" posture A2's authCodes rows have); nothing
+    // is staged, so a plain throw is safe.
+    if (ctx.now() > (challenge.expiresAt as number)) throw new Error(INVALID);
+
+    const factor = await verifyUserSecondFactor(ctx, config, challenge.userId as string, code);
+    if (factor) {
+      await ctx.db.delete(challenge._id as string); // consume the challenge — single-use (decision 6)
+      return mintSession(ctx, config, challenge.userId as string, challenge.deviceLabel as string | undefined);
+    }
+
+    // Wrong factor: bump the attempt counter; at `mfaAttempts` DELETE the challenge (destroys the
+    // pending window — decision 10). commitThenThrow so the bump/delete COMMITS despite the throw
+    // (same mechanism as A1's lockout / A2's OTP attempts).
+    const failedAttempts = (challenge.failedAttempts as number) + 1;
+    if (failedAttempts >= mfa.mfaAttempts) await ctx.db.delete(challenge._id as string);
+    else await ctx.db.replace(challenge._id as string, { ...challenge, failedAttempts });
+    return commitThenThrow(INVALID);
+  });
+
+  return { startMfaEnrollment, confirmMfaEnrollment, disableMfa, regenerateRecoveryCodes, getMfaStatus, completeMfaSignIn };
 }

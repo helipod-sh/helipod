@@ -2,7 +2,7 @@ import { mutation, action, httpAction, commitThenThrow, type ActionCtx, type Mut
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
 import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider, exchangeAndExtractIdentity } from "./oauth";
-import { resolveSession, mintSession, normalizeEmail, markVerifiedRevokingIfFirstProof, type MintResult } from "./functions";
+import { resolveSession, finishSignIn, normalizeEmail, markVerifiedRevokingIfFirstProof, type MintResult, type MfaRequired } from "./functions";
 import { sha256base64url, generateToken } from "./crypto";
 import { verifyIdToken } from "./jwt";
 import * as oauth from "oauth4webapi";
@@ -92,12 +92,12 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
  *  share. Every verification failure surfaces GENERIC — no unknown-kid/bad-signature/wrong-aud/expired/
  *  wrong-iss distinction (no enumeration). */
 function signInWithIdToken(config: AuthConfig) {
-  return action(async (ctx, { idToken, deviceLabel }: { idToken: string; deviceLabel?: string }): Promise<MintResult> => {
+  return action(async (ctx, { idToken, deviceLabel }: { idToken: string; deviceLabel?: string }): Promise<MintResult | MfaRequired> => {
     let v;
     try { v = await verifyIdToken(idToken, config.jwt!); }
     catch { throw new Error(GENERIC); }
     if (!v.sub) throw new Error(GENERIC);
-    return (ctx as ActionCtx).runMutation<MintResult>("auth:_resolveExternalIdentity", {
+    return (ctx as ActionCtx).runMutation<MintResult | MfaRequired>("auth:_resolveExternalIdentity", {
       provider: `oidc:${v.issuer}`, accountId: v.sub,
       // `emailVerified` is ALREADY a strict boolean from `verifyIdToken` (`=== true`, never a
       // truthy/string coercion — the STRICT-BOOLEAN CARRY-FORWARD); passed straight through, and the
@@ -118,10 +118,13 @@ function resolveExternalIdentityMutation(config: AuthConfig) {
   return mutation(async (ctx, args: {
     provider: string; accountId: string; email?: string; emailVerified: boolean;
     linkUserId?: string; deviceLabel?: string; outcome: "handoff" | "mint"; handoffHash?: string;
-  }): Promise<{ userId: string } | MintResult> => {
+  }): Promise<{ userId: string } | MintResult | MfaRequired> => {
     const now = ctx.now();
     const userId = await resolveUserId(ctx, args);
-    if (args.outcome === "mint") return mintSession(ctx, config, userId, args.deviceLabel);
+    // External identity is a FIRST factor (Task 5 / design spec "Gated sites") — route through the
+    // gate exactly like every password/email first-factor path, so an enrolled+confirmed user gets
+    // `mfaRequired` here too rather than a direct mint.
+    if (args.outcome === "mint") return finishSignIn(ctx, config, userId, args.deviceLabel);
     // outcome === "handoff": authorize a mint for `userId` (holds NO token); the httpAction has the raw code.
     // Invariant: "handoff" is OAuth-only (JWT's `signInWithIdToken` only ever sends "mint"). Guard the
     // non-null assertion below with a clear internal error instead of letting a JWT-only deployment
@@ -361,20 +364,23 @@ function _consumeOAuthState() {
 
 /** Exchange the handoff for the mint — consume-before-validate, then mint (A1 chokepoint). */
 function _consumeHandoff(config: AuthConfig) {
-  return mutation(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  return mutation(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> => {
     const handoffHash = sha256base64url(handoffCode);
     const [row] = await ctx.db.query("oauthHandoff", "byHandoffHash").eq("handoffHash", handoffHash).collect();
     if (!row) throw new Error(GENERIC);
     await ctx.db.delete(row._id as string);                   // consume
     if (ctx.now() > (row.expiresAt as number)) return commitThenThrow(GENERIC);
-    return mintSession(ctx, config, row.userId as string, row.deviceLabelHint as string | undefined);
+    // External identity is a FIRST factor (Task 5) — route through the gate, same as every other
+    // gated mint site: an enrolled+confirmed user gets `mfaRequired` here too.
+    return finishSignIn(ctx, config, row.userId as string, row.deviceLabelHint as string | undefined);
   });
 }
 
 /** The app calls this after reading `#code=<handoff>` off the redirect fragment. Mints THEN (tokens
- *  returned directly, never stored). */
+ *  returned directly, never stored) — or, if the resolved user has a confirmed MFA enrollment,
+ *  returns `mfaRequired` instead (Task 5: OAuth is a first factor like any other). */
 function completeOAuthSignIn() {
-  return action(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult> => {
-    return (ctx as ActionCtx).runMutation<MintResult>("auth:_consumeHandoff", { handoffCode });
+  return action(async (ctx, { handoffCode }: { handoffCode: string }): Promise<MintResult | MfaRequired> => {
+    return (ctx as ActionCtx).runMutation<MintResult | MfaRequired>("auth:_consumeHandoff", { handoffCode });
   });
 }

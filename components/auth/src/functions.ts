@@ -4,6 +4,7 @@ import type { AuthConfig } from "./config";
 import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
 import type { Flow } from "./email/templates";
 import { makeExternalModules } from "./external";
+import { makeMfaModules } from "./mfa/functions";
 import type { NotificationsSendFacade } from "./notifications-facade";
 import {
   RefreshStaleError,
@@ -36,8 +37,10 @@ export interface MintResult {
 export type NeedsVerification = { needsVerification: true };
 
 /** The gated `signUp`/`signIn` return type: additive over `MintResult` — existing callers (gate off,
- *  the default) keep getting a bare `MintResult`/`commitThenThrow` result, byte-identical to A1. */
-export type SignInResult = MintResult | NeedsVerification | ReturnType<typeof commitThenThrow>;
+ *  the default) keep getting a bare `MintResult`/`commitThenThrow` result, byte-identical to A1.
+ *  `MfaRequired` (Task 5) is a further additive arm — absent unless `defineAuth({ mfa })` is
+ *  configured AND the resolved user has a confirmed enrollment. */
+export type SignInResult = MintResult | MfaRequired | NeedsVerification | ReturnType<typeof commitThenThrow>;
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -86,6 +89,52 @@ export async function mintSession(
     }),
   )) as string;
   return { token, refreshToken, sessionId, userId, expiresAt };
+}
+
+/** MFA gate (Task 5 / design spec "Enrollment + second-factor data flow", "Security / correctness").
+ *  Additive over `mintSession`: with no `mfa` config this is a pure passthrough — byte-identical to a
+ *  pre-MFA deployment (decision 13). With `mfa` configured AND a CONFIRMED enrollment for `userId`,
+ *  withhold the mint entirely: insert a hashed, single-use, short-TTL `mfaChallenges` row (the same
+ *  "holds no token" shape as A3's `oauthHandoff`) and return `{ mfaRequired: true, pendingToken,
+ *  expiresAt }`. The pending token authorizes ONLY a second-factor completion
+ *  (`mfa/functions.ts`'s `completeMfaSignIn`) — never a session by itself: `authContext.getUserId`
+ *  only ever resolves `sessions` rows, so a pending challenge is invisible to every authenticated
+ *  query/mutation. `finishSignIn` is the SOLE interposition point — every gated first-factor success
+ *  path calls this INSTEAD of `mintSession` directly; `completeMfaSignIn` is the only new direct
+ *  `mintSession` caller (see that function + the gate-invariant test in
+ *  `test/mfa-gate.test.ts`). */
+export type MfaRequired = { mfaRequired: true; pendingToken: string; expiresAt: number };
+
+export async function finishSignIn(
+  ctx: WriteCtx,
+  config: AuthConfig,
+  userId: string,
+  deviceLabel?: string,
+): Promise<MintResult | MfaRequired> {
+  if (!config.mfa) return mintSession(ctx, config, userId, deviceLabel); // no gate configured — passthrough
+
+  const [enrollment] = await ctx.db.query("mfaEnrollments", "byUserId").eq("userId", userId).collect();
+  // Only a CONFIRMED enrollment gates (decision 4) — an in-progress/unconfirmed enrollment never
+  // blocks sign-in (else a user could lock themselves out mid-enrollment).
+  if (!enrollment || enrollment.confirmedAt === undefined) return mintSession(ctx, config, userId, deviceLabel);
+
+  // Pending-token CSPRNG generated INSIDE the mutation (A1/A2 precedent) — an OCC replay simply
+  // regenerates fresh, unguessable material with no correctness impact.
+  const pendingToken = generateToken();
+  const now = ctx.now();
+  const expiresAt = now + config.mfa.challengeTtlMs;
+  await ctx.db.insert(
+    "mfaChallenges",
+    compact({
+      challengeHash: sha256base64url(pendingToken),
+      userId,
+      deviceLabel,
+      failedAttempts: 0,
+      expiresAt,
+      createdAt: now,
+    }),
+  );
+  return { mfaRequired: true, pendingToken, expiresAt };
 }
 
 /** Resolve a presented ACCESS token to its live session row: `byTokenHash` first, legacy `byToken`
@@ -147,7 +196,7 @@ export async function markVerifiedRevokingIfFirstProof(ctx: MutationCtx, user: R
 
 /** Build the auth module set closing over `config`. `defineAuth` calls this (spec decision 10). */
 export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFunction> {
-  const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult | NeedsVerification> => {
+  const signUp = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<MintResult | MfaRequired | NeedsVerification> => {
     const normEmail = normalizeEmail(email);
     // Duplicate guard relies on single-writer OCC serialization — see schema.ts comment.
     const existing = await ctx.db.query("accounts", "byAccount").eq("provider", "password").eq("accountId", normEmail).collect();
@@ -197,7 +246,7 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
       const user = await ctx.db.get(userId);
       if (user?.emailVerified !== true) return { needsVerification: true } as NeedsVerification;
     }
-    return mintSession(ctx, config, userId, deviceLabel);
+    return finishSignIn(ctx, config, userId, deviceLabel);
   });
 
   const signIn = mutation(async (ctx, { email, password, deviceLabel }: Creds): Promise<SignInResult> => {
@@ -230,7 +279,7 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
       const user = await ctx.db.get(account.userId as string);
       if (user?.emailVerified !== true) return { needsVerification: true } as NeedsVerification;
     }
-    return mintSession(ctx, config, account.userId as string, deviceLabel);
+    return finishSignIn(ctx, config, account.userId as string, deviceLabel);
   });
 
   const signOut = mutation(async (ctx, { token }: { token: string }) => {
@@ -388,6 +437,7 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
   let modules: Record<string, RegisteredFunction> = base;
   if (config.email) modules = { ...modules, ...makeEmailModules(config) };            // email absent ⇒ A1's surface
   if (config.oauth || config.jwt) modules = { ...modules, ...makeExternalModules(config) }; // A3 absent ⇒ A1+A2's surface
+  if (config.mfa) modules = { ...modules, ...makeMfaModules(config) };                // mfa absent ⇒ gate is a pure passthrough
   return modules;
 }
 
@@ -595,7 +645,7 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     ctx: MutationCtx,
     normEmail: string,
     deviceLabel?: string,
-  ): Promise<MintResult | ReturnType<typeof commitThenThrow>> {
+  ): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> {
     let [user] = await ctx.db.query("users", "byEmail").eq("email", normEmail).collect();
     if (!user) {
       // LATENT instance of the same consume-before-validate footgun the resetPassword Critical
@@ -608,7 +658,7 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
       // regardless of reachability.
       if (!config.email!.createUsersOnEmailSignIn) return commitThenThrow(INVALID); // unknown email, creation off → generic (decision 11)
       const id = (await ctx.db.insert("users", { email: normEmail, emailVerified: true })) as string;
-      return mintSession(ctx, config, id, deviceLabel);
+      return finishSignIn(ctx, config, id, deviceLabel);
     }
     // Adopt an existing account. If it was NEVER verified, this is the FIRST mailbox proof — a
     // credential boundary: delete any PASSWORD credential (decision 10 — a pre-registrant's password
@@ -622,10 +672,10 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
       }
     }
     await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>); // session wipe on the flip + set true
-    return mintSession(ctx, config, user._id as string, deviceLabel);
+    return finishSignIn(ctx, config, user._id as string, deviceLabel);
   }
 
-  const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  const verifyEmail = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "verify", code);
     // Final-review fix (see the comment block above): expired/wrong/sentinel → generic, WITHOUT
@@ -640,10 +690,10 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     // the consume durable regardless of reachability, rather than relying on that invariant holding.
     if (!user) return commitThenThrow(INVALID);                   // verify targets an existing account
     await markVerifiedRevokingIfFirstProof(ctx, user as Record<string, unknown>); // flip + credential boundary
-    return mintSession(ctx, config, user._id as string, deviceLabel);
+    return finishSignIn(ctx, config, user._id as string, deviceLabel);
   });
 
-  const resetPassword = mutation(async (ctx, { email, code, newPassword }: { email: string; code: string; newPassword: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  const resetPassword = mutation(async (ctx, { email, code, newPassword }: { email: string; code: string; newPassword: string }): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "reset", code);
     // Final-review fix (see the comment block above `verifyEmail`): expired/wrong/sentinel →
@@ -670,10 +720,10 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     // credential boundary an emailVerified false→true flip would separately demand, so no additional
     // `markVerifiedRevokingIfFirstProof` call is needed here (see the design spec's amendment note).
     for (const s of await ctx.db.query("sessions", "byUserId").eq("userId", userId).collect()) await ctx.db.delete(s._id as string);
-    return mintSession(ctx, config, userId);
+    return finishSignIn(ctx, config, userId);
   });
 
-  const signInWithMagicLink = mutation(async (ctx, { email, token, deviceLabel }: { email: string; token: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  const signInWithMagicLink = mutation(async (ctx, { email, token, deviceLabel }: { email: string; token: string; deviceLabel?: string }): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "magic", token);
     // Final-review fix (see the comment block above `verifyEmail`): expired/wrong/sentinel →
@@ -683,7 +733,7 @@ function makeEmailModules(config: AuthConfig): Record<string, RegisteredFunction
     return adoptOrCreateThenMint(ctx, normEmail, deviceLabel); // shared with OTP
   });
 
-  const signInWithOtp = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | ReturnType<typeof commitThenThrow>> => {
+  const signInWithOtp = mutation(async (ctx, { email, code, deviceLabel }: { email: string; code: string; deviceLabel?: string }): Promise<MintResult | MfaRequired | ReturnType<typeof commitThenThrow>> => {
     if (!config.email) throw new EmailNotConfiguredError();
     const { row, normEmail, matches } = await peekCode(ctx, email, "otp", code);
     if (!row) throw new Error(INVALID); // no row at all → generic (no counter to bump)
