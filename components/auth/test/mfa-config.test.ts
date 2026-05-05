@@ -22,6 +22,8 @@ describe("resolveMfaConfig", () => {
     expect(mfa.challengeTtlMs).toBe(5 * 60 * 1000);
     expect(mfa.mfaAttempts).toBe(5);
     expect(mfa.window).toBe(1);
+    expect(mfa.verifyAttemptsPerWindow).toBe(10);
+    expect(mfa.verifyWindowMs).toBe(15 * 60 * 1000);
     expect(mfa.algorithm).toBe("SHA1");
     expect(mfa.digits).toBe(6);
     expect(mfa.period).toBe(30);
@@ -40,12 +42,16 @@ describe("resolveMfaConfig", () => {
       challengeTtlMs: 60_000,
       mfaAttempts: 3,
       window: 2,
+      verifyAttemptsPerWindow: 4,
+      verifyWindowMs: 60_000,
     });
     expect(mfa.issuer).toBe("Acme");
     expect(mfa.recoveryCodeCount).toBe(12);
     expect(mfa.challengeTtlMs).toBe(60_000);
     expect(mfa.mfaAttempts).toBe(3);
     expect(mfa.window).toBe(2);
+    expect(mfa.verifyAttemptsPerWindow).toBe(4);
+    expect(mfa.verifyWindowMs).toBe(60_000);
   });
 
   it("builds an ordered keyring from encryptionKeys, preserving [0] as primary", () => {

@@ -26,3 +26,16 @@ function generateOneRecoveryCode(): string {
   for (let i = 0; i < raw.length; i += 4) groups.push(raw.slice(i, i + 4));
   return groups.join("-");
 }
+
+/**
+ * Normalize a recovery code before hashing (review fix): strip every non-alphanumeric character
+ * (the display dashes, and any whitespace a user might paste in) and uppercase the rest. Applied
+ * identically at BOTH mint time (`mfa/functions.ts`'s enrollment-confirm/regenerate, before computing
+ * `codeHash`) and verify time (`verifyUserSecondFactor`'s recovery-code lookup) — so a user who types
+ * a code without its display dashes, or in lowercase, still hashes to the exact value stored at mint.
+ * The DISPLAYED format (dashed, uppercase groups from `generateRecoveryCodes` above) is unaffected;
+ * only what actually gets hashed changes.
+ */
+export function normalizeRecoveryCode(code: string): string {
+  return code.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+}

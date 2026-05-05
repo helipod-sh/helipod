@@ -57,3 +57,16 @@ export class MfaNotEnrolledError extends UserError {
   override readonly code = "MFA_NOT_ENROLLED";
   constructor() { super("MFA_NOT_ENROLLED"); }
 }
+/** `startMfaEnrollment` called by an anonymous (never-upgraded) caller — anon users can't enroll. */
+export class MfaAnonymousNotAllowedError extends UserError {
+  override readonly code = "MFA_ANONYMOUS_NOT_ALLOWED";
+  constructor() { super("MFA_ANONYMOUS_NOT_ALLOWED"); }
+}
+/** Review fix: `completeMfaSignIn`'s per-USER windowed second-factor rate limit tripped (spans
+ *  challenges — see `MfaConfig.verifyAttemptsPerWindow`/`verifyWindowMs`). Reached only with a valid
+ *  `pendingToken` (i.e. post-first-factor), so a distinct code here is not an enumeration oracle —
+ *  it never distinguishes a right vs. wrong code, only "too many recent guesses for this user". */
+export class MfaRateLimitedError extends UserError {
+  override readonly code = "MFA_RATE_LIMITED";
+  constructor() { super("MFA_RATE_LIMITED"); }
+}

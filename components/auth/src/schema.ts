@@ -109,7 +109,11 @@ export const authSchema = defineSchema({
     failedAttempts: v.number(),
     expiresAt: v.number(),
     createdAt: v.number(),
-  }).index("byChallengeHash", ["challengeHash"]),
+  })
+    .index("byChallengeHash", ["challengeHash"])
+    // Review fix: `finishSignIn` deletes a user's prior challenges via this range before inserting a
+    // fresh one (caps live challenges at one per user, sweeps stale/expired rows) — never a table scan.
+    .index("byUserId", ["userId"]),
   // A4 recovery codes (spec decision 7) — one row per code, hashed at rest
   // (`codeHash` = sha256base64url(rawCode)); consuming a code deletes its row.
   // `byUserCode` gives an O(1) consume-before-validate lookup by (userId, codeHash).

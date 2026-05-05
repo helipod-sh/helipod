@@ -3,8 +3,14 @@ import type { AuthConfig } from "../config";
 import { sha256base64url } from "../crypto";
 import { generateTotpSecret, verifyTotp, buildOtpauthUri } from "./totp";
 import { encryptSecret, decryptSecret } from "./secret-crypto";
-import { generateRecoveryCodes } from "./recovery";
-import { MfaNotConfiguredError, MfaAlreadyEnrolledError, MfaNotEnrolledError } from "../errors";
+import { generateRecoveryCodes, normalizeRecoveryCode } from "./recovery";
+import {
+  MfaNotConfiguredError,
+  MfaAlreadyEnrolledError,
+  MfaNotEnrolledError,
+  MfaAnonymousNotAllowedError,
+  MfaRateLimitedError,
+} from "../errors";
 // `completeMfaSignIn` is the ONLY new (Task 5) direct `mintSession` caller — every gated first-factor
 // path routes through `../functions`'s `finishSignIn` instead (see that function's doc comment + the
 // gate-invariant test in `test/mfa-gate.test.ts`). This import is deliberately the ONE place in this
@@ -98,7 +104,11 @@ export async function verifyUserSecondFactor(
       return "totp";
     }
   }
-  const codeHash = sha256base64url(code);
+  // Normalize BEFORE hashing (review fix — matches the normalization `generateRecoveryCodes`'
+  // callers below apply at mint time): strip the display dashes/whitespace and uppercase, so a user
+  // who types the code without dashes (or in lowercase) still matches. The displayed format stays
+  // dashed; only what gets hashed changes.
+  const codeHash = sha256base64url(normalizeRecoveryCode(code));
   const [recRow] = await ctx.db
     .query("mfaRecoveryCodes", "byUserCode")
     .eq("userId", userId)
@@ -123,12 +133,17 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
     const mfa = config.mfa;
     const userId = await requireUserId(ctx);
 
+    // REVIEW FIX (anon-enrollment guard): an anonymous user can't enroll — matches the design's
+    // "anon can't enroll" (there is no verified mailbox/credential to bind a second factor to, and
+    // an anon user's identity doesn't survive past its own session anyway).
+    const user = await ctx.db.get(userId);
+    if (user?.anonymous === true) throw new MfaAnonymousNotAllowedError();
+
     const existing = await enrollmentFor(ctx, userId);
     if (existing && existing.confirmedAt !== undefined) throw new MfaAlreadyEnrolledError(); // must disableMfa first
     if (existing) await ctx.db.delete(existing._id as string); // overwrite a prior UNCONFIRMED row (decision 4)
 
     const secret = generateTotpSecret(); // CSPRNG inside the mutation (A1/A2 precedent)
-    const user = await ctx.db.get(userId);
     const accountName = (user?.email as string | undefined) ?? userId;
     const otpauthUri = buildOtpauthUri({
       issuer: mfa.issuer,
@@ -184,9 +199,10 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
     await ctx.db.replace(enrollment._id as string, { ...enrollment, confirmedAt: ctx.now(), lastUsedStep: matchedStep });
 
     // Only NOW generate the recovery-code set (decision 4/7) — a failed confirm never mints codes.
+    // `normalizeRecoveryCode` before hashing (review fix) — see that function's doc comment.
     const rawCodes = generateRecoveryCodes(mfa.recoveryCodeCount);
     for (const raw of rawCodes) {
-      await ctx.db.insert("mfaRecoveryCodes", { userId, codeHash: sha256base64url(raw), createdAt: ctx.now() });
+      await ctx.db.insert("mfaRecoveryCodes", { userId, codeHash: sha256base64url(normalizeRecoveryCode(raw)), createdAt: ctx.now() });
     }
     return { recoveryCodes: rawCodes }; // raw codes returned ONCE
   });
@@ -223,9 +239,10 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
 
     const rows = await ctx.db.query("mfaRecoveryCodes", "byUserId").eq("userId", userId).collect();
     for (const r of rows) await ctx.db.delete(r._id as string); // replace the WHOLE set
+    // `normalizeRecoveryCode` before hashing (review fix) — see that function's doc comment.
     const rawCodes = generateRecoveryCodes(mfa.recoveryCodeCount);
     for (const raw of rawCodes) {
-      await ctx.db.insert("mfaRecoveryCodes", { userId, codeHash: sha256base64url(raw), createdAt: ctx.now() });
+      await ctx.db.insert("mfaRecoveryCodes", { userId, codeHash: sha256base64url(normalizeRecoveryCode(raw)), createdAt: ctx.now() });
     }
     return { recoveryCodes: rawCodes };
   });
@@ -256,6 +273,17 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
    * attempts use. Success deletes the challenge and is the ONLY new (Task 5) direct `mintSession`
    * call in the whole component — `finishSignIn` is the sole interposition point on the minting side,
    * and this is the sole exit on the completing side.
+   *
+   * REVIEW FIX — per-USER windowed second-factor rate limit: the per-CHALLENGE `failedAttempts` cap
+   * below is bypassable on its own, because `finishSignIn` inserts a brand-new challenge on every
+   * first-factor success — an attacker holding the victim's password can loop
+   * `signIn -> mfaAttempts guesses -> signIn -> ...` unbounded, each loop resetting the per-challenge
+   * counter to zero. A counter on the shared `authCounters` table, keyed `mfaVerify:<userId>` (the
+   * same `{name, windowStart, count}` shape/pattern `signInAnonymously`'s `anonymousSignIns` counter
+   * uses), now spans challenges: checked BEFORE `verifyUserSecondFactor` so a rate-limited request
+   * never consumes the second factor and never learns whether the presented code was right (the
+   * distinct `MfaRateLimitedError` is reached only with a valid `pendingToken` — i.e. strictly
+   * post-first-factor — so it is not an enumeration oracle).
    */
   const completeMfaSignIn = mutation(async (
     ctx: MutationCtx,
@@ -273,20 +301,46 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
     // recovery code against a window that should already be dead). No write needed either: the row
     // just sits there (same "linger until superseded/TTL" posture A2's authCodes rows have); nothing
     // is staged, so a plain throw is safe.
-    if (ctx.now() > (challenge.expiresAt as number)) throw new Error(INVALID);
+    const now = ctx.now();
+    if (now > (challenge.expiresAt as number)) throw new Error(INVALID);
 
-    const factor = await verifyUserSecondFactor(ctx, config, challenge.userId as string, code);
-    if (factor) {
-      await ctx.db.delete(challenge._id as string); // consume the challenge — single-use (decision 6)
-      return mintSession(ctx, config, challenge.userId as string, challenge.deviceLabel as string | undefined);
+    const userId = challenge.userId as string;
+    const counterName = `mfaVerify:${userId}`;
+    const [counter] = await ctx.db.query("authCounters", "byName").eq("name", counterName).collect();
+    const inWindow = counter !== undefined && now - (counter.windowStart as number) < mfa.verifyWindowMs;
+
+    // The per-user rate limit — checked BEFORE verifyUserSecondFactor (see the doc comment above).
+    // Nothing about the challenge/counter is written on this path: a rate-limited request is
+    // rejected outright, consuming nothing. commitThenThrow is used anyway for consistency with
+    // every other rejection path below (and defense-in-depth against a future edit adding a write
+    // ahead of this check).
+    if (inWindow && (counter!.count as number) >= mfa.verifyAttemptsPerWindow) {
+      return commitThenThrow(new MfaRateLimitedError().message);
     }
 
-    // Wrong factor: bump the attempt counter; at `mfaAttempts` DELETE the challenge (destroys the
-    // pending window — decision 10). commitThenThrow so the bump/delete COMMITS despite the throw
-    // (same mechanism as A1's lockout / A2's OTP attempts).
+    const factor = await verifyUserSecondFactor(ctx, config, userId, code);
+    if (factor) {
+      await ctx.db.delete(challenge._id as string); // consume the challenge — single-use (decision 6)
+      if (counter) await ctx.db.delete(counter._id as string); // reset the per-user rate-limit window on success
+      return mintSession(ctx, config, userId, challenge.deviceLabel as string | undefined);
+    }
+
+    // Wrong factor: bump the PER-CHALLENGE attempt counter; at `mfaAttempts` DELETE the challenge
+    // (destroys the pending window — decision 10). ALSO bump the PER-USER windowed counter — this is
+    // what actually survives across a fresh challenge and bounds the total guesses the loop above
+    // describes. commitThenThrow so every one of these writes COMMITS despite the throw (same
+    // mechanism as A1's lockout / A2's OTP attempts).
     const failedAttempts = (challenge.failedAttempts as number) + 1;
     if (failedAttempts >= mfa.mfaAttempts) await ctx.db.delete(challenge._id as string);
     else await ctx.db.replace(challenge._id as string, { ...challenge, failedAttempts });
+
+    if (!counter) {
+      await ctx.db.insert("authCounters", { name: counterName, windowStart: now, count: 1 });
+    } else if (!inWindow) {
+      await ctx.db.replace(counter._id as string, { ...counter, windowStart: now, count: 1 }); // fresh window
+    } else {
+      await ctx.db.replace(counter._id as string, { ...counter, count: (counter.count as number) + 1 });
+    }
     return commitThenThrow(INVALID);
   });
 

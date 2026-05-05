@@ -168,6 +168,28 @@ describe("A4 Task 5: the gate — finishSignIn / completeMfaSignIn", () => {
     ).rejects.toThrow(/invalid code/i);
   });
 
+  it("review fix: a recovery code matches whether presented with its display dashes or without them, and regardless of case (normalizeRecoveryCode)", async () => {
+    const nowRef = { value: NOW };
+    await setup(nowRef);
+    const up = await t.mutation<MintResult>("auth:signUp", { email: "recovery-fmt@x.co", password: "pw" });
+    const { recoveryCodes } = await enrollMfa(up.token, nowRef.value);
+    expect(recoveryCodes[0]).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/); // display format unaffected
+
+    // Presented WITHOUT its display dashes.
+    const noDashes = recoveryCodes[0]!.replace(/-/g, "");
+    const gated1 = await t.mutation<MfaRequired>("auth:signIn", { email: "recovery-fmt@x.co", password: "pw" });
+    const minted1 = await t.mutation<MintResult>("auth:completeMfaSignIn", { pendingToken: gated1.pendingToken, code: noDashes });
+    expect(minted1.userId).toBe(up.userId);
+
+    // Presented lowercase AND without dashes.
+    const lowerNoDashes = recoveryCodes[1]!.toLowerCase().replace(/-/g, "");
+    const gated2 = await t.mutation<MfaRequired>("auth:signIn", { email: "recovery-fmt@x.co", password: "pw" });
+    const minted2 = await t.mutation<MintResult>("auth:completeMfaSignIn", { pendingToken: gated2.pendingToken, code: lowerNoDashes });
+    expect(minted2.userId).toBe(up.userId);
+
+    expect(await recoveryCodeCount(up.userId)).toBe(8); // both consumed, single-use preserved
+  });
+
   it("wrong code rejects generically; mfaAttempts (default 5) wrong guesses deletes the challenge — the pending window is destroyed, even the correct code fails afterward", async () => {
     const nowRef = { value: NOW };
     await setup(nowRef);
@@ -367,6 +389,154 @@ describe("A4 Task 5: the gate — finishSignIn / completeMfaSignIn", () => {
 
     // The A4 surface itself is fully unregistered — calling it 404s/throws (not silently a no-op).
     await expect(t.mutation("auth:startMfaEnrollment", {})).rejects.toThrow();
+  });
+});
+
+describe("A4 review fix: finishSignIn caps live challenges at ONE per user", () => {
+  const NOW = 1_700_000_000_000;
+
+  afterEach(async () => {
+    await t.close();
+  });
+
+  it("signing in again before completing the first challenge deletes the stale row — never more than one live challenge for the same user", async () => {
+    const nowRef = { value: NOW };
+    await setup(nowRef);
+    const up = await t.mutation<MintResult>("auth:signUp", { email: "cap@x.co", password: "pw" });
+    await enrollMfa(up.token, nowRef.value);
+
+    const gated1 = await t.mutation<MfaRequired>("auth:signIn", { email: "cap@x.co", password: "pw" });
+    expect(await challengesFor(up.userId)).toHaveLength(1);
+
+    // Sign in again WITHOUT completing the first challenge — finishSignIn must sweep it.
+    const gated2 = await t.mutation<MfaRequired>("auth:signIn", { email: "cap@x.co", password: "pw" });
+    const rows = await challengesFor(up.userId);
+    expect(rows).toHaveLength(1); // still exactly one — the stale row is gone, not accumulated
+    expect(rows[0]!.challengeHash).toBe(sha256base64url(gated2.pendingToken));
+    expect(rows[0]!.challengeHash).not.toBe(sha256base64url(gated1.pendingToken));
+
+    // The FIRST (now-superseded) pendingToken no longer resolves to anything.
+    await expect(
+      t.mutation("auth:completeMfaSignIn", { pendingToken: gated1.pendingToken, code: "000000" }),
+    ).rejects.toThrow(/invalid code/i);
+  });
+});
+
+describe("A4 review fix: completeMfaSignIn's per-USER windowed second-factor rate limit", () => {
+  const NOW = 1_700_000_000_000;
+
+  afterEach(async () => {
+    await t.close();
+  });
+
+  /** Same shape as this file's top-level `setup`, but with a small `verifyAttemptsPerWindow` so the
+   *  test can trip the per-user cap in a handful of loops without needing 900_000ms of fake-clock
+   *  advance or a huge attempt count. */
+  async function setupTightWindow(nowRef: { value: number }): Promise<void> {
+    const { provider } = captureProvider();
+    t = await createTestStackbase({
+      modules: {},
+      components: [
+        defineAuth({
+          email: { provider, from: "noreply@app.co" },
+          mfa: { encryptionKey: TEST_KEY, verifyAttemptsPerWindow: 3 }, // tight cap, default 15min window
+        }),
+      ],
+      schema: false,
+      now: () => nowRef.value,
+    });
+  }
+
+  it("THE brute-force-loop fix: wrong guesses across MULTIPLE fresh challenges (signIn -> wrong guess -> signIn -> ...) still trip the per-user cap — after it, even a BRAND NEW challenge's CORRECT code is rejected as MfaRateLimitedError, not consumed", async () => {
+    const nowRef = { value: NOW };
+    await setupTightWindow(nowRef);
+    const up = await t.mutation<MintResult>("auth:signUp", { email: "loop@x.co", password: "pw" });
+    const { secret } = await enrollMfa(up.token, nowRef.value);
+    nowRef.value += 30_000; // fresh TOTP step past enrollment's consumed one
+
+    // Loop the exact attack this fix closes: re-sign-in for a FRESH challenge (well under the
+    // per-CHALLENGE mfaAttempts cap of 5, so that cap never trips) and burn ONE wrong guess each
+    // time — cumulative wrong guesses is what the per-user counter (cap 3) tracks.
+    for (let i = 0; i < 3; i++) {
+      const gated = await t.mutation<MfaRequired>("auth:signIn", { email: "loop@x.co", password: "pw" });
+      await expect(
+        t.mutation("auth:completeMfaSignIn", { pendingToken: gated.pendingToken, code: "000000" }),
+      ).rejects.toThrow(/invalid code/i);
+    }
+
+    // A brand new (4th) challenge, presented with the GENUINELY CORRECT live code — rejected by the
+    // per-user rate limit BEFORE the code is ever checked, proving the loop-across-challenges
+    // bypass is closed: the per-challenge cap alone would have let this through (each challenge only
+    // ever saw ONE wrong guess).
+    const gated4 = await t.mutation<MfaRequired>("auth:signIn", { email: "loop@x.co", password: "pw" });
+    const realCode = liveCodeFor(secret, nowRef.value);
+    await expect(
+      t.mutation("auth:completeMfaSignIn", { pendingToken: gated4.pendingToken, code: realCode }),
+    ).rejects.toThrow(/MFA_RATE_LIMITED/);
+
+    // Not consumed: the challenge is still there (rate-limited, not completed) and the live code is
+    // still fresh — proving the rate limit rejected BEFORE ever calling verifyUserSecondFactor.
+    expect(await challengesFor(up.userId)).toHaveLength(1);
+  });
+
+  it("the per-user counter resets on a SUCCESSFUL completion — a fresh run of wrong guesses afterward starts from zero", async () => {
+    const nowRef = { value: NOW };
+    await setupTightWindow(nowRef);
+    const up = await t.mutation<MintResult>("auth:signUp", { email: "reset@x.co", password: "pw" });
+    const { secret } = await enrollMfa(up.token, nowRef.value);
+    nowRef.value += 30_000;
+
+    // Two wrong guesses (under the cap of 3), then a genuine success.
+    for (let i = 0; i < 2; i++) {
+      const gated = await t.mutation<MfaRequired>("auth:signIn", { email: "reset@x.co", password: "pw" });
+      await expect(
+        t.mutation("auth:completeMfaSignIn", { pendingToken: gated.pendingToken, code: "000000" }),
+      ).rejects.toThrow(/invalid code/i);
+    }
+    const gatedOk = await t.mutation<MfaRequired>("auth:signIn", { email: "reset@x.co", password: "pw" });
+    await t.mutation<MintResult>("auth:completeMfaSignIn", {
+      pendingToken: gatedOk.pendingToken,
+      code: liveCodeFor(secret, nowRef.value),
+    });
+
+    // Post-success, two MORE wrong guesses should NOT trip the cap (it was reset to zero on success,
+    // not merely left at 2/3 from before).
+    for (let i = 0; i < 2; i++) {
+      nowRef.value += 30_000;
+      const gated = await t.mutation<MfaRequired>("auth:signIn", { email: "reset@x.co", password: "pw" });
+      await expect(
+        t.mutation("auth:completeMfaSignIn", { pendingToken: gated.pendingToken, code: "000000" }),
+      ).rejects.toThrow(/invalid code/i);
+    }
+  });
+
+  it("the window resets after verifyWindowMs elapses — a cap tripped long ago does not linger forever", async () => {
+    const nowRef = { value: NOW };
+    await setupTightWindow(nowRef);
+    const up = await t.mutation<MintResult>("auth:signUp", { email: "windowreset@x.co", password: "pw" });
+    const { secret } = await enrollMfa(up.token, nowRef.value);
+    nowRef.value += 30_000;
+
+    for (let i = 0; i < 3; i++) {
+      const gated = await t.mutation<MfaRequired>("auth:signIn", { email: "windowreset@x.co", password: "pw" });
+      await expect(
+        t.mutation("auth:completeMfaSignIn", { pendingToken: gated.pendingToken, code: "000000" }),
+      ).rejects.toThrow(/invalid code/i);
+    }
+    // Confirm the cap is live right now.
+    const gatedStillCapped = await t.mutation<MfaRequired>("auth:signIn", { email: "windowreset@x.co", password: "pw" });
+    await expect(
+      t.mutation("auth:completeMfaSignIn", { pendingToken: gatedStillCapped.pendingToken, code: "000000" }),
+    ).rejects.toThrow(/MFA_RATE_LIMITED/);
+
+    // Advance past the default 15-minute verifyWindowMs — a fresh window opens, the code now works.
+    nowRef.value += 15 * 60 * 1000 + 1;
+    const gatedFresh = await t.mutation<MfaRequired>("auth:signIn", { email: "windowreset@x.co", password: "pw" });
+    const minted = await t.mutation<MintResult>("auth:completeMfaSignIn", {
+      pendingToken: gatedFresh.pendingToken,
+      code: liveCodeFor(secret, nowRef.value),
+    });
+    expect(minted.userId).toBe(up.userId);
   });
 });
 

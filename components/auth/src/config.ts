@@ -60,6 +60,14 @@ export interface MfaConfig {
   challengeTtlMs: number;
   mfaAttempts: number;
   window: number;
+  /** Per-USER windowed second-factor rate limit (review fix — spans challenges, unlike
+   *  `mfaAttempts`'s per-CHALLENGE cap): the max wrong-guess `completeMfaSignIn` attempts a single
+   *  userId gets inside `verifyWindowMs`, keyed `mfaVerify:<userId>` on the shared `authCounters`
+   *  table. Closes the loop bypass where `finishSignIn` minting a fresh challenge on every first-
+   *  factor success let an attacker who already knows the password retry `signIn -> mfaAttempts
+   *  guesses -> signIn -> ...` unbounded. */
+  verifyAttemptsPerWindow: number;
+  verifyWindowMs: number;
   /** Fixed in the v1 config surface (spec decision 1) — stored per-enrollment, not an app knob. */
   algorithm: "SHA1";
   digits: number;
@@ -76,6 +84,10 @@ export interface MfaOptions {
   challengeTtlMs?: number;
   mfaAttempts?: number;
   window?: number;
+  /** Per-user windowed second-factor rate limit — see `MfaConfig`'s doc comment. Defaults: 10
+   *  attempts per 15 minutes. */
+  verifyAttemptsPerWindow?: number;
+  verifyWindowMs?: number;
 }
 
 /** The user-facing `email` block: `provider` + `from` required, everything else optional-with-defaults. */
@@ -219,6 +231,8 @@ const MFA_DEFAULTS = {
   challengeTtlMs: 5 * 60 * 1000,
   mfaAttempts: 5,
   window: 1,
+  verifyAttemptsPerWindow: 10,
+  verifyWindowMs: 15 * 60 * 1000,
   // Fixed in v1 (spec decision 1) — not app-configurable knobs, just the shared default stamped
   // onto every new enrollment's `algorithm`/`digits`/`period` fields.
   algorithm: "SHA1" as const,
@@ -246,6 +260,8 @@ export function resolveMfaConfig(opts: MfaOptions): MfaConfig {
     challengeTtlMs: opts.challengeTtlMs ?? MFA_DEFAULTS.challengeTtlMs,
     mfaAttempts: opts.mfaAttempts ?? MFA_DEFAULTS.mfaAttempts,
     window: opts.window ?? MFA_DEFAULTS.window,
+    verifyAttemptsPerWindow: opts.verifyAttemptsPerWindow ?? MFA_DEFAULTS.verifyAttemptsPerWindow,
+    verifyWindowMs: opts.verifyWindowMs ?? MFA_DEFAULTS.verifyWindowMs,
     algorithm: MFA_DEFAULTS.algorithm,
     digits: MFA_DEFAULTS.digits,
     period: MFA_DEFAULTS.period,

@@ -9,6 +9,7 @@ import { authContext } from "../src/context";
 import { makeAuthModules } from "../src/functions";
 import { makeMfaModules } from "../src/mfa/functions";
 import { totpCodeAt, currentStep } from "../src/mfa/totp";
+import { normalizeRecoveryCode } from "../src/mfa/recovery";
 import { resolveAuthConfig, type AuthOptions } from "../src/config";
 import { sha256base64url, type MintResult } from "../src";
 
@@ -144,7 +145,9 @@ describe("A4 Task 4: makeMfaModules — enrollment + management + recovery", () 
     expect(codeRows).toHaveLength(10);
     for (const codeRow of codeRows) {
       expect(confirm.recoveryCodes).not.toContain(codeRow.codeHash); // never the raw code
-      expect(confirm.recoveryCodes.some((raw) => sha256base64url(raw) === codeRow.codeHash)).toBe(true);
+      // Review fix: the persisted hash is over the NORMALIZED code (dashes stripped, uppercased),
+      // not the raw dashed display string — see `normalizeRecoveryCode`'s doc comment.
+      expect(confirm.recoveryCodes.some((raw) => sha256base64url(normalizeRecoveryCode(raw)) === codeRow.codeHash)).toBe(true);
     }
   });
 
@@ -311,5 +314,20 @@ describe("A4 Task 4: makeMfaModules — enrollment + management + recovery", () 
     const r = await makeRuntime({ mfa: { encryptionKey: TEST_KEY } }, () => NOW);
     await expect(r.run("auth:startMfaEnrollment", {}, { identity: null })).rejects.toThrow(/not authenticated/i);
     await expect(r.run("auth:getMfaStatus", {}, { identity: null })).rejects.toThrow(/not authenticated/i);
+  });
+
+  it("review fix: an ANONYMOUS caller cannot enroll — startMfaEnrollment rejects MFA_ANONYMOUS_NOT_ALLOWED, no enrollment row is created", async () => {
+    const r = await makeRuntime({ mfa: { encryptionKey: TEST_KEY } }, () => NOW);
+    const anon = (await r.run<MintResult>("auth:signInAnonymously", {})).value;
+
+    await expect(r.run("auth:startMfaEnrollment", {}, { identity: anon.token })).rejects.toThrow(
+      "MFA_ANONYMOUS_NOT_ALLOWED",
+    );
+    expect(await readEnrollment(r, anon.userId)).toBeNull();
+
+    // A non-anonymous (real, password) user is unaffected by the guard.
+    const up = (await r.run<MintResult>("auth:signUp", { email: "not-anon@b.co", password: "pw" })).value;
+    const start = (await r.run<StartResult>("auth:startMfaEnrollment", {}, { identity: up.token })).value;
+    expect(typeof start.secret).toBe("string");
   });
 });

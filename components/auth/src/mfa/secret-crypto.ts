@@ -24,12 +24,14 @@ export function decodeKeyMaterial(raw: string): Buffer {
     candidates.push(Buffer.from(raw, "hex"));
   }
 
-  // base64 (standard or url-safe): decode and check length.
+  // base64 (standard or url-safe): decode and check length. `Buffer.from(..., "base64")` never
+  // throws on its own — it silently ignores anything outside the base64 alphabet — so the regex
+  // above is the actual gate on "was this base64-shaped text" and the `exact` length check below
+  // (against `KEY_BYTES`) is the actual gate on "did it decode to a usable 32-byte key". This
+  // branch only pushes a non-empty decode result onto `candidates`; it does not re-encode or
+  // compare against the original input.
   if (/^[A-Za-z0-9+/_-]+={0,2}$/.test(raw)) {
     const decoded = Buffer.from(raw, "base64");
-    // Buffer.from(..., "base64") silently drops invalid characters rather than
-    // throwing, so re-encode and compare to make sure this was actually valid
-    // base64 text before trusting the decoded length.
     if (decoded.length > 0) candidates.push(decoded);
   }
 

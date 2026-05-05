@@ -118,6 +118,18 @@ export async function finishSignIn(
   // blocks sign-in (else a user could lock themselves out mid-enrollment).
   if (!enrollment || enrollment.confirmedAt === undefined) return mintSession(ctx, config, userId, deviceLabel);
 
+  // REVIEW FIX: cap live challenges at ONE per user. Without this, every first-factor success
+  // inserted a brand-new challenge — a signIn -> wrong-guesses -> signIn -> ... loop let an attacker
+  // who already has the password grind an unbounded number of second-factor guesses, each batch
+  // capped only per-challenge (`mfaAttempts`), never across the whole loop. Deleting every existing
+  // challenge for this user (via the `byUserId` range, never a table scan) before inserting the
+  // fresh one also sweeps rows that expired without ever being completed, so they don't accumulate.
+  // This composes with `completeMfaSignIn`'s new per-user windowed rate limit (`authCounters`,
+  // keyed `mfaVerify:<userId>`) which is what actually bounds total guesses across challenges.
+  for (const stale of await ctx.db.query("mfaChallenges", "byUserId").eq("userId", userId).collect()) {
+    await ctx.db.delete(stale._id as string);
+  }
+
   // Pending-token CSPRNG generated INSIDE the mutation (A1/A2 precedent) — an OCC replay simply
   // regenerates fresh, unguessable material with no correctness impact.
   const pendingToken = generateToken();
