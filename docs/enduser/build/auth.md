@@ -277,6 +277,180 @@ detection — not cookie isolation. httpOnly-cookie mode + CSRF is intentionally
 A1 (it would rearchitect identity transport for marginal gain). If your threat model requires cookie
 isolation, front Stackbase with your own auth-terminating proxy.
 
+## Two-factor authentication (TOTP)
+
+`@stackbase/auth` also supports TOTP-based two-factor authentication (RFC 6238 — Google
+Authenticator, Authy, 1Password, and the rest of the authenticator-app ecosystem) with
+one-time recovery codes as the backup factor. It gates every first-factor sign-in success
+(password, magic-link, OTP, email verification, password reset, and social/OAuth sign-in
+alike) behind a second factor, without ever bypassing the session-minting chokepoint —
+`finishSignIn` wraps `mintSession`, it never replaces it. MFA is **opt-in**: it only
+registers once you pass an `mfa` block to `defineAuth`, and a deployment without one is
+byte-identical to today.
+
+### Setup
+
+```ts
+import { defineAuth } from "@stackbase/auth";
+
+export const auth = defineAuth({
+  mfa: {
+    // A 32-byte key, base64 or hex, sourced from the environment — never hardcoded.
+    encryptionKey: process.env.STACKBASE_AUTH_MFA_KEY!,
+    issuer: "My App",          // otpauth:// issuer label shown in the authenticator app (default "Stackbase")
+  },
+});
+```
+
+Generate a key once per deployment:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+```
+
+`defineAuth` **fails fast** at boot if `mfa` is configured without a usable 32-byte key (a
+missing, empty, or wrong-length key is a config error, not a runtime surprise) — the same
+posture as `STACKBASE_ADMIN_KEY` for the admin/storage surfaces.
+
+The TOTP secret is encrypted at rest with **AES-256-GCM** under this key (not hashed — a
+one-way hash would make verification impossible, since the server has to *recompute* the
+expected code every time). Everything else the account already trusts — session tokens,
+email codes — is a one-way hash instead, because those are only ever compared, never
+recovered.
+
+### The enroll → confirm → gate → complete flow
+
+Enrollment is **two-phase**: `startMfaEnrollment` hands back a secret nobody can use to gate
+sign-in yet; only `confirmMfaEnrollment`, by proving a live code, actually turns MFA on. This
+guarantees a user can't lock themselves out mid-setup with a mistyped or unscanned secret.
+
+```ts
+import { StackbaseClient, webSocketTransport, createAuthClient, anyApi } from "@stackbase/client";
+
+const client = new StackbaseClient(webSocketTransport(url));
+const auth = createAuthClient(client);
+
+// 1. Enroll (while already signed in). The raw secret + otpauth:// URI are returned ONCE —
+//    render the URI as a QR code for the user to scan with their authenticator app.
+const enrollment = await client.mutation(anyApi.auth.startMfaEnrollment, {});
+// enrollment: { secret, otpauthUri, digits, period, algorithm }
+showQrCode(enrollment.otpauthUri);
+
+// 2. Confirm with the first live code the app displays — this is what activates MFA and
+//    mints the one-time recovery-code set (also returned ONCE — show it for the user to
+//    save/print/download; there is no way to view it again after this response).
+const { recoveryCodes } = await client.mutation(anyApi.auth.confirmMfaEnrollment, { code: userEnteredCode });
+showRecoveryCodesOnce(recoveryCodes);
+```
+
+From here on, every gated sign-in path (`signIn`, verified `signUp`, `verifyEmail`,
+`signInWithMagicLink`, `signInWithOtp`, `resetPassword`, and the OAuth/JWT mint paths) returns
+`{ mfaRequired: true, pendingToken, expiresAt }` instead of a session the moment the first
+factor succeeds — no token, no `MintResult`, nothing an app could mistake for being signed in:
+
+```ts
+const outcome = await client.mutation(anyApi.auth.signIn, { email, password });
+if ("mfaRequired" in outcome) {
+  // Prompt for a 6-digit authenticator code (or "use a recovery code instead").
+  const session = await client.mutation(anyApi.auth.completeMfaSignIn, {
+    pendingToken: outcome.pendingToken,
+    code: userEnteredCode,     // a live TOTP code OR one of the recovery codes — one input box
+  });
+  auth.setSession(session);   // same MintResult shape as every other sign-in path
+} else {
+  auth.setSession(outcome);
+}
+```
+
+`pendingToken` authorizes only a second-factor attempt for that one user, once, within
+`challengeTtlMs` (default 5 minutes) — it is never a session credential itself, and
+`ctx.auth.getUserId()` never resolves it. Five wrong `completeMfaSignIn` guesses (default,
+`mfaAttempts`) burn the pending window entirely; the client must restart from the first
+factor.
+
+### Recovery codes
+
+`confirmMfaEnrollment` mints 10 one-time recovery codes (`recoveryCodeCount`, default 10),
+shown to the user exactly once. Each is a backup second factor: `completeMfaSignIn` accepts
+either a live TOTP code or a recovery code through the same `code` field, and a recovery code
+is deleted (consumed) the moment it's used — it cannot be replayed. Track the remaining count
+so you can nudge the user to regenerate before they run out:
+
+```ts
+const status = await client.query(anyApi.auth.getMfaStatus, {});
+// { enrolled: boolean, confirmed: boolean, recoveryCodesRemaining: number }
+
+if (status.recoveryCodesRemaining < 3) {
+  const { recoveryCodes } = await client.mutation(anyApi.auth.regenerateRecoveryCodes, { code: userEnteredTotpCode });
+  showRecoveryCodesOnce(recoveryCodes); // replaces the WHOLE set — the old codes stop working
+}
+```
+
+`regenerateRecoveryCodes` requires a **live TOTP code specifically** — a recovery code
+cannot mint a fresh batch of recovery codes (it would be self-referential, and would also
+burn one of the codes being replaced).
+
+### Disabling MFA
+
+```ts
+await client.mutation(anyApi.auth.disableMfa, { code: userEnteredCode }); // TOTP or recovery code
+```
+
+`disableMfa` requires a **fresh, currently-valid** second factor — proof of possession, not
+just an active session — so a stolen-but-still-live access token can't silently strip a
+victim's second factor. It deletes the enrollment and every recovery code; the very next
+sign-in mints directly again, with no `mfaRequired` step.
+
+### The honest boundary: losing the authenticator
+
+There is no backdoor around a lost authenticator app **and** lost recovery codes together.
+This is deliberate — an unconditional bypass would defeat the point of a second factor. Two
+supported recoveries:
+
+- **A saved recovery code** — the intended path. Any one of the 10 codes shown at enrollment
+  completes `completeMfaSignIn` exactly like a TOTP code, and you should tell users, in
+  the UI, to save them somewhere durable (a password manager, printed and filed) the moment
+  they're shown.
+- **An admin/support-side reset** — your app decides this policy (e.g. a support flow that
+  verifies identity out-of-band, then calls `disableMfa` with elevated privileges, or simply
+  deletes the user's `mfaEnrollments`/`mfaRecoveryCodes` rows directly via the dashboard).
+  Stackbase does not ship an automatic "reset MFA" flow — that decision belongs to your
+  app's support/identity-verification process, not the auth component.
+
+There is also no self-service "remember this device for 30 days" skip: every gated sign-in
+challenges, every time, on every device.
+
+### Encryption-key rotation
+
+The `mfa` config also accepts a keyring for rotation:
+
+```ts
+defineAuth({
+  mfa: {
+    encryptionKeys: [
+      { id: "2", key: process.env.STACKBASE_AUTH_MFA_KEY_2! }, // NEW primary — encrypts going forward
+      { id: "1", key: process.env.STACKBASE_AUTH_MFA_KEY_1! }, // retired — still decrypts old secrets
+    ],
+  },
+});
+```
+
+The **first** entry is always the primary (used for all new encryptions); decryption
+dispatches on the `keyId` embedded in each stored secret's envelope, so existing enrollments
+keep working under a retired key until their owner re-enrolls. Only drop a retired key once
+no confirmed enrollment still references its `keyId` — losing every keyring entry that could
+decrypt a given secret permanently strands it (the account falls back to recovery codes, then
+re-enrollment; there is no server-side recovery of a lost key, by design — the same
+responsibility contract as `STACKBASE_ADMIN_KEY`).
+
+### Non-goals
+
+Not built, and not planned for this slice: WebAuthn/passkeys or SMS/phone-based two-factor,
+more than one confirmed TOTP enrollment per user, trusted-device 2FA skip, per-operation
+step-up re-prompts beyond disable/regenerate re-auth, admin-forced org-wide MFA policy, and
+automatic bulk key-rotation tooling. `algorithm`/`digits`/`period` are fixed at SHA1/6/30 (the
+combination the authenticator-app ecosystem broadly supports) — not app-configurable in v1.
+
 ## External identity
 
 `@stackbase/auth` also supports signing in via a **third-party OAuth provider** (Google, GitHub,

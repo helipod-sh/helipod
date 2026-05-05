@@ -83,4 +83,45 @@ export const authSchema = defineSchema({
     expiresAt: v.number(),
     createdAt: v.number(),
   }).index("byHandoffHash", ["handoffHash"]),
+  // A4 MFA/TOTP (spec "Schema", additive — no changes to any table above). One TOTP enrollment
+  // per user in v1. `secretEncrypted` is ALWAYS the AES-256-GCM envelope from `mfa/secret-crypto.ts`
+  // (`v1.<keyId>.<iv>.<ct>.<tag>`) — the raw secret is never persisted. `confirmedAt` absent means
+  // enrollment is in-progress (started but not yet proven with a live code) and does NOT gate
+  // sign-in; only a confirmed row does. `lastUsedStep` is the TOTP replay guard (decision 9).
+  mfaEnrollments: defineTable({
+    userId: v.id("users"),
+    secretEncrypted: v.string(),
+    algorithm: v.string(),
+    digits: v.number(),
+    period: v.number(),
+    confirmedAt: v.optional(v.number()),
+    lastUsedStep: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("byUserId", ["userId"]),
+  // A4 MFA pending-sign-in state (spec decision 6, the `oauthHandoff` shape) — holds NO session
+  // token, so it can never be mistaken for a live session by `authContext`. `challengeHash` =
+  // sha256base64url(pendingToken); `failedAttempts` drives the `mfaAttempts` lockout
+  // (commit-then-throw deletes the row at the limit, decision 10).
+  mfaChallenges: defineTable({
+    challengeHash: v.string(),
+    userId: v.id("users"),
+    deviceLabel: v.optional(v.string()),
+    failedAttempts: v.number(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("byChallengeHash", ["challengeHash"])
+    // Review fix: `finishSignIn` deletes a user's prior challenges via this range before inserting a
+    // fresh one (caps live challenges at one per user, sweeps stale/expired rows) — never a table scan.
+    .index("byUserId", ["userId"]),
+  // A4 recovery codes (spec decision 7) — one row per code, hashed at rest
+  // (`codeHash` = sha256base64url(rawCode)); consuming a code deletes its row.
+  // `byUserCode` gives an O(1) consume-before-validate lookup by (userId, codeHash).
+  mfaRecoveryCodes: defineTable({
+    userId: v.id("users"),
+    codeHash: v.string(),
+    createdAt: v.number(),
+  })
+    .index("byUserId", ["userId"])
+    .index("byUserCode", ["userId", "codeHash"]),
 });
