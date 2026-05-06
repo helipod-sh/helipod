@@ -1,7 +1,7 @@
 export * from "./crypto";
 export * from "./schema";
 export * from "./errors";
-export type { AuthConfig, AuthOptions, EmailConfig, EmailOptions, OAuthConfig, JwtConfig, OAuthOptions, JwtOptions, MfaConfig, MfaOptions } from "./config";
+export type { AuthConfig, AuthOptions, EmailConfig, EmailOptions, OAuthConfig, JwtConfig, OAuthOptions, JwtOptions, MfaConfig, MfaOptions, PasskeyConfig, PasskeyOptions } from "./config";
 export { resolveAuthConfig, resolveMfaConfig } from "./config";
 export type { OAuthProvider, ExternalIdentity } from "./oauth";
 export { googleProvider, githubProvider, discordProvider, facebookProvider, microsoftProvider, appleProvider, appleClientSecretMinter, oauthProvider } from "./oauth";

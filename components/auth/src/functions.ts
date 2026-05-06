@@ -5,6 +5,7 @@ import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
 import type { Flow } from "./email/templates";
 import { makeExternalModules } from "./external";
 import { makeMfaModules } from "./mfa/functions";
+import { makePasskeyModules } from "./passkeys";
 import type { NotificationsSendFacade } from "./notifications-facade";
 import {
   RefreshStaleError,
@@ -449,6 +450,7 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
   let modules: Record<string, RegisteredFunction> = base;
   if (config.email) modules = { ...modules, ...makeEmailModules(config) };            // email absent ⇒ A1's surface
   if (config.oauth || config.jwt) modules = { ...modules, ...makeExternalModules(config) }; // A3 absent ⇒ A1+A2's surface
+  if (config.passkeys) modules = { ...modules, ...makePasskeyModules(config) };       // passkeys absent ⇒ zero passkey functions
   if (config.mfa) modules = { ...modules, ...makeMfaModules(config) };                // mfa absent ⇒ gate is a pure passthrough
   return modules;
 }
