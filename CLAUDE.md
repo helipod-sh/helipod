@@ -70,7 +70,9 @@ TypeScript monorepo (Bun workspaces + Turborepo). Keep packages small and single
 bun install               # bootstrap workspace (Bun is the package manager + runtime)
 bun run build             # build all packages (Turborepo, topological)
 bun run dev               # watch-build packages
-bun run test              # run all tests (vitest, under Bun)
+bun run test              # FAST lane: parallel unit/integration suite (excludes heavy E2Es) — quick, reliable feedback
+bun run test:e2e          # SERIAL lane: heavy real-process E2Es (fleet, cli e2e, objectstore-substrate, bench smokes) — turbo --concurrency=1, ~5min
+bun run test:all          # CI command: fast lane THEN serial lane (bun run test && bun run test:e2e)
 bun run --filter <pkg> test    # single package's tests (e.g. --filter @stackbase/auth)
 bun run lint && bun run typecheck
 
@@ -85,6 +87,7 @@ When you add the first package, also add the script wiring so these top-level co
 ## Working conventions
 
 - **Two doc audiences, kept separate.** `docs/enduser/` is the **public, end-user product documentation** (how a developer *uses* Stackbase — this is the eventual `docs.stackbase.dev` site; derived from concave's docs, rebranded — canonical imports are `@stackbase/*` (NOT `convex/*`), per the "Product identity" locked decision above; Convex is referenced only in a "migrate from Convex" framing, and the stale `convex/*` import pages are being swept to `@stackbase/*`). Internal engineering docs (specs, architecture decisions) live separately under `docs/superpowers/specs/` (or `docs/internal/`). Do not mix them. Raw upstream reference is kept at `.reference/concave-docs-raw/`.
+- **Two test lanes — keep heavy E2Es out of the fast lane.** `bun run test` is the FAST parallel lane (unit + in-process integration); it must exit 0 **reliably** so it stays trustworthy for quick feedback. Genuinely heavy real-process E2Es (real multi-node fleet + embedded-Postgres + SIGSTOP failover, real containers, RSS-measuring child-spawning smokes, driver-timing cadence tests) flake under full-monorepo parallel CPU saturation, so they live in a dedicated SERIAL lane: `bun run test:e2e` (`turbo run test:e2e --concurrency=1` — fleet-e2e runs essentially alone). Heavy packages split their scripts: `test` excludes the heavy files (`--exclude` glob), `test:e2e` runs only them. Today's e2e lane = `@stackbase/fleet` `fleet-e2e`, all `packages/cli` `*-e2e.test.ts`, `objectstore-substrate` `*.e2e.test.ts`+gc/heartbeat-driver, and the child-spawning `benchmarks/runner` smokes. **`bun run test:all` (fast then serial) is the CI command** — every test still runs in exactly one lane, so no coverage is lost. When you add a real-process E2E, name it `*-e2e.test.ts` (or `*.e2e.test.ts`) and route it to the package's `test:e2e` — do NOT let it back into the default `test`. Prefer a deterministic fix (arm an explicit timer/trigger, no wall-clock) for light in-test timing races rather than a lane.
 - **Process:** this project uses the brainstorming → writing-plans → implementation flow. Each build-order slice gets a design spec in `docs/superpowers/specs/` before code. Don't skip to coding a slice without an approved spec.
 - **DX is the feature.** Error messages from the CLI/SDK, type inference quality, and `stackbase dev` startup speed are not polish — they are the reason to choose this over alternatives. Weigh changes against them.
 - **Never let the engine know which database it's on.** A leak of SQLite/Postgres specifics out of `packages/adapters/*` is a design bug.
