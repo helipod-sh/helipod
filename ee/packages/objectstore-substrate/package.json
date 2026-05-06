@@ -18,7 +18,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/*.e2e.test.ts' --exclude 'test/gc-driver.test.ts' --exclude 'test/heartbeat-driver.test.ts'",
+    "test:e2e": "vitest run test/*.e2e.test.ts test/gc-driver.test.ts test/heartbeat-driver.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
