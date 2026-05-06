@@ -91,6 +91,7 @@
         "oauth4webapi": "3.8.6",
       },
       "devDependencies": {
+        "@levischuck/tiny-cbor": "0.2.11",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
         "@stackbase/test": "workspace:*",
