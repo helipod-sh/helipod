@@ -24,7 +24,11 @@ class MinimalTransport {
   close(): void { for (const l of this.closers) l(); }
 }
 
-async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+// Default timeout is generous: the real-timer block below relies on SubtleCrypto digests that
+// resolve off a real threadpool, and under full-monorepo parallel `bun run test` load that
+// threadpool can be starved for well over a second. 10s of headroom keeps the assertion
+// deterministic (it still returns the instant `cond` is true) without flaking under CPU pressure.
+async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
