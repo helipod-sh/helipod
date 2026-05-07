@@ -407,6 +407,34 @@ describe("N1 Task 4: beginPasskeyAuthentication / finishPasskeyAuthentication", 
     await expect(finishAuth(r, assertion)).rejects.toThrow(/passkey authentication failed/);
   });
 
+  it("a client-supplied non-string userHandle (null) is treated as ABSENT — no raw Buffer.from(null) TypeError; a validly-signed assertion still mints for the credential's real owner", async () => {
+    const r = await makeRuntime();
+    const up = await signUp(r);
+    const { authenticator, credentialId } = await registerPasskey(r, up.token);
+    const options = await beginAuth(r);
+    const assertion = authenticator.createAssertion({
+      challenge: options.challenge,
+      rpID: RP_ID,
+      origin: ORIGIN,
+      credentialId,
+      counter: 1,
+      userId: up.userId,
+    });
+    // `response.userHandle` is client-supplied; the wire codec permits JSON `null` (only `undefined`
+    // is rejected), so the static `string | undefined` type is not a runtime guarantee. Before the
+    // fix, `null` passed the `!== undefined` gate and hit `Buffer.from(null, ...)` — a RAW TypeError
+    // that, thrown AFTER the credential lookup succeeded, distinguished "credential exists" by error
+    // TYPE from the generic reject an unknown credential gets. The fix guards on `typeof === "string"`,
+    // so a non-string userHandle is simply treated as absent (the non-discoverable path): the
+    // signature is still verified against the stored publicKey and the mint uses the credential's own
+    // `row.userId`, never the client's claim. Result: a genuine owner mints; an attacker who nulls
+    // userHandle against a credential they don't own can't produce a valid signature, so they hit the
+    // SAME generic reject at verify — no error-type oracle either way.
+    const nulled = { ...assertion, response: { ...assertion.response, userHandle: null } } as unknown as AuthenticationResponseJSON;
+    const mint = await finishAuth(r, nulled);
+    expect(mint.userId).toBe(up.userId); // minted for the credential's real owner, no crash
+  });
+
   it("MFA GATE: an MFA-enrolled user signing in with a passkey gets { mfaRequired } — the passkey is a FIRST factor, it does NOT bypass an explicitly-enrolled second factor", async () => {
     const r = await makeRuntimeWithMfa();
     const up = await signUp(r);

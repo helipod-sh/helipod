@@ -281,12 +281,19 @@ function finishPasskeyRegistration(config: AuthConfig) {
  * `users` row) or a known user with zero passkeys both return `[]` — byte-shape-identical to the
  * usernameless/discoverable begin, so `begin` is never usable as an existence oracle. `byEmail`/
  * `byUserId` index reads only — never a table scan.
+ *
+ * The second (`byUserId`) read is issued UNCONDITIONALLY — a known email would otherwise do two
+ * index reads to an unknown email's one, a timing side-channel distinguishing "account exists". On a
+ * `users` miss we read a sentinel userId no row can match (result `[]` either way), so both paths do
+ * equal work. This mirrors A2's uniform-cooldown sentinels closing the same enumeration class.
  */
 function _listCredentialsForEmail() {
   return query(async (ctx: QueryCtx, { email }: { email: string }): Promise<PasskeyDescriptor[]> => {
     const [user] = await ctx.db.query("users", "byEmail").eq("email", normalizeEmail(email)).collect();
-    if (!user) return [];
-    const rows = await ctx.db.query("passkeys", "byUserId").eq("userId", user._id as string).collect();
+    // A space-prefixed sentinel string is never a generated document id, so the read matches no row.
+    const userId = user ? (user._id as string) : " __no_such_user__";
+    const rows = await ctx.db.query("passkeys", "byUserId").eq("userId", userId).collect();
+    if (!user) return []; // rows is already empty (sentinel matches nothing); explicit for clarity
     return rows.map((r) =>
       compact({ credentialId: r.credentialId as string, transports: r.transports as string[] | undefined }),
     );
@@ -434,9 +441,21 @@ function finishPasskeyAuthentication(config: AuthConfig) {
     // usernameless assertion always carries it; a non-discoverable one MAY omit it — only check
     // when present, but a MISMATCH (an authenticator claiming a different owner than the credential
     // it signed with actually has) is a generic reject, never a partial trust.
+    //
+    // `response` is fully client-supplied and the wire codec permits JSON `null`/numbers (it rejects
+    // only `undefined`), so the static `string | undefined` type is NOT a runtime guarantee: guard on
+    // `typeof === "string"` (a non-string is simply "no userHandle", the discoverable path never sends
+    // one) and fold a malformed-base64url decode into the SAME generic reject — otherwise a raw
+    // `TypeError` here (reached only AFTER the credential lookup succeeds) would leak, by error TYPE,
+    // that the credentialId exists. `challengeOf` already applies this same defensive-catch convention.
     const userHandle = response.response.userHandle;
-    if (userHandle !== undefined) {
-      const claimedUserId = Buffer.from(userHandle, "base64url").toString("utf8");
+    if (typeof userHandle === "string") {
+      let claimedUserId: string;
+      try {
+        claimedUserId = Buffer.from(userHandle, "base64url").toString("utf8");
+      } catch {
+        throw new Error(AUTHENTICATION_FAILED);
+      }
       if (claimedUserId !== stored.userId) throw new Error(AUTHENTICATION_FAILED);
     }
 

@@ -59,3 +59,9 @@ attestation-format / MDS verification, and SMS-based second factor.
 9. **Per-request-stateless-JWT is a deliberate non-goal** — `signInWithIdToken` is an *exchange*
    (verify once, mint a real DB-backed session), not Convex's per-request-JWT-is-identity model; see
    the auth doc's "Third-party JWT / OIDC setup" section for the rationale.
+10. **Abandoned WebAuthn challenges are not reaped** — a passkey `begin*` ceremony that is never
+    finished (or expires unconsumed) leaves a single-use `webauthnChallenge` row behind. This is
+    bounded storage growth, not an auth or performance issue (a consumed challenge is deleted, and
+    lookups stay O(1) on the `byChallenge` index — an expired row can never be redeemed). A periodic
+    reaper keyed on `expiresAt` (the file-storage `storageReaper` driver pattern) is the reserved
+    remedy.
