@@ -11,7 +11,8 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from "@simplewebauthn/server";
-import { defineAuth, sha256base64url, type MintResult, type PasskeyOptions } from "../src";
+import { defineAuth, sha256base64url, type MintResult, type MfaRequired, type PasskeyOptions } from "../src";
+import { totpCodeAt, currentStep } from "../src/mfa/totp";
 import { createMockAuthenticator, type MockAuthenticator } from "./support/mock-authenticator";
 
 /**
@@ -25,6 +26,9 @@ const RP_ID = "localhost";
 const ORIGIN = "http://localhost:5173";
 const VALID: PasskeyOptions = { rpID: RP_ID, rpName: "Test App", origins: [ORIGIN] };
 const NOW = 1_700_000_000_000;
+// A 32-byte key encoded as base64 — same shape as mfa-gate.test.ts's key. Only used by the
+// MFA-interaction runtime below.
+const TEST_KEY = Buffer.alloc(32, 9).toString("base64");
 
 /** `EmbeddedRuntime.runAction`'s `args` is typed `JSONValue` — `@simplewebauthn/server`'s response
  *  types don't structurally satisfy that even though every field IS plain JSON. One cast site. */
@@ -59,6 +63,37 @@ async function makeRuntime(overrides?: Partial<PasskeyOptions>) {
     },
     now: () => NOW,
   });
+}
+
+/** Same harness as `makeRuntime`, plus a configured `mfa` gate — used to prove a passkey sign-in
+ *  still honors an enrolled second factor (routes through `finishSignIn`, not `mintSession`). */
+async function makeRuntimeWithMfa() {
+  const comp = defineAuth({ passkeys: VALID, mfa: { encryptionKey: TEST_KEY } });
+  const { catalog, moduleMap, componentNames, contextProviders } = composeComponents(
+    { schemaJson: defineSchema({}).export(), moduleMap: {} },
+    [comp],
+  );
+  return EmbeddedRuntime.create({
+    store: new SqliteDocStore(new NodeSqliteAdapter()),
+    catalog,
+    modules: moduleMap,
+    componentNames,
+    contextProviders,
+    systemModules: {
+      "_test:passkeysByUser": _readPasskeysByUser,
+      "_test:sessionsByUser": _readSessionsByUser,
+    },
+    now: () => NOW,
+  });
+}
+
+/** Enroll + confirm TOTP MFA for an authed user (by their session token), via the real
+ *  startMfaEnrollment/confirmMfaEnrollment mutations — mirrors mfa-gate.test.ts's `enrollMfa`. */
+async function enrollMfa(r: EmbeddedRuntime, token: string): Promise<void> {
+  const start = (
+    await r.run<{ secret: string }>("auth:startMfaEnrollment", {}, { identity: token })
+  ).value;
+  await r.run("auth:confirmMfaEnrollment", { code: totpCodeAt(start.secret, currentStep(NOW)) }, { identity: token });
 }
 
 async function passkeysByUser(r: EmbeddedRuntime, userId: string): Promise<Array<Record<string, unknown>>> {
@@ -370,6 +405,57 @@ describe("N1 Task 4: beginPasskeyAuthentication / finishPasskeyAuthentication", 
       userId: up.userId,
     });
     await expect(finishAuth(r, assertion)).rejects.toThrow(/passkey authentication failed/);
+  });
+
+  it("MFA GATE: an MFA-enrolled user signing in with a passkey gets { mfaRequired } — the passkey is a FIRST factor, it does NOT bypass an explicitly-enrolled second factor", async () => {
+    const r = await makeRuntimeWithMfa();
+    const up = await signUp(r);
+    const { authenticator, credentialId } = await registerPasskey(r, up.token);
+    await enrollMfa(r, up.token); // password + TOTP + a passkey all on one account
+
+    const options = await beginAuth(r);
+    const assertion = authenticator.createAssertion({
+      challenge: options.challenge,
+      rpID: RP_ID,
+      origin: ORIGIN,
+      credentialId,
+      counter: 1,
+      userId: up.userId,
+    });
+    // A fully valid passkey assertion — but because the user has a confirmed TOTP enrollment, the
+    // mint routes through finishSignIn and returns a pending challenge instead of a live session.
+    const result = (await finishAuth(r, assertion)) as unknown as MfaRequired;
+    expect(result.mfaRequired).toBe(true);
+    expect(typeof result.pendingToken).toBe("string");
+    expect("token" in result).toBe(false);
+
+    // No session was minted by the passkey step: the only session row is the original signUp one.
+    const sessions = await sessionsByUser(r, up.userId);
+    expect(sessions.every((s) => (s.tokenHash as string) !== undefined)).toBe(true);
+    // The counter DID advance (the assertion was genuine and the row updated in the same mutation
+    // that produced the challenge) — the gate is post-verification, not a pre-verification refusal.
+    const [row] = await passkeysByUser(r, up.userId);
+    expect(row!.counter).toBe(1);
+  });
+
+  it("MFA GATE (control): the SAME passkey flow WITHOUT an MFA enrollment mints a session directly", async () => {
+    const r = await makeRuntimeWithMfa(); // mfa configured, but this user never enrolls
+    const up = await signUp(r);
+    const { authenticator, credentialId } = await registerPasskey(r, up.token);
+
+    const options = await beginAuth(r);
+    const assertion = authenticator.createAssertion({
+      challenge: options.challenge,
+      rpID: RP_ID,
+      origin: ORIGIN,
+      credentialId,
+      counter: 1,
+      userId: up.userId,
+    });
+    const mint = await finishAuth(r, assertion);
+    expect(mint.userId).toBe(up.userId);
+    expect(typeof mint.token).toBe("string");
+    expect("mfaRequired" in mint).toBe(false);
   });
 
 });

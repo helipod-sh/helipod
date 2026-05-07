@@ -1,7 +1,7 @@
 import { action, mutation, query, commitThenThrow, type ActionCtx, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
 import type { AuthConfig } from "./config";
-import { currentSessionOf, mintSession, normalizeEmail, type FacadeCtx, type MintResult } from "./functions";
+import { currentSessionOf, finishSignIn, normalizeEmail, type FacadeCtx, type MintResult, type MfaRequired } from "./functions";
 import { buildRegistrationOptions, verifyRegistration, buildAuthenticationOptions, verifyAuthentication, challengeOf, type StoredCredential } from "./webauthn";
 import { PasskeyLimitReachedError, PasskeyAlreadyRegisteredError } from "./errors";
 
@@ -360,23 +360,26 @@ function beginPasskeyAuthentication(config: AuthConfig) {
  * true of essentially all synced/multi-device passkeys) → accept; else `newCounter > stored` →
  * accept; else — a regression or repeat of a nonzero value, a possible cloned authenticator —
  * **generic reject, NO write, NO mint** (no auto-revoke/DoS blast radius, per decision 6). On
- * accept: advance `counter`, stamp `lastUsedAt`, THEN `mintSession` — the A1 chokepoint (bypasses
- * `requireEmailVerification` by construction; passkey auth never consults that gate, per decision 7).
+ * accept: advance `counter`, stamp `lastUsedAt`, THEN finish sign-in through `finishSignIn` — passkey
+ * auth still bypasses `requireEmailVerification` by construction (possession of the registered
+ * credential IS proof), but it is a FIRST factor like every other sign-in, so it goes through the
+ * same MFA gate: `finishSignIn` mints directly for a non-MFA user, or returns `{ mfaRequired }` when
+ * the user has a confirmed TOTP enrollment.
  *
- * Per the plan (Task 4 §4.1) this calls `mintSession` directly, NOT `finishSignIn` — passkey
- * authentication does not gate on `@stackbase/auth`'s MFA (`mfa` config) step-up even when the
- * signed-in user has a confirmed TOTP enrollment. The design spec (decision 7) predates/doesn't
- * address that interaction; passkey-as-MFA-interaction is explicitly out of scope for this slice
- * (Non-goal #1 — "passkey as a SECOND factor" is deferred to N2) and the plan's own Task 4 code
- * sketch names `mintSession` verbatim. Flagged for the reviewer: this means a user who has enrolled
- * both a password+TOTP AND a passkey can bypass the TOTP step-up entirely by signing in with the
- * passkey — a real interaction worth resolving explicitly in N2, not a silent oversight here.
+ * SECURITY (corrected vs the parallel-designed spec's decision 7): passkeys and MFA were designed
+ * concurrently, so decision 7's "mint unconditionally like every other flow" predates MFA's
+ * `finishSignIn` gate (built + merged after). Minting DIRECTLY here would let a user enrolled in
+ * both password+TOTP AND a passkey skip TOTP entirely via a passkey sign-in — silently defeating
+ * their explicitly-configured second factor. Routing through `finishSignIn` (the same interposition
+ * every other first-factor path uses) closes that: an enrolled second factor is never bypassed. A
+ * future "passkey-with-user-verification satisfies MFA" refinement (skip TOTP when the assertion's
+ * UV flag is set) is a deliberate follow-on, not this conservative default.
  */
 function _finishPasskeyAuth(config: AuthConfig) {
   return mutation(async (
     ctx: MutationCtx,
     { credentialId, newCounter, deviceLabel }: { credentialId: string; newCounter: number; deviceLabel?: string },
-  ): Promise<MintResult> => {
+  ): Promise<MintResult | MfaRequired> => {
     const [row] = await ctx.db.query("passkeys", "byCredentialId").eq("credentialId", credentialId).collect();
     if (!row) throw new Error(AUTHENTICATION_FAILED); // credential vanished between lookup and mint — fail closed
 
@@ -390,7 +393,7 @@ function _finishPasskeyAuth(config: AuthConfig) {
     }
 
     await ctx.db.replace(row._id as string, { ...row, counter: newCounter, lastUsedAt: ctx.now() });
-    return mintSession(ctx, config, row.userId as string, deviceLabel);
+    return finishSignIn(ctx, config, row.userId as string, deviceLabel);
   });
 }
 
@@ -414,7 +417,7 @@ function finishPasskeyAuthentication(config: AuthConfig) {
   return action(async (
     ctx,
     { response, deviceLabel }: { response: AuthenticationResponseJSON; deviceLabel?: string },
-  ): Promise<MintResult> => {
+  ): Promise<MintResult | MfaRequired> => {
     const passkeyConfig = config.passkeys!;
     const actionCtx = ctx as ActionCtx;
 
@@ -462,7 +465,7 @@ function finishPasskeyAuthentication(config: AuthConfig) {
     // (decision 6) INDEPENDENTLY of `stored.counter` above — this action's own verify call already
     // ran the library's own counter check against the (possibly slightly stale) value fetched by
     // `_getPasskeyByCredentialId`, but the mint transaction is the source of truth under concurrency.
-    return actionCtx.runMutation<MintResult>(
+    return actionCtx.runMutation<MintResult | MfaRequired>(
       "auth:_finishPasskeyAuth",
       compact({ credentialId: stored.credentialId, newCounter: verified.newCounter, deviceLabel }),
     );
