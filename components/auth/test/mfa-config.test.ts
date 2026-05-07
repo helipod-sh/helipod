@@ -175,11 +175,15 @@ describe("MFA schema additivity", () => {
     }).index("byHandoffHash", ["handoffHash"]),
   });
 
-  it("adds exactly three new tables (mfaEnrollments, mfaChallenges, mfaRecoveryCodes)", () => {
+  it("adds the three MFA tables (mfaEnrollments, mfaChallenges, mfaRecoveryCodes)", () => {
+    // Subset check, not exact-set equality: a LATER additive slice (passkeys' `passkeys` +
+    // `webauthnChallenge`, N1) also adds tables on top of this pre-MFA baseline, which is fine —
+    // this test's own invariant is just "MFA's three tables are present", not "MFA is the only
+    // schema slice that has ever landed since this baseline".
     const before = new Set(Object.keys(preMfaSchema.export().tables));
     const after = new Set(Object.keys(authSchema.export().tables));
     const added = [...after].filter((name) => !before.has(name));
-    expect(added.sort()).toEqual(["mfaChallenges", "mfaEnrollments", "mfaRecoveryCodes"]);
+    for (const name of ["mfaChallenges", "mfaEnrollments", "mfaRecoveryCodes"]) expect(added).toContain(name);
   });
 
   it("leaves every pre-existing table's document shape byte-identical (the additive-gate invariant)", () => {

@@ -11,9 +11,16 @@ identity**: OAuth sign-in (Google + GitHub built in, any OIDC/OAuth2 provider vi
 seam) through engine-mounted, cookie-free callback routes with fragment handoff, and third-party
 JWT/OIDC verification (Clerk, Auth0, any JWKS-publishing issuer) via `signInWithIdToken` — both
 opt-in (`defineAuth({ oauth: {...} })` / `defineAuth({ jwt: {...} })`) and both resolving/linking
-through one shared, safety-first account-linking core. `ctx.auth.getUserId()` resolves identity
-inside the transaction, so session revocation is reactive — including the revocation a verified-email
-external-identity link triggers. Runtime-agnostic (`node:crypto`) — Node.js and Bun.
+through one shared, safety-first account-linking core. It also ships **TOTP two-factor
+authentication** (RFC 6238, opt-in via `defineAuth({ mfa: {...} })` — AES-256-GCM-encrypted secret,
+one-time recovery codes, gating every first-factor path behind `finishSignIn` without ever bypassing
+the mint chokepoint) and **passkeys / WebAuthn** (opt-in via `defineAuth({ passkeys: {...} })` —
+register-while-authed + usernameless or email-scoped sign-in, atomic signature-counter clone
+detection, anti-enumeration, reactive device management, crypto confined to actions behind the sole
+`@simplewebauthn/server` seam). `ctx.auth.getUserId()` resolves identity inside the transaction, so
+session revocation is reactive — including the revocation a verified-email external-identity link
+triggers, and a passkey sign-in honors an enrolled second factor like every other first factor.
+Runtime-agnostic (`node:crypto`) — Node.js and Bun.
 
 Configure via `defineAuth(options?)`; `export const auth = defineAuth()` uses the defaults.
 Session/token details, the client `createAuthClient`, and the full external-identity setup +
@@ -21,7 +28,9 @@ security model are documented in `docs/enduser/build/auth.md`.
 
 Reference implementations consulted: convex-auth (Apache-2.0) and better-auth (MIT) — adapted with
 attribution, never copied. The arc (A1 session core, A2 email flows, A3 external identity) is
-complete.
+complete, extended with TOTP two-factor authentication and passkeys/WebAuthn. Reserved follow-ons:
+a passkey **satisfying** an MFA step-up (today a passkey is strictly a first factor), WebAuthn
+attestation-format / MDS verification, and SMS-based second factor.
 
 ## Known limitations
 
@@ -50,3 +59,9 @@ complete.
 9. **Per-request-stateless-JWT is a deliberate non-goal** — `signInWithIdToken` is an *exchange*
    (verify once, mint a real DB-backed session), not Convex's per-request-JWT-is-identity model; see
    the auth doc's "Third-party JWT / OIDC setup" section for the rationale.
+10. **Abandoned WebAuthn challenges are not reaped** — a passkey `begin*` ceremony that is never
+    finished (or expires unconsumed) leaves a single-use `webauthnChallenge` row behind. This is
+    bounded storage growth, not an auth or performance issue (a consumed challenge is deleted, and
+    lookups stay O(1) on the `byChallenge` index — an expired row can never be redeemed). A periodic
+    reaper keyed on `expiresAt` (the file-storage `storageReaper` driver pattern) is the reserved
+    remedy.

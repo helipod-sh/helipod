@@ -90,6 +90,30 @@ export interface MfaOptions {
   verifyWindowMs?: number;
 }
 
+/** Resolved passkey/WebAuthn config. Present iff `defineAuth({ passkeys })` was passed (spec
+ *  "Config surface", decision 12) — absent ⇒ `AuthConfig.passkeys` is `undefined` and no passkey
+ *  module is registered (byte-identical to a pre-passkeys deployment). */
+export interface PasskeyConfig {
+  rpID: string;
+  rpName: string;
+  origins: string[];
+  challengeTtlMs: number;
+  maxCredentialsPerUser: number;
+  userVerification: "required" | "preferred" | "discouraged";
+  residentKey: "required" | "preferred" | "discouraged";
+}
+/** The user-facing `passkeys` block: `rpID`/`rpName`/`origins` required (the WebAuthn analogue of
+ *  `oauth.redirectAllowlist`), everything else optional-with-defaults. */
+export interface PasskeyOptions {
+  rpID: string;
+  rpName: string;
+  origins: string[];
+  challengeTtlMs?: number;
+  maxCredentialsPerUser?: number;
+  userVerification?: "required" | "preferred" | "discouraged";
+  residentKey?: "required" | "preferred" | "discouraged";
+}
+
 /** The user-facing `email` block: `provider` + `from` required, everything else optional-with-defaults. */
 export interface EmailOptions {
   provider: EmailProvider;
@@ -136,13 +160,17 @@ export interface AuthConfig {
   /** Present iff a project configured `mfa` with a usable key — absent ⇒ MFA is fully unregistered
    *  and every gated first-factor path mints directly (byte-identical to a pre-MFA deployment). */
   mfa?: MfaConfig;
+  /** Present iff a project configured `passkeys` — absent ⇒ passkey/WebAuthn functions are fully
+   *  unregistered (byte-identical to a pre-passkeys deployment). */
+  passkeys?: PasskeyConfig;
 }
 
-export type AuthOptions = Partial<Omit<AuthConfig, "email" | "oauth" | "jwt" | "mfa">> & {
+export type AuthOptions = Partial<Omit<AuthConfig, "email" | "oauth" | "jwt" | "mfa" | "passkeys">> & {
   email?: EmailOptions;
   oauth?: OAuthOptions;
   jwt?: JwtOptions;
   mfa?: MfaOptions;
+  passkeys?: PasskeyOptions;
 };
 
 const DEFAULTS: Omit<AuthConfig, "email"> = {
@@ -268,12 +296,42 @@ export function resolveMfaConfig(opts: MfaOptions): MfaConfig {
   };
 }
 
+const PASSKEY_DEFAULTS = {
+  challengeTtlMs: 5 * 60 * 1000,
+  maxCredentialsPerUser: 20,
+  userVerification: "preferred" as const,
+  residentKey: "preferred" as const,
+};
+
+/** Requires a non-empty `rpID`/`rpName`/`origins` (the WebAuthn analogue of `resolveOAuthConfig`'s
+ *  `redirectAllowlist` guard), validates every origin with the SAME `assertUrlIsSecure` predicate
+ *  A3 reuses (loopback `http://` allowed for dev; non-loopback must be `https://` — a plaintext
+ *  non-loopback origin is a downgrade an attacker could exploit), then applies defaults. */
+export function resolvePasskeyConfig(opts: PasskeyOptions): PasskeyConfig {
+  if (!opts.rpID) throw new Error("defineAuth({ passkeys }) requires a non-empty rpID");
+  if (!opts.rpName) throw new Error("defineAuth({ passkeys }) requires a non-empty rpName");
+  if (!opts.origins || opts.origins.length === 0) {
+    throw new Error("defineAuth({ passkeys }) requires a non-empty origins array");
+  }
+  opts.origins.forEach((origin, i) => assertUrlIsSecure(`passkeys origins[${i}]`, origin));
+  return {
+    rpID: opts.rpID,
+    rpName: opts.rpName,
+    origins: opts.origins,
+    challengeTtlMs: opts.challengeTtlMs ?? PASSKEY_DEFAULTS.challengeTtlMs,
+    maxCredentialsPerUser: opts.maxCredentialsPerUser ?? PASSKEY_DEFAULTS.maxCredentialsPerUser,
+    userVerification: opts.userVerification ?? PASSKEY_DEFAULTS.userVerification,
+    residentKey: opts.residentKey ?? PASSKEY_DEFAULTS.residentKey,
+  };
+}
+
 export function resolveAuthConfig(opts?: AuthOptions): AuthConfig {
-  const { email, oauth, jwt, mfa, ...rest } = opts ?? {};
+  const { email, oauth, jwt, mfa, passkeys, ...rest } = opts ?? {};
   const base: AuthConfig = { ...DEFAULTS, ...rest };
   if (email) base.email = resolveEmailConfig(email);
   if (oauth) base.oauth = resolveOAuthConfig(oauth);
   if (jwt) base.jwt = resolveJwtConfig(jwt);
   if (mfa) base.mfa = resolveMfaConfig(mfa);
+  if (passkeys) base.passkeys = resolvePasskeyConfig(passkeys);
   return base;
 }

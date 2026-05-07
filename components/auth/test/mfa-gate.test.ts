@@ -551,6 +551,7 @@ describe("A4 Task 5 — the gate invariant (static source guard)", () => {
   const functionsSrc = readFileSync(join(__dirname, "../src/functions.ts"), "utf8");
   const externalSrc = readFileSync(join(__dirname, "../src/external.ts"), "utf8");
   const mfaFunctionsSrc = readFileSync(join(__dirname, "../src/mfa/functions.ts"), "utf8");
+  const passkeysSrc = readFileSync(join(__dirname, "../src/passkeys.ts"), "utf8");
 
   // Every `mintSession(` occurrence that is NOT the function's own declaration (`function mintSession(`).
   function directCallCount(src: string): number {
@@ -572,5 +573,10 @@ describe("A4 Task 5 — the gate invariant (static source guard)", () => {
 
   it("mfa/functions.ts: completeMfaSignIn is the ONLY new direct mintSession( caller in the whole component", () => {
     expect(directCallCount(mfaFunctionsSrc)).toBe(1);
+  });
+
+  it("passkeys.ts: the passkey authentication mint is NOT a direct mintSession( — a passkey is a first factor and routes through finishSignIn so an enrolled second factor is never bypassed", () => {
+    expect(directCallCount(passkeysSrc)).toBe(0);
+    expect(finishSignInCallCount(passkeysSrc)).toBe(1); // _finishPasskeyAuth's single mint site
   });
 });

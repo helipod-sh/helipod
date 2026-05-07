@@ -124,4 +124,30 @@ export const authSchema = defineSchema({
   })
     .index("byUserId", ["userId"])
     .index("byUserCode", ["userId", "codeHash"]),
+  // N1 (this spec). A registered WebAuthn credential. publicKey/counter are the verification material;
+  // everything else is management metadata. base64url strings (rows are JSON — never raw bytes).
+  passkeys: defineTable({
+    userId: v.id("users"),
+    credentialId: v.string(),            // base64url of the raw credential id (== assertion `response.id`)
+    publicKey: v.string(),               // base64url of the COSE public key bytes (@simplewebauthn Uint8Array)
+    counter: v.number(),                 // signature counter; clone detection (decision 6)
+    transports: v.optional(v.array(v.string())),  // ["internal","hybrid","usb","nfc","ble"] — begin hints
+    deviceName: v.optional(v.string()),  // user-supplied label ("iPhone", "YubiKey 5")
+    backedUp: v.optional(v.boolean()),   // credentialBackedUp (synced/multi-device passkey flag) — display only
+    createdAt: v.number(),
+    lastUsedAt: v.optional(v.number()),
+  })
+    .index("byCredentialId", ["credentialId"])  // finish-auth lookup by response.id
+    .index("byUserId", ["userId"]),             // exclude/allow lists, per-user limit, device mgmt (never a scan)
+
+  // N1. Single-use WebAuthn ceremony challenge, TTL ~5min, consume-before-validate. `challenge` is stored
+  // RECOVERABLE (the documented exception, same as oauthState.codeVerifier): verify* needs it back as
+  // `expectedChallenge`. Not a bearer credential — useless without the matching authenticator signature.
+  webauthnChallenge: defineTable({
+    challenge: v.string(),               // base64url; the server-issued random challenge
+    kind: v.string(),                    // "register" | "authenticate"
+    userId: v.optional(v.id("users")),   // register: the authed caller; authenticate(email-scoped): the target
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index("byChallenge", ["challenge"]),
 });

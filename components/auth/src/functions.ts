@@ -5,6 +5,7 @@ import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";
 import type { Flow } from "./email/templates";
 import { makeExternalModules } from "./external";
 import { makeMfaModules } from "./mfa/functions";
+import { makePasskeyModules } from "./passkeys";
 import type { NotificationsSendFacade } from "./notifications-facade";
 import {
   RefreshStaleError,
@@ -174,13 +175,17 @@ export interface SessionSummary {
 
 /** The `ctx.auth` facade as visible from inside auth's own modules (context providers are attached
  *  to every function's ctx — including a component's own). Absent when no providers were composed
- *  (bare EmbeddedRuntime unit setups) → treated as unauthenticated. */
-type FacadeCtx = { db: MutationCtx["db"] | QueryCtx["db"]; auth?: { getSessionId(): Promise<string | null> } };
+ *  (bare EmbeddedRuntime unit setups) → treated as unauthenticated. Exported (N1) so `passkeys.ts`'s
+ *  internal mutations/queries can resolve the ambient caller the SAME way every other module does,
+ *  rather than a second divergent resolve helper — mirrors the existing `external.ts` <-> `functions.ts`
+ *  circular-import shape (a function-declaration cycle resolved fine by hoisting; only called inside
+ *  handler bodies, never at module-eval time). */
+export type FacadeCtx = { db: MutationCtx["db"] | QueryCtx["db"]; auth?: { getSessionId(): Promise<string | null> } };
 
 /** The ambient caller's own session row, or null when unauthenticated/expired. Resolves the id via
  *  the `ctx.auth` facade (the only channel the ambient identity reaches user code), then reads the
  *  row through the module's own db so the read lands in the calling function's read-set. */
-async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown> | null> {
+export async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown> | null> {
   const sessionId = await ctx.auth?.getSessionId();
   if (!sessionId) return null;
   return ((await ctx.db.get(sessionId)) as Record<string, unknown> | null) ?? null;
@@ -449,6 +454,7 @@ export function makeAuthModules(config: AuthConfig): Record<string, RegisteredFu
   let modules: Record<string, RegisteredFunction> = base;
   if (config.email) modules = { ...modules, ...makeEmailModules(config) };            // email absent ⇒ A1's surface
   if (config.oauth || config.jwt) modules = { ...modules, ...makeExternalModules(config) }; // A3 absent ⇒ A1+A2's surface
+  if (config.passkeys) modules = { ...modules, ...makePasskeyModules(config) };       // passkeys absent ⇒ zero passkey functions
   if (config.mfa) modules = { ...modules, ...makeMfaModules(config) };                // mfa absent ⇒ gate is a pure passthrough
   return modules;
 }

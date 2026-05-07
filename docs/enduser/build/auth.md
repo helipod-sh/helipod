@@ -445,11 +445,150 @@ responsibility contract as `STACKBASE_ADMIN_KEY`).
 
 ### Non-goals
 
-Not built, and not planned for this slice: WebAuthn/passkeys or SMS/phone-based two-factor,
-more than one confirmed TOTP enrollment per user, trusted-device 2FA skip, per-operation
-step-up re-prompts beyond disable/regenerate re-auth, admin-forced org-wide MFA policy, and
-automatic bulk key-rotation tooling. `algorithm`/`digits`/`period` are fixed at SHA1/6/30 (the
+Not built, and not planned for this slice: SMS/phone-based two-factor, more than one confirmed
+TOTP enrollment per user, trusted-device 2FA skip, per-operation step-up re-prompts beyond
+disable/regenerate re-auth, admin-forced org-wide MFA policy, and automatic bulk key-rotation
+tooling. (Passkeys have since shipped as a separate first-factor sign-in method — see
+[Passkeys](#passkeys-webauthn) below; using a passkey to *satisfy* an MFA step-up is a reserved
+follow-on noted there.) `algorithm`/`digits`/`period` are fixed at SHA1/6/30 (the
 combination the authenticator-app ecosystem broadly supports) — not app-configurable in v1.
+
+## Passkeys (WebAuthn)
+
+`@stackbase/auth` supports **passkeys** — WebAuthn credentials (Face ID / Touch ID / Windows
+Hello / a hardware security key / a synced platform passkey) as a phishing-resistant,
+passwordless sign-in. A passkey is a first factor like a password or a social login: it flows
+through the same session-minting chokepoint, so revocation, device management, and reactive
+identity all work identically no matter how the user signed in. Passkeys are **opt-in** — they
+register only once you pass a `passkeys` block to `defineAuth`, and a deployment without one is
+byte-identical to today.
+
+### Setup
+
+```ts
+import { defineAuth } from "@stackbase/auth";
+
+export const auth = defineAuth({
+  passkeys: {
+    rpID: "example.com",          // your Relying Party ID — the registrable domain, no scheme/port
+    rpName: "My App",             // human-readable label shown in the OS passkey prompt
+    origins: ["https://example.com"], // every web origin the ceremony may run from (exact-match)
+  },
+});
+```
+
+`rpID`, `rpName`, and `origins` are **required** (there is no safe default for a security
+domain). `defineAuth` **fails fast** at boot if any is missing, and validates every origin with
+the same rule the OAuth redirect allowlist uses: a loopback `http://localhost` origin is allowed
+for local dev, but any non-loopback origin **must** be `https://` (a plaintext production origin
+is a downgrade an attacker could exploit). Optional knobs and their defaults:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `userVerification` | `"preferred"` | Whether the authenticator must verify the user (biometric/PIN). `"required"` forces it. |
+| `residentKey` | `"preferred"` | Whether to create a **discoverable** credential (enables usernameless sign-in). |
+| `maxCredentialsPerUser` | `20` | Per-user credential cap; registering past it is a typed `PasskeyLimitReached`. |
+| `challengeTtlMs` | `300000` (5 min) | How long an issued registration/authentication challenge stays valid. |
+
+### The two ceremonies
+
+WebAuthn is a two-message handshake on each side. The server issues a one-time **challenge**
+(the `begin*` action), the authenticator signs it, and the server verifies the signature (the
+`finish*` action). The browser half is `@simplewebauthn/browser`; the crypto lives entirely
+server-side (in an action — never in a query/mutation).
+
+```bash
+npm install @simplewebauthn/browser
+```
+
+**Register a passkey** (the user must already be signed in — including
+[anonymously](#anonymous-auth), which is the passwordless-bootstrap path: sign in anonymously,
+register a passkey, and the account is now reachable from any device with no password ever set):
+
+```ts
+import { startRegistration } from "@simplewebauthn/browser";
+import { StackbaseClient, webSocketTransport, createAuthClient, anyApi } from "@stackbase/client";
+
+const client = new StackbaseClient(webSocketTransport(url));
+const authClient = createAuthClient(client);
+
+async function registerPasskey() {
+  // 1. Server issues creation options (with a fresh challenge) for the signed-in caller.
+  const options = await client.action(anyApi.auth.beginPasskeyRegistration, {});
+  // 2. The browser/OS prompts the user and produces a signed attestation.
+  const response = await startRegistration({ optionsJSON: options });
+  // 3. Server verifies it and stores the credential.
+  await client.action(anyApi.auth.finishPasskeyRegistration, { response });
+}
+```
+
+**Sign in with a passkey.** Two shapes share the same finish call:
+
+```ts
+import { startAuthentication } from "@simplewebauthn/browser";
+
+async function signInWithPasskey(email?: string) {
+  // Usernameless (omit email) uses a DISCOVERABLE credential — the OS shows the user their
+  // saved passkeys and no account hint is sent. Passing an email scopes the allowed credentials
+  // to that account (for a non-discoverable key); an unknown email returns the SAME empty shape
+  // as a known one with no passkeys, so it is never an account-existence oracle.
+  const options = await client.action(anyApi.auth.beginPasskeyAuthentication, email ? { email } : {});
+  const response = await startAuthentication({ optionsJSON: options });
+  const outcome = await client.action(anyApi.auth.finishPasskeyAuthentication, { response });
+
+  if ("mfaRequired" in outcome) {
+    // The user has TOTP enrolled — a passkey is a first factor, so it does NOT bypass an
+    // explicitly-configured second factor. Complete exactly like any other gated sign-in.
+    const session = await client.mutation(anyApi.auth.completeMfaSignIn, {
+      pendingToken: outcome.pendingToken,
+      code: userEnteredCode,
+    });
+    authClient.setSession(session);
+  } else {
+    authClient.setSession(outcome); // a normal MintResult
+  }
+}
+```
+
+### Device management
+
+A user's passkeys are managed exactly like their [sessions](#device-management):
+
+```ts
+const passkeys = await client.query(anyApi.auth.listPasskeys, {});
+// [{ passkeyId, deviceName, transports, backedUp, createdAt, lastUsedAt }, ...]
+//   — display metadata only; the public key and signature counter never leave the server.
+
+await client.mutation(anyApi.auth.renamePasskey, { passkeyId, deviceName: "My iPhone" });
+await client.mutation(anyApi.auth.revokePasskey, { passkeyId });
+```
+
+`listPasskeys` is reactive — revoking a credential on one device updates a live list on another.
+Rename and revoke are ownership-checked: another user's `passkeyId` is a generic "passkey not
+found", never a cross-user leak. A revoked passkey is un-authenticatable immediately.
+
+### Security notes
+
+- **Challenge / origin / RP-ID binding.** Every ceremony is bound to a fresh single-use
+  challenge (consumed before validation, so a replay finds nothing) and verified against the
+  configured `origins` and `rpID` — an assertion captured on a phishing origin does not verify.
+- **Clone detection.** Each credential carries a signature counter; an authentication that
+  presents a counter which regressed (or repeated a non-zero value) is rejected atomically —
+  no session minted, no state changed — as a possible cloned authenticator.
+- **Anti-enumeration.** Every authentication failure — unknown credential, wrong owner,
+  bad signature, stale challenge — collapses to one generic message, and a `begin` for an
+  unknown email is byte-shaped like a known one, so passkey sign-in is never an account oracle.
+- **No key-material leak.** `listPasskeys` returns display metadata only; the COSE public key
+  and counter are never sent to a client.
+
+### Non-goals (reserved follow-ons)
+
+Passkey **as a second factor** — i.e. a user-verified passkey assertion *satisfying* an MFA
+step-up so an MFA-enrolled user can skip TOTP — is a deliberate future refinement, not built
+here: today a passkey is strictly a first factor and honors any enrolled second factor. Also not
+built: attestation-format / MDS verification (registration uses `none` attestation), a dedicated
+email-capturing passkey **sign-up** (register runs against an existing authed account), and
+conditional-UI autofill.
 
 ## External identity
 

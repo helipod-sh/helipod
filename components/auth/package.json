@@ -13,6 +13,7 @@
     "@stackbase/errors": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/values": "workspace:*",
+    "@simplewebauthn/server": "13.3.2",
     "hash-wasm": "^4.12.0",
     "jose": "6.2.3",
     "oauth4webapi": "3.8.6"
@@ -21,6 +22,7 @@
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
     "@stackbase/test": "workspace:*",
+    "@levischuck/tiny-cbor": "0.2.11",
     "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:"
   }
 }
