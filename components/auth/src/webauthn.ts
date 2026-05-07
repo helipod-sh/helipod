@@ -66,6 +66,20 @@ function userIdBytes(userId: string): Uint8Array<ArrayBuffer> {
  * `existing` is the caller's already-registered credentials (`byUserId` index read) so the
  * authenticator can refuse to re-register one of them (`excludeCredentials`).
  */
+/**
+ * Deep-strip `undefined`-valued keys so an options object is safe to return across the sync
+ * connection. `@simplewebauthn/server` leaves optional keys undefined (`timeout`, `extensions`, a
+ * credential's `transports`, `authenticatorSelection` sub-fields, ...), and the client<->server value
+ * codec REJECTS `undefined` keys ("Cannot encode value of type undefined") — a failure the direct
+ * `runAction` component tests can't see, but a real WebSocket client hits on the first `begin*` call
+ * (caught only by the E2E). The options are pure JSON by contract (the `...JSON` return types), so a
+ * `JSON.parse(JSON.stringify(...))` round-trip is a lossless deep compaction (undefined object keys
+ * dropped; no `undefined` array elements exist here to become `null`).
+ */
+function codecSafe<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 export async function buildRegistrationOptions(
   config: PasskeyConfig,
   opts: {
@@ -74,7 +88,7 @@ export async function buildRegistrationOptions(
     existing: Array<{ credentialId: string; transports?: string[] }>;
   },
 ): Promise<PublicKeyCredentialCreationOptionsJSON> {
-  return generateRegistrationOptions({
+  return codecSafe(await generateRegistrationOptions({
     rpName: config.rpName,
     rpID: config.rpID,
     userName: opts.userName,
@@ -88,7 +102,7 @@ export async function buildRegistrationOptions(
       residentKey: config.residentKey,
       userVerification: config.userVerification,
     },
-  });
+  }));
 }
 
 /** Normalized `verifyRegistrationResponse` result — the shape `_savePasskey` (T3) persists
@@ -147,14 +161,14 @@ export async function buildAuthenticationOptions(
   config: PasskeyConfig,
   opts: { allowCredentials: Array<{ credentialId: string; transports?: string[] }> },
 ): Promise<PublicKeyCredentialRequestOptionsJSON> {
-  return generateAuthenticationOptions({
+  return codecSafe(await generateAuthenticationOptions({
     rpID: config.rpID,
     allowCredentials: opts.allowCredentials.map((c) => ({
       id: c.credentialId,
       transports: c.transports as AuthenticatorTransportFuture[] | undefined,
     })),
     userVerification: config.userVerification,
-  });
+  }));
 }
 
 /** Result of verifying an authentication assertion. `newCounter` is the authenticator-reported

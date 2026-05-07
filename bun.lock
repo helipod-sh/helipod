@@ -466,6 +466,8 @@
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
+        "@levischuck/tiny-cbor": "0.2.11",
+        "@simplewebauthn/server": "13.3.2",
         "@stackbase/auth": "workspace:*",
         "@stackbase/client": "workspace:*",
         "@stackbase/fleet": "workspace:*",
