@@ -144,7 +144,13 @@ export function createMockAuthenticator(): MockAuthenticator {
           clientDataJSON: b64u(clientDataJSON),
           authenticatorData: b64u(authData),
           signature: b64u(signature),
-          userHandle: userId !== undefined ? b64u(Buffer.from(userId, "utf8")) : undefined,
+          // Omit the key entirely when no userId is given (a real non-discoverable-credential
+          // assertion simply has no `userHandle` field — never a literal `undefined`) rather than
+          // setting it to `undefined`: this response crosses the wire as `JSONValue` in T4's
+          // component-level tests (`runAction`'s `jsonToConvex`), which — like every other
+          // JSON-boundary codec in this codebase (the pervasive `compact()` convention) — rejects a
+          // present key whose value is `undefined`.
+          ...(userId !== undefined ? { userHandle: b64u(Buffer.from(userId, "utf8")) } : {}),
         },
         clientExtensionResults: {},
         type: "public-key",

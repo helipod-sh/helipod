@@ -1,8 +1,8 @@
 import { action, mutation, query, commitThenThrow, type ActionCtx, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
-import type { RegistrationResponseJSON } from "@simplewebauthn/server";
+import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
 import type { AuthConfig } from "./config";
-import { currentSessionOf, type FacadeCtx } from "./functions";
-import { buildRegistrationOptions, verifyRegistration, challengeOf } from "./webauthn";
+import { currentSessionOf, mintSession, normalizeEmail, type FacadeCtx, type MintResult } from "./functions";
+import { buildRegistrationOptions, verifyRegistration, buildAuthenticationOptions, verifyAuthentication, challengeOf, type StoredCredential } from "./webauthn";
 import { PasskeyLimitReachedError, PasskeyAlreadyRegisteredError } from "./errors";
 
 /**
@@ -48,6 +48,13 @@ const REGISTRATION_FAILED = "passkey registration failed";
 /** `_consumeChallenge`'s one generic outcome for a missing/wrong-kind/expired/replayed challenge row
  *  — shared by BOTH ceremonies (Task 4 reuses this same mutation for `kind: "authenticate"`). */
 const CHALLENGE_INVALID = "invalid or expired passkey challenge";
+/** Task 4's ONE generic outcome for every `finishPasskeyAuthentication` failure mode — a stale/
+ *  replayed/wrong-kind challenge, an unknown `credentialId`, a `userHandle` that doesn't match the
+ *  stored credential's owner, a structurally-invalid or cryptographically-unverified assertion, AND
+ *  a signature-counter regression (spec decision 6/"generic reject, mint nothing, change no state").
+ *  Never distinguish these to the caller — that distinction is exactly the anti-enumeration/clone-
+ *  detection-oracle surface decision 5/6 close off. */
+const AUTHENTICATION_FAILED = "passkey authentication failed";
 
 /** A caller's existing credentials, shaped for `buildRegistrationOptions`'s `excludeCredentials`. */
 interface PasskeyDescriptor {
@@ -268,14 +275,208 @@ function finishPasskeyRegistration(config: AuthConfig) {
   });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Task 4 — authentication ceremony (assertion) + clone detection + mint.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Internal query (Task 4): resolve `allowCredentials` for a NON-DISCOVERABLE
+ * `beginPasskeyAuthentication({ email })`. Anti-enumeration (spec decision 5): an unknown email (no
+ * `users` row) or a known user with zero passkeys both return `[]` — byte-shape-identical to the
+ * usernameless/discoverable begin, so `begin` is never usable as an existence oracle. `byEmail`/
+ * `byUserId` index reads only — never a table scan.
+ */
+function _listCredentialsForEmail() {
+  return query(async (ctx: QueryCtx, { email }: { email: string }): Promise<PasskeyDescriptor[]> => {
+    const [user] = await ctx.db.query("users", "byEmail").eq("email", normalizeEmail(email)).collect();
+    if (!user) return [];
+    const rows = await ctx.db.query("passkeys", "byUserId").eq("userId", user._id as string).collect();
+    return rows.map((r) =>
+      compact({ credentialId: r.credentialId as string, transports: r.transports as string[] | undefined }),
+    );
+  });
+}
+
+/** A stored credential's verification material PLUS its owning `userId` — what
+ *  `finishPasskeyAuthentication` needs to call `webauthn.ts`'s `verifyAuthentication` and to
+ *  cross-check `response.userHandle`. `_getPasskeyByCredentialId`'s return shape. */
+interface StoredCredentialWithOwner extends StoredCredential {
+  userId: string;
+}
+
+/**
+ * Internal query (Task 4): look up a `passkeys` row by `credentialId` (the `response.id` an
+ * authenticator's assertion carries) — `byCredentialId` equality, never a table scan. Returns `null`
+ * on a miss (an unregistered/foreign credential); `finishPasskeyAuthentication` turns that into the
+ * ONE generic `AUTHENTICATION_FAILED` reject, same as every other failure mode here.
+ */
+function _getPasskeyByCredentialId() {
+  return query(async (ctx: QueryCtx, { credentialId }: { credentialId: string }): Promise<StoredCredentialWithOwner | null> => {
+    const [row] = await ctx.db.query("passkeys", "byCredentialId").eq("credentialId", credentialId).collect();
+    if (!row) return null;
+    return compact({
+      userId: row.userId as string,
+      credentialId: row.credentialId as string,
+      publicKey: row.publicKey as string,
+      counter: row.counter as number,
+      transports: row.transports as string[] | undefined,
+    });
+  });
+}
+
+/**
+ * `beginPasskeyAuthentication({ email? })` — ACTION (Task 4). **Discoverable/usernameless** (no
+ * `email`): `allowCredentials: []`, the authenticator resolves a resident credential itself and
+ * reports the owning `userId` back via `response.userHandle` at finish. **Non-discoverable**
+ * (`email` given): resolve that user's credential ids via `_listCredentialsForEmail` — which already
+ * returns `[]` for an unknown email (anti-enumeration, decision 5), so this action never has to
+ * branch on "did we find a user." Either way: build the options (`webauthn.ts`'s
+ * `buildAuthenticationOptions`, which generates the random `challenge`), THEN persist that challenge
+ * (`_storeChallenge`, `kind: "authenticate"` — unscoped to any `userId`, matching the usernameless
+ * shape regardless of which path produced `allowCredentials`). Returns the options JSON verbatim.
+ */
+function beginPasskeyAuthentication(config: AuthConfig) {
+  return action(async (ctx, args?: { email?: string }) => {
+    const passkeyConfig = config.passkeys!;
+    const actionCtx = ctx as ActionCtx;
+
+    const allowCredentials = args?.email
+      ? await actionCtx.runQuery<PasskeyDescriptor[]>("auth:_listCredentialsForEmail", { email: args.email })
+      : [];
+    const options = await buildAuthenticationOptions(passkeyConfig, { allowCredentials });
+    await actionCtx.runMutation("auth:_storeChallenge", { kind: "authenticate", challenge: options.challenge });
+    return options;
+  });
+}
+
+/**
+ * `_finishPasskeyAuth` — the ATOMIC counter-check + mint (Task 4, spec decision 6). Re-reads the
+ * `passkeys` row `byCredentialId` INDEPENDENTLY of whatever `finishPasskeyAuthentication` read a
+ * moment earlier via `runQuery` (defense in depth against a TOCTOU race under concurrent sign-ins —
+ * the whole point of doing the clone-detection compare-and-set INSIDE this single-writer-OCC
+ * transaction rather than trusting a value read outside it): missing row → generic reject (a
+ * credential deleted/revoked between `finishPasskeyAuthentication`'s lookup and this mutation).
+ * Clone rule: `stored === 0 && newCounter === 0` (an authenticator that doesn't report counters —
+ * true of essentially all synced/multi-device passkeys) → accept; else `newCounter > stored` →
+ * accept; else — a regression or repeat of a nonzero value, a possible cloned authenticator —
+ * **generic reject, NO write, NO mint** (no auto-revoke/DoS blast radius, per decision 6). On
+ * accept: advance `counter`, stamp `lastUsedAt`, THEN `mintSession` — the A1 chokepoint (bypasses
+ * `requireEmailVerification` by construction; passkey auth never consults that gate, per decision 7).
+ *
+ * Per the plan (Task 4 §4.1) this calls `mintSession` directly, NOT `finishSignIn` — passkey
+ * authentication does not gate on `@stackbase/auth`'s MFA (`mfa` config) step-up even when the
+ * signed-in user has a confirmed TOTP enrollment. The design spec (decision 7) predates/doesn't
+ * address that interaction; passkey-as-MFA-interaction is explicitly out of scope for this slice
+ * (Non-goal #1 — "passkey as a SECOND factor" is deferred to N2) and the plan's own Task 4 code
+ * sketch names `mintSession` verbatim. Flagged for the reviewer: this means a user who has enrolled
+ * both a password+TOTP AND a passkey can bypass the TOTP step-up entirely by signing in with the
+ * passkey — a real interaction worth resolving explicitly in N2, not a silent oversight here.
+ */
+function _finishPasskeyAuth(config: AuthConfig) {
+  return mutation(async (
+    ctx: MutationCtx,
+    { credentialId, newCounter, deviceLabel }: { credentialId: string; newCounter: number; deviceLabel?: string },
+  ): Promise<MintResult> => {
+    const [row] = await ctx.db.query("passkeys", "byCredentialId").eq("credentialId", credentialId).collect();
+    if (!row) throw new Error(AUTHENTICATION_FAILED); // credential vanished between lookup and mint — fail closed
+
+    const stored = row.counter as number;
+    const isFreshAuthenticator = stored === 0 && newCounter === 0; // no counter support — accept (decision 6)
+    const advanced = newCounter > stored;
+    if (!isFreshAuthenticator && !advanced) {
+      // Regression or repeat of a nonzero counter — a possible cloned authenticator. Reject
+      // generically; change NOTHING (no counter write, no mint, no auto-revoke).
+      throw new Error(AUTHENTICATION_FAILED);
+    }
+
+    await ctx.db.replace(row._id as string, { ...row, counter: newCounter, lastUsedAt: ctx.now() });
+    return mintSession(ctx, config, row.userId as string, deviceLabel);
+  });
+}
+
+/**
+ * `finishPasskeyAuthentication({ response, deviceLabel? })` — ACTION (Task 4). Decodes the challenge
+ * out of the assertion's `clientDataJSON` (`webauthn.ts`'s `challengeOf`), consumes the matching
+ * `webauthnChallenge` row (consume-before-validate — `_consumeChallenge`, `kind: "authenticate"`;
+ * already built in Task 3 to be kind-agnostic), looks up the credential `byCredentialId`
+ * (`_getPasskeyByCredentialId` — an unknown credential is a generic reject, same shape as every
+ * other failure here), cross-checks `response.userHandle` against the credential's OWNER `userId`
+ * when the authenticator supplied one (usernameless/discoverable sign-in always does; a
+ * non-discoverable one may omit it), then verifies the assertion (`webauthn.ts`'s
+ * `verifyAuthentication` — against the IMMUTABLE stored `publicKey`, so there is no TOCTOU on
+ * identity; only the mutable `counter` needs the atomic re-check `_finishPasskeyAuth` performs).
+ * Delegates the counter-check + mint to `_finishPasskeyAuth`. Every failure mode collapses to the
+ * ONE `AUTHENTICATION_FAILED` message (spec decision 5) — a stale/replayed challenge, an unknown
+ * credential, a `userHandle` mismatch, a failed/unverified assertion, and a counter-regression
+ * reject (raised by `_finishPasskeyAuth` itself) are all indistinguishable to the caller.
+ */
+function finishPasskeyAuthentication(config: AuthConfig) {
+  return action(async (
+    ctx,
+    { response, deviceLabel }: { response: AuthenticationResponseJSON; deviceLabel?: string },
+  ): Promise<MintResult> => {
+    const passkeyConfig = config.passkeys!;
+    const actionCtx = ctx as ActionCtx;
+
+    const challenge = challengeOf(response.response.clientDataJSON);
+    try {
+      await actionCtx.runMutation("auth:_consumeChallenge", { challenge, kind: "authenticate" });
+    } catch {
+      throw new Error(AUTHENTICATION_FAILED);
+    }
+
+    const stored = await actionCtx.runQuery<StoredCredentialWithOwner | null>("auth:_getPasskeyByCredentialId", {
+      credentialId: response.id,
+    });
+    if (!stored) throw new Error(AUTHENTICATION_FAILED); // unknown/foreign credentialId
+
+    // `response.userHandle` is the WebAuthn `userID` bytes we minted at registration
+    // (`webauthn.ts`'s `userIdBytes` — UTF-8 of the app `userId`, base64url'd). A discoverable/
+    // usernameless assertion always carries it; a non-discoverable one MAY omit it — only check
+    // when present, but a MISMATCH (an authenticator claiming a different owner than the credential
+    // it signed with actually has) is a generic reject, never a partial trust.
+    const userHandle = response.response.userHandle;
+    if (userHandle !== undefined) {
+      const claimedUserId = Buffer.from(userHandle, "base64url").toString("utf8");
+      if (claimedUserId !== stored.userId) throw new Error(AUTHENTICATION_FAILED);
+    }
+
+    let verified;
+    try {
+      verified = await verifyAuthentication(passkeyConfig, {
+        response,
+        expectedChallenge: challenge,
+        credential: {
+          credentialId: stored.credentialId,
+          publicKey: stored.publicKey,
+          counter: stored.counter,
+          transports: stored.transports,
+        },
+      });
+    } catch {
+      throw new Error(AUTHENTICATION_FAILED);
+    }
+    if (!verified.verified) throw new Error(AUTHENTICATION_FAILED);
+
+    // `_finishPasskeyAuth` re-reads the row and applies the atomic clone-detection compare-and-set
+    // (decision 6) INDEPENDENTLY of `stored.counter` above — this action's own verify call already
+    // ran the library's own counter check against the (possibly slightly stale) value fetched by
+    // `_getPasskeyByCredentialId`, but the mint transaction is the source of truth under concurrency.
+    return actionCtx.runMutation<MintResult>(
+      "auth:_finishPasskeyAuth",
+      compact({ credentialId: stored.credentialId, newCounter: verified.newCounter, deviceLabel }),
+    );
+  });
+}
+
 export function makePasskeyModules(config: AuthConfig): Record<string, RegisteredFunction> {
   return {
     // Ceremony actions (client-callable over the sync connection) — every `@simplewebauthn/server`
-    // call lives here (T3 registration below; T4 fills authentication), never in a query/mutation.
+    // call lives here (T3 registration, T4 authentication), never in a query/mutation.
     beginPasskeyRegistration: beginPasskeyRegistration(config),
     finishPasskeyRegistration: finishPasskeyRegistration(config),
-    beginPasskeyAuthentication: action(notImplemented), // T4
-    finishPasskeyAuthentication: action(notImplemented), // T4
+    beginPasskeyAuthentication: beginPasskeyAuthentication(config),
+    finishPasskeyAuthentication: finishPasskeyAuthentication(config),
     // Device management (client-callable, authed + ownership-checked — the A1 session-mgmt mirror).
     listPasskeys: query(notImplemented), // T5
     renamePasskey: mutation(notImplemented), // T5
@@ -285,7 +486,9 @@ export function makePasskeyModules(config: AuthConfig): Record<string, Registere
     _storeChallenge: _storeChallenge(config),
     _consumeChallenge: _consumeChallenge(),
     _savePasskey: _savePasskey(config),
-    _finishPasskeyAuth: mutation(notImplemented), // T4
+    _finishPasskeyAuth: _finishPasskeyAuth(config),
     _listPasskeyDescriptors: _listPasskeyDescriptors(),
+    _listCredentialsForEmail: _listCredentialsForEmail(),
+    _getPasskeyByCredentialId: _getPasskeyByCredentialId(),
   };
 }
