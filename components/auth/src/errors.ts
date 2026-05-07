@@ -70,3 +70,18 @@ export class MfaRateLimitedError extends UserError {
   override readonly code = "MFA_RATE_LIMITED";
   constructor() { super("MFA_RATE_LIMITED"); }
 }
+
+/** N1 passkeys: `_savePasskey` refused a NEW credential because the caller is already at
+ *  `maxCredentialsPerUser` (default 20). Authed + caller-actionable, not an enumeration surface
+ *  (spec decision 5 — registration is authed). */
+export class PasskeyLimitReachedError extends UserError {
+  override readonly code = "PASSKEY_LIMIT_REACHED";
+  constructor() { super("PASSKEY_LIMIT_REACHED"); }
+}
+/** N1 passkeys: `_savePasskey` refused a `credentialId` that already has a `passkeys` row (the
+ *  same authenticator can't register twice — `excludeCredentials` should normally prevent this at
+ *  the ceremony level; this is the storage-level backstop). */
+export class PasskeyAlreadyRegisteredError extends UserError {
+  override readonly code = "PASSKEY_ALREADY_REGISTERED";
+  constructor() { super("PASSKEY_ALREADY_REGISTERED"); }
+}

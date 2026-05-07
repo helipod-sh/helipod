@@ -175,13 +175,17 @@ export interface SessionSummary {
 
 /** The `ctx.auth` facade as visible from inside auth's own modules (context providers are attached
  *  to every function's ctx — including a component's own). Absent when no providers were composed
- *  (bare EmbeddedRuntime unit setups) → treated as unauthenticated. */
-type FacadeCtx = { db: MutationCtx["db"] | QueryCtx["db"]; auth?: { getSessionId(): Promise<string | null> } };
+ *  (bare EmbeddedRuntime unit setups) → treated as unauthenticated. Exported (N1) so `passkeys.ts`'s
+ *  internal mutations/queries can resolve the ambient caller the SAME way every other module does,
+ *  rather than a second divergent resolve helper — mirrors the existing `external.ts` <-> `functions.ts`
+ *  circular-import shape (a function-declaration cycle resolved fine by hoisting; only called inside
+ *  handler bodies, never at module-eval time). */
+export type FacadeCtx = { db: MutationCtx["db"] | QueryCtx["db"]; auth?: { getSessionId(): Promise<string | null> } };
 
 /** The ambient caller's own session row, or null when unauthenticated/expired. Resolves the id via
  *  the `ctx.auth` facade (the only channel the ambient identity reaches user code), then reads the
  *  row through the module's own db so the read lands in the calling function's read-set. */
-async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown> | null> {
+export async function currentSessionOf(ctx: FacadeCtx): Promise<Record<string, unknown> | null> {
   const sessionId = await ctx.auth?.getSessionId();
   if (!sessionId) return null;
   return ((await ctx.db.get(sessionId)) as Record<string, unknown> | null) ?? null;

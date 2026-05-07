@@ -1,5 +1,9 @@
-import { action, mutation, query, type RegisteredFunction } from "@stackbase/executor";
+import { action, mutation, query, commitThenThrow, type ActionCtx, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { AuthConfig } from "./config";
+import { currentSessionOf, type FacadeCtx } from "./functions";
+import { buildRegistrationOptions, verifyRegistration, challengeOf } from "./webauthn";
+import { PasskeyLimitReachedError, PasskeyAlreadyRegisteredError } from "./errors";
 
 /**
  * Passkey/WebAuthn module set (spec "Component surface"). `makeAuthModules` (functions.ts) calls
@@ -7,38 +11,281 @@ import type { AuthConfig } from "./config";
  * absent `passkeys` ⇒ none of these eleven keys are registered, byte-identical to a pre-passkeys
  * deployment (`passkeys-config.test.ts` pins this).
  *
- * Task 1 (this file) only lands the registered-KEY contract with every body stubbed — no ceremony
- * logic yet. Task 3 fills `beginPasskeyRegistration`/`finishPasskeyRegistration` +
- * `_storeChallenge`/`_consumeChallenge`/`_savePasskey`; Task 4 fills
- * `beginPasskeyAuthentication`/`finishPasskeyAuthentication` + `_finishPasskeyAuth`; Task 5 fills
- * `listPasskeys`/`renamePasskey`/`revokePasskey`. The registered shape does not change across those
- * tasks — only these bodies do.
+ * Task 3 (this file) fills the REGISTRATION ceremony: `beginPasskeyRegistration`/
+ * `finishPasskeyRegistration` + the internal `_storeChallenge`/`_consumeChallenge`/`_savePasskey`
+ * mutations, plus one new internal query (`_listPasskeyDescriptors`) the registration `begin` action
+ * needs to resolve the caller + build `excludeCredentials` BEFORE any challenge exists to store.
+ * Task 4 fills `beginPasskeyAuthentication`/`finishPasskeyAuthentication` + `_finishPasskeyAuth`;
+ * Task 5 fills `listPasskeys`/`renamePasskey`/`revokePasskey`. The registered shape (which keys
+ * exist) does not change across those tasks — only the still-stubbed bodies do.
+ *
+ * GLOBAL CONSTRAINT #1 (spec): every `@simplewebauthn/server` call lives in an ACTION — here,
+ * `buildRegistrationOptions`/`verifyRegistration` (thin `webauthn.ts` wrappers over the library) are
+ * called ONLY from `beginPasskeyRegistration`/`finishPasskeyRegistration`, never from a query/mutation.
+ * The challenge row write, the per-user-limit/duplicate check, and the credential row write are all
+ * internal MUTATIONS (`_storeChallenge`/`_consumeChallenge`/`_savePasskey`) — crypto stays out of the
+ * transactor, exactly the A3 `signInWithIdToken`/jose split.
  */
 const notImplemented = async (): Promise<never> => {
   throw new Error("not implemented");
 };
 
+/** Drop keys whose value is `undefined` — the syscall codec rejects `undefined` (same shape as
+ *  `functions.ts`/`mfa/functions.ts`'s own `compact`, duplicated per-file by this codebase's
+ *  existing convention). */
+function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
+  const out: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(obj)) if (val !== undefined) out[k] = val;
+  return out as { [K in keyof T]: Exclude<T[K], undefined> };
+}
+
+/** Every `finish*` challenge-consume/crypto failure surfaces as this ONE message (never distinguish
+ *  wrong-challenge / wrong-origin / wrong-RP-ID / tampered-signature to the caller) — registration is
+ *  authed so there's no cross-user enumeration surface (spec decision 5's "registration is authed"
+ *  carve-out), but a granular error would still leak protocol-attack feedback to whoever is driving
+ *  the ceremony, so it stays generic anyway. */
+const REGISTRATION_FAILED = "passkey registration failed";
+/** `_consumeChallenge`'s one generic outcome for a missing/wrong-kind/expired/replayed challenge row
+ *  — shared by BOTH ceremonies (Task 4 reuses this same mutation for `kind: "authenticate"`). */
+const CHALLENGE_INVALID = "invalid or expired passkey challenge";
+
+/** A caller's existing credentials, shaped for `buildRegistrationOptions`'s `excludeCredentials`. */
+interface PasskeyDescriptor {
+  credentialId: string;
+  transports?: string[];
+}
+
+/**
+ * Internal query (Task 3): resolve the AMBIENT authenticated caller (decision 9 — registration
+ * requires an authed session, anonymous included; unauthenticated ⇒ generic reject) and return just
+ * enough for `beginPasskeyRegistration` to build `generateRegistrationOptions`' input BEFORE any
+ * challenge exists to persist: the `userId` (WebAuthn `userID` bytes derive from this), a display
+ * `userName` (the account email, falling back to the opaque userId — the exact `startMfaEnrollment`
+ * `accountName` convention), and the caller's own already-registered credentials as `excludeCredentials`
+ * (so the same authenticator can't double-register — spec decision 9). A pure read — no crypto, no
+ * write — kept separate from `_storeChallenge` so `beginPasskeyRegistration` stays a true action:
+ * resolve-caller (this query) → build options (the action, calling into `webauthn.ts`) → persist the
+ * challenge `_storeChallenge` re-resolves the caller independently, at write time).
+ */
+function _listPasskeyDescriptors() {
+  return query(async (ctx: QueryCtx): Promise<{ userId: string; userName: string; existing: PasskeyDescriptor[] }> => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) throw new Error("not authenticated");
+    const userId = current.userId as string;
+    const user = await ctx.db.get(userId);
+    const userName = (user?.email as string | undefined) ?? userId;
+    const rows = await ctx.db.query("passkeys", "byUserId").eq("userId", userId).collect();
+    const existing = rows.map((r) =>
+      compact({ credentialId: r.credentialId as string, transports: r.transports as string[] | undefined }),
+    );
+    return { userId, userName, existing };
+  });
+}
+
+/**
+ * `_storeChallenge` (Task 3 body; Task 4 will call this same mutation for `kind: "authenticate"`).
+ * For `kind: "register"`: resolve the ambient session INDEPENDENTLY of any value threaded from an
+ * earlier call (defense in depth — the write is gated on a FRESH auth check at the moment the
+ * ceremony's challenge row is actually created, not on trust in an argument) and reject generically
+ * if unauthenticated; the resolved `userId` is what the row (and its returned value) is bound to.
+ * For `kind: "authenticate"` there is no ambient-auth requirement (a signed-out visitor is exactly
+ * who calls this) — `userId` stays undefined unless a future authenticate-kind caller passes one
+ * (Task 4's email-scoped begin does not, per plan: the row is unscoped either way, matching the
+ * anti-enumeration shape). Single-use TTL row, `compact()` at the codec boundary.
+ */
+function _storeChallenge(config: AuthConfig) {
+  return mutation(async (ctx: MutationCtx, { kind, challenge }: { kind: "register" | "authenticate"; challenge: string }): Promise<{ userId?: string }> => {
+    const passkeyConfig = config.passkeys!;
+    let userId: string | undefined;
+    if (kind === "register") {
+      const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+      if (!current) throw new Error("not authenticated"); // decision 9 — registration requires an authed caller
+      userId = current.userId as string;
+    }
+    const now = ctx.now();
+    await ctx.db.insert(
+      "webauthnChallenge",
+      compact({ challenge, kind, userId, expiresAt: now + passkeyConfig.challengeTtlMs, createdAt: now }),
+    );
+    return compact({ userId });
+  });
+}
+
+/**
+ * `_consumeChallenge` — consume-BEFORE-validate (spec decision 3/global constraint): look the
+ * challenge up `byChallenge`, DELETE it first (single-use, single-winner under single-writer OCC —
+ * a replay finds no row), THEN validate `kind` + `expiresAt`. Any post-delete failure returns
+ * `commitThenThrow` so the delete still commits (the `_consumeOAuthState`/`completeMfaSignIn`
+ * pattern) rather than a plain throw, which would roll the whole transaction — including the
+ * consume — back and let the same challenge be retried. A miss (nothing to consume) is a plain
+ * throw: nothing was staged, so there is nothing to lose by rolling back.
+ */
+function _consumeChallenge() {
+  return mutation(async (
+    ctx: MutationCtx,
+    { challenge, kind }: { challenge: string; kind: "register" | "authenticate" },
+  ): Promise<{ userId?: string } | ReturnType<typeof commitThenThrow>> => {
+    const [row] = await ctx.db.query("webauthnChallenge", "byChallenge").eq("challenge", challenge).collect();
+    if (!row) throw new Error(CHALLENGE_INVALID); // nothing consumed — no matching/already-replayed challenge
+    await ctx.db.delete(row._id as string); // consume FIRST
+    if ((row.kind as string) !== kind || ctx.now() > (row.expiresAt as number)) return commitThenThrow(CHALLENGE_INVALID);
+    return compact({ userId: row.userId as string | undefined });
+  });
+}
+
+/**
+ * `_savePasskey` — the credential write (Task 3 body). Enforces the per-user limit
+ * (`maxCredentialsPerUser`, `byUserId` range — never a table scan) and the duplicate-`credentialId`
+ * guard (`byCredentialId` equality; uniqueness relies on single-writer OCC serialization, same note
+ * `accounts`/`schema.ts` carries). Both throw TYPED errors (not the ceremony's generic message) —
+ * these are authed, caller-actionable ("you already registered this key" / "you're at your limit"),
+ * not an anti-enumeration surface (decision 5 — registration is authed, no enumeration concern).
+ */
+function _savePasskey(config: AuthConfig) {
+  return mutation(async (
+    ctx: MutationCtx,
+    args: {
+      userId: string;
+      credentialId: string;
+      publicKey: string;
+      counter: number;
+      transports?: string[];
+      backedUp?: boolean;
+      deviceName?: string;
+    },
+  ): Promise<{ passkeyId: string }> => {
+    const passkeyConfig = config.passkeys!;
+    const existingForUser = await ctx.db.query("passkeys", "byUserId").eq("userId", args.userId).collect();
+    if (existingForUser.length >= passkeyConfig.maxCredentialsPerUser) throw new PasskeyLimitReachedError();
+
+    const dup = await ctx.db.query("passkeys", "byCredentialId").eq("credentialId", args.credentialId).collect();
+    if (dup.length > 0) throw new PasskeyAlreadyRegisteredError();
+
+    const passkeyId = await ctx.db.insert(
+      "passkeys",
+      compact({
+        userId: args.userId,
+        credentialId: args.credentialId,
+        publicKey: args.publicKey,
+        counter: args.counter,
+        transports: args.transports,
+        backedUp: args.backedUp,
+        deviceName: args.deviceName,
+        createdAt: ctx.now(),
+      }),
+    );
+    return { passkeyId: passkeyId as string };
+  });
+}
+
+/**
+ * `beginPasskeyRegistration({ deviceName? })` — ACTION (Task 3). `deviceName` is accepted for API
+ * shape parity with `finishPasskeyRegistration` (spec "The two ceremonies") but unused here — it is
+ * only ever persisted by `finish*`'s `_savePasskey` call, never stored on the ephemeral challenge
+ * row. Sequence (spec "Registration"): resolve the caller + existing credentials
+ * (`_listPasskeyDescriptors` — an unauthenticated caller is rejected generically right here, before
+ * any crypto runs), build the registration options (`webauthn.ts`'s `buildRegistrationOptions`,
+ * which is what actually generates the random `challenge`), THEN persist that challenge
+ * (`_storeChallenge`). Returns the options JSON verbatim to the client.
+ */
+function beginPasskeyRegistration(config: AuthConfig) {
+  return action(async (ctx, _args?: { deviceName?: string }) => {
+    const passkeyConfig = config.passkeys!;
+    const actionCtx = ctx as ActionCtx;
+
+    const caller = await actionCtx.runQuery<{ userId: string; userName: string; existing: PasskeyDescriptor[] }>(
+      "auth:_listPasskeyDescriptors",
+      {},
+    );
+    const options = await buildRegistrationOptions(passkeyConfig, {
+      userId: caller.userId,
+      userName: caller.userName,
+      existing: caller.existing,
+    });
+    // Persist the challenge `generateRegistrationOptions` just generated. `_storeChallenge`
+    // re-resolves the caller from the ambient session itself (defense in depth) rather than trusting
+    // `caller.userId` threaded from the query above.
+    await actionCtx.runMutation("auth:_storeChallenge", { kind: "register", challenge: options.challenge });
+    return options;
+  });
+}
+
+/**
+ * `finishPasskeyRegistration({ response, deviceName? })` — ACTION (Task 3). Decodes the challenge out
+ * of the attestation's `clientDataJSON` (`webauthn.ts`'s `challengeOf` — NOT trusted input from the
+ * client beyond "which row to look up"), consumes the matching `webauthnChallenge` row
+ * (consume-before-validate; a missing/wrong-kind/expired/replayed challenge is one generic reject and
+ * `_consumeChallenge`'s delete has already committed regardless), verifies the attestation
+ * (`webauthn.ts`'s `verifyRegistration` — throws on ANY structural mismatch: wrong challenge/origin/
+ * RP-ID), then delegates the write to `_savePasskey` (per-user limit + duplicate guard, its own typed
+ * errors — NOT folded into the generic message, since those are authed/actionable, not an
+ * enumeration surface). Returns `{ registered: true, passkeyId }`.
+ */
+function finishPasskeyRegistration(config: AuthConfig) {
+  return action(async (ctx, { response, deviceName }: { response: RegistrationResponseJSON; deviceName?: string }) => {
+    const passkeyConfig = config.passkeys!;
+    const actionCtx = ctx as ActionCtx;
+
+    const challenge = challengeOf(response.response.clientDataJSON);
+    let consumed: { userId?: string };
+    try {
+      consumed = await actionCtx.runMutation<{ userId?: string }>("auth:_consumeChallenge", {
+        challenge,
+        kind: "register",
+      });
+    } catch {
+      throw new Error(REGISTRATION_FAILED);
+    }
+    // Defensive: a "register"-kind challenge row is ALWAYS written with a userId by `_storeChallenge`
+    // (it rejects unauthenticated before ever inserting) — this can only be hit if a future bug lets
+    // a userId-less row through, and even then it must fail closed, never mint/save headless.
+    if (!consumed.userId) throw new Error(REGISTRATION_FAILED);
+
+    let credential;
+    try {
+      credential = await verifyRegistration(passkeyConfig, { response, expectedChallenge: challenge });
+    } catch {
+      throw new Error(REGISTRATION_FAILED);
+    }
+
+    // `compact()` at the wire boundary: `transports`/`deviceName` may be `undefined` here, and the
+    // syscall codec (`jsonToConvex`/`convexToJson`) rejects a literal `undefined` value in the args
+    // object crossing `runMutation` — omit rather than null it out (same rule the DB-insert side of
+    // `_savePasskey` itself already applies).
+    const saved = await actionCtx.runMutation<{ passkeyId: string }>(
+      "auth:_savePasskey",
+      compact({
+        userId: consumed.userId,
+        credentialId: credential.credentialId,
+        publicKey: credential.publicKey,
+        counter: credential.counter,
+        transports: credential.transports,
+        backedUp: credential.backedUp,
+        deviceName,
+      }),
+    );
+    return { registered: true as const, passkeyId: saved.passkeyId };
+  });
+}
+
 export function makePasskeyModules(config: AuthConfig): Record<string, RegisteredFunction> {
-  // `config` (the resolved `PasskeyConfig`) is unused until T3-T5 build the real ceremony bodies
-  // over `config.passkeys`'s rpID/rpName/origins/TTLs — kept as a parameter now so the signature
-  // (and every later task's diff) stays stable.
-  void config;
   return {
     // Ceremony actions (client-callable over the sync connection) — every `@simplewebauthn/server`
-    // call will live here (T2/T3/T4), never in a query/mutation.
-    beginPasskeyRegistration: action(notImplemented),
-    finishPasskeyRegistration: action(notImplemented),
-    beginPasskeyAuthentication: action(notImplemented),
-    finishPasskeyAuthentication: action(notImplemented),
+    // call lives here (T3 registration below; T4 fills authentication), never in a query/mutation.
+    beginPasskeyRegistration: beginPasskeyRegistration(config),
+    finishPasskeyRegistration: finishPasskeyRegistration(config),
+    beginPasskeyAuthentication: action(notImplemented), // T4
+    finishPasskeyAuthentication: action(notImplemented), // T4
     // Device management (client-callable, authed + ownership-checked — the A1 session-mgmt mirror).
-    listPasskeys: query(notImplemented),
-    renamePasskey: mutation(notImplemented),
-    revokePasskey: mutation(notImplemented),
-    // Internal mutations (not client-callable, `_`-prefixed, reachable from the actions above via
-    // `runMutation` — the `scheduler:_enqueue` convention).
-    _storeChallenge: mutation(notImplemented),
-    _consumeChallenge: mutation(notImplemented),
-    _savePasskey: mutation(notImplemented),
-    _finishPasskeyAuth: mutation(notImplemented),
+    listPasskeys: query(notImplemented), // T5
+    renamePasskey: mutation(notImplemented), // T5
+    revokePasskey: mutation(notImplemented), // T5
+    // Internal mutations/queries (not client-callable, `_`-prefixed, reachable from the actions above
+    // via `runMutation`/`runQuery` — the `scheduler:_enqueue` convention).
+    _storeChallenge: _storeChallenge(config),
+    _consumeChallenge: _consumeChallenge(),
+    _savePasskey: _savePasskey(config),
+    _finishPasskeyAuth: mutation(notImplemented), // T4
+    _listPasskeyDescriptors: _listPasskeyDescriptors(),
   };
 }
