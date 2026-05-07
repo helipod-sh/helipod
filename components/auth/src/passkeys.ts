@@ -26,10 +26,6 @@ import { PasskeyLimitReachedError, PasskeyAlreadyRegisteredError } from "./error
  * internal MUTATIONS (`_storeChallenge`/`_consumeChallenge`/`_savePasskey`) — crypto stays out of the
  * transactor, exactly the A3 `signInWithIdToken`/jose split.
  */
-const notImplemented = async (): Promise<never> => {
-  throw new Error("not implemented");
-};
-
 /** Drop keys whose value is `undefined` — the syscall codec rejects `undefined` (same shape as
  *  `functions.ts`/`mfa/functions.ts`'s own `compact`, duplicated per-file by this codebase's
  *  existing convention). */
@@ -472,6 +468,76 @@ function finishPasskeyAuthentication(config: AuthConfig) {
   });
 }
 
+/** A passkey as surfaced to `listPasskeys` — display metadata ONLY, NEVER the `publicKey`/`counter`
+ *  (those are secrets/clone-detection state, exactly as `SessionSummary` omits every hash/token). */
+interface PasskeySummary {
+  passkeyId: string;
+  deviceName: string | null;
+  transports: string[] | null;
+  backedUp: boolean | null;
+  createdAt: number | null;
+  lastUsedAt: number | null;
+}
+
+/**
+ * `listPasskeys()` — the A1 `listSessions` mirror (Task 5). Resolves the ambient caller; unauthed ⇒
+ * `[]` (never throws — a device list is a benign read). Reads the caller's own credentials over the
+ * `byUserId` range, NEVER a table scan: this is a reactive query, so a full-table read-set would make
+ * every subscribed passkey list re-run on every credential write in the whole deployment; the index
+ * range keeps invalidation (and the reactive re-run) scoped to this one user. Projects to display
+ * metadata only — `publicKey` and `counter` never cross the wire.
+ */
+function listPasskeys() {
+  return query(async (ctx: QueryCtx): Promise<PasskeySummary[]> => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) return [];
+    const userId = current.userId as string;
+    const rows = await ctx.db.query("passkeys", "byUserId").eq("userId", userId).collect();
+    return rows.map((r) => ({
+      passkeyId: r._id as string,
+      deviceName: (r.deviceName as string | undefined) ?? null,
+      transports: (r.transports as string[] | undefined) ?? null,
+      backedUp: (r.backedUp as boolean | undefined) ?? null,
+      createdAt: (r.createdAt as number | undefined) ?? null,
+      lastUsedAt: (r.lastUsedAt as number | undefined) ?? null,
+    }));
+  });
+}
+
+/**
+ * `renamePasskey({ passkeyId, deviceName })` — authed + OWNERSHIP-checked (Task 5). `get` the row and
+ * reject a missing/foreign row with the SAME generic `"passkey not found"` the A1 `revokeSession`
+ * uses — a caller learns nothing about whether a `passkeyId` belongs to someone else. Only the label
+ * changes; the credential material is untouched.
+ */
+function renamePasskey() {
+  return mutation(async (ctx: MutationCtx, { passkeyId, deviceName }: { passkeyId: string; deviceName: string }) => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) throw new Error("not authenticated");
+    const row = await ctx.db.get(passkeyId);
+    if (!row || (row.userId as string) !== (current.userId as string)) throw new Error("passkey not found");
+    await ctx.db.replace(passkeyId, { ...row, deviceName });
+    return null;
+  });
+}
+
+/**
+ * `revokePasskey({ passkeyId })` — authed + OWNERSHIP-checked (Task 5), the A1 `revokeSession` mirror.
+ * A missing/foreign row is the same generic `"passkey not found"`. Deleting the row makes that
+ * credential un-authenticatable immediately (Task 4's `finishPasskeyAuthentication` looks it up
+ * `byCredentialId` and generic-rejects a vanished row) AND reactively updates any live `listPasskeys`.
+ */
+function revokePasskey() {
+  return mutation(async (ctx: MutationCtx, { passkeyId }: { passkeyId: string }) => {
+    const current = await currentSessionOf(ctx as unknown as FacadeCtx);
+    if (!current) throw new Error("not authenticated");
+    const row = await ctx.db.get(passkeyId);
+    if (!row || (row.userId as string) !== (current.userId as string)) throw new Error("passkey not found");
+    await ctx.db.delete(passkeyId);
+    return null;
+  });
+}
+
 export function makePasskeyModules(config: AuthConfig): Record<string, RegisteredFunction> {
   return {
     // Ceremony actions (client-callable over the sync connection) — every `@simplewebauthn/server`
@@ -481,9 +547,9 @@ export function makePasskeyModules(config: AuthConfig): Record<string, Registere
     beginPasskeyAuthentication: beginPasskeyAuthentication(config),
     finishPasskeyAuthentication: finishPasskeyAuthentication(config),
     // Device management (client-callable, authed + ownership-checked — the A1 session-mgmt mirror).
-    listPasskeys: query(notImplemented), // T5
-    renamePasskey: mutation(notImplemented), // T5
-    revokePasskey: mutation(notImplemented), // T5
+    listPasskeys: listPasskeys(),
+    renamePasskey: renamePasskey(),
+    revokePasskey: revokePasskey(),
     // Internal mutations/queries (not client-callable, `_`-prefixed, reachable from the actions above
     // via `runMutation`/`runQuery` — the `scheduler:_enqueue` convention).
     _storeChallenge: _storeChallenge(config),
