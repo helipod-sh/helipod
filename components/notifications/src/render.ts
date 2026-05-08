@@ -1,5 +1,6 @@
 import type { NotificationsConfig, Channel, InlineTemplate } from "./config";
-import type { EmailContent, InAppContent, SmsPayload, SendResult } from "./provider";
+import type { EmailContent, InAppContent, SmsPayload, SendResult, EmailProvider, SmsProvider } from "./provider";
+import { NotificationSendError } from "./provider";
 
 /** Drop `undefined`-valued keys before a `db.insert`/`db.replace` — the syscall codec rejects
  *  `undefined`; omit rather than null it out. Mirrors `components/scheduler/src/facade.ts`'s `compact`. */
@@ -71,22 +72,64 @@ export interface DeliverEntry {
   idempotencyKey?: string;
 }
 
-/** Resolve the channel's provider and deliver. Network I/O — called ONLY from the driver's action
- *  context or the action-mode `sendNow`, never a mutation. Throws on provider failure (the caller
- *  records `failed`). Passes `idempotencyKey` through to the provider's native header when set. */
-export async function deliverOutbound(config: NotificationsConfig, e: DeliverEntry): Promise<SendResult> {
-  if (e.channel === "email") {
+export interface DeliverOutcome extends SendResult {
+  /** The provider that ultimately succeeded (or, if throwing, unused — see the thrown error's
+   *  combined message instead). */
+  providerName: string;
+}
+
+/** The channel's ordered provider list — `[provider, ...fallbacks]` — each paired with its
+ *  diagnostic label (its own `.name`, else a positional default), plus the channel's `from`
+ *  address. Throws if the channel isn't configured at all (same guard `deliverOutbound` always
+ *  had). */
+function providerList(config: NotificationsConfig, channel: "email" | "sms"): { from: string; list: Array<{ provider: EmailProvider | SmsProvider; label: string }> } {
+  if (channel === "email") {
     const ch = config.channels.email;
     if (!ch) throw new Error("email channel not configured");
-    const c = e.payload as EmailContent;
-    return ch.provider.send(
-      compact({ to: e.to, from: ch.from, subject: c.subject, text: c.text, html: c.html, idempotencyKey: e.idempotencyKey }),
-    );
+    const all: EmailProvider[] = [ch.provider, ...(ch.fallbacks ?? [])];
+    return { from: ch.from, list: all.map((p, i) => ({ provider: p, label: p.name ?? (i === 0 ? "primary" : `fallback-${i}`) })) };
   }
   const ch = config.channels.sms;
   if (!ch) throw new Error("sms channel not configured");
+  const all: SmsProvider[] = [ch.provider, ...(ch.fallbacks ?? [])];
+  return { from: ch.from, list: all.map((p, i) => ({ provider: p, label: p.name ?? (i === 0 ? "primary" : `fallback-${i}`) })) };
+}
+
+/** One provider's `send` call — the SAME per-channel `compact({...})` dispatch `deliverOutbound`
+ *  always did (unchanged field mapping from before this slice), just parameterized over which
+ *  provider/`from` to use. */
+async function sendVia(channel: "email" | "sms", provider: EmailProvider | SmsProvider, from: string, e: DeliverEntry): Promise<SendResult> {
+  if (channel === "email") {
+    const c = e.payload as EmailContent;
+    return (provider as EmailProvider).send(
+      compact({ to: e.to, from, subject: c.subject, text: c.text, html: c.html, idempotencyKey: e.idempotencyKey }),
+    );
+  }
   const p = e.payload as SmsPayload;
-  return ch.provider.send(
-    compact({ to: e.to, from: ch.from, body: p.body, kind: p.kind, idempotencyKey: e.idempotencyKey }),
+  return (provider as SmsProvider).send(
+    compact({ to: e.to, from, body: p.body, kind: p.kind, idempotencyKey: e.idempotencyKey }),
   );
+}
+
+/** Resolve the channel's ordered provider list and try each in turn until one succeeds (provider-
+ *  level failover — see the fallback design doc, decisions 3/4). Network I/O — called ONLY from the
+ *  driver's action context or the action-mode `sendNow`, never a mutation. On a delivery attempt
+ *  where EVERY provider fails, throws a combined `NotificationSendError` whose `retryable` is the
+ *  OR across every tried provider's own classification (decision 4) — so N2's existing
+ *  `_markResult` retry/dead-letter logic needs no change to understand a fallback-aware failure. */
+export async function deliverOutbound(config: NotificationsConfig, e: DeliverEntry): Promise<DeliverOutcome> {
+  const { from, list } = providerList(config, e.channel);
+  const failures: string[] = [];
+  let anyRetryable = false;
+  for (const { provider, label } of list) {
+    try {
+      const res = await sendVia(e.channel, provider, from, e);
+      return { ...res, providerName: label };
+    } catch (err) {
+      const retryable = err instanceof NotificationSendError ? err.retryable : true;
+      anyRetryable = anyRetryable || retryable;
+      failures.push(`[${label}] ${String(err)}`);
+    }
+  }
+  throw new NotificationSendError(failures.join("; "), { retryable: anyRetryable });
 }
