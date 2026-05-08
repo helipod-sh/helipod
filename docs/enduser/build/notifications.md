@@ -186,7 +186,8 @@ Three adapters ship in N1:
 | `twilioSms({ accountSid, authToken })` | sms | SMS and WhatsApp (a `kind: "whatsapp"` message is addressed with the `whatsapp:` prefix). |
 | `consoleSms()` | sms | Zero-config dev provider; logs to the server console. |
 
-Selecting one active provider per channel is the N1 model (multi-provider fallback is N3).
+A channel can configure more than one provider — see [Provider fallback](#provider-fallback) below
+for automatic same-channel failover (e.g. Resend down → SES).
 
 ### Writing your own provider
 
@@ -215,6 +216,67 @@ export function myEmail(opts: { apiKey: string }): EmailProvider {
 
 Credentials live in the provider closure, never in a message row. The SMS seam (`SmsProvider`) is
 the same shape with an `SmsMessage` (`to`, `from`, `body`, `kind?`).
+
+## Provider fallback
+
+A channel can list additional providers tried, in order, after `provider` fails — all within the
+**same** delivery attempt (no extra retry/backoff round-trip):
+
+```ts
+defineNotifications({
+  channels: {
+    email: {
+      provider: resendEmail({ apiKey: RESEND_KEY }),
+      from: "no-reply@example.com",
+      fallbacks: [sesEmail({ /* … */ })], // tried only if resendEmail's send() throws
+    },
+  },
+});
+```
+
+The effective ordered list is `[provider, ...fallbacks]`. On a delivery attempt, `deliverOutbound`
+walks the whole list:
+
+- It stops at the **first** provider whose `send` succeeds.
+- A failure — **even a permanent, non-retryable one** (`NotificationSendError({ retryable: false })`,
+  e.g. a 4xx bad-recipient response) — does **not** stop the walk; a later provider is still tried.
+  A 4xx from Resend doesn't necessarily mean SES would also reject the recipient, so the walk never
+  short-circuits on a middle failure.
+- Only if **every** provider in the list fails does the attempt itself fail, re-entering the normal
+  [retry](#retries)/backoff/dead-letter path exactly as a single-provider failure always has. That
+  attempt's overall `retryable` verdict is the OR across every provider tried — retryable if *any*
+  of them was, non-retryable only if *all* of them were.
+
+**Observability.** The `messages` row records which provider ultimately delivered it, in a
+`providerName` field — visible in the dashboard's data browser. A provider's diagnostic label is its
+own `.name` if it sets one, else a positional default: `"primary"` (index 0), `"fallback-1"`,
+`"fallback-2"`, and so on.
+
+```ts
+defineNotifications({
+  channels: {
+    email: {
+      provider: resendEmail({ apiKey: RESEND_KEY }),      // labeled "primary"
+      fallbacks: [{ ...sesEmail({ /* … */ }), name: "ses-backup" }], // labeled "ses-backup"
+      from: "no-reply@example.com",
+    },
+  },
+});
+```
+
+**Webhooks with multiple providers.** The delivery webhook route is unchanged
+(`POST /api/notifications/webhooks/:channel`, keyed by *channel*, never by provider — no vendor-
+dashboard-registered callback URL needs to change). When a channel has fallbacks, an inbound webhook
+tries every configured provider's `verify()` in order and applies events from whichever one matches.
+Only the *primary* provider (index 0) receives the channel-level `webhookSecret`; every fallback
+receives no secret from the config and is expected to carry its own signing material internally —
+bake a fallback's own secret into its own factory args, the same way `twilioSms({ accountSid,
+authToken })` already does, rather than relying on a single shared `webhookSecret`.
+
+**What this is not.** This is *same-channel* fallback only — one email provider failing over to
+another email provider (or one SMS provider to another). *Cross-channel* fallback (e.g. an email
+send failing over to SMS) and time-of-day/quiet-hours-aware routing are different, unrelated
+features and remain deferred — see [What's deferred](#whats-deferred).
 
 ## Delivery reliability
 
@@ -593,7 +655,10 @@ release:
   "digest after N items" rather than purely time-windowed), and a crash-orphan digest reaper (a
   `flushedAt`-claimed-but-never-delivered row is not yet automatically recovered, unlike the queued-
   message reclaim in [Delivery reliability](#delivery-reliability)).
-- **Delivery-mechanics** — multi-channel provider fallback (e.g. retry a failed email send over SMS)
-  and time-of-day/quiet-hours-aware routing.
+- **Delivery-mechanics** — *cross-channel* provider fallback (e.g. retry a failed email send over
+  SMS) and time-of-day/quiet-hours-aware routing. (*Same-channel* multi-provider fallback — e.g.
+  Resend failing over to SES within the email channel — has shipped; see
+  [Provider fallback](#provider-fallback). These are distinct features: the shipped one never
+  crosses channels.)
 - **Beyond the arc** — a push channel (FCM/APNs/Expo); a markup/visual template registry
   (Liquid/MJML). Inline typed template functions are the v1 authoring model.
