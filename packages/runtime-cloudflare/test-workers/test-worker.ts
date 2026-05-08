@@ -45,6 +45,10 @@ export class FixtureStackbaseDO extends StackbaseDurableObject {
   }
 }
 
+// THROWAWAY audit re-export (cloudflare-feature-completeness audit) — a DO class must be exported
+// from the Worker's main module for workerd to instantiate it.
+export { AuditDO } from "./audit-fixture";
+
 // A Worker needs a default handler even when tests drive the DOs directly.
 export default {
   async fetch(): Promise<Response> {

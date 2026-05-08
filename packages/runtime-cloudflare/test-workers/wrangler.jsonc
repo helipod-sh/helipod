@@ -7,10 +7,12 @@
   "durable_objects": {
     "bindings": [
       { "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDO" },
-      { "name": "SQL_PROBE", "class_name": "SqlProbeDO" }
+      { "name": "SQL_PROBE", "class_name": "SqlProbeDO" },
+      { "name": "AUDIT_DO", "class_name": "AuditDO" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO", "SqlProbeDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO", "SqlProbeDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["AuditDO"] }
   ]
 }
