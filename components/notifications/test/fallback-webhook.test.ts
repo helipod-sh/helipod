@@ -28,6 +28,17 @@ function primaryProvider(): EmailProvider {
     webhook: { verify: () => false, parse: () => [] },
   };
 }
+// A contract-VIOLATING primary whose `verify` THROWS instead of returning false on an unrecognized
+// signature (real risk for custom/third-party providers — e.g. a header split or base64 decode on
+// absent material). The loop must treat the throw as "did not verify" and try the fallback, never
+// abort and swallow a legitimately-signed fallback webhook.
+function throwingPrimaryProvider(): EmailProvider {
+  return {
+    channel: "email",
+    async send() { return { providerMessageId: "re_1" }; },
+    webhook: { verify: () => { throw new Error("primary can't parse this body"); }, parse: () => [] },
+  };
+}
 function fallbackProvider(events: WebhookEvent[]): EmailProvider {
   return {
     channel: "email", name: "fallback-1",
@@ -37,9 +48,9 @@ function fallbackProvider(events: WebhookEvent[]): EmailProvider {
   };
 }
 
-function comp(fallback: EmailProvider): ComponentDefinition {
+function comp(fallback: EmailProvider, primary: EmailProvider = primaryProvider()): ComponentDefinition {
   const config = resolveNotificationsConfig({
-    channels: { email: { provider: primaryProvider(), from: "x@test", webhookSecret: "PRIMARY_SECRET", fallbacks: [fallback], templates: { hi: () => ({ subject: "S", text: "T" }) } } },
+    channels: { email: { provider: primary, from: "x@test", webhookSecret: "PRIMARY_SECRET", fallbacks: [fallback], templates: { hi: () => ({ subject: "S", text: "T" }) } } },
     driverIntervalMs: 10_000,
   });
   return defineComponent({
@@ -83,5 +94,26 @@ describe("notifications — fallback webhook verify loop", () => {
     const req = new Request("https://app.test/api/notifications/webhooks/email", { method: "POST", headers: {}, body: "{}" });
     const res = await built.runtime.runHttpAction("notifications:webhookHttp", req);
     expect(res.status).toBe(401);
+  });
+
+  it("a THROWING primary verify does not swallow a legitimately-signed FALLBACK webhook — the loop continues past the throw", async () => {
+    built = await makeNotifRuntime(
+      comp(fallbackProvider([{ providerMessageId: "re_1", deliveryStatus: "delivered" }]), throwingPrimaryProvider()),
+      appModules,
+    );
+    await seed(built);
+    const req = new Request("https://app.test/api/notifications/webhooks/email", {
+      method: "POST", headers: { "x-fallback-secret": "FALLBACK_SECRET" }, body: "{}",
+    });
+    const res = await built.runtime.runHttpAction("notifications:webhookHttp", req);
+    expect(res.status).toBe(200); // NOT a 500 — the primary's throw was treated as "did not verify"
+    expect((await built.readTable("notifications/messages"))[0]).toMatchObject({ deliveryStatus: "delivered" });
+  });
+
+  it("401s (never 500) when the only provider's verify THROWS and nothing else matches", async () => {
+    built = await makeNotifRuntime(comp(fallbackProvider([]), throwingPrimaryProvider()), appModules);
+    const req = new Request("https://app.test/api/notifications/webhooks/email", { method: "POST", headers: {}, body: "{}" });
+    const res = await built.runtime.runHttpAction("notifications:webhookHttp", req);
+    expect(res.status).toBe(401); // a throw fails CLOSED — never accepted, never a 500
   });
 });

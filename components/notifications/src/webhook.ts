@@ -88,8 +88,19 @@ export function makeWebhookModules(config: NotificationsConfig): Record<string, 
     const publicUrl = publicUrlOf(request);
     let matched: NotificationProvider | undefined;
     for (const { provider, secret } of candidates) {
-      // eslint-disable-next-line no-await-in-loop
-      const ok = await provider.webhook!.verify({ headers: request.headers, rawBody, url: publicUrl, secret });
+      // A provider's `verify()` MUST return false (never throw) on a signature it doesn't recognize,
+      // but the contract can't enforce that for a custom/third-party provider. Treat a THROW as "this
+      // provider did not verify" and try the next candidate — otherwise a throwing PRIMARY (handed a
+      // body meant for a fallback, e.g. a base64/header decode on absent material) would abort the
+      // whole loop and swallow a legitimately-signed FALLBACK webhook (500, delivery-status lost).
+      // A throw still never accepts: an unhandled loop simply ends with `matched` unset → 401.
+      let ok = false;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        ok = await provider.webhook!.verify({ headers: request.headers, rawBody, url: publicUrl, secret });
+      } catch {
+        ok = false;
+      }
       if (ok) { matched = provider; break; }
     }
     if (!matched) return new Response("invalid signature", { status: 401 }); // BEFORE any write

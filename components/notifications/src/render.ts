@@ -121,15 +121,22 @@ export async function deliverOutbound(config: NotificationsConfig, e: DeliverEnt
   const { from, list } = providerList(config, e.channel);
   const failures: string[] = [];
   let anyRetryable = false;
+  let lastError: unknown;
   for (const { provider, label } of list) {
     try {
       const res = await sendVia(e.channel, provider, from, e);
       return { ...res, providerName: label };
     } catch (err) {
+      lastError = err;
       const retryable = err instanceof NotificationSendError ? err.retryable : true;
       anyRetryable = anyRetryable || retryable;
       failures.push(`[${label}] ${String(err)}`);
     }
   }
+  // Zero-behavior-change for the common NO-FALLBACK case: a single-provider list re-throws the
+  // provider's OWN error verbatim (class, message, and `retryable`), byte-identical to the
+  // pre-fallback single-`provider.send()` path — no `[primary]` prefix, no re-wrap. Only a genuine
+  // multi-provider walk combines the per-provider failures into one OR-classified error.
+  if (list.length === 1) throw lastError;
   throw new NotificationSendError(failures.join("; "), { retryable: anyRetryable });
 }

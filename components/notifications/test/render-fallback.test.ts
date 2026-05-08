@@ -53,4 +53,22 @@ describe("deliverOutbound — provider-list fallback", () => {
     await expect(deliverOutbound(configFail, { channel: "email", to: "u@test", payload: { subject: "s", text: "t" } }))
       .rejects.toThrow(/bad recipient/);
   });
+
+  it("zero-behavior-change: a single-provider failure re-throws the provider's OWN error VERBATIM — no '[primary]' wrapping, class and message and retryable byte-identical to the pre-fallback path", async () => {
+    // NotificationSendError (permanent) — the exact object the provider threw must propagate.
+    const permanent = configWith(scripted("permanent"), []);
+    const err = await deliverOutbound(permanent, { channel: "email", to: "u@test", payload: { subject: "s", text: "t" } })
+      .then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(NotificationSendError);
+    expect(err.message).toBe("bad recipient");          // NOT "[primary] Error: bad recipient"
+    expect(err.message).not.toMatch(/\[primary\]/);
+    expect(err.retryable).toBe(false);
+
+    // A plain Error (retryable path) is likewise re-thrown verbatim, not re-wrapped.
+    const transient = configWith(scripted("retryable"), []);
+    const err2 = await deliverOutbound(transient, { channel: "email", to: "u@test", payload: { subject: "s", text: "t" } })
+      .then(() => null, (e) => e);
+    expect(err2.message).toBe("transient 503");
+    expect(err2.message).not.toMatch(/\[primary\]/);
+  });
 });

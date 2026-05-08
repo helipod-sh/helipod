@@ -273,6 +273,14 @@ receives no secret from the config and is expected to carry its own signing mate
 bake a fallback's own secret into its own factory args, the same way `twilioSms({ accountSid,
 authToken })` already does, rather than relying on a single shared `webhookSecret`.
 
+Because the route accepts an event as soon as *any* configured provider's `verify()` passes, the
+endpoint's trust surface is the union of every provider's verification — so configure only providers
+whose `verify()` you trust as a fallback on a given channel. A provider's `verify()` must return
+`false` on a signature it doesn't recognize; if a custom provider `verify()` *throws* instead, the
+route treats that as "did not verify" and moves on to the next candidate (a throw never accepts and
+never 500s — an unrecognized request still ends in `401`). Each event is parsed by the *matched*
+provider's own `parse()`, so a request only ever mutates message state its own signer authorized.
+
 **What this is not.** This is *same-channel* fallback only — one email provider failing over to
 another email provider (or one SMS provider to another). *Cross-channel* fallback (e.g. an email
 send failing over to SMS) and time-of-day/quiet-hours-aware routing are different, unrelated
