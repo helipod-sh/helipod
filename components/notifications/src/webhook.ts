@@ -11,12 +11,22 @@ const RANK: Record<DeliveryStatus, number> = {
   dropped: 1, bounced: 2, complained: 2, failed_permanent: 2, delivered: 3, opened: 4, clicked: 5,
 };
 
-/** Resolve the configured provider for a webhook path segment (the CHANNEL name: "email"|"sms"),
- *  plus its signing secret. One provider per channel in N1/N2. */
-function resolveWebhookProvider(config: NotificationsConfig, channel: string): { provider?: NotificationProvider; secret?: string } {
-  if (channel === "email") return { provider: config.channels.email?.provider, secret: config.channels.email?.webhookSecret };
-  if (channel === "sms") return { provider: config.channels.sms?.provider, secret: undefined };
-  return {};
+/** Resolve the ordered candidate providers for a webhook path segment (the CHANNEL name:
+ *  "email"|"sms") — `[provider, ...fallbacks]` — each paired with the secret to pass it (only the
+ *  PRIMARY, index 0, gets the channel-level `webhookSecret`; every fallback gets `secret: undefined`
+ *  and is expected to carry its own verification material internally — decision 9). */
+function resolveWebhookProviders(config: NotificationsConfig, channel: string): Array<{ provider: NotificationProvider; secret?: string }> {
+  if (channel === "email") {
+    const ch = config.channels.email;
+    if (!ch) return [];
+    return [{ provider: ch.provider, secret: ch.webhookSecret }, ...(ch.fallbacks ?? []).map((p) => ({ provider: p, secret: undefined }))];
+  }
+  if (channel === "sms") {
+    const ch = config.channels.sms;
+    if (!ch) return [];
+    return [{ provider: ch.provider, secret: undefined }, ...(ch.fallbacks ?? []).map((p) => ({ provider: p, secret: undefined }))];
+  }
+  return [];
 }
 
 /** Reconstruct the PUBLIC URL a URL-signing provider (Twilio) signed over, honoring a TLS-terminating
@@ -68,15 +78,23 @@ export function makeWebhookModules(config: NotificationsConfig): Record<string, 
   const webhookHttp = httpAction(async (ctx, request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const channel = url.pathname.slice(WEBHOOK_PREFIX.length); // "email" | "sms"
-    const { provider, secret } = resolveWebhookProvider(config, channel);
-    if (!provider?.webhook) return new Response("unknown webhook channel", { status: 404 });
+    const candidates = resolveWebhookProviders(config, channel).filter((c) => c.provider.webhook);
+    if (candidates.length === 0) return new Response("unknown webhook channel", { status: 404 });
     const rawBody = await request.text();
     // Sign-check against the PUBLIC url (proxy-forwarded), so URL-signing providers (Twilio) verify
-    // behind the documented TLS-terminating proxy. Verify strictly BEFORE any read/write.
-    const ok = await provider.webhook.verify({ headers: request.headers, rawBody, url: publicUrlOf(request), secret });
-    if (!ok) return new Response("invalid signature", { status: 401 }); // BEFORE any write
+    // behind the documented TLS-terminating proxy. Verify strictly BEFORE any read/write. Try every
+    // configured provider's verify in order — first match wins (a fallback's own webhook may be
+    // registered at the vendor with different signing material than the primary's).
+    const publicUrl = publicUrlOf(request);
+    let matched: NotificationProvider | undefined;
+    for (const { provider, secret } of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await provider.webhook!.verify({ headers: request.headers, rawBody, url: publicUrl, secret });
+      if (ok) { matched = provider; break; }
+    }
+    if (!matched) return new Response("invalid signature", { status: 401 }); // BEFORE any write
     let events;
-    try { events = provider.webhook.parse(rawBody); } catch { return new Response("bad payload", { status: 400 }); }
+    try { events = matched.webhook!.parse(rawBody); } catch { return new Response("bad payload", { status: 400 }); }
     for (const e of events) {
       await (ctx as ActionCtx).runMutation<null>("notifications:_applyWebhookEvent", compact({ providerMessageId: e.providerMessageId, deliveryStatus: e.deliveryStatus, detail: e.detail }));
     }
