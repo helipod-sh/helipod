@@ -15,6 +15,10 @@ export interface EmailChannelConfig {
   templates?: EmailTemplates;
   /** Signing secret for this provider's inbound delivery webhook (e.g. Resend `whsec_…`). */
   webhookSecret?: string;
+  /** Additional providers tried, in order, after `provider` fails, within the SAME delivery
+   *  attempt (provider-level failover — see the fallback design doc). Effective ordered list is
+   *  `[provider, ...fallbacks]`. */
+  fallbacks?: EmailProvider[];
 }
 
 /** Retry policy for a failed email/SMS send (N2). `maxAttempts` counts total delivery attempts
@@ -30,6 +34,7 @@ export interface SmsChannelConfig {
   provider: SmsProvider;
   from: string;
   templates?: SmsTemplates;
+  fallbacks?: SmsProvider[];
 }
 export interface InAppChannelConfig {
   enabled: true;

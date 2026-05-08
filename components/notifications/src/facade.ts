@@ -111,6 +111,7 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         if (!claimed) continue;
         let ok = false;
         let providerMessageId: string | undefined;
+        let providerName: string | undefined;
         let error: string | undefined;
         try {
           // Same auto-derived provider Idempotency-Key the driver uses (`msg:<rowId>`), so an N2
@@ -118,13 +119,14 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
           const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
           ok = true;
           providerMessageId = res.providerMessageId;
+          providerName = res.providerName;
           results.push(res);
         } catch (e) {
           error = String(e);
         }
         // Strip undefined keys — `runMutation`'s arg codec rejects an undefined-valued key (same
         // `jsonToConvex` the driver's `_markResult` call must `compact` around).
-        await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error }) as unknown as Record<string, unknown>);
+        await api.runMutation("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, providerName, error }) as unknown as Record<string, unknown>);
       }
       return { messageIds: r.messageIds, results, suppressed: r.suppressed, deferred: r.deferred };
     },

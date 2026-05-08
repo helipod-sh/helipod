@@ -46,6 +46,7 @@ export const notificationsSchema = defineSchema({
     // Recorded unconditionally here (the compliance/suppression signal). `v.literal("complained")`
     // stays in the deliveryStatus union only for the pre-delivery no-`delivered`-yet edge.
     complainedAt: v.optional(v.number()),
+    providerName: v.optional(v.string()), // the provider that succeeded a send (fallback observability)
   })
     // Driver sweep: scan `status:"queued"` cheaply (never `"sending"`/`"sent"`/`"failed"`).
     .index("byStatus", ["status"])

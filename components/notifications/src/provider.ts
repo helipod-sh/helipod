@@ -40,12 +40,16 @@ export interface EmailProvider {
   channel: "email";
   send(m: EmailMessage): Promise<SendResult>;
   webhook?: ProviderWebhook;
+  /** Optional diagnostic label recorded as `messages.providerName` on a successful send via this
+   *  provider. Defaults to a positional label ("primary" / "fallback-1" / "fallback-2" / …). */
+  name?: string;
 }
 
 export interface SmsProvider {
   channel: "sms";
   send(m: SmsMessage): Promise<SendResult>;
   webhook?: ProviderWebhook;
+  name?: string;
 }
 
 /** The base seam: any per-channel provider. `in_app` has no provider — the engine writes the row. */
