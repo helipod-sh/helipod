@@ -182,14 +182,17 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
   // `retryable` (undefined → treated as retryable) and `config.retry.maxAttempts` decide whether a
   // failure retries with a jittered backoff or dead-letters. Clears the transient `payload` (rendered
   // body, possibly OTP/PII) on sent/dead-letter; KEEPS it across a retry (needed to resend).
-  const _markResult = mutation(async (ctx: MutationCtx, args: { messageId: string; ok: boolean; providerMessageId?: string; error?: string; retryable?: boolean }): Promise<null> => {
+  const _markResult = mutation(async (ctx: MutationCtx, args: { messageId: string; ok: boolean; providerMessageId?: string; providerName?: string; error?: string; retryable?: boolean }): Promise<null> => {
     const row = await ctx.db.get(args.messageId);
     if (row === null || row.status !== "sending") return null; // must be mid-send — defensive
     const now = ctx.now();
     if (args.ok) {
       // `compact` drops the `undefined` keys, so `db.replace` writes a doc with NO `payload`/`error`
-      // key — that absence IS the clear (both are `v.optional`).
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, error: undefined, payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
+      // key — that absence IS the clear (both are `v.optional`). `providerName` is written ONLY on
+      // this success branch (fallback decision 5) — the failure/retry/dead-letter branch below never
+      // sets it; the concatenated `error` string from `deliverOutbound` already names every provider
+      // tried on a failed attempt.
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, providerName: args.providerName, error: undefined, payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
       return null;
     }
     const attempts = ((row.attempts as number | undefined) ?? 0) + 1;

@@ -118,24 +118,28 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
           attemptedThisPass.add(m._id); // claimed — about to deliver; guard against a same-pass re-entry
           let ok = false;
           let providerMessageId: string | undefined;
+          let providerName: string | undefined;
           let error: string | undefined;
           let retryable: boolean | undefined;
           try {
             // Auto-derive the provider Idempotency-Key from the stable row id (defense-in-depth: a
             // retry of the same row reuses it, so a supporting provider dedups). Independent of the
-            // caller's optional `sendReceipts` idempotencyKey.
+            // caller's optional `sendReceipts` idempotencyKey. `deliverOutbound` walks the channel's
+            // ordered [provider, ...fallbacks] list itself — this attempt's `retryable` verdict (used
+            // only in the catch below) is already the OR across every provider it tried.
             const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
             ok = true;
             providerMessageId = res.providerMessageId;
+            providerName = res.providerName;
           } catch (e) {
             error = String(e);
             retryable = e instanceof NotificationSendError ? e.retryable : true; // plain Error → retryable
           }
-          // `providerMessageId`/`error`/`retryable` may be undefined. `runFunction`'s arg codec
-          // (`jsonToConvex`) REJECTS an undefined-valued key (it does NOT drop it) — so strip them with
-          // `compact` before the call, exactly as the insert path does; `_markResult` reads the absent
-          // keys as undefined.
-          await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, error, retryable }) as unknown as JSONValue);
+          // `providerMessageId`/`providerName`/`error`/`retryable` may be undefined. `runFunction`'s
+          // arg codec (`jsonToConvex`) REJECTS an undefined-valued key (it does NOT drop it) — so strip
+          // them with `compact` before the call, exactly as the insert path does; `_markResult` reads
+          // the absent keys as undefined.
+          await ctx.runFunction("notifications:_markResult", compact({ messageId: m._id, ok, providerMessageId, providerName, error, retryable }) as unknown as JSONValue);
         } catch (e) {
           console.error(`[notifications] driver: message ${m._id} failed mid-pass:`, e);
         }
