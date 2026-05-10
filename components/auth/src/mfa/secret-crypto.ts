@@ -1,9 +1,25 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-
-const ALGO = "aes-256-gcm";
+// WHY WebCrypto (`crypto.subtle`) rather than node:crypto's `createCipheriv`/`createDecipheriv`:
+// `createCipheriv` is NOT a function on Cloudflare Workers / Durable Objects (workerd), even under
+// `nodejs_compat` — proven in the 2026-04-13 Cloudflare feature-completeness audit (gap 8b:
+// "`createCipheriv is not a function`"), which broke TOTP-secret storage on a DO. `crypto.subtle`'s
+// AES-GCM is available on BOTH Node 18+/Bun AND workerd, so this path is portable across every
+// deployment target with no host fork and NO `node:crypto` dependency (the IV comes from the
+// WebCrypto-native `crypto.getRandomValues`). AES-GCM here is the identical algorithm to node's
+// "aes-256-gcm"; the ONLY representational difference is that `crypto.subtle.encrypt` returns the
+// ciphertext with the 16-byte GCM auth tag APPENDED, whereas node's cipher exposes the tag
+// separately via `getAuthTag()`. We split the trailing tag back out on encrypt (and re-append it on
+// decrypt) so the on-disk envelope stays byte-for-byte identical to the previous node:crypto format
+// — an envelope written by the old code decrypts unchanged here and vice versa (proven by the
+// format-compat test), so no envelope version bump and no migration is needed.
 const KEY_BYTES = 32;
 const IV_BYTES = 12; // 96-bit, standard for GCM
+const GCM_TAG_BYTES = 16; // 128-bit auth tag — WebCrypto AES-GCM default; matches node's getAuthTag()
 const ENVELOPE_VERSION = "v1";
+
+/** Import a raw 32-byte keyring key as a non-extractable WebCrypto AES-GCM key for one operation. */
+async function importAesGcmKey(keyMaterial: Buffer, usage: "encrypt" | "decrypt"): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", new Uint8Array(keyMaterial), { name: "AES-GCM" }, false, [usage]);
+}
 
 /** A single decryption key in the deployment's MFA keyring. `key` is exactly 32 bytes. */
 export interface MfaKey {
@@ -47,23 +63,34 @@ export function decodeKeyMaterial(raw: string): Buffer {
  * the resulting envelope cannot be transplanted onto another user's row.
  *
  * Envelope shape: `v1.<keyId>.<ivB64url>.<ctB64url>.<tagB64url>`.
+ *
+ * Async because `crypto.subtle` is Promise-based (unlike node's synchronous cipher); callers thread
+ * the `await` through (see `mfa/functions.ts`).
  */
-export function encryptSecret(keyring: MfaKey[], plaintext: string, aadUserId: string): string {
+export async function encryptSecret(keyring: MfaKey[], plaintext: string, aadUserId: string): Promise<string> {
   const primary = keyring[0];
   if (!primary) throw new Error("encryptSecret: keyring is empty");
 
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGO, primary.key, iv);
-  cipher.setAAD(Buffer.from(aadUserId));
-  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const key = await importAesGcmKey(primary.key, "encrypt");
+  const combined = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: new Uint8Array(Buffer.from(aadUserId)) },
+      key,
+      new Uint8Array(Buffer.from(plaintext, "utf8")),
+    ),
+  );
+  // `crypto.subtle.encrypt` returns ct||tag; split the trailing 16-byte tag back out so the envelope
+  // matches node:crypto's separate-tag format exactly (see the file header for why).
+  const ct = combined.subarray(0, combined.length - GCM_TAG_BYTES);
+  const tag = combined.subarray(combined.length - GCM_TAG_BYTES);
 
   return [
     ENVELOPE_VERSION,
     primary.id,
-    iv.toString("base64url"),
-    ct.toString("base64url"),
-    tag.toString("base64url"),
+    Buffer.from(iv).toString("base64url"),
+    Buffer.from(ct).toString("base64url"),
+    Buffer.from(tag).toString("base64url"),
   ].join(".");
 }
 
@@ -74,8 +101,10 @@ export function encryptSecret(keyring: MfaKey[], plaintext: string, aadUserId: s
  * longer be `keyring[0]`). Throws a generic error on any failure: malformed
  * envelope, unknown keyId, wrong `aadUserId`, or a tampered
  * ciphertext/auth-tag.
+ *
+ * Async because `crypto.subtle` is Promise-based (see `encryptSecret`).
  */
-export function decryptSecret(keyring: MfaKey[], envelope: string, aadUserId: string): string {
+export async function decryptSecret(keyring: MfaKey[], envelope: string, aadUserId: string): Promise<string> {
   const parts = envelope.split(".");
   if (parts.length !== 5 || parts.some((p) => !p)) throw new Error("invalid MFA secret envelope");
   const [version, keyId, ivB64, ctB64, tagB64] = parts as [string, string, string, string, string];
@@ -88,9 +117,17 @@ export function decryptSecret(keyring: MfaKey[], envelope: string, aadUserId: st
   const ct = Buffer.from(ctB64, "base64url");
   const tag = Buffer.from(tagB64, "base64url");
 
-  const decipher = createDecipheriv(ALGO, mfaKey.key, iv);
-  decipher.setAAD(Buffer.from(aadUserId));
-  decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(ct), decipher.final()]);
-  return plaintext.toString("utf8");
+  // `crypto.subtle.decrypt` expects ct||tag concatenated (the inverse of the split in `encryptSecret`)
+  // and throws on any authentication failure — wrong key, wrong AAD, or a flipped ct/tag byte — which
+  // is the same failure surface node's `decipher.final()` had, so every caller's try/catch is unchanged.
+  const combined = Buffer.concat([ct, tag]);
+  const key = await importAesGcmKey(mfaKey.key, "decrypt");
+  const plaintext = new Uint8Array(
+    await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, additionalData: new Uint8Array(Buffer.from(aadUserId)) },
+      key,
+      combined,
+    ),
+  );
+  return Buffer.from(plaintext).toString("utf8");
 }

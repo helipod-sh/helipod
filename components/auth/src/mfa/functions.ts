@@ -68,7 +68,7 @@ async function verifyTotpForEnrollment(
   if (enrollment.confirmedAt === undefined) return null; // inert (decision 4) — never gates/re-auths
   const mfa = config.mfa!;
   try {
-    const secret = decryptSecret(mfa.keyring, enrollment.secretEncrypted as string, userId);
+    const secret = await decryptSecret(mfa.keyring, enrollment.secretEncrypted as string, userId);
     const lastUsedStep = (enrollment.lastUsedStep as number | undefined) ?? -1;
     const matchedStep = verifyTotp(secret, code, ctx.now(), {
       algorithm: mfa.algorithm,
@@ -153,7 +153,7 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
       digits: mfa.digits,
       period: mfa.period,
     });
-    const secretEncrypted = encryptSecret(mfa.keyring, secret, userId); // AAD=userId (decision 3)
+    const secretEncrypted = await encryptSecret(mfa.keyring, secret, userId); // AAD=userId (decision 3)
 
     await ctx.db.insert(
       "mfaEnrollments",
@@ -184,7 +184,7 @@ export function makeMfaModules(config: AuthConfig): Record<string, RegisteredFun
 
     let matchedStep: number | null;
     try {
-      const secret = decryptSecret(mfa.keyring, enrollment.secretEncrypted as string, userId);
+      const secret = await decryptSecret(mfa.keyring, enrollment.secretEncrypted as string, userId);
       matchedStep = verifyTotp(secret, code, ctx.now(), {
         algorithm: mfa.algorithm,
         digits: mfa.digits,
