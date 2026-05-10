@@ -53,7 +53,29 @@ export interface SmsProvider {
 }
 
 /** The base seam: any per-channel provider. `in_app` has no provider — the engine writes the row. */
-export type NotificationProvider = EmailProvider | SmsProvider;
+export interface PushMessage {
+  to: string[];
+  title: string;
+  body: string;
+  data?: Record<string, unknown>;
+  idempotencyKey?: string;
+}
+export interface PushSendResult extends SendResult {
+  /** Tokens the provider reported as permanently unregistered/invalid — pruned by the caller
+   *  (the driver / `sendNow`) via `_pruneInvalidPushTokens`, never retried. */
+  invalidTokens?: string[];
+}
+export interface PushProvider {
+  channel: "push";
+  send(m: PushMessage): Promise<PushSendResult>;
+  // no `webhook?` — push invalid-token detection is synchronous (send response), no async webhook.
+}
+export type NotificationProvider = EmailProvider | SmsProvider | PushProvider;
+export interface PushContent {
+  title: string;
+  body: string;
+  data?: Record<string, unknown>;
+}
 
 /** Rendered per-channel CONTENT (the output of an inline template function). Distinct from the
  *  wire *Message types above (which add `to`/`from`): content is channel payload only. */

@@ -102,13 +102,18 @@ export async function recordSend(db: GuestDatabaseWriter, now: number, config: N
         read: false, createdAt: now, messageId,
       }));
       messageIds.push(messageId);
-    } else {
+    } else if (channel === "email" || channel === "sms") {
+      // NOTE: "push" is handled by a dedicated branch added in T3 (device-token snapshot + fan-out) —
+      // narrowed out of this generic email/sms path here so the type checker (and this function) never
+      // mis-routes a push send through `renderSms`.
       const payload: EmailContent | SmsPayload = channel === "email" ? renderEmail(config, args.template, args.data) : renderSms(config, args.template, args.data);
       const messageId = (await db.insert("messages", compact({
         channel, to, status: "queued", createdAt: now, idempotencyKey: args.idempotencyKey, templateKey, dataHash, payload: payload as unknown as Value,
       }))) as string;
       messageIds.push(messageId);
       queued.push({ _id: messageId, channel, to, payload });
+    } else {
+      throw new Error(`send: channel "${channel}" is not yet supported`);
     }
   }
 
