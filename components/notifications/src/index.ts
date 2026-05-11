@@ -8,6 +8,7 @@ import { makeWebhookModules } from "./webhook";
 import { makePreferenceModules } from "./preferences";
 import { makeTopicModules } from "./topics";
 import { makeDigestModules } from "./digest";
+import { makePushModules } from "./push";
 import { notificationsDriver } from "./driver";
 
 // Seam + config + content types (for adapter authors and N4 auth reuse).
@@ -67,10 +68,15 @@ export function defineNotifications(opts: NotificationsOptions): ComponentDefini
       "every inbound email webhook will be rejected (401). Configure the provider's signing secret to enable delivery status.",
     );
   }
+  if (config.channels.push && Object.keys(config.channels.push.providers).length === 0) {
+    throw new Error(
+      '[notifications] channels.push is configured with an empty `providers` map — set at least one of expo/fcm/apns, or omit `channels.push` entirely.',
+    );
+  }
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,
-    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config) },
+    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config), ...makePushModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
     contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
     contextWrite: true,

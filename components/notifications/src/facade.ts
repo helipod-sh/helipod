@@ -5,6 +5,7 @@ import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
 import { applySetPreference } from "./preferences";
 import { subscribeImpl, unsubscribeImpl, type RecordSendBatchResult } from "./topics";
+import { registerPushTokenImpl, unregisterPushTokenImpl } from "./push";
 import { compact } from "./render";
 
 /**
@@ -36,6 +37,8 @@ export interface NotificationsContext {
   setPreference(args: { category: string; channel?: Channel; enabled: boolean }): Promise<null>;
   subscribe(args: { topic: string; userId?: string }): Promise<null>;
   unsubscribe(args: { topic: string; userId?: string }): Promise<null>;
+  registerPushToken(args: { token: string; provider: "expo" | "fcm" | "apns"; platform?: "ios" | "android" | "web"; userId?: string }): Promise<null>;
+  unregisterPushToken(args: { token: string; userId?: string }): Promise<null>;
   identity(): string | null;
 }
 
@@ -59,6 +62,16 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
       const userId = args.userId ?? (await facadeCallerId(cctx));
       if (!userId) throw new Error("not authenticated");
       return unsubscribeImpl(cctx.db as GuestDatabaseWriter, userId, args.topic);
+    },
+    async registerPushToken(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return registerPushTokenImpl(cctx.db as GuestDatabaseWriter, cctx.now, userId, args);
+    },
+    async unregisterPushToken(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return unregisterPushTokenImpl(cctx.db as GuestDatabaseWriter, userId, args);
     },
     identity: () => cctx.identity,
   };
