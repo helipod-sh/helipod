@@ -1,28 +1,31 @@
 import { mutation, query, type MutationCtx, type QueryCtx, type RegisteredFunction, type GuestDatabaseWriter } from "@stackbase/executor";
 import type { Value } from "@stackbase/values";
-import type { NotificationsConfig, SendArgs, Channel } from "./config";
+import type { NotificationsConfig, SendArgs, Channel, PushProviderKind } from "./config";
 import { digestWindowMs } from "./config";
-import type { EmailContent, SmsPayload, SendResult } from "./provider";
-import { compact, stableHash, renderEmail, renderSms, renderInApp, deliverOutbound, type DeliverEntry } from "./render";
+import type { EmailContent, SmsPayload, SendResult, PushContent } from "./provider";
+import { compact, stableHash, renderEmail, renderSms, renderInApp, renderPush, deliverOutbound, type DeliverEntry, type PushTokenEntry } from "./render";
 import { computeBackoff } from "./backoff";
 import { resolvePreference, isCritical } from "./preferences";
 
 /** Cap on queued rows a single driver pass drains (bounded work per iteration). */
 export const BATCH_CAP = 64;
 
-/** A queued email/SMS row the driver / `sendNow` delivers (returned by `_peekQueued` / `recordSend`).
- *  The provider Idempotency-Key is derived from `_id` (`msg:<_id>`) at delivery, not carried here. */
+/** A queued email/SMS/push row the driver / `sendNow` delivers (returned by `_peekQueued` /
+ *  `recordSend`). The provider Idempotency-Key is derived from `_id` (`msg:<_id>`) at delivery, not
+ *  carried here. `tokens` is push-only (the snapshotted device tokens at send time). */
 export interface QueuedMessage {
   _id: string;
-  channel: "email" | "sms";
+  channel: "email" | "sms" | "push";
   to: string;
-  payload: EmailContent | SmsPayload;
+  payload: EmailContent | SmsPayload | PushContent;
+  tokens?: PushTokenEntry[];
 }
 
 function resolveAddress(channel: Channel, to: SendArgs["to"]): string {
   if (channel === "email") { if (!to.email) throw new Error(`send: channel "email" requires to.email`); return to.email; }
   if (channel === "sms") { if (!to.phone) throw new Error(`send: channel "sms" requires to.phone`); return to.phone; }
-  if (!to.userId) throw new Error(`send: channel "in_app" requires to.userId`);
+  // in_app / push both address by userId — the recipient's identity, not a contact address.
+  if (!to.userId) throw new Error(`send: channel "${channel}" requires to.userId`);
   return to.userId;
 }
 
@@ -30,6 +33,7 @@ function assertConfigured(config: NotificationsConfig, channel: Channel): void {
   if (channel === "email" && !config.channels.email) throw new Error(`send: "email" channel is not configured on defineNotifications`);
   if (channel === "sms" && !config.channels.sms) throw new Error(`send: "sms" channel is not configured on defineNotifications`);
   if (channel === "in_app" && !config.channels.in_app) throw new Error(`send: "in_app" channel is not configured on defineNotifications`);
+  if (channel === "push" && !config.channels.push) throw new Error(`send: "push" channel is not configured on defineNotifications`);
 }
 
 /**
@@ -102,18 +106,26 @@ export async function recordSend(db: GuestDatabaseWriter, now: number, config: N
         read: false, createdAt: now, messageId,
       }));
       messageIds.push(messageId);
-    } else if (channel === "email" || channel === "sms") {
-      // NOTE: "push" is handled by a dedicated branch added in T3 (device-token snapshot + fan-out) —
-      // narrowed out of this generic email/sms path here so the type checker (and this function) never
-      // mis-routes a push send through `renderSms`.
+    } else if (channel === "push") {
+      // Snapshot the recipient's CURRENTLY registered device tokens at send time (not at delivery
+      // time) — a token registered/unregistered after this commit doesn't retroactively change what
+      // this logical send fans out to; a race is resolved in favor of whatever was durable at send.
+      const tokenRows = await db.query("pushTokens", "byUser").eq("userId", to).collect();
+      const tokens: PushTokenEntry[] = tokenRows.map((r) => ({ token: r.token as string, provider: r.provider as PushProviderKind }));
+      const content = renderPush(config, args.template, args.data);
+      const messageId = (await db.insert("messages", compact({
+        channel: "push", to, status: "queued", createdAt: now, idempotencyKey: args.idempotencyKey, templateKey, dataHash,
+        payload: content as unknown as Value, tokens: tokens.length ? (tokens as unknown as Value) : undefined,
+      }))) as string;
+      messageIds.push(messageId);
+      queued.push({ _id: messageId, channel: "push", to, payload: content, tokens });
+    } else {
       const payload: EmailContent | SmsPayload = channel === "email" ? renderEmail(config, args.template, args.data) : renderSms(config, args.template, args.data);
       const messageId = (await db.insert("messages", compact({
         channel, to, status: "queued", createdAt: now, idempotencyKey: args.idempotencyKey, templateKey, dataHash, payload: payload as unknown as Value,
       }))) as string;
       messageIds.push(messageId);
       queued.push({ _id: messageId, channel, to, payload });
-    } else {
-      throw new Error(`send: channel "${channel}" is not yet supported`);
     }
   }
 
@@ -160,10 +172,14 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
     const ready: QueuedMessage[] = [];
     let earliestDeferredAt: number | null = null;
     for (const r of rows) {
-      if (r.channel !== "email" && r.channel !== "sms") continue; // defensive: in_app is never queued
+      if (r.channel !== "email" && r.channel !== "sms" && r.channel !== "push") continue; // defensive: in_app is never queued
       const next = r.nextAttemptAt as number | undefined;
       if (next == null || next <= args.now) {
-        ready.push({ _id: r._id as string, channel: r.channel as "email" | "sms", to: r.to as string, payload: r.payload as unknown as EmailContent | SmsPayload });
+        ready.push({
+          _id: r._id as string, channel: r.channel as "email" | "sms" | "push", to: r.to as string,
+          payload: r.payload as unknown as EmailContent | SmsPayload | PushContent,
+          tokens: r.tokens as PushTokenEntry[] | undefined,
+        });
       } else if (earliestDeferredAt === null || next < earliestDeferredAt) {
         earliestDeferredAt = next;
       }
@@ -239,7 +255,19 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
     return reclaimed;
   });
 
-  return { _enqueueSend, _peekQueued, _claimForSend, _markResult, _reclaimStuck };
+  // Push invalid-token pruning: called by the driver/`sendNow` after a delivery attempt reports
+  // `invalidTokens` (a provider's synchronous "unregistered" signal). PRIVILEGED (fully-qualified
+  // "notifications/pushTokens") — same driver-facing-internal convention as `_claimForSend`/
+  // `_markResult`/`_reclaimStuck` above. A token already gone (raced unregister) is a silent no-op.
+  const _pruneInvalidPushTokens = mutation(async (ctx: MutationCtx, args: { tokens: string[] }): Promise<null> => {
+    for (const token of args.tokens) {
+      const [row] = await ctx.db.query("notifications/pushTokens", "byToken").eq("token", token).take(1).collect();
+      if (row) await ctx.db.delete(row._id as string);
+    }
+    return null;
+  });
+
+  return { _enqueueSend, _peekQueued, _claimForSend, _markResult, _reclaimStuck, _pruneInvalidPushTokens };
 }
 
 // Re-export the delivery dispatcher + result type so the facade's `sendNow` and the driver share the

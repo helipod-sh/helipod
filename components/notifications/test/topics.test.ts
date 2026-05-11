@@ -110,7 +110,7 @@ describe("notifications N3 — sendToTopic fan-out", () => {
     await built.runtime.run("app:sub", { topic: "news", userId: "u1" });
     // Fails BEFORE any page/DB write (the guard is at the top of sendToTopic).
     await expect(built.runtime.runAction("app:topicSend", { topic: "news", channels: ["email"], template: "hi" }))
-      .rejects.toThrow(/only the "in_app" channel/);
+      .rejects.toThrow(/only "in_app"\/"push" channels/);
     expect((await built.readTable("notifications/messages")).length).toBe(0); // no partial work
   });
 });

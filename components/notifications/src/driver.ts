@@ -127,10 +127,13 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
             // caller's optional `sendReceipts` idempotencyKey. `deliverOutbound` walks the channel's
             // ordered [provider, ...fallbacks] list itself — this attempt's `retryable` verdict (used
             // only in the catch below) is already the OR across every provider it tried.
-            const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
+            const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, tokens: m.tokens, idempotencyKey: `msg:${m._id}` });
             ok = true;
             providerMessageId = res.providerMessageId;
             providerName = res.providerName;
+            if (res.invalidTokens?.length) {
+              await ctx.runFunction("notifications:_pruneInvalidPushTokens", { tokens: res.invalidTokens });
+            }
           } catch (e) {
             error = String(e);
             retryable = e instanceof NotificationSendError ? e.retryable : true; // plain Error → retryable

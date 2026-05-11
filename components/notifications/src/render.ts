@@ -1,5 +1,5 @@
-import type { NotificationsConfig, Channel, InlineTemplate } from "./config";
-import type { EmailContent, InAppContent, SmsPayload, SendResult, EmailProvider, SmsProvider } from "./provider";
+import type { NotificationsConfig, Channel, InlineTemplate, PushProviderKind } from "./config";
+import type { EmailContent, InAppContent, SmsPayload, SendResult, EmailProvider, SmsProvider, PushContent, PushSendResult } from "./provider";
 import { NotificationSendError } from "./provider";
 
 /** Drop `undefined`-valued keys before a `db.insert`/`db.replace` — the syscall codec rejects
@@ -63,19 +63,37 @@ export function renderInApp(config: NotificationsConfig, template: string | Inli
   return template.in_app;
 }
 
+export function renderPush(config: NotificationsConfig, template: string | InlineTemplate, data: Record<string, unknown> | undefined): PushContent {
+  if (typeof template === "string") {
+    const fn = config.channels.push?.templates?.[template];
+    if (!fn) throw noTemplateError("push", template);
+    return fn(data ?? {});
+  }
+  if (!template.push) throw new Error(`inline template has no "push" content but "push" was in channels`);
+  return template.push;
+}
+
+/** One registered device token, as snapshotted onto a push `messages` row at send time
+ *  (`recordSend`'s push branch) and consumed by `deliverOutbound`'s push branch. */
+export interface PushTokenEntry { token: string; provider: PushProviderKind }
+
 /** A queued/now delivery to hand to a provider — the driver and `sendNow` both dispatch through here
  *  (the ONE place that maps a channel to its configured provider + `from`). */
 export interface DeliverEntry {
-  channel: "email" | "sms";
+  channel: "email" | "sms" | "push";
   to: string;
-  payload: EmailContent | SmsPayload;
+  payload: EmailContent | SmsPayload | PushContent;
+  tokens?: PushTokenEntry[]; // push only — the snapshotted device tokens to fan out to
   idempotencyKey?: string;
 }
 
 export interface DeliverOutcome extends SendResult {
-  /** The provider that ultimately succeeded (or, if throwing, unused — see the thrown error's
-   *  combined message instead). */
-  providerName: string;
+  /** The provider that ultimately succeeded. Omitted for push (a single logical send can fan out
+   *  across MULTIPLE provider groups — expo/fcm/apns — so there's no single "the" provider name). */
+  providerName?: string;
+  /** Push only: tokens the provider(s) reported as permanently unregistered/invalid — pruned by the
+   *  caller (the driver / `sendNow`) via `_pruneInvalidPushTokens`, never retried. */
+  invalidTokens?: string[];
 }
 
 /** The channel's ordered provider list — `[provider, ...fallbacks]` — each paired with its
@@ -116,8 +134,41 @@ async function sendVia(channel: "email" | "sms", provider: EmailProvider | SmsPr
  *  driver's action context or the action-mode `sendNow`, never a mutation. On a delivery attempt
  *  where EVERY provider fails, throws a combined `NotificationSendError` whose `retryable` is the
  *  OR across every tried provider's own classification (decision 4) — so N2's existing
- *  `_markResult` retry/dead-letter logic needs no change to understand a fallback-aware failure. */
+ *  `_markResult` retry/dead-letter logic needs no change to understand a fallback-aware failure.
+ *
+ *  Push is a DIFFERENT shape (fan-out across N provider GROUPS by token, not a single ordered
+ *  fallback list) — handled by its own branch before the email/sms `providerList` path. */
 export async function deliverOutbound(config: NotificationsConfig, e: DeliverEntry): Promise<DeliverOutcome> {
+  if (e.channel === "push") {
+    const tokens = e.tokens ?? [];
+    if (tokens.length === 0) return {}; // decision 6 — no devices is not a failure
+    const content = e.payload as PushContent;
+    const byProvider = new Map<PushProviderKind, string[]>();
+    for (const t of tokens) {
+      if (!byProvider.has(t.provider)) byProvider.set(t.provider, []);
+      byProvider.get(t.provider)!.push(t.token);
+    }
+    let providerMessageId: string | undefined;
+    const invalidTokens: string[] = [];
+    const errors: string[] = [];
+    for (const [kind, toks] of byProvider) {
+      const provider = config.channels.push?.providers[kind];
+      if (!provider) { console.warn(`[notifications] push tokens registered for unconfigured provider "${kind}" — skipped`); continue; }
+      try {
+        const res: PushSendResult = await provider.send(compact({ to: toks, title: content.title, body: content.body, data: content.data, idempotencyKey: e.idempotencyKey }));
+        providerMessageId ??= res.providerMessageId;
+        if (res.invalidTokens) invalidTokens.push(...res.invalidTokens);
+      } catch (err) {
+        errors.push(`${kind}: ${String(err)}`);
+      }
+    }
+    // Only rethrow (→ N2 retry/backoff) if EVERY configured group failed outright — decision 7.
+    if (errors.length > 0 && errors.length === byProvider.size) {
+      throw new NotificationSendError(errors.join("; "));
+    }
+    if (errors.length > 0) console.error(`[notifications] push: partial group failure (row still marked sent): ${errors.join("; ")}`);
+    return compact({ providerMessageId, invalidTokens: invalidTokens.length ? invalidTokens : undefined });
+  }
   const { from, list } = providerList(config, e.channel);
   const failures: string[] = [];
   let anyRetryable = false;
