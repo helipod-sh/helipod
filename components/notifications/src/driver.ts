@@ -127,13 +127,22 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
             // caller's optional `sendReceipts` idempotencyKey. `deliverOutbound` walks the channel's
             // ordered [provider, ...fallbacks] list itself — this attempt's `retryable` verdict (used
             // only in the catch below) is already the OR across every provider it tried.
-            const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
+            const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, tokens: m.tokens, idempotencyKey: `msg:${m._id}` });
             ok = true;
             providerMessageId = res.providerMessageId;
             providerName = res.providerName;
+            if (res.invalidTokens?.length) {
+              await ctx.runFunction("notifications:_pruneInvalidPushTokens", { tokens: res.invalidTokens });
+            }
           } catch (e) {
             error = String(e);
             retryable = e instanceof NotificationSendError ? e.retryable : true; // plain Error → retryable
+            // A failed push attempt may still have identified permanently-invalid tokens before it
+            // threw (e.g. one group's tokens unregistered while another group had a transient 500) —
+            // prune them now, or they'd linger in the registry until a later successful send.
+            if (e instanceof NotificationSendError && e.invalidTokens?.length) {
+              await ctx.runFunction("notifications:_pruneInvalidPushTokens", { tokens: e.invalidTokens });
+            }
           }
           // `providerMessageId`/`providerName`/`error`/`retryable` may be undefined. `runFunction`'s
           // arg codec (`jsonToConvex`) REJECTS an undefined-valued key (it does NOT drop it) — so strip

@@ -1,6 +1,6 @@
 import { httpAction, mutation, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
 import type { NotificationsConfig } from "./config";
-import type { DeliveryStatus, NotificationProvider } from "./provider";
+import type { DeliveryStatus, EmailProvider, SmsProvider } from "./provider";
 import { compact } from "./render";
 
 const WEBHOOK_PREFIX = "/api/notifications/webhooks/";
@@ -15,7 +15,7 @@ const RANK: Record<DeliveryStatus, number> = {
  *  "email"|"sms") — `[provider, ...fallbacks]` — each paired with the secret to pass it (only the
  *  PRIMARY, index 0, gets the channel-level `webhookSecret`; every fallback gets `secret: undefined`
  *  and is expected to carry its own verification material internally — decision 9). */
-function resolveWebhookProviders(config: NotificationsConfig, channel: string): Array<{ provider: NotificationProvider; secret?: string }> {
+function resolveWebhookProviders(config: NotificationsConfig, channel: string): Array<{ provider: EmailProvider | SmsProvider; secret?: string }> {
   if (channel === "email") {
     const ch = config.channels.email;
     if (!ch) return [];
@@ -86,7 +86,7 @@ export function makeWebhookModules(config: NotificationsConfig): Record<string, 
     // configured provider's verify in order — first match wins (a fallback's own webhook may be
     // registered at the vendor with different signing material than the primary's).
     const publicUrl = publicUrlOf(request);
-    let matched: NotificationProvider | undefined;
+    let matched: EmailProvider | SmsProvider | undefined;
     for (const { provider, secret } of candidates) {
       // A provider's `verify()` MUST return false (never throw) on a signature it doesn't recognize,
       // but the contract can't enforce that for a custom/third-party provider. Treat a THROW as "this

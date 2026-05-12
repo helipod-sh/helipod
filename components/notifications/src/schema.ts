@@ -21,7 +21,7 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  */
 export const notificationsSchema = defineSchema({
   messages: defineTable({
-    channel: v.union(v.literal("email"), v.literal("sms"), v.literal("in_app")),
+    channel: v.union(v.literal("email"), v.literal("sms"), v.literal("in_app"), v.literal("push")),
     to: v.string(),
     status: v.union(v.literal("queued"), v.literal("sending"), v.literal("sent"), v.literal("failed")),
     providerMessageId: v.optional(v.string()),
@@ -32,6 +32,7 @@ export const notificationsSchema = defineSchema({
     createdAt: v.number(),
     sentAt: v.optional(v.number()),
     payload: v.optional(v.any()), // transient — cleared by `_markResult` on sent/failed (see doc above)
+    tokens: v.optional(v.any()), // push-only device-token snapshot, Array<{token,provider}> — see T3
     // N2 delivery reliability (all additive/optional):
     attempts: v.optional(v.number()),        // retryable-failure count (absent = 0)
     nextAttemptAt: v.optional(v.number()),   // earliest sweep time for a backed-off `queued` row (absent = now)
@@ -79,7 +80,9 @@ export const notificationsSchema = defineSchema({
   notificationPreferences: defineTable({
     userId: v.string(),
     category: v.string(),
-    channel: v.optional(v.union(v.literal("email"), v.literal("sms"), v.literal("in_app"))), // absent = category-wide
+    // Additive: "push" joins the literal union (decision — N3's preference gate applies to push
+    // automatically per the design doc; a channel-specific push opt-out needs this literal to write).
+    channel: v.optional(v.union(v.literal("email"), v.literal("sms"), v.literal("in_app"), v.literal("push"))), // absent = category-wide
     enabled: v.boolean(),
     updatedAt: v.number(),
   })
@@ -112,4 +115,19 @@ export const notificationsSchema = defineSchema({
   })
     .index("byUnflushed", ["flushedAt"])                    // driver scans flushedAt = undefined
     .index("byRecipientCategory", ["recipientKey", "category"]),
+
+  // Push channel: one row per registered device token. Upserted BY TOKEN (not by (userId,token)) —
+  // a device token identifies one installation; whoever is currently logged into that device owns
+  // it (see push.ts's registerPushTokenImpl doc). `recordSend`'s push branch snapshots a user's
+  // current rows into `messages.tokens` at send time; the driver/sendNow prune a row here when its
+  // provider reports the token as permanently invalid/unregistered.
+  pushTokens: defineTable({
+    userId: v.string(),
+    token: v.string(),
+    provider: v.union(v.literal("expo"), v.literal("fcm"), v.literal("apns")),
+    platform: v.optional(v.union(v.literal("ios"), v.literal("android"), v.literal("web"))),
+    createdAt: v.number(),
+  })
+    .index("byUser", ["userId"])
+    .index("byToken", ["token"]),
 });

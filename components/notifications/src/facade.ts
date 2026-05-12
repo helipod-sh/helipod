@@ -5,6 +5,7 @@ import { recordSend, deliverOutbound } from "./modules";
 import type { QueuedMessage } from "./modules";
 import { applySetPreference } from "./preferences";
 import { subscribeImpl, unsubscribeImpl, type RecordSendBatchResult } from "./topics";
+import { registerPushTokenImpl, unregisterPushTokenImpl } from "./push";
 import { compact } from "./render";
 
 /**
@@ -36,6 +37,8 @@ export interface NotificationsContext {
   setPreference(args: { category: string; channel?: Channel; enabled: boolean }): Promise<null>;
   subscribe(args: { topic: string; userId?: string }): Promise<null>;
   unsubscribe(args: { topic: string; userId?: string }): Promise<null>;
+  registerPushToken(args: { token: string; provider: "expo" | "fcm" | "apns"; platform?: "ios" | "android" | "web"; userId?: string }): Promise<null>;
+  unregisterPushToken(args: { token: string; userId?: string }): Promise<null>;
   identity(): string | null;
 }
 
@@ -60,6 +63,16 @@ export function notificationsContext(cctx: ComponentContext, config: Notificatio
       if (!userId) throw new Error("not authenticated");
       return unsubscribeImpl(cctx.db as GuestDatabaseWriter, userId, args.topic);
     },
+    async registerPushToken(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return registerPushTokenImpl(cctx.db as GuestDatabaseWriter, cctx.now, userId, args);
+    },
+    async unregisterPushToken(args) {
+      const userId = args.userId ?? (await facadeCallerId(cctx));
+      if (!userId) throw new Error("not authenticated");
+      return unregisterPushTokenImpl(cctx.db as GuestDatabaseWriter, userId, args);
+    },
     identity: () => cctx.identity,
   };
 }
@@ -83,10 +96,10 @@ export interface NotificationsActionContext {
    *  per-subscriber key from it, so a re-run with the same key is a no-op per subscriber. */
   sendToTopic(args: {
     topic: string;
-    /** N3: `in_app` ONLY. A topic subscription stores just a `userId`, never an email/phone, so
-     *  email/SMS fan-out can't resolve an address — send those directly with `send`/`sendNow`, or
+    /** N3: `in_app`/`push` ONLY. A topic subscription stores just a `userId`, never an email/phone,
+     *  so email/SMS fan-out can't resolve an address — send those directly with `send`/`sendNow`, or
      *  await the deferred per-subscriber address-resolution seam. */
-    channels: Array<"in_app">;
+    channels: Array<"in_app" | "push">;
     template: SendArgs["template"];
     data?: SendArgs["data"];
     category?: string;
@@ -116,11 +129,14 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
         try {
           // Same auto-derived provider Idempotency-Key the driver uses (`msg:<rowId>`), so an N2
           // driver retry of a sendNow-crashed row reuses it and a supporting provider dedups.
-          const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, idempotencyKey: `msg:${m._id}` });
+          const res = await deliverOutbound(config, { channel: m.channel, to: m.to, payload: m.payload, tokens: m.tokens, idempotencyKey: `msg:${m._id}` });
           ok = true;
           providerMessageId = res.providerMessageId;
           providerName = res.providerName;
           results.push(res);
+          if (res.invalidTokens?.length) {
+            await api.runMutation("notifications:_pruneInvalidPushTokens", { tokens: res.invalidTokens });
+          }
         } catch (e) {
           error = String(e);
         }
@@ -133,9 +149,9 @@ export function notificationsActionContext(api: ActionApi, config: Notifications
     async sendToTopic(args) {
       // Fail fast BEFORE any page/DB work: topics only know a subscriber's `userId`, not their
       // email/phone, so email/SMS fan-out can't resolve an address (`resolveAddress` would throw
-      // per-subscriber, rolling back the whole page incl. the in_app sends). in_app only in N3.
-      if (args.channels.some((c) => c !== "in_app")) {
-        throw new Error('sendToTopic supports only the "in_app" channel (a topic knows a subscriber\'s userId, not their email/phone — send email/SMS directly with send/sendNow)');
+      // per-subscriber, rolling back the whole page incl. the in_app/push sends).
+      if (args.channels.some((c) => c !== "in_app" && c !== "push")) {
+        throw new Error('sendToTopic supports only "in_app"/"push" channels (a topic knows a subscriber\'s userId, not their email/phone — send email/SMS directly with send/sendNow)');
       }
       let cursor: string | null = null;
       let recipientCount = 0;

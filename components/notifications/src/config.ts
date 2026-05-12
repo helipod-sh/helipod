@@ -1,4 +1,4 @@
-import type { EmailProvider, SmsProvider, EmailContent, InAppContent } from "./provider";
+import type { EmailProvider, SmsProvider, EmailContent, InAppContent, PushContent, PushProvider } from "./provider";
 
 /** Inline typed per-channel templates (Global Constraints — not a markup engine). Keyed by
  *  templateKey; each renders channel content from the send's `data` payload. */
@@ -41,6 +41,16 @@ export interface InAppChannelConfig {
   templates?: InAppTemplates;
 }
 
+export type PushTemplateFn = (data: any) => PushContent; // eslint-disable-line @typescript-eslint/no-explicit-any
+export type PushTemplates = Record<string, PushTemplateFn>;
+export interface PushChannelConfig {
+  /** At least one must be set — `defineNotifications` throws at construction if `push` is
+   *  configured with an empty map (see index.ts). Which provider a token routes to is decided by
+   *  the token's OWN recorded `provider` field (pushTokens.provider), not by which of these are set. */
+  providers: { expo?: PushProvider; fcm?: PushProvider; apns?: PushProvider };
+  templates?: PushTemplates;
+}
+
 /** How often a digest-configured category's buffered email items are combined and flushed. */
 export type DigestFrequency = "hourly" | "daily" | "weekly";
 
@@ -59,6 +69,7 @@ export interface NotificationChannels {
   email?: EmailChannelConfig;
   sms?: SmsChannelConfig;
   in_app?: InAppChannelConfig;
+  push?: PushChannelConfig;
 }
 
 export interface NotificationsOptions {
@@ -117,7 +128,11 @@ export function digestWindowMs(config: NotificationsConfig, category: string): n
 }
 
 /** A channel medium. */
-export type Channel = "email" | "sms" | "in_app";
+export type Channel = "email" | "sms" | "in_app" | "push";
+
+/** A push provider adapter kind — routes by the token's OWN recorded `provider` field
+ *  (`pushTokens.provider`), never by OS platform. */
+export type PushProviderKind = "expo" | "fcm" | "apns";
 
 /** A channel-addressed recipient. `userId` for in_app; `email` for email; `phone` for sms. */
 export interface Recipient {
@@ -131,6 +146,7 @@ export interface InlineTemplate {
   email?: EmailContent;
   sms?: string;
   in_app?: InAppContent;
+  push?: PushContent;
 }
 
 /** The public `ctx.notifications.send`/`sendNow` argument. */

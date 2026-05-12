@@ -127,6 +127,7 @@
         "@stackbase/component": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/values": "workspace:*",
+        "jose": "6.2.3",
       },
       "devDependencies": {
         "@stackbase/docstore-sqlite": "workspace:*",

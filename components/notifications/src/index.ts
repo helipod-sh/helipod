@@ -8,22 +8,23 @@ import { makeWebhookModules } from "./webhook";
 import { makePreferenceModules } from "./preferences";
 import { makeTopicModules } from "./topics";
 import { makeDigestModules } from "./digest";
+import { makePushModules } from "./push";
 import { notificationsDriver } from "./driver";
 
 // Seam + config + content types (for adapter authors and N4 auth reuse).
 export * from "./schema";
 export type {
-  SendResult, EmailMessage, SmsMessage, EmailProvider, SmsProvider, NotificationProvider,
-  EmailContent, SmsPayload, InAppContent,
+  SendResult, EmailMessage, SmsMessage, EmailProvider, SmsProvider, PushMessage, PushProvider, PushSendResult, NotificationProvider,
+  EmailContent, SmsPayload, InAppContent, PushContent,
   DeliveryStatus, WebhookEvent, WebhookVerifyArgs, ProviderWebhook,
 } from "./provider";
 export { NotificationSendError } from "./provider";
 export type {
   NotificationsOptions, NotificationsConfig, NotificationChannels,
-  EmailChannelConfig, SmsChannelConfig, InAppChannelConfig,
-  EmailTemplates, SmsTemplates, InAppTemplates,
-  EmailTemplateFn, SmsTemplateFn, InAppTemplateFn,
-  Channel, Recipient, InlineTemplate, SendArgs,
+  EmailChannelConfig, SmsChannelConfig, InAppChannelConfig, PushChannelConfig,
+  EmailTemplates, SmsTemplates, InAppTemplates, PushTemplates,
+  EmailTemplateFn, SmsTemplateFn, InAppTemplateFn, PushTemplateFn,
+  Channel, PushProviderKind, Recipient, InlineTemplate, SendArgs,
   DigestFrequency, DigestItem, DigestTemplateFn,
 } from "./config";
 export { resolveNotificationsConfig, DEFAULT_DRIVER_INTERVAL_MS } from "./config";
@@ -43,6 +44,9 @@ export { notificationsDriver } from "./driver";
 export { consoleEmail, consoleSms } from "./provider-console";
 export { resendEmail } from "./provider-resend";
 export { twilioSms } from "./provider-twilio";
+export { expoPush } from "./provider-expo";
+export { fcmPush } from "./provider-fcm";
+export { apnsPush } from "./provider-apns";
 
 /**
  * `defineNotifications(opts)` — the `@stackbase/notifications` component: the `messages`/
@@ -67,10 +71,15 @@ export function defineNotifications(opts: NotificationsOptions): ComponentDefini
       "every inbound email webhook will be rejected (401). Configure the provider's signing secret to enable delivery status.",
     );
   }
+  if (config.channels.push && Object.keys(config.channels.push.providers).length === 0) {
+    throw new Error(
+      '[notifications] channels.push is configured with an empty `providers` map — set at least one of expo/fcm/apns, or omit `channels.push` entirely.',
+    );
+  }
   return defineComponent({
     name: "notifications",
     schema: notificationsSchema,
-    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config) },
+    modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config), ...makePushModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
     contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
     contextWrite: true,
