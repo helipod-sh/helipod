@@ -10,6 +10,7 @@
 import type { ReactNode } from "react";
 import type { Value } from "@stackbase/values";
 import { useQuery, useMutation } from "./react";
+import type { StackbaseClient } from "./client";
 
 /** An inbox row as delivered to the UI (mirrors the server `InboxItem`). */
 export interface InboxNotification {
@@ -65,7 +66,7 @@ export function Inbox(props: InboxProps): ReactNode {
  *  (mirrors the server `getPreferences` return; `channel` absent = category-wide). */
 export interface NotificationPreference {
   category: string;
-  channel?: "email" | "sms" | "in_app";
+  channel?: "email" | "sms" | "in_app" | "push";
   enabled: boolean;
 }
 
@@ -88,4 +89,23 @@ export function useNotificationPreferences(): UseNotificationPreferencesResult {
       await setFn(args as unknown as Record<string, Value>);
     },
   };
+}
+
+const REGISTER_PUSH_PATH = "notifications:registerPushToken";
+const UNREGISTER_PUSH_PATH = "notifications:unregisterPushToken";
+
+/** Register this device's push token for the CURRENT authenticated caller (self-only, server-
+ *  resolved — see `docs/superpowers/specs/2026-04-13-notifications-push-channel-design.md`).
+ *  Acquiring the actual OS token (Expo `getExpoPushTokenAsync()`, a native FCM/APNs SDK, or a web
+ *  `PushManager.subscribe`) is the caller's responsibility — this is a thin wire call, nothing
+ *  more, matching `useNotifications`'s scope boundary for the inbox. A plain async function (not a
+ *  hook): registration typically happens once at app-boot/permission-grant time, not on every
+ *  render. */
+export async function registerForPush(client: StackbaseClient, args: { token: string; provider: "expo" | "fcm" | "apns"; platform?: "ios" | "android" | "web" }): Promise<void> {
+  await client.mutation(REGISTER_PUSH_PATH, args as unknown as Record<string, Value>);
+}
+
+/** Unregister this device's push token (e.g. on sign-out / permission revoke). */
+export async function unregisterForPush(client: StackbaseClient, args: { token: string }): Promise<void> {
+  await client.mutation(UNREGISTER_PUSH_PATH, args as unknown as Record<string, Value>);
 }

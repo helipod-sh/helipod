@@ -1,10 +1,10 @@
 # Notifications
 
 `@stackbase/notifications` is an opt-in component for sending messages across pluggable
-channels — **email**, **SMS/WhatsApp**, and an in-app **inbox** — through swappable per-channel
-provider adapters (Resend, Twilio, or your own). Its headline feature is a **reactive in-app
-inbox**: an in-app notification is just a row in a live-queried table, so a user's inbox and unread
-count update in real time with no dedicated realtime service.
+channels — **email**, **SMS/WhatsApp**, an in-app **inbox**, and mobile/web **push** — through
+swappable per-channel provider adapters (Resend, Twilio, Expo/FCM/APNs, or your own). Its headline
+feature is a **reactive in-app inbox**: an in-app notification is just a row in a live-queried
+table, so a user's inbox and unread count update in real time with no dedicated realtime service.
 
 Both your app code **and** the auth component (`@stackbase/auth`, when composed alongside) send
 through the same seam, so an OTP email and a marketing blast share one delivery path with the same
@@ -285,6 +285,158 @@ provider's own `parse()`, so a request only ever mutates message state its own s
 another email provider (or one SMS provider to another). *Cross-channel* fallback (e.g. an email
 send failing over to SMS) and time-of-day/quiet-hours-aware routing are different, unrelated
 features and remain deferred — see [What's deferred](#whats-deferred).
+
+## Push
+
+`push` is a fourth channel — mobile/web push notifications via one or more of three built-in
+provider adapters (`expoPush`, `fcmPush`, `apnsPush`), all reusing the SAME `recordSend`/driver/
+preference/topics machinery every other channel does. There's no separate "push system" to learn.
+
+### Setup
+
+```ts
+import { defineConfig } from "@stackbase/component";
+import { defineNotifications, expoPush, fcmPush, apnsPush } from "@stackbase/notifications";
+
+export default defineConfig({
+  components: [
+    defineNotifications({
+      channels: {
+        push: {
+          providers: {
+            expo: expoPush({ accessToken: process.env.EXPO_ACCESS_TOKEN }), // optional — anonymous sends work without one
+            fcm: fcmPush({
+              projectId: process.env.FCM_PROJECT_ID!,
+              serviceAccount: JSON.parse(process.env.FCM_SERVICE_ACCOUNT_JSON!), // { client_email, private_key }
+            }),
+            apns: apnsPush({
+              teamId: process.env.APNS_TEAM_ID!,
+              keyId: process.env.APNS_KEY_ID!,
+              privateKey: process.env.APNS_PRIVATE_KEY!, // PKCS8 PEM
+              bundleId: "com.yourcompany.yourapp",
+              production: process.env.NODE_ENV === "production", // sandbox vs. production APNs endpoint
+            }),
+          },
+          templates: {
+            welcome: (d) => ({ title: "Welcome", body: `Hi ${d.name}!` }),
+          },
+        },
+      },
+    }),
+  ],
+});
+```
+
+At least one of `expo`/`fcm`/`apns` must be set — `defineNotifications` throws at construction if
+`channels.push` is configured with an empty `providers` map.
+
+### Registering device tokens
+
+A client registers its own device's push token — self-only, server-resolved identity (the same
+ownership model as topics' `subscribe`/inbox's `markRead`; there is no `userId` argument to smuggle
+another user's registration):
+
+```ts
+import { registerForPush, unregisterForPush } from "@stackbase/client/react";
+
+// After acquiring the OS token (Expo `getExpoPushTokenAsync()`, a native FCM/APNs SDK, or a web
+// `PushManager.subscribe()`) — acquiring the token itself is your app's responsibility.
+await registerForPush(client, { token: expoToken, provider: "expo", platform: "ios" });
+
+// On sign-out / permission revoke:
+await unregisterForPush(client, { token: expoToken });
+```
+
+**Routing is by the token's OWN recorded provider, not by OS platform.** `registerPushToken`'s
+`provider: "expo" | "fcm" | "apns"` argument decides which configured adapter a token's messages are
+sent through — an iOS device using the native APNs SDK registers with `provider: "apns"`; an iOS
+device using Expo's managed push service registers with `provider: "expo"`; there is no
+platform-sniffing. `platform` is optional metadata only (`"ios" | "android" | "web"`), not used for
+routing.
+
+Registration is an **upsert by token**, not by `(userId, token)`: a device token identifies one
+physical installation, so re-registering the same token under a different caller reassigns it
+(the previous owner stops receiving pushes to that device — correct when a device is shared or a
+user signs out and a different user signs in on the same phone).
+
+### Sending
+
+Push participates in `send`/`sendNow`/`sendToTopic` exactly like any other channel — address by
+`to.userId` (never an email/phone; push has no such concept):
+
+```ts
+await ctx.notifications.send({
+  to: { userId },
+  channels: ["push"],
+  template: "welcome",
+  data: { name: "Ada" },
+});
+```
+
+At send time, `recordSend` snapshots the recipient's *currently registered* device tokens onto the
+`messages` row. At delivery time, the driver groups those tokens by their recorded `provider` and
+fans out to each configured adapter — one logical send can deliver to a user's iPhone (APNs), Android
+phone (FCM), and an Expo-managed dev client all at once, transparently.
+
+**Zero registered devices is not an error.** If a recipient has no registered tokens, the row is
+still written (`queued` → `sent`), but no provider is ever called — nothing to retry, nothing to
+fail. Silence, not an error, is the correct behavior for "hasn't installed the app on any device
+yet" or "revoked all push permissions."
+
+**Partial multi-provider failure.** If a send fans out across multiple provider groups (e.g. both
+`expo` and `fcm` tokens are registered) and only SOME groups fail, the overall attempt is still
+`sent` — a partial success is success. Only when **every** configured group fails outright does the
+attempt fail and re-enter the normal [retry](#retries)/backoff/dead-letter path.
+
+**Invalid-token pruning.** When a provider's send response reports a token as permanently
+unregistered/invalid (Expo's `DeviceNotRegistered` ticket, FCM's `UNREGISTERED`/`NOT_FOUND`, APNs'
+`410`/`Unregistered`), the driver (and `sendNow`'s inline drain) automatically removes that row from
+`pushTokens` — no manual cleanup, and the stale token is never retried.
+
+**Preferences and topics apply for free.** A `channel: "push"` row in `notificationPreferences`
+behaves identically to an email/sms/in_app one (the N3 preference gate is channel-generic); a
+critical category still bypasses it. `sendToTopic({ channels: ["push"] })` fans out to every
+subscriber's registered devices, preference-aware, the same way `["in_app"]` always has.
+
+### Writing your own push provider
+
+A push provider is the same small `send`-only adapter shape as email/SMS, fanned out per *provider
+group* (not per token) — the component calls `send` once per configured provider with every token
+routed to it in that send's `to` array:
+
+```ts
+import type { PushProvider, PushMessage, PushSendResult } from "@stackbase/notifications";
+
+export function myPush(opts: { apiKey: string }): PushProvider {
+  return {
+    channel: "push",
+    async send(m: PushMessage): Promise<PushSendResult> {
+      const res = await fetch("https://api.example.com/push/send", {
+        method: "POST",
+        headers: { authorization: `Bearer ${opts.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ to: m.to, title: m.title, body: m.body, data: m.data }),
+      });
+      if (!res.ok) throw new Error(`send failed (${res.status})`);
+      const json = (await res.json()) as { id?: string; invalid?: string[] };
+      return { providerMessageId: json.id, invalidTokens: json.invalid };
+    },
+  };
+}
+```
+
+### Non-goals (v1)
+
+- **No rich payload** — title/body/data only. No images, action buttons, sounds, badges, or
+  platform-specific payload extensions (APNs `mutable-content`, FCM `android`/`apns` payload
+  blocks).
+- **No delivery/engagement receipts** — unlike email/SMS's webhook-driven `deliveryStatus`
+  (delivered/opened/clicked/…), push has no equivalent axis-2 signal in v1. A `sent` `messages` row
+  means "handed to the provider (or no devices to hand to)," not "the device confirmed receipt."
+- **No web push** (`PushManager`/VAPID) — only native mobile push (Expo/FCM/APNs) ships. A web-push
+  adapter is a plausible future `PushProvider` implementation (the seam supports it), just not built.
+- **No per-device delivery result** — a send's result is per logical send, not per device; a
+  provider-level fan-out failure of one device among many in the same provider group is not
+  individually surfaced (see each adapter's own documented v1 simplifications above).
 
 ## Delivery reliability
 
@@ -668,5 +820,7 @@ release:
   Resend failing over to SES within the email channel — has shipped; see
   [Provider fallback](#provider-fallback). These are distinct features: the shipped one never
   crosses channels.)
-- **Beyond the arc** — a push channel (FCM/APNs/Expo); a markup/visual template registry
-  (Liquid/MJML). Inline typed template functions are the v1 authoring model.
+- **Beyond the arc** — a markup/visual template registry (Liquid/MJML). Inline typed template
+  functions are the v1 authoring model. (A push channel — FCM/APNs/Expo — has since shipped; see
+  [Push](#push) above, including its own v1 non-goals: no rich payload, no delivery/engagement
+  receipts, no web push.)

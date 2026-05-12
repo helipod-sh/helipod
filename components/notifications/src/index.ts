@@ -14,17 +14,17 @@ import { notificationsDriver } from "./driver";
 // Seam + config + content types (for adapter authors and N4 auth reuse).
 export * from "./schema";
 export type {
-  SendResult, EmailMessage, SmsMessage, EmailProvider, SmsProvider, NotificationProvider,
-  EmailContent, SmsPayload, InAppContent,
+  SendResult, EmailMessage, SmsMessage, EmailProvider, SmsProvider, PushMessage, PushProvider, PushSendResult, NotificationProvider,
+  EmailContent, SmsPayload, InAppContent, PushContent,
   DeliveryStatus, WebhookEvent, WebhookVerifyArgs, ProviderWebhook,
 } from "./provider";
 export { NotificationSendError } from "./provider";
 export type {
   NotificationsOptions, NotificationsConfig, NotificationChannels,
-  EmailChannelConfig, SmsChannelConfig, InAppChannelConfig,
-  EmailTemplates, SmsTemplates, InAppTemplates,
-  EmailTemplateFn, SmsTemplateFn, InAppTemplateFn,
-  Channel, Recipient, InlineTemplate, SendArgs,
+  EmailChannelConfig, SmsChannelConfig, InAppChannelConfig, PushChannelConfig,
+  EmailTemplates, SmsTemplates, InAppTemplates, PushTemplates,
+  EmailTemplateFn, SmsTemplateFn, InAppTemplateFn, PushTemplateFn,
+  Channel, PushProviderKind, Recipient, InlineTemplate, SendArgs,
   DigestFrequency, DigestItem, DigestTemplateFn,
 } from "./config";
 export { resolveNotificationsConfig, DEFAULT_DRIVER_INTERVAL_MS } from "./config";
@@ -44,6 +44,9 @@ export { notificationsDriver } from "./driver";
 export { consoleEmail, consoleSms } from "./provider-console";
 export { resendEmail } from "./provider-resend";
 export { twilioSms } from "./provider-twilio";
+export { expoPush } from "./provider-expo";
+export { fcmPush } from "./provider-fcm";
+export { apnsPush } from "./provider-apns";
 
 /**
  * `defineNotifications(opts)` — the `@stackbase/notifications` component: the `messages`/
