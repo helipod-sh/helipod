@@ -84,7 +84,9 @@ export function apnsPush(opts: { teamId: string; keyId: string; privateKey: stri
           if (r.invalid) { invalidTokens.push(deviceToken); continue; }
           errors.push(r.error);
         }
-        if (errors.length > 0) throw new NotificationSendError(`apns send failed: ${errors.join("; ")}`, { retryable: true });
+        // Carry any permanently-invalid tokens found this pass onto the thrown error so the driver
+        // prunes them even though the attempt fails (they'd otherwise be lost with the throw).
+        if (errors.length > 0) throw new NotificationSendError(`apns send failed: ${errors.join("; ")}`, { retryable: true, invalidTokens });
         return invalidTokens.length ? { providerMessageId, invalidTokens } : { providerMessageId };
       } finally {
         session.close();

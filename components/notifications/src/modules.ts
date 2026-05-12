@@ -213,7 +213,7 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
       // this success branch (fallback decision 5) — the failure/retry/dead-letter branch below never
       // sets it; the concatenated `error` string from `deliverOutbound` already names every provider
       // tried on a failed attempt.
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, providerName: args.providerName, error: undefined, payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "sent", sentAt: now, providerMessageId: args.providerMessageId, providerName: args.providerName, error: undefined, payload: undefined, tokens: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
       return null;
     }
     const attempts = ((row.attempts as number | undefined) ?? 0) + 1;
@@ -224,7 +224,7 @@ export function makeSendModules(config: NotificationsConfig): Record<string, Reg
     } else {
       // Dead-letter: terminal failed. Clear payload (delivered/dead content not retained) + the stale
       // retry cursor.
-      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", attempts, error: args.error ?? "send failed", payload: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
+      await ctx.db.replace(args.messageId, compact({ ...row, status: "failed", attempts, error: args.error ?? "send failed", payload: undefined, tokens: undefined, claimedAt: undefined, nextAttemptAt: undefined }));
     }
     return null;
   });

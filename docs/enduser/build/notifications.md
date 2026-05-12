@@ -357,7 +357,12 @@ routing.
 Registration is an **upsert by token**, not by `(userId, token)`: a device token identifies one
 physical installation, so re-registering the same token under a different caller reassigns it
 (the previous owner stops receiving pushes to that device — correct when a device is shared or a
-user signs out and a different user signs in on the same phone).
+user signs out and a different user signs in on the same phone). This means possession of a device
+token is authority over its routing — a caller who knows another device's token can reassign it to
+themselves. That is the intended model (a device token is a device-local secret, not a public id),
+but note the boundary: don't treat a device token as safe to expose. The *argument*-based IDOR is
+fully closed separately — the client-callable `registerPushToken`/`unregisterPushToken` never accept
+a `userId`, so a caller can only ever act on tokens, never name a victim user directly.
 
 ### Sending
 

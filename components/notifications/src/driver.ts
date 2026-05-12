@@ -137,6 +137,12 @@ export function notificationsDriver(config: NotificationsConfig): NotificationsD
           } catch (e) {
             error = String(e);
             retryable = e instanceof NotificationSendError ? e.retryable : true; // plain Error → retryable
+            // A failed push attempt may still have identified permanently-invalid tokens before it
+            // threw (e.g. one group's tokens unregistered while another group had a transient 500) —
+            // prune them now, or they'd linger in the registry until a later successful send.
+            if (e instanceof NotificationSendError && e.invalidTokens?.length) {
+              await ctx.runFunction("notifications:_pruneInvalidPushTokens", { tokens: e.invalidTokens });
+            }
           }
           // `providerMessageId`/`providerName`/`error`/`retryable` may be undefined. `runFunction`'s
           // arg codec (`jsonToConvex`) REJECTS an undefined-valued key (it does NOT drop it) — so strip

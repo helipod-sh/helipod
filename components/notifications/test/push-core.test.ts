@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { defineComponent, type ComponentDefinition } from "@stackbase/component";
 import { mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { PushProvider, PushSendResult } from "../src/provider";
+import { NotificationSendError, type PushProvider, type PushSendResult } from "../src/provider";
 import { notificationsSchema } from "../src/schema";
 import { resolveNotificationsConfig } from "../src/config";
 import { makeSendModules } from "../src/modules";
@@ -132,10 +132,30 @@ describe("push channel — send + driver delivery", () => {
     expect(await built.readTable("notifications/pushTokens")).toHaveLength(0);
   });
 
-  it("one provider group throws, the other succeeds: row is sent (no retry), no duplicate on next tick", async () => {
-    let fcmCalls = 0;
+  it("invalid tokens identified before a FAILED attempt are still pruned (carried on the thrown error), not lost with the failure", async () => {
+    // A provider that found one token permanently invalid but then hit a transient failure — it throws
+    // retryably with the invalid token attached. The attempt re-queues AND the dead token is pruned.
+    const expo: PushProvider = {
+      channel: "push",
+      async send() { throw new NotificationSendError("transient after finding a dead token", { retryable: true, invalidTokens: ["dead1"] }); },
+    };
+    built = await makeNotifRuntime(compWithPush({ expo }), {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:send": mutation(async (ctx: any, a: any) => ctx.notifications.send(a)),
+    });
+    await built.runtime.run("notifications:registerPushToken", { token: "dead1", provider: "expo" }, { identity: "u1" });
+    await built.runtime.run("app:send", { to: { userId: "u1" }, channels: ["push"], template: "hi", data: { name: "X" } }, { identity: "u1" });
+    await (built.driver as { __tick: () => Promise<void> }).__tick();
+    const row = (await built.readTable("notifications/messages")).find((r) => r.channel === "push")!;
+    expect(row.status).toBe("queued"); // retryable failure → re-queued
+    expect(await built.readTable("notifications/pushTokens")).toHaveLength(0); // dead token pruned despite the failure
+  });
+
+  it("one provider group has a RETRYABLE failure while another succeeds: the whole message re-queues (disjoint device sets — the failed group's devices must not be silently stranded)", async () => {
     const expo = captureProvider(() => ({ providerMessageId: "ok" }));
-    const fcm: PushProvider = { channel: "push", async send() { fcmCalls++; throw new Error("network down"); } };
+    // A plain Error is retryable-by-default. Push groups are DISJOINT devices, so expo succeeding does
+    // NOT deliver the fcm device — the message must retry, not be marked sent.
+    const fcm: PushProvider = { channel: "push", async send() { throw new Error("network down"); } };
     built = await makeNotifRuntime(compWithPush({ expo, fcm }), {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       "app:send": mutation(async (ctx: any, a: any) => ctx.notifications.send(a)),
@@ -145,9 +165,28 @@ describe("push channel — send + driver delivery", () => {
     await built.runtime.run("app:send", { to: { userId: "u1" }, channels: ["push"], template: "hi", data: { name: "X" } }, { identity: "u1" });
     await (built.driver as { __tick: () => Promise<void> }).__tick();
     const row = (await built.readTable("notifications/messages")).find((r) => r.channel === "push")!;
-    expect(row.status).toBe("sent"); // partial success = overall ok
-    await (built.driver as { __tick: () => Promise<void> }).__tick(); // a second tick must NOT re-deliver (row is no longer queued)
-    expect(fcmCalls).toBe(1);
+    expect(row.status).toBe("queued"); // re-queued for retry (NOT silently sent with the fcm device dropped)
+    expect(row.attempts).toBe(1);
+  });
+
+  it("one provider group has a PERMANENT failure while another succeeds: row is sent (retry can't help a permanent failure), no re-delivery on the next tick", async () => {
+    let fcmCalls = 0;
+    const expo = captureProvider(() => ({ providerMessageId: "ok" }));
+    // A non-retryable NotificationSendError = a permanent failure (e.g. a bad app config for that
+    // provider). Retrying won't help, and another group DID deliver, so the row is terminal-sent.
+    const fcm: PushProvider = { channel: "push", async send() { fcmCalls++; throw new NotificationSendError("bad fcm config", { retryable: false }); } };
+    built = await makeNotifRuntime(compWithPush({ expo, fcm }), {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      "app:send": mutation(async (ctx: any, a: any) => ctx.notifications.send(a)),
+    });
+    await built.runtime.run("notifications:registerPushToken", { token: "e1", provider: "expo" }, { identity: "u1" });
+    await built.runtime.run("notifications:registerPushToken", { token: "f1", provider: "fcm" }, { identity: "u1" });
+    await built.runtime.run("app:send", { to: { userId: "u1" }, channels: ["push"], template: "hi", data: { name: "X" } }, { identity: "u1" });
+    await (built.driver as { __tick: () => Promise<void> }).__tick();
+    const row = (await built.readTable("notifications/messages")).find((r) => r.channel === "push")!;
+    expect(row.status).toBe("sent"); // only permanent failures remain + a success → terminal
+    await (built.driver as { __tick: () => Promise<void> }).__tick();
+    expect(fcmCalls).toBe(1); // no re-delivery
   });
 
   it("every provider group throws: retries per N2 backoff", async () => {

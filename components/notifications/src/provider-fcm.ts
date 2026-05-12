@@ -60,7 +60,9 @@ export function fcmPush(opts: { projectId: string; serviceAccount: { client_emai
         if (res.ok) { const json = (await res.json()) as { name?: string }; providerMessageId ??= json.name; continue; }
         const body = (await res.json().catch(() => ({}))) as { error?: { status?: string } };
         if (body.error?.status === "UNREGISTERED" || body.error?.status === "NOT_FOUND") { invalidTokens.push(to); continue; }
-        throw new NotificationSendError(`fcm send failed (${res.status}): ${body.error?.status ?? ""}`, { retryable: res.status >= 500 || res.status === 429 });
+        // Carry any tokens already found permanently-invalid THIS pass onto the thrown error, so the
+        // driver prunes them even though this attempt fails (they'd otherwise be lost with the throw).
+        throw new NotificationSendError(`fcm send failed (${res.status}): ${body.error?.status ?? ""}`, { retryable: res.status >= 500 || res.status === 429, invalidTokens });
       }
       return invalidTokens.length ? { providerMessageId, invalidTokens } : { providerMessageId };
     },

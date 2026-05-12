@@ -99,13 +99,18 @@ export interface InAppContent {
 
 /** Thrown by a provider `send` to signal whether the failure should be retried. A plain `Error`
  *  throw is treated as retryable by default; throw `new NotificationSendError(msg, {retryable:false})`
- *  for a permanent failure (e.g. a 4xx bad-recipient) so the driver dead-letters immediately. */
+ *  for a permanent failure (e.g. a 4xx bad-recipient) so the driver dead-letters immediately.
+ *  `invalidTokens` carries any permanently-unregistered push tokens gathered before the throw, so the
+ *  driver can prune them even on an ALL-groups-failed push attempt (they'd otherwise be lost with the
+ *  error and linger in the registry until a later successful send). */
 export class NotificationSendError extends Error {
   readonly retryable: boolean;
-  constructor(message: string, opts?: { retryable?: boolean }) {
+  readonly invalidTokens?: string[];
+  constructor(message: string, opts?: { retryable?: boolean; invalidTokens?: string[] }) {
     super(message);
     this.name = "NotificationSendError";
     this.retryable = opts?.retryable ?? true;
+    if (opts?.invalidTokens?.length) this.invalidTokens = opts.invalidTokens;
   }
 }
 

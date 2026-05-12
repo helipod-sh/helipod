@@ -148,26 +148,46 @@ export async function deliverOutbound(config: NotificationsConfig, e: DeliverEnt
       if (!byProvider.has(t.provider)) byProvider.set(t.provider, []);
       byProvider.get(t.provider)!.push(t.token);
     }
+    let anySuccess = false;
     let providerMessageId: string | undefined;
     const invalidTokens: string[] = [];
     const errors: string[] = [];
+    let anyRetryableFailure = false;
     for (const [kind, toks] of byProvider) {
       const provider = config.channels.push?.providers[kind];
       if (!provider) { console.warn(`[notifications] push tokens registered for unconfigured provider "${kind}" — skipped`); continue; }
       try {
         const res: PushSendResult = await provider.send(compact({ to: toks, title: content.title, body: content.body, data: content.data, idempotencyKey: e.idempotencyKey }));
+        anySuccess = true;
         providerMessageId ??= res.providerMessageId;
         if (res.invalidTokens) invalidTokens.push(...res.invalidTokens);
       } catch (err) {
+        // A push provider throw carries any invalid tokens it gathered BEFORE the throw (e.g. token A
+        // unregistered, token B a transient 500) — collect them so they're pruned even if the whole
+        // attempt ultimately fails.
+        if (err instanceof NotificationSendError && err.invalidTokens) invalidTokens.push(...err.invalidTokens);
+        if (!(err instanceof NotificationSendError) || err.retryable) anyRetryableFailure = true;
         errors.push(`${kind}: ${String(err)}`);
       }
     }
-    // Only rethrow (→ N2 retry/backoff) if EVERY configured group failed outright — decision 7.
-    if (errors.length > 0 && errors.length === byProvider.size) {
-      throw new NotificationSendError(errors.join("; "));
+    const pruned = invalidTokens.length ? invalidTokens : undefined;
+    // Unlike email/SMS fallback (ordered ALTERNATES for the SAME recipient — one success = delivered),
+    // push provider groups are DISJOINT sets of devices: a success in the expo group does not deliver
+    // the fcm group's devices. So a RETRYABLE failure in ANY group must re-queue the whole message
+    // (→ N2 retry/backoff), or those devices are silently stranded. Duplicate re-sends to
+    // already-delivered groups are acceptable (push tolerates duplicates; the `msg:<id>` idempotency
+    // key dedups on providers that honor it). Invalid tokens are attached so they're pruned on the way.
+    if (anyRetryableFailure) {
+      throw new NotificationSendError(errors.join("; "), { retryable: true, invalidTokens: pruned });
     }
-    if (errors.length > 0) console.error(`[notifications] push: partial group failure (row still marked sent): ${errors.join("; ")}`);
-    return compact({ providerMessageId, invalidTokens: invalidTokens.length ? invalidTokens : undefined });
+    // No retryable failures remain. If NOTHING succeeded, every group failed PERMANENTLY (e.g. all
+    // tokens invalid) → dead-letter (retrying can't help). Otherwise some group delivered and the only
+    // failures were permanent (already captured as invalidTokens) → mark sent and prune.
+    if (!anySuccess && errors.length > 0) {
+      throw new NotificationSendError(errors.join("; "), { retryable: false, invalidTokens: pruned });
+    }
+    if (errors.length > 0) console.error(`[notifications] push: partial PERMANENT group failure (row marked sent, invalid tokens pruned): ${errors.join("; ")}`);
+    return compact({ providerMessageId, invalidTokens: pruned });
   }
   const { from, list } = providerList(config, e.channel);
   const failures: string[] = [];
