@@ -20,6 +20,7 @@
  */
 import type { LoadedProject } from "@stackbase/cli/project";
 import type { ComponentDefinition } from "@stackbase/component";
+import type { BlobStore } from "@stackbase/blobstore";
 import { bootDurableObjectRuntime, type DurableObjectBoot } from "./boot";
 import { DurableObjectRuntimeHost } from "./host";
 import { DoAlarmWakeHost } from "./wake";
@@ -39,6 +40,10 @@ export interface DurableObjectAppConfig {
   loaded: LoadedProject;
   components?: ComponentDefinition[];
   adminKey: string;
+  /** File-storage byte backend (`env.R2` → `@stackbase/blobstore-r2`), supplied by the concrete DO
+   *  subclass. Injected, never imported — the engine stays blob-store-neutral. Absent → file storage
+   *  is inert (`ctx.storage` has no provider; `/api/storage/*` 404s), everything else unchanged. */
+  blobStore?: BlobStore;
   /** Stretch pure-backstop driver cadences (Cloudflare: `(d) => Math.max(d, 900_000)`). */
   backstopMs?: (defaultMs: number) => number;
   /** Injected clock (tests). */
@@ -79,6 +84,7 @@ export abstract class StackbaseDurableObject {
           transactionSync: this.ctx.storage.transactionSync.bind(this.ctx.storage),
           adminKey: cfg.adminKey,
           wakeHost: new DoAlarmWakeHost(this.ctx.storage),
+          ...(cfg.blobStore ? { blobStore: cfg.blobStore } : {}),
           ...(cfg.backstopMs ? { backstopMs: cfg.backstopMs } : {}),
           ...(cfg.now ? { now: cfg.now } : {}),
         });
@@ -89,6 +95,12 @@ export abstract class StackbaseDurableObject {
           ip: "0.0.0.0",
           admin: { api: this.boot.adminApi, key: this.boot.adminKey },
           routes: this.boot.project.routes,
+          // Engine-owned reserved routes matched ahead of the pure dispatcher (see `host.ts`): the
+          // always-on `/api/storage/*` byte endpoints (present only when a `blobStore` was injected)
+          // and component (OAuth) callbacks (always wired). This is the seam fix that unblocks BOTH
+          // file-storage serving and auth OAuth callbacks on the DO.
+          storageRoutes: this.boot.storageRoutes,
+          componentRoutes: this.boot.componentRoutes,
         });
         this.armAutoResponse();
         // DECISION 3 — eager rehydrate-all-on-wake: reconstruct every hibernated socket's session

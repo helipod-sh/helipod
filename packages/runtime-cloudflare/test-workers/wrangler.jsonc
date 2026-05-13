@@ -8,11 +8,16 @@
     "bindings": [
       { "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDO" },
       { "name": "SQL_PROBE", "class_name": "SqlProbeDO" },
-      { "name": "AUDIT_DO", "class_name": "AuditDO" }
+      { "name": "AUDIT_DO", "class_name": "AuditDO" },
+      { "name": "STORAGE_DO", "class_name": "StorageDO" }
     ]
   },
+  // The R2 bucket bound to the file-storage fixture DO (`StorageDO` reads `env.STORAGE_BUCKET`).
+  // vitest-pool-workers/miniflare provides an in-memory R2 emulation, so no real bucket is needed.
+  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "stackbase-test-bucket" }],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO", "SqlProbeDO"] },
-    { "tag": "v2", "new_sqlite_classes": ["AuditDO"] }
+    { "tag": "v2", "new_sqlite_classes": ["AuditDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["StorageDO"] }
   ]
 }

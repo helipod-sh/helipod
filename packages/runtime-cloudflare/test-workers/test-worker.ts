@@ -49,6 +49,10 @@ export class FixtureStackbaseDO extends StackbaseDurableObject {
 // from the Worker's main module for workerd to instantiate it.
 export { AuditDO } from "./audit-fixture";
 
+// File-storage (R2) + component-route (OAuth) fixture — a DO class must be exported from the Worker's
+// main module for workerd to instantiate it.
+export { StorageDO } from "./storage-fixture";
+
 // A Worker needs a default handler even when tests drive the DOs directly.
 export default {
   async fetch(): Promise<Response> {
