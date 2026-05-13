@@ -14,6 +14,10 @@
   "durable_objects": {
     "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
   },
+  // File storage: the R2 bucket the DO stores blobs in (`env.STORAGE_BUCKET` → `R2BlobStore`). Create
+  // it once with `wrangler r2 bucket create stackbase-do-fixture` before the first deploy (see
+  // ./README.md). Byte I/O runs in the DO's fetch handler, never in the transactor turn.
+  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "stackbase-do-fixture" }],
   "migrations": [
     {
       // DO-SQLite needs the SQLite-backed class migration tag — `new_sqlite_classes`, NOT
