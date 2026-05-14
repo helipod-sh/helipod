@@ -418,6 +418,20 @@
         "vitest": "catalog:",
       },
     },
+    "packages/blobstore-r2": {
+      "name": "@stackbase/blobstore-r2",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/blobstore": "workspace:*",
+      },
+      "devDependencies": {
+        "@cloudflare/workers-types": "^4.20241127.0",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/blobstore-s3": {
       "name": "@stackbase/blobstore-s3",
       "version": "0.0.0",
@@ -747,6 +761,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@stackbase/admin": "workspace:*",
+        "@stackbase/blobstore": "workspace:*",
         "@stackbase/cli": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/docstore": "workspace:*",
@@ -754,11 +769,13 @@
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/runtime-embedded": "workspace:*",
+        "@stackbase/storage": "workspace:*",
         "@stackbase/sync": "workspace:*",
       },
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.5.40",
         "@cloudflare/workers-types": "^4.20241127.0",
+        "@stackbase/blobstore-r2": "workspace:*",
         "@stackbase/docstore": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/index-key-codec": "workspace:*",
@@ -1222,6 +1239,8 @@
     "@stackbase/blobstore": ["@stackbase/blobstore@workspace:packages/blobstore"],
 
     "@stackbase/blobstore-fs": ["@stackbase/blobstore-fs@workspace:packages/blobstore-fs"],
+
+    "@stackbase/blobstore-r2": ["@stackbase/blobstore-r2@workspace:packages/blobstore-r2"],
 
     "@stackbase/blobstore-s3": ["@stackbase/blobstore-s3@workspace:packages/blobstore-s3"],
 

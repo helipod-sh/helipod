@@ -11,10 +11,16 @@
  *   - `createEmbeddedRuntime` for the engine itself;
  *   - `AdminApi` for the `/_admin/*` + dashboard-browse routes.
  *
- * FILE STORAGE IS OUT OF SCOPE for Slice 3 (§8.9): a DO has no local FS blob store and byte I/O
- * can't run in the transactor turn; `ctx.storage`/`_storage` byte handling on a DO is a later slice.
- * The `_storage` TABLE still exists (loadProject injects it) so schemas that reference `Id<"_storage">`
- * compile — only the byte-moving provider/reaper are absent. The fixture app avoids file storage.
+ * FILE STORAGE (`ctx.storage`) is wired HERE when a `blobStore` is injected (an R2-backed
+ * `@stackbase/blobstore-r2` on the DO — the engine stays blob-store-neutral, same story as the
+ * `DocStore`). The `_storage` TABLE always exists (loadProject injects it) so schemas that reference
+ * `Id<"_storage">` compile regardless; with a `blobStore`, the byte-moving provider (`ctx.storage`),
+ * the orphan reaper (riding the wake seam), and the `/api/storage/*` serve routes are all composed —
+ * exactly as the container `boot.ts` does. WITHOUT a `blobStore` (no R2 binding), file storage is
+ * inert (metadata-only calls to `ctx.storage` have no provider) — byte-less deployments are unchanged.
+ *
+ * Byte I/O never runs in the transactor turn: the provider's writes are metadata-only, and the actual
+ * `blobStore.store`/`read` happens in the DO's `fetch` handler serving `/api/storage/*` (§8.9's rule).
  */
 import { SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { DoSqliteAdapter, type SqlStorageLike, type TransactionSyncFn } from "@stackbase/docstore-do-sqlite";
@@ -23,6 +29,16 @@ import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, systemModules, browseTableModule, verifyAdminKey } from "@stackbase/admin";
 import { loadProject, type LoadedProject, type ProjectArtifacts } from "@stackbase/cli/project";
 import type { ComponentDefinition, WakeHost } from "@stackbase/component";
+import type { BlobStore } from "@stackbase/blobstore";
+import type { JSONValue } from "@stackbase/values";
+import {
+  storageContextProvider,
+  storageReaper,
+  storageModules,
+  storageRoutes,
+  type StorageRoute,
+  type StorageRouteDeps,
+} from "@stackbase/storage";
 
 export interface DurableObjectBootInput {
   /** The statically-bundled app: its schema default-export + `path:name → module` map (§4.2). */
@@ -34,8 +50,17 @@ export interface DurableObjectBootInput {
   sql: SqlStorageLike;
   /** `ctx.storage.transactionSync` (bind it to `ctx.storage`). */
   transactionSync: TransactionSyncFn;
-  /** The deployment admin key (gates `/_admin/*` + `/_admin/wake` + `SetAdminAuth`). */
+  /** The deployment admin key (gates `/_admin/*` + `/_admin/wake` + `SetAdminAuth`). Also the storage
+   *  capability-token signing key (same as the container path — see `storageContextProvider`). */
   adminKey: string;
+  /** The R2-backed (or any) `BlobStore` for file storage. Injected by the DO host (`env.R2` →
+   *  `@stackbase/blobstore-r2`), never imported — the engine stays blob-store-neutral. Absent → file
+   *  storage is inert (no `ctx.storage` provider, no reaper, no `/api/storage/*` routes). */
+  blobStore?: BlobStore;
+  /** Storage upload-URL / capability-token TTL override (ms). Defaults to the provider's 1h. */
+  storageUploadTtlMs?: number;
+  /** Storage orphan-reaper sweep cadence override (ms). Defaults to the reaper's 60s. */
+  storageReaperSweepMs?: number;
   /** The host's single alarm (the DO's `setAlarm`), for driver wake (scheduler/triggers). Optional —
    *  a DO without composed drivers needs no wake. */
   wakeHost?: WakeHost;
@@ -52,6 +77,12 @@ export interface DurableObjectBoot {
   project: ProjectArtifacts;
   logSink: InMemoryLogSink;
   adminKey: string;
+  /** Engine-owned `/api/storage/*` handlers — present only when a `blobStore` was injected. Empty
+   *  otherwise. The DO host matches these ahead of the pure dispatcher (see `host.ts`). */
+  storageRoutes: StorageRoute[];
+  /** Reserved routes contributed by composed components (e.g. auth's OAuth callbacks). Always wired —
+   *  independent of file storage. Matched after storage routes, before user routes. */
+  componentRoutes: StorageRoute[];
 }
 
 /**
@@ -69,19 +100,39 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
   // Idempotent DDL — safe to call on every cold wake; `createEmbeddedRuntime` also calls it.
   await store.setupSchema();
 
+  // File storage (`ctx.storage`) — composed ONLY when a `blobStore` is injected (an R2 binding on the
+  // DO). Mirrors the container `boot.ts`: the `_storage:*` built-ins go in BOTH `modules` (reached by
+  // the action-mode facade's `invoke` and the reaper's `runFunction`) and `systemModules` (reached by
+  // the `/api/storage/*` routes' `runSystem`, the trusted path `_admin` uses), the `ctx.storage`
+  // provider is PREPENDED to the composed providers, and the orphan reaper is prepended to the drivers
+  // (it rides the SAME wake seam scheduler/triggers use on the DO). Absent → byte-less, unchanged.
+  const blobStore = input.blobStore;
   const runtime = await createEmbeddedRuntime({
     store,
     catalog: project.catalog,
     logSink,
-    modules: project.moduleMap,
-    systemModules: systemModules(),
+    modules: blobStore ? { ...project.moduleMap, ...storageModules } : project.moduleMap,
+    systemModules: blobStore ? { ...systemModules(), ...storageModules } : systemModules(),
     adminModules: { "_admin:browseTable": browseTableModule },
     verifyAdmin: (key: string) => verifyAdminKey(input.adminKey, key),
     componentNames: project.componentNames,
-    contextProviders: project.contextProviders,
+    contextProviders: blobStore
+      ? [
+          storageContextProvider(blobStore, {
+            signingKey: input.adminKey,
+            ...(input.storageUploadTtlMs !== undefined ? { uploadTtlMs: input.storageUploadTtlMs } : {}),
+          }),
+          ...project.contextProviders,
+        ]
+      : project.contextProviders,
     tableNumbers: project.tableNumbers,
     bootSteps: project.bootSteps,
-    drivers: project.drivers,
+    drivers: blobStore
+      ? [
+          storageReaper(blobStore, input.storageReaperSweepMs !== undefined ? { sweepMs: input.storageReaperSweepMs } : undefined),
+          ...project.drivers,
+        ]
+      : project.drivers,
     // Single-shard by mandate (roadmap Global Constraints). Sharding is Slice 6.
     numShards: 1,
     // Decision 6 / §8.1: no process-shaped `setInterval` sweep, no per-session ping heartbeat.
@@ -103,5 +154,33 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
     catalog: project.catalog,
   });
 
-  return { runtime, adminApi, store, project, logSink, adminKey: input.adminKey };
+  // Engine-owned `/api/storage/*` handlers — only when file storage is composed. The routes reach the
+  // privileged `_storage:_finalize`/`_get` built-ins via `runSystem` (trusted, like `_admin`), which
+  // reads `systemModules` (unaffected by any later `setModules` swap — a DO has none anyway). No
+  // `checkRead` is wired (authz composition on a DO is a forward gap), so `handleServe` falls back to
+  // the capability-token check for private files — same default as the container path.
+  const routesForStorage: StorageRoute[] = blobStore
+    ? storageRoutes(blobStore, {
+        runMutation: async (path, args) => (await runtime.runSystem(path, args as JSONValue)).value,
+        runQuery: async (path, args) => (await runtime.runSystem(path, args as JSONValue)).value,
+        signingKey: input.adminKey,
+      } satisfies StorageRouteDeps)
+    : [];
+
+  // Component-contributed reserved routes (e.g. auth's OAuth callbacks) — always wired, independent of
+  // file storage. Bind each declared component httpAction to the runtime and shape it as an
+  // engine-owned `StorageRoute`. The raw `Authorization: Bearer <token>` is passed straight through as
+  // `identity` (no resolution — same convention `httpAction`/storage use). Mirrors the container path.
+  const bearerOf = (request: Request): string | null => {
+    const h = request.headers.get("authorization");
+    const m = h ? /^Bearer\s+(.+)$/.exec(h) : null;
+    return m ? (m[1] ?? null) : null;
+  };
+  const componentRoutes: StorageRoute[] = project.componentRoutes.map((r) => ({
+    method: r.method,
+    pathPrefix: r.pathPrefix,
+    handler: (request: Request) => runtime.runHttpAction(r.handlerPath, request, { identity: bearerOf(request) }),
+  }));
+
+  return { runtime, adminApi, store, project, logSink, adminKey: input.adminKey, storageRoutes: routesForStorage, componentRoutes };
 }

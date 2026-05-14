@@ -94,10 +94,54 @@ async function main() {
   console.log("✓ persistence read-back ok:", rows.length, "row(s)");
 
   ws.close();
+
+  // 8. FILE STORAGE on real R2 (needs the STORAGE_BUCKET binding — see README). generateUploadUrl →
+  //    proxied upload of bytes → the DO stores them in R2 → getUrl → download round-trips the bytes.
+  await storageE2E();
+
   console.log("\nALL PASS. Note: for the hibernation-resume sub-test, keep a socket subscribed, stay");
   console.log("SILENT ~60s (let the DO hibernate), then commit from a second client and re-run the");
   console.log("push assertion — the silence is the test (see README).");
   console.log(`\nMEASURED write latency (in-CF): ${latencyMs.toFixed(1)}ms`);
+}
+
+async function runValue(path, args) {
+  const res = await fetch(`${URL}/api/run`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path, args }),
+  });
+  if (res.status !== 200) throw new Error(`${path} → ${res.status}`);
+  return (await res.json()).value;
+}
+
+async function storageE2E() {
+  const payload = Buffer.from(`file-storage-e2e ${Date.now()}`, "utf8");
+
+  // Mint a proxied upload target (a mutation writing the pending `_storage` row).
+  const { storageId, target } = await runValue("files:genUpload", { contentType: "text/plain" });
+  if (target.kind !== "proxied") throw new Error(`expected proxied target, got ${target.kind}`);
+
+  // Proxied upload: POST bytes to the DO's own endpoint → stored in R2 → row flips to `ready`.
+  const up = await fetch(`${URL}${target.url}`, { method: "POST", headers: { "content-type": "text/plain" }, body: payload });
+  if (up.status !== 200) throw new Error(`upload → ${up.status}`);
+  console.log("✓ proxied upload stored bytes in real R2");
+
+  const meta = await runValue("files:getMeta", { id: storageId });
+  if (!meta || meta.size !== payload.byteLength) throw new Error(`meta size ${meta && meta.size} !== ${payload.byteLength}`);
+
+  // getUrl → token-signed download url → GET it → the exact bytes back out of R2.
+  const url = await runValue("files:getUrl", { id: storageId });
+  const dl = await fetch(`${URL}${url}`);
+  if (dl.status !== 200) throw new Error(`download → ${dl.status}`);
+  const got = Buffer.from(await dl.arrayBuffer());
+  if (!got.equals(payload)) throw new Error("download bytes mismatch");
+  console.log("✓ getUrl download round-trips the exact bytes from real R2");
+
+  // Range request → 206 partial.
+  const range = await fetch(`${URL}${url}`, { headers: { Range: "bytes=0-3" } });
+  if (range.status !== 206) throw new Error(`range → ${range.status}`);
+  console.log("✓ Range request returns a 206 partial");
 }
 
 main().catch((e) => {

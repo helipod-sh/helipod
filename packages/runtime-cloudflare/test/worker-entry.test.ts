@@ -40,6 +40,26 @@ describe("generateWorkerEntrySource", () => {
     expect(src).toContain(`env["STACKBASE_ADMIN_KEY"]`);
   });
 
+  it("wires an R2 blob store when r2BindingName is set (byte storage on the deployed DO)", () => {
+    const withR2 = generateWorkerEntrySource({
+      moduleImports: [{ key: "files", absPath: "/x/files.js" }],
+      schemaAbsPath: "/x/schema.js",
+      configAbsPath: null,
+      bindingName: "DO",
+      doClassName: "MyDO",
+      r2BindingName: "STORAGE_BUCKET",
+    });
+    expect(withR2).toContain(`import { R2BlobStore } from "@stackbase/blobstore-r2";`);
+    expect(withR2).toContain(`env["STORAGE_BUCKET"]`);
+    expect(withR2).toContain(`new R2BlobStore({ bucket: __bucket })`);
+    expect(withR2).not.toMatch(/\bawait\b/);
+  });
+
+  it("omits the R2 import + blobStore when r2BindingName is absent (byte-less deploy)", () => {
+    expect(src).not.toContain("@stackbase/blobstore-r2");
+    expect(src).not.toContain("R2BlobStore");
+  });
+
   it("omits the config import + empties components when there is no stackbase.config", () => {
     const noCfg = generateWorkerEntrySource({
       moduleImports: [{ key: "a", absPath: "/x/a.js" }],

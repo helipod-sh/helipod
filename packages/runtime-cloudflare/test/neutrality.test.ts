@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeHost } from "@stackbase/runtime-embedded";
+import type { StorageRoute } from "@stackbase/storage";
 import { DurableObjectRuntimeHost } from "../src/index";
 
 const repoRoot = join(import.meta.dirname, "../../..");
@@ -64,7 +65,9 @@ describe("engine neutrality — Cloudflare stays in the leaf host package", () =
   });
 
   it("DurableObjectRuntimeHost satisfies the RuntimeHost seam", () => {
-    const host = new DurableObjectRuntimeHost() satisfies RuntimeHost<never, never>;
+    // `StorageRt` is pinned to `StorageRoute` (the host matches storage + component reserved routes),
+    // so the seam proof supplies it; Route/Admin stay `never` (only the shape matters here).
+    const host = new DurableObjectRuntimeHost() satisfies RuntimeHost<never, never, StorageRoute>;
     expect(typeof host.serve).toBe("function");
     expect(typeof host.fetch).toBe("function");
   });

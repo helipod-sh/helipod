@@ -9,13 +9,17 @@ latency, real hibernation eviction.
 ## What's here
 
 - `wrangler.jsonc` — the deploy config: `nodejs_compat`, the `STACKBASE_DO` Durable Object binding, a
-  `new_sqlite_classes` migration (DO-SQLite needs the SQLite-backed class tag).
+  `new_sqlite_classes` migration (DO-SQLite needs the SQLite-backed class tag), and the
+  `STORAGE_BUCKET` **R2 bucket binding** for file storage.
 - `fixture/worker.ts` — the Worker/DO entry (hand-written stand-in for what
   `generateWorkerEntrySource` codegens): static imports of the fixture `convex/`, `export class
   StackbaseDO extends StackbaseDurableObject`, `export default createWorkerHandler("STACKBASE_DO")`.
-- `fixture/convex/` — a minimal reactive app (one indexed table, no file storage, no components).
+  Constructs an `R2BlobStore` over `env.STORAGE_BUCKET` (exactly what
+  `generateWorkerEntrySource({ r2BindingName: "STORAGE_BUCKET" })` emits).
+- `fixture/convex/` — a minimal reactive app (one indexed `messages` table) **plus `files.ts`**
+  exercising `ctx.storage.generateUploadUrl`/`getUrl`/`getMetadata`.
 - `e2e.mjs` — the assertion script (health → subscribe → commit → reactive push → latency →
-  persistence).
+  persistence → **file-storage upload/download/range on real R2**).
 
 ## The exact commands a human runs
 
@@ -29,21 +33,26 @@ npx wrangler login
 # 2. set the admin key as a SECRET (do NOT leave the placeholder in wrangler.jsonc)
 npx wrangler secret put STACKBASE_ADMIN_KEY      # paste a strong secret
 
-# 3. deploy — builds fixture/worker.ts into a Worker + the StackbaseDO Durable Object
+# 3. create the R2 bucket the file-storage E2E stores blobs in (name matches wrangler.jsonc's
+#    r2_buckets[].bucket_name). One-time; skip if it already exists.
+npx wrangler r2 bucket create stackbase-do-fixture
+
+# 4. deploy — builds fixture/worker.ts into a Worker + the StackbaseDO Durable Object (with the R2 bind)
 npx wrangler deploy
 #    → prints a URL like https://stackbase-do-fixture.<subdomain>.workers.dev
 
-# 4. run the E2E against the real deployment
+# 5. run the E2E against the real deployment (includes the real-R2 file-storage round-trip)
 node e2e.mjs --url https://stackbase-do-fixture.<subdomain>.workers.dev
 
-# 5. hibernation-resume sub-test (the silence IS the test — do NOT poll /api/health while waiting):
+# 6. hibernation-resume sub-test (the silence IS the test — do NOT poll /api/health while waiting):
 #    - keep a WS subscribed (e2e.mjs leaves the pattern), stay SILENT ~60s so the DO hibernates,
 #      then commit from a second client and assert the hibernated socket still receives the push
 #      with its read-set REHYDRATED from the 16 KB attachment (not lost). A harness that polls health
 #      keeps the DO alive and passes for the wrong reason.
 
-# 6. tear down when done
+# 7. tear down when done
 npx wrangler delete
+npx wrangler r2 bucket delete stackbase-do-fixture   # remove the R2 bucket too
 ```
 
 ## Placement (optional): pin the DO's home region
@@ -63,6 +72,7 @@ the paid [`@stackbase/runtime-cloudflare-shard`](../../../ee/packages/runtime-cl
 |---|---|
 | `GET /api/health` → 200 | the DO boots on real DO-SQLite |
 | subscribe → commit (2nd client) → push | reactivity across a **real** DO (G1/G4 in-process fan-out) |
+| `generateUploadUrl` → proxied upload → `getUrl` download | file storage on **real R2** (bytes actually in an R2 bucket, served through the DO's own `fetch`; `Range` → 206) |
 | write-latency measurement | the co-located DO-SQLite write vs the container→R2 ≈1.5 s WAN number — **report the real in-CF number** (methodology: measure from the SAME vantage; do not compare a laptop→R2 WAN number against an in-datacenter DO number) |
 | persistence read-back | DO-SQLite is durable |
 | hibernation-resume (silent) | the attachment-based rehydrate (§3) works on real hibernation |

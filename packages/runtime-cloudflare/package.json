@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@stackbase/admin": "workspace:*",
+    "@stackbase/blobstore": "workspace:*",
     "@stackbase/cli": "workspace:*",
     "@stackbase/component": "workspace:*",
     "@stackbase/docstore": "workspace:*",
@@ -30,11 +31,13 @@
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/runtime-embedded": "workspace:*",
+    "@stackbase/storage": "workspace:*",
     "@stackbase/sync": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.5.40",
     "@cloudflare/workers-types": "^4.20241127.0",
+    "@stackbase/blobstore-r2": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
     "@stackbase/index-key-codec": "workspace:*",
