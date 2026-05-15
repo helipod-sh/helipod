@@ -1,0 +1,89 @@
+---
+title: Queries
+description: How you read data — and why a query's read set is the heart of reactivity.
+---
+
+{/* diataxis: explanation */}
+
+A query is a function that **reads** data. Queries are the functions clients subscribe to, so
+understanding them is understanding how a stackbase app stays live.
+
+## Defining a query
+
+A query takes a context (`ctx`) and, optionally, arguments, and returns a value:
+
+```ts title="convex/messages.ts"
+import { v } from "@stackbase/values";
+import { query } from "./_generated/server";
+
+export const list = query({
+  args: { conversationId: v.id("conversations") },
+  handler: (ctx, args) =>
+    ctx.db
+      .query("messages", "by_conversation")
+      .eq("conversationId", args.conversationId)
+      .collect(),
+});
+```
+
+- **`args`** is a validator for the query's arguments. It is optional, but declaring it gives you
+  runtime validation and precise types on the client.
+- **`handler`** does the reading through `ctx.db`. `ctx.db.query(table, index)` opens a read over an
+  index; `.eq(field, value)` narrows it to a key; `.collect()` returns the matching documents.
+
+You can also add a **`returns`** validator describing the result shape. It is optional, but it is
+what lets the client type a query's result exactly — and it is required to type an optimistic update
+([Optimistic updates](/docs/client/optimistic-updates)).
+
+## Reading data
+
+Queries read exclusively through `ctx.db`:
+
+- `ctx.db.query(table, index).eq(field, value).collect()` — the documents matching an index key.
+- `.order("desc")` — reverse the index order (newest first, for example).
+- `.paginate({ cursor, pageSize })` — a page of results plus a cursor for the next page, instead of
+  the whole set.
+- `ctx.db.get(id)` — a single document by its `_id`.
+
+Every table has a built-in `by_creation` index, so `ctx.db.query("messages", "by_creation").collect()`
+lists a whole table in creation order. See [Schema & tables](/docs/core-concepts/schema-and-tables)
+for declaring your own indexes.
+
+## Queries are pure
+
+A query must be **deterministic**: given the same data, it must return the same result. That means
+**no** `fetch`, **no** `Date.now()`, **no** `Math.random()`, and no writes — a query cannot call
+`ctx.db.insert`. Anything non-deterministic belongs in an [action](/docs/core-concepts/actions);
+any write belongs in a [mutation](/docs/core-concepts/mutations).
+
+This purity is not a limitation for its own sake. It is what makes a subscription trustworthy.
+
+## The read set is the subscription
+
+While a query runs, stackbase records everything it read as a **read set** — the exact index ranges
+and documents it touched. That read set is what a subscription is *made of*. When a mutation later
+commits a write, stackbase intersects the write with every live query's read set and re-runs only
+the queries that were actually affected ([How it works](/docs/get-started/how-it-works)).
+
+So the shape of your query directly determines how it reacts. A query narrowed with
+`.eq("conversationId", id)` reads only one conversation's range, so only writes to *that*
+conversation refresh it — writes to other conversations cost it nothing. Writing precise queries is
+therefore also how you write efficient reactivity.
+
+## Using a query from a client
+
+On the client, you subscribe with the `useQuery` hook and the generated, typed `api`:
+
+```tsx
+import { useQuery } from "@stackbase/client/react";
+import { api } from "../convex/_generated/api";
+
+function Messages({ conversationId }: { conversationId: string }) {
+  const messages = useQuery(api.messages.list, { conversationId });
+  if (messages === undefined) return <p>Loading…</p>;
+  return <ul>{messages.map((m) => <li key={m._id}>{m.author}: {m.body}</li>)}</ul>;
+}
+```
+
+The component re-renders on its own whenever the query's result changes — that is the payoff of
+everything above. The full client surface is in [Client SDK](/docs/client/client-sdk).

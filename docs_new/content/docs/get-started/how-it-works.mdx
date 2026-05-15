@@ -1,0 +1,60 @@
+---
+title: How it works
+description: The reactive model — how stackbase knows which queries to refresh when data changes.
+---
+
+{/* diataxis: explanation */}
+
+Reactivity in stackbase is not magic and it is not polling. It comes from one idea: **the engine
+records what each query reads, records what each mutation writes, and refreshes a query only when
+the two overlap.** Everything else is a consequence of getting that one idea right.
+
+## Read sets and write sets
+
+When a query runs, the engine watches every read it makes and remembers them as a **read set** —
+the exact tables, rows, and index ranges the query touched to produce its result. The read set is
+not "the `messages` table"; it is as precise as "the rows of `messages` whose `conversationId`
+equals *this* value".
+
+When a mutation commits, the engine computes its **write set** — the specific rows it inserted,
+updated, or deleted.
+
+A subscribed query is re-run and re-pushed **only when a committed write set intersects its recorded
+read set.** If you send a message to conversation A, the subscription watching conversation A
+refreshes; the thousand subscriptions watching other conversations do not run at all. There is no
+polling loop and no fan-out to uninterested clients — the intersection *is* the notification.
+
+## Why queries must be deterministic
+
+This model only works if re-running a query is trustworthy. If a query could return a different
+answer for the same data — because it read the clock, generated a random value, or fetched from the
+network — then the engine could not reason about when its result really changed, and a subscription
+could show stale or wrong data.
+
+So queries (and mutations) are **deterministic**: no `fetch`, no `Date.now()`, no `Math.random()`.
+Anything non-deterministic belongs in an [action](/docs/core-concepts/actions), which runs outside
+the transaction and cannot be subscribed to. This is a constraint, but it is the constraint that
+makes reactivity correct by construction rather than best-effort.
+
+## Mutations are the only writers
+
+Every write goes through a mutation, and a mutation runs as a single **serializable transaction**.
+That gives you two things at once: your writes are atomic (all-or-nothing), and the engine has a
+single, well-defined moment — the commit — at which to compute a write set and run the intersection
+against every live query. Reads never block writes and writes never tear a reader's view, because
+reads run against a consistent snapshot.
+
+## The whole loop
+
+1. A client **subscribes** to a query. The engine runs it, records its read set, and returns the
+   result.
+2. Later, a **mutation commits** a write. The engine computes its write set.
+3. The engine **intersects** that write set with every live query's read set.
+4. Each query whose read set was touched is **re-run and re-pushed**; every other subscription is
+   untouched.
+
+That is the entire reactive core. The pages on
+[Schema & tables](/docs/core-concepts/schema-and-tables),
+[Queries](/docs/core-concepts/queries), [Mutations](/docs/core-concepts/mutations), and
+[Reactivity](/docs/core-concepts/reactivity) build on it — but if you understand this loop, you
+understand stackbase.

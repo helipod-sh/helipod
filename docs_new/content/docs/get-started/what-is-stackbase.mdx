@@ -1,0 +1,59 @@
+---
+title: What is stackbase?
+description: An open-source, self-hostable reactive backend — and why reactivity changes how you build.
+---
+
+{/* diataxis: explanation */}
+
+stackbase is an open-source, self-hostable **backend**. You write your backend as ordinary
+TypeScript functions that read and write a database; stackbase runs them for you — transactionally,
+server-side — and keeps every client that is looking at the data **automatically up to date**.
+
+The defining feature is that word *automatically*. In a traditional backend you write an endpoint,
+the client calls it, and when the underlying data changes later, it is your job to notice and tell
+the client — with polling, websockets you manage by hand, cache-invalidation rules, or a separate
+realtime service bolted on the side. stackbase removes that job. A client subscribes to a query
+once, and stackbase re-runs and re-pushes that query whenever — and only whenever — a write actually
+affects its result.
+
+## The mental model
+
+There are three kinds of function, and the whole system falls out of the differences between them:
+
+- **Queries** read data. They are pure and deterministic, and they are the things clients
+  subscribe to. Because a query is deterministic, stackbase can re-run it and know it will produce
+  the same answer for the same data — which is what makes reactivity trustworthy.
+- **Mutations** write data. A mutation runs as a single serializable transaction: it either
+  commits as a whole or not at all. Mutations are the *only* way to change data.
+- **Actions** do everything else — call a third-party API, send an email, use the clock or a random
+  number. They run *outside* the transaction, because anything non-deterministic would break the
+  guarantees that queries and mutations rely on.
+
+When a mutation commits, stackbase compares what it wrote against what each live query read, and
+refreshes exactly the queries that were affected. That single idea is covered in
+[How it works](/docs/get-started/how-it-works).
+
+## What comes in the box
+
+- A **reactive database** on an append-only, transactional storage engine (SQLite for local and
+  single-node; Postgres for a larger single node).
+- A **client SDK** with `useQuery`/`useMutation` hooks, optimistic updates, and durable offline
+  sync so queued writes survive a reload.
+- **Opt-in components** you compose as needed — [authentication](/docs/components/auth),
+  [authorization](/docs/components/authorization), [notifications](/docs/components/notifications),
+  [scheduling](/docs/components/scheduling), [durable workflows](/docs/components/workflows), and
+  [change triggers](/docs/components/triggers).
+- A **CLI** for hot-reloading local development and one-command self-hosting, and a **dashboard**
+  for browsing data, reading logs, and running functions.
+
+## What stackbase is not
+
+- **Not a hosted-only product.** stackbase is something you run — in a container, as a single
+  binary, or on your own cloud. Your data and your code stay portable; there is no lock-in.
+- **Not a thin database wrapper.** The reactive execution model — recording what each query reads
+  and matching it against what each mutation writes — is the core of the system, not a feature
+  layered on top.
+
+If you are coming from Convex, the programming model will feel familiar; see
+[Migrate from Convex](/docs/reference/migrate-from-convex). Otherwise, the fastest way to
+understand stackbase is to [build something with it](/docs/get-started/quickstart).

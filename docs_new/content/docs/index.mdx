@@ -1,0 +1,29 @@
+---
+title: stackbase
+description: An open-source, self-hostable reactive backend — write TypeScript functions, get real-time results.
+---
+
+stackbase is an open-source, self-hostable backend. You write TypeScript **query**,
+**mutation**, and **action** functions; stackbase runs them server-side and transactionally, and
+**pushes updated results to subscribed clients in real time** — with no polling and no
+cache-invalidation code to write yourself.
+
+It is TypeScript end to end (engine, CLI, and client SDK), runs on SQLite or Postgres, and deploys
+anywhere you can run a container or a single binary — no vendor lock-in.
+
+<Cards>
+  <Card title="What is stackbase?" href="/docs/get-started/what-is-stackbase" description="The idea, and why reactivity changes how you build." />
+  <Card title="How it works" href="/docs/get-started/how-it-works" description="The reactive model, in one page." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Install, write a function, and see it update live." />
+  <Card title="Core concepts" href="/docs/core-concepts/schema-and-tables" description="Schema, queries, mutations, and actions." />
+</Cards>
+
+## What you get
+
+- **A reactive database** — subscribe to a query and it stays up to date automatically.
+- **Server functions** — queries, mutations, and actions, with typed arguments and return values.
+- **A client SDK** — `useQuery`/`useMutation` hooks, optimistic updates, and durable offline sync.
+- **Opt-in components** — authentication, authorization, notifications, scheduling, durable
+  workflows, and change triggers, composed into your project as you need them.
+- **A CLI and dashboard** — hot-reloading local development, a live data browser, and one-command
+  self-hosting.

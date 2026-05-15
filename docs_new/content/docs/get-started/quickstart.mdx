@@ -1,0 +1,106 @@
+---
+title: Quickstart
+description: Install stackbase, write a query and a mutation, and watch the result update live — in a few minutes.
+---
+
+{/* diataxis: tutorial */}
+
+By the end of this page you will have a running stackbase backend with a `messages` table, a query
+that lists messages, and a mutation that adds one — and you will see the query update **live** the
+moment you write a new row. It takes a few minutes and every step is runnable.
+
+## Before you start
+
+You need **Node.js 18+** (or **Bun**) and a package manager. Create an empty project directory and
+initialize it:
+
+```bash
+mkdir my-app && cd my-app
+npm init -y
+```
+
+## 1. Install stackbase
+
+```bash
+npm install @stackbase/cli @stackbase/values @stackbase/client
+```
+
+- `@stackbase/cli` is the `stackbase` command — it runs your backend locally and generates typed
+  helpers.
+- `@stackbase/values` gives you `defineSchema` and the `v` validators.
+- `@stackbase/client` is the browser/Node client you will use later to read data from a UI.
+
+## 2. Define a schema
+
+Your backend lives in a `convex/` directory (the default). Create `convex/schema.ts`:
+
+```ts title="convex/schema.ts"
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+export default defineSchema({
+  messages: defineTable({
+    author: v.string(),
+    body: v.string(),
+  }),
+});
+```
+
+This declares one table, `messages`, with two string fields. Every document also gets an `_id` and
+a `_creationTime` automatically.
+
+## 3. Write a query and a mutation
+
+Create `convex/messages.ts`:
+
+```ts title="convex/messages.ts"
+import { v } from "@stackbase/values";
+import { query, mutation } from "./_generated/server";
+
+// A query: reads data. Clients can subscribe to it.
+export const list = query({
+  handler: (ctx) => ctx.db.query("messages", "by_creation").collect(),
+});
+
+// A mutation: the only way to write data. Runs as one transaction.
+export const send = mutation({
+  args: { author: v.string(), body: v.string() },
+  handler: (ctx, args) => ctx.db.insert("messages", { author: args.author, body: args.body }),
+});
+```
+
+`by_creation` is the built-in creation-order index every table has, so `list` returns all messages
+oldest-first without you declaring an index. Don't worry that `./_generated/server` doesn't exist
+yet — the next step creates it.
+
+## 4. Run it
+
+```bash
+npx stackbase dev
+```
+
+`stackbase dev` generates the typed `convex/_generated/` helpers, starts the reactive engine with a
+local SQLite database, watches your files for changes, and serves a **dashboard**. It prints the
+dashboard URL — open it in your browser.
+
+## 5. See reactivity happen
+
+In the dashboard:
+
+1. Open the **data browser** and select the `messages` table. Keep it visible — it is a *live*
+   view.
+2. Open the **function runner** and call `messages:send` with, for example,
+   `{ "author": "Ada", "body": "hello" }`.
+3. Watch the `messages` table in the data browser: the new row appears **immediately**, with no
+   refresh. That live view is a subscription to `messages:list` — exactly what a real client would
+   hold. Run `send` again and the list grows in real time.
+
+That is the whole model: a mutation wrote a row, and every subscription reading that table refreshed
+itself. You never wrote any invalidation or polling code.
+
+## Next steps
+
+- Wire this into a UI with the [Client SDK](/docs/client/client-sdk) and the `useQuery` /
+  `useMutation` hooks.
+- Understand *why* the list refreshed in [How it works](/docs/get-started/how-it-works).
+- Go deeper on [Schema & tables](/docs/core-concepts/schema-and-tables) and
+  [Queries](/docs/core-concepts/queries).

@@ -1,0 +1,75 @@
+---
+title: Schema & tables
+description: How you describe your data — tables, documents, validators, and indexes.
+---
+
+{/* diataxis: explanation */}
+
+A stackbase schema is a single file that describes every table in your database and the shape of the
+documents each one holds. It is plain TypeScript, so your editor and the compiler understand it, and
+stackbase enforces it at write time — a document that doesn't match its table's shape is rejected.
+
+## Defining a schema
+
+`convex/schema.ts` default-exports a `defineSchema` call that maps table names to `defineTable`
+definitions:
+
+```ts title="convex/schema.ts"
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+export default defineSchema({
+  conversations: defineTable({
+    title: v.string(),
+  }),
+  messages: defineTable({
+    conversationId: v.id("conversations"),
+    author: v.string(),
+    body: v.string(),
+  }).index("by_conversation", ["conversationId"]),
+});
+```
+
+Each field is described by a **validator** from `v`. Common ones are `v.string()`, `v.number()`,
+`v.boolean()`, `v.id("otherTable")` (a typed reference to another table's document),
+`v.array(...)`, `v.object({...})`, and `v.optional(...)` for a field that may be absent. The full
+list lives in the [Configuration reference](/docs/reference/configuration); this page is about the
+ideas, not the exhaustive catalog.
+
+## Documents
+
+A row is called a **document**. Every document, on every table, automatically has two system fields:
+
+- `_id` — a globally unique, typed id (`Id<"messages">`). It is what `v.id("messages")` refers to.
+- `_creationTime` — the time the document was inserted, as a number.
+
+You never set these yourself; stackbase assigns them on insert.
+
+## Indexes
+
+An **index** lets a query find documents efficiently instead of scanning the whole table. You
+declare one with `.index(name, [fields])`:
+
+```ts
+messages: defineTable({
+  conversationId: v.id("conversations"),
+  author: v.string(),
+  body: v.string(),
+}).index("by_conversation", ["conversationId"]),
+```
+
+Now a query can ask for exactly the messages in one conversation by that index. Every table also
+gets a built-in `by_creation` index (creation order), which is why the [Quickstart](/docs/get-started/quickstart)
+could list all messages without declaring an index of its own. Indexes are also what make
+reactivity precise: a subscription's read set is expressed in terms of the index range it touched,
+so a write only refreshes the queries whose ranges it actually falls in
+([How it works](/docs/get-started/how-it-works)).
+
+Which fields to index, and how queries use them, is covered in [Queries](/docs/core-concepts/queries).
+
+## Schema changes
+
+Your schema evolves as your app does. stackbase's live deploy accepts **additive** changes — new
+tables, and new *optional* fields on existing tables — without a migration step. Removing a field,
+renaming a table, or changing a field's type is rejected as a destructive change, so you never
+silently break existing data. See [Deploy and build](/docs/deploy/deploy-and-build) for how schema
+changes are applied to a running server.
