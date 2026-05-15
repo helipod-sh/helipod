@@ -35,6 +35,42 @@ stackbase really has**.
 4. **Modern OSS docs baseline.** Fast static site, good search, dark/light, copyable code,
    versionable — the table stakes a developer expects when evaluating an open-source backend.
 
+## Documentation types (Diátaxis)
+
+We follow the [Diátaxis](https://diataxis.fr/) framework: documentation serves four distinct
+user needs, and **a page must have ONE primary mode** — mixing them is the most common docs
+failure and produces pages that serve no one.
+
+| Mode | Orientation | It is | Reader's question |
+|---|---|---|---|
+| **Tutorial** | learning | a lesson | "teach me, hold my hand" |
+| **How-to guide** | task | a recipe | "how do I accomplish X?" |
+| **Reference** | information | a dictionary | "what exactly is the signature/config?" |
+| **Explanation** | understanding | a discussion | "why does it work this way?" |
+
+**How this maps onto the topic-first nav** (a page's *primary* mode in brackets):
+
+- **GET STARTED** — *Explanation* (What is / How it works) + *Tutorial* (Quickstart, Tutorial).
+  The Explanation pages stay pure: no API dumps, no step-by-step — just the mental model. The
+  Tutorial pages are guaranteed-success learning paths, deliberately narrow, not feature tours.
+- **CORE CONCEPTS** — *Explanation*-primary. Each page explains the model with just-enough
+  example and **links out** to Reference for exact signatures/validators, rather than inlining
+  the full API. (A reader who wants "the definitive `v.*` list" goes to Reference, not here.)
+- **CLIENT** — a mix of *How-to* (using the hooks) and *Explanation* (optimistic/offline models);
+  each page still declares one primary mode.
+- **COMPONENTS** — each topic (Auth, Notifications, …) is heavy enough that, when authored, it
+  **splits** into an *Explanation* page (the model), one or more *How-to* guides (set up OAuth,
+  add a push channel), and a *Reference* page (config + function signatures) — never a single
+  mega-page. The sidebar entry becomes a small sub-group.
+- **DEPLOY & OPERATE** — *How-to* guides (problem-oriented recipes: "self-host with Docker",
+  "point at Postgres", "deploy to Cloudflare").
+- **REFERENCE** — *Reference* (CLI, Configuration), plus *How-to* (Migrate from Convex) and a
+  Q&A-style *Explanation* (FAQ). Reference pages are terse, complete, and information-dense.
+
+**Convention:** every `.mdx` page's frontmatter names its Diátaxis type (a comment or a
+`type:` field) so a reviewer can immediately check "does this page keep to one mode?". When a
+topic page starts trying to be all four, that is the signal to split it.
+
 ## Tooling
 
 - **fumadocs** (Next.js App Router + MDX) as a **self-contained app** under `docs_new/`.
@@ -115,13 +151,21 @@ pages written for real:**
 2. The complete IA above wired via `meta.json` files — every section/entry present in the
    sidebar (non-spine entries are short stub pages: a one-line summary + a "documentation in
    progress" note, so the structure is browsable and no link 404s).
-3. **Spine pages written in full:**
-   - Docs home / landing (`index.mdx`)
-   - *What is stackbase?*
-   - *How it works* (the reactive model)
-   - *Quickstart* (install → a first reactive query/mutation running against `stackbase dev`)
-   - *Schema & tables* (core-concept exemplar #1)
-   - *Queries* (core-concept exemplar #2 — closes the reactive loop with the above)
+3. **Spine pages written in full** (each with its Diátaxis mode fixed — the spine deliberately
+   demonstrates all four modes so later pages have a template to copy):
+   - Docs home / landing (`index.mdx`) — a signpost page (links into each mode).
+   - *What is stackbase?* — **Explanation**. The pitch + mental model; no steps, no API.
+   - *How it works* — **Explanation**. The reactive model (read-set/write-set intersection).
+     Pure understanding — it must not drift into a how-to or a reference table.
+   - *Quickstart* — **Tutorial**. Install → one reactive query + mutation running against
+     `stackbase dev`. A **guaranteed-success, minimal** path — NOT a feature tour; every step is
+     runnable and verified, and it ends at a concrete working result.
+   - *Schema & tables* — **Explanation**-primary (core-concept exemplar #1). Explains tables,
+     documents, and indexes with just-enough example; links out to the (stub) schema Reference
+     for the exhaustive `v.*` validator list rather than inlining it.
+   - *Queries* — **Explanation**-primary (core-concept exemplar #2). Closes the reactive loop with
+     the two above (a query's read-set is what a subscription re-runs on); links to Reference for
+     the full query-builder surface.
 4. Every spine page's commands, imports, and code samples are **verified against the real
    shipping surface** (the `@stackbase/*` packages / `stackbase` CLI as they exist on `main`),
    not invented.
