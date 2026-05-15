@@ -5,6 +5,175 @@ description: The durable offline outbox.
 
 {/* diataxis: explanation */}
 
-Queue mutations while offline and drain them exactly-once on reconnect with the Receipted Outbox.
+[Optimistic updates](/docs/client/optimistic-updates) and the transport's automatic reconnect hold
+for a live, connected — or briefly reconnecting — session. On their own, a mutation that's `unsent`
+or `inflight` when the page reloads or the app relaunches is gone: nothing persists it, and nothing
+tells you what happened to it. The Receipted Outbox closes that gap. It's an opt-in layer on top of
+the reactive client: mutations queued while offline are written to durable storage, survive a full
+reload or crash, and drain in order once the connection returns — with server-side per-client
+receipts so a resend can never double-apply.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+A client constructed with no `outbox` behaves exactly as if this feature doesn't exist.
+
+## The model: queue, drain, receipts
+
+Three moving parts explain the whole design.
+
+**Queue.** Every `client.mutation(...)` call, once an outbox is configured, is stamped with a
+durable identity — a `clientId` (minted once per tab-session, at client construction) and a `seq`
+(a per-tab counter, incrementing once per mutation, never reused). That `(clientId, seq)` pair,
+plus the function path and arguments, is appended to durable storage. The append is
+**write-behind**: your call still sends over the wire immediately if you're online — it never waits
+for the disk write. If you're offline, the entry just sits durably as `unsent`.
+
+**Drain.** On reconnect, the client sends a `Connect` handshake naming every durable entry it's
+still holding. The server classifies each one, and the client sends the still-unresolved ones as
+`MutationBatch` chunks — one unacked chunk in flight at a time, FIFO across the *whole* queue
+(not per tab).
+
+**Receipts.** Every mutation that actually commits gets a durable server-side record keyed by
+`(identity, clientId, seq)`, written atomically with the mutation's own effects. If the device goes
+offline again mid-drain, or the app crashes right after a commit but before the response arrives,
+the next attempt resends the same pair — the server finds the existing record and replies with the
+*original* result instead of re-running the handler. Nothing is ever silently lost, and nothing is
+ever silently re-executed.
+
+This is why it's the *Receipted* Outbox specifically: correctness comes from a durable, atomic
+receipt the server keeps for exactly this purpose — not from the queue staying in strict lockstep
+with the server, which is what breaks under a crash or a lost response.
+
+## Choosing a backing store
+
+```ts
+import { StackbaseClient, webSocketTransport, indexedDBOutbox } from "@stackbase/client";
+
+const client = new StackbaseClient(webSocketTransport(url), {
+  outbox: indexedDBOutbox(), // browser, durable; probes IndexedDB, falls back to memory if unavailable
+});
+```
+
+- **`indexedDBOutbox()`** — the browser backend. Falls back transparently to an in-memory queue
+  wherever IndexedDB is unavailable (Node, private-mode Safari, a corrupt origin) — same API either
+  way.
+- **`fsOutbox({ dir })`** (from the `@stackbase/client/outbox-fs` subpath, so browser bundles never
+  see its `node:*` imports) — for Node/Bun processes, Electron main processes, and Tauri sidecars.
+  An append-only journal plus a pid lock file per directory; a second process opening the same
+  directory falls back to `memoryOutbox()` rather than throwing.
+- **`memoryOutbox()`** — the same identity/dedup machinery, backed by a plain `Map`. Nothing
+  survives a reload; useful for SSR, tests, or as a drop-in for an app that already has its own
+  external retry layer but wants the same exactly-once server receipts.
+
+Regardless of backend, the model above — queue, drain, receipts — is identical.
+
+## What actually survives a reload
+
+Durability of a *queued, never-sent* mutation is unconditional the moment an outbox is configured.
+The safe **parking** of a mutation that was already *sent* when the connection drops — the case
+where the outcome is genuinely unknown — activates only once the client has connected at least
+once and the server has proven, via a handshake, that it speaks this protocol. Before that first
+successful handshake in a tab-session, a dropped in-flight mutation still rejects with
+`MutationUndeliveredError`, exactly as it would with no outbox at all. Pointed at an older server
+that predates this feature, the client simply never arms — the same fail-fast behavior, forever,
+with no special handling required.
+
+Reconnecting itself is cheap: every server-pushed query result carries a content fingerprint, and
+the client echoes back the fingerprint it last saw for each still-live subscription. If a fresh
+re-run hashes the same, the server answers with a tiny "unchanged" marker instead of resending the
+value — a large bandwidth reduction for data that didn't change while offline, entirely automatic.
+This saves bandwidth, not compute: every subscribed query still fully re-executes on reconnect
+either way.
+
+## Client-supplied ids
+
+The outbox delivers a *single* queued mutation exactly once. The next question is what happens
+when two queued mutations depend on each other — the classic case is "create a conversation, then
+send the first message into it," both issued offline, where the second needs to reference a row
+the first hasn't committed yet.
+
+Client-supplied ids close that gap: mint a **real** `Id<"table">` on the client before either
+mutation is sent, and pass it as `_id` on the insert. The engine accepts it (instead of minting its
+own) so the id is valid — and referenceable — the instant it's minted, not the instant it lands.
+
+```ts
+import { mintId } from "../convex/_generated/ids";
+
+const conversationId = mintId("conversations"); // a REAL Id<"conversations">, minted now
+
+await client.mutation(api.conversations.create, { _id: conversationId, name });
+await client.mutation(api.messages.send, { conversationId, body });
+```
+
+Both calls enqueue into the durable outbox like any other mutation. On drain, `conversations.create`
+runs first (the outbox is FIFO), inserts under the minted id, and by the time `messages.send` runs
+the reference resolves against a real row.
+
+This is v1-scoped to **unsharded tables on the default ring** — a client-supplied `_id` is rejected
+(with a stable, typed error code) if the target table has a `shardKey` or the mutation is routed
+elsewhere via `shardBy`. Mint at args-construction time, outside any `withOptimisticUpdate` updater
+— minting consults randomness, so it follows the same purity rule as `placeholderId()`/`now()`: an
+updater reads the id *from args*, and never mints one itself.
+
+## The conflict taxonomy
+
+Stackbase has **no merge and no CRDT layer**, offline or online. A queued mutation, when it finally
+drains, runs against whatever the server's actual state is *at that moment* — not whatever it was
+when you went offline — and exactly one of three things happens: it succeeds normally; it's a
+no-op by your own handler's check-before-write logic (the idiom for anything you'd otherwise reach
+for a CRDT for); or it fails terminally (your handler threw, or a validation/authorization check
+rejected it — throw a typed, coded error so the drain can tell a real rejection apart from a
+transient infrastructure hiccup). There is no fourth branch where the outbox tries to reconcile
+your write against someone else's — that's a deliberate scope line: conflict handling is your
+mutation handler's job, exactly as it already is for two racing online writers.
+
+## The honest boundaries
+
+**Offline-after-reload rendering is app-effort.** There is no persisted query cache in this
+design — that's a different, much larger bet (a client-side replica), deliberately not built here.
+Concretely: while genuinely offline right after a reload, a `useQuery` you haven't yet reconnected
+for renders `undefined`, same as before any subscription result has ever arrived. An
+`optimisticUpdates` registry (keyed by function path, configured at client construction) can
+rebuild a durable entry's optimistic layer once a live baseline exists — so queued rows render
+before the drain has actually committed them — but until then, the honest affordance is a
+**pending tray**: a durable, reactive list of everything still queued, via
+`usePendingMutations()`/`client.pendingMutations()`, independent of whether any query has a cache
+to render into.
+
+**Browser storage is best-effort, not guaranteed.** Safari can evict an origin's IndexedDB data
+after roughly 7 days of no interaction; any browser can evict under storage pressure; a user can
+clear site data at any time. This is priced honestly, not hidden: if storage is evicted, the queue,
+the tab's `clientId`, and its `seq` counter are all gone together, and anything still queued is
+simply gone. Anything that already drained is unaffected — its receipts and effects are safely on
+the server. Server-side receipts, independently, are retained for 30 days past acknowledgment (with
+per-client floor rows retained at least a year), so the server-side half of this system outlives
+any realistic browser-side queue lifetime by a wide margin.
+
+**It's bounded-offline, not unbounded.** This is built for "closed my laptop overnight" or "was on
+a plane," not "used the app for a month with no network." `pendingSummary()`'s `oldestAgeMs` lets an
+app surface an advisory banner before a platform eviction cliff — the queue itself won't warn you.
+
+**Failure handling is explicit, not silent.** A coded (terminal) failure is settled and visible via
+`onMutationFailed`/`pendingMutations()`; the default `poisonPolicy: "skip"` keeps draining the rest
+of the queue rather than letting one bad mutation wedge everything behind it (`"pause"` is available
+for apps that want to halt on any failure instead). A failed entry persists until you call
+`entry.retry()` (re-enqueued under a fresh `(clientId, seq)`) or `entry.dismiss()`.
+
+**A server that can no longer account for a client's history says so, loudly.** If a queued `seq`
+falls below what the server can still account for (pruned records, or a restored backup), the
+server answers `known: false` on the next handshake rather than guess — unsent entries are safely
+re-enqueued under a fresh `clientId`; parked (in-flight-at-disconnect) entries reject with a typed
+error instead of a silent guess about whether they applied.
+
+**Multi-tab is safe by construction, not by locking.** Each tab mints its own `clientId`; all tabs
+against the same origin share one durable queue, drained by a Web-Locks-elected leader tab. If the
+leader closes mid-drain, another tab takes over — correctness comes from the server-side receipts,
+not from the lock, so a killed leader's successor finishes cleanly either way. Another tab's active
+durable mutations can also render live in your own queries (not just as a status entry), with one
+documented, self-healing residual: a single transient doubled frame when your tab's own live push
+beats the other tab's settle broadcast across the wire, which corrects itself on the very next push
+and never leaves a row absent.
+
+## Related
+
+- [Optimistic updates](/docs/client/optimistic-updates) — the live-session reconciliation model
+  the outbox's `optimisticUpdates` registry builds on.
+- [Client SDK](/docs/client/client-sdk) — constructing `StackbaseClient` and the React hooks.

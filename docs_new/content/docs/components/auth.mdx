@@ -5,6 +5,158 @@ description: Sessions, email, OAuth, MFA, and passkeys.
 
 {/* diataxis: explanation */}
 
-First-party authentication: password and anonymous sessions, email flows, social login, TOTP two-factor, and passkeys.
+`@stackbase/auth` is a first-party, self-hosted authentication component: email + password
+accounts, anonymous sign-in with in-place upgrade, a hardened session model, and a full set of
+identity flows — email verification/reset/magic-link/OTP, social OAuth, third-party JWT, TOTP MFA,
+and passkeys. Identity flows over the WebSocket sync connection via `SetAuth`, and
+`ctx.auth.getUserId()` resolves the current user inside your query/mutation — so revoking a
+session **reactively** flips every subscribed query, no polling.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Enabling it
+
+Compose it in `stackbase.config.ts` like any other component:
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineAuth, consoleEmail } from "@stackbase/auth";
+
+const auth = defineAuth({
+  email: { provider: consoleEmail(), from: "no-reply@example.com", baseUrl: "https://app.example.com" },
+});
+
+export default defineConfig({ components: [auth] });
+```
+
+`defineAuth()` alone (no options) gives you password + anonymous sign-in with sensible defaults;
+every other surface below — email flows, OAuth, MFA, passkeys — is opt-in behind its own config
+block, and a deployment that doesn't configure a block is byte-identical to one that predates it.
+
+## The session model
+
+Sign-in mints a pair: a short-lived **access token** (the `SetAuth` identity) and a longer-lived
+**refresh token**, both stored **hashed at rest** — a database leak is not a session hijack.
+`auth:refresh` rotates both tokens in place and remembers the previous refresh hash: presenting a
+stale-but-recent one is a soft `REFRESH_STALE` (a losing race between sibling tabs), but presenting
+one outside the grace window is `REFRESH_REUSED` — a theft signal — and deletes the whole session.
+A sliding `refreshTtlMs` and a fixed `sessionTotalTtlMs` absolute ceiling both force
+re-authentication eventually, even for an actively-refreshing session. See
+[core concepts](/docs/core-concepts/queries) for how `ctx.auth.getUserId()` folds into a query's
+read set — that's the mechanism that makes revocation reactive.
+
+On the client, `createAuthClient` manages the token lifecycle for you — persistence, applying the
+access token, scheduling refresh at ~80% of the access TTL, and a single cross-tab refresher via Web
+Locks:
+
+```ts
+import { StackbaseClient, webSocketTransport, createAuthClient, anyApi } from "@stackbase/client";
+
+const client = new StackbaseClient(webSocketTransport(url));
+const auth = createAuthClient(client, { onSignedOut: () => location.reload() });
+
+const result = await client.mutation(anyApi.auth.signUp, { email, password, deviceLabel: "Chrome on macOS" });
+auth.setSession(result);
+```
+
+Device management (`auth.listSessions` / `revokeSession` / `revokeOtherSessions`) and anonymous
+sign-in with in-place upgrade (`signInAnonymously` → later `signUp` on the *same* `userId`, so every
+row the anonymous user created survives) both build on this same session core.
+
+## Email flows
+
+Passing an `email` block turns on verification, password reset, magic-link, and one-time-code (OTP)
+sign-in — all built on one internal chokepoint that generates a code, hashes it, and stores only the
+hash:
+
+```ts
+import { defineAuth, consoleEmail } from "@stackbase/auth";
+
+defineAuth({
+  email: { provider: consoleEmail(), from: "no-reply@example.com", appName: "My App", baseUrl: "https://app.example.com" },
+});
+```
+
+`consoleEmail()` is the zero-config dev provider (prints to the server console); `resendEmail({
+apiKey })` delivers for real, and any other provider is a custom `{ send(msg) }` adapter — SMTP
+included, via a small `nodemailer` wrapper.
+
+Every `request*` call is an **action**; every redeem call is a **mutation** returning the same
+`MintResult` shape `signUp`/`signIn` do:
+
+```ts
+await client.action(anyApi.auth.requestPasswordReset, { email });
+const session = await client.mutation(anyApi.auth.resetPassword, { email, code, newPassword });
+auth.setSession(session);
+```
+
+Abuse defense is layered in by default: anti-enumeration on both request and redeem (a response
+never reveals whether an account exists), a per-`(email, flow)` cooldown, a per-code attempt counter
+for OTP, a global send throttle, and first-mailbox-proof session revocation (any flow that proves
+mailbox ownership for the first time revokes every existing session on the account, closing the
+pre-registration-takeover hole).
+
+## OAuth and third-party JWT
+
+Six built-in social providers — Google, GitHub, Microsoft, Discord, Facebook, and Apple — plus any
+custom OIDC/OAuth2 provider, all compose through the same account-linking core as password/email
+sign-in:
+
+```ts
+import { defineAuth, googleProvider, githubProvider } from "@stackbase/auth";
+
+defineAuth({
+  oauth: {
+    providers: {
+      google: googleProvider({ clientId: process.env.GOOGLE_CLIENT_ID!, clientSecret: process.env.GOOGLE_CLIENT_SECRET! }),
+      github: githubProvider({ clientId: process.env.GITHUB_CLIENT_ID!, clientSecret: process.env.GITHUB_CLIENT_SECRET! }),
+    },
+    redirectAllowlist: ["https://app.example.com/auth/callback"], // required — an open-redirect guard
+  },
+});
+```
+
+The engine mounts `GET/POST /api/auth/oauth/:provider/start` and `.../callback` for you — no app
+code to write. A returning `(provider, accountId)` pair signs in directly; a **verified** email
+match auto-links to an existing account (revoking its other sessions, the same first-mailbox-proof
+rule email flows use); an unverified or non-matching email always provisions a fresh user, never
+auto-links. Production endpoints must be `https://` — a config-time guard rejects a non-loopback
+`http://` provider or issuer before the app ever boots.
+
+For providers that hand your frontend a signed ID token directly (Clerk, Auth0, Supabase Auth),
+configure `jwt.issuers` and call `signInWithIdToken` — an **exchange model**: Stackbase verifies the
+token once, then trades it for a normal DB-backed Stackbase session, so revocation stays reactive
+and `ctx.auth.getUserId()` resolves to a real local `userId` — deliberately different from Convex's
+per-request-JWT-is-identity model.
+
+## Two-factor authentication and passkeys
+
+An `mfa` block turns on TOTP-based two-factor (authenticator apps + one-time recovery codes),
+gating every first-factor sign-in behind a second factor without ever bypassing the session-minting
+chokepoint:
+
+```ts
+defineAuth({ mfa: { encryptionKey: process.env.STACKBASE_AUTH_MFA_KEY! } });
+```
+
+Enrollment is two-phase (`startMfaEnrollment` → `confirmMfaEnrollment`, so a botched setup can't
+lock a user out), and every gated sign-in path returns `{ mfaRequired: true, pendingToken }` instead
+of a session until `completeMfaSignIn` provides a live TOTP code or a recovery code.
+
+A `passkeys` block adds WebAuthn (Face ID/Touch ID/hardware keys) as a phishing-resistant first
+factor — a passkey flows through the same session-minting chokepoint as a password, so it honors
+any enrolled MFA and participates in the same device-management surface:
+
+```ts
+defineAuth({ passkeys: { rpID: "example.com", rpName: "My App", origins: ["https://example.com"] } });
+```
+
+Registration/sign-in are each a two-message challenge/response ceremony (`begin*` then `finish*`
+actions), using `@simplewebauthn/browser` on the client; the crypto itself never runs in a
+query/mutation.
+
+## Where to go deeper
+
+This page covers the model and the primary entry points; the full option reference, security notes,
+and abuse-defense tables live in `docs/enduser/build/auth.md`. See also
+[Authorization](/docs/components/authorization) for permissions layered on top of a signed-in
+identity, and [Notifications](/docs/components/notifications) for routing auth's own transactional
+emails through a shared delivery path.

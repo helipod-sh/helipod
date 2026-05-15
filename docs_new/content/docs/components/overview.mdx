@@ -5,6 +5,95 @@ description: Opt-in capabilities composed in stackbase.config.ts.
 
 {/* diataxis: explanation */}
 
-What components are, and how to compose them into a deployment.
+The core engine — schema, queries, mutations, actions, reactivity — has no idea what auth,
+notifications, or workflows are. Those are **components**: self-contained packages that plug into
+the engine through the same seam, adding tables, a `ctx.<name>` facade, and background behavior to
+your deployment. You get to choose which capabilities your project actually needs.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## What a component contributes
+
+A component is a plain data value (`ComponentDefinition`) built by a `define*` function like
+`defineAuth()` or `defineScheduler()`. Depending on what it needs to do, a component can bring:
+
+- **Schema** — its own tables (e.g. `@stackbase/auth` adds `users`, `sessions`; `@stackbase/scheduler`
+  adds `jobs`, `crons`). These are namespaced (`scheduler/jobs`, not a bare `jobs`) so they can never
+  collide with your app's own tables of the same name.
+- **A context facade** — a `ctx.<name>` object available in your query/mutation/action handlers, the
+  same way `ctx.db` is. `ctx.scheduler.runAfter(...)`, `ctx.auth.getUserId()`, and
+  `ctx.notifications.send(...)` are all component facades attached this way.
+- **Modules** — registered functions the component needs internally, namespaced under its own name
+  (`scheduler:_cronTick`, `auth:signUp`) so they can't collide with your app's function paths either.
+- **A driver** — a recurring background loop, woken by commits and/or a wall-clock timer, for work
+  that happens outside any single request (the scheduler's dispatch loop, the triggers cursor, the
+  notifications delivery sweep).
+- **A boot step** — one-time work at startup (reconciling `crons.ts` into the `crons` table,
+  rebuilding an authorization index).
+- **Row policies** — read/write rules on *your* app's tables, contributed by `@stackbase/authz`.
+
+Not every component uses every one of these — `@stackbase/triggers` has a driver but no facade for
+most cases; `@stackbase/auth` has a facade and a policy-context contribution but no driver.
+
+## Composing components
+
+You declare which components are active in `stackbase.config.ts`, at your project root:
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineAuth, consoleEmail, googleProvider, githubProvider } from "@stackbase/auth";
+import { defineScheduler } from "@stackbase/scheduler";
+import { defineWorkflow, workflow } from "@stackbase/workflow";
+
+const auth = defineAuth({
+  email: { provider: consoleEmail(), from: "no-reply@demo.test", baseUrl: "http://localhost:5173" },
+  oauth: {
+    providers: {
+      google: googleProvider({ clientId: process.env.GOOGLE_CLIENT_ID ?? "", clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "" }),
+      github: githubProvider({ clientId: process.env.GITHUB_CLIENT_ID ?? "", clientSecret: process.env.GITHUB_CLIENT_SECRET ?? "" }),
+    },
+    redirectAllowlist: ["http://localhost:5173"],
+  },
+});
+
+const sample = workflow.define({
+  handler: async (step) => step.runQuery("whoami:get", {}),
+});
+
+export default defineConfig({
+  components: [auth, defineScheduler(), defineWorkflow({ workflows: { "workflows:sample": sample } })],
+});
+```
+
+(Adapted from `examples/auth-demo/stackbase.config.ts`, the reference pattern real projects copy
+from.)
+
+`defineConfig({ components: [...] })` is the whole surface — there is no separate CLI `init` command
+that installs a component into a project. Add or remove an entry, and every table, facade, module, and
+background driver it contributes appears (or disappears) with it.
+
+## Composition rules worth knowing
+
+- **A component can depend on another.** `defineWorkflow()` declares `requires: ["scheduler"]`
+  because it dispatches workflow steps through the scheduler's job queue — composing `workflow`
+  without `scheduler` fails at compose time, not silently at runtime. `@stackbase/authz` similarly
+  `requires: ["auth"]`, since permission checks resolve the caller's identity through `ctx.auth`.
+  Dependencies are ordered automatically (a topological sort over `requires`), so you can list
+  components in whatever order reads best.
+- **Components are fixed at boot.** Unlike your app's own functions and schema, the *set* of composed
+  components can't be hot-swapped by `stackbase deploy` — adding or removing one needs a restart. Your
+  app code and additive schema changes still push live; see
+  [Deploy & build](/docs/deploy/deploy-and-build) — but the component list itself is part of the
+  boot configuration.
+- **Names are reserved.** A component's name (`"scheduler"`, `"auth"`, …) can't collide with another
+  composed component or with one of your app's own top-level module names — composing two components
+  with the same name is a config-time error, not a silent override.
+
+## Where to go next
+
+Each capability has its own page:
+
+- [Auth](/docs/components/auth) — sessions, email flows, OAuth/JWT, MFA, passkeys.
+- [Authorization](/docs/components/authorization) — RBAC, ReBAC, row policies.
+- [Notifications](/docs/components/notifications) — email/SMS/in-app/push, the reactive inbox.
+- [Scheduling](/docs/components/scheduling) — `runAfter`/`runAt`/cron jobs.
+- [Workflows](/docs/components/workflows) — durable multi-step orchestration with saga compensation.
+- [Triggers](/docs/components/triggers) — react to committed table changes.

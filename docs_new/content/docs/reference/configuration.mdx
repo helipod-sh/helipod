@@ -1,10 +1,122 @@
 ---
 title: Configuration
-description: stackbase.config.ts and environment variables.
+description: The full v.* validator catalog, stackbase.config.ts, and the environment variables the engine reads.
 ---
 
 {/* diataxis: reference */}
 
-Reference for project configuration and the environment variables the engine reads.
+## Validators (`v`)
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+From `@stackbase/values`. Every field in `defineTable` and every entry in a function's `args` is one
+of these. `Infer<typeof validator>` gives you the matching TypeScript type.
+
+| Validator | TypeScript type | Notes |
+|---|---|---|
+| `v.string()` | `string` | |
+| `v.number()` | `number` | 64-bit float. Alias: `v.float64()` |
+| `v.float64()` | `number` | Alias of `v.number()` |
+| `v.int64()` | `bigint` | Alias: `v.bigint()` |
+| `v.bigint()` | `bigint` | Alias of `v.int64()` |
+| `v.boolean()` | `boolean` | |
+| `v.null()` | `null` | |
+| `v.bytes()` | `ArrayBuffer` | |
+| `v.any()` | `any` | Skips validation entirely — an escape hatch, not a default |
+| `v.id("table")` | `Id<"table">` | A typed reference to another (or the same) table's document |
+| `v.literal(value)` | the literal type | Exact string/number/bigint/boolean match |
+| `v.array(element)` | `Array<Infer<element>>` | Homogeneous array of another validator |
+| `v.object({ ...fields })` | `{ ...fields }` | Nested object; extra fields are rejected, missing required fields are rejected |
+| `v.record(keys, values)` | `Record<string, Infer<values>>` | An object with an arbitrary key set — `keys` validates each key, `values` each value |
+| `v.union(...members)` | union of member types | Matches if *any* member validates |
+| `v.optional(validator)` | `Infer<validator> \| undefined` | Marks a field as absent-allowed; wraps any other validator |
+
+Every write is checked against its table's document validator at commit time — a document that's
+wrong-typed, missing a required field, or carries an extra field is rejected with a
+`DocumentValidationError`. Turn this off for a whole schema with
+`defineSchema(tables, { schemaValidation: false })`, or loosen a single field with `v.any()`. See
+[Schema & tables](/docs/core-concepts/schema-and-tables).
+
+### Schema builder (`defineTable`)
+
+| Method | Purpose |
+|---|---|
+| `defineTable(fields)` | Declare a table's document shape from a `PropertyValidators` map |
+| `.index(name, [fields])` | A named index over one or more fields, queryable via `ctx.db.query(table, name)` |
+| `.shardKey(field)` | Marks a field as the table's shard key for multi-node write scaling (metadata only on a single-node deployment) — see [Scaling (fleet)](/docs/deploy/scaling) |
+
+Every table also implicitly gets a built-in `by_creation` index. `defineSchema(tables, options?)`
+combines a map of `defineTable(...)` calls into one schema; `options.schemaValidation` defaults to
+`true`.
+
+## `stackbase.config.ts`
+
+An optional file, alongside `convex/` (i.e. a sibling of the `convex` directory, not inside it),
+that composes opt-in components into your project. Absent entirely → no components, same as an
+empty `{ components: [] }`.
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineScheduler } from "@stackbase/scheduler";
+import { defineAuth } from "@stackbase/auth";
+
+export default defineConfig({
+  components: [defineScheduler(), defineAuth()],
+});
+```
+
+`defineConfig(config)` is an identity function (`{ components: ComponentDefinition[] }`) — its only
+job is to give the file a typed default export. Each entry is a component's `define*()` call (e.g.
+`defineScheduler()`, `defineAuth()`, `defineWorkflow()`, `defineTriggers({...})`) — see
+[Components](/docs/components/overview) for the available components and their own configuration
+options.
+
+`stackbase dev`, `serve`, `build`, and `deploy` all read this same file (`stackbase.config.ts` or
+`.js`) from the project root (the directory containing `convex/`).
+
+## Environment variables
+
+### Core (every deployment)
+
+| Variable | Read by | Meaning |
+|---|---|---|
+| `STACKBASE_ADMIN_KEY` | `serve`, `dev`, `deploy` | Bearer token for the dashboard and admin/deploy endpoints. **Required** for `serve` (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
+| `PORT` | `serve` | HTTP/WebSocket port (default `3000`) — `dev` uses `--port` instead, no env fallback |
+| `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
+| `STACKBASE_DATABASE_URL` | `dev`, `serve` | Postgres connection string — unset selects SQLite. Flags (`--database-url`) win over this. See [Postgres](/docs/deploy/postgres) |
+| `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
+| `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
+| `STACKBASE_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
+| `STACKBASE_DEPLOY_URL` | `deploy` | Default target URL for `stackbase deploy` (overridden by `--url`) |
+
+### File storage
+
+| Variable | Meaning |
+|---|---|
+| `STACKBASE_STORAGE_BUCKET` | Selects the S3-compatible backend (any bucket name set → S3 instead of the filesystem default) |
+| `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, …) |
+| `STACKBASE_STORAGE_REGION` | S3 region |
+| `STACKBASE_STORAGE_PUBLIC_URL` | Public base URL for `"public"`-visibility files |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend |
+
+Unset `STACKBASE_STORAGE_BUCKET` → files are stored on the local filesystem under
+`<data dir>/storage`, zero configuration required. See [File storage](/docs/core-concepts/file-storage).
+
+### Multi-node / advanced
+
+These configure the fleet (Tier 2, Postgres-backed multi-writer) and object-storage (Tier 3,
+bucket-backed) scale-out modes, and the Cloudflare host. They don't apply to a single-node
+deployment. See [Scaling (fleet)](/docs/deploy/scaling) and [Cloudflare](/docs/deploy/cloudflare)
+for the full story; the flags/variables themselves live in `packages/cli/src/serve.ts`,
+`fleet.ts`, and `objectstore.ts` if you need to check current behavior in source.
+
+| Variable | Area |
+|---|---|
+| `STACKBASE_FLEET`, `STACKBASE_ADVERTISE_URL`, `STACKBASE_FLEET_SHARDS`, `STACKBASE_FLEET_LEASE_TTL_MS`, `STACKBASE_GROUP_COMMIT` | Fleet (Tier 2, Postgres multi-writer) |
+| `STACKBASE_OBJECT_STORE`, `STACKBASE_OBJECTSTORE_GC_MS`, `STACKBASE_REPLICA`, `STACKBASE_WRITER_URL` | Object storage (Tier 3, bucket-backed) |
+| `STACKBASE_WAKE_URL`, `STACKBASE_BACKSTOP_MIN_MS` | The wake seam, for hosts (e.g. Cloudflare Containers) that stop the process between requests |
+
+## See also
+
+- [Schema & tables](/docs/core-concepts/schema-and-tables) — the concepts these validators serve.
+- [CLI](/docs/reference/cli) — every command that reads `stackbase.config.ts` and these env vars.
+- [Self-hosting](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres) — deployment
+  configuration walkthroughs.

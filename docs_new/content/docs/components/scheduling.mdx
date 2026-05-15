@@ -5,6 +5,91 @@ description: runAfter, runAt, and cron jobs.
 
 {/* diataxis: explanation */}
 
-Schedule functions to run later or on a recurring cron, with retries, backoff, and cascading cancel.
+`@stackbase/scheduler` runs a function later — once, at a specific time, or on a recurring cron —
+durably. A scheduled job is a row in the `jobs` table, dispatched by a background driver that wakes
+reactively on every commit plus a wall-clock timer armed to the earliest pending job, so nothing
+polls and nothing is lost to a crash between claim and completion.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Enabling it
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineScheduler } from "@stackbase/scheduler";
+
+export default defineConfig({ components: [defineScheduler()] });
+```
+
+`ctx.scheduler` is then available on every mutation (and, via a delegating action-mode facade, every
+action) — the same `runAfter`/`runAt`/`cancel` surface either way, so a function scheduling work is
+portable between the two.
+
+## Scheduling work
+
+```ts
+export const notifyLater = mutation({
+  handler: async (ctx, { userId }) => {
+    const jobId = await ctx.scheduler.runAfter(60_000, "reminders:_send", { userId });   // in 60s
+    // or: ctx.scheduler.runAt(new Date("2026-08-01T09:00:00Z"), "reminders:_send", { userId });
+    return jobId;
+  },
+});
+```
+
+- **`runAfter(delayMs, fnRef, args)`** / **`runAt(ts, fnRef, args)`** insert a `pending` job row in
+  the *calling mutation's own transaction* — the schedule commits (or rolls back) atomically with
+  the rest of your write.
+- `fnRef` is a bare function-path string or a codegen'd `api`/`internal` reference; the target can be
+  a mutation or an action — the scheduler resolves which, and dispatches accordingly. Actions are
+  **at-most-once** (a crash mid-flight dead-letters rather than blind-retrying, since an action's
+  side effects aren't transactional); mutations are safely retried on an infra kill.
+- **`cancel(jobId)`** cancels a still-`pending` job, and **cascades**: any of its own children
+  (jobs scheduled with this job as their logical parent, as `@stackbase/workflow` steps are)
+  are canceled too, walking the chain iteratively.
+- A failed job (mutation or action) is retried with jittered exponential backoff up to
+  `retry.maxFailures` (default 4), then dead-lettered to `state: "failed"`.
+
+## Recurring jobs — `cronJobs()`
+
+An app's `crons.ts` declares recurring work with the same Convex-parity surface:
+
+```ts title="convex/crons.ts"
+import { cronJobs } from "./_generated/server";
+
+const crons = cronJobs();
+crons.interval("cleanup", { minutes: 5 }, internal.maintenance.purge, {});
+crons.cron("nightly", "0 3 * * *", internal.reports.build, {}, { tz: "America/New_York" });
+crons.daily("digest", { hourUTC: 8, minuteUTC: 0 }, internal.email.digest, {});
+
+export default crons;
+```
+
+Pass the built registry to `defineScheduler({ crons })`; a boot step reconciles it into the `crons`
+table (matched by name), so adding, removing, or editing a cron entry between restarts converges to
+the new schedule without double-firing. `.interval()` takes a plain period; `.cron()` takes a cron
+expression with an optional IANA `tz` (defaulting UTC); `.daily()`/`.hourly()`/`.weekly()`/`.monthly()`
+are UTC-anchored convenience wrappers over `.cron()`.
+
+Every fire is **clock-anchored**, not `now()`-anchored — a late dispatch (a busy driver, a slow
+prior tick) never shifts the phase of later occurrences, and restarting with an unchanged schedule
+never double-schedules the cadence.
+
+### Catch-up policy
+
+If a deployment is down when one or more occurrences would have fired, `catchUp` (per-cron, default
+`"skip"`) decides what happens to the backlog on restart:
+
+| Policy | Behavior |
+|---|---|
+| `"skip"` (default) | Discard the missed backlog entirely; resume on the normal cadence. |
+| `"fireOnce"` | Fire exactly one job for the single most recent missed occurrence. |
+| `"fireAll"` | Fire one job per missed occurrence, oldest first — capped at 1000 per tick to bound the work; anything beyond the cap is discarded and logged. |
+
+Every policy re-anchors the cadence past the *entire* true backlog on the same tick, regardless of
+how much of it was actually fired — so the schedule's future phase never drifts, only the
+discarded/skipped occurrences are lost.
+
+## Related
+
+See [Workflows](/docs/components/workflows) for durable multi-step orchestration built on this same
+job dispatch (`defineWorkflow` `requires: ["scheduler"]`), and [Notifications](/docs/components/notifications)
+and [Triggers](/docs/components/triggers) for two other components with their own recurring drivers.

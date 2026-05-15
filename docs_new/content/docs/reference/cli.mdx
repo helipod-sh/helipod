@@ -1,10 +1,184 @@
 ---
 title: CLI
-description: Every stackbase command.
+description: Every stackbase command and its flags.
 ---
 
 {/* diataxis: reference */}
 
-Reference for dev, serve, deploy, build, migrate, and codegen.
+The `stackbase` command (package `@stackbase/cli`, binary `stackbase`). Every command below is
+implemented in `packages/cli/src/cli.ts` and its command modules.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+```bash
+stackbase <command> [options]
+```
+
+## Commands overview
+
+| Command | Purpose |
+|---|---|
+| [`dev`](#dev) | Run the engine locally with hot reload, codegen, and the dashboard |
+| [`serve`](#serve) | Run the production server |
+| [`deploy`](#deploy) | Push `convex/` to a running `serve --allow-deploy` and hot-swap it live |
+| [`build`](#build) | Compile the app to a self-contained executable |
+| [`migrate`](#migrate) | Migrate a Convex project into stackbase (imports + divergence report) |
+| [`migrate export` / `migrate import`](#migrate-export--migrate-import) | Move an app's data between deployments |
+| [`codegen`](#codegen) | Regenerate `convex/_generated/` types only |
+| `fleet reshard` / `objectstore reshard` | Offline resharding tools for multi-node deployments — see [Scaling (fleet)](/docs/deploy/scaling) |
+| `help` | Print usage |
+
+## `dev`
+
+Loads `convex/`, generates `_generated/`, boots the embedded engine over local SQLite (or Postgres,
+if configured), serves HTTP + WebSocket + the dashboard, and watches for file changes to hot-reload
+functions and schema.
+
+```bash
+stackbase dev
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dir <path>` | `convex` | The app directory to load |
+| `--port <n>` | `3000` | HTTP/WebSocket port |
+| `--ip <addr>` | `127.0.0.1` | Bind address |
+| `--data <path>` | `.stackbase/data.db` | SQLite file path |
+| `--database-url <url>` | unset (SQLite) | Postgres connection string — see [Postgres](/docs/deploy/postgres) |
+| `--storage-bucket <name>` | unset (filesystem) | Select the S3-compatible file-storage backend |
+| `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, …) |
+| `--web <dir>` | unset | Serve a static web UI directory at the site root, alongside the API |
+
+`dev` prints the dashboard URL and an admin key on startup. If `STACKBASE_ADMIN_KEY` is unset, it
+generates an ephemeral one for the run and (only on a loopback bind) embeds it in the dashboard HTML
+for convenience.
+
+## `serve`
+
+The production entrypoint: requires a persistent admin key, binds `0.0.0.0` by default, never
+generates codegen (an app's `_generated/` must already exist and be committed), and shuts down
+gracefully on `SIGTERM`/`SIGINT`. See [Self-hosting](/docs/deploy/self-hosting).
+
+```bash
+STACKBASE_ADMIN_KEY=<secret> stackbase serve
+```
+
+| Flag | Env equivalent | Default | Meaning |
+|---|---|---|---|
+| `--dir <path>` | — | `convex` | The app directory (must contain `_generated/`) |
+| `--port <n>` | `PORT` | `3000` | HTTP/WebSocket port |
+| `--ip <addr>` | — | `0.0.0.0` | Bind address |
+| `--data <path>` | `STACKBASE_DATA_DIR` | `./data/db.sqlite` | SQLite file path (`STACKBASE_DATA_DIR` sets the containing directory) |
+| `--no-dashboard` | `STACKBASE_DASHBOARD=off` | dashboard on | Disable the dashboard |
+| `--allow-deploy` | `STACKBASE_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy` for `stackbase deploy` |
+| `--database-url <url>` | `STACKBASE_DATABASE_URL` | unset (SQLite) | Postgres connection string |
+| `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` | unset (filesystem) | Select the S3-compatible file-storage backend |
+| `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint |
+| `--web <dir>` | `STACKBASE_WEB_DIR` | unset | Serve a static web UI at the site root |
+
+`STACKBASE_ADMIN_KEY` (required, no default) is read directly from the environment, not a flag —
+`serve` fails fast with a clear error if it's unset or blank.
+
+Multi-node fleet/object-storage flags (`--fleet`, `--object-store`, `--replica`, `--shards`, and
+related) exist for scale-out deployments; see [Scaling (fleet)](/docs/deploy/scaling) and
+[Cloudflare](/docs/deploy/cloudflare).
+
+## `deploy`
+
+Pushes the local `convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it live —
+no restart. Transpiles with esbuild (types stripped, import specifiers untouched), refreshes local
+codegen, then `POST`s the tree to `/_admin/deploy`. See [Deploy & build](/docs/deploy/deploy-and-build).
+
+```bash
+stackbase deploy --url https://my-deployment.example.com
+```
+
+| Flag | Env equivalent | Default | Meaning |
+|---|---|---|---|
+| `--url <url>` | `STACKBASE_DEPLOY_URL` | — (required) | Target `serve` deployment |
+| `--dir <path>` | — | `convex` | The app directory to push |
+
+`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the deploy request); the target must have
+been started with `--allow-deploy`. Schema changes must be additive (new tables, new optional
+fields) — a destructive change is rejected and the running server stays fully live on its previous
+code.
+
+## `build`
+
+Compiles the app — engine, composed components, schema, functions, and (by default) the dashboard —
+into one self-contained executable via `bun build --compile`. See
+[standalone binary](/docs/deploy/deploy-and-build).
+
+```bash
+stackbase build --target linux-x64
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dir <path>` | `convex` | The app directory to compile |
+| `--outfile <path>` | `./stackbase-server` | Output executable path (`.exe` appended automatically for `windows-x64`) |
+| `--target <name>` | host platform | Cross-compile target: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64` |
+| `--no-dashboard` | dashboard included | Exclude the dashboard from the binary |
+| `--verbose` | off | Stream the underlying `bun build` output |
+
+The database file itself is never embedded. At runtime the compiled binary reads its own flags —
+`--port`, `--hostname <addr>` (default `0.0.0.0`), `--data-dir <dir>` (default `./data`),
+`--database-url <url>` — plus the required `STACKBASE_ADMIN_KEY` (and `PORT`/`STACKBASE_DATABASE_URL`
+env fallbacks). These are the binary's own flag names, distinct from `serve`'s `--ip`/`--data`.
+
+## `migrate`
+
+Turns an existing Convex project into a stackbase project: rewrites Convex import specifiers to
+their `@stackbase/*` equivalents, scans for API divergences it can't auto-fix, writes a
+`MIGRATION-REPORT.md`, and regenerates `_generated/`. See
+[Migrate from Convex](/docs/reference/migrate-from-convex) for the full behavior.
+
+```bash
+stackbase migrate --from convex
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--from <source>` | `convex` | Migration source (only `convex` ships today) |
+| `--dir <path>` | `convex` | The app directory to migrate |
+| `--dry-run` | off | Report what would change without writing any files |
+| `--force` | off | Proceed even if the project has uncommitted git changes |
+
+Refuses to run against a dirty git working tree unless `--force` is passed (or the directory isn't a
+git repo at all, in which case it warns and proceeds).
+
+## `migrate export` / `migrate import`
+
+Move an app's *data* (not code) between two running deployments — e.g. between a portable
+SQLite/Postgres deployment and a Cloudflare DO-native one. Both are HTTP clients that hit a running
+deployment's bearer-gated admin endpoints.
+
+```bash
+stackbase migrate export --url <source-url> --out dump.json
+stackbase migrate import --url <target-url> --in dump.json
+```
+
+| Flag | Applies to | Meaning |
+|---|---|---|
+| `--url <url>` | both | The deployment to export from / import into |
+| `--out <file>` | `export` | Where to write the dump |
+| `--in <file>` | `import` | The dump file to read |
+| `--admin-key <key>` | both | Overrides `STACKBASE_ADMIN_KEY` |
+
+## `codegen`
+
+Regenerates `convex/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
+engine or serving anything.
+
+```bash
+stackbase codegen --dir convex
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dir <path>` | `convex` | The app directory to load and generate types for |
+
+## See also
+
+- [Configuration](/docs/reference/configuration) — `stackbase.config.ts` and the full environment
+  variable list.
+- [Local dev & dashboard](/docs/deploy/local-dev), [Self-hosting](/docs/deploy/self-hosting),
+  [Deploy & build](/docs/deploy/deploy-and-build).

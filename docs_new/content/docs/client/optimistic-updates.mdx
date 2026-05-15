@@ -5,6 +5,171 @@ description: Instant local UI with exact rollback.
 
 {/* diataxis: how-to */}
 
-withOptimisticUpdate gives instant, no-flicker local updates that reconcile with the authoritative server result.
+A mutation round-trips to the server: your function runs transactionally, commits, and the result
+comes back over the WebSocket. That's real latency — a handful of milliseconds, but noticeable on
+a chat send button or a todo checkbox. `withOptimisticUpdate` lets you render the *predicted*
+result immediately, in the same tick as the click, then swap seamlessly to the real committed
+value with **no flicker** — the frame where your guess disappears is always the same frame the
+authoritative row appears.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Chain `.withOptimisticUpdate` onto `useMutation`
+
+```tsx title="examples/chat/web/main.tsx"
+import { useMutation } from "@stackbase/client/react";
+import type { OptimisticLocalStore } from "@stackbase/client";
+
+function appendOptimistic(
+  store: OptimisticLocalStore,
+  args: { conversationId: Id<"conversations">; author: string; body: string },
+): void {
+  const list = store.getQuery(api.messages.list, { conversationId: args.conversationId });
+  if (list === undefined) return; // nothing subscribed locally yet — nothing to patch
+  store.setQuery(api.messages.list, { conversationId: args.conversationId }, [
+    ...list,
+    {
+      _id: store.placeholderId("messages"), // deterministic across replays — NOT crypto.randomUUID()
+      _creationTime: store.now(),           // fixed at entry creation — NOT Date.now()
+      conversationId: args.conversationId,
+      author: args.author,
+      body: args.body,
+    },
+  ]);
+}
+
+const send = useMutation(api.messages.send).withOptimisticUpdate(appendOptimistic);
+```
+
+Declare the updater as a stable, module-scoped function (not an inline closure) — `.withOptimisticUpdate`
+returns the same bound callable across renders only when the updater reference itself is stable,
+so an inline arrow churns it every render.
+
+Calling `send(args)` still returns the same promise it always did — it now *also* runs your
+updater synchronously before anything hits the wire, so any component reading the patched query
+re-renders with the predicted value in the same tick as the click.
+
+## The `OptimisticLocalStore` your updater receives
+
+```ts
+interface OptimisticLocalStore {
+  getQuery<Q>(ref: Q, args?: FunctionArgs<Q>): FunctionReturnType<Q> | undefined;
+  setQuery<Q>(ref: Q, args: FunctionArgs<Q>, value: FunctionReturnType<Q> | undefined): void;
+  getAllQueries<Q>(ref: Q): Array<{ args: FunctionArgs<Q>; value: FunctionReturnType<Q> | undefined }>;
+  placeholderId(table: string): string; // deterministic per (entry, table, call-ordinal)
+  now(): number;                        // entry-creation time, stable across replays
+}
+```
+
+- **`getQuery`/`setQuery`** read and patch one query's cached result (matched by function
+  reference + args).
+- **`getAllQueries(ref)`** returns every live `(args, value)` pair for that function across all its
+  argument variants — useful for patching a paginated or per-id family of queries at once.
+- **`placeholderId`/`now`** are covered below — always use them instead of `crypto.randomUUID()`/`Date.now()`.
+
+This is the entire v1 surface — there is no `defineLocalMutators` registry and no optimistic
+support for actions (actions have no commit timestamp to gate a layer's removal on).
+
+### Typing the store: add a `returns` validator
+
+`getQuery`/`setQuery`/`getAllQueries` are typed from the function reference's declared return type
+— which comes from an explicit `returns` validator on the query, same as `args`:
+
+```ts title="convex/messages.ts"
+export const list = query({
+  args: { conversationId: v.id("conversations") },
+  returns: v.array(v.object({
+    _id: v.id("messages"),
+    _creationTime: v.number(),
+    conversationId: v.id("conversations"),
+    author: v.string(),
+    body: v.string(),
+  })),
+  handler: (ctx, args) =>
+    ctx.db.query("messages", "by_conversation").eq("conversationId", args.conversationId).collect(),
+});
+```
+
+A query with no `returns` validator still works — `getQuery` against it falls back to the untyped
+`Value` shape.
+
+A row your updater inserts is missing whatever fields a real commit fills in that your handler
+doesn't set. There's no first-class "pending" flag in v1 — widen the type at the call site instead:
+
+```ts
+type Message = Doc<"messages">;
+type PendingMessage = Message | (Omit<Message, "_id"> & { _id: string; pending?: true });
+```
+
+Render optimistically-inserted rows (`pending === true`) with whatever affordance you want
+(dimmed, a spinner) — inferred at your render site, not carried as schema data.
+
+## Purity rules: `placeholderId()` and `now()`, never `crypto.randomUUID()`/`Date.now()`
+
+An updater can run **more than once** for the same mutation: every server push that arrives while
+your mutation is still pending rebuilds the composed view by replaying every surviving layer's
+updater from scratch. Your updater must therefore be a **pure, deterministic** function of
+`(store, args)`.
+
+- `placeholderId("messages")` returns the **same id** every time this mutation's updater replays,
+  a **different, ordinal-distinct** id for the *n*th call within one updater run, and a different
+  id again for every other pending mutation.
+- `now()` returns the timestamp fixed when the mutation was created — stable across every replay.
+
+Calling `crypto.randomUUID()` or `Date.now()` inside an updater instead would mint a *fresh* value
+on every replay, which React (keying off it) would see as a brand-new row rather than the same
+optimistic row re-rendering — remounts, list-key churn, lost focus, on every unrelated server push
+while your mutation is pending.
+
+**Never pass a `placeholderId()` value as a mutation argument** — it isn't a real, resolvable id.
+If you need to create a row and immediately reference it in a second mutation call (e.g. create a
+conversation, then send the first message into it), mint a real id instead with `mintId` — see
+[Client-supplied ids](/docs/client/offline-sync#client-supplied-ids) in the offline guide.
+
+## The reconciliation contract (why it doesn't flicker)
+
+Every subscribed query has two layers under the hood: a `serverValue` (only ever written by data
+actually received from the server) and a `composedValue` (what your components see — the server
+value with any surviving optimistic layers replayed on top, in call order). Calling a mutation
+with `withOptimisticUpdate`:
+
+1. Runs your updater against the current composed view and stacks its writes as a new layer —
+   every component reading a patched query re-renders immediately.
+2. Sends the mutation. Once it commits, the server response carries the commit's timestamp.
+3. Your layer is **not** removed the moment the response arrives — it's removed the moment a
+   subsequent server push demonstrably reflects that commit ("drop on observed inclusion," never
+   drop on ack). That's what makes it flicker-free: the guessed row and the real row are never
+   both absent, and never rendered as two different frames in sequence.
+4. If the mutation fails, or the connection drops before its outcome is known, your layer is
+   dropped and every affected query is recomputed as if it had never run. Rollback is "stop
+   replaying this layer," never an inverse operation.
+5. Several optimistic mutations against overlapping queries stack — each layer replays over the
+   previous layer's result, in call order. If an earlier one fails, later ones simply replay over
+   the corrected base.
+
+You never interact with this machinery directly — it's described here so you know what "instant,
+then settles cleanly" is actually guaranteeing.
+
+## The promise resolves at commit, not at the flicker-free gate
+
+`await send(args)` resolves the moment the server's response for that mutation arrives — the
+mutation has committed. It does **not** wait for the point where your optimistic layer is provably
+superseded by an authoritative push. In practice this rarely matters: the composed view already
+shows your write synchronously the moment you called `send`, and anything you read after `await`
+reflects the commit regardless. This is a deliberate departure from Convex's own gate-time
+resolution, chosen because gate-time resolution has sharp edges: a transport drop can turn a
+mutation that *did* commit into a promise that rejects, and a lost gating frame with no follow-on
+traffic can leave a promise hanging forever.
+
+## Reconnect
+
+The WebSocket transport reconnects automatically by default (exponential backoff with jitter).
+What survives a drop:
+
+- **Unsent mutations survive** — retained and flushed, in order, once the connection reopens.
+- **In-flight mutations do not** — a sent mutation whose response never arrived has an unknowable
+  outcome; its promise rejects with `MutationUndeliveredError` and its optimistic layer is dropped.
+  There is no automatic retry (a blind resend risks double-applying an already-committed write).
+- **Already-completed mutations' layers do not carry across a reconnect** — a fresh connection
+  starts a fresh session, and every live query re-subscribes against it.
+
+For durability across a reload or crash — not just a brief reconnect — see
+[Offline sync](/docs/client/offline-sync).

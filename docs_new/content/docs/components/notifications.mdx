@@ -5,6 +5,128 @@ description: Email, SMS, in-app, and push.
 
 {/* diataxis: explanation */}
 
-Multi-channel notifications with a reactive in-app inbox, preferences, digests, provider fallback, and push.
+`@stackbase/notifications` sends messages across pluggable channels — **email**, **SMS/WhatsApp**,
+an in-app **inbox**, and mobile/web **push** — through swappable per-channel provider adapters
+(Resend, Twilio, Expo/FCM/APNs, or your own). Its headline feature is a **reactive in-app inbox**:
+a notification is just a row in a live-queried table, so a user's inbox and unread count update in
+real time with no dedicated realtime service.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Enabling it
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineNotifications, consoleEmail } from "@stackbase/notifications";
+
+export default defineConfig({
+  components: [
+    defineNotifications({
+      channels: {
+        email: { provider: consoleEmail(), from: "no-reply@app.test" },
+        in_app: { enabled: true },
+      },
+    }),
+  ],
+});
+```
+
+`consoleEmail()` is the zero-config dev provider (prints to the server console); swap in
+`resendEmail({ apiKey })` for real delivery, or `twilioSms(...)`/`expoPush(...)`/`fcmPush(...)`/
+`apnsPush(...)` for the other channels. Every channel shares the same send/preference/retry
+machinery — there's no separate "push system" to learn once you know `email`.
+
+## Sending
+
+`ctx.notifications.send(...)` runs on every mutation context, **inside the calling transaction**:
+
+```ts
+export const welcome = mutation({
+  handler: async (ctx, { userId, email, name }) => {
+    await ctx.notifications.send({
+      to: { userId, email },
+      channels: ["in_app", "email"],
+      template: "welcome",
+      data: { name },
+    });
+  },
+});
+```
+
+`in_app` writes synchronously and is live to any inbox subscription the instant the mutation
+commits. `email`/`sms`/`push` are **queued**: the send writes a `queued` row, and a background
+driver delivers it outside the transaction (network I/O never runs inside a mutation) — the row
+moves `queued → sending → sent`/`failed`. Pass `idempotencyKey` to guarantee a message (an OTP, a
+receipt) is never sent twice, even on a replayed call. From an action, `ctx.notifications.sendNow(...)`
+delivers email/SMS synchronously and returns the provider result.
+
+## The reactive in-app inbox
+
+```tsx
+import { useNotifications } from "@stackbase/client/react";
+
+function InboxBell() {
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
+  return (
+    <button onClick={markAllRead}>
+      {unreadCount} unread — {notifications[0]?.title}
+    </button>
+  );
+}
+```
+
+`notifications`/`unreadCount` are the caller's own feed, live and reactive; `markRead`/`markAllRead`
+are ownership-checked server-side — the caller's identity is resolved server-side, never taken as a
+client argument, so no caller can name another user's inbox. Per-user isolation requires a verified
+identity, so compose [Auth](/docs/components/auth) (or verify the token upstream) before relying on
+it.
+
+## Preferences and topics
+
+Every send carries a **category** (`"marketing"`, `"security"`, …); a user can opt a
+`(category, channel)` pair out, and a suppressed send is skipped before it ever reaches a provider —
+default-allow, so a deployment with no preference rows sends everything:
+
+```ts
+await ctx.notifications.setPreference({ category: "marketing", channel: "email", enabled: false });
+```
+
+Mark a category `critical` in config (or pass `critical: true` on a single send) to bypass
+preferences entirely — the pattern for account-security mail that must always reach the user
+regardless of their marketing settings.
+
+A **topic** is a named subscriber list you fan a single send out to, for broadcasts and per-resource
+watchers:
+
+```ts
+await ctx.notifications.subscribe({ topic: "news" });                 // self-only, from the client
+await ctx.notifications.sendToTopic({ topic: "news", channels: ["in_app"], template: "announcement", data: {} }); // action-only
+```
+
+`sendToTopic` supports `in_app` only (a topic stores just a `userId`, not an email/phone) and is
+preference-aware and paginated internally for arbitrarily large subscriber lists.
+
+## Delivery reliability and digest
+
+Email/SMS sends are retried with exponential backoff on a transient failure, and a crash between
+claiming a send and recording its outcome is recovered by a background reclaim sweep — this applies
+only to `email`/`sms`/`push`, since `in_app` has no queue or send step to recover. Wiring a
+provider's delivery webhook (Resend, Twilio) picks up a normalized `deliveryStatus`
+(`delivered`/`bounced`/`opened`/`clicked`/…) as a second, independent axis from the send lifecycle.
+
+A category can also be configured to **digest**: matching email sends buffer per recipient and
+combine into one periodic message instead of one per event, on a rolling `"hourly"`/`"daily"`/
+`"weekly"` window.
+
+## Auth unification
+
+Composing `@stackbase/auth` alongside `@stackbase/notifications` routes auth's own transactional
+emails (verification, reset, magic-link, OTP) through this same delivery path automatically — no
+extra wiring, and always sent `critical: true` so they can never be silently dropped by a recipient's
+preferences. Auth duck-types the facade at runtime, so it works standalone if notifications isn't
+composed at all.
+
+## Where to go deeper
+
+This page covers the model and the primary API; provider adapters, the full retry/reclaim/digest
+configuration surface, and security notes for delivery webhooks are in
+`docs/enduser/build/notifications.md`. See [Scheduling](/docs/components/scheduling) for the
+recurring-driver mechanism notifications' own delivery sweep is built on.

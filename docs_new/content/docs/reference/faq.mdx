@@ -1,10 +1,103 @@
 ---
 title: FAQ
-description: Common questions.
+description: Honest answers about what stackbase is, what it isn't, and what isn't built yet.
 ---
 
 {/* diataxis: explanation */}
 
-Answers to common questions about stackbase.
+## Is stackbase production-ready?
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+The reactive engine, client SDK, dashboard, and CLI are real and used end-to-end: schema + typed
+query/mutation/action functions, transactional execution, WebSocket reactive subscriptions with
+range-precise invalidation, optimistic updates, a durable offline outbox, `stackbase dev`/`serve`,
+a single-binary compile, and a working `docker compose up` self-host all ship and are exercised by
+tests that run through the real CLI server, not just unit mocks. Several opt-in components
+(authentication, notifications, scheduling/crons, durable workflows with saga/compensation, change
+triggers, an authorization component) are built the same way.
+
+What's genuinely **not** built yet: full-text/vector search, true V8-isolate sandboxing for
+untrusted code (functions run in-process today — the syscall interface is designed to be
+isolate-ready, but the isolation itself isn't wired up), and built-in TLS termination (put a reverse
+proxy like nginx/Caddy/Traefik in front for HTTPS). Multi-node write scale-out (the "fleet"/Tier 2
+mode) exists but is licensed separately from the free self-hosted core — see below.
+
+This FAQ, and the rest of these docs, only describe what's actually shipped — see
+[What is stackbase?](/docs/get-started/what-is-stackbase) for the full pitch.
+
+## SQLite or Postgres — which should I use?
+
+Start with **SQLite** — it's the zero-config default for `stackbase dev` and works fine for
+self-hosted single-node production too. Move to **Postgres** when you want a managed/scalable
+database underneath the same engine: pass `--database-url postgres://…` (or set
+`STACKBASE_DATABASE_URL`) to `dev` or `serve` — no code changes, no migration step, since stackbase
+never generates SQL schema migrations for your app tables either way (the storage layer is
+schemaless; your `schema.ts` changes are validated, not migrated). See
+[Postgres](/docs/deploy/postgres).
+
+The engine never imports a database driver directly — storage is pluggable behind a `DatabaseAdapter`
+interface, and adding another backend doesn't touch engine logic.
+
+## How is stackbase different from Convex?
+
+stackbase is architecturally similar to Convex on purpose — the reactive model (queries record read
+sets, mutations are the only writer, a subscription re-runs only when a committed write set
+intersects its read set) is directly inspired by Convex's public, well-documented design. The
+differences are in what you can *do* with it:
+
+- **Self-hostable by design.** `docker compose up` brings up the engine, database, and dashboard in
+  one container on your own infrastructure — there's no managed-cloud dependency to run stackbase at
+  all.
+- **Storage is pluggable** (SQLite or Postgres), not fixed to one proprietary database.
+- **A single-binary compile** (`stackbase build`) produces one self-contained executable with the
+  engine, your app, and the dashboard embedded — useful for Electron/Tauri-style distribution.
+- **stackbase has already grown past Convex's shipped feature set** in some areas: durable
+  workflows with saga/compensation, a Postgres storage adapter, and a durable offline mutation
+  outbox with client-supplied ids all ship today.
+- **It is not a Convex account/service.** Convex compatibility exists as a **migration on-ramp**
+  (`stackbase migrate` rewrites `convex/*` imports to `@stackbase/*`), not as the product's
+  canonical surface — see [Migrate from Convex](/docs/reference/migrate-from-convex).
+
+stackbase is a clean-room build studied against Convex's open architecture documentation, not a
+fork or a decompilation of Convex's code.
+
+## Can I self-host for free?
+
+Yes. stackbase is licensed **FSL-1.1-Apache-2.0** (the same license Convex itself uses): free to
+use and self-host, including at scale, on your own infrastructure, forever — the license only
+forbids offering stackbase itself as a competing hosted service, and it converts to plain Apache-2.0
+two years after each release. Single-node self-hosting, deploying anywhere, and owning your own data
+are free — not a trial and not a bait-and-switch.
+
+Multi-node write scale-out (the "fleet" mode, for horizontally scaling *writes* across nodes) lives
+in a separate `ee/` area under a different commercial license, following an "open core" model similar
+to GitLab or n8n: you still deploy it yourself, on your own infrastructure — a paid key unlocks the
+capability, not a managed cloud.
+
+## Does it do full-text or vector search?
+
+Not yet. This is intentionally **not documented as a feature** elsewhere in these docs, and
+`stackbase migrate` flags a Convex app's `.searchIndex(...)`/`.vectorIndex(...)` usage as
+unsupported rather than pretending to translate it. If your app needs search today, you'll need an
+external service or a custom adapter.
+
+## What runtime does it run on?
+
+**Bun is primary** — `stackbase dev`/`serve`, and the single-binary compile
+(`bun build --compile`) — but **Node is fully supported** for running the engine (npm packages, a
+Node SQLite adapter). The engine itself is runtime-agnostic behind its storage/runtime seams.
+
+## What does "component" mean here?
+
+An opt-in, composable piece of server-side functionality — authentication, notifications,
+scheduling/crons, durable workflows, change triggers, authorization — that you add to your project
+by listing it in `stackbase.config.ts` (e.g. `defineAuth()`, `defineScheduler()`). It's not
+installed by any `init` wizard; you compose exactly the components your app needs. See
+[Components overview](/docs/components/overview).
+
+## Where do I go next?
+
+- New to stackbase: [What is stackbase?](/docs/get-started/what-is-stackbase) →
+  [Quickstart](/docs/get-started/quickstart).
+- Coming from Convex: [Migrate from Convex](/docs/reference/migrate-from-convex).
+- Looking for exact signatures: [Configuration](/docs/reference/configuration) and
+  [CLI](/docs/reference/cli).

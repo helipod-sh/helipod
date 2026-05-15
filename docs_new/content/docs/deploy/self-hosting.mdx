@@ -1,10 +1,117 @@
 ---
 title: Self-hosting with Docker
-description: stackbase serve and docker compose up.
+description: stackbase serve and docker compose up — the baseline production self-host path.
 ---
 
 {/* diataxis: how-to */}
 
-Self-host the production entrypoint with Docker and a persistent database volume.
+`docker compose up` — the whole stackbase backend, one container, one volume. This is the baseline
+self-host path: a generic `stackbase:latest` image running `stackbase serve`, with your app's
+`convex/` bind-mounted in and its SQLite database on a named volume so data survives restarts.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Prerequisites
+
+You need a `convex/` directory with **committed `_generated/`**. `stackbase serve` never runs
+codegen — it fails fast if `convex/_generated/server.ts` is missing. Generate it first:
+
+```bash
+stackbase codegen --dir convex
+```
+
+You also need Docker and Docker Compose.
+
+## 1. Set a strong admin key
+
+`stackbase serve` refuses to start without `STACKBASE_ADMIN_KEY` — there's no default, and unlike
+`stackbase dev` it never embeds the key into the dashboard HTML. Put it in a `.env` file next to
+`docker-compose.yml` (Compose loads `.env` automatically):
+
+```bash title=".env"
+STACKBASE_ADMIN_KEY=$(openssl rand -hex 32)
+```
+
+## 2. `docker compose up`
+
+From the repo root:
+
+```bash
+docker compose up
+```
+
+This builds the image (`target: runner` in the `Dockerfile`), binds it to `0.0.0.0:3000`,
+bind-mounts `./convex` read-only into `/app/convex`, and persists SQLite on the `stackbase-data`
+named volume at `/data/db.sqlite`. The container's command is:
+
+```
+serve --dir /app/convex --data /data/db.sqlite
+```
+
+## 3. Open the dashboard
+
+The dashboard is served at `http://localhost:3000/_dashboard`. Because the admin key is never
+baked into the served HTML in `serve` mode, the SPA prompts you for it on load — paste the value
+you set in `.env`. The API itself is reachable at `http://localhost:3000` (sync WebSocket, `/api/*`
+HTTP, `httpAction` routes).
+
+## 4. Data persists across restarts
+
+The SQLite database lives on the `stackbase-data` Docker volume, not inside the container.
+`docker compose down && docker compose up` does not lose data — only `docker compose down -v`
+(which explicitly deletes volumes) does.
+
+## Verify it end to end
+
+```bash
+# 1) Bring it up
+docker compose up -d
+
+# 2) Health check
+curl -f localhost:3000/api/health
+
+# 3) Open the dashboard, paste the admin key from .env
+open http://localhost:3000/_dashboard
+
+# 4) Write some data via the dashboard or a mutation, then restart
+docker compose down
+docker compose up -d
+
+# 5) Confirm the data is still there
+```
+
+## Alternative: bake the app into an immutable image
+
+The default compose file bind-mounts `convex/` at run time — convenient locally, but the image
+alone isn't a deployable artifact. For an immutable image (e.g. to push to a registry), build a
+small wrapper `Dockerfile` on top of `stackbase:latest` that copies your app in instead of mounting
+it:
+
+```dockerfile title="Dockerfile"
+FROM stackbase:latest
+COPY ./convex /app/convex
+# ENTRYPOINT/CMD are inherited from stackbase:latest
+# (serve --dir /app/convex --data /data/db.sqlite)
+```
+
+```bash
+docker build -t myapp:latest .
+docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=... -v stackbase-data:/data myapp:latest
+```
+
+## Reverse proxy / TLS
+
+stackbase serves plain HTTP — `serve` has no TLS support built in. Put a reverse proxy (nginx,
+Caddy, or Traefik) in front of the container to terminate TLS and forward to `stackbase:3000`. The
+sync WebSocket and `httpAction` routes both proxy transparently over standard HTTP upgrade — no
+special configuration needed beyond normal WebSocket passthrough.
+
+## Related
+
+- [Postgres](/docs/deploy/postgres) — swap the SQLite volume for a Postgres database, still
+  single-node.
+- [Deploy and build](/docs/deploy/deploy-and-build) — `stackbase deploy` for live hot-swap onto a
+  running `serve`, and `stackbase build` for a single self-contained binary instead of the
+  runtime-based image.
+- [Scaling](/docs/deploy/scaling) — when one `serve` process isn't enough, the multi-node fleet
+  story built on the same Postgres backend.
+- [Cloudflare](/docs/deploy/cloudflare) — an alternative host if you specifically want Cloudflare's
+  edge/scale-to-zero economics.

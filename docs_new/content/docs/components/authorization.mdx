@@ -5,6 +5,153 @@ description: RBAC, ReBAC, and row policies.
 
 {/* diataxis: explanation */}
 
-Role- and relationship-based access control with materialized effective permissions.
+`@stackbase/authz` layers permissions on top of a signed-in identity: role-based access control
+(RBAC) with inheritance, scoped role assignments (grant a role globally or within one org/team/
+resource), relationship-based access control (ReBAC) for sharing-style permissions, and row
+policies that filter what a query returns and gate what a mutation can write — enforced through the
+same reactive read-set mechanism as everything else, so revoking access re-runs and empties a
+subscribed query, no polling.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+It composes on top of `@stackbase/auth` (`requires: ["auth"]`) — permission checks resolve the
+caller's identity through `ctx.auth`, so authz has no identity model of its own.
+
+## Roles and permissions
+
+A role maps resources to the actions it grants, and can inherit from other roles:
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { auth } from "@stackbase/auth";
+import { defineAuthz } from "@stackbase/authz";
+
+const authz = defineAuthz({
+  roles: {
+    viewer: { documents: ["read"] },
+    editor: { inherits: "viewer", documents: ["read", "update"] },
+    admin: { inherits: "editor", authz: ["manage"], "*": ["*"] },
+  },
+});
+
+export default defineConfig({ components: [auth, authz] });
+```
+
+A permission is a `"resource:action"` string; either half can be `"*"` (a role entry of `{ "*":
+["*"] }` grants everything). `inherits` accepts one role name or an array, resolved recursively.
+
+## Scoped role assignments
+
+Assign a role globally, or scoped to a specific resource (an org, a team, a single document):
+
+```ts
+await client.mutation(anyApi.authz.assignRole, { userId, role: "editor" });                    // global
+await client.mutation(anyApi.authz.assignRole, { userId, role: "editor", scope: { type: "org", id: orgId } }); // scoped
+await client.mutation(anyApi.authz.revokeRole, { userId, role: "editor", scope: { type: "org", id: orgId } });
+```
+
+`assignRole`/`revokeRole` themselves require the caller hold `authz:manage` in the target scope (or
+globally) — the same permission model gates who can manage permissions. A scope's `type`/`id` must
+both be non-empty when given; omit `scope` entirely for a global assignment (an empty-string scope is
+reserved internally for "global" and can't be spoofed as a real one).
+
+Bootstrap the first admin once, before any role exists — `bootstrapFirstAdmin` is a trust-on-first-
+use gate that rejects if *any* admin (any user already holding `authz:manage`) exists:
+
+```ts
+await client.mutation(anyApi.authz.bootstrapFirstAdmin, { userId, role: "admin" });
+```
+
+## Materialized effective permissions
+
+Rather than re-walking role inheritance on every permission check, authz **materializes** each
+user's effective permission patterns per scope into an `effective_permissions` table
+(`(scopeType, scopeId, userId, permission)`, indexed for point lookups) the moment a role is
+assigned or revoked. A check is then an indexed lookup against at most four candidate keys
+(`res:act`, `res:*`, `*:act`, `*:*`) — not a graph walk. The index is rebuilt at boot only if your
+`roles`/`permissions` config actually changed since the last boot (a stable hash of the config is
+stamped and compared), so restarting with an unchanged config does no extra work.
+
+## Checking permissions — `ctx.authz`
+
+Every query/mutation/action gets a read-only `ctx.authz` facade:
+
+```ts
+export const listDocs = query({
+  handler: async (ctx) => {
+    if (!(await ctx.authz.can("documents:read"))) return [];
+    return ctx.db.query("documents", "by_creation").collect();
+  },
+});
+```
+
+- **`can(permission, scope?)`** — checks the caller's effective permissions in `scope`, falling back
+  to a global grant if the scoped check misses. Returns `false` for an unauthenticated caller.
+- **`require(permission, scope?)`** — same check, throwing `Forbidden: <permission>` instead of
+  returning `false`.
+- **`roles(scope?)`** — the caller's assigned role names in a scope (or globally).
+- **`scopesWith(permission, type?)`** — every scope id the caller holds `permission` in, optionally
+  filtered to one scope `type` — the pattern for "which orgs can this user manage?"
+
+## ReBAC — relationship-based sharing
+
+For sharing-style permissions that don't fit a role ("Alice can view *this* document because Bob
+shared it with her, or because she's on the `eng` team and the team was granted access"), authz
+stores relation tuples — `object#relation@subject`:
+
+```ts
+await client.mutation(anyApi.authz.addRelation, {
+  subject: { type: "user", id: aliceId },
+  relation: "viewer",
+  object: { type: "document", id: docId },
+});
+```
+
+`addRelation`/`removeRelation` require the caller hold `<objectType>:share` in that object's scope,
+and are idempotent (adding an existing tuple, or removing a missing one, is a no-op). A subject can
+also be a **userset** — a group's own relation to something, e.g. `{ type: "team", id: "eng",
+relation: "member" }` — resolved one level deep: if `team:eng#member` is a `viewer` of a document,
+every direct member of `eng` inherits that.
+
+```ts
+await ctx.authz.hasRelation({ type: "user", id: aliceId }, "viewer", { type: "document", id: docId });
+await ctx.authz.objectsWith("viewer", "document"); // every document id the CALLER can view via a relation
+```
+
+## Row policies
+
+A component (or your own app, via `defineAuthz({ policies })`) can declare `read`/`write` rules on
+your app's own tables. A `read` policy compiles to a filter applied to every query over that table;
+a `write` policy gates whether a mutation's insert/update/delete on a row is allowed:
+
+```ts
+const authz = defineAuthz({
+  roles: { editor: { documents: ["read", "update"] } },
+  policies: {
+    documents: {
+      read: ({ auth }) => auth.can("documents:read"),                    // boolean → allow/deny everything
+      write: ({ auth }) => auth.can("documents:update"),
+    },
+  },
+});
+```
+
+A `read` policy can also return a structured predicate (`{ ownerId: userId }`, or logical `AND`/
+`OR`/`NOT` combinations over field comparisons — `eq`/`ne`/`lt`/`lte`/`gt`/`gte`/`in`/`notIn`/
+`isNull`) instead of a plain boolean, to filter to a subset of rows rather than all-or-nothing. The
+policy's rule context (`{ auth, db }`) exposes the same `can`/`roles`/`scopesWith`/`hasRelation`/
+`objectsWith` surface `ctx.authz` does, plus the caller's `userId`/`identity` directly — so a policy
+can express "only rows this user owns" as easily as "only if this role is held."
+
+Because a policy's filter participates in the same read-set tracking every query does, revoking a
+role or removing a relation tuple reactively re-runs and re-filters every live subscription over that
+table — no separate invalidation to wire up.
+
+## What's confirmed vs. not yet public
+
+This page is grounded directly in `components/authz/src/*` (`define-authz.ts`, `roles.ts`,
+`context.ts`, `relations.ts`, `policies.ts`, `effective-permissions.ts`, `functions.ts`) and its test
+suite (`components/authz/test/*`), since there is no prior end-user doc for this component. Two
+things worth flagging: the exact shape and defaults of `WhereInput`/`FieldOps` (re-exported from
+`@stackbase/executor`) are reference-level detail not repeated in full here, and `MAX_PATTERNS_PER_ROLE`
+(1000 expanded permission patterns per role) is an internal safety cap rather than a tunable option.
+
+See [Auth](/docs/components/auth) for the identity layer this component builds on.

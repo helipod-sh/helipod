@@ -5,6 +5,118 @@ description: React to table changes.
 
 {/* diataxis: explanation */}
 
-Run a handler on every insert, update, or delete via a durable cursor over the change log.
+`@stackbase/triggers` runs a handler of your choosing whenever documents in a table you're watching
+are inserted, updated, or deleted — server-side, durably. It fills the gap between mutations
+(synchronous, run inside the writer's own transaction) and [workflows](/docs/components/workflows)
+(explicit, caller-initiated): denormalized counters, audit logs, notification fan-out, kicking off a
+durable workflow, syncing to an external system.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## A trigger is a durable cursor over the log, not a queue
+
+Every write in Stackbase lands in an append-only MVCC log — that log **is** the change feed. A
+trigger owns one durable cursor recording how far it's read; a background driver wakes on every
+commit, reads the committed revisions after the cursor for the watched table, runs your handler with
+the batch, and only then advances the cursor. There's no separate queue table anything could be
+dropped from — a missed change is impossible by construction. The only failure mode a crash can
+produce is **redelivering** a batch that already ran but whose cursor advance never landed.
+
+## Configuring a trigger
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineTriggers } from "@stackbase/triggers";
+
+export default defineConfig({
+  components: [
+    defineTriggers({
+      messages: { handler: "notifications:_onMessage" },
+      users: { handler: "audit:_onUserChange", fromStart: true },
+    }),
+  ],
+});
+```
+
+Each key is a watched table's app-visible name. `handler` is an ordinary registered `mutation` or
+`action` at an **internal** (`_`-prefixed) path — the same convention scheduler job targets use — and
+is validated at boot: an unregistered path, a non-internal path, or one resolving to a query fails
+fast before the driver ever tries to dispatch to it. A brand-new trigger starts at the log's current
+tip by default; `fromStart: true` replays the table's entire existing history instead (potentially
+minutes on a large table — reach for it deliberately, e.g. backfilling a new audit table).
+
+## Handlers and the change batch
+
+The handler receives exactly `{ changes: LogChange[] }`:
+
+```ts
+interface LogChange {
+  table: string;
+  id: string;
+  op: "insert" | "update" | "delete";
+  newDoc: unknown | null;   // null for a delete
+  oldDoc: unknown | null;   // null for an insert
+  ts: number;
+  changeId: string;         // "<table>:<id>:<ts>" — stable across redelivery
+}
+```
+
+```ts title="convex/audit.ts"
+export const _onChange = mutation({
+  handler: async (ctx, { changes }: { changes: LogChange[] }) => {
+    for (const change of changes) {
+      const dup = await ctx.db.query("auditLog", "by_changeId").eq("changeId", change.changeId).take(1).collect();
+      if (dup.length > 0) continue;   // dedup on redelivery
+      await ctx.db.insert("auditLog", { changeId: change.changeId, table: change.table, docId: change.id, op: change.op });
+    }
+  },
+});
+```
+
+An **action** handler works the same way but runs outside the transaction — no `ctx.db`, native
+`fetch`, the shape for notification fan-out or syncing to an external system.
+
+## The delivery contract
+
+Delivery is **bounded at-least-once** and **in-order per document**, never coalesced — a document
+written twice before the cursor reaches it produces both revisions, and there's no ordering
+guarantee across different triggers. **Handlers must be idempotent, or dedup on `changeId`** — treat
+it as that change's permanent, stable identity, exactly as the audit-log example above does.
+
+## Failure handling and the circuit breaker
+
+If a handler throws, the same batch is retried with exponential backoff — the cursor never advances
+past an undelivered batch. After **8 consecutive failures** the trigger pauses itself
+(`state: "paused"`) until you call `triggers:resume`, picked up within about 30 seconds. A trigger
+writing back to its own watched table is delivered like any other write (DB-trigger semantics,
+intentional — recomputing a field, chaining a state machine forward) but a runaway recursive write
+trips a separate circuit breaker (default 1000 deliveries/10s window, `maxDeliveriesPerWindow`),
+pausing with `pausedReason: "circuit-breaker"` instead of melting the node.
+
+## Composing with workflows
+
+Triggers pair naturally with [durable workflows](/docs/components/workflows): react to a data change
+by starting a durable, multi-step run instead of doing the work inline in the handler.
+
+```ts
+export const _onOrderChange = mutation({
+  handler: async (ctx, { changes }: { changes: LogChange[] }) => {
+    for (const change of changes) {
+      if (change.op !== "insert") continue;
+      await ctx.workflow.start("workflows:fulfillOrder", { orderId: change.id });
+    }
+  },
+});
+```
+
+The trigger is the reactive edge (data change → workflow start); the workflow is the durable
+multi-step body.
+
+## What triggers are not
+
+Not effectively-once (co-committing a handler's own effects with its cursor advance in one
+transaction isn't wired — dedup on `changeId` instead), not a field-level or predicate filter (a
+trigger watches an entire table; filter inside the handler), and not dynamically registerable at
+runtime — like crons, a trigger is declared in `stackbase.config.ts` and fixed for the deployment's
+life.
+
+See [Scheduling](/docs/components/scheduling) for the driver mechanism triggers' own commit-woken
+loop is built on the same shape as.

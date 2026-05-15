@@ -1,10 +1,209 @@
 ---
 title: Tutorial
-description: Build a small reactive app end to end.
+description: Build a small reactive task list, end to end, with a real React UI.
 ---
 
 {/* diataxis: tutorial */}
 
-A guided, end-to-end lesson that builds a complete small application on stackbase, from schema to a live reactive UI.
+The [Quickstart](/docs/get-started/quickstart) got a query and a mutation running and showed you
+reactivity in the dashboard. This tutorial goes one step further: you'll build a tiny task list with
+a **real React UI** — `useQuery` and `useMutation` wired to the same backend — and watch it update
+live across two browser tabs with zero refresh code of your own.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+Every step below is runnable. You'll need **Bun** (the tutorial's build step uses `bun build`
+directly, so Bun is required here, even though the backend itself also runs on Node).
+
+## 1. Set up the project
+
+```bash
+mkdir task-list && cd task-list
+bun init -y
+bun add @stackbase/cli @stackbase/values @stackbase/client react react-dom
+```
+
+## 2. Define the schema
+
+```ts title="convex/schema.ts"
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+export default defineSchema({
+  tasks: defineTable({
+    label: v.string(),
+    done: v.boolean(),
+  }),
+});
+```
+
+One table, `tasks`. No custom index needed — the built-in `by_creation` index is enough to list every
+task in the order it was added (see [Schema & tables](/docs/core-concepts/schema-and-tables)).
+
+## 3. Write the backend functions
+
+```ts title="convex/tasks.ts"
+import { v } from "@stackbase/values";
+import { query, mutation } from "./_generated/server";
+
+export const list = query({
+  returns: v.array(
+    v.object({
+      _id: v.id("tasks"),
+      _creationTime: v.number(),
+      label: v.string(),
+      done: v.boolean(),
+    }),
+  ),
+  handler: (ctx) => ctx.db.query("tasks", "by_creation").collect(),
+});
+
+export const add = mutation({
+  args: { label: v.string() },
+  returns: v.id("tasks"),
+  handler: (ctx, { label }) => ctx.db.insert("tasks", { label, done: false }),
+});
+
+export const toggle = mutation({
+  args: { id: v.id("tasks"), done: v.boolean() },
+  returns: v.null(),
+  handler: async (ctx, { id, done }) => {
+    const task = await ctx.db.get(id);
+    if (task === null) return null;
+    // ctx.db.replace takes the whole document — see Mutations for why there's no partial patch.
+    await ctx.db.replace(id, { label: task.label as string, done });
+    return null;
+  },
+});
+```
+
+This is exactly the pattern from [Mutations](/docs/core-concepts/mutations): `add` inserts a new
+document; `toggle` reads the current one and replaces it in full with the one field changed. The
+`returns` validators on all three are what let the client below know their exact result types.
+
+## 4. Build the web UI
+
+Create a `web/` directory alongside `convex/`:
+
+```html title="web/index.html"
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Task List</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
+```
+
+```tsx title="web/main.tsx"
+import { StrictMode, useState, type FormEvent } from "react";
+import { createRoot } from "react-dom/client";
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
+import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
+import { api } from "../convex/_generated/api";
+
+const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
+
+function TaskList() {
+  const tasks = useQuery(api.tasks.list, {});
+  const add = useMutation(api.tasks.add);
+  const toggle = useMutation(api.tasks.toggle);
+  const [label, setLabel] = useState("");
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    void add({ label: trimmed });
+    setLabel("");
+  }
+
+  if (tasks === undefined) return <p>Loading…</p>;
+
+  return (
+    <div>
+      <h1>Task list</h1>
+      <ul>
+        {tasks.map((t) => (
+          <li key={t._id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={t.done}
+                onChange={(e) => void toggle({ id: t._id, done: e.target.checked })}
+              />
+              {t.label}
+            </label>
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={submit}>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="New task…" />
+        <button type="submit">Add</button>
+      </form>
+    </div>
+  );
+}
+
+const root = document.getElementById("root");
+if (root) {
+  createRoot(root).render(
+    <StrictMode>
+      <StackbaseProvider client={client}>
+        <TaskList />
+      </StackbaseProvider>
+    </StrictMode>,
+  );
+}
+```
+
+This is the same client shape as [Queries](/docs/core-concepts/queries)'s `useQuery` example, plus
+`useMutation` for both writes: `client` connects over WebSocket to `/api/sync`, `StackbaseProvider`
+makes it available to the tree, `useQuery` subscribes and re-renders on its own when the result
+changes, and `useMutation` returns a plain callback for each write.
+
+## 5. Bundle the client
+
+```bash
+bun build web/main.tsx --outfile web/main.js
+```
+
+This produces the `web/main.js` that `web/index.html` loads. Re-run it any time you change
+`web/main.tsx`.
+
+## 6. Run it
+
+```bash
+bunx stackbase dev --web web
+```
+
+`stackbase dev` generates `convex/_generated/`, starts the reactive engine, and — because of
+`--web web` — also serves your bundled UI from the same port as the backend. It prints a URL; open
+it in your browser.
+
+## 7. Watch it react
+
+1. Add a couple of tasks using the form. Each appears immediately — that's `add`'s commit fanning
+   out to your own `useQuery(api.tasks.list)` subscription.
+2. Open the **same URL in a second tab**, side by side with the first.
+3. Check off a task in one tab. It updates in the other tab too, with no refresh — the same
+   mutation-commits-a-write-set / subscription-re-runs loop from
+   [How it works](/docs/get-started/how-it-works), now driving a UI you wrote yourself instead of
+   the dashboard's built-in data browser.
+
+## What you built
+
+A schema, a query, two mutations, and a React UI wired to all three with `useQuery`/`useMutation` —
+the same shape every stackbase app is built from, whether it's a chat app, a dashboard, or something
+much bigger. From here:
+
+- [Client SDK](/docs/client/client-sdk) — the full hook surface (`useAction`, connection state, and
+  more) beyond what this tutorial used.
+- [Optimistic updates](/docs/client/optimistic-updates) — make `add`/`toggle` render instantly,
+  before the server has confirmed them.
+- [Reactivity](/docs/core-concepts/reactivity) — exactly how precise the invalidation you just saw
+  really is.
+- [Actions](/docs/core-concepts/actions) and [HTTP & webhooks](/docs/core-concepts/http-and-webhooks)
+  — once your app needs to talk to the outside world.

@@ -1,10 +1,185 @@
 ---
 title: Deploy and build
-description: Live hot-swap and single-binary builds.
+description: Live hot-swap onto a running server with stackbase deploy, or compile a self-contained binary with stackbase build.
 ---
 
 {/* diataxis: how-to */}
 
-Push functions to a running server with stackbase deploy, or compile a self-contained binary with stackbase build.
+Two ways to ship a change once you're past local dev: push it live to an already-running server
+with no restart, or compile your whole app into one self-contained executable.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## `stackbase deploy` — live hot-swap
+
+`stackbase deploy` transpiles your local functions and additive schema changes and pushes them to
+a running `stackbase serve` deployment, which hot-swaps them in atomically — the same process keeps
+serving requests throughout, and a rejected deploy never leaves it partially applied.
+
+### Enabling it: `--allow-deploy`
+
+A running `serve` does **not** accept deploys by default. Start it with `--allow-deploy` (or set
+`STACKBASE_ALLOW_DEPLOY=1`) to opt in:
+
+```bash
+stackbase serve --dir convex --allow-deploy
+```
+
+Without this flag, `POST /_admin/deploy` isn't registered at all — it falls through to the generic
+admin-router 404, indistinguishable from a nonexistent endpoint. This is deliberate: the admin key
+already grants full read/write access to your data, so requiring a separate opt-in keeps "read/write
+my data" and "replace my running code" as two distinct, deliberately-opted-into capabilities.
+
+### Usage
+
+From your app's project root:
+
+```bash
+STACKBASE_ADMIN_KEY=… stackbase deploy --url https://myapp.example
+```
+
+- `--url <url>` — the target deployment's base URL (or `STACKBASE_DEPLOY_URL`).
+- `--dir <convexDir>` — defaults to `convex`.
+
+`stackbase deploy`:
+
+1. Refreshes your local `convex/_generated/` (same codegen `stackbase dev`/`stackbase codegen`
+   produce).
+2. Transpiles every `.ts` file under `convex/` (types stripped, imports untouched — bare
+   `@stackbase/*` imports resolve against the target's own `node_modules`).
+3. `POST`s the resulting file tree to `/_admin/deploy`, bearer-authenticated with
+   `STACKBASE_ADMIN_KEY`.
+
+On success:
+
+```
+✓ deployed rev 4b3187d88b93 (7 functions)
+```
+
+The new functions are callable immediately — no restart, and existing WebSocket subscriptions keep
+working and reactively pick up writes made through the newly-deployed code.
+
+### Additive-only schema — destructive changes are rejected
+
+There are no data migrations. A deploy may add new tables or new **optional** fields to an existing
+table. A deploy is **rejected** (server stays on the previous version, nothing swaps) if it would
+remove/rename a table, change a table's internal number, remove a field, change a field's type,
+turn an optional field required, or add a new required field. Any of these come back as
+`deploy failed: <reason>` with exit code 1, and the running deployment is completely unaffected —
+validation always completes before anything is swapped.
+
+### The component set is fixed at boot
+
+Components composed via `stackbase.config.ts` (e.g. `@stackbase/scheduler`, `@stackbase/workflow`)
+are fixed at boot. `stackbase deploy` can push new functions and additive schema against that
+component set, but adding or removing a component requires a restart.
+
+### Known limitation
+
+The function loader is top-level only — it doesn't recurse into subdirectories of `convex/`. Keep
+modules directly under `convex/*.ts`, not nested under a subfolder; nested modules are silently
+not loaded. This applies to `dev`/`serve` as well as `deploy`.
+
+## Other deploy targets: Cloudflare and Docker
+
+`stackbase deploy` also has a general `--target <name> --env <name>` form (with `--dry-run` and
+`--check` flags) that provisions infrastructure other than a running `serve` — for example
+`--target cloudflare` provisions a Durable-Object-native Cloudflare host via `wrangler deploy`. The
+`--url` usage above is the back-compat shorthand for `--target serve` with no `stackbase.config.ts`
+needed; see [Cloudflare](/docs/deploy/cloudflare) for the Cloudflare target in full.
+
+## `stackbase build` — single self-contained binary
+
+`stackbase build` compiles your whole app — the Bun runtime, the stackbase engine, `bun:sqlite`,
+your `convex/` functions and schema, and any composed components — into one executable via
+`bun build --compile`. No `bun`/`node` install and no `convex/` directory needed at deployment time;
+only the binary and a data directory for SQLite.
+
+| Component | Bundled? |
+|---|---|
+| Bun runtime | Yes |
+| stackbase engine | Yes |
+| SQLite (`bun:sqlite`) | Yes |
+| Your `convex/` functions + schema | Yes (embedded via a generated static-import entrypoint) |
+| Composed components | Yes |
+| Dashboard | Optional — included by default, `--no-dashboard` to exclude |
+| SQLite **database file** | **No** — lives on disk under `--data-dir`, external to the binary |
+
+### Build
+
+```bash
+stackbase build
+```
+
+Output: `./stackbase-server`. `stackbase build` runs its own codegen internally, so there's no
+separate codegen step first.
+
+```bash
+stackbase build --outfile ./dist/my-backend
+```
+
+### Cross-compilation
+
+```bash
+stackbase build --target linux-x64 --outfile ./dist/server-linux
+stackbase build --target linux-arm64 --outfile ./dist/server-linux-arm64
+stackbase build --target darwin-arm64 --outfile ./dist/server-macos
+stackbase build --target darwin-x64 --outfile ./dist/server-macos-x64
+stackbase build --target windows-x64 --outfile ./dist/server-windows.exe
+```
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--dir <path>` | `convex` | App's `convex/` directory to build |
+| `--outfile <path>` | `./stackbase-server` | Output path |
+| `--target <platform>` | current platform | `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64` |
+| `--no-dashboard` | — | Exclude the dashboard UI |
+| `--verbose` | — | Stream the underlying `bun build --compile` output |
+
+The compile step deliberately omits `--bytecode` — the generated entrypoint uses a top-level
+`await` to boot the runtime before serving, which `--bytecode` rejects. Cold-start speed doesn't
+matter for a long-running server binary.
+
+### Run it
+
+```bash
+STACKBASE_ADMIN_KEY=your-strong-secret ./stackbase-server --port 3000 --hostname 0.0.0.0 --data-dir ./data
+```
+
+`STACKBASE_ADMIN_KEY` is **required** — same as `stackbase serve`, the binary fails fast (exit 1)
+if it isn't set, and it's never auto-generated.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--port` | `3000` (or `$PORT`) | Port to listen on |
+| `--hostname` | `0.0.0.0` | Address to bind to |
+| `--data-dir` | `./data` | Directory holding the SQLite database (`db.sqlite`) |
+
+### Machine-readable startup
+
+On successful startup, the binary writes exactly one JSON line to stdout, after the listener is up:
+
+```json
+{"ready":true,"port":3000,"url":"http://0.0.0.0:3000"}
+```
+
+This is designed for a parent process (Electron, Tauri, a supervisor script) to read stdout and
+know exactly when the server is ready and which port it bound. It handles `SIGINT`/`SIGTERM` for
+graceful shutdown.
+
+### Limitations
+
+- **Single instance.** SQLite requires exclusive file access — one binary process per data
+  directory.
+- **No live hot-swap.** Unlike `stackbase serve --allow-deploy`, the binary doesn't expose
+  `POST /_admin/deploy` — functions, schema, and the composed component set are all fixed at build
+  time. Shipping a change means rebuilding and redeploying the binary.
+- **No Postgres adapter.** SQLite only.
+
+## Related
+
+- [Self-hosting with Docker](/docs/deploy/self-hosting) — the `serve` deployment `stackbase deploy`
+  pushes onto.
+- [Cloudflare](/docs/deploy/cloudflare) — `stackbase deploy --target cloudflare`, and the
+  general `--target`/`--env` model.
+- [CLI reference](/docs/reference/cli) — every command and flag in one place.

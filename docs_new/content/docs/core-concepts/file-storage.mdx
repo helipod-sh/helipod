@@ -1,10 +1,128 @@
 ---
 title: File storage
-description: Store and serve files with ctx.storage.
+description: The _storage table, ctx.storage, and why uploads are a two-phase process.
 ---
 
 {/* diataxis: explanation */}
 
-The _storage system table, two-phase uploads, and private-by-default serving.
+File storage is **always on** — there's nothing to opt into in `stackbase.config.ts`. Every project
+gets a reserved `_storage` system table and a `ctx.storage` facade in every query, mutation, and
+action. Actual bytes live in a separate backend behind the scenes: the local filesystem by default,
+or an S3-compatible bucket when you point the server at one — your function code is identical
+either way.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## The `_storage` table and `Id<"_storage">`
+
+`_storage` is a built-in system table holding metadata for every uploaded file — `status`, `size`,
+`contentType`, `sha256`, `visibility` — keyed by its document id. `Id<"_storage">` is a first-class
+id type: put one in a schema field with `v.id("_storage")` and it behaves like any other document
+reference, including participating in reactivity — a query that reads a document holding a stored
+file id re-runs when that row (or the `_storage` row it points to) changes, exactly like any other
+reference.
+
+```ts title="convex/schema.ts"
+import { v, defineSchema, defineTable } from "@stackbase/values";
+
+export default defineSchema({
+  photos: defineTable({
+    caption: v.string(),
+    image: v.id("_storage"),
+  }),
+});
+```
+
+## Why uploads are two-phase
+
+A mutation can't do byte I/O — writing an actual file is non-deterministic the same way `fetch` is
+(see [Mutations](/docs/core-concepts/mutations)). But minting the *record* of an upload — a pending
+`_storage` row and a place to send the bytes — is a perfectly ordinary transactional write. So
+uploading splits into two phases: a mutation reserves the upload, and the byte transfer that follows
+happens outside any transaction, then confirms.
+
+```ts title="convex/files.ts"
+import { mutation } from "./_generated/server";
+import { v } from "@stackbase/values";
+
+export const createUpload = mutation({
+  args: { contentType: v.optional(v.string()) },
+  handler: (ctx, { contentType }) => ctx.storage.generateUploadUrl({ contentType }),
+});
+```
+
+`generateUploadUrl` returns a `storageId` (the new, still-`pending` `Id<"_storage">`) and a
+`target` describing where to send the bytes. Which shape `target` takes depends on the backend, not
+your code:
+
+- **`proxied`** (filesystem backend) — the client `POST`s bytes to the engine's own endpoint, which
+  stores them and flips the row to `ready` in the same request.
+- **`presigned`** (S3-compatible backend) — the client `PUT`s bytes straight to the bucket, bypassing
+  the server entirely, then separately `POST`s the returned `confirmUrl` to finalize the row.
+
+Either way, the row only becomes `ready` once the transfer is confirmed. An upload that's reserved
+and never finished — the client abandoned it, the tab closed — leaves a stale pending row, which a
+background reaper reclaims on its own; nothing leaks storage forever.
+
+## Reading files
+
+`getUrl`, `getMetadata`, and `delete` are metadata-only operations — they don't touch actual bytes,
+so they work from queries and mutations as well as actions:
+
+```ts title="convex/files.ts"
+export const photoUrl = query({
+  args: { id: v.id("_storage") },
+  handler: (ctx, { id }) => ctx.storage.getUrl(id),
+});
+```
+
+`getUrl` returns `null` for an id that doesn't exist or whose upload was abandoned and has since
+expired; otherwise it returns a URL the client can fetch or render directly — see access control
+below for what that URL actually carries. `delete` tombstones the `_storage` row immediately
+(transactional and reactive, like any other write); the underlying bytes are reclaimed
+asynchronously by the same reaper, since byte I/O can't run inside a transaction.
+
+## Byte I/O is action-only
+
+Reading or writing the actual file contents is real I/O against the storage backend — exactly the
+kind of non-determinism that belongs in an [action](/docs/core-concepts/actions), never a
+query or mutation:
+
+```ts title="convex/files.ts"
+import { action } from "./_generated/server";
+
+export const resizeAndStore = action({
+  args: { id: v.id("_storage") },
+  handler: async (ctx, { id }) => {
+    const stream = await ctx.storage.get(id); // ReadableStream<Uint8Array> | null
+    // ... process the bytes ...
+    return await ctx.storage.store(processedBytes, { contentType: "image/png" });
+  },
+});
+```
+
+`store(bytes, opts?)` takes a `Uint8Array` or `ReadableStream<Uint8Array>` and returns an
+already-`ready` `Id<"_storage">` in one call — there's no separate confirm step here, since the
+action already holds the whole blob.
+
+## Access control: private by default
+
+Every file has a `visibility`, set at upload time and defaulting to `"private"`:
+
+- **`"public"`** files are served at a stable URL — anyone holding it can fetch the bytes, no token
+  required. Use this for content that's meant to be world-readable.
+- **`"private"`** files (the default) are never served on a bare URL. `getUrl()` instead returns a
+  URL carrying a signed, expiring **capability token** — an HMAC over the file id and an expiry,
+  signed with the deployment's own admin key. Anyone holding that URL can fetch the bytes until it
+  expires; there is no per-user or per-role check layered on top today. Treat a private file's URL
+  like a signed download link: safe to hand to the user it's meant for, not safe to log publicly or
+  embed where anyone can view it.
+
+Per-user/per-role authorization on file reads (`"only the uploader or their team can read this"`) is
+not built yet — if your app needs finer-grained rules than "anyone with the link, until it expires,"
+add your own check before handing out a private file's URL.
+
+## Related
+
+- [Mutations](/docs/core-concepts/mutations) and [Actions](/docs/core-concepts/actions) — why the
+  upload flow splits where it does.
+- [Self-hosting](/docs/deploy/self-hosting) — pointing the storage backend at an S3-compatible
+  bucket instead of the local filesystem default.

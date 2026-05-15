@@ -1,10 +1,121 @@
 ---
 title: Local development
-description: stackbase dev and the dashboard.
+description: stackbase dev's hot-reload server and the built-in dashboard.
 ---
 
 {/* diataxis: how-to */}
 
-Run the engine locally with hot reload, and browse your data in the dashboard.
+Run the reactive engine locally with hot reload, and browse your data in the built-in dashboard —
+this is the day-to-day loop for building a stackbase app.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Start the dev server
+
+From your app's root (where `convex/` lives):
+
+```bash
+npx stackbase dev
+```
+
+This does four things at once:
+
+- **Runs codegen** and writes `convex/_generated/` — the typed `api`/`Doc`/`Id` helpers your
+  functions and client import.
+- **Watches `convex/`** and re-runs codegen + hot-reloads your functions on every save.
+- **Starts the reactive engine** against a local SQLite database.
+- **Serves the sync WebSocket, `/api/*` HTTP, your `httpAction` routes, and the dashboard** all on
+  one port.
+
+It prints the URL to open, including the dashboard's.
+
+## Defaults and flags
+
+| Option | Default | Flag |
+|---|---|---|
+| Port | `3000` | `--port <n>` |
+| Hostname | `127.0.0.1` (localhost only) | `--ip <addr>` |
+| Function directory | `convex/` | `--dir <path>` |
+| Database | SQLite at `.stackbase/data.db` | `--data <path>` |
+
+Other flags: `--web <dir>` serves a static web UI alongside the API; `--database-url <url>` points
+at Postgres instead of SQLite (see [Postgres](/docs/deploy/postgres)); `--storage-bucket` /
+`--storage-endpoint` configure S3-compatible file storage.
+
+The dev server isn't reachable from your LAN by default — pass `--ip 0.0.0.0` to expose it.
+
+### Runtime selection
+
+The runtime is auto-detected: Bun if you run the CLI under Bun, Node otherwise. There's no `--bun`
+or `--node` flag — just invoke it with the runtime you want:
+
+```bash
+bun stackbase dev     # Bun (primary runtime)
+node stackbase dev    # Node
+```
+
+The Node path uses `node:sqlite` and requires **Node.js 22.5+**.
+
+## Generate types without starting a server
+
+```bash
+stackbase codegen
+```
+
+`stackbase dev` does this automatically on every change. You need the explicit command before
+[`stackbase serve`](/docs/deploy/self-hosting), which never runs codegen itself.
+
+## Run a function without the dashboard
+
+There's no `stackbase run` command. Either use the dashboard's function runner, or hit the HTTP API
+directly:
+
+```bash
+curl -X POST http://localhost:3000/api/run \
+  -H 'content-type: application/json' \
+  -d '{"path": "messages:list", "args": {"limit": 5}}'
+```
+
+The response is `{"value": …, "committed": …, "commitTs": "…"}`.
+
+## The dashboard
+
+Open the URL `stackbase dev` prints — `http://localhost:<port>/_dashboard`. In dev mode the admin
+key is embedded in the served HTML, so it just opens with no login step.
+
+### Data browser
+
+A **live** view of every table:
+
+- Select a table to see its documents, paginated.
+- Filter by field value to narrow results.
+- Click a row to expand it and see every field, including `_id` and `_creationTime`.
+- Edit a document's fields directly — this runs a real mutation against your database, exactly
+  like any other write.
+
+Because it's a subscription like any client's, the table updates the instant a mutation commits,
+with no manual refresh — the same mechanism the [Quickstart](/docs/get-started/quickstart) walks
+through.
+
+### Function runner
+
+Call any query, mutation, or action with a JSON argument editor and see its result — the same
+`/api/run` path the `curl` example above hits, with a UI around it.
+
+### Logs and schema
+
+The dashboard also has a logs viewer for function invocations, and a schema viewer showing your
+tables, fields, and indexes as declared in `convex/schema.ts`.
+
+### Security note
+
+The dashboard has **no authentication in dev mode** and grants unrestricted read/write access to
+your whole database — that's fine for local development, but never expose it to production
+unprotected. [`stackbase serve`](/docs/deploy/self-hosting) serves the dashboard key-less by
+default (no embedded key — it prompts you for one), which is the production-safe version of the
+same UI.
+
+## Related
+
+- [Quickstart](/docs/get-started/quickstart) — install stackbase and see the whole loop end to end.
+- [Self-hosting with Docker](/docs/deploy/self-hosting) — `stackbase serve`, the production
+  counterpart of `stackbase dev` (no codegen, required admin key, binds `0.0.0.0`).
+- [CLI reference](/docs/reference/cli) — the full command list.

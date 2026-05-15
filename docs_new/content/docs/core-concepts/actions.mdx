@@ -1,10 +1,89 @@
 ---
 title: Actions
-description: Side effects that run outside the transaction.
+description: Side effects — fetch, timers, and randomness — running outside the transaction.
 ---
 
 {/* diataxis: explanation */}
 
-Actions run non-deterministic work (fetch, timers, third-party APIs) outside a transaction, orchestrating queries and mutations.
+[Queries](/docs/core-concepts/queries) and [mutations](/docs/core-concepts/mutations) are
+deterministic on purpose: it's what makes reactivity and transactional replay trustworthy. But real
+apps need to call third-party APIs, send an email, or generate a true random id — none of which can
+be deterministic. That's what an action is for.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Actions run outside the transaction
+
+An action has no `ctx.db`. There is nothing to read or write directly, because an action isn't part
+of any transaction — there's no snapshot, no write-set, no commit for the engine to reason about.
+That also means an action's result is never subscribed to: only queries participate in reactivity.
+
+Because an action isn't constrained by determinism, it gets the capabilities queries and mutations
+don't: native `fetch`, `Date.now()`, `Math.random()`, and timers all work normally inside one.
+
+## Defining an action
+
+```ts title="convex/tasks.ts"
+import { v } from "@stackbase/values";
+import { action } from "./_generated/server";
+
+export const sendReminder = action({
+  args: { taskId: v.id("tasks") },
+  handler: async (ctx, { taskId }) => {
+    const task = await ctx.runQuery("tasks:get", { id: taskId });
+    await fetch("https://api.email.example.com/send", {
+      method: "POST",
+      body: JSON.stringify({ subject: `Reminder: ${task.title}` }),
+    });
+  },
+});
+```
+
+`args` and `returns` validators work exactly as they do for queries and mutations. A function
+reference can be either a typed `api.tasks.get`-style reference (see
+[Queries](/docs/core-concepts/queries)) or, as above, its bare `"module:export"` path string.
+
+## Reaching the database through runQuery / runMutation / runAction
+
+An action has no direct database access, so it orchestrates through three methods on `ctx`:
+
+- **`ctx.runQuery(ref, args)`** — runs a query and returns its result.
+- **`ctx.runMutation(ref, args)`** — runs a mutation as its own transaction and returns its result.
+- **`ctx.runAction(ref, args)`** — runs another action.
+
+Each call is a fresh, independent top-level run — not a sub-transaction of anything. If an action
+calls `runMutation` three times, that's three separate commits, each producing its own write-set
+and its own round of reactive invalidation. There's no way to wrap multiple `runMutation` calls in
+one atomic transaction from inside an action; if you need several writes to commit together, put
+them in a single mutation and call that one mutation once.
+
+## Where an action can be called from
+
+An action isn't reachable through the reactive subscription path (there's nothing to subscribe to),
+but it's callable from everywhere else a query or mutation is:
+
+- **From the client** — `client.action(...)` or the `useAction` hook, over the same sync connection
+  as queries and mutations, or over plain HTTP with `POST /api/run` naming an action's path.
+- **From another action** — `ctx.runAction`. Queries and mutations have no `runQuery`/`runMutation`/
+  `runAction` methods at all — that escape hatch exists only on `ActionCtx`, precisely because an
+  action is already outside any transaction. A query or mutation can't call into another function;
+  it can only read or write through its own `ctx.db`.
+- **From the scheduler** — `ctx.scheduler.runAfter`/`runAt` and `cronJobs()` (see
+  [Scheduling](/docs/components/scheduling)) run actions at-most-once on their own schedule, exactly
+  as if a client had called them.
+
+## Using an action from a client
+
+```tsx
+import { useAction } from "@stackbase/client/react";
+import { api } from "../convex/_generated/api";
+
+function ReminderButton({ taskId }: { taskId: string }) {
+  const sendReminder = useAction(api.tasks.sendReminder);
+  return <button onClick={() => void sendReminder({ taskId })}>Send reminder</button>;
+}
+```
+
+Unlike `useQuery`, `useAction` (like `useMutation`) is not reactive — it's a plain callback that
+resolves once the action finishes. See [Client SDK](/docs/client/client-sdk) for the full hook
+surface, and [HTTP & webhooks](/docs/core-concepts/http-and-webhooks) for `httpAction` — an action
+variant whose input/output is a raw `Request`/`Response` instead of typed args, used for public
+endpoints and webhooks.

@@ -1,10 +1,192 @@
 ---
 title: Testing
-description: Test functions with @stackbase/test.
+description: Test functions against the real engine with @stackbase/test.
 ---
 
 {/* diataxis: how-to */}
 
-Write tests against the real engine with createTestStackbase.
+`@stackbase/test` runs your queries, mutations, and actions against a **real** `EmbeddedRuntime` —
+real MVCC SQLite storage, the real transactor, the real query engine, and (if you compose them) real
+component drivers. There's no mocked `ctx.db` and no simulated reactivity: `t.subscribe` drives the
+actual client → sync protocol → engine path over an in-process loopback connection.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Install
+
+```bash
+npm install -D @stackbase/test
+```
+
+## Create a test backend
+
+```ts
+import { createTestStackbase } from "@stackbase/test";
+import * as messages from "./messages";
+import schema from "./schema";
+
+const t = await createTestStackbase({
+  modules: { "messages.ts": messages, "schema.ts": { default: schema } },
+});
+
+try {
+  const id = await t.mutation("messages:send", { body: "hi" });
+  const rows = await t.query("messages:list", {});
+} finally {
+  await t.close();
+}
+```
+
+`createTestStackbase` is **async** — always `await` it. Always call `t.close()` (in a
+`try`/`finally` or an `afterEach`) — it tears down the in-memory database, stops component drivers,
+and removes the temp directory backing file storage.
+
+### The `modules` map
+
+`modules` maps a Convex-style module path (`"messages.ts"`) to that module's exports. Two shapes
+work:
+
+```ts
+// Explicit imports
+const t = await createTestStackbase({
+  modules: { "messages.ts": messages, "users.ts": users, "schema.ts": { default: schema } },
+});
+
+// Or let your bundler enumerate the directory (the non-eager form — a map of lazy
+// loaders — works as-is; each is awaited before use)
+const t = await createTestStackbase({
+  modules: import.meta.glob("./convex/**/*.ts"),
+});
+```
+
+A `schema.ts` entry (default-exporting `defineSchema(...)`) is picked up automatically — this is
+`schema: "auto"`, the default. Pass an explicit schema to override it, or `schema: false` for no
+schema at all.
+
+### Composing components
+
+If your app opts into a component in `stackbase.config.ts`, list it the same way here:
+
+```ts
+import { defineScheduler } from "@stackbase/scheduler";
+
+const t = await createTestStackbase({
+  modules: { /* ... */ },
+  components: [defineScheduler()],
+});
+```
+
+Without a composed scheduler, `t.finishScheduledFunctions()` / `t.advanceTimers()` are harmless
+no-ops rather than errors.
+
+## Calling functions
+
+Both a `"module:fn"` string and a typed `FunctionReference` (your codegen'd `api`, or `anyApi` cast)
+work anywhere a function reference is expected:
+
+```ts
+await t.query("messages:list", {});
+await t.query(api.messages.list, {});
+```
+
+- **`t.query(ref, args)` / `t.mutation(ref, args)` / `t.action(ref, args)`** — call a function as a
+  client would, through the public gate. Identity is whatever `t.withIdentity` set (none, by
+  default).
+- **`t.run(fn)`** — runs `fn` with a full, privileged database-writer `ctx` inside one real
+  transaction, bypassing the public gate entirely. Use it for setup/seeding or assertions that
+  shouldn't have to go through an app-defined mutation:
+
+  ```ts
+  const id = await t.run(async (ctx) => ctx.db.insert("messages", { body: "seeded" }));
+  ```
+
+- **`t.fetch(request)`** — routes a `Request` through your app's `http.ts` router exactly as the
+  real server dispatches to an `httpAction`, returning a `Response` (a plain 404 for no match).
+
+## Testing with identity
+
+```ts
+const asAda = t.withIdentity("some-token");
+await asAda.mutation("messages:send", { body: "hi" });
+```
+
+`t.withIdentity(token)` returns a view of the *same* backend whose calls carry `token` as the
+ambient identity — reaching function code only through a context provider (e.g. `@stackbase/auth`'s
+`ctx.auth`), never a bare `ctx.identity` populated from JWT claims. `run` and `close` stay shared
+with the backend, not per-view.
+
+## Testing reactivity with `t.subscribe`
+
+```ts
+const sub = t.subscribe("messages:list", {});
+sub.onChange((rows) => {
+  // ...
+});
+
+await t.mutation("messages:send", { body: "hi" });
+// sub.value() is now re-computed and re-pushed — because the write's write set
+// intersected the query's recorded read set, not because anything was polled.
+
+sub.unsubscribe();
+```
+
+This is the real client → sync protocol → `SubscriptionManager` → engine path, not a simulated
+re-render: a committed write only triggers a re-push when its write set intersects the
+subscription's recorded read set, exactly as it would over a live WebSocket. Asserting that one
+mutation *does* invalidate a given subscription and *doesn't* invalidate an unrelated one is a
+first-class test here.
+
+## Time control (scheduler / crons)
+
+```ts
+await t.mutation("reminders:schedule", {});
+await t.advanceTimers(60_000);       // moves the virtual clock and drives one pass
+await t.finishScheduledFunctions();  // drains everything due (incl. cascades) to completion
+```
+
+Both are driven by the harness's own virtual clock — no real timers or sleeps — and are no-ops
+without a composed `@stackbase/scheduler`.
+
+## Isolation
+
+Every `createTestStackbase()` call is a fully independent backend — its own SQLite `:memory:`
+database, its own temp file-storage directory, its own component drivers. Two instances in the same
+test file never see each other's writes.
+
+## Differences from Convex's testing tools
+
+If you're porting tests written against Convex's `convex-test`, these are the places behavior
+diverges:
+
+- **Identity is a raw string token, not a claims object.** `t.withIdentity("token")` sets the
+  ambient token your own auth component resolves — not a bare `ctx.identity` from JWT claims.
+- **Index reads use a chained query builder, not `.withIndex(cb)`:**
+
+  ```ts
+  ctx.db.query("docs", "by_owner").eq("owner", "a").gte("n", 1).lt("n", 3).order("asc").collect();
+  ```
+
+- **Pagination returns a different shape:** `.paginate({ cursor, pageSize })` returns
+  `{ page, nextCursor, hasMore, scanCapped }`, not Convex's `{ isDone, continueCursor }`.
+- **There is no `ctx.db.patch`.** A partial update is read, spread-merge, then
+  `ctx.db.replace(id, merged)`.
+- **Schema validation is runtime-enforced.** An insert/replace whose document is wrong-typed, has an
+  extra field, or is missing a required field is rejected with a `DocumentValidationError`. Disable
+  it with `defineSchema(tables, { schemaValidation: false })`, or loosen one field with `v.any()`.
+
+`stackbase migrate` rewrites your Convex import specifiers automatically, but it does not translate
+`convex-test` calls to `@stackbase/test` — see [Migrate from Convex](/docs/reference/migrate-from-convex).
+
+## E2E testing against a running server
+
+`@stackbase/test`'s in-process harness (above) is the right tool for function/reactivity logic. For
+transport- or CLI-level behavior (hot reload, the wire protocol, Docker, deploy), start a real
+`stackbase dev`/`serve` and drive it with `@stackbase/client` over a real WebSocket, or `POST
+/api/run` over HTTP — the pattern stackbase's own end-to-end tests use (see
+`packages/cli/test/*-e2e.test.ts` in the repo).
+
+## See also
+
+- [Client SDK](/docs/client/client-sdk) — the same `useQuery`/`useMutation` hooks a test's
+  `t.subscribe` stands in for.
+- [Configuration](/docs/reference/configuration) — the full `v.*` validator list referenced above.
+- [Schema & tables](/docs/core-concepts/schema-and-tables) — `defineSchema`, indexes, and
+  `schemaValidation`.

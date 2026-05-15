@@ -1,10 +1,111 @@
 ---
 title: Migrate from Convex
-description: Move a Convex app to stackbase.
+description: Use stackbase migrate to port a Convex project's imports, then work through its report.
 ---
 
 {/* diataxis: how-to */}
 
-Use stackbase migrate to port a Convex project to stackbase.
+stackbase's function/schema model is deliberately Convex-shaped, so porting a Convex app is mostly
+an import rewrite plus a handful of API differences — not a rewrite. `stackbase migrate` automates
+the mechanical part and gives you a concrete list for the rest.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+Canonical imports in stackbase are `@stackbase/*` (not `convex/*`) — see
+[What is stackbase?](/docs/get-started/what-is-stackbase). Migrating moves your app onto that
+native surface; it does not make stackbase run `convex/*` imports unchanged.
+
+## What stays the same
+
+- **Handler logic is unchanged.** `query`/`mutation`/`action` still come from
+  `./_generated/server`; your function bodies don't need to change.
+- **The schema format is unchanged.** `convex/schema.ts` keeps its shape — `defineSchema`,
+  `defineTable`, and indexes work the same way; only the import moves.
+- **The client hooks are unchanged in shape.** `useQuery`/`useMutation` keep the same signatures,
+  from `@stackbase/client/react` instead of `convex/react`.
+
+## Run the migration
+
+```bash
+stackbase migrate --from convex
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--from <source>` | `convex` | Migration source — only `convex` ships today |
+| `--dir <path>` | `convex` | The app directory to migrate |
+| `--dry-run` | off | Report what would change without writing any files |
+| `--force` | off | Proceed even with uncommitted git changes |
+
+The command refuses to run against a dirty git working tree (commit or stash first, or pass
+`--force`) so a bad migration is always one `git checkout` away from undone. If the directory isn't
+a git repo at all, it warns and proceeds.
+
+It detects a Convex project by the presence of `convex/schema.ts` or a `convex` dependency in
+`package.json`.
+
+## What it does
+
+1. **Rewrites import specifiers**, file by file, across your `convex/` tree:
+
+   | From | To |
+   |---|---|
+   | `"convex/values"` | `"@stackbase/values"` |
+   | `"convex/react"` | `"@stackbase/client/react"` |
+   | `"convex/browser"` | `"@stackbase/client"` |
+   | `"convex/server"` importing only `defineSchema`/`defineTable` | `"@stackbase/values"` |
+   | `"convex/server"` importing only `httpRouter`/`httpAction` | `"./_generated/server"` |
+
+   A `"convex/server"` import mixing other symbols (or importing `cronJobs`) is **not** auto-rewritten
+   — it's flagged as action-needed with a specific fix (see below).
+
+2. **Updates `package.json`** — drops `convex` and any `@convex-dev/*` dependency, adds whichever
+   `@stackbase/*` packages the rewrite introduced.
+
+3. **Scaffolds `stackbase.config.ts`** composing `defineScheduler()`, but only if it detects
+   `crons.ts` or a `cronJobs(...)` call — Convex crons map onto `@stackbase/scheduler`'s cron jobs,
+   which must be explicitly composed (see [Scheduling](/docs/components/scheduling)).
+
+4. **Regenerates `convex/_generated/`** against the rewritten source.
+
+5. **Writes `MIGRATION-REPORT.md`** at the project root, listing every finding by severity.
+
+## The report
+
+Every finding is one of three severities:
+
+- **auto-fixed** — an import specifier rewrite the command already applied; listed for visibility.
+- **action-needed** — a real feature with a stackbase equivalent, but the code must be adapted by
+  hand. The report names the specific fix.
+- **unsupported** — no automatic path; you decide how (or whether) to proceed.
+
+### Action-needed patterns it detects
+
+| Convex pattern | Fix |
+|---|---|
+| `.withIndex(...)` | No `.withIndex` — use `ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"\|"desc").collect()` |
+| `ctx.db.patch(...)` | No `patch` — read the doc, spread-merge, `ctx.db.replace(id, { ...doc, ...changes })` |
+| `.paginate(...)` | `paginate({ cursor, pageSize, maxScan? })` returns `{ page, nextCursor, hasMore, scanCapped }` |
+| `ctx.auth` / `getUserIdentity()` | Identity is a string token via a context provider (e.g. `@stackbase/auth`'s `ctx.auth`), not a JWT-claims object |
+| `crons.ts` / `cronJobs(...)` | Compose `defineScheduler()` in `stackbase.config.ts`; use `cronJobs()` from `@stackbase/scheduler` |
+
+### Unsupported patterns it detects
+
+| Convex pattern | Why |
+|---|---|
+| Convex Auth (`@convex-dev/auth`, `convex/auth`) | Not auto-translated — use [`@stackbase/auth`](/docs/components/auth) or an external JWT provider |
+| Convex Components (`app.use(...)`, `convex.config.ts`) | Convex components don't map 1:1 — recompose the equivalent stackbase component(s) via `stackbase.config.ts` |
+| `.vectorIndex(...)` / `.searchIndex(...)` | Full-text and vector search are not yet shipped in stackbase |
+
+## After migrating
+
+- Fix everything in `MIGRATION-REPORT.md` marked action-needed or unsupported.
+- Run `stackbase dev` and exercise your app.
+- If you're also porting tests: `stackbase migrate` rewrites your app's own imports, but it does not
+  rewrite `convex-test` calls — switch to `@stackbase/test` yourself; see
+  [Testing](/docs/reference/testing).
+
+## See also
+
+- [What is stackbase?](/docs/get-started/what-is-stackbase) — why the canonical surface is
+  `@stackbase/*`, not `convex/*`.
+- [Configuration](/docs/reference/configuration) — the full `v.*` validator catalog.
+- [Testing](/docs/reference/testing) — `@stackbase/test` vs. `convex-test`.

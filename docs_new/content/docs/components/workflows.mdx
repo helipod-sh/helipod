@@ -5,6 +5,108 @@ description: Durable multi-step orchestration.
 
 {/* diataxis: explanation */}
 
-Durable workflows via deterministic replay over a journal, with saga-style compensation.
+`@stackbase/workflow` orchestrates multi-step, long-running processes — "reserve stock, charge the
+card, mark the order fulfilled," possibly spanning sleeps and external signals — durably. A workflow
+run survives a process restart because it isn't held in memory: each step's result is journaled, and
+the whole handler is replayed deterministically from that journal every time it's advanced. It's
+built **on** `@stackbase/scheduler` (`requires: ["scheduler"]`), not a replacement for it — every
+step dispatches through the scheduler's own job queue and inherits its retry/backoff.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Defining and starting a workflow
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineScheduler } from "@stackbase/scheduler";
+import { defineWorkflow, workflow } from "@stackbase/workflow";
+
+const fulfillOrder = workflow.define({
+  handler: async (step, { orderId }: { orderId: string }) => {
+    await step.runMutation("orders:_reserveStock", { orderId });
+    await step.runAction("payments:_charge", { orderId });
+    await step.runMutation("orders:_markFulfilled", { orderId });
+  },
+});
+
+export default defineConfig({
+  components: [defineScheduler(), defineWorkflow({ workflows: { "workflows:fulfillOrder": fulfillOrder } })],
+});
+```
+
+```ts
+export const placeOrder = mutation({
+  handler: async (ctx, { orderId }) => {
+    await ctx.workflow.start("workflows:fulfillOrder", { orderId });
+  },
+});
+```
+
+`ctx.workflow.start(ref, args)` inserts a `workflows` row in the calling mutation's own transaction
+and enqueues the first `workflow:_advance` poll through the scheduler — the same `contextWrite`-backed
+pattern `ctx.scheduler.runAfter` uses. It's also available from an action (`ctx.workflow` there
+delegates to an internal mutation), so a workflow can be started from either.
+
+## The `step` API
+
+A workflow handler receives `step` as its first argument:
+
+- **`step.runMutation(ref, args?, opts?)`** / **`step.runQuery(ref, args?)`** / **`step.runAction(ref, args?, opts?)`** —
+  dispatch one durable step through the scheduler and await its result. `opts?.maxAttempts` caps
+  that step's own retries.
+- **`step.sleep(ms)`** / **`step.sleepUntil(ts)`** — a durable timer: the workflow parks until a
+  scheduled job fires at that time, computed from the current poll's fixed clock, not `Date.now()`.
+- **`step.waitForEvent(name, opts?)`** — parks the workflow with **no scheduler job at all**, until
+  `ctx.workflow.sendEvent(runId, name, payload)` delivers a value. This is the durable-external-signal
+  primitive — waiting on a webhook, a human approval, another system's callback — with nothing
+  polling in the meantime.
+
+Every step call is journaled by `stepNumber`; on replay, a step already in the journal resolves
+instantly from its recorded result (no re-dispatch) — this is what makes the handler safe to
+re-run from the top on every poll. Because of that, **a workflow handler must be deterministic**
+given its journal: the same sequence of step calls with the same arguments, every time. Non-
+deterministic work (a `fetch`, `Math.random()`) belongs inside a step (`runAction`), never inline in
+the handler body — exactly the query/mutation purity rule, applied to workflow replay.
+
+## Checking status
+
+`workflow:status` is a live query:
+
+```ts
+const status = await client.query(anyApi.workflow.status, { runId });
+// { state: "running" | "compensating" | "canceled" | "success" | "failed", result?, error? }
+```
+
+Subscribe to it from the client for a reactive "is my order done yet?" view with no polling.
+
+## Canceling and saga compensation
+
+`ctx.workflow.cancel(runId, opts?)` cancels a running workflow, and **cascades**: canceling a
+pending forward step's own scheduler job (and any in-flight compensation job) the same way
+`ctx.scheduler.cancel` cascades to children.
+
+A step can declare `{ compensate: FnRef }` — an "undo" handler recorded on the journal:
+
+```ts
+await step.runMutation("orders:_reserveStock", { orderId }, { compensate: "orders:_releaseStock" });
+```
+
+If a later step in the same run fails (after exhausting its own retries), or if the workflow is
+canceled while steps have already succeeded, the workflow enters `"compensating"` and walks its
+completed steps **backwards**, running each one's owed `{ compensate }` handler in reverse order —
+compensate-by-default; pass `{ compensate: false }` to `cancel` to skip straight to `"canceled"`
+instead. If a compensation itself exhausts its own retries, the unwind **halts** rather than
+continuing or hanging — the run terminal-fails with the halt reason recorded alongside the original
+error. A step's own `{ maxAttempts }` also caps its compensation's retries.
+
+## What workflows are not
+
+- **Not a general task queue.** For "run this once, later," reach for
+  [`ctx.scheduler`](/docs/components/scheduling) directly — a workflow is for coordinating *multiple*
+  durable steps, with replay and (optionally) compensation.
+- **No sub-workflows, replay-debugging UI, or handler versioning** yet — a workflow's registered
+  handlers are fixed for the deployment's lifetime, same as crons and triggers.
+
+## Related
+
+[Scheduling](/docs/components/scheduling) covers the underlying job dispatch every step rides on.
+[Triggers](/docs/components/triggers) pairs naturally with workflows — react to a data change by
+starting a durable run instead of doing multi-step work inline in the trigger handler.

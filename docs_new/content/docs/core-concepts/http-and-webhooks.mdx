@@ -1,10 +1,87 @@
 ---
 title: HTTP and webhooks
-description: httpAction and the public HTTP router.
+description: Expose a public HTTP endpoint with httpAction and a conventional http.ts router.
 ---
 
 {/* diataxis: how-to */}
 
-Expose HTTP endpoints and receive webhooks with httpAction and a conventional router.
+This page walks through exposing a plain HTTP endpoint — the shape you need for a webhook from a
+third party (Stripe, GitHub, an email provider) that can't speak the sync protocol and just wants to
+`POST` JSON at a URL.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## 1. Write the handler with httpAction
+
+`httpAction` is an [action](/docs/core-concepts/actions) whose input and output are a raw Web
+`Request` and `Response`, instead of typed args and a return value. It has the same non-deterministic
+context as a regular action — `fetch`, the clock, and `ctx.runQuery`/`ctx.runMutation`/`ctx.runAction`
+all work, and there's no `ctx.db`.
+
+```ts title="convex/http.ts"
+import { httpAction, httpRouter } from "./_generated/server";
+
+export const receiveWebhook = httpAction(async (ctx, request) => {
+  const body = (await request.json()) as { author: string; body: string };
+  await ctx.runMutation("messages:send", { author: body.author, body: body.body });
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+});
+```
+
+Because the handler has no `ctx.db`, it does its actual write by calling a mutation with
+`ctx.runMutation` — that mutation is what produces a write-set and fans out to any subscription
+reading the `messages` table (see [Reactivity](/docs/core-concepts/reactivity)).
+
+## 2. Register it in http.ts
+
+A conventional `convex/http.ts` default-exports an `httpRouter()` populated with `route()` calls —
+this is how the engine discovers your endpoints:
+
+```ts title="convex/http.ts"
+const http = httpRouter();
+
+http.route({ path: "/webhooks/messages", method: "POST", handler: receiveWebhook });
+
+export default http;
+```
+
+`route()` takes exactly one of `path` (an exact match) or `pathPrefix` (matches anything starting
+with it), plus a `method`. If both a `path` route and a `pathPrefix` route could match the same
+request, the exact `path` match always wins; among prefix routes, the longest matching prefix wins.
+
+## 3. Reserved paths
+
+`/api/*` and any path whose first segment starts with `_` belong to the engine — the sync
+connection, admin routes, and storage all live there. `route()` rejects a conflicting registration
+at load time (before your `http.ts` can ever shadow a built-in), so a typo like `path: "/api/foo"`
+fails immediately with a clear error instead of silently never firing.
+
+## 4. Call it
+
+The endpoint is just HTTP — no client SDK required:
+
+```bash
+curl -X POST https://your-deployment/webhooks/messages \
+  -H "content-type: application/json" \
+  -d '{"author": "webhook", "body": "hello from the webhook"}'
+```
+
+Any client already subscribed to a query over the `messages` table — a `useQuery(api.messages.list)`
+in a running app, for example — receives the update the moment this request's mutation commits, with
+no polling and no extra wiring on the client side.
+
+## Reading the caller's identity
+
+If the request carries an `Authorization: Bearer <token>` header, that raw token is passed straight
+through to the handler's context as its identity — there's no built-in verification or resolution
+step. If you need to check a webhook's authenticity (an HMAC signature, a shared secret, a provider's
+signing scheme), verify it yourself inside the handler before calling `ctx.runMutation`, the same way
+you would in any other HTTP framework.
+
+## Related
+
+- [Actions](/docs/core-concepts/actions) — the non-deterministic execution model `httpAction` shares.
+- [Mutations](/docs/core-concepts/mutations) — the only way a webhook's data actually gets written.
+- [Reactivity](/docs/core-concepts/reactivity) — why a write from a webhook shows up in a live query
+  with no extra code.

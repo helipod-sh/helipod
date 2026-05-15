@@ -1,10 +1,105 @@
 ---
 title: Postgres
-description: Point stackbase at a Postgres database.
+description: Point stackbase at a Postgres database — a scalable single-node storage backend.
 ---
 
 {/* diataxis: how-to */}
 
-Use the Postgres storage adapter for a scalable single-node deployment.
+SQLite is the zero-config default for `stackbase serve`. Postgres is an **opt-in** alternative
+storage backend for when you want a managed database — durability, backups, replicas managed
+outside the container — instead of a SQLite file on a Docker volume.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Selecting Postgres
+
+Point `serve` (or `dev`) at a Postgres database with `--database-url`, or the
+`STACKBASE_DATABASE_URL` environment variable (the flag wins if both are set):
+
+```bash
+# flag
+stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+
+# or env var
+STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir convex
+```
+
+Leave both unset and `serve` falls back to SQLite exactly as before — switching backends needs no
+code changes, only this flag.
+
+## Docker Compose with a `postgres:16` service
+
+Add a `postgres` service to `docker-compose.yml` and drop the SQLite volume in favor of
+`STACKBASE_DATABASE_URL`:
+
+```yaml title="docker-compose.yml"
+services:
+  stackbase:
+    build:
+      context: .
+      target: runner
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./convex:/app/convex:ro
+    environment:
+      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY}
+      STACKBASE_DATABASE_URL: postgres://stackbase:stackbase@postgres:5432/stackbase
+    command: serve --dir /app/convex
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stackbase
+      POSTGRES_PASSWORD: stackbase
+      POSTGRES_DB: stackbase
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
+```
+
+`docker compose up` now persists to the `postgres-data` named volume instead of `stackbase-data` —
+the rest of [Self-hosting](/docs/deploy/self-hosting) (admin key, dashboard, restart persistence)
+applies unchanged.
+
+## No app-schema migrations
+
+The Postgres adapter is **physically schemaless**: it stores documents in a small, fixed set of
+internal tables (the same MVCC-log shape the SQLite adapter uses), so your app's tables and fields
+are *data*, not DDL. Adding a table, adding a field, or changing `schema.ts` as your app evolves
+needs no `ALTER TABLE` or migration step against Postgres — the physical schema never changes
+shape underneath you.
+
+## Single-writer constraint
+
+Exactly **one** stackbase engine may be connected to a given Postgres database at a time. On boot,
+the engine takes a `pg_advisory_lock`; a second `serve`/`dev` process pointed at the same database
+fails fast with an error instead of silently corrupting state. This is a **single-node durability**
+story — a stronger, externally-managed database for a single writer — not clustering or multi-node
+write scale-out. Running two engines against the same Postgres database for high availability is
+not supported on this path; see [Scaling](/docs/deploy/scaling) for the multi-node story built on
+top of this same adapter.
+
+## Known limitations
+
+- **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
+  connection for its lifetime — the same connection the single-writer lock and transaction pinning
+  depend on. If that connection drops (a network blip, a Postgres restart, a failover), the engine
+  does **not** transparently reconnect; restart the stackbase process to re-establish it.
+- **An unclean process kill can briefly hold the lock.** The single-writer guard is a
+  session-level `pg_advisory_lock`. A graceful shutdown (`SIGTERM`) releases it immediately, but an
+  unclean kill (`SIGKILL`, a crash) may leave an immediate restart briefly failing with "another
+  engine already connected" until Postgres notices the dead session — typically within seconds.
+
+Neither of these is a clustering/HA limitation — they're consequences of the single-node,
+single-writer durability story above, not new constraints on top of it.
+
+## Related
+
+- [Self-hosting with Docker](/docs/deploy/self-hosting) — the baseline `stackbase serve` +
+  `docker compose up` this backend swaps into.
+- [Scaling](/docs/deploy/scaling) — `stackbase serve --fleet`, multiple nodes sharing this same
+  Postgres backend, live failover.

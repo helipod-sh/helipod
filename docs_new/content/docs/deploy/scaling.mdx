@@ -1,10 +1,112 @@
 ---
 title: Scaling
-description: Multi-node write scale-out (fleet).
+description: The tiered model — single-node free, multi-node write scale-out under a commercial entitlement.
 ---
 
 {/* diataxis: explanation */}
 
-Scale writes across nodes with the Tier-2 fleet and sharding.
+stackbase is designed as a set of **tiers**, not a single fixed shape: the same app code — schema,
+queries, mutations, subscriptions, the client SDK — runs unchanged whether it's on a laptop running
+`stackbase dev`, a single `stackbase serve` process, or a multi-node fleet. Scaling out is something
+you opt into at the infrastructure layer, not something that changes how you write functions.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## Tier 0/1: single-node (free, forever)
+
+A single `stackbase serve` process — SQLite or Postgres, Docker or the standalone binary — is
+**one writer**. Every mutation goes through it, fully serializable, with no coordination overhead.
+This is free forever and is the right shape for the overwhelming majority of apps: it's simple,
+it's fast, and "one writer" is not a real bottleneck until you have genuine concurrent write
+volume that a single process can't absorb.
+
+Everything under [Self-hosting](/docs/deploy/self-hosting), [Postgres](/docs/deploy/postgres), and
+[Deploy and build](/docs/deploy/deploy-and-build) lives at this tier.
+
+## Tier 2: multi-node write scale-out (the fleet)
+
+When one process's write throughput genuinely isn't enough, or you need redundancy, stackbase's
+answer is `stackbase serve --fleet`: a small, symmetric fleet of `stackbase serve` processes that
+share one Postgres database. There's no coordinator service and no primary/replica flag — every
+node runs the identical command, and the fleet decides its own roles (one writer, the rest sync
+nodes) using a lease that lives in the database itself.
+
+A few properties define the model, without repeating the full mechanics (see the fleet package's
+own docs for the operational detail):
+
+- **Any node serves any request.** Queries and subscriptions are always answered locally — a sync
+  node tails the shared write log into its own embedded replica and never round-trips to Postgres
+  to answer a read. Mutations are transparently forwarded to whichever node currently holds the
+  write lease.
+- **Live failover.** If the writer dies, another node picks up the lease (typically within a few
+  seconds) and promotes itself — no restart of the other nodes.
+- **Reads survive a database outage; writes don't.** This is read-availability, not full HA — be
+  precise about that distinction when planning around it.
+- **This is a scaling knob, not automatic.** There's no autoscaler and no load balancer bundled —
+  you start/stop nodes and front the fleet with your own proxy.
+
+### Sharding: what actually parallelizes the writes
+
+By itself, a fleet gives you *redundancy* and *read* scale — one node is still the single writer.
+**Sharding** is what lets writes themselves parallelize: annotate a table with `.shardKey(field)`
+and a mutation that writes it with `shardBy`, and that table's writes route across multiple
+independent shards instead of funneling through one bottleneck. Within a shard, mutations stay
+fully serializable — the same guarantee a single writer always gave you, just partitioned N ways.
+
+Two knobs compose:
+
+- **Sharding** partitions a table's writes across shards (a schema/function-level choice, opt-in
+  per table).
+- **Multi-writer fleet distribution** (`STACKBASE_FLEET_MULTI_WRITER=1`) spreads different shards'
+  *ownership* across different fleet nodes, so write throughput scales with node count as well as
+  shard count — instead of every shard's writes still funneling through one node.
+
+An app that never declares `.shardKey`/`shardBy` runs byte-identical to before at every tier — the
+shard machinery exists but is never exercised. `stackbase dev` runs the full shard count locally
+too, so a sharding mistake (a cross-shard write, an immutable shard-key change) is a dev-time
+error, not a production surprise.
+
+## Cloudflare's own scale-out axis
+
+The Durable-Object-native Cloudflare target (see [Cloudflare](/docs/deploy/cloudflare)) has a
+parallel, Cloudflare-native answer to the same problem, rather than reusing the Postgres fleet: a
+paid-tier package that routes `.shardBy(key)` mutations to one Durable Object *per shard key*,
+using Cloudflare's own `namespace.getByName` addressing instead of leases and forwarders. Because
+each Durable Object is independently placed, this is also how Cloudflare deployments scale
+*geographically* — a shard's home DO can be pinned near its own audience, with no shared bottleneck
+between shards. It's the Cloudflare-native sibling of the Postgres fleet, not built on top of it.
+
+## Where the license boundary sits
+
+Everything at Tier 0/1 — single-node self-hosting on SQLite or Postgres, the standalone binary, the
+Durable-Object-native Cloudflare target as a single global DO — is free, unrestricted, and always
+will be: deploy anywhere on your own infrastructure with no key required.
+
+Multi-node write scale-out is where a commercial entitlement applies. Both the Postgres fleet
+(`@stackbase/fleet`) and the Cloudflare multi-shard router
+(`@stackbase/runtime-cloudflare-shard`) are **`ee/`-licensed packages** — source-available under
+stackbase's commercial license, not the same FSL-1.1-Apache-2.0 license as the rest of the repo. In
+the current phase both are free to use in production, with no license-key gate yet; the intent
+(per the project's business model) is that scaling capability, not deployment location, is what a
+future paid key unlocks — you can always deploy anywhere, the key affects whether you can scale up.
+Core stackbase has no hard dependency on either package: `stackbase serve --fleet` and a
+Cloudflare-native multi-shard deploy both dynamically `import()` the ee package, so a deployment
+that doesn't request scale-out never even resolves it.
+
+## When to reach for which tier
+
+- **Start at Tier 0/1.** Most apps never need more than one writer — reach for a fleet or sharding
+  because you've measured a real write-throughput ceiling or need failover, not preemptively.
+- **Reach for the fleet** when you need redundancy or more read capacity, and you're already on (or
+  willing to move to) Postgres.
+- **Reach for sharding** when a specific table's write volume is the actual bottleneck — it's an
+  opt-in, per-table decision, not an all-or-nothing switch for the whole app.
+- **Reach for multi-writer distribution or the Cloudflare shard router** only once sharding alone
+  (parallel writes on one node) isn't enough, or when per-shard geographic placement is itself the
+  goal.
+
+## Related
+
+- [Self-hosting with Docker](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres) —
+  the Tier 0/1 baseline this whole model builds on.
+- [Cloudflare](/docs/deploy/cloudflare) — the Durable-Object-native target and its single-global-DO
+  v1 scope.
+- [Deploy and build](/docs/deploy/deploy-and-build) — shipping code changes at Tier 0/1.

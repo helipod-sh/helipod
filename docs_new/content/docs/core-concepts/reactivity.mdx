@@ -1,10 +1,79 @@
 ---
 title: Reactivity
-description: Subscriptions, read-sets, and invalidation.
+description: How read-sets and write-sets are actually matched — index-range precision, and what exactly triggers a re-run.
 ---
 
 {/* diataxis: explanation */}
 
-How a subscribed query re-runs only when a committed write intersects its recorded read-set — no polling.
+[How it works](/docs/get-started/how-it-works) covers the core idea: a subscribed query re-runs
+only when a committed write intersects its recorded read-set. This page goes one level deeper —
+what a read-set is actually made of, how the engine finds the affected subscriptions without
+scanning every live one, and exactly what determinism buys you.
 
-> **Documentation in progress.** This page is being written. The capability it documents already ships in stackbase today; until it is complete, see the package source and the legacy reference under `docs/enduser/`.
+## A read-set is index-range-precise, not table-level
+
+When a query reads through `ctx.db.query(table, index).eq(field, value)`, the engine doesn't record
+"this query touched the `messages` table." It records the exact **keyspace** (the table and index)
+and the **key range** the scan covered — for `.eq("conversationId", id)`, that's the single narrow
+span of the `by_conversation` index belonging to that one conversation. `.gt`/`.gte`/`.lt`/`.lte`
+narrow it further to a bound rather than a single key; `ctx.db.get(id)` records a range that's a
+single point.
+
+That precision is what [Queries](/docs/core-concepts/queries) means when it says the shape of your
+query determines how it reacts: a narrow read range means only writes landing in that same narrow
+range can ever invalidate it.
+
+## Table-level fallback
+
+Not every read can be expressed as a bounded key range. A query with no index bound at all —
+scanning a whole table, or applying a `.where(...)` filter that the engine can't turn into a range —
+still gets a read-set, but it degrades to **table-level** matching: any write to that table
+invalidates it, the same coarse behavior as if ranges didn't exist. This isn't a special mode you
+opt into; it's simply what happens when a read genuinely can't be bounded to a range. Writing
+queries that scope down to an index range (as in the example above) is what keeps them off this
+fallback path.
+
+## Finding affected subscriptions without scanning all of them
+
+At commit, a mutation's write-set is also a set of key ranges (or tables, for writes that don't
+narrow to a range). The engine doesn't walk every live subscription to check for overlap — read
+ranges are indexed in an **interval index**, bucketed by keyspace, so a write range only ever
+compares against subscriptions on the *same* table-and-index. Within a keyspace, matching is a
+tree lookup, not a linear scan: finding the affected subscriptions costs roughly the number of
+subscriptions actually affected, not the number of subscriptions that exist. A deployment with ten
+thousand live queries and one narrow write pays for that one write, not for the other 9,999
+subscriptions.
+
+Subscriptions on the table-level fallback path (above) are kept in a separate per-table set and are
+still matched directly by table — cheap to check, just coarse in what triggers them.
+
+## What exactly triggers a re-run
+
+Putting the two together, a subscription re-runs when, and only when:
+
+1. Its query recorded a read-set (a set of keyspace/range pairs, or a table-level fallback) at
+   subscribe time.
+2. A mutation committed a write-set (rows inserted, replaced, or deleted, expressed as ranges or
+   tables) — see [Mutations](/docs/core-concepts/mutations).
+3. The interval index finds at least one overlap between the two.
+
+Everything else — every other live subscription with no overlap — is untouched: not re-run, not
+even inspected individually. There's no polling, no periodic sweep, and no per-write cost
+proportional to the number of unrelated subscribers.
+
+## Why determinism is the thing that makes this safe
+
+Re-running a query's handler and trusting the result requires the handler to be a pure function of
+the data it reads: same rows in, same output out, every time. That's why queries and mutations
+can't call `fetch`, read `Date.now()`, or call `Math.random()` — if a query's answer could differ
+between two runs against identical data, "re-run it" would sometimes mean "silently change what the
+client sees" for reasons that have nothing to do with a write actually happening.
+
+This isn't only about pushing correct updates to subscribers. The same determinism requirement is
+what lets a mutation be **replayed** after an optimistic-concurrency conflict and still produce the
+correct result — see [Mutations](/docs/core-concepts/mutations). When a query or mutation genuinely
+needs the current time or a random value, `ctx.now()` and `ctx.random()` are the deterministic
+substitutes: both are fixed for the life of a transaction (and any replay of it), so the same inputs
+always produce the same read-set, write-set, and result. Anything that can't be made deterministic
+this way — a real network call, true randomness — belongs in an [action](/docs/core-concepts/actions),
+which runs outside the transaction and is never part of a subscription.
