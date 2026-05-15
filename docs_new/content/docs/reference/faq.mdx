@@ -7,91 +7,461 @@ description: Honest answers about what stackbase is, what it isn't, and what isn
 
 ## Is stackbase production-ready?
 
-The reactive engine, client SDK, dashboard, and CLI are real and used end-to-end: schema + typed
-query/mutation/action functions, transactional execution, WebSocket reactive subscriptions with
-range-precise invalidation, optimistic updates, a durable offline outbox, `stackbase dev`/`serve`,
-a single-binary compile, and a working `docker compose up` self-host all ship and are exercised by
-tests that run through the real CLI server, not just unit mocks. Several opt-in components
-(authentication, notifications, scheduling/crons, durable workflows with saga/compensation, change
-triggers, an authorization component) are built the same way.
+For a **single node, yes.** The reactive engine, client SDK, dashboard, and CLI are real and used
+end-to-end — schema + typed query/mutation/action functions, transactional execution via a
+`DatabaseAdapter` seam, WebSocket reactive subscriptions with index-range-precise invalidation
+(not table-level), optimistic updates, a durable offline outbox, `stackbase dev`/`serve`, a
+single-binary compile, and a working `docker compose up` self-host all ship and are exercised by
+tests that run through the real CLI server, not just unit mocks. The full opt-in component set —
+authentication, notifications, scheduling/crons, durable workflows with saga/compensation, change
+triggers, an authorization component — is built the same way, proven through the shipped
+entrypoints rather than in-process harnesses alone.
 
-What's genuinely **not** built yet: full-text/vector search, true V8-isolate sandboxing for
-untrusted code (functions run in-process today — the syscall interface is designed to be
-isolate-ready, but the isolation itself isn't wired up), and built-in TLS termination (put a reverse
-proxy like nginx/Caddy/Traefik in front for HTTPS). Multi-node write scale-out (the "fleet"/Tier 2
-mode) exists but is licensed separately from the free self-hosted core — see below.
+**Multi-node scale is newer and lives under a separate license.** `stackbase serve --fleet`
+(Tier 2, Postgres-backed write scale-out with live failover) and the Cloudflare-native multi-shard
+router are `ee/`-licensed packages, not the FSL-1.1-Apache-2.0 core — see
+[Can I self-host for free?](#can-i-self-host-for-free) below. They're functional and benchmarked
+(see [Performance](#how-fast-is-it-measured-numbers) below), but they're the newest part of the
+system and haven't run in production nearly as long as the single-node core. If you're choosing
+stackbase today: single-node self-hosting (SQLite or Postgres) is the safe, well-exercised default
+for the overwhelming majority of apps; reach for the fleet only once you've actually measured a
+write-throughput ceiling or need failover.
 
-This FAQ, and the rest of these docs, only describe what's actually shipped — see
-[What is stackbase?](/docs/get-started/what-is-stackbase) for the full pitch.
+See [What is stackbase?](/docs/get-started/what-is-stackbase) for the full pitch and
+[What's deferred](#whats-deferred--not-shipped) below for what's honestly not built.
 
-## SQLite or Postgres — which should I use?
+## What's deferred / not shipped
 
-Start with **SQLite** — it's the zero-config default for `stackbase dev` and works fine for
-self-hosted single-node production too. Move to **Postgres** when you want a managed/scalable
-database underneath the same engine: pass `--database-url postgres://…` (or set
-`STACKBASE_DATABASE_URL`) to `dev` or `serve` — no code changes, no migration step, since stackbase
-never generates SQL schema migrations for your app tables either way (the storage layer is
-schemaless; your `schema.ts` changes are validated, not migrated). See
-[Postgres](/docs/deploy/postgres).
+Stated plainly — none of these are documented as shipped features anywhere else in these docs:
 
-The engine never imports a database driver directly — storage is pluggable behind a `DatabaseAdapter`
-interface, and adding another backend doesn't touch engine logic.
+- **Full-text and vector search.** Not built. There's no `.searchIndex()`/`.vectorIndex()`, and no
+  builder for either is in progress. `stackbase migrate` flags a Convex app's use of either as
+  **unsupported** in its migration report rather than pretending to translate it — see
+  [Migrate from Convex](/docs/reference/migrate-from-convex#unsupported-patterns-it-detects). If
+  your app needs search today, reach for an external service.
+- **True V8-isolate sandboxing.** User functions run **in-process** today, through an inline
+  executor. The syscall boundary — every `ctx.db` call crossing as a JSON operation name plus a
+  JSON argument into a host-side kernel — is deliberately designed to be **isolate-ready**: the
+  same boundary would work unchanged if the guest side became a real V8 isolate with its own
+  globals. But that swap hasn't happened. Don't run untrusted, multi-tenant code on a shared
+  deployment expecting hard sandboxing; the inline executor trusts the code it runs.
+- **Built-in TLS termination.** stackbase serves plain HTTP. Put a reverse proxy — nginx, Caddy,
+  Traefik — in front for HTTPS. This is true on every deploy path except the Cloudflare Worker
+  paths, where Cloudflare itself terminates TLS at the edge.
+- **A `Bun.SQL` Postgres driver.** The shipped `@stackbase/docstore-postgres` implementation
+  (`NodePgClient`) is built on the [`pg`](https://node-postgres.com/) driver, which runs on both
+  Node and Bun. The interface (`PgClient`: `query`/`transaction`/`acquireWriterLock`/`close`) is
+  deliberately shaped so a `Bun.SQL`-backed client could drop in with zero changes to
+  `PostgresDocStore` — it's a reserved, seam-swappable fast-follow — but it doesn't exist yet.
+- **Per-user/per-role file-read authorization.** Reading a private file is a bearer-token model
+  today: whoever holds a valid `getUrl` link can read it until it expires. The storage serve
+  endpoint has an internal `checkRead(identity, id)` seam reserved for finer-grained rules, but
+  it's intentionally **unwired** — there's no per-`(table, id, identity)` read-permission primitive
+  in the engine to plug into it yet. If you need finer rules, check ownership yourself in the
+  function that hands out the file's id or url.
+- **Sub-workflows, replay-debugging, and handler versioning.** Within `@stackbase/workflow`: a
+  workflow can't start and await another workflow as one of its own steps; there's no built-in UI
+  to step through or visualize a run's journal (query `workflow:status` or browse the
+  `workflows`/`steps`/`events` tables via the dashboard instead); and a workflow's registered
+  handler/step sequence is fixed for the deployment's lifetime — changing it while runs are
+  in-flight against the old sequence throws a journal-mismatch error rather than silently
+  reinterpreting history.
+- **Some Tier-3 tail items.** The object-storage substrate (no database at all — an object store
+  as the write-only durable log, local SQLite as queryable state) has its core shipped and
+  E2E-proven on both filesystem and real MinIO, but multi-shard-node support, a dedicated
+  replica-serve mode, a standalone GC driver with its own fencing, and a reshard tool remain
+  unbuilt tail items on that arc.
+- **Scheduled functions on the Cloudflare Containers path.** Not a feature gap so much as a
+  platform mismatch worth flagging here too: Cloudflare stops a Container ~5 seconds after its
+  last request, so `ctx.scheduler`/crons/triggers/the storage reaper don't fire on that path. The
+  Cloudflare **DO-native** path doesn't have this problem — see
+  [Can I run it on Cloudflare?](#can-i-run-it-on-cloudflare) below.
 
-## How is stackbase different from Convex?
+## SQLite vs Postgres — which should I use?
 
-stackbase is architecturally similar to Convex on purpose — the reactive model (queries record read
-sets, mutations are the only writer, a subscription re-runs only when a committed write set
-intersects its read set) is directly inspired by Convex's public, well-documented design. The
-differences are in what you can *do* with it:
+Both are opt-in, drop-in storage backends behind the same `DatabaseAdapter`/`DocStore` seam — the
+engine never imports either driver directly, and switching between them is a flag, never an
+application-code change.
 
-- **Self-hostable by design.** `docker compose up` brings up the engine, database, and dashboard in
-  one container on your own infrastructure — there's no managed-cloud dependency to run stackbase at
-  all.
+- **SQLite is the zero-config default.** An embedded, MVCC, single-writer store with nothing
+  external to run. It's the right choice for `stackbase dev`, and for self-hosted single-node
+  production too — it's measurably the *faster* single-node store (no network round trip, no
+  fsync-per-commit cost, since it's in-memory/CPU-bound).
+- **Postgres is the opt-in alternative** for when you want a managed, externally-durable database —
+  backups, replicas, monitoring you already run — under the identical engine:
+  `--database-url postgres://…` (or `STACKBASE_DATABASE_URL`), no code changes. It's also the
+  required shared substrate if you're headed toward the multi-node fleet (see
+  [Performance](#how-fast-is-it-measured-numbers) below).
+
+```bash
+# SQLite (default) — nothing to set
+stackbase serve --dir convex
+
+# Postgres — same app, one flag
+stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+```
+
+**Both are single-writer** — this is architectural, not a Postgres-specific limitation. Exactly one
+mutation commits at a time on either backend, because that's precisely what makes conflict
+validation cheap and the commit log's timestamp ordering meaningful. Concurrency adds latency
+(clients queue behind the one writer), not throughput — measured on the same insert workload:
+
+| concurrent clients | SQLite ops/s | SQLite p50 / p99 | Postgres ops/s | Postgres p50 / p99 |
+|---|---:|---:|---:|---:|
+| 1 | 44,516 | 0.019 / 0.042 ms | 4,516 | 0.211 / 0.585 ms |
+| 8 | 46,553 | 0.019 / 0.041 ms | 4,617 | 1.643 / 2.678 ms |
+| 64 | 46,157 | 0.019 / 1.527 ms | 4,472 | 14.018 / 20.209 ms |
+
+Postgres is roughly an order of magnitude slower than SQLite here and fsync-bound — the commit's
+real cost is the disk sync, not the engine. To scale writes past one writer, you **shard** (or add
+fleet nodes at Tier 2 — see below), never add threads against one connection.
+
+**Neither backend needs an app-schema migration, ever.** Both are physically schemaless: your
+`schema.ts` tables/fields/indexes live as *data* inside a small, fixed set of internal tables (an
+append-only MVCC log — `documents`, `indexes`, plus bookkeeping tables) that never change shape as
+your schema evolves. There's no `CREATE TABLE`, no `ALTER TABLE`, no migration file to write or
+run, on either store. See [Postgres](/docs/deploy/postgres) for the full mechanics, including group
+commit (a free +39–58% Postgres throughput win, on by default there and off by default on SQLite
+where it's a net loss with no fsync to amortize).
+
+## How does stackbase compare to Convex?
+
+The reactive model is directly inspired by Convex's public architecture on purpose: a query
+records a read set as precise index ranges, a mutation commits a write set, and a subscription
+re-runs only when a committed write set intersects its read set — one mechanism giving you both OCC
+serializability and realtime, with zero manual cache invalidation. The differences are in what you
+can *do* with it:
+
+- **Self-hostable by design, no managed-cloud dependency.** `docker compose up` brings up the
+  engine, database, and dashboard in one container on your own infrastructure.
 - **Storage is pluggable** (SQLite or Postgres), not fixed to one proprietary database.
-- **A single-binary compile** (`stackbase build`) produces one self-contained executable with the
-  engine, your app, and the dashboard embedded — useful for Electron/Tauri-style distribution.
-- **stackbase has already grown past Convex's shipped feature set** in some areas: durable
+- **A single-binary compile** (`stackbase build`) embeds the engine, your app, and the dashboard in
+  one executable — useful for Electron/Tauri-style distribution.
+- **Native `@stackbase/*` imports are canonical**, not `convex/*` — stackbase is its own product,
+  not a Convex account or drop-in replacement. `stackbase migrate --from convex` is the on-ramp
+  (see [Migrate from Convex](/docs/reference/migrate-from-convex)), not the identity.
+- **stackbase has already grown past Convex's shipped feature set in some areas**: durable
   workflows with saga/compensation, a Postgres storage adapter, and a durable offline mutation
   outbox with client-supplied ids all ship today.
-- **It is not a Convex account/service.** Convex compatibility exists as a **migration on-ramp**
-  (`stackbase migrate` rewrites `convex/*` imports to `@stackbase/*`), not as the product's
-  canonical surface — see [Migrate from Convex](/docs/reference/migrate-from-convex).
 
-stackbase is a clean-room build studied against Convex's open architecture documentation, not a
-fork or a decompilation of Convex's code.
+**Two API divergences worth knowing up front if you're porting code:**
+
+- **There is no `ctx.db.patch(...)`.** Read the document, spread-merge the changes yourself, and
+  call `ctx.db.replace(id, { ...doc, ...changes })`. `stackbase migrate` flags every `.patch(...)`
+  call it finds with this exact fix.
+- **A mutation's client-side promise resolves at commit, not at Convex's later flicker-free gate.**
+  `await send(args)` resolves the moment the server's response arrives — the mutation has
+  committed — not at the point where an optimistic layer is provably superseded by an authoritative
+  push. This is a deliberate departure: gate-time resolution has sharp edges (a transport drop can
+  turn a committed mutation into a rejected promise; a lost gating frame with no follow-on traffic
+  can leave a promise hanging forever) that this protocol doesn't want to inherit. In practice this
+  rarely matters — your optimistic update already renders synchronously the moment you call the
+  mutation — but if you're porting `await`-then-local-cache-read code, know the guarantee here is
+  "committed," not "your optimistic guess has been definitively superseded." See
+  [Optimistic updates](/docs/client/optimistic-updates#the-promise-resolves-at-commit-not-at-the-flicker-free-gate)
+  for the full reasoning and the two documented residuals that fall out of it.
+
+Measured, not just claimed — a same-substrate benchmark (both backends as Docker containers on the
+same host, driven by their own native WebSocket clients through identical measurement code) against
+a matched app:
+
+| metric | stackbase | Convex |
+|---|---:|---:|
+| reactive propagation p50 (50 subscribers) | **8.6 ms** | 13.4 ms |
+| reactive propagation p99 | 13.7 ms | 27.3 ms |
+
+Same order of magnitude, and — in this same-substrate test — competitive-to-ahead of the Rust
+reference it's cloning. See [Performance](#how-fast-is-it-measured-numbers) below for the full
+scorecard and its caveats, and stackbase is a clean-room build studied against Convex's open,
+published architecture documentation — not a fork or a decompilation of Convex's code.
+
+## How does stackbase compare to Firebase/Supabase?
+
+Both are different *kinds* of reactive backend:
+
+- **Firebase's** realtime model is **security-rules-based**: rules gate raw document access
+  directly from the client, and there's no server-side transactional function layer standing
+  between a write and the database it lands in. Your authorization logic lives in a rules DSL, not
+  in ordinary code you can unit test.
+- **Supabase's** is **Postgres plus a ring of roughly a dozen microservices** (PostgREST, Realtime,
+  GoTrue, Storage, Studio, and more) wired around row-level security, with its WAL-tailing realtime
+  server as a single-threaded path.
+- **stackbase's** reactivity comes from **one mechanism, in one process**: deterministic
+  TypeScript functions with recorded read/write sets, intersected at commit time. There's no rules
+  DSL to gate access (authorization is ordinary function code, optionally composed via
+  `@stackbase/authz`'s row policies) and no fleet of services to run — one process is the whole
+  backend.
+
+And on the deploy axis: stackbase deploys anywhere you can run a container, a binary, or a
+Cloudflare Worker — the same portability story that doesn't apply to either Firebase (Google-only)
+or, in practice, Supabase's own hosted product (a dozen-service self-host is heavy compared to a
+single `docker compose up`).
 
 ## Can I self-host for free?
 
-Yes. stackbase is licensed **FSL-1.1-Apache-2.0** (the same license Convex itself uses): free to
-use and self-host, including at scale, on your own infrastructure, forever — the license only
-forbids offering stackbase itself as a competing hosted service, and it converts to plain Apache-2.0
-two years after each release. Single-node self-hosting, deploying anywhere, and owning your own data
-are free — not a trial and not a bait-and-switch.
+Yes. stackbase is licensed **FSL-1.1-Apache-2.0** (the Functional Source License — the same license
+Convex itself uses): free to use, modify, and self-host, including at scale, on your own
+infrastructure — the license forbids exactly one thing, offering stackbase itself as a competing
+hosted service, and each release converts to plain Apache 2.0 two years after it ships.
 
-Multi-node write scale-out (the "fleet" mode, for horizontally scaling *writes* across nodes) lives
-in a separate `ee/` area under a different commercial license, following an "open core" model similar
-to GitLab or n8n: you still deploy it yourself, on your own infrastructure — a paid key unlocks the
-capability, not a managed cloud.
+**Free forever, not a trial, no bait-and-switch:**
+
+- **Single-node self-host** — the full engine (functions, reactivity, workflows + saga, storage,
+  scheduler, actions, `httpAction`, the Postgres adapter, the single-binary build, the dashboard).
+  Production-usable for the large majority of real apps.
+- **Deploy anywhere** — your box, your VPS, your cloud, Docker, an air-gapped server. No
+  phone-home, ever.
+- **Data and code portability** — plain HTTP, open formats, `stackbase migrate` in and
+  `stackbase migrate export`/`import` your data out. You are never trapped.
+
+**What's gated, and when:** multi-node write scale-out — `stackbase serve --fleet`
+(`@stackbase/fleet`, Postgres-backed) and the Cloudflare-native multi-shard router
+(`@stackbase/runtime-cloudflare-shard`) — lives in a separate `ee/` area under a **different**
+commercial license, not FSL, following the GitLab/n8n open-core pattern (`ee/`-folder, not
+SSPL-style viral copyleft). **Right now, in this phase, both are free to use in production with no
+license-key gate at all** — the goal of this phase is adoption, not revenue. The plan (not yet
+executed) is that a *future* paid license key unlocks scale/enterprise capability once there's
+real demand for it — and even then, the key unlocks a **capability**, never a deployment location:
+you always deploy on your own infrastructure either way. No managed cloud, no metered usage, no
+phone-home verification — a signed key checked offline at boot, the same model n8n and GitLab use.
 
 ## Does it do full-text or vector search?
 
-Not yet. This is intentionally **not documented as a feature** elsewhere in these docs, and
-`stackbase migrate` flags a Convex app's `.searchIndex(...)`/`.vectorIndex(...)` usage as
-unsupported rather than pretending to translate it. If your app needs search today, you'll need an
-external service or a custom adapter.
+Not yet — see [What's deferred](#whats-deferred--not-shipped) above. This is intentionally **not
+documented as a feature** anywhere else in these docs, and `stackbase migrate` flags a Convex app's
+`.searchIndex(...)`/`.vectorIndex(...)` usage as unsupported rather than pretending to translate
+it. If your app needs search today, reach for an external service or a custom adapter.
+
+## How fast is it? (measured numbers)
+
+Every number below is hand-transcribed from a runnable benchmark harness under `benchmarks/` — see
+[Benchmarks](/docs/reference/faq#reproducing-these-numbers) for how to reproduce any of them. The
+running theme: **honest measurement** — same conditions on both sides of a comparison, caveats
+stated, and "no" or "here's a problem" reported when that's what a benchmark actually said.
+
+### Reactivity (the signature metric)
+
+Same-substrate (both Docker containers, matched app) against `get-convex/convex-backend`:
+
+| metric | stackbase | Convex |
+|---|---:|---:|
+| reactive propagation p50 (50 subs) | **8.6 ms** | 13.4 ms |
+| reactive propagation p99 | 13.7 ms | 27.3 ms |
+
+The interval-indexed subscription matcher (which decides *which* live subscriptions a write's range
+overlaps, without scanning every one) cut the pathological "one write, one matching subscriber out
+of 10,000" cell from **6.72 ms p50 to 0.24 ms p50** (−96.4%) — the fix that keeps write cost
+independent of how many *other* subscriptions exist on a node.
+
+### Write throughput
+
+| axis | result |
+|---|---|
+| single-node group commit (Postgres) | **+39% at 8 clients, +58% at 64 clients**, neutral at 1 client — a real fsync amortization win, on by default for Postgres |
+| single-node sharding (Postgres, in-process) | **~2.6–2.85× at 8 shards**, sub-linear with a knee around 4 shards (shared WAL) |
+| multi-node fleet (shared Postgres) | **~1.75× at 3 nodes** — real, but sub-linear; the shared Postgres, not the engine, is the ceiling |
+
+### Offline outbox
+
+The durable offline mutation outbox adds effectively no online-path cost:
+
+| axis | result |
+|---|---|
+| online round-trip latency, adapter on vs off | **Δ ≈ 0** (0.121ms vs 0.119ms p50) |
+| concurrent throughput, adapter on | **~13,000 ops/s** |
+| 500-entry reload drain, time-to-empty | **674.6 ms**, longest main-thread block **3.3 ms** |
+
+### Reconnect / resume
+
+Subscription-resume fingerprints (a client echoes its last-known result hash on reconnect; an
+unchanged query answers with a tiny marker instead of resending the full value):
+
+| scenario (50 subscriptions, all unchanged) | bytes | savings |
+|---|---:|---:|
+| fingerprints OFF | 310,882 | — |
+| fingerprints ON | 2,052 | **−99.3%** |
+
+This is a bandwidth win, not a compute win — every subscription still fully re-executes and
+re-hashes on resubscribe. Saving the re-run itself (retained read-sets across a disconnect) is the
+documented v2 seam, not yet built.
+
+### Connections at scale
+
+One sync node holds **10,000 concurrent subscribed connections cleanly** (all connected, zero
+failed sockets) at **7.69 KB/connection** and 0.4% idle CPU. Under hot fan-out (one hot query, all
+10,000 subscribers), push latency grows roughly linearly with subscriber count — **~19 µs of added
+write→observed latency per additional subscriber** — saturating most of one core by N=10,000; this
+is the honest capacity edge of the current single-threaded per-subscriber send path, not a
+defect — see the connections benchmark for the full shape.
+
+### Fleet cross-node behavior
+
+| metric | result |
+|---|---|
+| cross-node push latency (writer commits, a different node's subscriber receives it) | **~15–16 ms p50**, flat across fleet width K=1/2/4 |
+| RSS/connection tax for running in fleet mode at all | none found — same curve as single-node |
+| idle CPU tax for fleet mode | **~2–3 percentage points**, flat regardless of fleet width |
+| failover resume (fingerprint survives landing on a different physical node) | **100%** `QueryUnchanged` at every tested width |
+
+### Docker capacity (the shipped self-host image, cgroup-budgeted)
+
+| node budget | max clean concurrent subscribers | hot-push p50 | CPU used |
+|---|---:|---:|---:|
+| 1 vCPU / 512 MB | 2,000 | 102 ms | 11.9% of budget |
+| 2 vCPU / 1 GB | 2,000 | 104 ms | 5.8% of budget |
+| 4 vCPU / 2 GB | 2,000 | 105 ms | 3.0% of budget |
+
+A 1-vCPU/512MB node — the smallest tier tested, on the exact shipped `Dockerfile` — cleanly holds
+2,000 concurrent subscribers, survives a full kill-all reconnect storm at 100% `QueryUnchanged`
+resume, at under 12% of its CPU budget.
+
+### Cloudflare Durable-Object-native host
+
+| path | measured write latency |
+|---|---:|
+| DO-native (co-located DO-SQLite) | **133 ms** |
+| Containers (R2 CAS round trip) | **~1,500 ms** |
+
+The DO-native host is **~11× faster on writes** than the Containers path, measured against real
+Cloudflare and real R2. See [Can I run it on Cloudflare?](#can-i-run-it-on-cloudflare) below for
+what each path actually is.
+
+### The honest caveats, stated once
+
+Every number above carries machine/substrate caveats in its source report — Docker Desktop on
+macOS taxes absolute latency (both sides of a comparison pay it equally, so ratios are the signal,
+not absolutes); loopback has no WAN jitter; several cells are single-machine co-located rather than
+genuinely distributed hardware. None of the *shapes* (single-writer flatness, sub-linear sharding,
+the O(N)-fixed interval matcher, the bandwidth-only nature of resume) are expected to change on
+different hardware — the absolute milliseconds will.
+
+### Reproducing these numbers
+
+```bash
+bun run bench:reactive --store both      # overhead ladder + reactive fan-out
+bun run bench:writes --store both        # single-node write/commit throughput
+bun run bench:sharded                    # single-node sharding scale-out
+bun run bench:connections                # concurrent-connection capacity
+bun run bench:dockerfleet                # cgroup-budgeted Docker capacity
+```
+
+See `benchmarks/README.md` in the source repo for the full harness list, including the opt-in
+env-gated multi-node/fleet benches that need Postgres or Docker.
 
 ## What runtime does it run on?
 
 **Bun is primary** — `stackbase dev`/`serve`, and the single-binary compile
 (`bun build --compile`) — but **Node is fully supported** for running the engine (npm packages, a
-Node SQLite adapter). The engine itself is runtime-agnostic behind its storage/runtime seams.
+Node SQLite adapter). The engine itself is runtime-agnostic behind its storage/runtime seams;
+neither `stackbase dev` nor `serve` cares which one you're running as long as the seam is
+satisfied.
+
+## Can I run it on Cloudflare?
+
+Yes — via **`@stackbase/runtime-cloudflare`**, in one of two genuinely different architectures.
+Neither is wired into `stackbase deploy`'s automatic push flow; both are a `wrangler deploy` of a
+small entrypoint that imports a stackbase host package.
+
+### Path A: the Durable-Object-native host (the one to reach for)
+
+One Durable Object *is* the whole backend — the OCC writer, DO-SQLite storage
+(`ctx.storage.sql`), every hibernatable WebSocket, the subscription index, and a wake alarm, all in
+the same object. Because the writer and the subscription index are the same in-process object, a
+mutation's reactive fan-out is a plain function call in the same turn, not an RPC hop to reorder
+across — which is what makes the engine's write-serialization and origin-frontier ordering
+guarantees hold *by construction* here.
+
+**Scheduled functions, crons, triggers, and the storage reaper all fire on this path** — a DO alarm
+(`ctx.storage.setAlarm`) wakes the object even from full hibernation and calls
+`runtime.fireDueTimers()`. This is the key differentiator from Path B below.
+
+```
+Client (HTTP / WebSocket)
+        │
+        ▼
+  Worker (stateless router)
+        │  forwards every request/upgrade to one DO by name
+        ▼
+  StackbaseDurableObject
+    ├─ OCC writer (the DO's own single-threaded model IS the mutex)
+    ├─ DoSqliteAdapter over ctx.storage.sql
+    ├─ Hibernatable WebSockets
+    ├─ Subscription index
+    └─ Wake alarm → runtime.fireDueTimers()
+```
+
+Known limits: 10 GB DO-SQLite storage per object, 128 MB memory (billed flat), a soft ~200–500
+writes/s ceiling for a write-heavy single DO, and — in v1 — a single global DO (no built-in
+sharding; that's a separate paid-tier package, `@stackbase/runtime-cloudflare-shard`).
+
+### Path B: Cloudflare Containers (experimental, and has a correctness gap)
+
+Runs the exact same portable `stackbase serve` image you'd run under Docker anywhere else, fronted
+by a stateless Worker, with R2 as the object-store source of truth (container disk is ephemeral,
+so a plain SQLite deployment here would silently lose data on every restart — `--object-store` is
+not optional on this path).
+
+**Scheduled functions, crons, triggers, and the storage reaper do NOT fire on this path.**
+Cloudflare stops a container ~5 seconds after its last request — the same mechanism that gives
+scale-to-zero economics — so a `ctx.scheduler.runAfter(300_000, …)` call schedules work into a
+process that won't exist five seconds later. This is invisible until someone notices their emails
+never sent. Use this path only for a genuinely request-driven app that doesn't depend on any of
+those.
+
+### Measured, both real
+
+| | DO-native | Containers |
+|---|---:|---:|
+| write latency | **133 ms** | **~1,500 ms** |
+
+Both measured against real Cloudflare and real R2 (2026-03-12/16) — DO-native is **~11×** faster on
+writes because it's a co-located DO-SQLite write versus an R2 CAS round trip on every commit.
+
+**When to pick which:** default to DO-native unless you specifically need the portable image's
+storage options (e.g. Postgres) that DO-native doesn't offer, or you're deliberately choosing a
+request-driven, scheduler-free app. See [Cloudflare](/docs/deploy/cloudflare) for the full setup of
+both paths, including `wrangler.jsonc`, the region-pinning hint, and R2-backed file storage.
+
+## Does it lock me in?
+
+No. Two things make that concrete, not just a slogan:
+
+- **The same app code runs everywhere.** Your `schema.ts` and `convex/` functions run unchanged on
+  `stackbase dev`, `stackbase serve` (SQLite or Postgres), a compiled single binary, a multi-node
+  fleet, or either Cloudflare path. Moving up the tiered architecture changes deployment
+  configuration and adapters, never the functions you wrote.
+- **Your data moves too, explicitly.** `stackbase migrate export`/`stackbase migrate import` pulls
+  a full point-in-time dump (every live document, every index row, the table-number map) from a
+  running deployment's admin API and pushes it into a fresh one — the same tool works between any
+  two hosts or topologies, because every stackbase store shares the same logical MVCC-log shape.
+
+```bash
+STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://old-host.example.com --out dump.json
+STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://new-host.example.com --in dump.json
+```
+
+Caveats worth knowing: import targets a fresh deployment (not a merge) and refuses if the target's
+table numbers don't match the dump's; it's single-shard only today (multi-shard migration isn't
+built); and the dump is a point-in-time snapshot, not a live/streaming copy — stop writes on the
+source for a clean cutover. Different physical topologies (e.g. a Postgres fleet vs. a Cloudflare
+DO-native host) genuinely store data differently, so this export/import step is how you move
+between them — data doesn't teleport, but it's never trapped either.
+
+And on the license side: single-node self-hosting, deploying anywhere, and data/code portability
+are free **forever** under FSL — not a trial, not a bait-and-switch. See
+[Can I self-host for free?](#can-i-self-host-for-free) above.
 
 ## What does "component" mean here?
 
 An opt-in, composable piece of server-side functionality — authentication, notifications,
 scheduling/crons, durable workflows, change triggers, authorization — that you add to your project
-by listing it in `stackbase.config.ts` (e.g. `defineAuth()`, `defineScheduler()`). It's not
-installed by any `init` wizard; you compose exactly the components your app needs. See
+by listing it in `stackbase.config.ts` (e.g. `defineAuth()`, `defineScheduler()`). The core engine
+(schema, queries, mutations, reactivity) has no idea what auth or notifications are; a component
+adds its own namespaced tables (so `scheduler/jobs` can never collide with your app's own `jobs`
+table), a `ctx.<name>` facade in your handlers, internal modules, and sometimes a background
+driver. It's not installed by any `init` wizard — you compose exactly the components your app
+needs, and a component can declare a dependency on another (`defineWorkflow()` requires
+`"scheduler"`) resolved automatically at compose time. See
 [Components overview](/docs/components/overview).
 
 ## Where do I go next?
@@ -99,5 +469,8 @@ installed by any `init` wizard; you compose exactly the components your app need
 - New to stackbase: [What is stackbase?](/docs/get-started/what-is-stackbase) →
   [Quickstart](/docs/get-started/quickstart).
 - Coming from Convex: [Migrate from Convex](/docs/reference/migrate-from-convex).
+- Choosing storage: [Postgres](/docs/deploy/postgres).
+- Going past one node: [Scaling](/docs/deploy/scaling).
+- Deploying on Cloudflare: [Cloudflare](/docs/deploy/cloudflare).
 - Looking for exact signatures: [Configuration](/docs/reference/configuration) and
   [CLI](/docs/reference/cli).

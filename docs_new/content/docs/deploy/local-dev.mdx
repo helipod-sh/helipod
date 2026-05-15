@@ -5,8 +5,10 @@ description: stackbase dev's hot-reload server and the built-in dashboard.
 
 {/* diataxis: how-to */}
 
-Run the reactive engine locally with hot reload, and browse your data in the built-in dashboard —
-this is the day-to-day loop for building a stackbase app.
+`stackbase dev` is the day-to-day loop for building a stackbase app: it loads your project,
+generates types, boots the real reactive engine, and serves everything on one port — with hot
+reload on every save. This page is the complete recipe for running it, every flag it takes, and
+everything the built-in dashboard actually does.
 
 ## Start the dev server
 
@@ -16,57 +18,129 @@ From your app's root (where `convex/` lives):
 npx stackbase dev
 ```
 
-This does four things at once:
+One command does five things, in order:
 
-- **Runs codegen** and writes `convex/_generated/` — the typed `api`/`Doc`/`Id` helpers your
-  functions and client import.
-- **Watches `convex/`** and re-runs codegen + hot-reloads your functions on every save.
-- **Starts the reactive engine** against a local SQLite database.
-- **Serves the sync WebSocket, `/api/*` HTTP, your `httpAction` routes, and the dashboard** all on
-  one port.
+1. **Loads your project** — resolves `stackbase.config.ts` (component composition), reads
+   `convex/schema.ts` and every function file under `convex/`.
+2. **Generates `convex/_generated/`** — the typed `api`/`Doc`/`Id` helpers your functions and
+   client import.
+3. **Boots the embedded engine** against a local SQLite database (or Postgres — see
+   [`--database-url`](#flag-reference) below).
+4. **Serves everything on one port**: the sync WebSocket (`/api/sync`), the `/api/*` HTTP surface,
+   your `httpAction` routes, the `/_admin/*` admin API, and the dashboard at `/_dashboard`.
+5. **Starts watching `convex/`** for changes and hot-reloads your functions on every save (see
+   [Hot reload](#hot-reload) below).
 
-It prints the URL to open, including the dashboard's.
+On startup it prints the server URL, the dashboard URL, and the admin key:
 
-## Defaults and flags
+```
+stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+admin key → 7f3a9c2e1b8d4f6a...
+```
 
-| Option | Default | Flag |
+If you passed `--web <dir>`, it also prints a web UI URL (`web UI → http://127.0.0.1:3000/`). If
+the dashboard package hasn't been built, the server still runs but prints a note instead of a
+dashboard URL:
+
+```
+(dashboard SPA not built — run `bun run --filter @stackbase/dashboard build`)
+```
+
+The process then runs until you kill it (`Ctrl-C`) — there's no separate "stop" step.
+
+## Flag reference
+
+| Flag | Default | What it does |
 |---|---|---|
-| Port | `3000` | `--port <n>` |
-| Hostname | `127.0.0.1` (localhost only) | `--ip <addr>` |
-| Function directory | `convex/` | `--dir <path>` |
-| Database | SQLite at `.stackbase/data.db` | `--data <path>` |
+| `--port <n>` | `3000` | HTTP/WebSocket port. |
+| `--ip <addr>` | `127.0.0.1` | Bind address. `127.0.0.1`, `::1`, and `localhost` all count as loopback (see [Admin key](#admin-key) below); anything else exposes the server on your network. |
+| `--dir <path>` | `convex` | Where your schema and functions live. |
+| `--data <path>` | `.stackbase/data.db` | SQLite database file path. Ignored when `--database-url` is set. |
+| `--web <dir>` | unset | Serve a static web UI (e.g. a built frontend) alongside the API. `GET` requests that don't match `/api/*`, `/_admin/*`, or `/_dashboard` fall through to files in this directory. |
+| `--database-url <url>` | unset | A `postgres://` or `postgresql://` connection string. Set → Postgres instead of SQLite; see [Postgres](/docs/deploy/postgres). Also readable from `STACKBASE_DATABASE_URL`; the flag wins. |
+| `--storage-bucket <name>` | unset | Select the S3-compatible file-storage backend (bucket name). Unset → local filesystem storage under `<data dir>/storage`. Also readable from `STACKBASE_STORAGE_BUCKET`. |
+| `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, etc.) — only meaningful alongside `--storage-bucket`. Also readable from `STACKBASE_STORAGE_ENDPOINT`. |
 
-Other flags: `--web <dir>` serves a static web UI alongside the API; `--database-url <url>` points
-at Postgres instead of SQLite (see [Postgres](/docs/deploy/postgres)); `--storage-bucket` /
-`--storage-endpoint` configure S3-compatible file storage.
+A CLI flag always wins over its environment-variable equivalent when both are set.
 
-The dev server isn't reachable from your LAN by default — pass `--ip 0.0.0.0` to expose it.
+File storage is **always on** — there's no opt-in flag for it. Every project gets a `_storage`
+system table and `ctx.storage`; `--storage-bucket`/`--storage-endpoint` only choose which byte
+backend serves it. Setting `STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` without a bucket is a
+misconfiguration `stackbase dev` refuses to boot from (it would otherwise silently write uploads to
+local disk when you meant to configure S3) — set the bucket too, or drop the other settings. See
+[File storage](/docs/data/file-storage) for the full byte-storage story.
+
+The dev server isn't reachable from your LAN by default — pass `--ip 0.0.0.0` to expose it (useful
+for testing from a phone on the same network, for example).
 
 ### Runtime selection
 
-The runtime is auto-detected: Bun if you run the CLI under Bun, Node otherwise. There's no `--bun`
-or `--node` flag — just invoke it with the runtime you want:
+The runtime is auto-detected: Bun if you invoke the CLI under Bun, Node otherwise. There's no
+`--bun`/`--node` flag — run it with the runtime you want:
 
 ```bash
-bun stackbase dev     # Bun (primary runtime)
-node stackbase dev    # Node
+bun stackbase dev     # Bun — primary runtime
+node stackbase dev    # Node — fully supported
 ```
 
-The Node path uses `node:sqlite` and requires **Node.js 22.5+**.
+The Node path uses the built-in `node:sqlite` module and requires **Node.js 22.5 or newer**. If you
+see `Cannot find module 'node:sqlite'`, check your Node version.
+
+## Admin key
+
+Every admin-gated surface — the `/_admin/*` API the dashboard runs on, `/_admin/deploy`, `/_admin/wake`
+— is protected by a single bearer token, the **admin key**.
+
+- If `STACKBASE_ADMIN_KEY` is set in your environment, `stackbase dev` uses it as-is.
+- If it's unset, `stackbase dev` **generates a fresh ephemeral key on every run** and prints it to
+  stdout. Nothing persists it — restart the server and you get a new one.
+- If `STACKBASE_ADMIN_KEY` is set but blank/whitespace, `stackbase dev` treats it as unset (a blank
+  key would authenticate everything) and prints a warning before falling back to an ephemeral key.
+
+**The ephemeral key is only ever embedded in the dashboard's served HTML when the bind is
+loopback** — `--ip 127.0.0.1` (the default), `::1`, or `localhost`. On any other bind (`--ip
+0.0.0.0`, a real network interface), the dashboard is served **without** the key baked in, even if
+the key itself is ephemeral — the SPA prompts you for it instead, and the key you type is kept in
+`sessionStorage`. This is a deliberate guard: an admin key baked into unauthenticated HTML is only
+safe when the only thing that can reach that HTML is the same machine. A persistent
+`STACKBASE_ADMIN_KEY` is *never* embedded in the HTML, loopback or not.
+
+## Hot reload
+
+`stackbase dev` watches `convex/` (recursively) via a filesystem watch, ignoring anything under
+`convex/_generated/` (so codegen's own writes don't re-trigger themselves). On every change, after
+a short debounce, it:
+
+1. Re-loads and re-pushes your project (schema + functions + composed components), catching load
+   errors — a bad `schema.ts` or a syntax error prints `✗ reload failed: <message>` and leaves the
+   previous, working set of functions running rather than crashing the server.
+2. Re-writes `convex/_generated/` with the freshly generated types.
+3. Calls `runtime.setModules(...)` with the new function map. This **replaces the module map
+   wholesale**, so `stackbase dev` re-applies the always-on `_storage:*` built-in functions on every
+   reload (they aren't part of your `convex/` source, so they'd otherwise vanish on the first save).
+4. Calls `server.setRoutes(...)` with the freshly resolved `http.ts` routes, so `httpAction`
+   changes take effect immediately too.
+
+On success it prints `↻ pushed (<n> functions)`. Live subscriptions aren't dropped across a
+reload — a client watching a query stays connected and gets re-run against the new function code
+the next time something invalidates it.
 
 ## Generate types without starting a server
 
 ```bash
 stackbase codegen
+stackbase codegen --dir convex   # if your functions aren't in ./convex
 ```
 
-`stackbase dev` does this automatically on every change. You need the explicit command before
-[`stackbase serve`](/docs/deploy/self-hosting), which never runs codegen itself.
+This regenerates `convex/_generated/` and exits — no server, no watch loop. `stackbase dev` does
+this automatically on every change; you need the explicit command before
+[`stackbase serve`](/docs/deploy/self-hosting), which never runs codegen itself (it fails fast at
+boot if `_generated/` is missing).
 
-## Run a function without the dashboard
+## Call a function without the dashboard
 
-There's no `stackbase run` command. Either use the dashboard's function runner, or hit the HTTP API
-directly:
+There's no `stackbase run` command. Either use the dashboard's [function runner](#function-runner),
+or hit the HTTP API directly:
 
 ```bash
 curl -X POST http://localhost:3000/api/run \
@@ -74,48 +148,91 @@ curl -X POST http://localhost:3000/api/run \
   -d '{"path": "messages:list", "args": {"limit": 5}}'
 ```
 
-The response is `{"value": …, "committed": …, "commitTs": "…"}`.
+The response is `{"value": …, "committed": …, "commitTs": "…"}` — `value` is the function's return
+value (JSON-encoded), `committed` is whether a mutation's write actually landed, and `commitTs` is
+the commit timestamp as a string (timestamps don't fit in a JSON number). An `Authorization: Bearer
+<token>` header, if present, is passed through as the call's identity unchanged — `/api/run` does
+no token verification of its own.
+
+There's also a plain health check, no auth required:
+
+```bash
+curl http://localhost:3000/api/health
+# {"status":"ok","functions":12,"tables":4}
+```
 
 ## The dashboard
 
-Open the URL `stackbase dev` prints — `http://localhost:<port>/_dashboard`. In dev mode the admin
-key is embedded in the served HTML, so it just opens with no login step.
+Open the URL `stackbase dev` prints — `http://localhost:<port>/_dashboard`. In dev mode, on a
+loopback bind, the admin key is embedded in the served HTML, so it opens straight into the app with
+no login prompt (see [Admin key](#admin-key) above for when that's *not* true).
+
+The dashboard has three views, reachable from the left sidebar: a **data browser** per table, a
+**function runner**, and a **logs viewer**.
 
 ### Data browser
 
-A **live** view of every table:
+Select a table from the sidebar to open a **live** view of its documents:
 
-- Select a table to see its documents, paginated.
-- Filter by field value to narrow results.
-- Click a row to expand it and see every field, including `_id` and `_creationTime`.
-- Edit a document's fields directly — this runs a real mutation against your database, exactly
-  like any other write.
-
-Because it's a subscription like any client's, the table updates the instant a mutation commits,
-with no manual refresh — the same mechanism the [Quickstart](/docs/get-started/quickstart) walks
-through.
+- **Live via a real subscription.** The data browser opens a WebSocket admin session and subscribes
+  to `_admin:browseTable` — an ordinary reactive query, the same mechanism any client uses. When a
+  mutation commits a write that overlaps what's on screen, the table updates on its own; there's no
+  manual refresh button and no polling.
+- **Cursor pagination.** Prev/Next walk the table page by page using the same opaque-cursor
+  contract every paginated query uses (see [Pagination](/docs/core-concepts/queries#pagination)) —
+  pages stay contiguous even while the table is being written to concurrently.
+- **Structured filters.** Add one or more `field / operator / value` conditions (`eq`, `ne`, `lt`,
+  `lte`, `gt`, `gte`) and apply them to narrow the page — the filter re-issues the subscription with
+  the new conditions rather than filtering client-side.
+- **A `scanCapped` banner.** The underlying query caps its scan at 1,000 examined index entries per
+  page. If a heavily-filtered query hits that cap before filling the page, the browser shows *"Scan
+  limit reached — narrow the filter to see all results"* instead of silently returning a partial,
+  possibly-misleading page.
+- **Row actions.** Click **Edit** to open a document's non-system fields in a JSON editor and save —
+  this issues a real `PATCH` through the admin HTTP API (`/_admin/tables/<table>/docs/<id>`), i.e.
+  an actual mutation against your database, not a preview. **+ New** creates a document the same
+  way (`POST`), and **Del** removes one (`DELETE`). None of the three call `invalidateQueries` —
+  the live subscription is what reflects the write, exactly like any other client watching that
+  data would see it happen.
+- **The table list itself** (the sidebar) loads once over plain HTTP (`GET /_admin/tables`) and only
+  refreshes when you click its refresh icon — it is *not* a live subscription, so a table created or
+  dropped by a schema change won't appear until you refresh it manually. Document counts and per-table
+  contents inside a selected table, by contrast, are fully live.
 
 ### Function runner
 
-Call any query, mutation, or action with a JSON argument editor and see its result — the same
-`/api/run` path the `curl` example above hits, with a UI around it.
+Pick any query, mutation, or action from a dropdown (populated from `GET /_admin/functions`), edit
+its arguments as JSON, and click **Run**. The result — or a thrown error's message — is shown as
+formatted JSON below. This calls the same `/_admin/run` admin endpoint under the hood as the
+`/api/run` HTTP call described [above](#call-a-function-without-the-dashboard), just with a UI
+around it and no `Authorization` header needed (the admin key is already attached to every admin
+call).
 
-### Logs and schema
+### Logs
 
-The dashboard also has a logs viewer for function invocations, and a schema viewer showing your
-tables, fields, and indexes as declared in `convex/schema.ts`.
+A table of recent function executions — path, kind (`query`/`mutation`/`action`), status, and
+duration in milliseconds — refreshed every 2 seconds via `GET /_admin/logs`. A failed invocation
+shows its error message inline next to the `error` status badge. This is a polling view, not a
+subscription; it's meant for quick "did my last write actually run" debugging, not a durable log
+store.
 
 ### Security note
 
-The dashboard has **no authentication in dev mode** and grants unrestricted read/write access to
-your whole database — that's fine for local development, but never expose it to production
-unprotected. [`stackbase serve`](/docs/deploy/self-hosting) serves the dashboard key-less by
-default (no embedded key — it prompts you for one), which is the production-safe version of the
-same UI.
+The dashboard has **no authentication of its own beyond the admin key**, and the admin key grants
+unrestricted read/write access to your whole database plus the ability to run any function. That's
+the right tradeoff for local development — it's why `stackbase dev` hands you the key with zero
+friction on a loopback bind — but never expose an unprotected admin key over the network.
+[`stackbase serve`](/docs/deploy/self-hosting) serves the same dashboard build in production, but
+key-less by default (no key embedded in the HTML at all — it prompts you), and requires you to set
+a real `STACKBASE_ADMIN_KEY` before it will even start.
 
 ## Related
 
 - [Quickstart](/docs/get-started/quickstart) — install stackbase and see the whole loop end to end.
 - [Self-hosting with Docker](/docs/deploy/self-hosting) — `stackbase serve`, the production
-  counterpart of `stackbase dev` (no codegen, required admin key, binds `0.0.0.0`).
-- [CLI reference](/docs/reference/cli) — the full command list.
+  counterpart of `stackbase dev` (no codegen, required admin key, binds `0.0.0.0`, dashboard served
+  key-less).
+- [Deploying without a restart](/docs/deploy/deploying) — `stackbase deploy`, for pushing a schema
+  and function change to an already-running `serve` without hot-reload's dev-only watch loop.
+- [Queries](/docs/core-concepts/queries) — the `.paginate()`/`scanCapped` contract the data browser
+  itself relies on.

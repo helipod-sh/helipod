@@ -1,122 +1,438 @@
 ---
 title: Configuration
-description: The full v.* validator catalog, stackbase.config.ts, and the environment variables the engine reads.
+description: The full v.* validator catalog, stackbase.config.ts, crons.ts, http.ts, and every environment variable the engine reads.
 ---
 
 {/* diataxis: reference */}
 
+Terse, exhaustive lookup for every configuration surface in stackbase: the `v.*` validator
+catalog, the schema builder, `stackbase.config.ts`, `crons.ts`, `http.ts`, and every
+`STACKBASE_*` environment variable the CLI reads. For the *why* behind any of this, see
+[Schema & tables](/docs/core-concepts/schema-and-tables), [Queries](/docs/core-concepts/queries),
+and [Components overview](/docs/components/overview).
+
 ## Validators (`v`)
 
-From `@stackbase/values`. Every field in `defineTable` and every entry in a function's `args` is one
-of these. `Infer<typeof validator>` gives you the matching TypeScript type.
+From `@stackbase/values`. Every field in `defineTable`, every entry in a function's `args`/`returns`,
+and `stackbase.config.ts`-composed components' own config all build on these. `Infer<typeof validator>`
+gives you the matching TypeScript type; every validator also serializes to JSON (`.toJSON()`) — this
+is what the engine stores as a table's live schema and what `stackbase deploy`'s schema diff compares.
 
 | Validator | TypeScript type | Notes |
 |---|---|---|
-| `v.string()` | `string` | |
-| `v.number()` | `number` | 64-bit float. Alias: `v.float64()` |
-| `v.float64()` | `number` | Alias of `v.number()` |
-| `v.int64()` | `bigint` | Alias: `v.bigint()` |
-| `v.bigint()` | `bigint` | Alias of `v.int64()` |
+| `v.id(table)` | `Id<"table">` | A typed reference to another table's document (or the same table). At runtime, checks only that the value is a string — not that it resolves to a real row. |
+| `v.null()` | `null` | Exact `null`. |
 | `v.boolean()` | `boolean` | |
-| `v.null()` | `null` | |
-| `v.bytes()` | `ArrayBuffer` | |
-| `v.any()` | `any` | Skips validation entirely — an escape hatch, not a default |
-| `v.id("table")` | `Id<"table">` | A typed reference to another (or the same) table's document |
-| `v.literal(value)` | the literal type | Exact string/number/bigint/boolean match |
-| `v.array(element)` | `Array<Infer<element>>` | Homogeneous array of another validator |
-| `v.object({ ...fields })` | `{ ...fields }` | Nested object; extra fields are rejected, missing required fields are rejected |
-| `v.record(keys, values)` | `Record<string, Infer<values>>` | An object with an arbitrary key set — `keys` validates each key, `values` each value |
-| `v.union(...members)` | union of member types | Matches if *any* member validates |
-| `v.optional(validator)` | `Infer<validator> \| undefined` | Marks a field as absent-allowed; wraps any other validator |
+| `v.number()` | `number` | 64-bit float. |
+| `v.float64()` | `number` | Alias of `v.number()` — same class, same runtime check. |
+| `v.int64()` | `bigint` | Requires a JS `bigint`, not a `number`. |
+| `v.bigint()` | `bigint` | Alias of `v.int64()`. |
+| `v.string()` | `string` | |
+| `v.bytes()` | `ArrayBuffer` | Checks `instanceof ArrayBuffer`. |
+| `v.any()` | `any` | Skips validation entirely for that field — an escape hatch, not a default. |
+| `v.literal(x)` | the literal's own type | Exact match on one specific `string`/`number`/`bigint`/`boolean` value. |
+| `v.array(el)` | `Array<Infer<el>>` | Every element checked against `el`; failures report a `tags[i]`-style indexed path. |
+| `v.object({ ...fields })` | `{ ...fields }` | **Closed** shape: a missing non-optional field or an extra field not in `fields` both fail. Recurses. |
+| `v.record(keys, values)` | `Record<string, Infer<values>>` | An arbitrary, unbounded key set — every key checked against `keys`, every value against `values`. No fixed field list. |
+| `v.union(...members)` | union of the members' types | Valid if it matches **any** member, tried in declaration order. |
+| `v.optional(inner)` | `Infer<inner> \| undefined` | Wraps any other validator; makes a field allowed-to-be-absent. Only meaningful as an object-field value (not a general nullable wrapper — use `v.union(v.string(), v.null())` for "value itself may be null"). |
 
-Every write is checked against its table's document validator at commit time — a document that's
-wrong-typed, missing a required field, or carries an extra field is rejected with a
-`DocumentValidationError`. Turn this off for a whole schema with
-`defineSchema(tables, { schemaValidation: false })`, or loosen a single field with `v.any()`. See
-[Schema & tables](/docs/core-concepts/schema-and-tables).
+```ts title="convex/schema.ts"
+import { v } from "@stackbase/values";
 
-### Schema builder (`defineTable`)
+v.object({
+  status: v.union(v.literal("open"), v.literal("closed")),
+  assigneeId: v.optional(v.id("users")),
+  tags: v.array(v.string()),
+  translations: v.record(v.string(), v.string()),
+  raw: v.any(),
+});
+```
 
-| Method | Purpose |
-|---|---|
-| `defineTable(fields)` | Declare a table's document shape from a `PropertyValidators` map |
-| `.index(name, [fields])` | A named index over one or more fields, queryable via `ctx.db.query(table, name)` |
-| `.shardKey(field)` | Marks a field as the table's shard key for multi-node write scaling (metadata only on a single-node deployment) — see [Scaling (fleet)](/docs/deploy/scaling) |
+Every write (`ctx.db.insert`/`replace`/the patch path) is checked against its table's document
+validator at commit time inside the transaction — a wrong-typed, missing-required-field, or
+extra-field document is rejected with a `DocumentValidationError` before anything lands, and the
+mutation throws (nothing partial commits). Turn this off for a whole schema with
+`defineSchema(tables, { schemaValidation: false })` (every table becomes unchecked — there's no
+per-table override); loosen a single field with `v.any()` instead if you only need one escape hatch.
+See [Schema & tables](/docs/core-concepts/schema-and-tables#document-validation-at-write-time) for
+the full error-message shape and the "same validator, rehydrated from JSON" guarantee this rests on.
 
-Every table also implicitly gets a built-in `by_creation` index. `defineSchema(tables, options?)`
-combines a map of `defineTable(...)` calls into one schema; `options.schemaValidation` defaults to
-`true`.
+## Schema builder
+
+```ts title="convex/schema.ts"
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+export default defineSchema({
+  conversations: defineTable({
+    title: v.string(),
+  }),
+  messages: defineTable({
+    conversationId: v.id("conversations"),
+    author: v.string(),
+    body: v.string(),
+  })
+    .index("by_conversation", ["conversationId"])
+    .shardKey("conversationId"),
+});
+```
+
+| Symbol | Signature | Notes |
+|---|---|---|
+| `defineTable(fields)` | `(fields: PropertyValidators) => TableDefinition` | `fields` is a plain object of field name → validator. Builds the table's document validator as `v.object(fields)` under the hood. |
+| `.index(name, [fields])` | `(name: string, fields: string[]) => TableDefinition` | A named index over one or more fields, in order — queryable via `ctx.db.query(table, name)`. Chainable; a table may declare many. |
+| `.shardKey(field)` | `(field: string) => TableDefinition` | Marks `field` as the table's shard key for multi-node write scaling. At Tier 0/1 (default single-process `dev`/`serve`) this is metadata only — one shard, `"default"`. See [Scaling](/docs/deploy/scaling). A `.shardKey`'d table cannot accept client-supplied `_id`s. |
+| `defineSchema(tables, options?)` | `(tables: Record<string, TableDefinition>, options?: { schemaValidation?: boolean }) => SchemaDefinition` | Combines the table map into one schema. `options.schemaValidation` defaults to `true`. |
+
+Every table — even one with no `.index(...)` calls — also implicitly gets a built-in `by_creation`
+index (creation order), so `ctx.db.query(table, "by_creation").collect()` always works with zero
+schema declaration.
+
+### System fields
+
+Every document, on every table, automatically carries two fields you never set yourself:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `_id` | `Id<"table">` | A globally unique, table-branded id. A compile-time phantom type — `Id<"messages">` and `Id<"users">` are different TypeScript types though both are plain strings at runtime. |
+| `_creationTime` | `number` | Insert time, taken from the mutation's own transaction snapshot (`ctx.now()`), never wall-clock — deterministic like everything else in a mutation. |
+
+Every index key also implicitly ends in `_creationTime` then `_id`, which is what keeps index keys
+unique and pagination cursors stable even under duplicate field values.
+
+### System tables
+
+`_storage` is the one built-in **app-namespace** system table — every project gets it automatically
+(file storage's metadata table), whether or not the app uses `ctx.storage`. Its document shape:
+
+```ts
+{
+  status: v.union(v.literal("pending"), v.literal("ready")),
+  key: v.string(),
+  size: v.union(v.number(), v.null()),
+  contentType: v.union(v.string(), v.null()),
+  sha256: v.union(v.string(), v.null()),
+  visibility: v.union(v.literal("private"), v.literal("public")),
+  expiresAt: v.union(v.number(), v.null()),
+}
+```
+
+`Id<"_storage">`/`v.id("_storage")` type-check in your own `schema.ts` exactly like a reference to
+any table you defined — codegen merges system tables into `DataModel` ahead of your own tables. See
+[File storage](/docs/core-concepts/file-storage) for the `ctx.storage` API this table backs.
+
+Component-composed tables (e.g. `scheduler`'s `jobs`/`crons`, `auth`'s `users`/`sessions`) are
+**namespaced** (`component/table`, not the app root) and are not part of your own `schema.ts` at
+all — see each component's own reference page under [Components](/docs/components/overview).
 
 ## `stackbase.config.ts`
 
-An optional file, alongside `convex/` (i.e. a sibling of the `convex` directory, not inside it),
-that composes opt-in components into your project. Absent entirely → no components, same as an
-empty `{ components: [] }`.
+An optional file, alongside `convex/` (a sibling of the `convex` directory, not inside it), that
+composes opt-in components into your project. Absent entirely → no components, byte-identical to
+an explicit `{ components: [] }`. `stackbase dev`, `serve`, `build`, and `deploy` all read the same
+file (`stackbase.config.ts` or `.js`) from the project root.
 
 ```ts title="stackbase.config.ts"
 import { defineConfig } from "@stackbase/component";
 import { defineScheduler } from "@stackbase/scheduler";
+import { defineWorkflow } from "@stackbase/workflow";
 import { defineAuth } from "@stackbase/auth";
+import { defineAuthz } from "@stackbase/authz";
+import { defineTriggers } from "@stackbase/triggers";
+import { defineNotifications, resendEmail } from "@stackbase/notifications";
+import crons from "./convex/crons";
+import { policies } from "./convex/policies";
 
 export default defineConfig({
-  components: [defineScheduler(), defineAuth()],
+  components: [
+    defineScheduler({ crons }),
+    defineWorkflow({ workflows: {} }),
+    defineAuth(),
+    defineAuthz({ policies }), // requires: ["auth"] — auth must also be composed
+    defineTriggers({ messages: { handler: "logChange" } }),
+    defineNotifications({
+      channels: {
+        email: { provider: resendEmail({ apiKey: process.env.RESEND_API_KEY! }), from: "noreply@example.com" },
+      },
+    }),
+  ],
 });
 ```
 
-`defineConfig(config)` is an identity function (`{ components: ComponentDefinition[] }`) — its only
-job is to give the file a typed default export. Each entry is a component's `define*()` call (e.g.
-`defineScheduler()`, `defineAuth()`, `defineWorkflow()`, `defineTriggers({...})`) — see
-[Components](/docs/components/overview) for the available components and their own configuration
-options.
+`StackbaseConfig` is exactly one field:
 
-`stackbase dev`, `serve`, `build`, and `deploy` all read this same file (`stackbase.config.ts` or
-`.js`) from the project root (the directory containing `convex/`).
+```ts
+export interface StackbaseConfig {
+  components: ComponentDefinition[];
+}
+
+export function defineConfig(config: StackbaseConfig): StackbaseConfig; // identity — just gives the file a typed default export
+```
+
+Each entry is a component's own `define*()` call — `defineScheduler()`, `defineWorkflow()`,
+`defineAuth()`, `defineAuthz()`, `defineTriggers()`, `defineNotifications()` — every one of them
+returns a plain `ComponentDefinition`, so nothing besides `components: [...]` belongs in this file.
+See each component's own page under [Components](/docs/components/overview) for its `define*()`
+options (`defineAuth(options?)`, `defineAuthz(config)`, `defineWorkflow(opts)`,
+`defineTriggers(opts)`, `defineNotifications(opts)`, `defineScheduler(opts?)`).
+
+**Composition rules:**
+
+- **Declaration order doesn't have to be dependency order.** A component declares its dependencies
+  via `requires: string[]` (e.g. `defineAuthz` is built with `requires: ["auth"]`), and
+  `composeComponents` runs a stable topological sort over the whole list before booting — every
+  component ends up after everything it `requires`, regardless of array order. Omitting a required
+  component (composing `defineAuthz()` without `defineAuth()`) fails fast at compose time:
+  `component "authz" requires "auth", which is not enabled`. A `requires` cycle is also rejected.
+- **The composed set is fixed at boot.** Which components are active — and their table numbers —
+  is decided once, at `stackbase dev`/`serve`/`build` startup. Adding or removing a component from
+  `stackbase.config.ts` needs a restart; it is not something `stackbase deploy`'s live hot-swap can
+  do (deploy only hot-swaps *functions and additive schema* against the already-booted component
+  set — see [Deploy and build](/docs/deploy/deploy-and-build)).
+- **Each component's config is a plain value passed to its own `define*()`**, not a Stackbase-owned
+  field — provider API keys, OAuth client credentials, and similar secrets are read from
+  `process.env` by *your* `stackbase.config.ts`, not by the engine. See
+  [Component config from environment variables](#component-config-from-environment-variables) below.
+
+## `crons.ts`
+
+A conventional file an app writes to declare recurring/scheduled work, composed into the project
+via `defineScheduler({ crons })` (above) — `cronJobs()` itself and its registry come from
+`@stackbase/scheduler`, re-exported through codegen's `_generated/server` so the file needs only
+one import:
+
+```ts title="convex/crons.ts"
+import { cronJobs } from "./_generated/server";
+import { internal } from "./_generated/api";
+
+const crons = cronJobs();
+
+crons.interval("cleanup", { minutes: 5 }, internal.maintenance.purge, {});
+crons.cron("nightly", "0 3 * * *", internal.reports.build, {}, { tz: "America/New_York" });
+crons.daily("digest", { hourUTC: 8, minuteUTC: 0 }, internal.email.digest, {});
+crons.hourly("rollup", { minuteUTC: 15 }, internal.stats.rollup, {});
+crons.weekly("report", { dayOfWeek: "monday", hourUTC: 9, minuteUTC: 0 }, internal.reports.weekly, {});
+crons.monthly("invoice", { day: 1, hourUTC: 0, minuteUTC: 0 }, internal.billing.invoice, {});
+
+export default crons;
+```
+
+Then, in `stackbase.config.ts`: `import crons from "./convex/crons"; defineScheduler({ crons })`.
+
+| Method | Signature | Cadence expressed as |
+|---|---|---|
+| `.interval(name, period, fnRef, args, opts?)` | `period: { seconds?, minutes?, hours? }` | A fixed period, summed across whichever fields are given (e.g. `{ hours: 1, minutes: 30 }`). Must resolve to a positive duration. |
+| `.cron(name, expr, fnRef, args, opts?)` | `expr: string` | A standard 5-field cron expression, parsed via `cron-parser`; `opts.tz` is an IANA timezone (default `"UTC"`). |
+| `.daily(name, at, fnRef, args, opts?)` | `at: { hourUTC, minuteUTC }` | Once a day at a fixed UTC time. |
+| `.hourly(name, at, fnRef, args, opts?)` | `at: { minuteUTC }` | Once an hour at a fixed minute. |
+| `.weekly(name, at, fnRef, args, opts?)` | `at: { dayOfWeek, hourUTC, minuteUTC }` | Once a week; `dayOfWeek` is `"sunday"`–`"saturday"`. |
+| `.monthly(name, at, fnRef, args, opts?)` | `at: { day, hourUTC, minuteUTC }` | Once a month on a fixed day-of-month, UTC. |
+
+Every method's `fnRef` is an `internal.*`/`api.*` function reference and `args` is that function's
+JSON args object — the same shape `ctx.scheduler.runAfter`/`runAt` take. `name` must be unique
+across the whole registry (registering the same name twice throws at load time).
+
+`CronOpts` (`.interval`/`.cron` only) — `{ tz?: string; catchUp?: "skip" | "fireOnce" | "fireAll" }`.
+`.daily`/`.hourly`/`.weekly`/`.monthly` only accept `{ catchUp? }` (no `tz` — their fields are
+already UTC-named, so a timezone override would be ambiguous about which field it applies to).
+`catchUp` governs what happens to fires missed while the process was down: `"skip"` (default) drops
+them, `"fireOnce"` runs the single most recent missed occurrence, `"fireAll"` replays every missed
+occurrence in order. Editing a cron's cadence, target function, or args in `stackbase.config.ts` and
+redeploying re-anchors its schedule from the moment of the change; editing only `catchUp` does not
+disturb the running cadence. Removing an entry from `crons.ts` cancels its pending cadence job on
+the next boot/reconcile and drops its row — already-enqueued work jobs it spawned are left alone.
+
+## `http.ts`
+
+A conventional file default-exporting an `httpRouter()` of routes, each backed by an `httpAction`:
+
+```ts title="convex/http.ts"
+import { httpRouter } from "./_generated/server";
+import { httpAction } from "./_generated/server";
+import { internal } from "./_generated/api";
+
+const http = httpRouter();
+
+http.route({
+  path: "/webhooks/stripe",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const event = await request.json();
+    await ctx.runMutation(internal.billing.recordEvent, { event });
+    return new Response(null, { status: 200 });
+  }),
+});
+
+http.route({
+  pathPrefix: "/files/",
+  method: "GET",
+  handler: httpAction(async (ctx, request) => { /* ... */ return new Response("ok"); }),
+});
+
+export default http;
+```
+
+| Symbol | Signature | Notes |
+|---|---|---|
+| `httpRouter()` | `() => HttpRouter` | Builds an empty route table. |
+| `.route(spec)` | `(spec: { method: string; path?: string; pathPrefix?: string; handler: RegisteredFunction }) => void` | Exactly one of `path` or `pathPrefix` is required — passing both, or neither, throws at registration time. |
+
+**Matching:** method must always match; an exact `path` match wins over any `pathPrefix`; among
+`pathPrefix` matches, the longest wins. `/api/*` and any path whose first segment starts with `_`
+(`/_*`) are **reserved for the engine** — `route()` throws immediately if you try to register one,
+before a malformed `http.ts` can ever shadow a built-in endpoint (the storage-serving routes,
+`/_admin/deploy`, etc.).
+
+An `httpAction` handler has the same non-deterministic-context rules as a plain `action` —
+`ctx.runQuery`/`ctx.runMutation`/`ctx.runAction`, native `fetch`/`Date`/timers, no `ctx.db` — except
+its I/O is a raw `Request` in, `Response` out, instead of JSON args in, a JSON value out. See
+[Actions](/docs/core-concepts/actions) for the shared execution model. There is no automatic CORS,
+no named path params (`:id`-style segments), and no per-route middleware — these are non-goals, not
+deferred.
 
 ## Environment variables
 
-### Core (every deployment)
+Every variable below is `STACKBASE_`-prefixed and read by the CLI (`stackbase dev`/`serve`/`deploy`).
+A CLI flag, where one exists, always wins over its environment-variable equivalent.
+
+### Core
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `STACKBASE_ADMIN_KEY` | `serve`, `dev`, `deploy` | Bearer token for the dashboard and admin/deploy endpoints. **Required** for `serve` (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
-| `PORT` | `serve` | HTTP/WebSocket port (default `3000`) — `dev` uses `--port` instead, no env fallback |
-| `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve` | Postgres connection string — unset selects SQLite. Flags (`--database-url`) win over this. See [Postgres](/docs/deploy/postgres) |
-| `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
-| `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
-| `STACKBASE_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
-| `STACKBASE_DEPLOY_URL` | `deploy` | Default target URL for `stackbase deploy` (overridden by `--url`) |
+| `STACKBASE_ADMIN_KEY` | `serve`, `dev` (optional) | Bearer token for the dashboard and every admin/deploy endpoint. **Required for `serve`** — it fails fast (exit 1) if unset or blank. `dev` generates an ephemeral one per run if unset (printed to stdout on startup), or warns and does the same if the variable is set but blank. |
+| `PORT` | `serve` | HTTP/WebSocket port, default `3000`. (Not `STACKBASE_`-prefixed — a bare `PORT` is the conventional PaaS variable.) `dev` takes `--port` instead, with no env fallback. |
+| `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file, written to `<dir>/db.sqlite`. `dev` takes `--data <path>` instead (default `.stackbase/data.db`), with no env fallback. |
+| `STACKBASE_DATABASE_URL` | `dev`, `serve`, `deploy`(fleet) | A Postgres connection string. Unset → SQLite. `--database-url` wins over this. See [Postgres](/docs/deploy/postgres). |
+| `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`). Any other value (including unset) leaves it on. |
+| `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy`, `stackbase deploy`'s hot-swap target (equivalent to `--allow-deploy`). Off by default. |
+| `STACKBASE_WEB_DIR` | `serve` | A static web UI directory to serve at the site root, alongside the sync WebSocket and API — so a same-origin client SPA needs no separate backend-URL config. Equivalent to `--web`. |
+| `STACKBASE_DEPLOY_URL` | `deploy` | Default target URL for `stackbase deploy` when `--url` is omitted. |
 
 ### File storage
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_STORAGE_BUCKET` | Selects the S3-compatible backend (any bucket name set → S3 instead of the filesystem default) |
-| `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, …) |
-| `STACKBASE_STORAGE_REGION` | S3 region |
-| `STACKBASE_STORAGE_PUBLIC_URL` | Public base URL for `"public"`-visibility files |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend |
+| `STACKBASE_STORAGE_BUCKET` | Selects the S3-compatible backend — **any** bucket name set here switches from the filesystem default to S3. Unset → files live on disk under `<data dir>/storage`, zero configuration. |
+| `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, Cloudflare R2, etc.). Only meaningful with `STACKBASE_STORAGE_BUCKET` set — `serve`/`dev` fail fast if endpoint/region/public-url are set without a bucket, rather than silently starting on the filesystem backend. |
+| `STACKBASE_STORAGE_REGION` | S3 region. |
+| `STACKBASE_STORAGE_PUBLIC_URL` | Public base URL used for `"public"`-visibility files' `getUrl()` (a CDN/bucket public endpoint) instead of the private capability-token URL. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend. Deliberately **not** treated as "S3 intent" on their own — they're commonly present in an environment for unrelated reasons, so only `STACKBASE_STORAGE_BUCKET` selects the backend. |
 
-Unset `STACKBASE_STORAGE_BUCKET` → files are stored on the local filesystem under
-`<data dir>/storage`, zero configuration required. See [File storage](/docs/core-concepts/file-storage).
+`--storage-bucket`/`--storage-endpoint` flags (both `dev` and `serve`) win over their env
+equivalents. See [File storage](/docs/core-concepts/file-storage).
 
-### Multi-node / advanced
+### Fleet (Tier 2 — Postgres multi-writer)
 
-These configure the fleet (Tier 2, Postgres-backed multi-writer) and object-storage (Tier 3,
-bucket-backed) scale-out modes, and the Cloudflare host. They don't apply to a single-node
-deployment. See [Scaling (fleet)](/docs/deploy/scaling) and [Cloudflare](/docs/deploy/cloudflare)
-for the full story; the flags/variables themselves live in `packages/cli/src/serve.ts`,
-`fleet.ts`, and `objectstore.ts` if you need to check current behavior in source.
+Opt into a symmetric fleet of `serve` processes sharing one Postgres database via `--fleet` (or
+`STACKBASE_FLEET=1`/`true`). Requires the enterprise `@stackbase/fleet` package. See
+[Scaling](/docs/deploy/scaling).
 
-| Variable | Area |
+| Variable | Meaning |
 |---|---|
-| `STACKBASE_FLEET`, `STACKBASE_ADVERTISE_URL`, `STACKBASE_FLEET_SHARDS`, `STACKBASE_FLEET_LEASE_TTL_MS`, `STACKBASE_GROUP_COMMIT` | Fleet (Tier 2, Postgres multi-writer) |
-| `STACKBASE_OBJECT_STORE`, `STACKBASE_OBJECTSTORE_GC_MS`, `STACKBASE_REPLICA`, `STACKBASE_WRITER_URL` | Object storage (Tier 3, bucket-backed) |
-| `STACKBASE_WAKE_URL`, `STACKBASE_BACKSTOP_MIN_MS` | The wake seam, for hosts (e.g. Cloudflare Containers) that stop the process between requests |
+| `STACKBASE_FLEET` | `1`/`true` enables fleet mode (equivalent to `--fleet`). Requires `STACKBASE_DATABASE_URL`/`--database-url` (Postgres) and an advertise URL — boot fails fast with an actionable message if either is missing, or if `@stackbase/fleet` isn't installed. |
+| `STACKBASE_ADVERTISE_URL` | The URL other fleet nodes reach *this* node at (recorded on the write lease when this node is the writer; sync nodes forward writes/proxy httpActions here). Equivalent to `--advertise-url`. Required in fleet mode. |
+| `STACKBASE_FLEET_SHARDS` | Number of shards the fleet runs (default 8 in `@stackbase/fleet`). Persisted once at first boot and immutable after — a later mismatched value fails boot fast. Also read (without fleet) as the lane count for a single-node `--object-store --shards N` writer. |
+| `STACKBASE_FLEET_LEASE_TTL_MS` | The write lease's TTL in milliseconds — the one knob the whole failover clock (heartbeat + acquire cadence) scales from. Unset → fleet default (15000ms). Ops/test tuning knob; no CLI flag. |
+| `STACKBASE_FLEET_MULTI_WRITER` | `1`/`true`/`yes` opts into multi-writer scale-out (sharded writes across more than one writer node against the same Postgres database) — off by default. |
+| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` enables group commit (batches concurrent commits through a staged two-buffer committer) — an opt-in throughput mode for both fleet and non-fleet single-node Postgres deployments. Off (structurally zero-cost) by default. |
+
+### Object storage (Tier 3 — bucket-backed, no database)
+
+Run the engine directly against an object-storage bucket (or local directory) as its substrate,
+instead of SQLite/Postgres, via `--object-store <url>` (or `STACKBASE_OBJECT_STORE`). Mutually
+exclusive with `--fleet`. See [Scaling](/docs/deploy/scaling).
+
+| Variable | Meaning |
+|---|---|
+| `STACKBASE_OBJECT_STORE` | The bucket/dir URL (`s3://…`, `s3+http(s)://…`, `file://…`, or a bare path). Equivalent to `--object-store`. |
+| `STACKBASE_OBJECTSTORE_GC_MS` | The object-store writer's garbage-collection sweep cadence, ms. Unset → ~60s default. Env-only (no flag), mirroring `STACKBASE_FLEET_LEASE_TTL_MS`'s ops-tuning-knob shape. |
+| `STACKBASE_REPLICA` | `1`/`true`/`yes` boots this node as a **read-only replica** of the object store's shard (materialize + tail, no write lease — every mutation rejected) instead of a writer. Requires `--object-store`/`STACKBASE_OBJECT_STORE` also be set; equivalent to `--replica`. |
+| `STACKBASE_WRITER_URL` | Only meaningful on a `--replica` boot: the writer node's URL. When set, every mutation/action on the replica **forwards** there instead of being rejected outright. Equivalent to `--writer-url`. |
+
+`--shards N` (no bare env flag beyond the shared `STACKBASE_FLEET_SHARDS` above) sizes the number of
+object-storage lanes a writer owns when `N > 1`; invalid combined with `--replica` (single-shard by
+definition) or `--fleet` (its own shard resolution).
+
+### The wake seam (serverless / stop-between-requests hosts)
+
+For a host that stops the process entirely between requests (so a plain `setTimeout` can never fire
+and every scheduler/trigger/reaper driver would go dead) — notably Cloudflare Containers.
+
+| Variable | Meaning |
+|---|---|
+| `STACKBASE_WAKE_URL` | An HTTP endpoint `serve` POSTs the next wake's absolute timestamp to (on Cloudflare, the container's Outbound-Worker hostname, which turns it into a Durable Object alarm). Equivalent to `--wake-url`. Unset (every non-serverless deployment) → no wake host, plain `setTimeout`, unchanged behavior. |
+| `STACKBASE_BACKSTOP_MIN_MS` | A floor applied to every driver's backstop poll cadence (`backstopMs = max(driverDefault, this)`). Unset → identity (each driver's own default, 30s/60s). Set where every wake costs a cold start, so a driver's own 30s backstop doesn't mean "boot a container every 30 seconds forever." Equivalent to `--backstop-min-ms`. |
+
+### Cloudflare DO-native host
+
+| Variable | Meaning |
+|---|---|
+| `STACKBASE_DO_LOCATION_HINT` | Pins the single-shard Cloudflare Durable Object host's ONE Durable Object to a home region — one of the 11 `locationHint` codes (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `apac-ne`, `apac-se`, `oc`, `afr`, `me`). Unset → Cloudflare places the DO near the first requester (its normal default). Only the first `get()` for a given DO ever honors a hint — a DO is single-homed for life once created. |
+
+(The `durable_objects` binding name itself, e.g. `STACKBASE_DO` in `wrangler.jsonc`, is a Wrangler
+binding identifier, not a `process.env` variable the engine reads — see
+[Cloudflare](/docs/deploy/cloudflare) for the full Workers deployment shape.)
+
+## Component config from environment variables
+
+Stackbase itself owns no environment variables for component secrets — provider API keys, OAuth
+client credentials, and similar values are plain fields on each component's `define*()` options,
+which *your* `stackbase.config.ts` populates from `process.env` however you like:
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineAuth } from "@stackbase/auth";
+import { googleProvider, githubProvider } from "@stackbase/auth";
+import { defineNotifications, resendEmail, twilioSms } from "@stackbase/notifications";
+
+export default defineConfig({
+  components: [
+    defineAuth({
+      oauth: {
+        providers: [
+          googleProvider({
+            clientId: process.env.GOOGLE_CLIENT_ID!,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+          }),
+          githubProvider({
+            clientId: process.env.GITHUB_CLIENT_ID!,
+            clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+          }),
+        ],
+      },
+    }),
+    defineNotifications({
+      channels: {
+        email: { provider: resendEmail({ apiKey: process.env.RESEND_API_KEY! }), from: "noreply@example.com" },
+        sms: {
+          provider: twilioSms({
+            accountSid: process.env.TWILIO_ACCOUNT_SID!,
+            authToken: process.env.TWILIO_AUTH_TOKEN!,
+            from: process.env.TWILIO_FROM_NUMBER!,
+          }),
+        },
+      },
+    }),
+  ],
+});
+```
+
+These variable names (`GOOGLE_CLIENT_ID`, `RESEND_API_KEY`, `TWILIO_ACCOUNT_SID`, …) are a
+convention you choose, not a contract the engine enforces or reads itself — pick whatever names fit
+your deployment's secret-management story (Docker Compose `env_file`, a platform's secrets manager,
+a plain `.env` loaded before `stackbase serve` starts). See
+[Auth](/docs/components/auth), [Notifications](/docs/components/notifications), and
+[Authorization](/docs/components/authorization) for each component's full provider/config surface.
 
 ## See also
 
-- [Schema & tables](/docs/core-concepts/schema-and-tables) — the concepts these validators serve.
-- [CLI](/docs/reference/cli) — every command that reads `stackbase.config.ts` and these env vars.
-- [Self-hosting](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres) — deployment
+- [Schema & tables](/docs/core-concepts/schema-and-tables) — the concepts and guarantees these
+  validators and the schema builder serve, in prose.
+- [Queries](/docs/core-concepts/queries) — how an index declared here actually shapes a read set.
+- [Components overview](/docs/components/overview) — every component's own `define*()` reference.
+- [CLI](/docs/reference/cli) — every command and flag that reads `stackbase.config.ts` and the
+  environment variables above.
+- [Scaling](/docs/deploy/scaling) and [Cloudflare](/docs/deploy/cloudflare) — the fleet,
+  object-storage, and DO-native deployment stories the multi-node variables belong to.
+- [Self-hosting](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres) — core deployment
   configuration walkthroughs.

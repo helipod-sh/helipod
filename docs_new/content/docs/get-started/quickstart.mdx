@@ -5,34 +5,42 @@ description: Install stackbase, write a query and a mutation, and watch the resu
 
 {/* diataxis: tutorial */}
 
-By the end of this page you will have a running stackbase backend with a `messages` table, a query
-that lists messages, and a mutation that adds one — and you will see the query update **live** the
-moment you write a new row. It takes a few minutes and every step is runnable.
+By the end of this page you will have a running stackbase backend with a `messages` table, a
+query that lists messages, and a mutation that adds one — and you will see the query update
+**live** the moment you write a new row, both from the dashboard and from a few lines of client
+code. Every command below is real and runnable.
 
-## Before you start
+## Prerequisites
 
-You need **Node.js 18+** (or **Bun**) and a package manager. Create an empty project directory and
-initialize it:
+- **Bun** (the primary runtime — used for `stackbase dev`, the single-binary build, and every
+  example in these docs) **or Node.js 22.5+**. The CLI auto-detects which one is running you; there
+  is no `--bun`/`--node` flag to pick.
+- A package manager (`npm`, `bun`, or equivalent).
+- Your backend lives in a directory conventionally named **`convex/`**. That name is kept only as a
+  low-friction default — it is not a Convex dependency, and every import in this guide is
+  `@stackbase/*`. You can point the CLI at a different directory with `--dir`, but `convex/` is what
+  every example and doc page assumes.
+
+## 1. Install the packages
 
 ```bash
 mkdir my-app && cd my-app
 npm init -y
+npm install @stackbase/values @stackbase/client
+npm install --save-dev @stackbase/cli
 ```
 
-## 1. Install stackbase
-
-```bash
-npm install @stackbase/cli @stackbase/values @stackbase/client
-```
-
-- `@stackbase/cli` is the `stackbase` command — it runs your backend locally and generates typed
-  helpers.
-- `@stackbase/values` gives you `defineSchema` and the `v` validators.
-- `@stackbase/client` is the browser/Node client you will use later to read data from a UI.
+- **`@stackbase/values`** gives you `defineSchema`/`defineTable` and the `v` validators — used in
+  both your schema and your function `args`/`returns`.
+- **`@stackbase/client`** is the framework-agnostic client plus the `@stackbase/client/react` hooks
+  (`useQuery`/`useMutation`) you'll use to read data from a UI.
+- **`@stackbase/cli`** provides the `stackbase` command: `dev`, `serve`, `build`, `deploy`,
+  `codegen`, `migrate`. It's a dev dependency — your running backend doesn't need it installed at
+  runtime.
 
 ## 2. Define a schema
 
-Your backend lives in a `convex/` directory (the default). Create `convex/schema.ts`:
+Create `convex/schema.ts`:
 
 ```ts title="convex/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
@@ -45,8 +53,14 @@ export default defineSchema({
 });
 ```
 
-This declares one table, `messages`, with two string fields. Every document also gets an `_id` and
-a `_creationTime` automatically.
+`defineTable` takes a map of field name to validator — `v.string()`, `v.number()`, `v.boolean()`,
+`v.id("otherTable")`, `v.array(...)`, `v.object(...)`, `v.union(...)`, `v.optional(...)`, and more
+(see [Schema & tables](/docs/core-concepts/schema-and-tables) for the full validator reference).
+Every document also gets an `_id` and a `_creationTime` automatically — you never declare those
+yourself.
+
+`defineSchema` takes a map of table name to `defineTable(...)`. This one declares a single table,
+`messages`, with two string fields.
 
 ## 3. Write a query and a mutation
 
@@ -56,21 +70,41 @@ Create `convex/messages.ts`:
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 
-// A query: reads data. Clients can subscribe to it.
+// A query: reads data through ctx.db. Pure and deterministic — no fetch, no Date.now(),
+// no Math.random(), no writes. Clients subscribe to it and get pushed updates.
 export const list = query({
+  returns: v.array(
+    v.object({
+      _id: v.id("messages"),
+      _creationTime: v.number(),
+      author: v.string(),
+      body: v.string(),
+    }),
+  ),
   handler: (ctx) => ctx.db.query("messages", "by_creation").collect(),
 });
 
-// A mutation: the only way to write data. Runs as one transaction.
+// A mutation: the only way to write data. Runs as one serializable transaction.
 export const send = mutation({
   args: { author: v.string(), body: v.string() },
+  returns: v.id("messages"),
   handler: (ctx, args) => ctx.db.insert("messages", { author: args.author, body: args.body }),
 });
 ```
 
-`by_creation` is the built-in creation-order index every table has, so `list` returns all messages
-oldest-first without you declaring an index. Don't worry that `./_generated/server` doesn't exist
-yet — the next step creates it.
+A few things worth noticing:
+
+- **`by_creation`** is the built-in creation-order index every table has, so `list` returns all
+  messages oldest-first without you declaring an index of your own.
+- **`args`** validates a mutation's (or query's) incoming arguments — the client's call is rejected
+  before the handler runs if it doesn't match.
+- **`returns`** is optional, but declaring it is what lets the client (and an
+  [optimistic update](/docs/client/optimistic-updates)) know the exact shape a query or mutation
+  produces, instead of falling back to a loose `Value` type.
+- **`ctx.db.insert(table, fields)`** is how a mutation writes — it's the only way any data ever
+  enters the store. See [Mutations](/docs/core-concepts/mutations) and
+  [Queries](/docs/core-concepts/queries) for the full read/write surface.
+- Don't worry that `./_generated/server` doesn't exist yet — the next step creates it.
 
 ## 4. Run it
 
@@ -78,29 +112,195 @@ yet — the next step creates it.
 npx stackbase dev
 ```
 
-`stackbase dev` generates the typed `convex/_generated/` helpers, starts the reactive engine with a
-local SQLite database, watches your files for changes, and serves a **dashboard**. It prints the
-dashboard URL — open it in your browser.
+`stackbase dev` does four things, in order, every time it starts and every time a file changes:
 
-## 5. See reactivity happen
+1. **Generates `convex/_generated/`** — typed `Doc`/`Id`/`api` and the `query`/`mutation`/`action`
+   builders you imported above (see [The generated types](#the-generated-types) below).
+2. **Boots the reactive engine** against a local **SQLite** database at `.stackbase/data.db` by
+   default (create the file yourself; nothing to install — see
+   [Local data & storage](#local-data--storage) below).
+3. **Serves HTTP, WebSocket sync, and the dashboard** all on one port (default `3000`):
+   `POST /api/run` for one-off function calls, `/api/sync` for the reactive WebSocket protocol the
+   client SDK speaks, and `/_dashboard` for the built-in data browser and function runner.
+4. **Watches `convex/` for changes** and hot-reloads: edit `schema.ts` or `messages.ts`, save, and
+   the running server picks up the new functions (and regenerates `_generated/`) without you
+   restarting anything.
 
-In the dashboard:
+It prints something like:
 
-1. Open the **data browser** and select the `messages` table. Keep it visible — it is a *live*
-   view.
-2. Open the **function runner** and call `messages:send` with, for example,
+```
+stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+admin key → sk_dev_3f8a1c...
+```
+
+- The **dashboard** lives at `<server.url>/_dashboard` — open it in your browser.
+- The **admin key** gates every admin/dashboard API call. In dev, on a loopback bind (`127.0.0.1`/
+  `::1`/`localhost`, the default), the CLI embeds a freshly generated key straight into the
+  dashboard's HTML so it just works with no prompt. Set `STACKBASE_ADMIN_KEY` yourself to pin it to
+  a stable value across restarts; on a non-loopback `--ip` bind, or when `serve` runs it in
+  production, the key is never embedded — the dashboard prompts for it instead (see
+  [`stackbase serve`](/docs/deploy/self-hosting)).
+
+Every save to `convex/*.ts` prints a line like:
+
+```
+↻ pushed (2 functions)
+```
+
+confirming the reload landed — that's `messages:list` and `messages:send`.
+
+### CLI flags
+
+`stackbase dev` (and `serve`) accept:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--port <n>` | `3000` | HTTP/WebSocket port |
+| `--ip <addr>` | `127.0.0.1` | Bind address |
+| `--dir <path>` | `convex` | Function directory |
+| `--data <path>` | `.stackbase/data.db` | SQLite file path |
+| `--web <path>` | (none) | Serve a static built web UI alongside the API |
+| `--database-url <url>` | (unset → SQLite) | Use Postgres instead (`postgres://...`) |
+| `--storage-bucket <name>` | (unset → local FS) | Use S3-compatible file storage instead of local disk |
+
+Run `stackbase help` any time for the authoritative list of commands.
+
+## The generated types
+
+Look inside `convex/_generated/` after the first run:
+
+```
+convex/_generated/
+  server.ts       # re-exports query/mutation/action/httpAction + the typed api/internal objects
+  dataModel.d.ts  # DataModel, TableNames, Id<T>, Doc<T> — derived from schema.ts
+  api.d.ts        # the Api type: every public function's path, args, and return type
+  internal.d.ts   # the same, for internal-only functions
+```
+
+Two things from here matter everywhere else in the docs:
+
+- **`Doc<"messages">`** and **`Id<"messages">`** — the exact TypeScript type of a `messages`
+  document, and a branded id type for referencing one (e.g. as a foreign key via
+  `v.id("messages")` in another table). Import them from `./_generated/dataModel`.
+- **`api`** — a typed object mirroring your function tree: `api.messages.list`,
+  `api.messages.send`. Pass these directly to `useQuery`/`useMutation`, or to `client.query()`/
+  `client.mutation()` — the client infers each call's argument and return types straight from the
+  function's `args`/`returns` validators, no manual typing.
+
+`convex/_generated/server.ts` is also where `query`/`mutation`/`action`/`httpAction` — the builders
+you imported in step 3 — actually come from; they're re-exported from `@stackbase/executor`, typed
+against your schema.
+
+Regenerate by hand any time with:
+
+```bash
+stackbase codegen --dir convex
+```
+
+`stackbase dev` already does this automatically on every change, so you rarely need to run it
+directly — except before a `stackbase build`/`serve` deploy, where **`_generated/` must be
+committed**: `stackbase serve` never runs codegen at boot and fails fast if it's missing.
+
+## 5. Wire a minimal client
+
+With the server running, connect to it. Both shapes below point at the same
+`ws://<host>/api/sync` endpoint the dev server just opened.
+
+### Framework-agnostic
+
+```ts title="client.ts"
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
+import { api } from "./convex/_generated/server";
+
+const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
+
+// One-shot read (not reactive):
+const messages = await client.query(api.messages.list, {});
+
+// Subscribe (reactive) — re-invoked every time the result actually changes:
+const unsubscribe = client.subscribe(api.messages.list, {}, (messages) => {
+  console.log("messages updated:", messages);
+});
+
+// Write:
+await client.mutation(api.messages.send, { author: "Ada", body: "hello" });
+```
+
+### React
+
+```tsx title="App.tsx"
+import { StackbaseClient, webSocketTransport } from "@stackbase/client";
+import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
+import { api } from "./convex/_generated/server";
+
+const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
+
+function Messages() {
+  const messages = useQuery(api.messages.list, {});
+  const send = useMutation(api.messages.send);
+
+  if (messages === undefined) return <p>Loading…</p>;
+  return (
+    <ul>
+      {messages.map((m) => <li key={m._id}>{m.author}: {m.body}</li>)}
+    </ul>
+  );
+}
+
+export function App() {
+  return (
+    <StackbaseProvider client={client}>
+      <Messages />
+    </StackbaseProvider>
+  );
+}
+```
+
+`StackbaseProvider` puts the client on context; `useQuery` subscribes a component to a reactive
+query (returns `undefined` until the first result arrives, then re-renders on its own whenever the
+result changes); `useMutation` returns a plain async callback for a write. This is the entire
+pattern every stackbase UI is built from — see [Client SDK](/docs/client/client-sdk) for the full
+hook surface (`useAction`, connection state, `usePendingMutations`, and more), and
+[Tutorial](/docs/get-started/tutorial) for a complete runnable app with this UI wired up end to end.
+
+## 6. See reactivity happen
+
+You don't need the client code above to see this — the dashboard alone proves it, since its data
+browser is itself a live subscription:
+
+1. Open `<server.url>/_dashboard` in your browser.
+2. Open the **data browser** and select the `messages` table. Keep it visible — it is a *live*
+   view, not a snapshot.
+3. Open the **function runner** and call `messages:send` with, for example,
    `{ "author": "Ada", "body": "hello" }`.
-3. Watch the `messages` table in the data browser: the new row appears **immediately**, with no
-   refresh. That live view is a subscription to `messages:list` — exactly what a real client would
-   hold. Run `send` again and the list grows in real time.
+4. Watch the `messages` table in the data browser: the new row appears **immediately**, with no
+   refresh. That live view is a subscription to `messages:list` — exactly what the `useQuery` call
+   above holds. If you also have the client code from step 5 running, its console log or its React
+   list updates at the same instant.
 
-That is the whole model: a mutation wrote a row, and every subscription reading that table refreshed
-itself. You never wrote any invalidation or polling code.
+That is the whole model: a mutation wrote a row, and every subscription reading that table
+refreshed itself. You never wrote any invalidation or polling code — see
+[How it works](/docs/get-started/how-it-works) for exactly why.
+
+## Local data & storage
+
+By default, `stackbase dev`/`stackbase serve` store everything in a single **SQLite** file at
+`.stackbase/data.db` (override with `--data <path>`) — nothing to install, nothing to configure.
+Storage is pluggable behind the same interface: pass `--database-url postgres://...` (or set
+`STACKBASE_DATABASE_URL`) to run against Postgres instead, with no code changes to your app (see
+[Postgres](/docs/deploy/postgres)). File uploads (`ctx.storage`) similarly default to local disk
+under the data directory and can be pointed at an S3-compatible bucket with `--storage-bucket` (see
+[File storage](/docs/core-concepts/file-storage)).
 
 ## Next steps
 
-- Wire this into a UI with the [Client SDK](/docs/client/client-sdk) and the `useQuery` /
-  `useMutation` hooks.
-- Understand *why* the list refreshed in [How it works](/docs/get-started/how-it-works).
-- Go deeper on [Schema & tables](/docs/core-concepts/schema-and-tables) and
-  [Queries](/docs/core-concepts/queries).
+- [Tutorial](/docs/get-started/tutorial) — build a real React UI (a task list) against a backend
+  like this one, and watch it stay in sync live across two browser tabs.
+- [How it works](/docs/get-started/how-it-works) — the read-set/write-set model behind the
+  reactivity you just saw.
+- [Schema & tables](/docs/core-concepts/schema-and-tables) and
+  [Queries](/docs/core-concepts/queries) / [Mutations](/docs/core-concepts/mutations) — go deeper on
+  the pieces you just wrote.
+- [Client SDK](/docs/client/client-sdk) — the full client surface beyond `useQuery`/`useMutation`.
+- [Self-hosting](/docs/deploy/self-hosting) — take this from `stackbase dev` to a real deployment
+  with `stackbase serve` and Docker.
