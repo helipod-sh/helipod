@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-15
+
+Authentication hardening and notification delivery. `@stackbase/auth` gains TOTP
+two-factor and passkeys/WebAuthn; `@stackbase/notifications` gains multi-provider
+fallback and a mobile/web push channel. All four are **opt-in** and
+backward-compatible — a deployment that configures none is byte-identical to
+before. Each shipped through an adversarial whole-branch security review.
+
+### Added
+
+- **TOTP two-factor authentication** (`@stackbase/auth`, opt-in via `defineAuth({ mfa })`). RFC 6238 TOTP (Google Authenticator/Authy/1Password/…) with one-time recovery codes. The TOTP secret is **AES-256-GCM-encrypted at rest** (AAD-bound to the user id; recoverable because verification must recompute the code — unlike the one-way-hashed session tokens/email codes), under a keyring sourced from the environment with fail-fast validation. Enrollment is two-phase (`startMfaEnrollment` → `confirmMfaEnrollment` proving a live code, so a user can't lock themselves out mid-setup). Every first-factor path (password, magic-link, OTP, email verification, password reset, and OAuth/JWT sign-in) routes through one `finishSignIn` interposition that returns `{ mfaRequired, pendingToken, expiresAt }` instead of a session; `completeMfaSignIn` (a live TOTP **or** a recovery code) then mints. `disableMfa`/`regenerateRecoveryCodes` require a fresh second factor (proof of possession, so a stolen live token can't strip 2FA). `finishSignIn` never replaces the `mintSession` chokepoint — a static-source guard test fails CI if a gated site ever mints directly.
+- **Passkeys / WebAuthn** (`@stackbase/auth`, opt-in via `defineAuth({ passkeys })`). Phishing-resistant passwordless sign-in (Face ID / Touch ID / Windows Hello / security keys / synced platform passkeys). Registration attestation + authentication assertion run behind the sole `@simplewebauthn/server` seam, with all crypto confined to actions (the transactor stays crypto-free). Usernameless (discoverable) **and** email-scoped sign-in; anonymous-then-register is a passwordless-bootstrap path. Atomic signature-counter **clone detection** (a regressed/repeated counter is rejected with no mint and no state change), consume-before-validate single-use challenges, per-user credential limit, and anti-enumeration (an unknown email's `begin` is byte-shaped like a known one; every failure is one generic message). Reactive device management — `listPasskeys`/`renamePasskey`/`revokePasskey` (display metadata only; the public key and counter never leave the server). Client recipe uses `@simplewebauthn/browser` + `client.action(...)`.
+- **Multi-provider fallback for notifications** (`@stackbase/notifications`). An email/SMS channel can configure `fallbacks: Provider[]` alongside its `provider`. Within **one** delivery attempt, `deliverOutbound` walks the ordered `[provider, ...fallbacks]` list and succeeds on the first provider that works; only an all-fail attempt fails, re-entering the unchanged retry/backoff/dead-letter path (its `retryable` verdict is the OR across every tried provider). The inbound delivery webhook tries every configured provider's `verify()` in order (first match wins; only the primary receives the channel-level `webhookSecret`, each fallback carries its own signing material). One additive `messages.providerName` field; zero behavior change when no fallbacks are set.
+- **Push channel for notifications** (`@stackbase/notifications`). A fourth `"push"` channel plugging into the same `recordSend` chokepoint, driver, retry/backoff, and preferences/critical-bypass/topics machinery as email/SMS/in-app. A **self-only** device-token registry (`registerPushToken`/`unregisterPushToken` resolve the subject from the caller, never a `userId` arg); a send snapshots the server-chosen recipient's tokens, groups them by provider, fans out, and prunes tokens a provider reports permanently invalid. Three adapters on the `PushProvider` seam: `expoPush` (chunked batch), `fcmPush` (service-account OAuth2 + cached access token), and `apnsPush` (ES256 JWT via `jose`, over `node:http2` — Apple's provider API is HTTP/2-only). Per-user push preferences honored with the same critical-bypass as other channels. Additive schema (`pushTokens` table; `messages.tokens`).
+
+### Security
+
+- **A passkey cannot bypass an enrolled second factor.** Passkey authentication mints through the same `finishSignIn` gate as every other first factor, so an MFA-enrolled user still completes TOTP after a passkey sign-in (passkeys and MFA were designed in parallel; routing the mint through the shared chokepoint closes the interaction gap). A client-supplied non-string WebAuthn `userHandle` is folded into the one generic reject rather than throwing a distinct error (no credential-existence oracle).
+- **The notification delivery webhook fails closed.** It writes only after a provider's signature verifies, 401s before any write when none do, and treats a provider `verify()` that *throws* (rather than returning false) as "did not verify" — so a misbehaving provider can't 500 the endpoint or let one fallback's throw swallow another's legitimately-signed callback.
+- **Push delivery never silently strands a device.** Because push provider groups are disjoint device sets (unlike email/SMS fallback alternates), a retryable failure in any group re-queues the whole message rather than marking it sent on a partial success; permanently-invalid tokens are pruned even on a failed attempt, and device tokens are cleared from terminal message rows.
+
 ## [1.4.0] — 2025-12-25
 
 ### Changed
@@ -160,6 +181,7 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
 - **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
+[1.5.0]: https://example.com/releases/tag/v1.5.0
 [1.4.0]: https://example.com/releases/tag/v1.4.0
 [1.3.0]: https://example.com/releases/tag/v1.3.0
 [1.2.0]: https://example.com/releases/tag/v1.2.0
