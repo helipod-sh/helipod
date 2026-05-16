@@ -566,6 +566,19 @@
         "vitest": "catalog:",
       },
     },
+    "packages/deploy": {
+      "name": "@stackbase/deploy",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stackbase/component": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
     "packages/docstore": {
       "name": "@stackbase/docstore",
       "version": "0.0.0",
@@ -1253,6 +1266,8 @@
     "@stackbase/component": ["@stackbase/component@workspace:packages/component"],
 
     "@stackbase/dashboard": ["@stackbase/dashboard@workspace:apps/dashboard"],
+
+    "@stackbase/deploy": ["@stackbase/deploy@workspace:packages/deploy"],
 
     "@stackbase/docstore": ["@stackbase/docstore@workspace:packages/docstore"],
 
