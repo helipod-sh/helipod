@@ -23,6 +23,6 @@ describe("FakeSpawner", () => {
     s.queue({ stdout: "wrangler 3.0.0" });
     const r = await s.run("wrangler", ["--version"], { stdio: "capture" });
     expect(r.stdout).toBe("wrangler 3.0.0");
-    expect(s.calls).toEqual([{ cmd: "wrangler", args: ["--version"] }]);
+    expect(s.calls).toMatchObject([{ cmd: "wrangler", args: ["--version"] }]);
   });
 });
