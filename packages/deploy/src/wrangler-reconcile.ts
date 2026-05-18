@@ -21,8 +21,33 @@ export function stripJsonc(text: string): string {
     if (c === "/" && n === "*") { inBlock = true; i++; continue; }
     out += c;
   }
-  // Remove trailing commas before } or ]
-  return out.replace(/,(\s*[}\]])/g, "$1");
+  // Remove trailing commas before } or ], string-aware (comments are already gone at this point).
+  return removeTrailingCommas(out);
+}
+
+/** Drop a comma immediately preceding (modulo whitespace) a } or ], without touching commas inside
+ *  string literals. Runs on already comment-stripped text. */
+function removeTrailingCommas(text: string): string {
+  let out = "";
+  let inStr = false;
+  let q = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      out += c;
+      if (c === "\\") { out += text[i + 1] ?? ""; i++; continue; }
+      if (c === q) inStr = false;
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = true; q = c; out += c; continue; }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+      if (j < text.length && (text[j] === "}" || text[j] === "]")) continue; // trailing comma — drop it
+    }
+    out += c;
+  }
+  return out;
 }
 
 const DO_BINDING = "STACKBASE_DO";
@@ -51,7 +76,10 @@ export function reconcileWrangler(input: Record<string, unknown>, opts: Reconcil
   const migrations = (config.migrations ??= []) as Array<{ tag: string; new_sqlite_classes?: string[] }>;
   const hasSqliteClass = migrations.some((m) => m.new_sqlite_classes?.includes(DO_CLASS));
   if (!hasSqliteClass) {
-    migrations.push({ tag: `v${migrations.length + 1}`, new_sqlite_classes: [DO_CLASS] });
+    const usedTags = new Set(migrations.map((m) => m.tag));
+    let n = migrations.length + 1;
+    while (usedTags.has(`v${n}`)) n++;
+    migrations.push({ tag: `v${n}`, new_sqlite_classes: [DO_CLASS] });
     added.push(`migrations.${DO_CLASS}`);
   }
 
