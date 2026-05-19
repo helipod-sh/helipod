@@ -461,6 +461,7 @@
         "@stackbase/codegen": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/dashboard": "workspace:*",
+        "@stackbase/deploy": "workspace:*",
         "@stackbase/docstore": "workspace:*",
         "@stackbase/docstore-postgres": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
