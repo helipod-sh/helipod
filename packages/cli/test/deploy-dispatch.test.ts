@@ -54,4 +54,24 @@ describe("deployCommand dispatch", () => {
     const code = await deployCommand(["--target", "ghost"], { spawn: new RecordingSpawner(), cwd: dir, interactive: true });
     expect(code).toBe(1);
   });
+
+  it("--check on a fresh project (no _generated) reports drift, exits 1, and never deploys", async () => {
+    const dir = makeProject(); cleanup.push(dir);
+    const spawn = new RecordingSpawner();
+    const code = await deployCommand(["--check"], { spawn, cwd: dir, interactive: true });
+    expect(code).toBe(1); // _generated is absent → drift
+    expect(spawn.calls.some((c) => c.args[0] === "deploy")).toBe(false); // never pushed
+  });
+
+  it("--check on a project with up-to-date _generated exits 0 and never deploys (the footgun test)", async () => {
+    const dir = makeProject(); cleanup.push(dir);
+    // Prime convex/_generated so there is no drift: a --dry-run runs the target's package() step,
+    // whose ctx.codegen() writes _generated as a side effect (and --dry-run never pushes).
+    await deployCommand(["--dry-run"], { spawn: new RecordingSpawner(), cwd: dir, interactive: true });
+    // Now --check finds no drift. It MUST return 0 WITHOUT proceeding to a real wrangler deploy.
+    const spawn = new RecordingSpawner();
+    const code = await deployCommand(["--check"], { spawn, cwd: dir, interactive: true });
+    expect(code).toBe(0);
+    expect(spawn.calls.some((c) => c.args[0] === "deploy")).toBe(false); // the footgun: must NOT deploy
+  });
 });

@@ -133,7 +133,10 @@ export async function deployCommand(args: string[], deps: DeployDeps = {}): Prom
       return 1;
     }
     process.stdout.write("✓ convex/_generated is up to date\n");
-    if (!flags.dryRun && !flags.target && !config.deploy) return 0; // --check-only invocation
+    // `--check` never pushes: it's a verification gate. Return after the drift verdict unless the
+    // caller ALSO passed --dry-run (the dry-run flow below runs but always skips push), so --check
+    // can never reach `push`.
+    if (!flags.dryRun) return 0;
   }
 
   const resolved = resolveDeploy({ deploy: config.deploy, target: flags.target, env: flags.env, inlineUrl: flags.url });
