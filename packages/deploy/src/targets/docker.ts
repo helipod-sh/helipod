@@ -1,16 +1,24 @@
-import type { DeployContext, DeployResult, DeployTarget } from "../types";
+import type { DeployTarget, DeployContext, DeployResult } from "../types";
+import { DeployError } from "../types";
 
-// STUB — replaced by the real implementation in Task 8. Exists now only so the lazy `loadTarget`
-// registry's `import("./targets/docker")` resolves and `bun run build` succeeds.
 export const dockerTarget: DeployTarget = {
   name: "docker",
-  async preflight(_ctx: DeployContext): Promise<void> {
-    throw new Error("docker target not yet implemented (Task 8)");
+  async preflight(ctx) {
+    const v = await ctx.spawn.run("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "capture" }).catch(() => {
+      throw new DeployError("docker not found — install Docker to use the docker target");
+    });
+    if (v.code !== 0) {
+      throw new DeployError("Docker is installed but the daemon is not reachable — start Docker and retry");
+    }
   },
-  async package(_ctx: DeployContext): Promise<void> {
-    throw new Error("docker target not yet implemented (Task 8)");
+  async package(ctx) {
+    // The image builds from the repo's Dockerfile/compose at push time (`--build`); refresh codegen
+    // so the baked convex/_generated matches the functions being deployed.
+    await ctx.codegen();
   },
-  async push(_ctx: DeployContext): Promise<DeployResult> {
-    throw new Error("docker target not yet implemented (Task 8)");
+  async push(ctx): Promise<DeployResult> {
+    const r = await ctx.spawn.run("docker", ["compose", "up", "-d", "--build"], { cwd: ctx.cwd, stdio: "inherit" });
+    if (r.code !== 0) return { ok: false, error: `docker compose up failed: ${(r.stderr || r.stdout).trim() || `exit ${r.code}`}` };
+    return { ok: true, detail: "container up (docker compose)" };
   },
 };
