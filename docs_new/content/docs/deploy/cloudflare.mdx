@@ -5,127 +5,33 @@ description: stackbase deploy --target cloudflare provisions a Durable-Object-na
 
 {/* diataxis: how-to */}
 
-stackbase has **two** distinct ways to run on Cloudflare. They are different architectures with
-different storage models, different guarantees, and different maturity — read the comparison
-before picking one.
+stackbase has **two** Cloudflare deployment paths. Most projects want the first one.
 
-| | DO-native (`@stackbase/runtime-cloudflare`) | Containers (the portable image) |
+| | Durable-Object-native (this page's main path) | Containers (alternative) |
 |---|---|---|
-| What runs | One Durable Object per deployment, owning the writer + storage + sockets | Workers (router) + a Container running the same `stackbase serve` image you'd run anywhere |
-| Storage | DO-SQLite (`ctx.storage.sql`), per-object | R2, as the object-store source of truth |
-| Scheduled functions / crons / triggers / the storage reaper | **Fire** — a DO alarm wakes them through hibernation | **Do not fire** — the container stops ~5s after the last request |
-| How you deploy it | Hand-write a `worker.ts` + `wrangler.jsonc`, then `wrangler deploy` | Hand-write a `Dockerfile` + `wrangler.jsonc`, then `wrangler deploy` |
-| `stackbase deploy` integration | **None.** There is no `stackbase deploy --target cloudflare` command. | **None.** |
-| Status | The path to reach for | Experimental — request-driven apps only |
-| Measured | write **133ms** (co-located DO-SQLite) | write **~1500ms** (R2 CAS round trip) — DO-native is **~11x** faster |
+| Command | `stackbase deploy --target cloudflare` | hand-wired, no `stackbase deploy` integration |
+| Storage | DO-SQLite (per-object) | R2 (object-store substrate) |
+| Scheduled functions / crons / triggers | **Fire** — the DO's own alarm wakes them | **Do not fire** — container stops ~5s after idle |
+| Status | Supported target | Experimental |
 
-Both numbers above were measured against real Cloudflare + real R2 (2026-03-12/16). Neither path is
-wired into `stackbase deploy` today — both are `wrangler deploy` of a small hand-written entrypoint
-that imports a stackbase host package. If you want a portable image with no Cloudflare-specific
-code, see [Self-hosting with Docker](/docs/deploy/self-hosting) instead — this page is specifically
-about running *on* Cloudflare.
+## The recommended path: Durable-Object-native
 
-## Path A: the Durable-Object-native host
+`stackbase deploy --target cloudflare` provisions `@stackbase/runtime-cloudflare`'s Durable Object
+host via `wrangler deploy`. One Durable Object is the OCC writer, the DO-SQLite store, every
+hibernatable WebSocket, and the wake alarm that fires scheduled functions/crons/triggers even
+though the DO idles between requests. It's a **single global DO** in v1 — not a sharded fleet (see
+[Scaling](/docs/deploy/scaling) for the paid-tier multi-shard follow-on).
 
-`@stackbase/runtime-cloudflare` puts your whole backend inside **one Durable Object**. Unlike the
-Containers path (a stateless Worker in front of a heavyweight container), the DO *is* the backend:
-the same object owns the OCC writer, the DO-SQLite store, every hibernatable WebSocket, the
-subscription index, and the wake alarm. Because the writer and the subscription index are the same
-in-process object, a mutation's reactive fan-out is a plain function call in the same turn — no RPC
-hop between a transactor and a sync tier to reorder across. That's what makes the engine's shipped
-G1 (write-serialization) and G4 (origin-frontier) ordering guarantees hold **by construction** on
-this host, not as a special case.
+### 1. Install wrangler
 
-### Architecture in one picture
-
-```
-Client (HTTP / WebSocket)
-        │
-        ▼
-  Worker (stateless router — createWorkerHandler)
-        │  forwards every request/upgrade to one DO by name
-        ▼
-  StackbaseDurableObject
-    ├─ OCC writer (single-threaded — the DO's own concurrency model IS the mutex)
-    ├─ DoSqliteAdapter over ctx.storage.sql (DO-SQLite)
-    ├─ Hibernatable WebSockets (ctx.acceptWebSocket)
-    ├─ Subscription index (the union of every live socket's 16 KB attachment)
-    └─ Wake alarm (ctx.storage.setAlarm) → runtime.fireDueTimers()
+```bash
+npm i -D wrangler
 ```
 
-The Worker itself is stateless and holds no state at all — it exists only to terminate the
-HTTP/WebSocket connection and forward it to the Durable Object, addressed by a fixed name
-(`idFromName("default")`). This is a **single global DO in v1**: one object, not a sharded fleet.
-Placing many shard-DOs near their own regional audiences is a separate paid-tier package — see
-[Scaling](/docs/deploy/scaling#cloudflares-own-scale-out-axis).
+Authenticate locally with `wrangler login`, or in CI set `CLOUDFLARE_API_TOKEN` (and typically
+`CLOUDFLARE_ACCOUNT_ID`) as environment variables — never `wrangler login` in CI.
 
-### What you write by hand
-
-There is no `stackbase deploy --target cloudflare` and no scaffolding command that generates these
-files for you. You write two files yourself: a Worker/DO entrypoint and a `wrangler.jsonc`.
-
-**`worker.ts`** — imports your app statically (a Worker bundle can't scan a `convex/` directory at
-runtime the way `stackbase dev`/`stackbase serve` do on Node/Bun), subclasses
-`StackbaseDurableObject`, and exports the stateless router:
-
-```ts title="worker.ts"
-import * as messages from "./convex/messages";
-import schema from "./convex/schema";
-import {
-  StackbaseDurableObject,
-  createWorkerHandler,
-  type DurableObjectAppConfig,
-} from "@stackbase/runtime-cloudflare";
-import type { LoadedProject } from "@stackbase/cli/project";
-
-const loaded: LoadedProject = { schema, modules: { messages } };
-
-export class StackbaseDO extends StackbaseDurableObject {
-  protected appConfig(env: unknown): DurableObjectAppConfig {
-    const adminKey = (env as { STACKBASE_ADMIN_KEY?: string }).STACKBASE_ADMIN_KEY ?? "";
-    return { loaded, adminKey };
-  }
-}
-
-export default createWorkerHandler("STACKBASE_DO");
-```
-
-`appConfig(env)` is the one method a concrete DO subclass must implement. It returns:
-
-| Field | Required | What it's for |
-|---|---|---|
-| `loaded` | yes | The statically-bundled `{ schema, modules }` — the same shape `loadProject` consumes everywhere else. |
-| `adminKey` | yes | Read from `env`, gates `/_admin/*` and the storage capability-token signing key. The DO fails fast on an empty admin key. |
-| `components` | no | Composed `ComponentDefinition[]` (`@stackbase/scheduler`, `@stackbase/workflow`, `@stackbase/triggers`, `@stackbase/auth`, …), fixed at deploy time — adding/removing one needs a redeploy. |
-| `blobStore` | no | An R2-backed `BlobStore` for [file storage](#file-storage-r2) — omit it and `ctx.storage` is inert. |
-| `backstopMs` | no | Stretches driver-timer cadences (see [Scheduled work below](#scheduled-functions-crons-and-triggers)) so an idle DO isn't cold-woken every 30s by a default-cadence backstop sweep. |
-| `now` | no | An injected clock, for tests. |
-
-`createWorkerHandler(bindingName)` builds the stateless router; `bindingName` must match the
-`durable_objects.bindings[].name` you declare in `wrangler.jsonc` below.
-
-If you'd rather generate `worker.ts` than hand-write it, `@stackbase/runtime-cloudflare` exports the
-pure generator its own test suite and deploy rig use, `generateWorkerEntrySource` — call it yourself
-from a small build script (there's no CLI command wired to it yet):
-
-```ts
-import { generateWorkerEntrySource } from "@stackbase/runtime-cloudflare";
-import { writeFileSync } from "node:fs";
-
-writeFileSync(
-  "worker.ts",
-  generateWorkerEntrySource({
-    moduleImports: [{ key: "messages", absPath: "./convex/messages.ts" }],
-    schemaAbsPath: "./convex/schema.ts",
-    configAbsPath: "./stackbase.config.ts", // or null if you have none
-    bindingName: "STACKBASE_DO",
-    doClassName: "StackbaseDO",
-    // r2BindingName: "STORAGE_BUCKET", // set to enable file storage — see below
-  }),
-);
-```
-
-**`wrangler.jsonc`**:
+### 2. Write a `wrangler.jsonc`
 
 ```jsonc title="wrangler.jsonc"
 {
@@ -133,334 +39,187 @@ writeFileSync(
   "name": "my-app",
   "main": "worker.ts",
   "compatibility_date": "2024-11-27",
-  // node:crypto (the sync handler's drift/resume-fingerprint hashing) needs nodejs_compat.
+  // node:crypto (fingerprint/resume hashing) needs nodejs_compat.
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
   },
   "migrations": [
-    // DO-SQLite needs the SQLite-backed class migration tag — new_sqlite_classes, NOT new_classes.
-    // Without it ctx.storage.sql is unavailable.
+    // DO-SQLite needs the SQLite-backed class migration tag.
     { "tag": "v1", "new_sqlite_classes": ["StackbaseDO"] }
   ]
 }
 ```
 
-You need a `convex/` directory with committed `_generated/` — same requirement as `stackbase
-serve`, since nothing at Worker-deploy time runs codegen for you. Run `stackbase codegen` (or
-`stackbase dev` once, locally) before writing `worker.ts`'s imports.
+Your worker source needs only a few lines: `export class StackbaseDO extends
+StackbaseDurableObject { … }` plus `export default createWorkerHandler("STACKBASE_DO")`.
+`stackbase deploy` doesn't scaffold this file for you — it reconciles bindings into an existing
+`wrangler.jsonc`, additively, never dropping a field you hand-wrote.
 
-### Deploying
+You also need a `convex/` directory with committed `_generated/` — same requirement as
+`stackbase serve`; `stackbase deploy` refreshes codegen before packaging.
+
+### 3. Deploy
 
 ```bash
-npm i -D wrangler
-npx wrangler login                          # or CLOUDFLARE_API_TOKEN in CI — never `login` in CI
-npx wrangler secret put STACKBASE_ADMIN_KEY  # paste a strong secret — never commit it to wrangler.jsonc
-npx wrangler deploy
+stackbase deploy --target cloudflare --env production
 ```
 
-`wrangler deploy` prints the deployed URL (`https://<name>.<subdomain>.workers.dev` by default).
-`STACKBASE_ADMIN_KEY` is required — the DO fails fast on boot with an empty admin key, same
-fail-fast discipline as `stackbase serve`. Set it with `wrangler secret put`, never as a plaintext
-`vars` entry in a committed `wrangler.jsonc`.
+`stackbase deploy --target cloudflare`:
 
-Shipping a code change means editing `worker.ts`/your `convex/` functions and running `wrangler
-deploy` again — there is no live hot-swap on this path (unlike `stackbase serve --allow-deploy`;
-see [Deploy and build](/docs/deploy/deploy-and-build)). The component set, schema, and functions are
-all fixed at whatever you last deployed.
+- Checks/adds `durable_objects.bindings`, `migrations`, and `compatibility_flags` in
+  `wrangler.jsonc` if missing (byte-for-byte unchanged, comments included, if nothing was missing).
+- Shells out to `wrangler deploy`, passing `--env <name>` through when your config's
+  `environments.<name>` sets `wranglerEnv`.
+- Prints the deployed URL, parsed from wrangler's own output.
 
-### Pinning the DO's home region
+`--dry-run` runs preflight + packaging (validate wrangler, refresh codegen, reconcile
+`wrangler.jsonc`) and skips the actual `wrangler deploy` — useful for validating a PR. `--check`
+fails if your committed `convex/_generated/` has drifted from a fresh codegen run.
 
-A Durable Object is **single-homed**: it's created once, near whoever first reaches it, and never
-moves afterward. For most apps that's fine — but if you want to pin it deliberately (say, a
-US-centric app that doesn't want its one DO landing wherever the first CI health-check request came
-from), set `STACKBASE_DO_LOCATION_HINT` as a Worker environment variable to one of Cloudflare's 11
-region codes:
+Configure environments in `stackbase.config.ts`:
 
-```
-wnam enam sam weur eeur apac apac-ne apac-se oc afr me
-```
+```ts title="stackbase.config.ts"
+import { defineConfig, env } from "@stackbase/component";
 
-The Worker reads it per request and passes it to `namespace.get(id, { locationHint })` — but **only
-the first `get()`** for the DO's id is ever honored; every request after that reuses the
-already-pinned location regardless of the hint. An invalid hint (anything outside the 11 codes) is a
-loud `500` at the edge rather than being silently passed through, since a bad hint would otherwise
-mis-place the DO permanently. Leaving the variable unset is byte-identical to not passing a hint at
-all — Cloudflare's default first-requester placement.
-
-This pins **one** DO to **one** region. It is not geographic scale-out — placing many shard-DOs each
-near their own regional audience is the separate paid-tier multi-shard router (see
-[Scaling](/docs/deploy/scaling#cloudflares-own-scale-out-axis)).
-
-You can verify where your DO actually landed with the built-in diagnostic route:
-
-```
-GET /api/_whereami?shard=<k>&region=<hint>
+export default defineConfig({
+  deploy: {
+    targets: {
+      cloudflare: {
+        provider: "cloudflare",
+        environments: {
+          production: {},                      // wrangler deploy
+          staging: { wranglerEnv: "staging" },  // wrangler deploy --env staging
+        },
+      },
+    },
+  },
+});
 ```
 
-It fetches `https://workers.cloudflare.com/cdn-cgi/trace` **from inside the DO** and returns the
-resulting `colo` — because the request originates from the DO's own datacenter, this reveals the
-DO's true physical location independent of the calling client's latency, letting you confirm a
-`locationHint` actually took effect.
+### 4. Set the admin key as a secret
 
-### Scheduled functions, crons, and triggers
-
-This is the headline difference from the Containers path: **scheduled work fires here.** A
-`ctx.scheduler.runAfter(...)`, a `cronJobs()` entry, or a `@stackbase/triggers` cursor all register a
-due-time with the engine's internal driver multiplexer, which reduces every live timer down to one
-"next wake" instant and hands it to a `WakeHost`. On this host that's `DoAlarmWakeHost`, implemented
-directly over `ctx.storage.setAlarm` — the one durable alarm primitive a Durable Object offers. The
-DO's own `alarm()` handler calls `runtime.fireDueTimers()`, which fires whatever's due even though
-the DO was fully hibernated (no in-memory state, no running process) until the alarm woke it.
-
-This works because a **plain** Durable Object may override `alarm()` directly — the "never override
-`alarm()`" landmine that applies to `@cloudflare/containers` (which reserves the alarm for container
-lifecycle management) simply doesn't apply here. A DO-native host owns its alarm outright.
-
-If you compose drivers that fire frequently in dev but would cold-wake an otherwise-idle production
-DO too often, stretch their cadence with `backstopMs` in `appConfig`:
-
-```ts
-return {
-  loaded,
-  adminKey,
-  // Stretch every driver's backstop-sweep cadence to at least 15 minutes on Cloudflare, so an idle
-  // DO with composed drivers isn't cold-woken by a default (much shorter) backstop interval.
-  backstopMs: (defaultMs) => Math.max(defaultMs, 15 * 60_000),
-};
+```bash
+wrangler secret put STACKBASE_ADMIN_KEY
 ```
+
+`STACKBASE_ADMIN_KEY` is required — the DO fails fast on an empty admin key. `stackbase deploy`
+doesn't manage secrets; `wrangler secret put` is a one-time, out-of-band step, same as
+`CLOUDFLARE_API_TOKEN` itself never belonging in `wrangler.jsonc`.
 
 ### File storage (R2)
 
-If your app uses [file storage](/docs/core-concepts/file-storage), wire in an R2 bucket via
-`@stackbase/blobstore-r2` — the Workers-safe `BlobStore` implementation for this host. It uses no
-`node:fs`, `node:stream`, or `node:crypto`; bytes flow as `Uint8Array`/Web `ReadableStream`, and the
-content digest is computed with `crypto.subtle` (WebCrypto) rather than Node's `createHash`.
+If your app uses [file storage](/docs/core-concepts/file-storage), turn on an R2 binding:
 
-Add the `r2_buckets` binding to `wrangler.jsonc`:
-
-```jsonc
-"r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "my-app-storage" }]
+```ts
+cloudflare: {
+  provider: "cloudflare",
+  r2: true,
+  r2BucketName: "my-app-storage", // optional, defaults to "stackbase-storage"
+},
 ```
 
-Create the bucket once, out of band:
+`stackbase deploy --target cloudflare` reconciles an `r2_buckets` binding into `wrangler.jsonc`.
+Create the bucket once, out-of-band:
 
 ```bash
-npx wrangler r2 bucket create my-app-storage
+wrangler r2 bucket create my-app-storage
 ```
 
-Then construct an `R2BlobStore` over the binding and thread it as `blobStore` in `appConfig`:
+### Pinning the DO's region
 
-```ts title="worker.ts"
-import { R2BlobStore, type R2BucketLike } from "@stackbase/blobstore-r2";
+A Durable Object is single-homed and never moves once created — by default it lands near whoever
+first reaches it. Set `STACKBASE_DO_LOCATION_HINT` (one of the 11 Cloudflare region codes, e.g.
+`enam`) as a Worker environment variable to pin it explicitly. Only the *first* request after a
+fresh deploy honors the hint.
 
-export class StackbaseDO extends StackbaseDurableObject {
-  protected appConfig(env: unknown): DurableObjectAppConfig {
-    const adminKey = (env as { STACKBASE_ADMIN_KEY?: string }).STACKBASE_ADMIN_KEY ?? "";
-    const bucket = (env as { STORAGE_BUCKET?: R2BucketLike }).STORAGE_BUCKET;
-    return {
-      loaded,
-      adminKey,
-      ...(bucket ? { blobStore: new R2BlobStore({ bucket }) } : {}),
-    };
-  }
-}
+### What works
+
+| | |
+|---|---|
+| Reactive queries/mutations, WebSocket sync | Full support — writer and subscription index are the same in-process object, no RPC hop. |
+| Scheduled functions, crons, [triggers](/docs/components/triggers) | Work — the DO's own alarm wakes due timers through idle/hibernation. |
+| File storage | Supported via the R2 binding above. |
+| Scale | Single global DO in v1 — not a sharded fleet. See [Scaling](/docs/deploy/scaling) for the paid-tier multi-shard router. |
+
+## CI: GitHub Actions
+
+```yaml title=".github/workflows/deploy.yml"
+name: deploy
+on:
+  pull_request:
+  push: { branches: [main] }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: npm i -D wrangler
+      - if: github.event_name == 'pull_request'
+        run: bunx stackbase deploy --check --dry-run --target cloudflare
+      - if: github.ref == 'refs/heads/main'
+        run: bunx stackbase deploy --target cloudflare --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          STACKBASE_ADMIN_KEY: ${{ secrets.STACKBASE_ADMIN_KEY }}
 ```
 
-If you generate `worker.ts` via `generateWorkerEntrySource`, pass `r2BindingName: "STORAGE_BUCKET"`
-and this wiring is emitted for you. Omitting the binding degrades cleanly: `ctx.storage`'s writes are
-metadata-only calls with no byte-moving provider behind them, so a byte-less deployment is
-unaffected — the `_storage` system table always exists (so a schema referencing `Id<"_storage">`
-still compiles) but every upload/read becomes inert until R2 is wired in.
+Every target's preflight requires credentials up front and fails fast with an actionable error in
+non-interactive mode (`CI=true`) — it never prompts or hangs waiting on stdin.
 
-Because R2 has no presigned-PUT surface reachable from a Workers binding (presigning needs the S3
-API plus static credentials, not the binding), uploads on this path are always **proxied**: the
-client `POST`s bytes to the engine's own `/api/storage/upload` endpoint, and the DO's own `fetch`
-handler calls R2's `put` — never inline in the transactor turn, following the same rule every
-storage backend obeys. Downloads without a `signGetUrl` stream the R2 object's body straight back
-through the serve endpoint (no redirect), and `Range` requests are supported.
+## The alternative path: Cloudflare Containers (experimental)
 
-The orphan reaper (which reclaims an abandoned/deleted upload's bytes) rides the same wake-alarm
-seam as the scheduler — it's prepended to the DO's composed drivers automatically whenever a
-`blobStore` is present.
+If you specifically want the same portable `stackbase serve` image (SQLite/Postgres storage
+options) you'd run anywhere else, running inside a Cloudflare **Container** instead of a Durable
+Object, that's possible too — but it's hand-wired (no `stackbase deploy` integration) and has a
+correctness gap worth knowing before you pick it.
 
-### Auth and other components
+**Scheduled functions, crons, triggers, and the file-storage reaper do not fire.** Cloudflare stops
+the container ~5 seconds after the last request — the same mechanism that gives scale-to-zero. A
+cron set for 03:00 only runs if traffic happens to arrive at 03:00. Use this path only for a
+request-driven app that doesn't depend on any of those.
 
-Composed components — `@stackbase/auth` (including its OAuth callback routes), `@stackbase/scheduler`,
-`@stackbase/workflow`, `@stackbase/triggers` — work on this host the same way they do everywhere
-else. A component's reserved HTTP routes (e.g. an OAuth callback) are matched by the DO's dispatch
-ahead of the pure engine dispatcher, the same order the container path uses (storage routes, then
-component routes, then everything else). Pass composed components via `appConfig`'s `components`
-field, exactly as you would `stackbase.config.ts`'s `components` array elsewhere.
-
-### Known limits, honestly
-
-| Limit | Value |
-|---|---|
-| DO-SQLite storage | 10 GB per Durable Object (a hard `SQLITE_FULL` on write past it, surfaced as a typed `DatabaseFullError`) |
-| DO memory | 128 MB, billed flat regardless of actual usage |
-| Concurrency | Single-threaded — one request processed at a time (this *is* the OCC mutex, for free) |
-| Sustained write throughput | A soft ~200–500 writes/s ceiling for a write/storage-heavy single DO |
-| WebSocket attachment | 16 KB per socket, capped at `MAX_SUBSCRIPTIONS_PER_SOCKET` = 128 live subscriptions — a subscribe past the cap is a clean client-visible rejection (a `QueryFailed`), never a silent truncation |
-| Scale-out | Single global DO in v1 — sharding is the separate paid-tier `@stackbase/runtime-cloudflare-shard` package |
-
-The attachment stores each subscription's **definition** (`{udfPath, args, sinceTs?, resultHash?}`)
-— the recipe to re-derive its read set on revival — not the read set itself, which is what keeps 16
-KB realistic. On wake, every hibernated socket's session is eagerly reconstructed from its attachment
-before anything else is served, so a commit's reactive fan-out never silently misses a hibernated
-subscriber.
-
-### What doesn't apply here
-
-The transactor/sync split some larger reactive backends use (one DO for writes, another for
-sockets) isn't built on this path — deliberately: keeping writer and subscription index in the same
-object is what makes G1/G4 ordering hold without an RPC hop to reorder across. If a future multi-DO
-split ships, it stays additive to this same host, not a replacement.
-
-## Path B: Cloudflare Containers (experimental)
-
-If you specifically want to run the exact same portable `stackbase serve` image you'd run under
-Docker anywhere else — SQLite or Postgres storage options, the identical binary — inside a
-Cloudflare **Container**, that's the other path. It has a correctness gap worth understanding before
-you pick it.
-
-**Scheduled functions, crons, triggers, and the file-storage orphan reaper do not fire on this
-path.** Cloudflare stops a container roughly 5 seconds after its last request — the same mechanism
-that gives scale-to-zero economics. A `ctx.scheduler.runAfter(300_000, …)` call schedules work into a
-process that will not exist five seconds later; a cron set for 03:00 only runs if traffic happens to
-arrive at 03:00. This is invisible until it silently isn't happening — use this path only for a
-request-driven app that genuinely doesn't depend on any of those.
-
-### What it actually uses
-
-| Service | Role |
-|---|---|
-| Workers | A stateless router in front of the container |
-| Containers | Runs the shipped `stackbase serve` image |
-| Durable Objects | Automatic — the `Container` class *is* a DO under the hood; you don't write one yourself |
-| R2 | The object-store substrate — **the source of truth** |
-
-Not needed, despite what you might expect from a "database" mental model: D1, KV, Vectorize,
-Hyperdrive, Queues. Stackbase's storage seam is satisfied by R2 alone on this path.
-
-### Why R2 has to be the source of truth
-
-Container disk is **ephemeral** — a container that stops and restarts gets a fresh filesystem. That's
-survivable only when `serve` is pointed at an object store (`--object-store`/`STACKBASE_OBJECT_STORE`),
-where R2 holds the durable truth and any local SQLite is a disposable materialized cache that
-rehydrates from R2 on boot. A plain SQLite deployment (no `--object-store`) would silently lose all
-data on every container restart — `--object-store` is **not optional** on this path.
-
-### Requirements
-
-- **Workers Paid plan** (~$5/mo minimum) — Containers and Durable Objects have no free tier (R2 does).
-- An R2 bucket and an R2 API token (access key id + secret).
-- A `convex/` directory with **committed `_generated/`** — `stackbase serve` never runs codegen.
-- Docker able to build **`linux/amd64`** — Cloudflare Containers require this architecture. Building
-  natively on Apple Silicon gives you an arm64 image and a deploy that fails with an opaque `no match
-  for platform in manifest`. Cross-build explicitly:
-
-  ```bash
-  docker build --platform linux/amd64 -t my-app-backend .
-  ```
-
-### Baking the app in — no bind mounts
-
-Containers have no bind mounts, so the `docker-compose.yml` pattern of mounting `./convex` into a
-generic image (see [Self-hosting with Docker](/docs/deploy/self-hosting)) doesn't apply here. Your
-app must be baked into the image — the same immutable-image pattern that page documents as its
-alternative to bind-mounting:
+It uses Workers (a stateless router), Containers (running the shipped `stackbase serve` image),
+and R2 as the object-store substrate — R2 has to be the source of truth because container disk is
+ephemeral. Requirements: a Workers Paid plan (~$5/mo — Containers/DOs have no free tier), an R2
+bucket, and Docker able to build `linux/amd64` (cross-build explicitly on Apple Silicon:
+`docker build --platform linux/amd64`). Your app must be baked into the image (no bind mounts on
+Containers):
 
 ```dockerfile
 FROM stackbase:latest
 COPY ./convex /app/convex
 ```
 
-Rebuilding and redeploying that image is how you ship a change — there is no live hot-swap on this
-path either.
+Point `serve` at R2 with `--object-store` (`s3+https://<account-id>.r2.cloudflarestorage.com/<bucket>?region=auto&forcePathStyle=true`).
+Expect ~4.5s warm cold-starts (~7.3s cold) and writes that are structurally slower than a
+local-disk host, since every commit is an R2 CAS round trip.
 
-### Wiring it up
-
-Point `serve` at R2 with `--object-store` (or `STACKBASE_OBJECT_STORE`). R2's S3-compatible endpoint
-needs `region=auto` (R2 has no regions) and path-style addressing:
-
-```
-s3+https://<account-id>.r2.cloudflarestorage.com/<bucket>?region=auto&forcePathStyle=true
-```
-
-Credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or inline as
-`s3+https://<key>:<secret>@…`. Set them, plus the required `STACKBASE_ADMIN_KEY`, as container
-environment variables in `wrangler.jsonc` — keep the actual secret values in `wrangler secret put`,
-never committed in the file. The Worker forwards every request to the container; the container runs
-`serve` exactly as it would under Docker. Health is at `GET /api/health`, the dashboard at
-`/_dashboard`.
-
-### Behavior to expect
-
-| | |
-|---|---|
-| Scale to zero | The container stops ~5s after the last request — you aren't billed for an idle backend. |
-| Cold start | ~4.5s on a warm image, ~7.3s on the very first boot. The first request after idle pays this. |
-| Reads | Local to the container's materialized SQLite — fast. |
-| Writes | Structurally slower than a local-disk host: every commit is an R2 CAS round trip (**measured ~1500ms**, vs. **133ms** for the DO-native path's co-located write) — no configuration removes this, it's the definition of "object storage is the linearization point." |
-
-### Should you use this path?
-
-**Good fit:** a request-driven app that idles a lot, where scale-to-zero economics and Cloudflare's
-edge matter more than write latency, and cold starts are acceptable, and you specifically need the
-portable-image storage options (Postgres) the DO-native path doesn't offer.
-
-**Bad fit:** anything using scheduled functions, crons, triggers, or the storage reaper (none of them
-run); write-heavy workloads; anything needing predictable low-latency writes or no cold start. For
-those, prefer the [DO-native path](#path-a-the-durable-object-native-host) above, or
-[Docker self-hosting](/docs/deploy/self-hosting) off Cloudflare entirely.
+Choose this path only if scale-to-zero economics matter more than write latency and you don't need
+scheduled work — otherwise prefer the Durable-Object-native path above, or
+[Docker self-hosting](/docs/deploy/self-hosting) for a non-Cloudflare target.
 
 ## Moving data between hosts
 
-The DO-native path (per-object DO-SQLite) and the Containers path (R2 as one shared log) — and any
-non-Cloudflare host (plain SQLite or Postgres) — store data in genuinely different physical
-topologies. Data doesn't teleport between them; the same app **code** (schema + functions) runs
-unchanged on every one of them, but moving live **data** between deployments is an explicit,
-separate step: `stackbase migrate export`/`stackbase migrate import`.
+The two Cloudflare paths — and non-Cloudflare hosts — store data in different physical topologies;
+data doesn't teleport between them. Export a portable dump from one deployment and import it into
+another:
 
 ```bash
-# Pull the full current state of a running source deployment to a file.
 STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://source.example.com --out dump.json
-
-# Push that dump into a running target deployment (a fresh one).
 STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.com --in dump.json
 ```
 
-Both commands are plain HTTP clients against a running deployment's admin API — `GET
-/_admin/export` and `POST /_admin/import`, bearer-authenticated with `STACKBASE_ADMIN_KEY` (or
-`--admin-key`) — which is why one client tool works against either Cloudflare path, or any other
-host: the DO-native host and the container path both expose the same `/_admin/*` routes, and a DO
-can only be reached over HTTP in the first place. `--url`/`--out`/`--in` are the only flags; the
-admin key is read from `STACKBASE_ADMIN_KEY` or `--admin-key`.
-
-The dump is a JSON snapshot: every live document, every index row, and the table-number map — every
-Stackbase store shares the same logical MVCC-log shape, so the round trip reproduces your rows
-**exactly**, same `_id`s and `_creationTime`s.
-
-What to know before you run it:
-
-- **Deploy the matching schema on the target first.** Import refuses (rather than silently serving
-  rows under the wrong table) if the target's table numbers don't match the dump's — deploy the
-  *same* app to a fresh target before importing into it.
-- **Import targets a fresh deployment, not a merge.** Importing over divergent existing data is
-  unsupported.
-- **Single-shard only.** Multi-shard migration (either the Postgres fleet or the Cloudflare
-  multi-shard router) isn't built.
-- The dump is a point-in-time snapshot, not a live/streaming copy. Stop writes on the source (or
-  accept that anything written after the export isn't carried) for a clean cutover.
+Deploy the matching schema on the target first — import refuses if table numbers don't match the
+dump's. Import targets a fresh deployment, not a merge, and is single-shard only.
 
 ## Related
 
-- [Scaling](/docs/deploy/scaling) — the tiered model, and Cloudflare's own paid-tier multi-shard
-  scale-out axis (`@stackbase/runtime-cloudflare-shard`) for when a single global DO isn't enough.
-- [Deploy and build](/docs/deploy/deploy-and-build) — `stackbase deploy`'s live hot-swap onto a
-  running `serve`, and `stackbase build`'s single-binary compile — neither of which is Cloudflare.
-- [Self-hosting with Docker](/docs/deploy/self-hosting) — the non-Cloudflare portable-image baseline,
-  including the immutable-image pattern the Containers path's `Dockerfile` borrows from.
-- [File storage](/docs/core-concepts/file-storage) — the `ctx.storage` API both Cloudflare paths
-  serve, on top of a different `BlobStore` backend each.
+- [Deploy and build](/docs/deploy/deploy-and-build) — `stackbase deploy`'s `serve` target and
+  `stackbase build`, the other ways to ship a change.
+- [Scaling](/docs/deploy/scaling) — the paid-tier multi-shard Cloudflare router and the Postgres
+  fleet, for when a single node (DO or otherwise) isn't enough.
+- [Self-hosting with Docker](/docs/deploy/self-hosting) — the non-Cloudflare baseline.

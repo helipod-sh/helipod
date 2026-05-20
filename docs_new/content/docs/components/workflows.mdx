@@ -441,7 +441,10 @@ canceling a workflow is safe even while steps are actively in flight.
   *multiple* durable steps, with replay and (optionally) compensation. A one-shot job with no
   sequencing needs is unnecessary overhead as a workflow.
 - **No sub-workflows.** A workflow can't currently start and await another workflow as one of its
-  own steps.
+  own steps. (The `workflows` row does carry `onComplete`/`context` fields — a completion-callback
+  round-trip primitive the engine already uses internally for step dispatch — but they are not yet
+  exposed as options on `ctx.workflow.start`, so there's no public way to be notified when a run you
+  started finishes. Poll [`workflow:status`](#checking-status-the-live-workflowstatus-query) instead.)
 - **No replay-debugging UI.** There's no built-in tool to step through or visualize a run's journal
   beyond querying `workflow:status` and browsing the `workflows`/`steps`/`events` tables directly
   (e.g. via the dashboard's data browser).
