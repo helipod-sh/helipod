@@ -7,7 +7,7 @@
  * --dry-run). `--check` gates on codegen drift (does the committed _generated/ match a fresh run).
  */
 import { readdirSync, statSync, readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { transform } from "esbuild";
 import { writeGenerated } from "@stackbase/codegen";
@@ -123,7 +123,10 @@ function dirsEqual(a: string, b: string): boolean {
 export async function deployCommand(args: string[], deps: DeployDeps = {}): Promise<number> {
   const flags = parseDeployFlags(args);
   const cwd = deps.cwd ?? process.cwd();
-  const convexDir = join(cwd, flags.convexDir);
+  // `resolve` (not `join`): flags.convexDir may already be absolute (e.g. a caller passing a
+  // fixture path via --dir, or any future non-cwd-relative invocation) — join() would naively
+  // concatenate cwd + an absolute path into a bogus nested path instead of respecting it.
+  const convexDir = resolve(cwd, flags.convexDir);
   const config = await loadConfig(cwd);
 
   if (flags.check) {

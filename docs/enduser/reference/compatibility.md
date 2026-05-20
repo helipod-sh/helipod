@@ -103,7 +103,8 @@ All supported features work consistently across runtimes:
 |---------|--------|-------|
 | Bun | Production | Self-hosting and local dev. The primary runtime. |
 | Node.js | Production | Self-hosting (requires 22.5+, experimental flags) |
-| Cloudflare | Experimental | Not a Workers-native build — Cloudflare runs the shipped `stackbase serve` image on **Workers + Containers + R2**. Works, scales to zero, but **scheduled functions, crons, triggers, and the storage reaper do not fire** (the container stops between requests). See [Cloudflare](/deploy/cloudflare). |
+| Cloudflare (Durable-Object-native) | Built | `stackbase deploy --target cloudflare` provisions a Durable-Object-native host (`@stackbase/runtime-cloudflare`) — scheduled functions/crons/triggers DO fire, via the DO's own alarm. See [Cloudflare](/deploy/cloudflare). |
+| Cloudflare via Containers | Experimental | Not a Workers-native build — this alternative, hand-wired path runs the shipped `stackbase serve` image on **Workers + Containers + R2**. Works, scales to zero, but **scheduled functions, crons, triggers, and the storage reaper do not fire** (the container stops between requests). See [Cloudflare via Containers](/deploy/cloudflare-containers). |
 
 ---
 

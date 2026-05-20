@@ -50,6 +50,11 @@ Flags:
 - `--url <url>` — the target deployment's base URL (or set `STACKBASE_DEPLOY_URL`).
 - `--dir <convexDir>` — defaults to `convex`.
 
+> `--url` is the back-compat shorthand documented on this page — it resolves to the `serve` target
+> with an inline URL, no `stackbase.config.ts` needed. `stackbase deploy` also has a general
+> `--target <name> --env <name>` form (with `--dry-run`/`--check`) for deploying to other providers
+> (e.g. Cloudflare) or across named environments — see [Deploy Targets](/deploy/targets).
+
 `stackbase deploy`:
 
 1. Refreshes your local `convex/_generated/` (same codegen `stackbase dev`/`stackbase codegen`
@@ -112,5 +117,9 @@ whatever terminates TLS in front of it (nginx, Caddy, Traefik) — see
 ## Related
 
 - [Docker Self-Hosting](/self-hosting) — how to run the `serve` target this pushes to.
+- [Deploy Targets](/deploy/targets) — the multi-provider `--target`/`--env` seam (`serve` /
+  `cloudflare` / `docker`), the `deploy` block in `stackbase.config.ts`, and `--dry-run`/`--check`.
+- [Cloudflare](/deploy/cloudflare) — provisioning the Durable-Object-native target with `--target cloudflare`.
+- [GitHub Actions](/deploy/ci-github-actions) — a copy-paste CI workflow.
 - Data migrations, a rollback command, and multi-node deploys are not part of this slice — see the
   repo `CLAUDE.md` for what's shipped vs. deferred.
