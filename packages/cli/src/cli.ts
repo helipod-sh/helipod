@@ -123,7 +123,7 @@ function printHelp(): void {
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
       "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
-      "  deploy     Push convex/ to a running `serve --allow-deploy` and hot-swap it live",
+      "  deploy     Deploy the app: --target <serve|cloudflare|docker> --env <name> [--dry-run] [--check]",
       "  build      Compile the app to a self-contained executable (bun build --compile)",
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  migrate export --url <src> --out dump.json   Export app data to a portable dump",
@@ -134,6 +134,7 @@ function printHelp(): void {
       "  help       Show this help",
       "",
       "Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>",
+      "Deploy:  --target <name>  --env <name>  --dry-run  --check   (default target: serve; default env: production)",
       "",
     ].join("\n"),
   );

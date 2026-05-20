@@ -27,7 +27,8 @@ SQLite. Not everything below is built yet. Honest status:
 | **Actions**, scheduled functions / **crons**, `httpAction` + HTTP router | ✅ Built |
 | **File storage** (blob) — `ctx.storage`, fs + S3-compatible backends | ✅ Built |
 | Postgres storage adapter, **standalone binary** (`stackbase build`), `stackbase deploy` | ✅ Built |
-| **Cloudflare** deploy (Workers + Containers + R2) | ⚠️ Experimental — works, but scheduled functions/crons/triggers **do not fire**. See [Cloudflare](/deploy/cloudflare). |
+| **`stackbase deploy --target cloudflare`** (Durable-Object-native, `wrangler deploy`) | ✅ Built — see [Cloudflare](/deploy/cloudflare). |
+| Cloudflare via **Containers + R2** (hand-wired, portable `serve` image) | ⚠️ Experimental — works, but scheduled functions/crons/triggers **do not fire**. See [Cloudflare via Containers](/deploy/cloudflare-containers). |
 | **Auth** | 🟡 Partial — session core built; not fully documented here yet |
 | **Full-text & vector search** | 🚧 Planned (adapter seams reserved) |
 | **Desktop bundling** (Electron/Tauri/Electrobun) | 🚧 Planned — the [standalone binary](/deploy/standalone-binary) is the real path today |
@@ -73,7 +74,10 @@ The reactive core (Build + Local development) is real and runnable — see
 
 - [Self-Hosted](/deploy/self-hosted) — Docker, Railway, Fly.io. **The baseline deployment story.**
 - [Standalone Binary](/deploy/standalone-binary) — single-file builds for Linux/macOS/Windows.
-- [Cloudflare](/deploy/cloudflare) — Workers + Containers + R2. **Experimental**, with a scheduler gap.
+- [Deploy Targets](/deploy/targets) — the multi-provider `stackbase deploy --target/--env` seam.
+- [Cloudflare](/deploy/cloudflare) — `stackbase deploy --target cloudflare`, the Durable-Object-native host. Scheduler/crons/triggers work here.
+- [Cloudflare via Containers](/deploy/cloudflare-containers) — the alternative hand-wired path (portable `serve` image in a Container). **Experimental**, with a scheduler gap.
+- [GitHub Actions](/deploy/ci-github-actions) — a copy-paste CI deploy workflow.
 - [Scaling Blueprint](/deploy/scaling) — multi-region topology and sharding.
 - Desktop bundling: [Electron](/deploy/electron) · [Electrobun](/deploy/electrobun) · [Tauri](/deploy/tauri).
 

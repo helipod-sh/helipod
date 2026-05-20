@@ -8,8 +8,11 @@ title: Scaling Blueprint
 
 This page describes the target scaling architecture for Stackbase. It is a blueprint, not a guarantee that every piece is shipped as a turnkey feature yet. Use it to design deployments and glue code consistently across platforms.
 
-> **Not a Cloudflare page.** Cloudflare runs a single containerized node, not this topology — see
-> [Cloudflare](/deploy/cloudflare).
+> **Not a Cloudflare page.** Neither Cloudflare path is this topology — the Containers path runs a
+> single containerized node (see [Cloudflare via Containers](/deploy/cloudflare-containers)), and
+> the Durable-Object-native path (see [Cloudflare](/deploy/cloudflare)) is a single global DO, not
+> a sharded fleet, in the v1 `stackbase deploy --target cloudflare` (the paid-tier
+> `@stackbase/runtime-cloudflare-shard` router is the many-shard follow-on, not this).
 
 ## General pattern (platform agnostic)
 
@@ -107,13 +110,18 @@ environment surface.
 
 ## Cloudflare
 
-Cloudflare does **not** run a Workers-native or Durable-Object-native build of Stackbase, and there
-is no DO-based sync-shard/coordinator topology. Cloudflare runs the same shipped `stackbase serve`
-image every other target runs, inside **Containers**, with **R2** as the substrate — a single node,
-not a sharded fleet. Scaling knobs on this page do not apply to it.
+Cloudflare has two deployment paths, and neither is this page's topology.
 
-It is **experimental**, and scheduled functions/crons/triggers do not fire there. See
-[Cloudflare](/deploy/cloudflare) for what actually works, what it costs, and the gaps.
+`stackbase deploy --target cloudflare` provisions a **Durable-Object-native** host
+(`@stackbase/runtime-cloudflare`) — one DO owns the writer, DO-SQLite, and every WebSocket. It's a
+single global DO, not a sharded fleet; scaling knobs on this page don't apply. See
+[Cloudflare](/deploy/cloudflare).
+
+The alternative, hand-wired **Containers** path runs the same shipped `stackbase serve` image every
+other target runs, inside a Cloudflare Container, with R2 as the substrate — also a single node, not
+a sharded fleet, and **experimental**, with scheduled functions/crons/triggers not firing there. See
+[Cloudflare via Containers](/deploy/cloudflare-containers) for what actually works, what it costs,
+and the gaps.
 
 ## Fly.io (self-hosted, multi-region)
 

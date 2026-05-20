@@ -41,7 +41,7 @@ node stackbase dev    # Node
 ```
 
 Bun is the primary runtime. There is no Cloudflare dev mode — see
-[Cloudflare](/deploy/cloudflare) for what that (experimental) deployment path actually looks like.
+[Cloudflare via Containers](/deploy/cloudflare-containers) for what that (experimental) deployment path actually looks like — or [Cloudflare](/deploy/cloudflare) for the Durable-Object-native `stackbase deploy --target cloudflare` path.
 
 ### Node.js requirements
 

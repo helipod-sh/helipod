@@ -40,6 +40,7 @@
     "@stackbase/blobstore-s3": "workspace:*",
     "@stackbase/codegen": "workspace:*",
     "@stackbase/component": "workspace:*",
+    "@stackbase/deploy": "workspace:*",
     "@stackbase/docstore": "workspace:*",
     "@stackbase/docstore-postgres": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
