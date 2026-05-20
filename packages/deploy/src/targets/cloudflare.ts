@@ -32,7 +32,7 @@ export const cloudflareTarget: DeployTarget = {
     const parsed = JSON.parse(stripJsonc(raw)) as Record<string, unknown>;
     const r = reconcileWrangler(parsed, {
       needsR2: Boolean(ctx.target.settings.r2),
-      r2BucketName: ctx.target.settings.r2BucketName as string | undefined,
+      r2BucketName: ctx.target.settings.r2BucketName == null ? undefined : String(ctx.target.settings.r2BucketName),
     });
     if (r.changed) {
       // NOTE: reconcile rewrites as plain JSON (comments not preserved) — only happens when a binding
@@ -43,7 +43,7 @@ export const cloudflareTarget: DeployTarget = {
   },
   async push(ctx): Promise<DeployResult> {
     const args = ["deploy"];
-    const wranglerEnv = ctx.target.settings.wranglerEnv as string | undefined;
+    const wranglerEnv = ctx.target.settings.wranglerEnv == null ? undefined : String(ctx.target.settings.wranglerEnv);
     if (wranglerEnv) args.push("--env", wranglerEnv);
     const r = await ctx.spawn.run("wrangler", args, { cwd: ctx.cwd, stdio: "capture" });
     if (r.code !== 0) return { ok: false, error: `wrangler deploy failed: ${(r.stderr || r.stdout).trim()}` };
