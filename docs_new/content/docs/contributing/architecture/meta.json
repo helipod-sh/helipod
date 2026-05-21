@@ -1,0 +1,12 @@
+{
+  "title": "Architecture",
+  "pages": [
+    "system-design",
+    "storage",
+    "transactions",
+    "reactivity",
+    "query-engine",
+    "execution",
+    "runtimes"
+  ]
+}

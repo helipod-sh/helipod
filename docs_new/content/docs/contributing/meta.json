@@ -1,0 +1,13 @@
+{
+  "root": true,
+  "title": "Contributing",
+  "pages": [
+    "index",
+    "architecture",
+    "codebase",
+    "extending",
+    "---The project---",
+    "contributing-guide",
+    "licensing"
+  ]
+}

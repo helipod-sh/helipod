@@ -1,0 +1,8 @@
+{
+  "title": "Extending stackbase",
+  "pages": [
+    "custom-component",
+    "storage-adapter",
+    "providers"
+  ]
+}
