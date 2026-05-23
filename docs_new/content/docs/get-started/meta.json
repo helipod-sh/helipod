@@ -1,1 +1,10 @@
-{ "title": "Get Started", "pages": ["what-is-stackbase", "how-it-works", "quickstart", "tutorial"] }
+{
+  "title": "Get Started",
+  "pages": [
+    "what-is-stackbase",
+    "how-it-works",
+    "performance",
+    "quickstart",
+    "tutorial"
+  ]
+}
