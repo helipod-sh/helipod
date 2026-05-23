@@ -248,6 +248,13 @@ document's *old* encoded key against its *new* one, per index:
 - **Update**, and the key **changed**: tombstone the old key, add the new one.
 - **Update**, and the key is **byte-identical** to before: do nothing at all.
 
+```mermaid
+flowchart LR
+    U["update: old doc -> new doc"] --> C{"encoded key\nchanged?"}
+    C -->|"yes"| W["tombstone old key\n+ add new key"]
+    C -->|"no (byte-identical)"| N["no index write,\nno invalidation"]
+```
+
 That last case is a deliberate optimization, and it matters more than it
 looks. If you update a message's `text` field but the index is only on
 `author`, the author-index key hasn't moved — so no index write happens, and

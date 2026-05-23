@@ -174,6 +174,16 @@ Diffable query still has a re-run path available as its safety net (see
 next section) — this is a pure speed optimization layered on top of a
 mechanism that already works.
 
+The pieces of this pipeline live in a handful of small, purpose-built files
+in `packages/sync/src`: `classify.ts` does the classification above,
+`commit-differ.ts` derives the actual `Change[]` a commit implies for a
+diffable subscription straight from its before/after values, and `change.ts`
+holds the shared `Change` vocabulary and the one `applyChanges` function used
+on both the server and the client so the two sides can't drift on what a diff
+means. The interval-tree search itself (from the previous section) lives
+alongside the key-range encoding it operates over, in
+`index-key-codec/interval-index.ts`.
+
 ```mermaid
 flowchart TD
     S["Client subscribes"] --> C{"Classify the query's<br/>read shape"}
@@ -281,6 +291,10 @@ becoming everyone else's problem:
 - **Rate limiting** and a **subscription cap** — bound how many messages and
   how many live subscriptions one session can have, so one runaway or
   misbehaving client can't monopolize the server.
+- A **per-session lock serializing a session's operations** — subscribing,
+  unsubscribing, and reacting to a commit all run one at a time, in order, for
+  a given session, so a subscribe can't interleave with an in-flight notify
+  and see (or miss) a half-applied version bump.
 
 ## The transport seam: the same brain, three sockets
 

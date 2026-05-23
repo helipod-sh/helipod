@@ -31,11 +31,25 @@ Stackbase's answer is not to pick a lane. It makes both **the same system at two
 
 ```mermaid
 flowchart LR
-  A["Great DX -> in-process hot path"]
-  B["Lightweight -> one-binary Tier 0"]
-  C["Fastest realtime -> push + differential updates"]
-  D["Deploy anywhere -> narrow storage seam"]
-  E["Scalable -> tiered split"]
+  IP["In-process execution"]
+  SEAM["Narrow storage seam"]
+  TIER["Tiered split"]
+  PUSH["Push + differential updates"]
+
+  DX["Great developer experience"]
+  LIGHT["Lightweight"]
+  FAST["Fastest realtime"]
+  DEPLOY["Deploy anywhere"]
+  SCALE["Scalable"]
+
+  IP --> DX
+  IP --> LIGHT
+  IP --> FAST
+  PUSH --> FAST
+  SEAM --> DEPLOY
+  SEAM --> SCALE
+  TIER --> SCALE
+  TIER --> LIGHT
 ```
 
 Each goal above maps to one concrete mechanism. The rest of this page explains those five mechanisms.
@@ -95,7 +109,7 @@ flowchart LR
 
 - **Tier 0 — the default.** One executable: the transactor, executors, sync tier, and dashboard all run in the same process, over embedded SQLite. A client on the same machine talks to the engine over an in-memory loopback connection instead of a real network socket — there's no network hop at all. This is what makes `stackbase dev`, a self-contained Docker container, and a compiled single-file binary all possible.
 - **Tier 1 — same process, real database.** Identical to Tier 0 except the adapter underneath is Postgres instead of SQLite. Still one writer, still one process — this is usually the "we outgrew a single SQLite file" step, with no code changes.
-- **Tier 2 — split apart.** The executors become a stateless, horizontally-scaled pool. The transactor stays a single logical writer, but now *per shard* — write throughput scales by adding shards, not by weakening consistency. The sync tier becomes its own standalone service, so connection count and query-recompute load can scale independently of storage. Postgres gains read replicas.
+- **Tier 2 — split apart.** The executors become a stateless, horizontally-scaled pool. The transactor stays a single logical writer, but now *per shard* (a shard is just a slice of the data with its own single writer, so you add write capacity by adding slices instead of by weakening consistency) — write throughput scales by adding shards, not by weakening consistency. The sync tier becomes its own standalone service, so connection count and query-recompute load can scale independently of storage. Postgres gains read replicas (read-only copies that stay in sync with the writer, so read traffic can be spread across them instead of all hitting one database).
 
 The promise across all three: moving up a tier changes deployment configuration and which adapters are plugged in — **never** your query/mutation/action functions. That promise, not any single piece of tech, is the actual product.
 

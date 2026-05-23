@@ -132,8 +132,10 @@ You won't need all of these on day one, but here's what to reach for when you ne
 | `codegen` | Generates the typed `Doc`/`Id`/`api` your app code imports |
 | `client` | The framework-agnostic client, plus React hooks (`useQuery`, `useMutation`) |
 | `cli` | The `stackbase` command: `dev`, `serve`, `deploy`, `build`, `codegen` |
+| `deploy` | The pluggable `DeployTarget` seam (`serve`/`cloudflare`/`docker`) behind `stackbase deploy` |
 | `blobstore` + `storage` | The byte-storage seam and the always-on `ctx.storage` file API |
 | `admin` | The API the dashboard app talks to |
+| `receipts` | The Receipted Outbox's server-side TTL reaper — sweeps expired dedup rows off `DocStore` |
 
 If a name isn't in this table, it's either a leaf adapter (`docstore-postgres`, `blobstore-s3`, ...) whose job is obvious from its name, or test-only scaffolding (`test`).
 
@@ -149,7 +151,7 @@ Three packages — **fleet** (distributed Tier 2 scale-out), **objectstore-subst
 
 ## The tooling
 
-- **Bun workspaces** — Bun is both the package manager and the runtime. The workspace globs (`packages/*`, `components/*`, `ee/packages/*`, `apps/*`, `examples/*`) and a shared dependency **catalog** (pinned versions for things like `typescript` and `vitest`, so every package asks for the same version) both live in the root `package.json`. Internal cross-package dependencies use `workspace:*`, so they always resolve to the local source, not a published version.
+- **Bun workspaces** — Bun is both the package manager and the runtime. The workspace globs (`packages/*`, `components/*`, `ee/packages/*`, `apps/*`, `examples/*`, plus `benchmarks/convex-comparison` and `benchmarks/runner`) and a shared dependency **catalog** (pinned versions for things like `typescript` and `vitest`, so every package asks for the same version) both live in the root `package.json`. Internal cross-package dependencies use `workspace:*`, so they always resolve to the local source, not a published version.
 - **Turborepo** — `turbo.json` defines the task graph: `build`, `test`, `typecheck`, `lint`, `dev`. The key line is `"dependsOn": ["^build"]` on the `test` and `typecheck` tasks — the `^` means "build my dependencies first," which is what makes `bun run build` (and `bun run test`) run every package in the right order automatically, instead of you having to know the order yourself.
 - **vitest, run under Node** — even though Bun is the primary runtime, the test suite runs under Node via vitest. That means a test that only works with a Bun-specific API won't get caught by the normal `bun run test` — worth knowing if you're testing something Bun-only.
 

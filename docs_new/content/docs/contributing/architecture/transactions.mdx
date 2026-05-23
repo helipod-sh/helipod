@@ -11,7 +11,7 @@ If you haven't read `/docs/core-concepts/mutations` yet, start there for the dev
 
 ## The one trick: only one writer at a time, per shard
 
-Stackbase's engine is organized into **shards**. In the default single-binary setup there is exactly one shard, so for now just think of it as "the database." (Sharding is how Stackbase scales writes horizontally at Tier 2 — see `/docs/contributing/architecture/runtimes` — but everything on this page applies per-shard either way.)
+Stackbase's engine is organized into **shards**. In the default single-binary setup there is exactly one shard, so for now just think of it as "the database." (Sharding is how Stackbase scales writes horizontally at Tier 2 — see `/docs/contributing/architecture/runtimes` — but everything on this page applies per-shard either way.) The class that fans a commit out across multiple shards is `ShardedTransactor` (`packages/transactor/src/sharded-transactor.ts`) — it holds N independent `ShardWriter`s behind the same single `Transactor` interface `SingleWriterTransactor` implements, so callers don't need to know whether they're talking to one shard or many.
 
 Inside one shard, Stackbase makes a deliberate simplifying choice: **only one transaction is allowed to commit at a time.** A per-shard lock (`AsyncMutex`, in `packages/transactor/src/shard-writer.ts`) makes sure commits happen one after another, never in parallel. Alongside that lock sits a **monotonic clock** — an oracle that only ever hands out ever-increasing numbers ("timestamps"). Every committed transaction gets a timestamp strictly greater than every timestamp committed before it on that shard.
 

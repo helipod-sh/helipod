@@ -60,7 +60,7 @@ None of this requires a license key today, and none of it is expected to require
 
 Stackbase isn't a charity — it needs a way to fund ongoing development. The plan is deliberately sequenced: win adoption first with a genuinely complete free product, and only later — after real popularity, not on a fixed date — introduce a paid unlock for one specific thing: running stackbase's distributed, multi-node scale-out tier plus a bundle of enterprise features (things like SSO and audit logging).
 
-This is often called the **n8n / GitLab-EE model**: sell license keys, not compute. There's no managed cloud hosting business planned — you still deploy the paid tier on your own infrastructure, the same as everything else. The key unlocks a *capability*, not a *place to run it*.
+This is often called the **n8n / GitLab-EE model**: sell license keys, not compute. There's no managed cloud hosting business planned — you still deploy the paid tier on your own infrastructure, the same as everything else. The key unlocks a *capability*, not a *place to run it*: the rough shape is a signed key that's verified offline, at startup, with no network call back to stackbase — so a self-hosted or air-gapped deployment is never at the mercy of a phone-home check to keep running. (The mechanics are designed but not built — more on that in the caveats below.)
 
 ```mermaid
 flowchart LR
@@ -94,7 +94,7 @@ flowchart LR
     Free -.->|"license boundary"| Paid
 ```
 
-The `ee/` directory in the repository (short for "enterprise edition," the same convention GitLab popularized) is where this future paid code will live. It already exists today as a placeholder — packages like a distributed fleet coordinator are reserved there — but the paid gate itself isn't built or active yet. Nothing in `ee/` currently requires a license key to use.
+The `ee/` directory in the repository (short for "enterprise edition," the same convention GitLab popularized) is where this future paid code will live. It already exists today as a placeholder — for example `ee/packages/fleet`, the distributed multi-node coordination package for Tier 2 scale-out, is reserved there — but the paid gate itself isn't built or active yet. Nothing in `ee/` currently requires a license key to use.
 
 Code under `ee/` is **not** covered by FSL — it's under a separate commercial license from the start. This matters because FSL's two-year Apache conversion only applies to the FSL-licensed core. If the paid tier were also under FSL, it would automatically become free after two years too, which would defeat the entire point. Keeping `ee/` on its own, non-converting license from day one avoids that leak.
 

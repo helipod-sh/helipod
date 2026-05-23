@@ -138,6 +138,15 @@ returns whatever plain object should show up as `ctx.<name>`. That object's meth
 `cctx.db`, which behaves exactly like the `ctx.db` your own query/mutation code already uses, just
 scoped to your component's own tables.
 
+```ts title="packages/executor/src/executor.ts (shape)"
+interface ComponentContext {
+  readonly db: GuestDatabaseReader;
+  readonly identity: string | null;
+  readonly now: number; // fixed per OCC attempt, never wall-clock
+  readonly components: Record<string, unknown>; // facades built before this one
+}
+```
+
 By default `cctx.db` is **read-only**, even inside a mutation. That's deliberate: most facades (like
 `@stackbase/authz`'s permission checks) only ever need to read. If your facade needs to *write* —
 insert a job row, record a session — set `contextWrite: true` on your `ComponentDefinition`. With
@@ -169,6 +178,18 @@ touching a transaction directly:
 
 ```ts
 buildAction?: (api: ActionApi) => object;
+```
+
+`ActionApi` mirrors an action's own `ctx` — `runQuery`/`runMutation`/`runAction` (each a fresh,
+independent top-level call) plus the ambient `identity` — and deliberately has no `db`:
+
+```ts title="packages/executor/src/executor.ts (shape)"
+interface ActionApi {
+  runQuery<T>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runMutation<T>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  runAction<T>(ref: FunctionReference | string, args?: Record<string, unknown>): Promise<T>;
+  identity: string | null;
+}
 ```
 
 This is exactly the pattern `@stackbase/scheduler`'s `schedulerActionContext` and
@@ -207,7 +228,20 @@ gets to actually do things outside of any request:
   client request. This is how a driver actually dispatches work.
 - **`readLog({ afterTs, tables?, limit? })`** — reads committed changes from the underlying change
   log after a given timestamp. This is the seam a "react to every insert/update/delete on a table"
-  component (like `@stackbase/triggers`) is built on, described further below.
+  component (like `@stackbase/triggers`) is built on, described further below. Each returned change
+  in the batch looks like:
+
+  ```ts title="packages/component/src/define-component.ts (shape)"
+  interface LogChange {
+    table: string;                            // e.g. "messages"
+    id: string;
+    op: "insert" | "update" | "delete";
+    newDoc: JSONValue | null;                  // null for a delete
+    oldDoc: JSONValue | null;                  // null for an insert
+    ts: number;                                // commit timestamp of this revision
+    changeId: string;                          // "<table>:<id>:<ts>", stable across redelivery
+  }
+  ```
 - **`now()`** / **`backstopMs(defaultMs)`** — the driver's clock, and a hook for declaring "this timer
   is a pure fallback poll, not real work" (a long-lived host leaves it unchanged; a host where every
   wake costs a cold start can stretch it).
@@ -294,6 +328,22 @@ definition and again, defense-in-depth, when the project composes it:
 
 At compose time, two different components' routes for the same HTTP method are also rejected if
 their prefixes overlap at all, so which one wins is never a silent, declaration-order accident.
+
+```mermaid
+flowchart TD
+    P["pathPrefix"] --> R1{"Starts with\n/api/ or /_ ?"}
+    R1 -->|no| Rej["rejected"]
+    R1 -->|yes| R2{">= 2 path\nsegments?"}
+    R2 -->|no, e.g. /api/| Rej
+    R2 -->|yes| R3{"Equals / nests under /\nis ancestor of a built-in?"}
+    R3 -->|yes| Rej
+    R3 -->|no| R4{"Overlaps another\ncomponent's route,\nsame method?"}
+    R4 -->|yes| Rej
+    R4 -->|no| Ok["accepted"]
+```
+
+For example, `/api/widget/` (two segments, no overlap with `/api/run` etc.) passes; `/api/` alone
+fails rule 2, and `/api/storage/extra` fails rule 3 (it nests under the reserved `/api/storage/`).
 
 ## The lighter seams
 

@@ -119,7 +119,11 @@ store opens.
 **Writing.** There are three ways to write, because they solve slightly different problems:
 - `write(documents, indexUpdates, conflictStrategy)` is the low-level "insert these already-stamped
   rows" primitive — used when the caller (e.g. a replica applying someone else's committed rows)
-  already knows the exact `ts` each row belongs at.
+  already knows the exact `ts` each row belongs at. Its `conflictStrategy` (`"Error"` or
+  `"Overwrite"`) says what to do if a row at that exact `(table_id, internal_id, ts)` already
+  exists: `"Error"` refuses the write, while `"Overwrite"` replaces it in place — used by tooling
+  like the migration importer, which re-inserts documents at their real, already-known `ts` and
+  needs a second pass over the same rows to be a safe no-op rather than a duplicate-key failure.
 - `commitWrite(documents, indexUpdates)` is what an ordinary transaction commit calls. The
   documents and index updates arrive with `ts: 0n` as a placeholder, and **the store itself
   allocates the real commit timestamp, inside its own transaction**, before writing the rows. That
@@ -195,7 +199,8 @@ and indexes, so they commit atomically with the writes they're receipting. See
 
 Every commit needs a `ts` that's guaranteed to be strictly greater than every `ts` that came
 before it — that's what makes "newest revision with `ts <= readTimestamp`" a well-defined,
-stable answer. The component responsible for that is the `TimestampOracle`, one per store:
+stable answer. The component responsible for that is the `TimestampOracle`, one per store (one per
+shard at Tier 2's scaled-out deployments):
 
 - `getCurrentTimestamp()` — the latest timestamp allocated so far (which might still be an
   in-flight commit that hasn't landed yet).
@@ -264,6 +269,16 @@ tables — no matter how many logical tables or indexes your app defines. A logi
 `table_id` value that happens to appear in the `documents` rows; a logical index is just an
 `index_id` value in the `indexes` rows. Defining a new table or index is a **metadata operation** —
 allocate it a number, start writing rows tagged with that number — never a schema migration.
+
+```mermaid
+flowchart TD
+    Users["logical table: users<br/>table_id = 10001"] --> Documents["physical table: documents<br/>(table_id, internal_id, ts, prev_ts, value)"]
+    Messages["logical table: messages<br/>table_id = 10002"] --> Documents
+    Storage["logical table: _storage<br/>table_id = 20"] --> Documents
+```
+
+Every row above lives side by side in the very same physical table, distinguished only by the
+`table_id` column — there's no per-table SQL object for the engine to create, alter, or migrate.
 
 This is also why Stackbase never needs a migration step as your app's `schema.ts` evolves: there's
 no DDL to run in the first place. (Additive schema changes are still validated at deploy time — see

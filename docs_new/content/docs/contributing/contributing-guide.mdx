@@ -40,7 +40,8 @@ Walking through it:
   catches "wrong problem" mistakes before they cost a design doc.
 - **Spec (the approval gate).** Every build-order slice — see below — gets a written design
   spec under `docs/superpowers/specs/` **before any code is written**. A spec lays out the
-  problem, the design, and the trade-offs, and it needs to be **approved** before you move on.
+  problem, the design, and the trade-offs, and it needs to be **approved by the maintainer (your
+  human partner on the change)** before you move on — not just written down and assumed good.
   This is the one hard gate in the whole pipeline: no spec, no code.
 - **Plan.** The approved spec becomes a concrete implementation plan — the ordered steps a
   contributor (human or agent) will actually execute.
@@ -62,6 +63,15 @@ Stackbase isn't built feature-by-feature in a random order — it's built in **s
 a complete, working vertical: foundation (the reactive engine) first, then the dashboard, then
 auth, then file storage, then actions/scheduler/HTTP, then production deploy tooling, and so on.
 Distributed multi-node scale-out is deliberately last.
+
+```mermaid
+flowchart LR
+    A[Foundation] --> B[Dashboard]
+    B --> C[Auth]
+    C --> D["File storage"]
+    D --> E["Actions / scheduler / HTTP"]
+    E --> F["Deploy tooling"]
+```
 
 The rule that keeps this honest: **you don't start a later slice before the earlier one runs
 end-to-end.** A half-working foundation with a half-working auth layer bolted on top is worse

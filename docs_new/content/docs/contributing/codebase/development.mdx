@@ -35,6 +35,8 @@ cd stackbase
 bun install
 ```
 
+(`<your-fork-url>` is a placeholder — clone whichever fork/remote you're actually working from.)
+
 `bun install` reads the Bun workspace defined in the root `package.json` — every package under
 `packages/`, `components/`, `examples/`, `apps/`, and `ee/packages/` is one workspace, installed
 and linked together in a single pass.
@@ -75,7 +77,7 @@ Day to day, the loop looks like this:
 ```mermaid
 flowchart LR
     A["Edit source in packages/*"] --> B["bun run build"]
-    B --> C["bun run typecheck + test"]
+    B --> C["bun run typecheck + test + lint"]
     C --> D["stackbase dev on an example"]
     D --> A
     B -.->|"writes dist/ - the ONLY thing tests import"| C

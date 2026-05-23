@@ -67,6 +67,10 @@ export interface PushProvider {
   channel: "push";
   send(m: PushMessage): Promise<PushSendResult>; // no webhook — invalid tokens come back synchronously
 }
+
+export interface PushSendResult extends SendResult {
+  invalidTokens?: string[]; // dead device tokens to stop sending to, gathered before any throw
+}
 ```
 
 `SendResult` is just `{ providerMessageId?: string }` — an optional id you can use later to match
@@ -83,6 +87,11 @@ There's no status-code return value to check — the convention is a plain **thr
 - Throwing `new NotificationSendError(message, { retryable: false })` marks the failure as
   **permanent** (for example, a 4xx "bad recipient" response) — the driver dead-letters the message
   immediately instead of wasting retries on something that will never succeed.
+
+```ts
+// permanent failure — e.g. the vendor returned a 4xx "bad recipient" response
+throw new NotificationSendError("recipient rejected", { retryable: false });
+```
 
 This is the whole failure-signaling contract. You don't need to touch the retry queue, backoff
 schedule, or dead-letter table yourself — throwing the right kind of error is enough. The two
