@@ -1,8 +1,421 @@
 ---
 title: "Build a custom component"
-description: "Author your own @stackbase/* component with defineComponent."
+description: "Author your own @stackbase/*-style component with defineComponent — schema, facade, driver, boot, and HTTP routes."
 ---
 
-How to build a component like @stackbase/auth: the ComponentDefinition seams — schema, context, modules, driver, boot, and httpRoutes.
+{/* diataxis: how-to */}
 
-> **Stub — content coming next.** This page is part of the Contributing tab scaffold; its real content will be written from the engine source and the internal `docs/dev/` architecture notes.
+This is a how-to for building your **own** component — a package shaped like `@stackbase/scheduler`
+or `@stackbase/auth` that a project opts into from its `stackbase.config.ts`. If you just want to
+understand what a component *is* as a concept, read [Components](/docs/components/overview) first —
+this page assumes that context and focuses on the mechanics of authoring one.
+
+## What a component is
+
+Think of a component as a **self-contained mini-backend** that plugs into the engine. It can bring:
+
+- its own database tables (namespaced so they never collide with your app's tables or another
+  component's),
+- its own query/mutation/action functions,
+- an optional `ctx.<name>` object that every function in the project gets to call (a "facade"),
+- an optional background loop that runs even when nobody's making a request,
+- an optional one-time startup step,
+- and optional HTTP routes at reserved paths.
+
+Every piece is optional except a name, a schema, and a set of functions — a component can be as
+small as "a couple of tables and a background loop" (`@stackbase/triggers`) or as full-featured as
+"tables, a facade, an action-mode facade, HTTP routes, and a boot step" (`@stackbase/auth`). The six
+components that ship today — scheduler, triggers, auth, authz, workflow, notifications — are not
+special-cased by the engine in any way. They're built on exactly the seam described on this page, so
+they double as the best reference material for building your own.
+
+A component is **opt-in per project**: it does nothing until a project lists it in its
+`stackbase.config.ts`. Nothing is auto-installed, and nothing about the engine itself needs to
+change to add a new component to the ecosystem.
+
+## The entry point: `defineComponent`
+
+A component package exports one factory function (`defineScheduler()`, `defineAuth(opts)`, or — for
+yours — something like `defineMyThing(opts)`) that builds a plain object and hands it to
+`defineComponent`:
+
+```ts title="packages/component/src/define-component.ts (shape)"
+function defineComponent(def: ComponentDefinition): ComponentDefinition
+```
+
+`defineComponent` doesn't do anything clever — it validates `def` and returns it unchanged. Nothing
+runs yet; the object is just data. The validation it performs is exactly the set of footguns that are
+easy to hit and painful to debug later, caught here instead:
+
+- **Name rules.** `def.name` must be non-empty, match `^[a-zA-Z][a-zA-Z0-9_]*$` (letters, digits,
+  underscores only — no `/` or `:`, since those are the namespace separators the compose step uses),
+  and can't be `"app"` (reserved for your own project code) or start with `_` (reserved for
+  internal/non-user-callable paths).
+- **`contextType` needs `context`.** Declaring a TypeScript type for `ctx.<name>` without actually
+  providing the function that builds it is rejected — a typed-but-undefined facade is a worse
+  failure than no type at all.
+- **HTTP route sanity.** Every entry in `def.httpRoutes` is checked against the same
+  `assertValidComponentRoutePrefix` guard described under [`httpRoutes`](#seam-6-httproutes) below,
+  and each route's `handler` must actually name an `httpAction` in `def.modules`.
+
+If your factory function calls `defineComponent` and none of these throw, your component is
+structurally sound — the rest of this page is about what to put into each field.
+
+### The shape, at a glance
+
+```mermaid
+flowchart LR
+    D["defineComponent(def)"]
+    D -->|schema| T["namespaced tables\ne.g. scheduler/jobs"]
+    D -->|modules| F["functions\ne.g. scheduler:_claim"]
+    D -->|"context / buildAction"| C["ctx.&lt;name&gt;\nin every function"]
+    D -->|driver| L["recurring background loop"]
+    D -->|boot| S["one-time startup step"]
+    D -->|httpRoutes| H["reserved /api or /_ routes"]
+```
+
+Each arrow is a separate, independent seam — a component can use one, several, or (rarely) all of
+them. The rest of this page walks each one in the order you'll likely reach for them.
+
+## Seam 1: `schema` — your own namespaced tables
+
+```ts
+interface ComponentDefinition {
+  schema: SchemaDefinition;
+  // ...
+}
+```
+
+This is an ordinary `SchemaDefinition`, defined exactly the way you'd define tables in an app's own
+`schema.ts` (see [Schema & tables](/docs/core-concepts/schema-and-tables)). The only thing that's
+different is what happens at compose time: every table you declare gets namespaced under your
+component's name. If your component is named `"widget"` and you declare a table called `items`, the
+actual table on disk is `widget/items` — so an app that also happens to have its own `items` table,
+or another composed component that also calls a table `items`, can never collide with yours.
+
+Table numbers are allocated once, in composed order, by `composeTables`
+(`packages/component/src/compose.ts`). Declaring the same full table name twice (a bug, not a
+feature) is a compose-time error, never a silent overwrite.
+
+## Seam 2: `modules` — your component's own functions
+
+```ts
+interface ComponentDefinition {
+  modules: Record<string, RegisteredFunction>;
+  // ...
+}
+```
+
+`modules` is a map of query/mutation/action/httpAction functions, just like the functions your app
+registers in its own files — except these are namespaced with `:` instead of `/`. A `tick` mutation
+in a component named `scheduler` becomes reachable at the path `scheduler:tick`.
+
+The convention every built-in component follows: prefix a function name with `_` when it's an
+internal implementation detail that only your own driver or facade should call — never something an
+app or a client is meant to invoke directly. `@stackbase/scheduler`'s own dispatch loop, for example,
+calls three internal mutations in sequence: `_peekDue`, `_claim`, and `_complete`. None of those are
+meant to be called from application code; they exist purely so the driver (seam 4, below) has
+something to run.
+
+## Seam 3: `context` / `buildAction` — the facade users actually touch
+
+This is the seam that puts `ctx.scheduler`, `ctx.auth`, or (for your component) `ctx.widget` into
+every query, mutation, and action in the project.
+
+```ts
+interface ComponentDefinition {
+  context?: (cctx: ComponentContext) => object;
+  contextType?: { import: string; type: string };
+  contextWrite?: boolean;
+  buildAction?: (api: ActionApi) => object;
+  serverExports?: string[];
+}
+```
+
+`context` is a function that's handed a `ComponentContext` — your component's own namespaced view of
+the current transaction (its own tables, a fixed `now()`, and a `functionKind` resolver) — and
+returns whatever plain object should show up as `ctx.<name>`. That object's methods can read through
+`cctx.db`, which behaves exactly like the `ctx.db` your own query/mutation code already uses, just
+scoped to your component's own tables.
+
+By default `cctx.db` is **read-only**, even inside a mutation. That's deliberate: most facades (like
+`@stackbase/authz`'s permission checks) only ever need to read. If your facade needs to *write* —
+insert a job row, record a session — set `contextWrite: true` on your `ComponentDefinition`. With
+that flag, `cctx.db` becomes writable during a mutation call (still read-only during a query, since
+queries never write at all). This is the single most important detail for a facade that does real
+work, so it's worth restating: **a write your facade makes runs inside the calling mutation's own
+transaction.** It commits or rolls back together with everything else that mutation does, and once
+it commits, it fans out to reactive subscriptions exactly like any other write — nothing special has
+to happen for `ctx.scheduler.runAfter(...)`'s side effect to show up live in a subscribed query.
+
+`contextType` and `serverExports` are purely for codegen, not runtime behavior:
+
+- `contextType: { import, type }` tells `stackbase codegen` which package and type name to import so
+  it can type `ctx.<name>` correctly in the generated `_generated/server.ts`. Declaring `contextType`
+  without `context` is rejected by `defineComponent` (see above) — the two must travel together.
+- `serverExports: string[]` lets you re-export a helper alongside `query`/`mutation`/`action` from
+  `_generated/server.ts`, sourced from the same `contextType.import` path. `@stackbase/scheduler`
+  sets `serverExports: ["cronJobs"]` so an app's `crons.ts` can write
+  `` import { cronJobs } from "./_generated/server" `` without a separate import from
+  `@stackbase/scheduler` itself.
+
+### Actions need a second implementation: `buildAction`
+
+Actions run *outside* the transaction (see [Actions](/docs/core-concepts/actions)) — there's no
+`ctx.db` at all inside one. So if you want `ctx.widget` to also work from inside an action, you need
+a second builder with the **same method signatures** as `context`'s object, but implemented by
+calling your own component's internal mutations through `api.runMutation`/`api.runQuery` instead of
+touching a transaction directly:
+
+```ts
+buildAction?: (api: ActionApi) => object;
+```
+
+This is exactly the pattern `@stackbase/scheduler`'s `schedulerActionContext` and
+`@stackbase/workflow`'s `workflowActionContext` both use — an action-mode facade delegates to an
+internal (`_`-prefixed) mutation that does the real work in its own fresh transaction. The payoff:
+`ctx.scheduler.runAfter(...)` reads identically whether the code calling it is a mutation or an
+action, even though two different objects are actually behind `ctx.scheduler` depending on which one
+you're in.
+
+## Seam 4: `driver` — the recurring background loop
+
+Most of the interesting components need to do work that isn't triggered by any single request —
+running a job whose time has come, retrying a failed delivery, sweeping for something stuck. That's
+what `driver` is for:
+
+```ts
+interface Driver {
+  name: string;
+  start(ctx: DriverContext): void | Promise<void>;
+  stop?(): void | Promise<void>;
+}
+```
+
+`start` is called exactly once, after the project boots. `DriverContext` is the toolbox your driver
+gets to actually do things outside of any request:
+
+- **`onCommit(cb)`** — a callback that fires on *every* commit anywhere in the running project, with
+  the list of tables/ranges it touched. This is how a driver reacts to writes instantly instead of
+  polling — a driver typically filters this down to "did this commit touch one of MY tables?"
+- **`setTimer(atMs, cb)` / `clearTimer(handle)`** — arms a wake at an absolute wall-clock instant
+  (never a relative delay — see the seam's own doc comment in
+  `packages/component/src/define-component.ts` for why absolute-only avoids clock-skew bugs on
+  restart). Every driver's timers collapse down to a single pending wake under the hood, so a host
+  only ever needs to implement one alarm.
+- **`runFunction(path, args)`** — runs one of your registered functions, privileged, outside of any
+  client request. This is how a driver actually dispatches work.
+- **`readLog({ afterTs, tables?, limit? })`** — reads committed changes from the underlying change
+  log after a given timestamp. This is the seam a "react to every insert/update/delete on a table"
+  component (like `@stackbase/triggers`) is built on, described further below.
+- **`now()`** / **`backstopMs(defaultMs)`** — the driver's clock, and a hook for declaring "this timer
+  is a pure fallback poll, not real work" (a long-lived host leaves it unchanged; a host where every
+  wake costs a cold start can stretch it).
+
+### Walking through it: the scheduler end to end
+
+The clearest way to see why the driver seam exists is to follow one `ctx.scheduler.runAfter(...)`
+call all the way through:
+
+```mermaid
+sequenceDiagram
+    participant M as Your mutation
+    participant Tx as Transaction
+    participant Fan as Commit fan-out
+    participant Drv as schedulerDriver
+    participant Sub as Live subscription
+
+    M->>Tx: ctx.scheduler.runAfter(...)
+    Tx->>Tx: insert a jobs row (same transaction)
+    Tx->>Fan: commit
+    Fan->>Drv: wake (onCommit)
+    Drv->>Drv: claim the due job, runFunction runs it
+    Drv->>Sub: the job's own write fans out reactively
+```
+
+The insert that `ctx.scheduler.runAfter` makes happens **inside your mutation's own transaction** —
+that's the `contextWrite: true` facade seam from above. Once that transaction commits, the commit
+fan-out wakes the scheduler's driver (it's watching for any commit touching its own `scheduler/*`
+tables). The driver claims the now-due job and calls `runFunction` on whatever function path you
+scheduled. That function is an ordinary mutation — its own writes commit as their own transaction,
+and fan out to any subscription watching that data exactly like any other write would.
+
+No polling loop is scanning a `jobs` table on an interval anywhere in this picture — the whole path
+is either "woken by a commit" or "woken by a wall-clock timer armed to the next due timestamp."
+
+### A simpler driver: `@stackbase/triggers`
+
+Not every driver needs a writable facade. `@stackbase/triggers` has no `context` at all — you
+configure it declaratively (`{ table: { handler } }` in `stackbase.config.ts`), and its driver is
+just a cursor walking forward through `readLog`, calling your handler function with batches of
+changes as it goes, advancing its own cursor once your handler returns successfully. It's a good
+second reference alongside the scheduler: same `driver` seam, no facade, no HTTP routes — proof that
+you don't need every seam to build something useful.
+
+## Seam 5: `boot` — one-time startup work
+
+```ts
+boot?: (ctx: BootContext) => Promise<void>;
+```
+
+`boot` runs once per process start, before your driver's `start` is called and before the project
+starts serving requests. `BootContext` gives it `{ db, now }` — a writer scoped to your component's
+own boot-time transaction, and a clock. This is for reconciling some piece of config into a table:
+`@stackbase/scheduler` uses it to read an app's declared `cronJobs()` schedule and write matching
+rows into its `crons` table (`reconcileCrons`) so the driver has something concrete to dispatch
+against, rather than re-parsing the config file on every tick.
+
+## Seam 6: `httpRoutes` — reserved endpoints
+
+```ts
+interface ComponentHttpRoute {
+  method: string;
+  pathPrefix: string;
+  handler: string; // a bare httpAction name in this component's own `modules`
+}
+```
+
+If your component needs a raw HTTP endpoint — an OAuth callback, a delivery-provider webhook — you
+declare it here instead of asking app authors to wire it into their own `http.ts`. `handler` names an
+`httpAction` inside your own `modules` (see [Actions](/docs/core-concepts/actions) for what an
+`httpAction` is).
+
+Three rules keep this from ever becoming a foot-gun, enforced both when `defineComponent` builds your
+definition and again, defense-in-depth, when the project composes it:
+
+1. **Must live under a reserved namespace** — `pathPrefix` has to start with `/api/` or `/_`. Your
+   users' own `http.ts` mounts everywhere else, so a component route can never collide with an app
+   route.
+2. **Must have at least two path segments** — `/api/widget/` is fine; `/api/` or `/_` alone is
+   rejected outright, so a careless component can't accidentally shadow an entire reserved namespace.
+3. **Must not collide with a built-in engine prefix** (`/api/run`, `/api/health`, `/api/sync`,
+   `/api/storage/`, `/_admin/`, `/_fleet/`, `/_dashboard`), checked in both directions — your prefix
+   can't equal, nest under, *or* sit as an ancestor of one of these.
+
+At compose time, two different components' routes for the same HTTP method are also rejected if
+their prefixes overlap at all, so which one wins is never a silent, declaration-order accident.
+
+## The lighter seams
+
+A few more fields round out `ComponentDefinition`, each smaller than the six above:
+
+- **`requires: string[]`** — names other components yours needs composed alongside it.
+  `@stackbase/workflow` declares `requires: ["scheduler"]` because it dispatches its steps through
+  the scheduler's job queue. The project composing your component gets a clear compose-time error
+  (`component "widget" requires "scheduler", which is not enabled`) instead of a confusing runtime
+  failure the first time your facade is touched.
+- **`config: Validator<unknown>`** — a validator for whatever options your `defineWidget(opts)`
+  factory accepts, if you want them validated the same way document fields are.
+- **`grants: Record<string, { read?: string[]; write?: string[] }>`** — declares what your component
+  touches on other tables, for tooling/introspection purposes.
+- **`policies` / `policyContext`** — how a component like `@stackbase/authz` attaches row-level
+  read/write rules to an app's own tables, and contributes fields (like the caller's identity) into
+  every policy's evaluation context. Most components never touch this pair at all.
+
+## Worked example: `@stackbase/scheduler`
+
+Here's every seam wired up at once, from `defineScheduler()` in
+`components/scheduler/src/index.ts`:
+
+```ts title="components/scheduler/src/index.ts (trimmed)"
+export function defineScheduler(opts?: { crons?: CronJobs }): ComponentDefinition {
+  return defineComponent({
+    name: "scheduler",
+    schema: schedulerSchema,                              // seam 1
+    modules: { _peekDue, _claim, _complete, _reclaim, _cronTick, _enqueue, _cancel }, // seam 2
+    context: (cctx) => schedulerContext(cctx),             // seam 3
+    contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" },
+    serverExports: ["cronJobs"],
+    contextWrite: true,                                    // seam 3, writable
+    driver: schedulerDriver(),                              // seam 4
+    boot: (ctx) => reconcileCrons(ctx, opts?.crons),        // seam 5
+    buildAction: (api) => schedulerActionContext(api),      // seam 3, action-mode twin
+  });
+}
+```
+
+Reading straight down that object is the whole component: `jobs`/`job_args`/`crons` tables namespaced
+under `scheduler/`; a handful of `_`-prefixed internal mutations only the driver calls; a writable
+`ctx.scheduler` facade (`runAfter`/`runAt`/`cancel`); a driver that's reactive on any
+`scheduler/*` commit plus a wall-clock timer to the next due job; a boot step that reconciles an
+app's `crons.ts` into the `crons` table once; and an action-mode twin so `ctx.scheduler` works
+identically from a mutation or an action.
+
+The facade itself (`components/scheduler/src/facade.ts`) is a good template for the transactional
+write pattern from seam 3 — `runAfter` boils down to one insert:
+
+```ts title="components/scheduler/src/facade.ts (shape)"
+async runAfter(delayMs, fnRef, args) {
+  return enqueueInternal(db, now, FACADE_TABLES, fnRef, args, {
+    runAt: now() + Math.max(0, delayMs),
+  }, kindOf);
+}
+```
+
+`enqueueInternal` just does a `db.insert` into the (namespaced) `jobs`/`job_args` tables — nothing
+more exotic than that. Everything after "the row is inserted" — the driver waking up, claiming it,
+running it, and that job's own write fanning out reactively — is the sequence diagram from seam 4,
+above.
+
+## Composing your component into a project
+
+Once your `defineWidget(opts)` factory exists, a project uses it exactly like a built-in component —
+by listing it in `stackbase.config.ts`:
+
+```ts title="stackbase.config.ts"
+import { defineConfig } from "@stackbase/component";
+import { defineScheduler } from "@stackbase/scheduler";
+import { defineWidget } from "@my-org/stackbase-widget";
+
+export default defineConfig({
+  components: [defineScheduler(), defineWidget({ /* your options */ })],
+});
+```
+
+(This mirrors `examples/auth-demo/stackbase.config.ts`, which composes `auth`, `scheduler`, and
+`workflow` together as its own reference pattern.)
+
+```mermaid
+flowchart TD
+    Cfg["stackbase.config.ts\ndefineConfig({ components: [...] })"]
+    Cfg --> Compose["composeComponents"]
+    Compose --> NS["namespace tables + modules\nper component"]
+    Compose --> Collect["collect drivers, boot steps,\nhttpRoutes"]
+    NS --> Rt["wired into the runtime at boot"]
+    Collect --> Rt
+```
+
+The CLI runs `composeComponents` (`packages/component/src/compose.ts`) once, at boot: it namespaces
+every component's tables and modules, topologically orders components by their `requires` edges,
+and collects every driver/boot-step/HTTP-route into the flat lists the runtime actually wires up.
+
+This composed set is **fixed at boot**. Adding or removing a component from `stackbase.config.ts`
+needs a restart (`stackbase serve` again, or a fresh `stackbase build`) — there's no live
+"activate this component" call. That's a deliberate, narrower boundary than `stackbase deploy`'s
+live hot-swap of your app's own functions and additive schema changes; see
+[Deploy & build](/docs/deploy/deploy-and-build) for exactly where that line is drawn.
+
+## Checklist for building your own
+
+1. Pick a `name` (letters/digits/underscores, not `"app"`, not `_`-prefixed).
+2. Declare your `schema` — your tables will be namespaced under `<name>/` automatically.
+3. Write your `modules` — prefix anything internal-only with `_`.
+4. If you want `ctx.<name>`, write `context` (and `contextType` for codegen); set
+   `contextWrite: true` if it needs to write. Add `buildAction` if it should also work from actions.
+5. If you need background work, write a `driver` — react to `onCommit`, arm `setTimer` for
+   time-based work, or walk `readLog` for a change-feed style component.
+6. If you need startup reconciliation, write `boot`.
+7. If you need a raw endpoint, add an entry to `httpRoutes` under a `/api/<name>/` prefix.
+8. Wrap it all in `defineComponent({...})` inside your own `defineWidget(opts)` factory, and export
+   that factory as your package's public API.
+
+## Where to go next
+
+- [Components](/docs/components/overview) — the conceptual overview, composition rules, and the
+  table of everything shipped today.
+- [Reactivity & sync](/docs/contributing/architecture/reactivity) — how a committed write actually
+  finds and updates a live subscription, which is what makes a facade's write "just work" reactively.
+- [Custom storage adapter](/docs/contributing/extending/storage-adapter) — the other major extension
+  seam, for backing the engine with a different database entirely.
+- [Scheduling](/docs/components/scheduling) and [Triggers](/docs/components/triggers) — the two
+  components this page walks through in the most depth, from the product-docs side.

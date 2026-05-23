@@ -1,8 +1,119 @@
 ---
 title: "Licensing & the ee/ split"
-description: "FSL-1.1-Apache-2.0, and where the paid tier lives."
+description: "Why stackbase uses FSL-1.1-Apache-2.0, what's free forever, and how the paid ee/ tier works."
 ---
 
-The license (FSL-1.1-Apache-2.0), why it was chosen, the free-forever single-node guarantee, and the ee/ area for scale-out features.
+{/* diataxis: explanation */}
 
-> **Stub — content coming next.** This page is part of the Contributing tab scaffold; its real content will be written from the engine source and the internal `docs/dev/` architecture notes.
+If you're evaluating stackbase for a real project, the first question is usually: "what am I actually allowed to do with this, and will that change later?" This page answers both, plainly.
+
+The short version: everything you need to build and run a real application is free, forever, including self-hosting at scale on your own infrastructure. The one thing you can't do is take stackbase and resell it as your own competing hosted service. That's it.
+
+## The license in plain language
+
+Stackbase ships under the **Functional Source License (FSL-1.1-Apache-2.0)**. You can find the full text in the repository's `LICENSE` file. Here's what it means without the legalese:
+
+- **Free to use.** Run stackbase in your product, your company, your side project — no cost, no approval needed.
+- **Free to self-host.** Deploy it on your own server, your own cloud account, or an air-gapped box with no internet access at all.
+- **Free to modify.** Fork it, patch it, read every line — it's all open source.
+- **One restriction:** you may not take stackbase and offer it back out as a competing hosted product or service (for example, "Stackbase Cloud, run by someone who isn't us"). That's the only thing FSL forbids.
+- **It expires — in your favor.** Two years after each release, that one restriction automatically lifts and the release converts to the plain, fully permissive Apache 2.0 license. Nothing you use today stays FSL-restricted forever.
+
+If this sounds familiar, it should: it's the same license [Convex](https://convex.dev) uses. It's a well-understood, developer-friendly middle ground — not an exotic legal experiment.
+
+```mermaid
+flowchart LR
+    A["You use stackbase\nself-host, modify, run in prod"] -->|allowed| B["Permitted"]
+    C["You resell stackbase\nas a competing hosted service"] -->|forbidden| D["Not permitted"]
+    E["2 years after release"] --> F["Auto-converts to Apache 2.0\nrestriction lifts entirely"]
+```
+
+## Why FSL, and not plain MIT or Apache
+
+"Free" doesn't have to mean "permissive." Those are two different axes, and stackbase deliberately picks free-to-use but not free-to-strip-mine.
+
+Here's the reasoning:
+
+**The engine is the product.** Unlike a project such as Supabase — whose real moat is Postgres, something it doesn't own — stackbase's entire value is the reactive engine itself. A permissive (MIT/Apache) license would let any well-funded cloud provider take that engine, host it, and compete directly with stackbase's own future business, contributing nothing back. FSL closes exactly that gap while changing nothing for ordinary users and self-hosters.
+
+**Relicensing later is a trap, not a fallback.** A tempting shortcut is "start fully permissive to maximize adoption, then restrict the license once we need to protect the business." History says this backfires badly — it doesn't buy time, it burns trust:
+
+- Redis relicensed permissive-to-restrictive and the community hard-forked it into **Valkey**.
+- Elastic did the same and got forked into **OpenSearch** (by AWS).
+- HashiCorp's Terraform license change produced **OpenTofu**.
+
+In every case, the backlash wasn't about adding paid features — companies like n8n and GitLab add paid features constantly and nobody minds. The backlash was about **changing the rules on code people already had in production**. Once you promise permissive terms, you can't credibly walk them back.
+
+Stackbase avoids the trap by setting the protective license **once, from the very first commit** — before there's a community to betray. Any future paid feature is then just a normal new release under terms that were already public, not a reversal.
+
+## What's free forever
+
+This is the part worth being precise about, because it's the whole trust proposition. Under FSL, permanently, with no future gate planned:
+
+- **The full single-node engine** — functions, the reactive query/subscription system, durable workflows and saga compensation, file storage, the scheduler, actions and webhooks, the Postgres adapter, the single-binary build, and the dashboard. This is a complete, production-usable backend for the large majority of real applications, not a crippled trial.
+- **Deploy anywhere** — your laptop, your own VPS, any cloud, an air-gapped facility with no outbound network at all. There is no phone-home requirement, ever.
+- **Your data and your code, portable** — plain HTTP APIs, open formats, `stackbase migrate` to bring data in, and nothing stopping you from taking it back out. You're never locked in.
+
+None of this requires a license key today, and none of it is expected to require one later. See [Getting started](/docs) for what "the full engine" actually includes, and [Self-hosting](/docs/deploy/self-hosting) for how deploy-anywhere works in practice.
+
+## The business model: free now, gate scale later
+
+Stackbase isn't a charity — it needs a way to fund ongoing development. The plan is deliberately sequenced: win adoption first with a genuinely complete free product, and only later — after real popularity, not on a fixed date — introduce a paid unlock for one specific thing: running stackbase's distributed, multi-node scale-out tier plus a bundle of enterprise features (things like SSO and audit logging).
+
+This is often called the **n8n / GitLab-EE model**: sell license keys, not compute. There's no managed cloud hosting business planned — you still deploy the paid tier on your own infrastructure, the same as everything else. The key unlocks a *capability*, not a *place to run it*.
+
+```mermaid
+flowchart LR
+    subgraph P1["Phase 1 — Grow (now)"]
+        A["Everything free\nwhole repo under FSL\nno gate"]
+    end
+    subgraph P2["Phase 2 — Earn (after adoption)"]
+        B["Single-node stays free\nunder FSL"]
+        C["Tier 2 scale + enterprise\nbehind a paid license key"]
+    end
+    A -->|"adoption signal"| P2
+```
+
+The trigger for Phase 2 isn't a calendar date — it's meaningful adoption plus real demand for multi-node scale. Until that signal shows up, everything, including any distributed features that get built, ships free.
+
+## Free forever vs. what a paid key unlocks
+
+Laid out side by side, this is the whole boundary:
+
+```mermaid
+flowchart LR
+    subgraph Free["Free forever, under FSL"]
+        F1["Single-node engine\nfull feature set"]
+        F2["Deploy anywhere\nyour infra, no phone-home"]
+        F3["Data + code portability"]
+    end
+    subgraph Paid["Behind a paid key, later"]
+        P1["Tier 2: multi-node\ndistributed scale-out"]
+        P2["Enterprise features\nSSO, audit, etc."]
+    end
+    Free -.->|"license boundary"| Paid
+```
+
+The `ee/` directory in the repository (short for "enterprise edition," the same convention GitLab popularized) is where this future paid code will live. It already exists today as a placeholder — packages like a distributed fleet coordinator are reserved there — but the paid gate itself isn't built or active yet. Nothing in `ee/` currently requires a license key to use.
+
+Code under `ee/` is **not** covered by FSL — it's under a separate commercial license from the start. This matters because FSL's two-year Apache conversion only applies to the FSL-licensed core. If the paid tier were also under FSL, it would automatically become free after two years too, which would defeat the entire point. Keeping `ee/` on its own, non-converting license from day one avoids that leak.
+
+## Why the sequencing matters more than the mechanism
+
+The single most important decision here isn't FSL itself — it's the order of operations: **set the protective license now, write the paywall code later.** Never the reverse.
+
+A license change on code people already run feels like a betrayal, even when the new terms are reasonable. A new paid feature shipping under terms that were already public just feels like a normal product release. FSL plus requiring a CLA (Contributor License Agreement) or DCO (Developer Certificate of Origin) from every contributor from day one are both about the same thing: keeping stackbase's future licensing options fully open, so that Phase 2 never has to touch a license anyone is already relying on. See the [contributing guide](/docs/contributing/contributing-guide) for what the CLA/DCO means in practice when you submit a change.
+
+## Honest caveats
+
+A few things worth being upfront about, rather than glossing over:
+
+- **This isn't a recurring-revenue model.** A managed cloud earns continuously as customers grow; a license key earns once at purchase (or once a year, depending on the pricing shape chosen later). The ceiling is lower than a hosting business — that's an accepted tradeoff for a small team that doesn't want to run infrastructure or be on call for anyone else's production database.
+- **Enforcement is legal and social, not DRM.** Because the source is fully visible — including the future gate check itself — a sufficiently motivated person could in principle patch it out. That's an accepted, known tradeoff, not an oversight: it's exactly how n8n, GitLab, and Sentry operate today. A real business isn't going to risk a license violation to avoid a modest fee, and a hobbyist determined enough to patch a check out isn't the customer for multi-node scale anyway. There's no plan to build unbreakable copy protection.
+- **The gate mechanics are designed but deliberately not built yet.** The rough shape, for reference: a signed key (an offline-verifiable token, not a phone-home check) carrying entitlements and an expiry, verified locally at startup with no network call required — so self-hosted and air-gapped deployments are never broken by license checking. This is documented intent, not a shipped feature; nothing in stackbase checks for a license key today.
+
+## Related pages
+
+- [Contributing guide](/docs/contributing/contributing-guide) — the workflow for proposing and landing a change, including the CLA/DCO.
+- [Architecture](/docs/contributing/architecture) — how the engine that this license protects is put together.
+- [Self-hosting](/docs/deploy/self-hosting) — the free-forever deploy-anywhere story in practice.

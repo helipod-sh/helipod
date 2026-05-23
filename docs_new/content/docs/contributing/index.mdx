@@ -1,8 +1,81 @@
 ---
 title: "Contributing to stackbase"
-description: "How stackbase is built, and how to work on it or extend it."
+description: "An orientation to how Stackbase is built: the architecture, the codebase, and how to extend it."
 ---
 
-An orientation to the codebase, the architecture, how to build and test, how to extend stackbase with your own components and adapters, and how to contribute changes.
+{/* diataxis: explanation */}
 
-> **Stub — content coming next.** This page is part of the Contributing tab scaffold; its real content will be written from the engine source and the internal `docs/dev/` architecture notes.
+This section is for people who want to work *on* Stackbase itself, not just build *with* it — reading the engine source, fixing a bug, adding a storage adapter, or writing a new component. If you just want to use Stackbase in your app, the [Get Started](/docs/get-started/what-is-stackbase) and [Core Concepts](/docs/core-concepts/schema-and-tables) sections are the right place instead.
+
+## Stackbase in one breath
+
+Stackbase is an open-source, self-hostable, **reactive** backend. You write ordinary TypeScript functions — queries, mutations, and actions — they run on the server inside a transaction, and every client subscribed to the data those functions touch gets pushed a fresh result over a WebSocket the instant it changes. No polling, no manual "please refetch" calls, no cache-invalidation bugs. It aims for Convex-grade developer experience with no vendor lock-in: run it on your own laptop, your own server, or your own cloud account.
+
+## The one idea everything else serves
+
+Before anything else clicks, get this one primitive:
+
+- A **query** is a read-only function. While it runs, the engine quietly notes exactly *what it read* — which tables, which rows, which ranges. This is called the **read set**.
+- A **mutation** is the only kind of function allowed to write. When it commits, the engine notes exactly *what it wrote* — the **write set**.
+- Every live subscription is just a query plus its read set, sitting around waiting. Whenever a mutation commits, the engine checks: does this write set overlap any subscription's read set? If yes, that query is re-run and the new result is pushed to whichever clients are subscribed to it. If no, that subscription is left alone — it costs nothing.
+
+That's it. There's no polling loop, no manually-declared cache keys, no pub/sub topics you have to wire up by hand. "Did what I just wrote touch what you're watching?" is the entire reactivity model.
+
+```mermaid
+flowchart LR
+    Q["Query runs"] --> RS["records read set"]
+    M["Mutation commits"] --> WS["produces write set"]
+    RS --> X{"read set overlaps<br/>write set?"}
+    WS --> X
+    X -->|yes| P["push fresh result to<br/>subscribed clients"]
+```
+
+Nearly every architecture page in this section is really just an answer to "how do we make this one idea correct and fast?" — how the read/write sets are recorded (the [query engine](/docs/contributing/architecture/query-engine)), how commits are made safe under concurrency (the [transactor](/docs/contributing/architecture/transactions)), how the overlap check is actually implemented and pushed to clients (the [reactivity](/docs/contributing/architecture/reactivity) page — the one page to read most carefully), and where the bytes physically live (the [storage](/docs/contributing/architecture/storage) page). The end-user framing of the same idea lives in [Core Concepts: Reactivity](/docs/core-concepts/reactivity), if you want the user-facing version first.
+
+## The shape of the system, in three sentences
+
+1. **One language, end to end.** The CLI, the server engine, and the client SDK are all TypeScript — no Rust core, no second language to context-switch into when you go from writing a query to debugging the engine that runs it.
+2. **Storage is hidden behind one narrow seam.** The engine never imports a database driver directly — it talks to an abstract `DocStore`/`DatabaseAdapter` interface, and the exact same engine logic runs unmodified on embedded SQLite (the zero-config default) or Postgres (for networked, durable self-hosting).
+3. **The same app code scales up without a rewrite.** Today that means a single self-contained binary or container (what this project calls Tier 0/1) that runs happily on a $5 VPS; a distributed, multi-node fleet (Tier 2) is designed for and partly built in the `ee/` tree, but is not yet a shipped, general-purpose product surface — see the status note below.
+
+## Where this architecture came from
+
+Stackbase is loosely inspired by [Convex](https://github.com/get-convex/convex-backend) and by a project called concave. To be precise about what that means for a contributor: the internal architecture notes under `docs/dev/` were written by *studying* Convex's and concave's published, documented behavior as reference material — never by copying their source. Both are source-available under a non-compete license (FSL), so this codebase treats them the same way you'd treat a spec: read for ideas, reimplement from scratch.
+
+Two practical consequences worth knowing before you dive into the deeper architecture pages:
+
+- Those internal notes are dense, expert-written, and occasionally describe *intent* rather than *what shipped* — a design that was proposed, then later built differently, deferred, or superseded. This Contributing section is the reconciled, ships-are-real view; where the internal notes and the shipped code disagree, the shipped code wins.
+- "Convex-compatible" describes the *authoring style* (how you write a query or a schema), not a promise to be a drop-in replacement — Stackbase's canonical imports are its own (`@stackbase/*`), and it has already grown capabilities Convex doesn't have (durable workflows with saga/compensation, a Postgres adapter, a single-binary build). Convex compatibility shows up as a migration on-ramp (`stackbase migrate`), not the product's identity.
+
+## A map of this section
+
+The Contributing tab has four groups of pages. Skim this before you go looking for something specific.
+
+```mermaid
+graph TD
+    S["Start here:<br/>system-design"] --> A["Architecture"]
+    S --> B["Codebase"]
+    S --> C["Extending"]
+    S --> D["Meta"]
+```
+
+- **[Architecture](/docs/contributing/architecture/system-design)** — how the engine actually works, from the 30,000-foot view down to specific subsystems: [system design](/docs/contributing/architecture/system-design) (the north star — read this first), [storage](/docs/contributing/architecture/storage) (the append-only log and the storage seam), [transactions](/docs/contributing/architecture/transactions) (the single-writer commit protocol), [reactivity](/docs/contributing/architecture/reactivity) (the read-set/write-set overlap, in full — the concept most worth getting right), [query engine](/docs/contributing/architecture/query-engine) (how a query becomes an index scan and a recorded read set), [execution](/docs/contributing/architecture/execution) (how your function code actually runs, and the determinism boundary), and [runtimes](/docs/contributing/architecture/runtimes) (embedded, fleet, and edge hosts for the same engine).
+- **[Codebase](/docs/contributing/codebase/monorepo)** — the practical tour: [the monorepo](/docs/contributing/codebase/monorepo) (what lives where and why) and [development setup](/docs/contributing/codebase/development) (clone, install, build, test, the dev loop).
+- **[Extending](/docs/contributing/extending/custom-component)** — the seams you can build against without touching the engine core: [a custom component](/docs/contributing/extending/custom-component) (like `@stackbase/auth` or `@stackbase/scheduler`), [a custom storage adapter](/docs/contributing/extending/storage-adapter) (a new database backend), and [custom providers](/docs/contributing/extending/providers) (email, OAuth, or blob-store backends for existing components).
+- **Meta** — the [contributing guide](/docs/contributing/contributing-guide) (how a change actually gets proposed and landed) and [licensing](/docs/contributing/licensing) (the FSL license and the `ee/` split).
+
+## Where to start reading
+
+If you're new here, read in this order:
+
+1. **[System design](/docs/contributing/architecture/system-design)** first — it's the one-page synthesis of the whole architecture, and every other page assumes you've read it.
+2. **[Reactivity](/docs/contributing/architecture/reactivity)** next — of everything in the system, this is the piece most likely to be misunderstood, and it's the one idea the whole product is built to protect.
+3. Then dive into whichever subsystem page matches what you're actually touching — you don't need to read all of Architecture front to back.
+4. Get the repo running via [development setup](/docs/contributing/codebase/development) so you can poke at things as you read.
+5. Before writing code for anything nontrivial, read the [contributing guide](/docs/contributing/contributing-guide) — this project works spec-first (brainstorm → written plan → implementation), and skipping straight to code for a real feature is the one workflow mistake that reliably costs the most time later.
+
+## How mature is this, honestly
+
+The reactive core, single-node/single-binary production tooling (`stackbase serve`, Docker self-host, live hot-deploy, a compiled standalone binary), the Postgres adapter, file storage, and the built-in components (auth, scheduler, workflow, triggers, notifications) all ship today and are covered by end-to-end tests against the real running server — not just unit tests of internal mechanisms.
+
+What's genuinely **not** there yet, so you calibrate correctly before relying on it: distributed **Tier 2** multi-node write scale-out is designed and partly built under the source-available `ee/` tree, not a finished general product surface; full-text and vector **search** are not built; and while the function executor's internal syscall interface was designed from day one to be safe to send across a real V8 isolate boundary, that isolation is not wired up yet — today's executor runs your functions in-process, trusting them, rather than sandboxing them. None of these gaps affect correctness of what has shipped; they're scope not yet reached.
