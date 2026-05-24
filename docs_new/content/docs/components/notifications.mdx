@@ -242,7 +242,7 @@ Covered in full under [Topics](#topics) below.
 | Provider | Notes |
 |---|---|
 | `consoleEmail()` | Zero-config dev default: logs the full email to the server console. |
-| `resendEmail({ apiKey, baseUrl? })` | One `fetch` to the Resend API. Passes `idempotencyKey` through as Resend's native `Idempotency-Key` header. Non-2xx: 4xx (except 429) is classified non-retryable; 5xx/429 retryable. Implements the delivery webhook (Svix signature scheme, see [Delivery webhooks](#delivery-webhooks)). |
+| `resendEmail({ apiKey, baseUrl? })` | One `fetch` to the Resend API. Passes `idempotencyKey` through as Resend's native `Idempotency-Key` header. Non-2xx: 4xx (except 429) is classified non-retryable; 5xx/429 retryable. Implements the delivery webhook (Svix signature scheme, see [Delivery webhooks](#delivery-webhooks-and-normalized-status)). |
 
 ```ts
 interface EmailChannelConfig {
