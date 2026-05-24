@@ -7,14 +7,14 @@ description: "How to write your own email, SMS, push, OAuth, and file-storage ad
 
 ## The idea in one sentence
 
-A handful of components need to talk to the outside world — send an email, text a phone, verify a
+A handful of components need to talk to the outside world: send an email, text a phone, verify a
 Google login, store an uploaded file. Instead of hard-wiring one vendor's SDK into the engine,
 each of these components defines a small **provider interface** and lets you plug in an
 implementation. The vendor SDK never touches core code; it lives in a "leaf" you write or pick off
 the shelf.
 
 This is the exact same idea you'll find at [Custom storage adapter](/docs/contributing/extending/storage-adapter)
-for databases (`DatabaseAdapter`) — just applied to email/SMS/push, OAuth logins, and file bytes
+for databases (`DatabaseAdapter`), just applied to email/SMS/push, OAuth logins, and file bytes
 instead of rows. If you understand one, you understand all of them: **a typed interface, a
 throw-to-signal convention for failure, and a vendor chosen in config, never imported by the
 engine.**
@@ -27,10 +27,10 @@ By the end of this page you'll be able to:
 
 ## Notifications: one interface per channel
 
-`@stackbase/notifications` groups delivery into **channels** — `email`, `sms`, `push`, and
+`@stackbase/notifications` groups delivery into **channels**: `email`, `sms`, `push`, and
 `in_app`. A channel is *what kind of message this is*; a **provider** is *who actually sends it*.
 Resend and a plain `console.log` are both email providers; Twilio is an SMS provider; Expo, FCM,
-and APNs are push providers. `in_app` is the odd one out: there's no vendor to call at all — the
+and APNs are push providers. `in_app` is the odd one out: there's no vendor to call at all. The
 engine just inserts a row into the recipient's inbox table.
 
 ```mermaid
@@ -40,13 +40,13 @@ flowchart LR
     SMS --> Console
     SMS --> Twilio
     Push --> PushVendors["Expo / FCM / APNs"]
-    InApp["in_app"] --> Row["no provider — engine writes the row"]
+    InApp["in_app"] --> Row["no provider, engine writes the row"]
 ```
 
 Source: `components/notifications/src/provider.ts`.
 
-Each channel's provider is a plain object shape — no base class, no vendor SDK type leaking into
-the signature:
+Each channel's provider is a plain object shape, with no base class and no vendor SDK type
+leaking into the signature:
 
 ```ts
 export interface EmailProvider {
@@ -65,7 +65,7 @@ export interface SmsProvider {
 
 export interface PushProvider {
   channel: "push";
-  send(m: PushMessage): Promise<PushSendResult>; // no webhook — invalid tokens come back synchronously
+  send(m: PushMessage): Promise<PushSendResult>; // no webhook: invalid tokens come back synchronously
 }
 
 export interface PushSendResult extends SendResult {
@@ -73,28 +73,28 @@ export interface PushSendResult extends SendResult {
 }
 ```
 
-`SendResult` is just `{ providerMessageId?: string }` — an optional id you can use later to match
+`SendResult` is just `{ providerMessageId?: string }`: an optional id you can use later to match
 up a delivery-status webhook. `PushSendResult` adds an `invalidTokens` array so a provider can tell
 the driver "these device tokens are dead, stop sending to them" in the same response.
 
 ### How a provider says "it worked" or "it didn't"
 
-There's no status-code return value to check — the convention is a plain **throw**:
+There's no status-code return value to check. The convention is a plain **throw**:
 
 - `send` **returns** a `SendResult` on success.
 - `send` **throws** on failure. A plain `Error` (or `NotificationSendError` with no options) is
-  treated as **retryable** — the built-in retry driver backs off and tries again.
+  treated as **retryable**: the built-in retry driver backs off and tries again.
 - Throwing `new NotificationSendError(message, { retryable: false })` marks the failure as
-  **permanent** (for example, a 4xx "bad recipient" response) — the driver dead-letters the message
-  immediately instead of wasting retries on something that will never succeed.
+  **permanent** (for example, a 4xx "bad recipient" response), and the driver dead-letters the
+  message immediately instead of wasting retries on something that will never succeed.
 
 ```ts
-// permanent failure — e.g. the vendor returned a 4xx "bad recipient" response
+// permanent failure: the vendor returned a 4xx "bad recipient" response
 throw new NotificationSendError("recipient rejected", { retryable: false });
 ```
 
 This is the whole failure-signaling contract. You don't need to touch the retry queue, backoff
-schedule, or dead-letter table yourself — throwing the right kind of error is enough. The two
+schedule, or dead-letter table yourself. Throwing the right kind of error is enough. The two
 shipped adapters agree on where the line is: `resendEmail` and `twilioSms` both treat `5xx` and
 `429` (rate limited) as retryable and everything else as permanent.
 
@@ -103,21 +103,25 @@ optional `webhook` field:
 
 ```ts
 export interface ProviderWebhook {
-  // MUST return false on a missing/invalid signature — the HTTP route 401s before any write happens.
+  // MUST return false on a missing/invalid signature: the HTTP route 401s before any write happens.
   verify(args: WebhookVerifyArgs): boolean | Promise<boolean>;
   // Maps the vendor's payload to normalized events. Throw on a malformed body → the route answers 400.
   parse(rawBody: string): WebhookEvent[];
 }
 ```
 
-`verify` is a security boundary, not a nicety: the shipped `resendEmail` adapter verifies a Svix
-HMAC signature with a constant-time comparison and a 5-minute timestamp-skew check before it will
-let a webhook event anywhere near a write. Copy that shape rather than skipping verification.
+<Callout type="warn" title="Verify is a security boundary">
+
+`verify` is not a nicety. The shipped `resendEmail` adapter verifies a Svix HMAC signature with a
+constant-time comparison and a 5-minute timestamp-skew check before it will let a webhook event
+anywhere near a write. Copy that shape rather than skipping verification.
+
+</Callout>
 
 ### Writing a minimal custom email provider
 
 A provider is just a function that returns an object matching the interface. Nothing needs to be
-registered anywhere else — the object *is* the plugin.
+registered anywhere else. The object *is* the plugin.
 
 ```ts
 import type { EmailProvider } from "@stackbase/notifications";
@@ -157,13 +161,13 @@ defineNotifications({
 
 From there the component's send path calls `provider.send(...)` and its retry driver decides what
 to do with whatever the call returns or throws. You never edit the notifications component itself
-to add a vendor — see the shipped references for the full pattern, including chunking, auth
-token caching, and idempotency-key passthrough where a vendor supports it:
+to add a vendor. See the shipped references for the full pattern, including chunking, auth token
+caching, and idempotency-key passthrough where a vendor supports it:
 
-- `provider-console.ts` — zero-config dev default, logs to stdout
-- `provider-resend.ts` — email, plus a signed webhook
-- `provider-twilio.ts` — SMS/WhatsApp, plus a signed webhook
-- `provider-expo.ts` / `provider-fcm.ts` / `provider-apns.ts` — push, one adapter per platform
+- `provider-console.ts`: zero-config dev default, logs to stdout
+- `provider-resend.ts`: email, plus a signed webhook
+- `provider-twilio.ts`: SMS/WhatsApp, plus a signed webhook
+- `provider-expo.ts` / `provider-fcm.ts` / `provider-apns.ts`: push, one adapter per platform
 
 All live under `components/notifications/src/`. For the full channel model, preferences, topics,
 and the reactive inbox, see [Notifications](/docs/components/notifications).
@@ -174,21 +178,21 @@ and the reactive inbox, see [Notifications](/docs/components/notifications).
 needs to verify "yes, this really is that person's Google account." Both are provider seams, and
 both live in `components/auth/src`.
 
-### Email — the same shape, a separate copy
+### Email: the same shape, a separate copy
 
 Auth's own `EmailProvider` (`components/auth/src/email/provider.ts`) is the same
-`send(msg): Promise<void>` shape as notifications' console/Resend adapters — `consoleEmail` for
+`send(msg): Promise<void>` shape as notifications' console/Resend adapters: `consoleEmail` for
 dev, `resendEmail` for production. It's a deliberately independent copy: if you also compose
 `@stackbase/notifications` in your project, auth's verification/reset/magic-link/OTP emails
 automatically route through the notifications provider instead (so you configure a vendor once);
 without notifications composed, auth falls back to its own copy, untouched. Either way, writing a
 custom email provider for auth uses the exact same recipe as the notifications section above.
 
-### OAuth — describing a login provider, not calling one directly
+### OAuth: describing a login provider, not calling one directly
 
 Signing in with Google or GitHub means redirecting the user to that provider, getting a code back,
 exchanging it for tokens, and mapping whatever claims come back to a normalized identity. An
-`OAuthProvider` is the config object that describes how to do all of that for one vendor —
+`OAuthProvider` is the config object that describes how to do all of that for one vendor.
 `components/auth/src/oauth.ts` ships `googleProvider`, `githubProvider`, `microsoftProvider`,
 `discordProvider`, `facebookProvider`, and `appleProvider` built on this seam, plus the generic
 `oauthProvider()` builder underneath all of them.
@@ -210,13 +214,18 @@ export interface OAuthProvider {
 
 Two protocol details worth knowing before you write a new one:
 
-- **`mapClaims` is the only vendor-specific logic you usually write.** Everything else — building
+- **`mapClaims` is the only vendor-specific logic you usually write.** Everything else (building
   the authorize URL, exchanging the code, verifying the token's signature against the vendor's
-  published keys — is shared plumbing (`oauth4webapi` + `jose`) that every provider reuses.
-- **A plain `http://` endpoint is rejected at config time** unless it points at `localhost`/
-  `127.0.0.1` (for local testing). This isn't optional per-provider behavior — it's a shared guard
-  (`assertProviderEndpointsSecure`) that runs for every provider, built-in or custom, so a
-  production deployment can't accidentally point a login provider at an unencrypted endpoint.
+  published keys) is shared plumbing (`oauth4webapi` + `jose`) that every provider reuses.
+
+<Callout type="warn" title="Endpoints must be HTTPS">
+
+A plain `http://` endpoint is rejected at config time unless it points at `localhost`/
+`127.0.0.1` (for local testing). This isn't optional per-provider behavior: it's a shared guard
+(`assertProviderEndpointsSecure`) that runs for every provider, built-in or custom, so a
+production deployment can't accidentally point a login provider at an unencrypted endpoint.
+
+</Callout>
 
 Sketch of adding a new OIDC-based provider (an identity provider that already speaks standard
 OpenID Connect discovery, e.g. a corporate SSO tenant):
@@ -231,7 +240,7 @@ export function myCompanySsoProvider(opts: { clientId: string; clientSecret: str
     clientId: opts.clientId,
     clientSecret: opts.clientSecret,
     scopes: ["openid", "email", "profile"],
-    // Optional — the default mapClaims already covers a standard OIDC claim set.
+    // Optional: the default mapClaims already covers a standard OIDC claim set.
     mapClaims: (c) => ({
       accountId: String(c.sub ?? ""),
       email: typeof c.email === "string" ? c.email : undefined,
@@ -243,7 +252,7 @@ export function myCompanySsoProvider(opts: { clientId: string; clientSecret: str
 ```
 
 For a vendor that *doesn't* speak OIDC discovery (no `.well-known` document, no signed
-`id_token` — GitHub, Discord, and Facebook are all like this), use `kind: "oauth2"` with explicit
+`id_token`; GitHub, Discord, and Facebook are all like this), use `kind: "oauth2"` with explicit
 endpoints and write a `mapClaims` that reads whatever shape that vendor's userinfo endpoint
 returns, the way `githubProvider` / `discordProvider` / `facebookProvider` do.
 
@@ -253,10 +262,10 @@ If your client already holds a signed JWT from some other identity provider (Cle
 own separate auth service) rather than doing an OAuth redirect through stackbase, that's the `jwt`
 config block instead of `oauth`. You list trusted issuers; `verifyIdToken`
 (`components/auth/src/jwt.ts`) fetches that issuer's public keys (a JWKS document) and checks the
-token's signature, issuer, audience, and expiry — once, at sign-in, not on every request. A
-verified token is then exchanged for a stackbase session the same way an OAuth login is, through
-the shared identity-resolution path both transports funnel into. The same non-loopback-`http://`
-guard from OAuth applies here too, on the JWKS URL.
+token's signature, issuer, audience, and expiry, once at sign-in, not on every request. A verified
+token is then exchanged for a stackbase session the same way an OAuth login is, through the shared
+identity-resolution path both transports funnel into. The same non-loopback-`http://` guard from
+OAuth applies here too, on the JWKS URL.
 
 For the full sign-in flows, session model, and device management, see [Auth](/docs/components/auth)
 and [Authorization](/docs/components/authorization).
@@ -275,7 +284,7 @@ flowchart LR
     Seam --> R2["r2"]
 ```
 
-Which adapter is active is decided purely by configuration — set `STACKBASE_STORAGE_BUCKET` (or
+Which adapter is active is decided purely by configuration: set `STACKBASE_STORAGE_BUCKET` (or
 `--storage-bucket`) and you get the S3/R2-compatible adapter; leave it unset and you get the
 zero-config filesystem adapter. The engine and your app code never know or care which one is live.
 
@@ -293,7 +302,7 @@ export interface BlobStore {
 
 ### Why upload has two shapes
 
-`createUploadTarget` doesn't just hand back a URL — it hands back one of two different upload
+`createUploadTarget` doesn't just hand back a URL. It hands back one of two different upload
 *strategies*, and the difference is where the bytes physically travel:
 
 ```mermaid
@@ -312,40 +321,40 @@ flowchart LR
   client `POST`s the file's bytes straight to our own engine endpoint, which stores them and
   finalizes the row in one round trip.
 - **Presigned** (S3/R2): the client `PUT`s the bytes straight to the bucket, bypassing the engine
-  entirely — better for large files and lower server load. Since the engine never sees the bytes go
-  by, the client makes one extra call afterward — `POST` to a `confirmUrl` — to tell the engine
-  "the upload finished, flip this file to ready."
+  entirely. That's better for large files and lower server load. Since the engine never sees the
+  bytes go by, the client makes one extra call afterward (`POST` to a `confirmUrl`) to tell the
+  engine "the upload finished, flip this file to ready."
 
 Your app code doesn't need to know which shape it got back; both are represented by the same
 `UploadTarget` union, and the client SDK handles either.
 
 ### How `ctx.storage` uses this seam
 
-`ctx.storage` (`packages/storage/src/context.ts`) is the always-on facade every project gets — it's
+`ctx.storage` (`packages/storage/src/context.ts`) is the always-on facade every project gets. It's
 not opt-in like the components above. It wraps `BlobStore` with the parts a raw byte store
 shouldn't know about: minting a `_storage` row, signing HMAC capability tokens so a private file's
 URL can't be guessed or replayed for the wrong purpose, and reclaiming abandoned uploads with a
-background reaper. Two facades come out of it — `generateUploadUrl` / `getUrl` / `getMetadata` /
-`delete` inside queries and mutations (transactional, deterministic — no direct byte I/O, since a
+background reaper. Two facades come out of it: `generateUploadUrl` / `getUrl` / `getMetadata` /
+`delete` inside queries and mutations (transactional, deterministic, no direct byte I/O, since a
 mutation must stay replay-safe), and `store` / `get` / `getUrl` / `getMetadata` inside actions,
 where actual byte I/O is allowed.
 
 Writing your own `BlobStore` (say, for Google Cloud Storage) means implementing that interface
-once and pointing the storage component at it — same recipe as a custom `DatabaseAdapter`, see
-[Custom storage adapter](/docs/contributing/extending/storage-adapter). For the end-user-facing
-upload/download flows, capability tokens, and reaper behavior, see
+once and pointing the storage component at it. It's the same recipe as a custom `DatabaseAdapter`;
+see [Custom storage adapter](/docs/contributing/extending/storage-adapter). For the
+end-user-facing upload/download flows, capability tokens, and reaper behavior, see
 [File storage](/docs/core-concepts/file-storage).
 
 ## The pattern, once more
 
 Every seam on this page is the same three ingredients:
 
-1. **A small typed interface** — `EmailProvider`, `OAuthProvider`, `BlobStore` — describing exactly
+1. **A small typed interface** (`EmailProvider`, `OAuthProvider`, `BlobStore`) describing exactly
    the operations the component needs, nothing vendor-specific in the shape.
 2. **A throw-to-signal convention** for failure, so the caller doesn't need a side channel to know
    what went wrong or whether to retry.
 3. **The vendor SDK stays out of the engine.** It's imported only inside the leaf function you
-   write (`resendEmail`, `googleProvider`, `blobstore-s3`), and selected in your project's config —
+   write (`resendEmail`, `googleProvider`, `blobstore-s3`), and selected in your project's config,
    never inside core code.
 
 Once you've internalized that shape, adding a new vendor anywhere in stackbase is always "write a

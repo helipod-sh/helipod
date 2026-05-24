@@ -5,27 +5,34 @@ description: Live hot-swap onto a running server with stackbase deploy, or compi
 
 {/* diataxis: how-to */}
 
-Once you've got a `stackbase serve` deployment running (see [Self-hosting](/docs/deploy/self-hosting)),
-there are two ways to ship a code change to it without touching the container image or restarting the
-process — plus a third path if you'd rather not run a container at all. This page covers all three:
+You've got a `stackbase serve` deployment running (see [Self-hosting](/docs/deploy/self-hosting)). Now
+you want to ship a code change to it without rebuilding the container or restarting the process.
 
-- **`stackbase deploy`** — push local `convex/` changes to an already-running `serve` and hot-swap
-  them in live, no restart.
-- **`stackbase build`** — compile your whole app into one self-contained executable, for when you'd
-  rather ship a binary than a Docker image.
-- Pointers to the Cloudflare target, which is a different `stackbase deploy` mode entirely (a
-  provisioning deploy, not a hot-swap).
+There are two ways to do that, plus a third path if you'd rather skip containers entirely:
 
-## `stackbase deploy` — live hot-swap onto a running server
+- `stackbase deploy` pushes local `convex/` changes to an already-running `serve` and hot-swaps them in
+  live, with no restart.
+- `stackbase build` compiles your whole app into one self-contained executable, for when you'd rather
+  ship a binary than a Docker image.
+- The Cloudflare target, a different `stackbase deploy` mode entirely. It provisions infrastructure, it
+  doesn't hot-swap.
 
-`stackbase deploy` transpiles your local `convex/` functions and additive schema changes and pushes
-them to a running `stackbase serve` deployment, which validates and applies them **atomically** — the
-process keeps serving requests the entire time, and a rejected deploy never leaves it partially
-updated.
+This page covers all three.
 
-### Step 1: enable it on the server — `--allow-deploy`
+## `stackbase deploy`: live hot-swap onto a running server
 
-A running `serve` does **not** accept deploys by default. Start it with `--allow-deploy`, or set
+`stackbase deploy` transpiles your local `convex/` functions and additive schema changes, then pushes
+them to a running `stackbase serve` deployment. The server validates everything and applies it
+atomically: it keeps serving requests the whole time, and a rejected deploy never leaves it
+half-updated.
+
+<Steps>
+
+<Step>
+
+### Enable it on the server: `--allow-deploy`
+
+A running `serve` doesn't accept deploys by default. Start it with `--allow-deploy`, or set
 `STACKBASE_ALLOW_DEPLOY=1`, to opt in:
 
 ```bash
@@ -34,15 +41,24 @@ stackbase serve --dir convex --allow-deploy
 STACKBASE_ALLOW_DEPLOY=1 stackbase serve --dir convex
 ```
 
-Without this flag, `POST /_admin/deploy` isn't registered at all — the request falls through to the
-generic admin-router 404, indistinguishable from a nonexistent endpoint. This is deliberate, not an
-oversight: `STACKBASE_ADMIN_KEY` already grants full read/write access to your data (the dashboard and
-`stackbase deploy` both authenticate with it). Without a separate opt-in, a leaked admin key would mean
-remote code execution — every deploy replaces the functions that run *inside* the transaction. Requiring
-`--allow-deploy` keeps "read/write my data" and "replace my running code" as two distinct,
-deliberately-opted-into capabilities, even though today they share one key.
+Without this flag, `POST /_admin/deploy` isn't registered at all. The request falls through to the
+generic admin-router 404, indistinguishable from a nonexistent endpoint.
 
-### Step 2: push a deploy
+<Callout type="warn" title="Why this isn't on by default">
+
+`STACKBASE_ADMIN_KEY` already grants full read and write access to your data (the dashboard and
+`stackbase deploy` both authenticate with it). Without a separate opt-in, a leaked admin key would mean
+remote code execution: every deploy replaces the functions that run *inside* the transaction. Requiring
+`--allow-deploy` keeps "read/write my data" and "replace my running code" as two distinct, deliberately
+opted-into capabilities, even though today they share one key.
+
+</Callout>
+
+</Step>
+
+<Step>
+
+### Push a deploy
 
 From your app's project root (where `convex/` lives):
 
@@ -50,14 +66,12 @@ From your app's project root (where `convex/` lives):
 STACKBASE_ADMIN_KEY=your-strong-secret stackbase deploy --url https://myapp.example
 ```
 
-Flags:
-
 | Flag | Env fallback | Default | Description |
 |---|---|---|---|
-| `--url <url>` | `STACKBASE_DEPLOY_URL` | — (required) | The target deployment's base URL |
-| `--dir <convexDir>` | — | `convex` | The local `convex/` directory to push |
+| `--url <url>` | `STACKBASE_DEPLOY_URL` | (required) | The target deployment's base URL |
+| `--dir <convexDir>` | none | `convex` | The local `convex/` directory to push |
 
-`STACKBASE_ADMIN_KEY` is read from the environment (there's no `--admin-key` flag) and is required —
+`STACKBASE_ADMIN_KEY` is read from the environment (there's no `--admin-key` flag), and it's required.
 `stackbase deploy` refuses to run without it.
 
 On success:
@@ -67,87 +81,50 @@ On success:
 ```
 
 `rev` is a content hash of the pushed file tree (the first 12 hex characters of its SHA-256), not a
-sequence number — deploying the exact same tree twice produces the same `rev`. The new functions are
-callable immediately: no restart, and existing WebSocket subscriptions keep working and reactively pick
-up writes made through the newly-deployed code, exactly as if the change had been made via `stackbase dev`'s
-hot reload.
+sequence number. Deploying the exact same tree twice produces the same `rev`. The new functions are
+callable immediately, with no restart, and existing WebSocket subscriptions keep working. They
+reactively pick up writes made through the newly deployed code, exactly as if the change had been made
+via `stackbase dev`'s hot reload.
 
-### What actually happens, step by step
+</Step>
 
-`stackbase deploy` runs four steps, in order, all from your machine except the last:
-
-1. **Refreshes local codegen.** It runs the same `loadConvexDir → push → writeGenerated` pipeline
-   `stackbase dev`/`stackbase codegen` use, rewriting `convex/_generated/` in place. This runs *before*
-   packaging, so the client types your app ships with match the code you're about to push — you don't
-   need a separate `stackbase codegen` step.
-2. **Transpiles every `.ts` file under `convex/`** via `esbuild`'s `transform` (not `bundle`) — this
-   strips TypeScript types but leaves **import specifiers completely untouched**. A bare import like
-   `import { v } from "@stackbase/values"` is passed through as-is; it resolves against the *target
-   server's own* `node_modules`, not anything on your machine. Relative imports resolve within the
-   pushed file tree itself. This is why a deploy target needs the same `@stackbase/*` packages
-   installed as your app does (the Docker image already provides this — see
-   [Self-hosting](/docs/deploy/self-hosting)).
-3. **`POST`s the resulting file tree** to `/_admin/deploy` as `{files: [{path, code}]}`, with
-   `Authorization: Bearer $STACKBASE_ADMIN_KEY`.
-4. **The server validates and applies it** (see below) — this is the only step that runs remotely.
-
-### Server-side: validate everything, then swap atomically
-
-On the server, `applyDeploy` does the following, in this exact order:
-
-1. **Writes the pushed tree** to disk under a per-revision directory (`<deployRoot>/<rev>/convex/`),
-   rejecting any path that's absolute or contains a `..` segment (path-traversal guard on the payload).
-2. **Loads and pushes it** through the same `loadConvexDir → push` pipeline used at boot, against the
-   deployment's fixed, already-composed component set (see below) and its *current* table numbers (so
-   existing tables — app and component alike — keep the numbers they already have; only genuinely new
-   tables get fresh ones).
-3. **Diffs the schema** (see the additive-only rules below). If a table or field change is destructive,
-   the deploy is rejected here — **nothing has been swapped yet**.
-4. **Only if both of those succeed**, atomically swaps four things in sequence, with no `await` between
-   them: `runtime.setModules(...)`, `runtime.setTableNumbers(...)`, `setRoutes(...)` (for `httpAction`
-   routes), and the admin API's live schema (`adminApi.setSchema(...)`). Because there's no `await` in
-   this sequence, no request can observe a state where only some of these have updated.
-
-A load error or a schema rejection both leave the running deployment **completely untouched** — the
-previous version keeps serving every request throughout. This is what "atomic" means here: not that the
-swap is instantaneous (it is), but that validation is guaranteed to fully complete, with zero mutation
-of running state, before the very first field is swapped.
+</Steps>
 
 ### Responses and status codes
 
 | Condition | HTTP status | CLI behavior |
 |---|---|---|
 | `--allow-deploy` not set on the target | 404 | `✗ deploy not enabled on target (start serve with --allow-deploy)`, exit 1 |
-| Wrong or missing admin key | 401 | `✗ deploy failed: unauthorized`, exit 1 — checked **before** any file is written |
+| Wrong or missing admin key | 401 | `✗ deploy failed: unauthorized`, exit 1 (checked before any file is written) |
 | Malformed payload (bad JSON, unsafe path) | 400 | `✗ deploy failed: <reason>`, exit 1 |
-| Destructive schema change | 409 | `✗ deploy failed: <reason>`, exit 1 — old version stays fully live |
+| Destructive schema change | 409 | `✗ deploy failed: <reason>`, exit 1 (old version stays fully live) |
 | Success | 200 | `✓ deployed rev <hash> (<n> functions)`, exit 0 |
 
-### Additive-only schema — destructive changes are rejected, not migrated
+### Additive-only schema: destructive changes are rejected, not migrated
 
 There are no data migrations in Stackbase today. `diffSchema` compares your pushed schema against the
-server's live one field by field and table by table:
+server's live one, field by field and table by table.
 
-**Allowed (accepted, swap proceeds):**
+**Allowed** (accepted, swap proceeds):
 - Adding a brand-new table.
-- Adding a new **optional** field to an existing table.
+- Adding a new optional field to an existing table.
 
-**Rejected (409, server stays on the previous version):**
+**Rejected** (409, server stays on the previous version):
 - Removing or renaming a table.
-- Changing a table's internal table number (this shouldn't happen under normal use — table numbers
-  are stable across a deploy specifically so this check never fires on a legitimate change).
+- Changing a table's internal table number. This shouldn't happen under normal use: table numbers are
+  stable across a deploy specifically so this check never fires on a legitimate change.
 - Removing a field from an existing table.
-- Changing a field's type — **including what looks like a safe widening**, like `string` -> a union
-  that includes `string`, or `any` -> `string`. The diff can't verify a "widening" is actually sound
-  against every existing row (an `any` column may hold values that aren't valid `string`s), so v1
-  takes the conservative position: **any** field-type change is rejected. Over-rejecting only fails a
-  deploy — it can never corrupt data, which is the property this gate exists to protect.
+- Changing a field's type, including what looks like a safe widening, like `string` to a union that
+  includes `string`, or `any` to `string`. The diff can't verify a "widening" is actually sound against
+  every existing row (an `any` column may hold values that aren't valid `string`s), so v1 takes the
+  conservative position: any field-type change is rejected. Over-rejecting only fails a deploy. It can
+  never corrupt data, which is the property this gate exists to protect.
 - Turning an existing optional field required.
-- Adding a **new required** field to an existing table (existing rows don't have it — make it
-  optional instead, and backfill via a mutation if you need every row populated).
+- Adding a new required field to an existing table. Existing rows don't have it, so make it optional
+  instead, and backfill via a mutation if you need every row populated.
 
-Any of these come back as `deploy failed: <reason>` describing exactly which table/field failed and
-why, e.g.:
+Any of these come back as `deploy failed: <reason>` describing exactly which table and field failed and
+why:
 
 ```
 ✗ deploy failed: field "notes.priority" changed type string→number (destructive)
@@ -155,18 +132,20 @@ why, e.g.:
 
 ### The component set is fixed at boot
 
-Components composed via `stackbase.config.ts` — `@stackbase/scheduler`, `@stackbase/workflow`, and any
-others — are whatever was declared when `serve` booted. `stackbase deploy` can push new functions and
-additive schema *against* that fixed component set, but it **cannot** add or remove a component on a
-live server. Changing the component list in `stackbase.config.ts` requires restarting the process (or
-redeploying the container).
+Components composed via `stackbase.config.ts` (`@stackbase/scheduler`, `@stackbase/workflow`, and any
+others) are whatever was declared when `serve` booted. `stackbase deploy` can push new functions and
+additive schema against that fixed component set, but it can't add or remove a component on a live
+server. Changing the component list in `stackbase.config.ts` requires restarting the process, or
+redeploying the container.
 
-### Known limitation: functions must be top-level under `convex/`
+<Callout type="warn" title="Functions must be top-level under convex/">
 
-The function loader (used by `dev`, `serve`, and `deploy` alike) is **top-level only** — it does not
-recurse into subdirectories. Keep your query/mutation/action modules directly under `convex/*.ts` (for
-example `convex/items.ts`), not nested under a subfolder like `convex/lib/items.ts` — nested modules
-are silently not loaded, in a deploy exactly as in local dev.
+The function loader (used by `dev`, `serve`, and `deploy` alike) is top-level only. It does not recurse
+into subdirectories. Keep your query, mutation, and action modules directly under `convex/*.ts` (for
+example `convex/items.ts`), not nested under a subfolder like `convex/lib/items.ts`. Nested modules are
+silently not loaded, in a deploy exactly as in local dev.
+
+</Callout>
 
 ### Worked example
 
@@ -188,23 +167,77 @@ curl -X POST http://localhost:3000/api/run \
 ```
 
 Any WebSocket client subscribed to a query touching the `notes` table before step 3 sees the write from
-step 4 pushed to it reactively — the deploy in between didn't drop or reset the subscription.
+step 4 pushed to it reactively. The deploy in between didn't drop or reset the subscription.
+
+### Going deeper: what a deploy actually does
+
+<Accordions type="single">
+
+<Accordion title="What happens on your machine">
+
+`stackbase deploy` runs three steps locally, then hands off to one remote step:
+
+1. **Refreshes local codegen.** It runs the same `loadConvexDir → push → writeGenerated` pipeline
+   `stackbase dev`/`stackbase codegen` use, rewriting `convex/_generated/` in place. This runs before
+   packaging, so the client types your app ships with match the code you're about to push. You don't
+   need a separate `stackbase codegen` step.
+2. **Transpiles every `.ts` file under `convex/`** via esbuild's `transform` (not `bundle`). This strips
+   TypeScript types but leaves import specifiers completely untouched. A bare import like
+   `import { v } from "@stackbase/values"` passes through as-is, and it resolves against the target
+   server's own `node_modules`, not anything on your machine. Relative imports resolve within the
+   pushed file tree itself. This is why a deploy target needs the same `@stackbase/*` packages
+   installed as your app does (the Docker image already provides this, see
+   [Self-hosting](/docs/deploy/self-hosting)).
+3. **Posts the resulting file tree** to `/_admin/deploy` as `{files: [{path, code}]}`, with
+   `Authorization: Bearer $STACKBASE_ADMIN_KEY`.
+4. **The server validates and applies it** (see the next section). This is the only step that runs
+   remotely.
+
+</Accordion>
+
+<Accordion title="What happens on the server">
+
+On the server, `applyDeploy` does the following, in this exact order:
+
+1. **Writes the pushed tree** to disk under a per-revision directory (`<deployRoot>/<rev>/convex/`),
+   rejecting any path that's absolute or contains a `..` segment (a path-traversal guard on the
+   payload).
+2. **Loads and pushes it** through the same `loadConvexDir → push` pipeline used at boot, against the
+   deployment's fixed, already-composed component set and its current table numbers. Existing tables,
+   app and component alike, keep the numbers they already have. Only genuinely new tables get fresh
+   ones.
+3. **Diffs the schema** (see the additive-only rules above). If a table or field change is destructive,
+   the deploy is rejected here, and nothing has been swapped yet.
+4. **Only if both of those succeed**, it atomically swaps four things in sequence, with no `await`
+   between them: `runtime.setModules(...)`, `runtime.setTableNumbers(...)`, `setRoutes(...)` (for
+   `httpAction` routes), and the admin API's live schema (`adminApi.setSchema(...)`). Because there's no
+   `await` in this sequence, no request can observe a state where only some of these have updated.
+
+A load error or a schema rejection both leave the running deployment completely untouched. The previous
+version keeps serving every request throughout. That's what "atomic" means here: not that the swap is
+instantaneous (it is), but that validation is guaranteed to fully complete, with zero mutation of
+running state, before the first field is swapped.
+
+</Accordion>
+
+</Accordions>
 
 ## Other `stackbase deploy` targets: Cloudflare
 
-`stackbase deploy --url <url>` (documented above) is actually shorthand for one specific target:
-`--target serve` with no `stackbase.config.ts` deploy target configured. `stackbase deploy` also
+`stackbase deploy --url <url>` (documented above) is shorthand for one specific target:
+`--target serve` with no deploy target configured in `stackbase.config.ts`. `stackbase deploy` also
 supports a general `--target <name> --env <name>` form (with `--dry-run` and `--check` flags) that
-*provisions infrastructure*, rather than hot-swapping an already-running process — for example,
-`--target cloudflare` provisions a Durable-Object-native Cloudflare host via `wrangler deploy`. See
-[Cloudflare](/docs/deploy/cloudflare) for that target in full; it's a materially different deploy model
-(infrastructure provisioning vs. live hot-swap) and doesn't share the additive-schema gate described
-above.
+provisions infrastructure instead of hot-swapping an already-running process. For example,
+`--target cloudflare` provisions a Durable-Object-native Cloudflare host via `wrangler deploy`.
 
-## `stackbase build` — one self-contained binary
+See [Cloudflare](/docs/deploy/cloudflare) for that target in full. It's a materially different deploy
+model (infrastructure provisioning, not live hot-swap), and it doesn't share the additive-schema gate
+described above.
 
-`stackbase build` compiles your **entire app** — the Bun runtime, the Stackbase engine, `bun:sqlite`,
-your `convex/` functions and schema, and any composed components — into a single executable via
+## `stackbase build`: one self-contained binary
+
+`stackbase build` compiles your entire app, the Bun runtime, the Stackbase engine, `bun:sqlite`, your
+`convex/` functions and schema, and any composed components, into a single executable via
 `bun build --compile`. At deployment time you need nothing but the binary and a data directory: no
 `bun`/`node` install, no `node_modules`, no `convex/` source tree.
 
@@ -212,21 +245,29 @@ your `convex/` functions and schema, and any composed components — into a sing
 |---|---|
 | Bun runtime | Yes |
 | Stackbase engine (query engine, transactor, sync protocol) | Yes |
-| SQLite (`bun:sqlite`) | Yes — built into Bun |
-| Your `convex/` functions + schema | Yes — embedded via a generated static-import entrypoint |
-| Composed components (`@stackbase/scheduler`, `@stackbase/workflow`, …) | Yes — whatever `stackbase.config.ts` composes |
-| Dashboard | Optional — included by default, `--no-dashboard` to exclude |
-| SQLite **database file** | **No** — lives on disk under `--data-dir`, external to the binary |
+| SQLite (`bun:sqlite`) | Yes, built into Bun |
+| Your `convex/` functions and schema | Yes, embedded via a generated static-import entrypoint |
+| Composed components (`@stackbase/scheduler`, `@stackbase/workflow`, …) | Yes, whatever `stackbase.config.ts` composes |
+| Dashboard | Optional, included by default (`--no-dashboard` to exclude) |
+| SQLite database file | No, it lives on disk under `--data-dir`, external to the binary |
 
-### Prerequisites
+<Steps>
 
-You need a `convex/` directory (schema + functions) and, optionally, a `stackbase.config.ts` next to
-it — the same layout `stackbase dev` uses. There's no `stackbase init` scaffolder; if your app composes
+<Step>
+
+### Check prerequisites
+
+You need a `convex/` directory (schema and functions) and, optionally, a `stackbase.config.ts` next to
+it: the same layout `stackbase dev` uses. There's no `stackbase init` scaffolder. If your app composes
 components, install them as ordinary dependencies (`bun add @stackbase/scheduler @stackbase/workflow`).
 `stackbase build` runs its own codegen internally, so there's no separate `stackbase codegen` step to
 run first.
 
-### Building
+</Step>
+
+<Step>
+
+### Build
 
 ```bash
 stackbase build
@@ -238,49 +279,13 @@ Output: `./stackbase-server` (the default `--outfile`).
 stackbase build --outfile ./dist/my-backend
 ```
 
-### How it works internally
-
-1. **Refreshes codegen** — `loadConvexDir → push → writeGenerated`, same as `deploy`, so the app's own
-   `import "./_generated/server"` resolves once bundled.
-2. **Generates a static-import entrypoint.** `bun build --compile` only bundles code reached via
-   *static* `import` statements — there's no filesystem to dynamically scan inside a compiled binary.
-   So `stackbase build` writes a throwaway `entry.ts` that statically imports every `convex/` module by
-   absolute path, the schema, `stackbase.config.ts` (if present), and — if the dashboard is included —
-   every dashboard asset via `import x with { type: "file" }`, then reconstructs the exact
-   `{schema, modules}` shape `loadConvexDir` returns at runtime and hands it to `runBinaryServer`
-   (the same boot core `stackbase serve` uses, just fed statically-imported modules instead of a
-   dynamic directory scan).
-3. **Shells out to `bun build --compile --minify`** (via `node:child_process.spawnSync`, so this works
-   whether the CLI itself is invoked under Bun or Node — only the compile step itself needs Bun on
-   `PATH`).
-4. Cleans up the generated entrypoint.
-
-**Why no `--bytecode`:** the generated entrypoint boots with a top-level `await` (to fully start the
-runtime before serving), and `bun build --compile --bytecode` rejects top-level await. Cold-start speed
-is negligible for a long-running self-hosted server binary, so `stackbase build` omits `--bytecode`
-rather than restructure the entrypoint around it.
-
-### Cross-compilation
-
-```bash
-stackbase build --target linux-x64   --outfile ./dist/server-linux
-stackbase build --target linux-arm64 --outfile ./dist/server-linux-arm64
-stackbase build --target darwin-arm64 --outfile ./dist/server-macos
-stackbase build --target darwin-x64   --outfile ./dist/server-macos-x64
-stackbase build --target windows-x64  --outfile ./dist/server-windows.exe
-```
-
-A `windows-x64` target automatically appends `.exe` to `--outfile` if you didn't already include it.
-
-### Build options
-
 | Flag | Default | Description |
 |---|---|---|
 | `--dir <path>` | `convex` | App's `convex/` directory to build |
 | `--outfile <path>` | `./stackbase-server` | Output path |
 | `--target <platform>` | current platform | One of `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `windows-x64` |
-| `--no-dashboard` | — (dashboard included) | Exclude the dashboard UI from the binary |
-| `--verbose` | — | Stream the underlying `bun build --compile` output instead of suppressing it |
+| `--no-dashboard` | dashboard included | Exclude the dashboard UI from the binary |
+| `--verbose` | off | Stream the underlying `bun build --compile` output instead of suppressing it |
 
 On success, `stackbase build` prints the output path and its size:
 
@@ -288,58 +293,66 @@ On success, `stackbase build` prints the output path and its size:
 ✓ built ./stackbase-server (58MB)
 ```
 
-### Running the compiled binary
+</Step>
+
+<Step>
+
+### Run it
 
 ```bash
 STACKBASE_ADMIN_KEY=your-strong-secret ./stackbase-server --port 3000 --hostname 0.0.0.0 --data-dir ./data
 ```
 
-`STACKBASE_ADMIN_KEY` is **required**, exactly like `stackbase serve` — the binary fails fast (exit 1)
-if it isn't set, and it is never auto-generated; this is production-facing, same as `serve`.
+`STACKBASE_ADMIN_KEY` is required, exactly like `stackbase serve`. The binary fails fast (exit 1) if
+it isn't set, and it's never auto-generated. This is production-facing, same as `serve`.
 
 | Flag | Env fallback | Default | Description |
 |---|---|---|---|
 | `--port` | `PORT` | `3000` | Port to listen on |
-| `--hostname` | — | `0.0.0.0` | Address to bind to |
-| `--data-dir` | — | `./data` | Directory holding the SQLite database (`db.sqlite`) |
-| `--database-url` | `STACKBASE_DATABASE_URL` | — (SQLite) | Postgres connection string — same flag `serve` accepts; unset uses the embedded SQLite adapter |
+| `--hostname` | none | `0.0.0.0` | Address to bind to |
+| `--data-dir` | none | `./data` | Directory holding the SQLite database (`db.sqlite`) |
+| `--database-url` | `STACKBASE_DATABASE_URL` | SQLite | Postgres connection string, same flag `serve` accepts. Unset uses the embedded SQLite adapter |
 
 The binary is otherwise runtime-flag-compatible with `stackbase serve`: the same required-admin-key
 fail-fast behavior, and graceful shutdown on `SIGTERM`/`SIGINT` (stop the listener, close the database,
 exit 0).
 
-### Machine-readable startup line
-
-Immediately after the listener is up, the binary writes exactly **one** JSON line to stdout:
+Immediately after the listener is up, the binary writes exactly one JSON line to stdout:
 
 ```json
 {"ready":true,"port":3000,"url":"http://0.0.0.0:3000"}
 ```
 
-This exists for a parent process — Electron, Tauri, a supervisor script — to read stdout and know
-precisely when the server is ready and which port it actually bound (relevant when `--port 0` or `$PORT`
-picks an ephemeral port). Nothing else is printed to stdout before this line; treat "first line of
-stdout" as the contract, not "first line matching some pattern."
+This exists for a parent process, like Electron, Tauri, or a supervisor script, to read stdout and know
+precisely when the server is ready and which port it actually bound (relevant when `--port 0` or
+`$PORT` picks an ephemeral port). Nothing else is printed to stdout before this line. Treat "first line
+of stdout" as the contract, not "first line matching some pattern."
 
-### What's fixed at build time — no live hot-swap
+</Step>
 
-Unlike `stackbase serve --allow-deploy`, a compiled binary does **not** expose `POST /_admin/deploy`.
+</Steps>
+
+<Callout type="warn" title="No live hot-swap in a compiled binary">
+
+Unlike `stackbase serve --allow-deploy`, a compiled binary doesn't expose `POST /_admin/deploy`.
 Everything embedded at compile time is fixed for the life of that binary:
 
-- Functions and schema — shipping a change means rebuilding and redeploying the binary, not
+- Functions and schema: shipping a change means rebuilding and redeploying the binary, not
   `stackbase deploy`.
-- The composed component set — adding `@stackbase/workflow` to `stackbase.config.ts` requires a
-  rebuild, same as it requires a restart under `serve`.
+- The composed component set: adding `@stackbase/workflow` to `stackbase.config.ts` requires a rebuild,
+  same as it requires a restart under `serve`.
 
-If you need live hot-swap, run `stackbase serve --allow-deploy` instead (see above); the single binary
+If you need live hot-swap, run `stackbase serve --allow-deploy` instead (see above). The single binary
 trades that away for a zero-dependency, single-file deployment artifact.
+
+</Callout>
 
 ### Other limitations
 
-- **Single instance.** SQLite requires exclusive file access — one binary process per data directory
+- Single instance. SQLite requires exclusive file access, so it's one binary process per data directory
   (unless you pass `--database-url` to point it at Postgres, in which case the usual single-writer
   advisory-lock rules from [Postgres](/docs/deploy/postgres) apply instead).
-- **No `stackbase init` scaffolder.** You bring your own `convex/` directory; `stackbase build` doesn't
+- No `stackbase init` scaffolder. You bring your own `convex/` directory. `stackbase build` doesn't
   generate one.
 
 ### Worked example: fixture app with a component, then cross-compiled
@@ -363,17 +376,81 @@ stackbase build --dir convex --target linux-x64 --outfile ./dist/server-linux --
 # ✓ built ./dist/server-linux (95MB)
 ```
 
+### Going deeper: how the build works
+
+<Accordions type="single">
+
+<Accordion title="How the build works internally">
+
+1. **Refreshes codegen**: `loadConvexDir → push → writeGenerated`, same as `deploy`, so the app's own
+   `import "./_generated/server"` resolves once bundled.
+2. **Generates a static-import entrypoint.** `bun build --compile` only bundles code reached via static
+   `import` statements. There's no filesystem to dynamically scan inside a compiled binary, so
+   `stackbase build` writes a throwaway `entry.ts` that statically imports every `convex/` module by
+   absolute path, the schema, `stackbase.config.ts` (if present), and, if the dashboard is included,
+   every dashboard asset via `import x with { type: "file" }`. It then reconstructs the exact
+   `{schema, modules}` shape `loadConvexDir` returns at runtime and hands it to `runBinaryServer` (the
+   same boot core `stackbase serve` uses, just fed statically imported modules instead of a dynamic
+   directory scan).
+3. **Shells out to `bun build --compile --minify`** (via `node:child_process.spawnSync`, so this works
+   whether the CLI itself is invoked under Bun or Node; only the compile step itself needs Bun on
+   `PATH`).
+4. **Cleans up the generated entrypoint.**
+
+**Why no `--bytecode`:** the generated entrypoint boots with a top-level `await` (to fully start the
+runtime before serving), and `bun build --compile --bytecode` rejects top-level await. Cold-start speed
+is negligible for a long-running self-hosted server binary, so `stackbase build` omits `--bytecode`
+rather than restructure the entrypoint around it.
+
+</Accordion>
+
+</Accordions>
+
+### Cross-compilation
+
+<Tabs items={['linux-x64', 'linux-arm64', 'darwin-arm64', 'darwin-x64', 'windows-x64']}>
+
+```bash tab="linux-x64"
+stackbase build --target linux-x64 --outfile ./dist/server-linux
+```
+
+```bash tab="linux-arm64"
+stackbase build --target linux-arm64 --outfile ./dist/server-linux-arm64
+```
+
+```bash tab="darwin-arm64"
+stackbase build --target darwin-arm64 --outfile ./dist/server-macos
+```
+
+```bash tab="darwin-x64"
+stackbase build --target darwin-x64 --outfile ./dist/server-macos-x64
+```
+
+```bash tab="windows-x64"
+stackbase build --target windows-x64 --outfile ./dist/server-windows.exe
+```
+
+</Tabs>
+
+A `windows-x64` target automatically appends `.exe` to `--outfile` if you didn't already include it.
+
 ### Deployment patterns for the binary
 
-**Standalone, on a VPS or bare metal:**
+<Tabs items={['VPS or bare metal', 'Immutable Docker image', 'Desktop sidecar', 'systemd service']}>
+
+<Tab value="VPS or bare metal">
 
 ```bash
 STACKBASE_ADMIN_KEY=your-strong-secret ./stackbase-server --hostname 0.0.0.0 --port 8080 --data-dir /var/lib/stackbase
 ```
 
-**A tiny, immutable Docker image** — an alternative to the bind-mounted image in
-[Self-hosting](/docs/deploy/self-hosting): cross-compile for Linux, then copy just the binary into a
-distroless base with no Bun, no `node_modules`, no source at all:
+</Tab>
+
+<Tab value="Immutable Docker image">
+
+An alternative to the bind-mounted image in [Self-hosting](/docs/deploy/self-hosting): cross-compile
+for Linux, then copy just the binary into a distroless base with no Bun, no `node_modules`, and no
+source at all.
 
 ```dockerfile title="Dockerfile.binary"
 FROM gcr.io/distroless/base-debian12
@@ -389,11 +466,16 @@ docker build -f Dockerfile.binary -t my-app-binary .
 docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=your-strong-secret -v stackbase-data:/data my-app-binary
 ```
 
-**As a desktop-app sidecar** — Tauri or Electrobun can spawn the binary as a child process and parse
-its `{"ready":...}` stdout line to learn the URL to connect to, giving you process isolation from the
-app's own runtime.
+</Tab>
 
-**As a systemd service:**
+<Tab value="Desktop sidecar">
+
+Tauri or Electrobun can spawn the binary as a child process and parse its `{"ready":...}` stdout line
+to learn the URL to connect to. That gives you process isolation from the app's own runtime.
+
+</Tab>
+
+<Tab value="systemd service">
 
 ```ini
 [Unit]
@@ -411,14 +493,18 @@ User=stackbase
 WantedBy=multi-user.target
 ```
 
+</Tab>
+
+</Tabs>
+
 ## Choosing between `deploy`, `build`, and Docker self-hosting
 
 | | `stackbase deploy` | `stackbase build` | Docker (bind-mount) |
 |---|---|---|---|
-| Restart needed to ship a change? | No — live hot-swap | Yes — rebuild + redeploy the binary | Yes — restart the container |
-| Schema changes | Additive only, validated, atomic | Whatever the new build embeds (no live validation — it's a fresh process) | Same as `deploy` if you also run `deploy` against it; a plain restart has no gate |
+| Restart needed to ship a change? | No, live hot-swap | Yes, rebuild and redeploy the binary | Yes, restart the container |
+| Schema changes | Additive only, validated, atomic | Whatever the new build embeds (no live validation, it's a fresh process) | Same as `deploy` if you also run `deploy` against it; a plain restart has no gate |
 | Component set changes | Requires a restart | Requires a rebuild | Requires a restart |
-| Deployment artifact | None — pushes to an existing process | One native executable | Docker image + bind-mounted `convex/` |
+| Deployment artifact | None, pushes to an existing process | One native executable | Docker image plus bind-mounted `convex/` |
 | Runtime dependency | `serve` already running | Bun/Node only to build; the binary itself needs nothing | Docker |
 | Postgres | Whatever the target `serve` was started with | `--database-url` flag, same as `serve` | Same as `serve` |
 
@@ -428,11 +514,11 @@ image only when you need to change the composed component set.
 
 ## Related
 
-- [Self-hosting with Docker](/docs/deploy/self-hosting) — the `serve` deployment `stackbase deploy`
+- [Self-hosting with Docker](/docs/deploy/self-hosting): the `serve` deployment `stackbase deploy`
   pushes onto, and the bind-mounted-image alternative to the standalone binary.
-- [Postgres](/docs/deploy/postgres) — `--database-url`/`STACKBASE_DATABASE_URL`, accepted by both
+- [Postgres](/docs/deploy/postgres): `--database-url`/`STACKBASE_DATABASE_URL`, accepted by both
   `serve` and the compiled binary.
-- [Cloudflare](/docs/deploy/cloudflare) — `stackbase deploy --target cloudflare`, and the general
+- [Cloudflare](/docs/deploy/cloudflare): `stackbase deploy --target cloudflare`, and the general
   `--target`/`--env` provisioning model.
-- [Local dev](/docs/deploy/local-dev) — `stackbase dev`, the hot-reload loop this page's `deploy` and
+- [Local dev](/docs/deploy/local-dev): `stackbase dev`, the hot-reload loop this page's `deploy` and
   `build` both build on.

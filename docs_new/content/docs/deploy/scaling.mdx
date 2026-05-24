@@ -1,48 +1,71 @@
 ---
 title: Scaling
-description: The tiered model — single-node free forever, a Postgres fleet and an object-storage substrate for multi-node write scale-out under a commercial entitlement.
+description: The tiered model - single-node free forever, plus a Postgres fleet and an object-storage substrate for multi-node write scale-out under a commercial entitlement.
 ---
 
 {/* diataxis: explanation */}
 
-stackbase is designed as a set of **tiers**, not one fixed shape. The same app code — schema,
-queries, mutations, subscriptions, the client SDK — runs unchanged whether it's a laptop running
-`stackbase dev`, one `stackbase serve` process, a symmetric fleet of nodes sharing a Postgres
-database, or a fleet of nodes sharing nothing but an object-storage bucket. Scaling out is
-something you opt into at the infrastructure layer — a flag, an environment variable, a schema
-annotation — never something that changes how you write a query or a mutation.
+stackbase runs as a set of tiers, not one fixed shape. Think of it as a building with three floors.
+You write your schema, queries, mutations, and subscriptions once, on the ground floor, and the
+same code runs unchanged whether you're on a laptop running `stackbase dev`, one `stackbase serve`
+process, a fleet of nodes sharing a Postgres database, or a fleet of nodes sharing nothing but an
+object-storage bucket.
 
-This page is the deployment-side story: what each tier actually is, the guarantees it keeps and
+Moving up a floor is something you opt into at the infrastructure layer: a flag, an environment
+variable, a schema annotation. It never changes how you write a query or a mutation.
+
+This page is about the deployment side: what each tier actually is, the guarantees it keeps and
 gives up, every flag and environment variable that controls it, and the measured numbers behind
-the claims. For the *authoring* side of write sharding — `.shardKey()`, `shardBy`, and the exact
-runtime errors a misused shard throws — see [Schema & tables](/docs/core-concepts/schema-and-tables#sharding-shardkeyfield)
-and [Mutations](/docs/core-concepts/mutations#sharding-shardby); this page covers what sharding
-*means* operationally and links back rather than re-deriving those rules.
+the claims. For the authoring side of write sharding, the `.shardKey()`, `shardBy`, and the exact
+runtime errors a misused shard throws, see [Schema & tables](/docs/core-concepts/schema-and-tables#sharding-shardkeyfield)
+and [Mutations](/docs/core-concepts/mutations#sharding-shardby). This page covers what sharding
+means operationally and links back to those rather than repeating them.
 
 ## The tiered model
 
 | Tier | Shape | Storage | Scales |
 |---|---|---|---|
-| **0/1** | One process | Embedded SQLite, or Postgres | Nothing — one writer, always |
-| **2 — Fleet** | N symmetric nodes | Shared Postgres | Reads (every tier); writes too, with sharding + multi-writer distribution |
-| **3 — Object storage** | N nodes, no database | An object-storage bucket (S3/R2/MinIO/GCS) + a local SQLite cache per node | Reads and writes, with no shared database at all |
+| **0/1** | One process | Embedded SQLite, or Postgres | Nothing (one writer, always) |
+| **2 (fleet)** | N symmetric nodes | Shared Postgres | Reads (every tier); writes too, with sharding and multi-writer distribution |
+| **3 (object storage)** | N nodes, no database | An object-storage bucket (S3/R2/MinIO/GCS) + a local SQLite cache per node | Reads and writes, with no shared database at all |
 
-Tier 0/1 is free forever and is documented in [Self-hosting](/docs/deploy/self-hosting), [Postgres](/docs/deploy/postgres),
-and [Deploy and build](/docs/deploy/deploy-and-build) — a single `stackbase serve` process is
-**one writer**: every mutation goes through it, fully serializable, no coordination overhead. This
-is the right shape for the overwhelming majority of apps. Tiers 2 and 3 are what you reach for once
-you've actually measured a write-throughput ceiling, need redundancy, or want to run with no
-managed database at all — each is covered in full below.
+```mermaid
+flowchart TB
+  subgraph T1["Tier 0/1: one process"]
+    A1["stackbase serve"] --> D1[("SQLite or Postgres")]
+  end
+  subgraph T2["Tier 2: fleet"]
+    W["writer node"] --> PG[("shared Postgres")]
+    Y1["sync node"] --> PG
+    Y2["sync node"] --> PG
+  end
+  subgraph T3["Tier 3: object storage"]
+    N1["node"] --> OS[("S3 / R2 / MinIO")]
+    N2["node"] --> OS
+    N3["node"] --> OS
+  end
+```
+
+Tier 0/1 is free forever and is documented in [Self-hosting](/docs/deploy/self-hosting),
+[Postgres](/docs/deploy/postgres), and [Deploy and build](/docs/deploy/deploy-and-build). A single
+`stackbase serve` process is one writer: every mutation goes through it, fully serializable, no
+coordination overhead. This is the right shape for the overwhelming majority of apps. Tiers 2 and 3
+are what you reach for once you've measured a real write-throughput ceiling, need redundancy, or
+want to run with no managed database at all. Each is covered in full below.
 
 ## Tier 2: the fleet (`@stackbase/fleet`)
 
 `stackbase serve --fleet` runs a small, symmetric fleet of `stackbase serve` processes that share
-one Postgres database. There is no coordinator service and no primary/replica flag — every node
-runs the identical command, and the fleet decides its own roles using a **lease that lives in the
-database itself**: the first node to acquire a Postgres advisory lock becomes the **writer**;
-every other node is a **sync node**.
+one Postgres database. There's no coordinator service and no primary/replica flag. Every node runs
+the identical command, and the fleet decides its own roles using a lease that lives in the database
+itself: the first node to acquire a Postgres advisory lock becomes the **writer**, and every other
+node is a **sync node**.
 
 ### Starting a fleet node
+
+<Tabs items={['CLI flags', 'Environment variables']}>
+
+<Tab value="CLI flags">
 
 ```bash
 STACKBASE_ADMIN_KEY=secret stackbase serve \
@@ -52,8 +75,12 @@ STACKBASE_ADMIN_KEY=secret stackbase serve \
   --advertise-url http://10.0.0.5:3000
 ```
 
-Or the environment-variable equivalent (useful for container orchestration — every node runs the
-same command, only the advertised address differs):
+</Tab>
+
+<Tab value="Environment variables">
+
+Useful for container orchestration: every node runs the same command, only the advertised address
+differs.
 
 ```bash
 export STACKBASE_ADMIN_KEY=secret
@@ -63,125 +90,134 @@ export STACKBASE_ADVERTISE_URL=http://10.0.0.5:3000
 stackbase serve --dir convex
 ```
 
+</Tab>
+
+</Tabs>
+
 - **`--fleet` / `STACKBASE_FLEET`** turns fleet mode on.
-- **`--database-url` / `STACKBASE_DATABASE_URL`** must point at Postgres — SQLite has no concept
-  of a shared lease across processes, so `--fleet` against SQLite (or no database URL at all)
-  fails fast at boot.
-- **`--advertise-url` / `STACKBASE_ADVERTISE_URL`** is the URL *other* fleet nodes should use to
-  reach this node — recorded on the lease when this node is the writer, and used by sync nodes to
-  forward writes and proxy `httpAction`s to it. Every node needs its own value.
+- **`--database-url` / `STACKBASE_DATABASE_URL`** must point at Postgres. SQLite has no concept of
+  a shared lease across processes, so `--fleet` against SQLite (or no database URL at all) fails
+  fast at boot.
+- **`--advertise-url` / `STACKBASE_ADVERTISE_URL`** is the URL *other* fleet nodes use to reach this
+  node. It's recorded on the lease when this node is the writer, and sync nodes use it to forward
+  writes and proxy `httpAction`s to it. Every node needs its own value.
 - **The same `STACKBASE_ADMIN_KEY` on every node.** Nodes authenticate to each other's internal
   forwarding endpoint with this key.
 - **A unique data directory per node.** A node's local replica lives at `<dir>/fleet-replica.db`
-  alongside whatever `--data`/`STACKBASE_DATA_DIR` you gave it. This isn't validated — two nodes
-  sharing a directory silently stomp each other's replica file rather than failing fast.
-- **`@stackbase/fleet` installed.** `serve` loads it via a dynamic `import()` — core stackbase has
-  no static dependency on it — so `--fleet` without the package installed fails fast with an
-  install instruction rather than a cryptic module-not-found error.
+  alongside whatever `--data`/`STACKBASE_DATA_DIR` you gave it. This isn't validated: two nodes
+  sharing a directory silently stomp each other's replica file instead of failing fast.
+- **`@stackbase/fleet` installed.** `serve` loads it via a dynamic `import()` (core stackbase has no
+  static dependency on it), so `--fleet` without the package installed fails fast with an install
+  instruction instead of a cryptic module-not-found error.
 
 Misconfiguration fails fast with a specific message in every case:
 
 | Misconfiguration | Result |
 |---|---|
-| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (or a SQLite URL) | `fleet mode requires --database-url (Postgres) — set --database-url postgres://… or STACKBASE_DATABASE_URL.` |
-| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `fleet mode requires --advertise-url (or STACKBASE_ADVERTISE_URL) — the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` |
-| `--fleet` without `@stackbase/fleet` installed | `fleet mode requires @stackbase/fleet — install it (bun add @stackbase/fleet).` |
-| `--fleet` combined with `--object-store` | `--object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.` |
-| No `--fleet` at all | Unchanged — today's single-node behavior. |
+| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (or a SQLite URL) | `fleet mode requires --database-url (Postgres): set --database-url postgres://… or STACKBASE_DATABASE_URL.` |
+| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `fleet mode requires --advertise-url (or STACKBASE_ADVERTISE_URL): the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` |
+| `--fleet` without `@stackbase/fleet` installed | `fleet mode requires @stackbase/fleet: install it (bun add @stackbase/fleet).` |
+| `--fleet` combined with `--object-store` | `--object-store cannot be combined with --fleet (Tier 2): pick one write-scaling story.` |
+| No `--fleet` at all | Unchanged, today's single-node behavior. |
 
 `serve`'s machine-readable startup line gains two additive fields in fleet mode:
-`{"fleet":true,"role":"writer"}` (or `"sync"`) — printed once at boot, so watch logs or the
-dashboard, not this line, to observe a later promotion.
+`{"fleet":true,"role":"writer"}` (or `"sync"`), printed once at boot. Watch logs or the dashboard,
+not this line, to observe a later promotion.
 
 ### What every request gets
 
 - **Any node serves any request.** A client can open its WebSocket/HTTP connection to *any* node.
-  Queries and subscriptions are always answered **locally** — never a round-trip to Postgres for a
-  read (see the replica model below). Mutations, actions, and `httpAction` requests landing on a
-  sync node are transparently **forwarded** to the current writer over an internal,
-  admin-key-authenticated endpoint; the client never knows or cares which node is the writer.
+  Queries and subscriptions are always answered locally: never a round trip to Postgres for a read
+  (see the replica model below). Mutations, actions, and `httpAction` requests landing on a sync
+  node are transparently forwarded to the current writer over an internal, admin-key-authenticated
+  endpoint. The client never knows or cares which node is the writer.
 - **Reactive updates cross the process boundary.** When the writer commits, it `NOTIFY`s Postgres;
   every sync node's replica tailer is `LISTEN`ing (with a 1-second poll fallback if a `NOTIFY` is
   ever missed) and applies the newly-committed batch, derives the invalidation, and re-runs/pushes
-  affected subscriptions. The write log is always the source of truth — a missed notification
-  costs latency, never a missed update.
+  affected subscriptions. The write log is always the source of truth. A missed notification costs
+  latency, never a missed update.
 
 ### Reads served from a local, verbatim-applied replica
 
 Every sync node runs a **replica tailer** that follows the shared Postgres write log and applies
-each committed batch, verbatim, onto a local file-backed SQLite replica at `<dir>/fleet-replica.db` —
+each committed batch, verbatim, onto a local file-backed SQLite replica at `<dir>/fleet-replica.db`,
 the same storage engine single-node self-hosting uses, just fed by the tail instead of by local
-writes. All queries and subscriptions on that node are served entirely from this local file; the
+writes. All queries and subscriptions on that node are served entirely from this local file. The
 node's Postgres connection is used only to pull the next batch of committed writes, never to answer
 a read. This is what keeps primary read load from growing with fleet size.
 
 - **New nodes catch up before reporting ready.** A node starting cold (or whose replica file was
-  deleted) replays the write log before its startup line prints `"ready":true` — there's no
+  deleted) replays the write log before its startup line prints `"ready":true`. There's no
   partial-ready state.
 - **Restarts resume, they don't replay.** A node restarted against the same data directory reopens
   its replica and resumes from its own last-applied position.
-- **The replica file is safe to delete** — it's a rebuildable mirror, never a source of truth.
-  Delete it (and its `-wal`/`-shm` sidecars) and restart; a corrupted file (e.g. from a hard crash
+- **The replica file is safe to delete.** It's a rebuildable mirror, never a source of truth. Delete
+  it (and its `-wal`/`-shm` sidecars) and restart. A corrupted file (e.g. from a hard crash
   mid-write) is detected and rebuilt automatically the same way.
 - **A replica reused against the wrong primary is caught and rebuilt automatically.** Every
   deployment stamps a one-time identity marker on the primary; every replica mirrors that stamp
   locally. A data directory copied between environments (or reattached to a different database) is
-  detected the moment the node boots, deleted, and rebuilt from the current primary — nothing to
+  detected the moment the node boots, deleted, and rebuilt from the current primary. Nothing to
   clean up by hand.
 
 ### Read-your-own-writes
 
 A mutation's success response, from **any** node, guarantees an immediate follow-up read against
-**that same node** sees the write — even on a sync node answering from its own local replica.
+**that same node** sees the write, even on a sync node answering from its own local replica.
 Internally the node waits for its replica to catch up to the mutation's commit before returning the
-result, bounded at **5 seconds**; past that bound the mutation still returns rather than hanging,
-and in that rare case an immediately-following read could be stale.
+result, bounded at 5 seconds. Past that bound the mutation still returns rather than hanging; in
+that rare case, an immediately following read could be stale.
 
 **This covers `action` calls too**, including their inner writes. An action's own response has no
 single commit of its own, but the engine tracks the highest commit timestamp across everything it
 wrote via inner `ctx.runMutation`/`ctx.runAction` calls (recursively) and carries it on the
-response — the forwarding node waits on that same timestamp, same 5-second bound. An action that
-performs no writes has nothing to wait on and returns as soon as the handler completes.
+response. The forwarding node waits on that same timestamp, with the same 5-second bound. An action
+that performs no writes has nothing to wait on and returns as soon as the handler completes.
 
 ### Reads survive a Postgres outage; writes don't
 
 If the shared Postgres database becomes unreachable, sync nodes keep answering queries and
-subscriptions keep pushing updates — they're reading from a local replica file that needs nothing
-from Postgres once it's caught up. Writes do not share this tolerance: a mutation forwarded to the
+subscriptions keep pushing updates. They're reading from a local replica file that needs nothing
+from Postgres once it's caught up. Writes don't share this tolerance: a mutation forwarded to the
 writer during the outage fails visibly (a bounded failure, not a silent success or an indefinite
 hang) rather than being queued or served stale. Once Postgres returns, the writer resumes
 committing and the fleet reconverges automatically.
 
-Be precise about what this means: it is **read availability, not full high availability**.
+<Callout type="warn" title="Read availability, not full high availability">
+
+If Postgres goes down, reads and subscriptions on sync nodes keep working. Writes don't, until
+Postgres comes back.
+
+</Callout>
 
 ### Backpressure and heartbeat
 
 A client whose connection can't keep up with pushed updates (a slow network, a backgrounded tab)
-doesn't grow the server's memory without bound — its outbound updates queue up to a cap (1 MiB /
-200 frames), and past that cap the server drops the newest update rather than queuing indefinitely.
-A dropped update isn't lost data: the client SDK detects the resulting gap and automatically
-resyncs (re-subscribes its live queries from scratch) the next time it hears from the server, no
-app code involved. A connection that's gone entirely (not just slow) is detected and closed by a
+doesn't grow the server's memory without bound. Its outbound updates queue up to a cap (1 MiB / 200
+frames), and past that cap the server drops the newest update rather than queuing indefinitely. A
+dropped update isn't lost data: the client SDK detects the resulting gap and automatically resyncs
+(re-subscribes its live queries from scratch) the next time it hears from the server, with no app
+code involved. A connection that's gone entirely, not just slow, is detected and closed by a
 periodic heartbeat, freeing its resources. Neither mechanism is fleet-specific, but both matter more
-in a fleet where one node may be fanning out to more connections.
+in a fleet, where one node may be fanning out to more connections.
 
 ### Failover timing and in-flight requests
 
-- **A dead writer** (crash, `SIGKILL`, a bad deploy) releases its Postgres session — and with it
-  the advisory lock — as soon as Postgres notices the connection is gone. A sync node's
-  lease-acquire retry loop polls every ~2 seconds, so failover typically completes within a couple
-  of seconds, up to roughly 10 in the worst case. Proven end-to-end by killing a live writer with
-  `SIGKILL` and observing a sync node promote and start serving writes.
+- **A dead writer** (crash, `SIGKILL`, a bad deploy) releases its Postgres session, and with it the
+  advisory lock, as soon as Postgres notices the connection is gone. A sync node's lease-acquire
+  retry loop polls every ~2 seconds, so failover typically completes within a couple of seconds, up
+  to roughly 10 in the worst case. Proven end-to-end by killing a live writer with `SIGKILL` and
+  observing a sync node promote and start serving writes.
 - **A writer that's alive but stuck** (a GC pause, a frozen process, a hung transaction) is a
   different failure: the process never exits, so another node has to notice and take over. Every
-  writer's lease carries a time limit — **`STACKBASE_FLEET_LEASE_TTL_MS`, default `15000`** — it
+  writer's lease carries a time limit, **`STACKBASE_FLEET_LEASE_TTL_MS`** (default `15000`), that it
   must keep renewing to stay the writer. Once it stops renewing, another node waits out the limit
-  and takes the lease away, **fencing** it: any commit the stuck writer had in flight at that exact
+  and takes the lease away, fencing it: any commit the stuck writer had in flight at that exact
   moment is aborted rather than allowed to land, so a write is never left half-applied. The new
   writer also terminates the stuck writer's database sessions so it can't wake up and keep writing
   unnoticed. Measured end-to-end with the TTL shortened to 4 seconds for testing: takeover completed
   about 4.5 seconds after the writer wedged. A revived frozen writer discovers its lease is gone and
-  exits on its own; a process supervisor restarts it and it rejoins as an ordinary sync node.
+  exits on its own. A process supervisor restarts it, and it rejoins as an ordinary sync node.
 - Lowering `STACKBASE_FLEET_LEASE_TTL_MS` makes a wedged-writer takeover faster at the cost of a
   healthy writer needing to renew more often (a transient GC pause could trigger an unnecessary
   failover); raising it does the opposite. Set the same value on every node.
@@ -189,60 +225,60 @@ in a fleet where one node may be fanning out to more connections.
   SQL statement is capped at 10 seconds, an idle-in-transaction session at 5 seconds. Either limit
   fails the offending write visibly instead of letting it hang.
 - **Any mutation/action in flight against the dying writer at the moment it dies fails visibly** to
-  its caller — there is no in-flight request migration. Retry from the client/app, the same way
+  its caller. There's no in-flight request migration. Retry from the client or app, the same way
   you'd handle any dropped connection.
-- Subscriptions on surviving nodes are never affected by a writer failing over — they keep
-  streaming from their own local replica throughout.
+- Subscriptions on surviving nodes are never affected by a writer failing over. They keep streaming
+  from their own local replica throughout.
 
 ### Effectively-once forwarding
 
 Every forwarded write (sync-node-to-writer, or node-to-node under multi-writer distribution) carries
 a one-time marker recorded atomically as part of the same commit as the write itself. If the same
-forwarded write is retried — because the original response never made it back to the caller —
+forwarded write is retried, because the original response never made it back to the caller,
 stackbase recognizes the marker and hands back the original result instead of running the write a
 second time. Precisely stated:
 
 - Your mutation's handler body can still run more than once if two retries of the very same write
-  race each other concurrently, but **the durable write itself — and everything it fans out to —
+  race each other concurrently, but **the durable write itself, and everything it fans out to,
   happens exactly once**, no matter how many concurrent attempts are in flight.
 - A crash in the narrow window after a write commits but before its result is recorded leaves a
-  retry able to confirm the write succeeded (and when) without recovering its return value — treat
+  retry able to confirm the write succeeded (and when) without recovering its return value. Treat
   this like any response dropped after a successful write.
 - **Retry markers are kept for one hour.** A retry arriving after that window re-executes the write
   rather than replaying it.
 
-None of this changes how you write mutations — it's automatic on every forwarded write.
+None of this changes how you write mutations. It's automatic on every forwarded write.
 
 ### Ops surface
 
 Two plain Postgres tables give direct visibility into fleet state:
 
-- **`fleet_nodes`** — one heartbeated row per live node (advertise URL, presence expiry).
-- **`shard_leases`** — one row per shard, recording which node currently owns it (every row points
-  at the same node in single-writer mode; different shards point at different nodes under
-  multi-writer distribution — see below).
+- **`fleet_nodes`**: one heartbeated row per live node (advertise URL, presence expiry).
+- **`shard_leases`**: one row per shard, recording which node currently owns it (every row points at
+  the same node in single-writer mode; different shards point at different nodes under multi-writer
+  distribution, see below).
 
 `/api/health` grows additive fleet fields: a stringified frontier progress marker, how long it's
-been stuck, and which shard is currently pinning it — useful for spotting a stalled shard before it
+been stuck, and which shard is currently pinning it. Useful for spotting a stalled shard before it
 becomes user-visible staleness.
 
 ### Current limits
 
 - **By default, one node writes at a time.** Sharded writes parallelize on that one node, not yet
-  across nodes — turn on multi-writer distribution (below) for that.
-- **A sync node's data-directory uniqueness isn't validated** — get it wrong and both nodes'
-  replica state corrupts silently rather than failing fast.
-- **Read availability, not full HA** — writes still fail during a Postgres outage.
-- **No autoscaler and no load balancer included** — you start/stop nodes and front the fleet with
-  your own proxy.
-- **`ee/` licensing** — see [License and entitlement](#license-and-entitlement) below.
+  across nodes. Turn on multi-writer distribution (below) for that.
+- **A sync node's data-directory uniqueness isn't validated.** Get it wrong and both nodes' replica
+  state corrupts silently rather than failing fast.
+- **Read availability, not full HA.** Writes still fail during a Postgres outage.
+- **No autoscaler and no load balancer included.** You start and stop nodes yourself, and front the
+  fleet with your own proxy.
+- **`ee/` licensing.** See [License and entitlement](#license-and-entitlement) below.
 
 ## Write sharding: the Fenced Frontier model
 
-By itself, a fleet gives you redundancy and read scale — one node is still the single writer.
-**Sharding** is what lets writes themselves parallelize: annotate a table with `.shardKey(field)`
-and a mutation that writes it with `shardBy`, and that table's writes route across multiple
-independent shards instead of funneling through one bottleneck.
+By itself, a fleet gives you redundancy and read scale. One node is still the single writer.
+Sharding is what lets writes themselves parallelize: annotate a table with `.shardKey(field)` and a
+mutation that writes it with `shardBy`, and that table's writes route across multiple independent
+shards instead of funneling through one bottleneck.
 
 ```ts title="convex/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
@@ -266,68 +302,75 @@ export const send = mutation({
 });
 ```
 
-The full authoring surface — the `shardBy` resolver form, the codegen cross-checks, and each
-runtime-enforced rule (a sharded mutation must declare a shard; every write in it must route to
-that shard; the shard-key field is immutable after insert; a sharded mutation may only scan its own
-shard via an index led by the shard key; it may freely insert into global tables but not
-replace/delete them) — lives in [Schema & tables](/docs/core-concepts/schema-and-tables#sharding-shardkeyfield)
-and [Mutations](/docs/core-concepts/mutations#sharding-shardby). These rules fire identically on a
-laptop running `stackbase dev`, a single `stackbase serve`, or a fleet — `stackbase dev` runs the
-full shard count (8 by default) as separate virtual shards in-process, so a shard mistake is a
-dev-time error, never a production surprise. An app that never declares `.shardKey`/`shardBy` is
-byte-identical to before at every tier.
+The full authoring surface lives in [Schema & tables](/docs/core-concepts/schema-and-tables#sharding-shardkeyfield)
+and [Mutations](/docs/core-concepts/mutations#sharding-shardby): the `shardBy` resolver form, the
+codegen cross-checks, and every runtime-enforced rule (a sharded mutation must declare a shard,
+every write in it must route to that shard, the shard-key field is immutable after insert, a
+sharded mutation may only scan its own shard via an index led by the shard key, and it may freely
+insert into global tables but not replace or delete them). These rules fire identically on a laptop
+running `stackbase dev`, a single `stackbase serve`, or a fleet. `stackbase dev` runs the full shard
+count (8 by default) as separate virtual shards in-process, so a shard mistake is a dev-time error,
+never a production surprise. An app that never declares `.shardKey`/`shardBy` is byte-identical to
+before, at every tier.
 
 ### The protocol behind the guarantee: Fenced Frontier
 
 Sharding only works if a subscription spanning multiple shards can never show effect before cause,
-and if a wedged writer can never corrupt or fork a shard's history. Stackbase's design for this —
-called the **Fenced Frontier** — keeps one global, monotone visibility line even though writes
-happen on N independent per-shard writers:
+and if a wedged writer can never corrupt or fork a shard's history. Stackbase's design for this,
+called the **Fenced Frontier**, keeps one global, monotone visibility line even though writes happen
+on N independent per-shard writers:
 
-- **Per-shard parallel OCC writers.** Within a shard, mutations are fully serializable — the exact
+- **Per-shard parallel OCC writers.** Within a shard, mutations are fully serializable: the exact
   guarantee a single writer has always given, just partitioned N ways. Each shard has its own
   commit ring and its own timestamp allocation, done inside the commit's own Postgres transaction
   (no allocated-but-unlanded window).
 - **Lease, fence, and frontier are one database row per shard.** Every commit atomically advances
   that shard's `frontier_ts` on the same row that holds its writer lease. Evicting a wedged writer
-  is itself a fencing update on that row — Postgres's own row-locking serializes it against any
+  is itself a fencing update on that row: Postgres's own row-locking serializes it against any
   in-flight commit, so either the straggling commit lands first and is counted, or the fencer wins
   and the straggler's commit aborts. A shard's history can never fork and no committed timestamp is
   ever silently skipped, including across a failover.
-- **One global visibility line, F = min(frontier_ts) over every shard.** Queries, subscriptions,
-  and pagination cursors are all evaluated at F — a stable prefix of the whole system, so a
-  subscription spanning multiple shards sees a true consistent snapshot, never a torn or
-  causally-inverted view. F is closed cooperatively (a periodic beat plus commit-triggered
-  notifications), not by a naive per-shard heartbeat, so it advances promptly on a busy fleet and
-  costs nothing when idle.
+- **One global visibility line, F = min(frontier_ts) over every shard.** Queries, subscriptions, and
+  pagination cursors are all evaluated at F, a stable prefix of the whole system, so a subscription
+  spanning multiple shards sees a true consistent snapshot, never a torn or causally inverted view.
+  F is closed cooperatively (a periodic beat plus commit-triggered notifications), not by a naive
+  per-shard heartbeat, so it advances promptly on a busy fleet and costs nothing when idle.
+
+```mermaid
+flowchart LR
+  S1["Shard 1, frontier_ts = 104"] --> F["F = min(frontier_ts) = 101"]
+  S2["Shard 2, frontier_ts = 101"] --> F
+  S3["Shard 3, frontier_ts = 108"] --> F
+  F --> Q["Queries and subscriptions read at F"]
+```
 
 ### Consistency: what's serialized and what isn't
 
-- **Within a shard, fully serializable** — unchanged from a single writer's guarantee.
+- **Within a shard, fully serializable.** Unchanged from a single writer's guarantee.
 - **A sharded mutation's reads of unsharded (global) tables are a stable snapshot at F, not
   serialized against concurrent global writes.** This is a deliberate trade-off: serializing every
   shard's global reads against every other shard's global writes would reintroduce the very
-  bottleneck sharding removes. In practice this opens a narrow write-skew window — concretely, a
+  bottleneck sharding removes. In practice this opens a narrow write-skew window. Concretely, a
   permission just revoked in a global `permissions`/`users` table can still read as effective inside
-  a sharded mutation for a brief window (typically tens of milliseconds) — the same class of lag you
+  a sharded mutation for a brief window (typically tens of milliseconds), the same class of lag you
   already accept with a bearer token that isn't checked against a live revocation list on every
   call. If a mutation's correctness depends on a perfectly up-to-date global read, run it on the
   **default shard** instead (a mutation with no `shardBy`), which owns every global document's
   read-modify-write and is fully serializable against every other global write.
-- **Queries and subscriptions are untouched.** They always read one consistent snapshot across
-  every shard — this guarantee predates sharding and sharding doesn't weaken it.
+- **Queries and subscriptions are untouched.** They always read one consistent snapshot across every
+  shard. This guarantee predates sharding, and sharding doesn't weaken it.
 
 ### Shard count: `STACKBASE_FLEET_SHARDS`
 
 The shard count is a **deployment-wide constant**, not per-table or per-app:
 
 - **Default: 8**, whether on `stackbase dev`, a single `serve`, or a fleet.
-- **Set explicitly with `STACKBASE_FLEET_SHARDS`** (a positive integer) before the deployment's
-  very first boot. It's read once, persisted, and every later boot reads the persisted value back.
-- **Immutable after first boot** — an `STACKBASE_FLEET_SHARDS` value that disagrees with what's
-  already persisted fails fast at boot rather than silently picking one. Pick generously up front
-  if you expect to need write parallelism; growing into it later is an offline operation (below),
-  not a live one.
+- **Set explicitly with `STACKBASE_FLEET_SHARDS`** (a positive integer) before the deployment's very
+  first boot. It's read once, persisted, and every later boot reads the persisted value back.
+- **Immutable after first boot.** A `STACKBASE_FLEET_SHARDS` value that disagrees with what's
+  already persisted fails fast at boot rather than silently picking one. Pick generously up front if
+  you expect to need write parallelism. Growing into it later is an offline operation (below), not a
+  live one.
 
 ### Changing shard count on a stopped fleet: `stackbase fleet reshard`
 
@@ -335,124 +378,139 @@ The shard count is a **deployment-wide constant**, not per-table or per-app:
 stackbase fleet reshard --shards 16 --database-url postgres://user:pass@host:5432/db
 ```
 
-This changes a **stopped** Postgres fleet's shard count N→M. It's Postgres-only (`--database-url`,
-or `STACKBASE_DATABASE_URL`, must resolve to a real Postgres URL) and refuses to run against a
-fleet with any live node — every fleet node must be stopped first.
+This changes a **stopped** Postgres fleet's shard count N to M. It's Postgres-only (`--database-url`,
+or `STACKBASE_DATABASE_URL`, must resolve to a real Postgres URL) and refuses to run against a fleet
+with any live node. Every fleet node must be stopped first.
 
 The reason this is safe and fast: a fleet shard is a **logical commit-serialization lane over one
 shared Postgres database**, not a physical partition of data. Routing always recomputes which shard
 a document belongs to from its key; nothing about a document's storage depends on the shard count.
-Resharding therefore **moves no rows** — it updates the persisted shard count and
-creates/deletes the per-shard lease rows to match, in one transaction, healing every remaining
-shard's frontier forward so the fleet comes back up fully consistent. After a successful reshard,
-update `STACKBASE_FLEET_SHARDS` (or unset it) on every node before restarting the fleet — the
-command's own output tells you the new count to use.
+Resharding therefore moves no rows. It updates the persisted shard count and creates or deletes the
+per-shard lease rows to match, in one transaction, healing every remaining shard's frontier forward
+so the fleet comes back up fully consistent. After a successful reshard, update
+`STACKBASE_FLEET_SHARDS` (or unset it) on every node before restarting the fleet. The command's own
+output tells you the new count to use.
 
 ### On a fleet: parallel commits on the writer
 
 By default, all of a sharded table's writes still go through whichever single node holds the fleet
-writer role — but that node commits across its shards **in parallel**, through separate per-shard
-connections to Postgres, so write throughput already scales with shard count, not just with a
-single writer's ceiling, even before spreading shard ownership across nodes.
+writer role. But that node commits across its shards **in parallel**, through separate per-shard
+connections to Postgres, so write throughput already scales with shard count, not just with a single
+writer's ceiling, even before spreading shard ownership across nodes.
 
 ### Group commit: a single-shard escape hatch
 
-`STACKBASE_GROUP_COMMIT=1` batches concurrent writes on a **single shard** (or an unsharded fleet,
-which is just shard count 1) so they share one Postgres round trip instead of each paying its own.
-It's worth trying if a single shard is your write bottleneck — measured **1.6×** at 64 concurrent
-clients on a single shard. Default is **off**: a sharded fleet already spreads commits across
-per-shard connections and gets no additional benefit (or additional risk — the idle-frontier closer
-treats a shard with an in-flight batch as busy and skips it) from also batching within a shard.
+`STACKBASE_GROUP_COMMIT=1` batches concurrent writes on a single shard (or an unsharded fleet, which
+is just shard count 1) so they share one Postgres round trip instead of each paying its own.
+
+<Callout type="info" title="Worth trying if a single shard is your write bottleneck">
+
+Measured 1.6x at 64 concurrent clients on a single shard.
+
+Default is off. A sharded fleet already spreads commits across per-shard connections and gets no
+extra benefit (or extra risk: the idle-frontier closer treats a shard with an in-flight batch as busy
+and skips it) from also batching within a shard.
+
+</Callout>
 
 ### Multi-writer distribution: writes scale with node count
 
 Everything above describes the default topology: one writer, every other node a read replica. One
-environment variable changes that — different shards get owned and written by *different* nodes at
+environment variable changes that: different shards get owned and written by *different* nodes at
 once, so write throughput scales with node count as well as shard count.
 
 ```bash
 export STACKBASE_FLEET_MULTI_WRITER=1
 ```
 
-Set this on **every** node — there's no CLI flag, only the environment variable, and it's a
+Set this on **every** node. There's no CLI flag, only the environment variable, and it's a
 whole-deployment setting: mixing nodes with and without it set isn't supported. With it set:
 
-- **Shard ownership is assigned automatically** — every live node computes the same assignment
-  independently from a small set of rows in the shared Postgres database, no shard-to-node mapping
-  to configure and no separate coordinator process.
+- **Shard ownership is assigned automatically.** Every live node computes the same assignment
+  independently from a small set of rows in the shared Postgres database. No shard-to-node mapping to
+  configure, no separate coordinator process.
 - **Placement converges within a handful of seconds** of a membership change (a node joining,
   leaving, or dying).
-- **Writers stay reactive to each other's commits** — a live subscription open against any writer
+- **Writers stay reactive to each other's commits.** A live subscription open against any writer
   keeps seeing changes to every shard, not just the ones that node itself owns.
 - **Failover is per-shard.** Losing a writer node stalls only the shards it owned, not the whole
   fleet's writes; other nodes' own shards keep committing throughout. Same
   `STACKBASE_FLEET_LEASE_TTL_MS` timing as single-writer failover.
-- **Adding a node doesn't wait for anything to expire** — existing writers notice a healthy newcomer
+- **Adding a node doesn't wait for anything to expire.** Existing writers notice a healthy newcomer
   within a couple of beats and hand it its share of shards directly.
-- **Scheduled functions and crons always run on exactly one node** — whichever one owns the same
-  "default" shard every unsharded table uses. If that node dies, whichever node picks up the
-  default shard also picks up scheduled work, with no separate scheduler configuration.
+- **Scheduled functions and crons always run on exactly one node**: whichever one owns the same
+  "default" shard every unsharded table uses. If that node dies, whichever node picks up the default
+  shard also picks up scheduled work, with no separate scheduler configuration.
 - **Reads scale on every node, writers included.** A writer node in multi-writer mode keeps the same
-  local replica a sync node does and answers its own reads from it — writing is the only thing that
-  goes straight to the shards a node owns. One eventually-consistent corner: a bare one-off query
+  local replica a sync node does and answers its own reads from it. Writing is the only thing that
+  goes straight to the shards a node owns. One eventually consistent corner: a bare one-off query
   fired immediately after a writer node's own local write may run a beat before the write appears in
   its own replica (live subscriptions and forwarded writes are always read-your-own-writes; a raw
   race against your own just-committed write on the same writer node is the exception, and it
   converges within the replication beat).
 
-### Measured: multi-node write scale-out
+### Measured numbers
 
-Real distributed write throughput, N `serve --fleet` writer nodes (`STACKBASE_FLEET_MULTI_WRITER=1`)
-over one shared Postgres, 4 shards per node, driver routing every write directly to its shard's
-owner (see `docs/dev/research/multinode-throughput.md` for the full harness):
+<Accordions type="single">
+
+<Accordion title="Multi-node write scale-out">
+
+Real distributed write throughput, N `serve --fleet` writer nodes
+(`STACKBASE_FLEET_MULTI_WRITER=1`) over one shared Postgres, 4 shards per node, driver routing every
+write directly to its shard's owner (see `docs/dev/research/multinode-throughput.md` for the full
+harness):
 
 | nodes | shards | aggregate mut/s | scale vs. 1 node |
 |------:|-------:|----------------:|------------------:|
-| 1 | 4 | 675 | 1.00× |
-| 2 | 8 | 943 | 1.40× |
-| 3 | 12 | 1,180 | 1.75× |
+| 1 | 4 | 675 | 1.00x |
+| 2 | 8 | 943 | 1.40x |
+| 3 | 12 | 1,180 | 1.75x |
 
-Multi-node write scale-out is real — aggregate throughput rises with node count — but it's
-**sublinear**, because every node still commits to the **same** shared Postgres database and
-contends on that one store's write path. The fleet parallelizes the engine work (executor, OCC,
-per-shard commit pipelines) across nodes; the store itself is the diminishing-returns ceiling. True
-linear write scale-out needs the *store* sharded too, which is exactly what Tier 3 does.
+Multi-node write scale-out is real. Aggregate throughput rises with node count, but it's sublinear,
+because every node still commits to the same shared Postgres database and contends on that one
+store's write path. The fleet parallelizes the engine work (executor, OCC, per-shard commit
+pipelines) across nodes. The store itself is the diminishing-returns ceiling. True linear write
+scale-out needs the store sharded too, which is exactly what Tier 3 does.
 
-### Measured: connections and fan-out
+</Accordion>
 
-- **N = 10,000 concurrent subscribed WebSockets, clean, on one sync node**: 7.69 KB/connection,
-  0.4% idle CPU. Hot-fan-out push latency scales **~19 µs/subscriber, linear** (p50 20/95/194 ms at
+<Accordion title="Connections and fan-out">
+
+- N = 10,000 concurrent subscribed WebSockets, clean, on one sync node: 7.69 KB/connection, 0.4%
+  idle CPU. Hot-fan-out push latency scales ~19 µs/subscriber, linear (p50 20/95/194 ms at
   1k/5k/10k concurrent subscribers on one hot query).
-- **A 1 vCPU / 512 MB fleet sync node holds 2,000 clean subscribers** on the shipped Docker image
+- A 1 vCPU / 512 MB fleet sync node holds 2,000 clean subscribers on the shipped Docker image
   (~102 ms hot-push p50 at 11.9% of its CPU budget, 0.021 MB RSS/connection, 100% `QueryUnchanged`
-  on reconnect). Capacity was flat across CPU tiers in this benchmark because a Docker-Desktop
-  port-forward accept ceiling bound first — a substrate floor in that harness, not the node's own
+  on reconnect). Capacity was flat across CPU tiers in this benchmark because a Docker Desktop
+  port-forward accept ceiling bound first: a substrate floor in that harness, not the node's own
   ceiling.
-- **Cross-node fan-out is fast**: a write on one fleet node reaches a live subscription on a
-  different node in **15–16 ms p50**, flat across the number of connections tested. **100% of
-  reconnects across nodes resolve as `QueryUnchanged`** (unchanged data costs almost nothing to
-  resume), and hot-fan-out parallelizes across nodes sub-linearly but genuinely (per-node CPU
-  dropping as node count rises, not staying pinned).
-- **No RSS tax for running as a fleet node** versus a plain single-node `serve` — but a real,
-  small **idle CPU tax (~2.5–3.2% per node)** from the tailer/heartbeat machinery running even when
-  idle.
+- Cross-node fan-out is fast: a write on one fleet node reaches a live subscription on a different
+  node in 15-16 ms p50, flat across the number of connections tested. 100% of reconnects across
+  nodes resolve as `QueryUnchanged` (unchanged data costs almost nothing to resume), and hot-fan-out
+  parallelizes across nodes sub-linearly but genuinely (per-node CPU dropping as node count rises,
+  not staying pinned).
+- No RSS tax for running as a fleet node versus a plain single-node `serve`, but there's a real,
+  small idle CPU tax (~2.5-3.2% per node) from the tailer/heartbeat machinery running even when idle.
+
+</Accordion>
+
+</Accordions>
 
 ## Tier 3: the object-storage substrate (`@stackbase/objectstore-substrate`)
 
 Tier 2's own benchmark names its ceiling honestly: every fleet node commits to the *same* Postgres
-database, so multi-node write scale-out is real but sublinear — the shared store is what's
-contended, not the engine. Tier 3 removes the shared database entirely.
+database, so multi-node write scale-out is real but sublinear. The shared store is what's contended,
+not the engine. Tier 3 removes the shared database entirely.
 
-**Storage and compute are separated.** The object-storage bucket (S3, R2, MinIO, or any
-S3-compatible store) is a **write-only durable log** — immutable per-shard segments, plus
-periodic snapshots — and a **fence**: one compare-and-swap (CAS) updated manifest per shard that
-is simultaneously the lease, the fence, and the frontier, exactly the same lease-fence-frontier
-identity the Postgres fleet uses, ported onto object storage. The bucket is **never queried**. Each
-node instead materializes its shard's current state into a **local, file-backed
-`docstore-sqlite`** — the same storage engine every other tier uses — and runs the ordinary
-transactor/query engine against that local file, exactly as a fleet's replica tailer already does.
-This is a genuinely different deployment shape: **a reactive, multi-node backend with no database
-at all.**
+Storage and compute are separated. The object-storage bucket (S3, R2, MinIO, or any S3-compatible
+store) is a write-only durable log (immutable per-shard segments, plus periodic snapshots) and a
+fence: one compare-and-swap (CAS) updated manifest per shard that is simultaneously the lease, the
+fence, and the frontier. That's the same lease-fence-frontier identity the Postgres fleet uses,
+ported onto object storage. The bucket is never queried. Each node instead materializes its shard's
+current state into a local, file-backed `docstore-sqlite` (the same storage engine every other tier
+uses) and runs the ordinary transactor/query engine against that local file, exactly as a fleet's
+replica tailer already does. This is a genuinely different deployment shape: a reactive, multi-node
+backend with no database at all.
 
 ### Starting an object-storage node
 
@@ -465,57 +523,57 @@ STACKBASE_ADMIN_KEY=secret stackbase serve --dir convex \
   `s3+http://` / `s3+https://` for an S3-compatible bucket (AWS S3, MinIO, R2, GCS via its S3
   interop), `file://<path>` or a bare filesystem path for a local, single-process filesystem store
   (development use). An unsupported scheme is rejected rather than silently falling back to the
-  filesystem. **Mutually exclusive with `--fleet`** — pick one write-scaling story.
+  filesystem. Mutually exclusive with `--fleet`: pick one write-scaling story.
 - **`--shards N` / `STACKBASE_FLEET_SHARDS`** (object-store boots only) sizes a **multi-shard
   single-node writer**: this node owns and writes all N lanes itself. `N = 1` (the default) is the
   single-shard path, unchanged. Requires `--object-store`; invalid combined with `--replica` (a
   replica is always single-shard-per-lane, but tails every lane the bucket has) or `--fleet`.
 - **`--replica` / `STACKBASE_REPLICA`** boots this node as a **read-only replica** of an
-  object-storage bucket — it materializes and tails every shard lane the bucket currently has
-  (derived from the bucket's own persisted globals, not a flag), serves queries and subscriptions
-  from its local materialized copy, and **rejects mutations** with a clear "read replica" message.
-  Requires `--object-store`.
+  object-storage bucket. It materializes and tails every shard lane the bucket currently has (derived
+  from the bucket's own persisted globals, not a flag), serves queries and subscriptions from its
+  local materialized copy, and rejects mutations with a clear "read replica" message. Requires
+  `--object-store`.
 - **`--writer-url` / `STACKBASE_WRITER_URL`** (replica boots only) makes a replica **forward**
-  mutations/actions to the named writer instead of rejecting them — the same write-forwarding model
+  mutations/actions to the named writer instead of rejecting them, the same write-forwarding model
   the Postgres fleet uses, on the engine's shared `WriteRouter` seam. Without it, a replica simply
   rejects writes. Not yet supported when the bucket has more than one shard (see
   [Current limits](#current-limits-1) below).
 - **`STACKBASE_OBJECTSTORE_GC_MS`** sets the writer's background garbage-collection sweep cadence
-  (default ~60 seconds) — reclaiming segments and snapshots already superseded by a later snapshot.
+  (default ~60 seconds), reclaiming segments and snapshots already superseded by a later snapshot.
 - **`--wake-url` / `STACKBASE_WAKE_URL`** and **`--backstop-min-ms` / `STACKBASE_BACKSTOP_MIN_MS`**
   are the *wake seam*: for a host that stops the process between requests (e.g. Cloudflare
   Containers), `--wake-url` gives every recurring driver (the heartbeat, the gc sweep) a way to ask
   the host to wake the process again; `--backstop-min-ms` floors every driver's own backstop poll
   cadence at the given value (`backstopMs = (d) => Math.max(d, n)`) so a cold start isn't paid more
-  often than necessary. Unset, both are a no-op — drivers use their own default 30s/60s cadence.
+  often than necessary. Unset, both are a no-op: drivers use their own default 30s/60s cadence.
 
 ### What's actually shipped
 
 - **Object-first commit.** A commit allocates its timestamp from the shard's manifest, durably
   writes an immutable segment (`putImmutable`), then advances the manifest via a CAS
-  (`casManifest`) — the exact same lease-fence-frontier identity the Postgres fleet's
+  (`casManifest`). That's the exact same lease-fence-frontier identity the Postgres fleet's
   `shard_leases` row embodies, just realized as one object instead of one database row. A CAS
   conflict (another writer moved the manifest first) aborts and fences the loser.
 - **Snapshots, fast bootstrap, and GC.** A shard periodically snapshots its full current state to
   the bucket; a node opening a shard restores the latest snapshot and replays only the segments
-  after it — bootstrap cost is proportional to state size plus the unsnapshotted tail, not the
-  whole history. Garbage collection reclaims segments and snapshots the current snapshot has
-  already superseded.
+  after it. Bootstrap cost is proportional to state size plus the unsnapshotted tail, not the whole
+  history. Garbage collection reclaims segments and snapshots the current snapshot has already
+  superseded.
 - **Multi-shard, fence, and failover.** The manifest *is* the lease: `acquire` bootstraps a shard
   then claims it via an epoch-CAS if it's unowned or its lease has expired (a live lease held by
-  another writer is refused outright — no ping-pong, no coordinator); `heartbeat` CAS-renews it; a
+  another writer is refused outright: no ping-pong, no coordinator); `heartbeat` CAS-renews it; a
   commit against a moved manifest self-fences. A crashed owner's shard fails over to a new owner
   once its lease expires, the new owner bootstrapping full state from the bucket alone.
 - **Replicas and cross-node reactivity.** `ObjectStoreReplicaTailer` polls a shard's manifest, pulls
   new segments, applies them verbatim to a local materialized copy, and drives that node's own
-  reactive fan-out — so a mutation committed by a writer node fans out live to a subscription open
-  on a completely separate replica node, with no shared database or shared process anywhere between
-  them. A replica publishes its own applied watermark so the writer's GC never reclaims a segment a
+  reactive fan-out. A mutation committed by a writer node fans out live to a subscription open on a
+  completely separate replica node, with no shared database or shared process anywhere between them.
+  A replica publishes its own applied watermark so the writer's GC never reclaims a segment a
   replica still needs.
 - **Production `serve` integration.** A recurring heartbeat driver renews the writer's lease on a
   timer and, on a fencing error, stops the node from serving further writes. Graceful shutdown
-  (`SIGTERM`/`SIGINT`) calls `relinquish()` — a best-effort CAS-clear of the lease — so another node
-  can take over **immediately** rather than waiting out the full lease TTL.
+  (`SIGTERM`/`SIGINT`) calls `relinquish()`, a best-effort CAS-clear of the lease, so another node
+  can take over immediately rather than waiting out the full lease TTL.
 
 ### Changing shard count: `stackbase objectstore reshard`
 
@@ -523,66 +581,71 @@ STACKBASE_ADMIN_KEY=secret stackbase serve --dir convex \
 stackbase objectstore reshard --object-store s3://... --dir convex --shards 4
 ```
 
-Unlike the Postgres fleet's reshard, an object-storage shard has its **own physical, append-only
-log** — a document whose shard changes must be physically moved between one lane's log and
-another's. This is a genuinely different operation from the fleet reshard above: **non-atomic, and
-requires the deployment to be stopped.** It reads each source lane's current state, re-partitions
-every document by the new shard count, writes each target lane fresh, and only then updates the
-bucket's persisted shard count as the linearization point. Treat it like any offline data migration:
-stop the deployment, back up first, run the reshard, then restart with (or without — the bucket's
-persisted count is authoritative) a matching `--shards`.
+Unlike the Postgres fleet's reshard, an object-storage shard has its own physical, append-only log.
+A document whose shard changes must be physically moved between one lane's log and another's.
+
+<Callout type="warn" title="Non-atomic, and the deployment must be stopped">
+
+This is a genuinely different operation from the fleet reshard above. It reads each source lane's
+current state, re-partitions every document by the new shard count, writes each target lane fresh,
+and only then updates the bucket's persisted shard count as the linearization point.
+
+Treat it like any offline data migration: stop the deployment, back up first, run the reshard, then
+restart with a matching `--shards` (or without one; the bucket's persisted count is authoritative).
+
+</Callout>
 
 ### Current limits
 
 - **Write-forwarding to a multi-shard bucket isn't supported yet.** `--replica --writer-url` against
   a bucket with more than one shard lane fails fast at boot with a clear "not yet supported" error,
-  rather than shipping a latent per-lane timing hazard — per-lane forwarding is future work.
-- **A real-cloud benchmark is a documented manual run**, not a CI-gated number — it needs live cloud
+  rather than shipping a latent per-lane timing hazard. Per-lane forwarding is future work.
+- **A real-cloud benchmark is a documented manual run**, not a CI-gated number. It needs live cloud
   credentials (AWS S3 or R2) rather than the MinIO/filesystem harnesses this substrate is otherwise
   proven against.
-- **This is the newest tier** — it has the least production mileage of the three, by construction.
+- **This is the newest tier.** It has the least production mileage of the three, by construction.
 
 ## License and entitlement
 
-Everything at Tier 0/1 — single-node self-hosting on SQLite or Postgres, the standalone binary — is
+Everything at Tier 0/1 (single-node self-hosting on SQLite or Postgres, the standalone binary) is
 free, unrestricted, and always will be: deploy anywhere on your own infrastructure with no key
 required.
 
-Both `@stackbase/fleet` (Tier 2) and `@stackbase/objectstore-substrate` (Tier 3) are **`ee/`-licensed
-packages** — source-available under stackbase's separate, non-converting commercial license, not
-the FSL-1.1-Apache-2.0 license the rest of the repo ships under. In the current phase, both are
-**free to use in production, with no license-key gate yet**. The intent, per the project's business
-model, is that a future paid license unlocks the `license.has("scale")` capability those packages
-sit behind — **scaling capability, not deployment location**, is what the key gates: you can always
-deploy anywhere, on your own infrastructure, at every tier; the key affects whether you can scale
-past one writer. Core stackbase has no hard dependency on either `ee/` package: `serve --fleet` and
+Both `@stackbase/fleet` (Tier 2) and `@stackbase/objectstore-substrate` (Tier 3) are `ee/`-licensed
+packages: source-available under stackbase's separate, non-converting commercial license, not the
+FSL-1.1-Apache-2.0 license the rest of the repo ships under. In the current phase, both are free to
+use in production, with no license-key gate yet. The intent, per the project's business model, is
+that a future paid license unlocks the `license.has("scale")` capability those packages sit behind.
+Scaling capability, not deployment location, is what the key gates: you can always deploy anywhere,
+on your own infrastructure, at every tier. The key affects whether you can scale past one writer.
+Core stackbase has no hard dependency on either `ee/` package: `serve --fleet` and
 `serve --object-store` both dynamically `import()` their package, so a deployment that never opts
 into scale-out never even resolves it.
 
 ## When to reach for which tier
 
-- **Start at Tier 0/1.** Most apps never need more than one writer — reach for a fleet or sharding
+- **Start at Tier 0/1.** Most apps never need more than one writer. Reach for a fleet or sharding
   because you've measured a real write-throughput ceiling or need failover, not preemptively.
 - **Reach for the fleet** when you need redundancy or more read capacity, and you're already on (or
   willing to move to) Postgres.
-- **Reach for sharding** when a specific table's write volume is the actual bottleneck — it's an
+- **Reach for sharding** when a specific table's write volume is the actual bottleneck. It's an
   opt-in, per-table decision, not an all-or-nothing switch for the whole app.
 - **Reach for multi-writer distribution** once sharding alone (parallel writes on one node) isn't
   enough and you want write throughput to also grow with node count.
 - **Reach for the object-storage substrate** when you want multi-node write scale-out with no
-  managed database in the deployment at all — the trade is a newer, less-battle-tested substrate
-  in exchange for one less piece of infrastructure to run.
+  managed database in the deployment at all. The trade is a newer, less battle-tested substrate in
+  exchange for one less piece of infrastructure to run.
 
 ## Related
 
 - [Schema & tables](/docs/core-concepts/schema-and-tables#sharding-shardkeyfield) and
-  [Mutations](/docs/core-concepts/mutations#sharding-shardby) — the `.shardKey()`/`shardBy`
-  authoring surface and its exact runtime-enforced rules.
-- [Self-hosting with Docker](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres) — the
+  [Mutations](/docs/core-concepts/mutations#sharding-shardby): the `.shardKey()`/`shardBy` authoring
+  surface and its exact runtime-enforced rules.
+- [Self-hosting with Docker](/docs/deploy/self-hosting) and [Postgres](/docs/deploy/postgres): the
   Tier 0/1 baseline every tier above builds on.
-- [Reactivity](/docs/core-concepts/reactivity) — the range-precise invalidation model that stays
+- [Reactivity](/docs/core-concepts/reactivity): the range-precise invalidation model that stays
   correct, unchanged, across every tier on this page.
-- [Cloudflare](/docs/deploy/cloudflare) — a different, Cloudflare-native single-container target;
-  not the topology this page describes.
-- [Configuration reference](/docs/reference/configuration) — every environment variable on this page
+- [Cloudflare](/docs/deploy/cloudflare): a different, Cloudflare-native single-container target, not
+  the topology this page describes.
+- [Configuration reference](/docs/reference/configuration): every environment variable on this page
   in one table.

@@ -6,34 +6,40 @@ description: Build a small reactive chat app, end to end, with a real React UI.
 {/* diataxis: tutorial */}
 
 The [Quickstart](/docs/get-started/quickstart) got one query and one mutation running and showed
-you reactivity in the dashboard. This tutorial goes much further: a small **chat app** with
+you reactivity in the dashboard. This tutorial goes further. You'll build a small **chat app**:
 multiple conversations, a real React UI, pagination, an action that calls out to the network, and
-live updates across two browser tabs — all the pieces a real stackbase app is built from.
+live updates across two browser tabs. It's the full shape a real stackbase app is built from.
 
-Every step below is runnable. You'll need **Bun** — the tutorial bundles its own UI with
-`bun build`, so Bun is required here even though the backend engine itself also runs on Node.
+Every step below is runnable. You'll need **Bun** for this one. The tutorial bundles its own UI
+with `bun build`, so Bun is required here even though the backend engine itself also runs on Node.
 
 ## What you'll build
 
 - A `conversations` table and a `messages` table, related by an indexed foreign key, with
-  `messages` also carrying a **shard key** (the scale-out annotation — free and inert on a
+  `messages` also carrying a **shard key** (the scale-out annotation: free and inert on a
   single-node deployment, but the same code that would let this table's writes fan out across
   nodes later).
 - Queries that read a whole conversation (`.eq` on an index) and page through one 20 messages at a
   time (`.paginate`).
-- Mutations that insert, replace, and delete — the three ways a mutation writes — each fanning out
+- Mutations that insert, replace, and delete (the three ways a mutation writes), each fanning out
   reactively to every open subscription that reads what it touched.
 - An **action** that reaches out to the network, callable from the client with `useAction`.
 - A React UI wired with `StackbaseProvider`, `useQuery`, `useMutation` (with an optimistic update
-  for instant sends), and `useAction` — plus one-shot manual pagination via the client directly.
+  for instant sends), and `useAction`, plus one-shot manual pagination via the client directly.
 - Two browser tabs open side by side, proving the whole thing is reactive with zero refresh code.
 
-## Prerequisites
+<Callout title="Before you start">
 
-- **Bun**, for `bun build` (bundling the web UI) and to run `stackbase dev` itself.
-- No prior stackbase project — this tutorial creates one from scratch.
+You need **Bun**, for `bun build` (bundling the web UI) and to run `stackbase dev` itself. No
+prior stackbase project needed. This tutorial creates one from scratch.
 
-## 1. Set up the project
+</Callout>
+
+<Steps>
+
+<Step>
+
+### Set up the project
 
 ```bash
 mkdir chat-app && cd chat-app
@@ -43,10 +49,14 @@ bun add @stackbase/cli @stackbase/values @stackbase/client react react-dom
 
 - `@stackbase/cli` is the `stackbase` command.
 - `@stackbase/values` gives you `defineSchema`, `defineTable`, and the `v` validators.
-- `@stackbase/client` is the browser client — the reactive connection, plus its `/react` subpath
+- `@stackbase/client` is the browser client: the reactive connection, plus its `/react` subpath
   for hooks.
 
-## 2. Define the schema
+</Step>
+
+<Step>
+
+### Define the schema
 
 Your backend lives in `convex/` (the default function directory). Create `convex/schema.ts`:
 
@@ -70,24 +80,28 @@ export default defineSchema({
 
 Two tables:
 
-- **`conversations`** — just a title. Every table automatically gets a typed `_id` and a
+- **`conversations`**: just a title. Every table automatically gets a typed `_id` and a
   `_creationTime`, so this needs nothing else.
-- **`messages`** — a typed reference to its conversation (`v.id("conversations")`), an author, a
+- **`messages`**: a typed reference to its conversation (`v.id("conversations")`), an author, a
   body, and an *optional* `edited` flag (`v.optional(...)`, absent until a message is actually
   edited). See [Schema & tables](/docs/core-concepts/schema-and-tables) for the full validator
   catalog.
 
 Two annotations on `messages` matter for everything that follows:
 
-- **`.index("by_conversation", ["conversationId"])`** — lets a query ask for exactly one
+- **`.index("by_conversation", ["conversationId"])`** lets a query ask for exactly one
   conversation's messages instead of scanning the whole table.
-- **`.shardKey("conversationId")`** — marks `conversationId` as this table's shard key, the
-  scale-out seam from [Scaling](/docs/deploy/scaling). On the single-node deployment this tutorial
-  runs, it's inert metadata — it costs nothing and changes nothing about how the app behaves. It
-  does mean every mutation that writes `messages` must declare which shard (which conversation) it's
-  writing to, which you'll see in the next step.
+- **`.shardKey("conversationId")`** marks `conversationId` as this table's shard key, the
+  scale-out seam from [Scaling](/docs/deploy/scaling). On the single-node deployment this
+  tutorial runs, it's inert metadata: it costs nothing and changes nothing about how the app
+  behaves. It does mean every mutation that writes `messages` must declare which shard (which
+  conversation) it's writing to, which you'll see in the next step.
 
-## 3. Conversations: create and list
+</Step>
+
+<Step>
+
+### Conversations: create and list
 
 Create `convex/conversations.ts`:
 
@@ -112,12 +126,16 @@ export const list = query({
 Nothing new here beyond the [Quickstart](/docs/get-started/quickstart): `create` inserts,
 `list` reads every conversation via the built-in `by_creation` index (every table gets one, in
 insertion order). The `returns` validator on both is what lets the client (and, later, an
-optimistic update) know their exact result type — see
+optimistic update) know their exact result type. See
 [Queries](/docs/core-concepts/queries#defining-a-query).
 
-## 4. Messages: insert, replace, delete
+</Step>
 
-Create `convex/messages.ts`. This is the file that does the real work — three mutations covering
+<Step>
+
+### Messages: insert, replace, delete
+
+Create `convex/messages.ts`. This is the file that does the real work: three mutations covering
 every way a mutation writes, plus two queries:
 
 ```ts title="convex/messages.ts"
@@ -134,8 +152,8 @@ const messageObject = v.object({
 });
 
 // Insert. `shardBy: "conversationId"` routes this write to the shard that owns this
-// conversation — required because `messages` declared `.shardKey("conversationId")` in the
-// schema, and because `conversationId` is a required arg of the same type as the shard key
+// conversation. That's required because `messages` declared `.shardKey("conversationId")` in
+// the schema, and because `conversationId` is a required arg of the same type as the shard key
 // field, codegen cross-checks the pairing at every `stackbase dev`/`stackbase codegen` run.
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
@@ -149,7 +167,7 @@ export const send = mutation({
     }),
 });
 
-// Replace. There is no partial-patch method — read the document, then write back every field,
+// Replace. There is no partial-patch method: read the document, then write back every field,
 // changed or not (see Mutations: "Writing data").
 export const edit = mutation({
   args: { conversationId: v.id("conversations"), id: v.id("messages"), body: v.string() },
@@ -179,7 +197,7 @@ export const remove = mutation({
   },
 });
 
-// A single message, by id — used by the webhook action in the next step.
+// A single message, by id, used by the webhook action in the next step.
 export const get = query({
   args: { id: v.id("messages") },
   returns: v.union(messageObject, v.null()),
@@ -218,30 +236,35 @@ export const listPaginated = query({
 
 A few things worth calling out:
 
-- **Every write to `messages` names its shard.** `edit` and `remove` only strictly need a message
-  `id` to do their job, but because `messages` is sharded, each mutation also takes
-  `conversationId` and declares `shardBy: "conversationId"` — the arg that tells the engine which
+- **Every write to `messages` names its shard.** `edit` and `remove` only strictly need a
+  message `id` to do their job, but because `messages` is sharded, each mutation also takes
+  `conversationId` and declares `shardBy: "conversationId"`, the arg that tells the engine which
   shard's writer to run this transaction on. This is the one recurring cost of declaring a shard
-  key: every mutation touching that table must be able to say, from its own arguments, which shard
-  key value it's writing. (If you never plan to shard, just skip `.shardKey`/`shardBy` entirely —
-  an app that never declares either runs exactly as it would without this feature existing at all.)
+  key: every mutation touching that table must be able to say, from its own arguments, which
+  shard key value it's writing. (If you never plan to shard, just skip `.shardKey`/`shardBy`
+  entirely. An app that never declares either runs exactly as it would without this feature
+  existing at all.)
 - **`.eq("conversationId", id)`** narrows the read to one conversation's slice of the
-  `by_conversation` index — not the whole `messages` table. That narrowing is also what makes the
+  `by_conversation` index, not the whole `messages` table. That narrowing is also what makes the
   subscription precise: a write to a *different* conversation never re-runs this query. See
   [Reactivity](/docs/core-concepts/reactivity#a-read-set-is-index-range-precise-not-table-level).
 - **`.order("desc")`** reverses the index scan (newest-first) before `.paginate` slices it into
-  pages — useful for a chat thread, where you want the most recent messages first and older ones
+  pages. Useful for a chat thread, where you want the most recent messages first and older ones
   loaded on demand.
 - **`.paginate({ cursor, pageSize })`** returns `{ page, nextCursor, hasMore, scanCapped }`: a
-  page of documents, an opaque cursor for the next call (`null` once there isn't one),
-  whether more remain, and whether an internal scan cap was hit before filling the page (rare,
-  and never a correctness problem — just possibly a shorter page than requested).
-- **`v.union(messageObject, v.null())`** is how you type "this document, or nothing" — `ctx.db.get`
-  returns `null` for a missing id, never throws.
+  page of documents, an opaque cursor for the next call (`null` once there isn't one), whether
+  more remain, and whether an internal scan cap was hit before filling the page (rare, and never
+  a correctness problem, just possibly a shorter page than requested).
+- **`v.union(messageObject, v.null())`** is how you type "this document, or nothing":
+  `ctx.db.get` returns `null` for a missing id, never throws.
 
-## 5. An action: notify a webhook
+</Step>
 
-[Actions](/docs/core-concepts/actions) are the only place `fetch` is allowed — queries and
+<Step>
+
+### An action: notify a webhook
+
+[Actions](/docs/core-concepts/actions) are the only place `fetch` is allowed. Queries and
 mutations must stay deterministic, so anything that talks to the outside world runs outside the
 transaction, in an action. Create `convex/webhook.ts`:
 
@@ -264,14 +287,18 @@ export const pingWebhook = action({
 });
 ```
 
-`ctx.runQuery` is how an action reaches into the database — it runs `messages:get` as its own
+`ctx.runQuery` is how an action reaches into the database. It runs `messages:get` as its own
 independent read (an action has no `ctx.db` of its own). `fetch` and `Date.now()`, forbidden in a
-query or mutation, work normally here. The result isn't reactive — an action has nothing for a
-client to subscribe to — but its return value still resolves back to whoever called it, same as a
+query or mutation, work normally here. The result isn't reactive (an action has nothing for a
+client to subscribe to), but its return value still resolves back to whoever called it, same as a
 mutation's does. See [Actions](/docs/core-concepts/actions) for the full picture, including
 `ctx.runMutation`/`ctx.runAction` for orchestrating writes and other actions.
 
-## 6. Build the web UI
+</Step>
+
+<Step>
+
+### Build the web UI
 
 Create a `web/` directory alongside `convex/`:
 
@@ -290,17 +317,17 @@ Create a `web/` directory alongside `convex/`:
 </html>
 ```
 
-Now the client. This is the longest piece, so it's introduced in sections — they all belong in one
-file, `web/main.tsx`.
+Now the client. This is the longest piece, so it's introduced in sections. They all belong in
+one file, `web/main.tsx`.
 
-### Client setup
+#### Client setup
 
-```tsx title="web/main.tsx (part 1 — setup)"
+```tsx title="web/main.tsx (part 1, setup)"
 import { StrictMode, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { StackbaseClient, webSocketTransport, anyApi, type OptimisticLocalStore } from "@stackbase/client";
 import { StackbaseProvider, useQuery, useMutation, useAction, useStackbaseClient } from "@stackbase/client/react";
-// Type-only imports — erased at bundle time, so this never pulls the server-side
+// Type-only imports, erased at bundle time, so this never pulls the server-side
 // `@stackbase/executor` re-exports in `_generated/server.ts` into the browser bundle. `anyApi`
 // (below) is the real runtime value; `Api` just shapes it, at the import site, for free.
 import type { Api } from "../convex/_generated/api";
@@ -312,19 +339,23 @@ const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 ```
 
-`_generated/api.d.ts` is types only (it declares the `Api` type, not a runtime value), and
-`_generated/server.ts`'s runtime `api` re-exports server-only code alongside it — fine to import
-from a Node process, wasteful to ship to a browser. `anyApi` (from `@stackbase/client`) is a
-plain runtime proxy that turns `api.messages.send` into a `{ __path: "messages:send" }` reference;
-casting it `as Api` gives you the exact same object, fully typed, with nothing server-side dragged
-along. This is the pattern every stackbase client entry point uses.
+<Callout type="info">
 
-`webSocketTransport` opens the reactive connection to `/api/sync` — the same path `stackbase dev`
+`_generated/api.d.ts` is types only (it declares the `Api` type, not a runtime value), and
+`_generated/server.ts`'s runtime `api` re-exports server-only code alongside it: fine to import
+from a Node process, wasteful to ship to a browser. `anyApi` (from `@stackbase/client`) is a
+plain runtime proxy that turns `api.messages.send` into a `{ __path: "messages:send" }`
+reference. Casting it `as Api` gives you the exact same object, fully typed, with nothing
+server-side dragged along. This is the pattern every stackbase client entry point uses.
+
+</Callout>
+
+`webSocketTransport` opens the reactive connection to `/api/sync`, the same path `stackbase dev`
 serves the sync WebSocket on.
 
-### Conversations sidebar
+#### Conversations sidebar
 
-```tsx title="web/main.tsx (part 2 — conversations)"
+```tsx title="web/main.tsx (part 2, conversations)"
 function Sidebar({ selected, onSelect }: { selected: Id<"conversations"> | null; onSelect: (id: Id<"conversations">) => void }) {
   const conversations = useQuery(api.conversations.list, {});
   const create = useMutation(api.conversations.create);
@@ -359,32 +390,32 @@ function Sidebar({ selected, onSelect }: { selected: Id<"conversations"> | null;
 }
 ```
 
-`useQuery(api.conversations.list, {})` subscribes; the list re-renders on its own the moment
-`create` commits a new row — including in this very component, since `create`'s write and this
+`useQuery(api.conversations.list, {})` subscribes. The list re-renders on its own the moment
+`create` commits a new row, including in this very component, since `create`'s write and this
 query's read are the same table. `create({ title })` resolves with the new conversation's `_id`
 (its `returns: v.id("conversations")` validator), which is why `onSelect(id)` can switch straight
 to the conversation you just made.
 
-### The message thread, with an optimistic send
+#### The message thread, with an optimistic send
 
-```tsx title="web/main.tsx (part 3 — thread)"
+```tsx title="web/main.tsx (part 3, thread)"
 type Message = Doc<"messages">;
 // An optimistically-inserted row carries a placeholder `_id` (a deterministic-but-non-decodable
-// string, never a real `Id<"messages">`) until the real commit swaps it in — see
+// string, never a real `Id<"messages">`) until the real commit swaps it in. See
 // docs/client/optimistic-updates.mdx for the recipe this type widening follows.
 type PendingMessage = Message | (Omit<Message, "_id"> & { _id: string; pending: true });
 
 // Module-scoped (not an inline closure) so `.withOptimisticUpdate` returns the SAME bound
-// callable across re-renders — an inline arrow here would churn it every render.
+// callable across re-renders. An inline arrow here would churn it every render.
 function appendOptimistic(
   store: OptimisticLocalStore,
   args: { conversationId: Id<"conversations">; author: string; body: string },
 ): void {
   const list = store.getQuery(api.messages.list, { conversationId: args.conversationId });
-  if (list === undefined) return; // nothing subscribed locally yet — nothing to patch
+  if (list === undefined) return; // nothing subscribed locally yet, nothing to patch
   const pending: PendingMessage = {
-    _id: store.placeholderId("messages"), // deterministic across replays — never crypto.randomUUID()
-    _creationTime: store.now(),           // fixed at entry creation — never Date.now()
+    _id: store.placeholderId("messages"), // deterministic across replays, never crypto.randomUUID()
+    _creationTime: store.now(),           // fixed at entry creation, never Date.now()
     conversationId: args.conversationId,
     author: args.author,
     body: args.body,
@@ -414,7 +445,7 @@ function Thread({ conversationId, author }: { conversationId: Id<"conversations"
   return (
     <div>
       <ul>
-        {messages.length === 0 && <li>No messages yet — say hi.</li>}
+        {messages.length === 0 && <li>No messages yet. Say hi.</li>}
         {messages.map((m) => (
           <li key={m._id} className={"pending" in m ? "pending" : undefined}>
             <b>{m.author}</b>: {m.body} {m.edited && <em>(edited)</em>}
@@ -457,30 +488,31 @@ function Thread({ conversationId, author }: { conversationId: Id<"conversations"
 Four hooks, four jobs:
 
 - **`useQuery(api.messages.list, { conversationId })`** subscribes; changing `conversationId`
-  (switching the sidebar selection) unsubscribes the old query and subscribes the new one, and the
-  component shows `undefined` (rendered here as "Loading…") until the first result for the new
-  conversation arrives.
-- **`useMutation(api.messages.send).withOptimisticUpdate(appendOptimistic)`** renders your own sent
-  message *instantly*, in the same tick as the click — `appendOptimistic` runs synchronously against
-  the local query cache before the mutation is even sent. The pending row is dropped the moment a
-  real server push demonstrably includes the commit, never merely "when the promise resolves" — so
-  there's no flicker between the guessed row and the real one. `placeholderId`/`now()` (never
-  `crypto.randomUUID()`/`Date.now()`) exist because this updater can replay more than once for the
-  same pending mutation; using the real globals there would mint a fresh value on every replay and
-  break React's keying. Full detail in [Optimistic updates](/docs/client/optimistic-updates).
-- **`useMutation(api.messages.edit)` / `useMutation(api.messages.remove)`** are plain callbacks —
-  no optimistic update here, so an edit or delete round-trips before you see it, same as `send`
+  (switching the sidebar selection) unsubscribes the old query and subscribes the new one, and
+  the component shows `undefined` (rendered here as "Loading…") until the first result for the
+  new conversation arrives.
+- **`useMutation(api.messages.send).withOptimisticUpdate(appendOptimistic)`** renders your own
+  sent message *instantly*, in the same tick as the click. `appendOptimistic` runs synchronously
+  against the local query cache before the mutation is even sent. The pending row is dropped the
+  moment a real server push demonstrably includes the commit, never merely "when the promise
+  resolves," so there's no flicker between the guessed row and the real one.
+  `placeholderId`/`now()` (never `crypto.randomUUID()`/`Date.now()`) exist because this updater
+  can replay more than once for the same pending mutation; using the real globals there would
+  mint a fresh value on every replay and break React's keying. Full detail in
+  [Optimistic updates](/docs/client/optimistic-updates).
+- **`useMutation(api.messages.edit)` / `useMutation(api.messages.remove)`** are plain callbacks.
+  No optimistic update here, so an edit or delete round-trips before you see it, same as `send`
   would without `.withOptimisticUpdate`.
 - **`useAction(api.webhook.pingWebhook)`** is a plain callback too, exactly like `useMutation`
-  without the subscription machinery — there's nothing to subscribe to, since an action's result
+  without the subscription machinery. There's nothing to subscribe to, since an action's result
   isn't part of the reactive model.
 
-### One-shot pagination
+#### One-shot pagination
 
-`listPaginated` isn't wired to `useQuery` — it's a page-at-a-time read, not something you keep a
+`listPaginated` isn't wired to `useQuery`. It's a page-at-a-time read, not something you keep a
 live subscription open on. Call it directly on the client through `useStackbaseClient()`:
 
-```tsx title="web/main.tsx (part 4 — load older messages)"
+```tsx title="web/main.tsx (part 4, load older messages)"
 function LoadOlder({ conversationId }: { conversationId: Id<"conversations"> }) {
   const client = useStackbaseClient();
   const [older, setOlder] = useState<Message[]>([]);
@@ -507,15 +539,15 @@ function LoadOlder({ conversationId }: { conversationId: Id<"conversations"> }) 
 }
 ```
 
-`useStackbaseClient()` returns the same `StackbaseClient` instance `<StackbaseProvider>` holds —
+`useStackbaseClient()` returns the same `StackbaseClient` instance `<StackbaseProvider>` holds:
 the escape hatch for anything that isn't a live subscription. `client.query(ref, args)` is a
-one-shot read: it resolves once with the current result and then unsubscribes — nothing here stays
-live, so a new message arriving elsewhere doesn't reshuffle a page you've already loaded. Each call
-passes the previous call's `nextCursor` to resume exactly where the last page left off.
+one-shot read: it resolves once with the current result and then unsubscribes. Nothing here
+stays live, so a new message arriving elsewhere doesn't reshuffle a page you've already loaded.
+Each call passes the previous call's `nextCursor` to resume exactly where the last page left off.
 
-### Putting it together
+#### Putting it together
 
-```tsx title="web/main.tsx (part 5 — the app)"
+```tsx title="web/main.tsx (part 5, the app)"
 function App() {
   const [conversationId, setConversationId] = useState<Id<"conversations"> | null>(null);
   const [author] = useState(() => `user-${Math.floor(Math.random() * 1000)}`);
@@ -548,85 +580,105 @@ if (root) {
 ```
 
 `<StackbaseProvider client={client}>` is what makes `useQuery`/`useMutation`/`useAction`/
-`useStackbaseClient` work anywhere beneath it in the tree — exactly one client, shared by the whole
-app.
+`useStackbaseClient` work anywhere beneath it in the tree: exactly one client, shared by the
+whole app.
 
-## 7. Bundle the client
+</Step>
+
+<Step>
+
+### Bundle the client
 
 ```bash
 bun build web/main.tsx --outfile web/main.js
 ```
 
 This produces the `web/main.js` that `web/index.html` loads. Re-run it whenever you change
-`web/main.tsx` — or add `--watch` to have it rebuild automatically on save:
+`web/main.tsx`, or add `--watch` to have it rebuild automatically on save:
 
 ```bash
 bun build web/main.tsx --outfile web/main.js --watch
 ```
 
-## 8. Run it
+</Step>
+
+<Step>
+
+### Run it
 
 ```bash
 bunx stackbase dev --web web
 ```
 
 `stackbase dev` generates `convex/_generated/`, boots the reactive engine on local SQLite, serves
-HTTP + the sync WebSocket + the dashboard — and, because of `--web web`, also serves your bundled
-UI from the same origin and port, so there's no separate dev server or proxy to configure. It
-prints the dashboard URL (and an admin key, if you didn't set `STACKBASE_ADMIN_KEY`) on startup;
-open the printed URL in your browser to see the app itself.
+HTTP + the sync WebSocket + the dashboard. Because of `--web web`, it also serves your bundled UI
+from the same origin and port, so there's no separate dev server or proxy to configure. It prints
+the dashboard URL (and an admin key, if you didn't set `STACKBASE_ADMIN_KEY`) on startup. Open the
+printed URL in your browser to see the app itself.
 
-## 9. Watch it react
+</Step>
 
-1. Create a conversation, pick it, and send a couple of messages. Each appears **instantly** —
-   that's the optimistic update rendering before the round trip completes, then settling into the
-   real committed row with no visible change.
+<Step>
+
+### Watch it react
+
+1. Create a conversation, pick it, and send a couple of messages. Each appears **instantly**:
+   that's the optimistic update rendering before the round trip completes, then settling into
+   the real committed row with no visible change.
 2. Edit one of your own messages, then delete another. Both round-trip (no optimistic update on
    those two) and update the thread once they commit.
-3. Click **Load older messages** a few times as you add more — that's `listPaginated` walking
+3. Click **Load older messages** a few times as you add more. That's `listPaginated` walking
    backward through history one page at a time.
 4. Open the **same URL in a second browser tab**, side by side with the first. Pick the same
    conversation.
-5. Send a message in one tab. It appears in the other tab too, with **no refresh** — the same
+5. Send a message in one tab. It appears in the other tab too, with **no refresh**: the same
    mutation-commits-a-write-set / subscription-re-runs loop from
    [How it works](/docs/get-started/how-it-works), now driving a UI you wrote yourself. Edit or
    delete a message in one tab and watch the other tab update as well.
 
 There is no client-side polling, no manual refetch, and no invalidation code anywhere in
-`web/main.tsx` — every re-render above is the engine intersecting a commit's write-set against a
+`web/main.tsx`. Every re-render above is the engine intersecting a commit's write-set against a
 live query's read-set and pushing the result to every open subscription that matched.
 
-## 10. Hot reload while you work
+</Step>
+
+<Step>
+
+### Hot reload while you work
 
 `stackbase dev` watches `convex/` and reloads automatically: edit a query, mutation, or schema
-field and the running server picks it up without a restart — try adding a field to `messages` or
+field and the running server picks it up without a restart. Try adding a field to `messages` or
 tweaking `list`'s handler and watch the dashboard/your app reflect it on the next read. The web UI
-is not part of that watch loop — after editing `web/main.tsx`, re-run `bun build` (or keep
-`--watch` running from step 7) and reload the browser tab to see the change; there's no HMR for the
-static bundle in this setup.
+is not part of that watch loop. After editing `web/main.tsx`, re-run `bun build` (or keep
+`--watch` running from step 7) and reload the browser tab to see the change; there's no HMR for
+the static bundle in this setup.
+
+</Step>
+
+</Steps>
 
 ## What you built
 
 A two-table schema with an index and a shard key, five backend functions covering every write a
-mutation can make (insert, replace, delete) plus both ways to read (a full collect and a paginated
-walk), one action reaching out to the network, and a React UI wired to all of it with
-`StackbaseProvider`, `useQuery`, `useMutation` (with an optimistic update), `useAction`, and direct
-one-shot `client.query()` calls. That's the same shape every stackbase app is built from, whether
-it's a chat app, a dashboard, or something much bigger.
+mutation can make (insert, replace, delete) plus both ways to read (a full collect and a
+paginated walk), one action reaching out to the network, and a React UI wired to all of it with
+`StackbaseProvider`, `useQuery`, `useMutation` (with an optimistic update), `useAction`, and
+direct one-shot `client.query()` calls. That's the same shape every stackbase app is built from,
+whether it's a chat app, a dashboard, or something much bigger.
 
 From here:
 
-- [Client SDK](/docs/client/client-sdk) — the full hook and client surface, including connection
+- [Client SDK](/docs/client/client-sdk): the full hook and client surface, including connection
   state and ephemeral broadcasts (presence/typing) that bypass the engine entirely.
-- [Optimistic updates](/docs/client/optimistic-updates) — the full reconciliation contract behind
+- [Optimistic updates](/docs/client/optimistic-updates): the full reconciliation contract behind
   `.withOptimisticUpdate`, purity rules, and reconnect behavior.
-- [Offline sync](/docs/client/offline-sync) — durable offline mutations that survive a reload or
+- [Offline sync](/docs/client/offline-sync): durable offline mutations that survive a reload or
   crash, for when a brief reconnect isn't enough.
-- [Reactivity](/docs/core-concepts/reactivity) — exactly how precise the invalidation you just saw
+- [Reactivity](/docs/core-concepts/reactivity): exactly how precise the invalidation you just saw
   really is, and when a query falls back to coarser table-level matching.
-- [Scaling (fleet)](/docs/deploy/scaling) — what `.shardKey`/`shardBy` actually unlock once you
+- [Scaling (fleet)](/docs/deploy/scaling): what `.shardKey`/`shardBy` actually unlock once you
   outgrow a single node.
-- [Components](/docs/components/overview) — opt-in pieces like scheduling, workflows, triggers, and
-  auth that compose onto an app exactly like this one.
-- [Self-hosting](/docs/deploy/self-hosting) and [Deploy & build](/docs/deploy/deploy-and-build) —
+- [Components](/docs/components/overview): opt-in pieces like scheduling, workflows, triggers,
+  and auth that compose onto an app exactly like this one.
+- [Self-hosting](/docs/deploy/self-hosting) and [Deploy & build](/docs/deploy/deploy-and-build):
   taking this from `stackbase dev` to a real deployment.

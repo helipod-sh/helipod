@@ -1,20 +1,21 @@
 ---
 title: Queries
-description: How you read data — and why a query's read set is the heart of reactivity.
+description: How you read data, and why a query's read set is the heart of reactivity.
 ---
 
 {/* diataxis: explanation */}
 
-A query is a function that **reads** data. Queries are the functions clients subscribe to, so
-understanding them — precisely, not just the gist — is understanding how a stackbase app stays
-live. This page covers the full authoring surface: the query builder, `ctx.db.get`, pagination and
-cursors, `scanCapped`, and exactly which query shapes get the cheap incremental reactivity path
-versus a full re-run.
+A query is a function that reads data. It's also the function type your app subscribes to, so how
+well you understand queries is how well you understand why a stackbase app stays live.
+
+This page walks through the whole surface: the query builder, `ctx.db.get`, pagination and cursors,
+`scanCapped`, and exactly which query shapes get the cheap incremental reactivity path versus a full
+re-run.
 
 ## Defining a query
 
 `query({ args, returns, handler })` takes a validated argument object and a handler. The handler
-receives a `QueryCtx` whose only capability is `ctx.db` — a **read-only** database handle:
+receives a `QueryCtx` whose only capability is `ctx.db`, a **read-only** database handle:
 
 ```ts title="convex/messages.ts"
 import { v } from "@stackbase/values";
@@ -31,24 +32,24 @@ export const list = query({
 });
 ```
 
-- **`args`** validates the query's arguments before the handler runs. It's optional — a query with
-  no `args` accepts anything — but declaring it gets you a runtime-enforced shape (wrong type,
-  missing, or extra fields are rejected before your handler ever sees them) and precise argument
-  types on the generated client `api`.
+- **`args`** validates the query's arguments before the handler runs. It's optional (a query with
+  no `args` accepts anything), but declaring it gets you a runtime-enforced shape: wrong type,
+  missing, or extra fields get rejected before your handler ever sees them. You also get precise
+  argument types on the generated client `api`.
 - **`handler`** does the reading through `ctx.db`. It can be sync or `async`; either return shape
-  works, since a query never awaits anything nondeterministic (see [Determinism](#determinism-why-queries-cant-touch-the-outside-world)
-  below).
+  works, since a query never awaits anything nondeterministic (see
+  [Determinism](#determinism-why-queries-cant-touch-the-outside-world) below).
 - **`returns`** is an optional validator describing the result shape. It has no runtime enforcement
-  on the return value today — it's a typing/codegen input, not a check — but it's what lets the
-  generated client `api` type a query's result exactly, and it's what a typed
+  on the return value today: it's a typing and codegen input, not a check. But it's what lets the
+  generated client `api` type a query's result exactly, and what a typed
   [optimistic update](/docs/client/optimistic-updates)'s `OptimisticLocalStore.setQuery` uses to know
   the shape it's setting.
 
-A query **cannot write**. There is no `ctx.db.insert`/`replace`/`delete` on a `QueryCtx` — those
-exist only on a mutation's writer (see [Mutations](/docs/core-concepts/mutations)). If you need a
-query's result on the way to a write, read it from inside the mutation itself; queries and mutations
-don't call each other directly (that's what `ctx.runQuery` from an [action](/docs/core-concepts/actions)
-is for).
+A query can't write. There's no `ctx.db.insert`/`replace`/`delete` on a `QueryCtx`. Those exist only
+on a mutation's writer (see [Mutations](/docs/core-concepts/mutations)). If you need a query's
+result on the way to a write, read it from inside the mutation itself. Queries and mutations don't
+call each other directly; that's what `ctx.runQuery` from an [action](/docs/core-concepts/actions)
+is for.
 
 ## The query builder
 
@@ -66,20 +67,22 @@ The builder's methods:
 | Method | What it does |
 |---|---|
 | `.eq(field, value)` | Narrow to an exact key. Chaining `.eq` on successive index fields builds a compound-key prefix. |
-| `.gt(field, value)` / `.gte(field, value)` | A lower bound on the next (non-equality) index field — exclusive / inclusive. |
-| `.lt(field, value)` / `.lte(field, value)` | An upper bound on that same field — exclusive / inclusive. |
+| `.gt(field, value)` / `.gte(field, value)` | A lower bound on the next (non-equality) index field. `.gt` is exclusive, `.gte` is inclusive. |
+| `.lt(field, value)` / `.lte(field, value)` | An upper bound on that same field. `.lt` is exclusive, `.lte` is inclusive. |
 | `.order("asc" \| "desc")` | Scan direction. Default is `"asc"` (oldest/lowest first). |
 | `.where(op, field, value)` | A **post-filter**: evaluated after the index narrows the scan, not part of the index range itself. `op` is one of `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. Multiple `.where()` calls AND together. |
 | `.take(n)` | Cap the number of documents `.collect()` returns. |
 | `.collect()` | Run the scan; returns the matching documents as an array. |
 | `.paginate({ cursor, pageSize, maxScan? })` | Run the scan as one page; see [Pagination](#pagination) below. |
 
-There is no `.first()`. To get one document, either `.take(1)` and read index 0, or — if you have
-its id — use `ctx.db.get` instead, which is both simpler and gets the cheaper by-id reactivity path
-(see [Reactivity classification](#reactivity-classification) below).
+There's no `.first()`. To get one document, either `.take(1)` and read index 0, or (if you have its
+id) use `ctx.db.get` instead. It's simpler, and it gets the cheaper by-id reactivity path (see
+[Reactivity classification](#reactivity-classification) below).
 
-There is also no `.withIndex(name, (q) => q.eq(...))` — Convex's builder shape. Stackbase's index
-name is the second argument to `.query()` itself, and the range methods (`.eq`/`.gt`/`.gte`/`.lt`/`.lte`)
+<Callout type="info" title="Coming from Convex?">
+
+There's no `.withIndex(name, (q) => q.eq(...))`, Convex's builder shape. Stackbase's index name is
+the second argument to `.query()` itself, and the range methods (`.eq`/`.gt`/`.gte`/`.lt`/`.lte`)
 chain directly off the builder:
 
 ```ts
@@ -87,10 +90,12 @@ chain directly off the builder:
 // stackbase: ctx.db.query("messages", "by_conversation").eq("conversationId", id)
 ```
 
+</Callout>
+
 ### Index range scans
 
-An index's fields form a compound key. `.eq()` on each field in order builds a key **prefix**;
-after the last equality, at most one field may additionally take a bound (`.gt`/`.gte` and/or
+An index's fields form a compound key. `.eq()` on each field in order builds a key **prefix**.
+After the last equality, at most one field may additionally take a bound (`.gt`/`.gte` and/or
 `.lt`/`.lte`) to narrow a range within that prefix. For example, with an index on
 `["conversationId", "priority"]`:
 
@@ -102,10 +107,10 @@ ctx.db.query("messages", "by_conversation_priority")
   .collect();
 ```
 
-This resolves to one contiguous byte interval in the index's keyspace — `conversationId == id` AND
-`2 <= priority <= 5` — which the engine scans directly rather than filtering row-by-row.
-Constraints on a field that isn't next in the index's field order (or a second bounded field) can't
-be expressed as part of the range; use `.where(...)` for those instead, which still runs, just as a
+This resolves to one contiguous byte interval in the index's keyspace, `` `conversationId == id` ``
+and `` `2 <= priority <= 5` ``, which the engine scans directly instead of filtering row by row. A
+constraint on a field that isn't next in the index's field order (or a second bounded field) can't
+be expressed as part of the range. Use `.where(...)` for those instead. It still runs, just as a
 post-filter over the (possibly wider) range the index alone can express.
 
 Every index key also implicitly ends in `_creationTime` then `_id` (see [Schema &
@@ -124,52 +129,52 @@ export const getMessage = query({
 });
 ```
 
-This is a **point read** — the narrowest possible read set (see below) — and is the cheapest,
-most-reactive way to read a single document when you already have its id.
+This is a point read, the narrowest possible read set (see below). It's the cheapest, most
+reactive way to read a single document once you already have its id.
 
 ## Determinism: why queries can't touch the outside world
 
 A query must be **deterministic**: given the same underlying data, running it twice must produce
-the same result. Concretely, a query's handler cannot call `fetch`, `Date.now()`, `Math.random()`,
-`crypto.randomUUID()`, or `setTimeout` — all of these are blocked at the runtime boundary. If your
+the same result. Concretely, a query's handler can't call `fetch`, `Date.now()`, `Math.random()`,
+`crypto.randomUUID()`, or `setTimeout`. All of these are blocked at the runtime boundary. If your
 handler genuinely needs the current time or a random value, `ctx.now()` and `ctx.random()` are the
 deterministic substitutes: both are fixed for the life of the call (and any replay of it), so
 re-running the same query against the same data always produces the same answer.
 
-This isn't a restriction for its own sake — it's the property that makes the whole reactive model
-trustworthy. The engine's entire subscription mechanism rests on being able to **re-run a query's
-handler** and treat the result as authoritative. If a query could return a different answer for
-identical data (because it hit the network, or read the wall clock), the engine would have no way
+This isn't a restriction for its own sake. It's the property that makes the whole reactive model
+trustworthy. The engine's entire subscription mechanism rests on being able to re-run a query's
+handler and treat the result as authoritative. If a query could return a different answer for
+identical data, say because it hit the network or read the wall clock, the engine would have no way
 to tell "the data actually changed" apart from "the query just happened to answer differently this
-time." Anything genuinely nondeterministic — a real network call, true randomness, timers — belongs
+time." Anything genuinely nondeterministic (a real network call, true randomness, a timer) belongs
 in an [action](/docs/core-concepts/actions), which runs outside the transaction and outside any
 subscription.
 
 ## The read set: what a subscription is made of
 
-While a query runs, the engine records exactly which index ranges (or, for `ctx.db.get`, which
-single point) it touched — its **read set**. This is not "the query touched the `messages` table";
-it's as precise as "rows of the `by_conversation` index between these two byte keys." That read set
-*is* the subscription: when a later mutation commits a write, the engine intersects the write with
+While a query runs, the engine records exactly which index ranges it touched (or, for `ctx.db.get`,
+which single point). That's its **read set**. This isn't "the query touched the `messages` table."
+It's as precise as "rows of the `by_conversation` index between these two byte keys." That read set
+*is* the subscription. When a later mutation commits a write, the engine intersects the write with
 every live query's read set and re-runs only the queries the write actually overlaps (see [How it
-works](/docs/get-started/how-it-works) and [Reactivity](/docs/core-concepts/reactivity) for the full
-matching mechanism).
+works](/docs/get-started/how-it-works) and [Reactivity](/docs/core-concepts/reactivity) for the
+full matching mechanism).
 
 Two consequences follow directly from how the query builder works:
 
-- **A collect with no limit records the whole scanned interval**, including the space past the last
-  matching row — so an insert anywhere in that range (even one that would sort after everything
-  currently returned) still wakes the subscription.
-- **A collect with `.take(n)` records only the interval actually consumed** — from the start of the
-  range up to (and including) the last row returned. A row that would sort *beyond* the taken window
-  does **not** wake this subscription, because the query never read that far. This is the correct
-  behavior for a top-N query, but it means `.take()` and "get notified about anything appended
-  later" don't mix — if you need that, don't limit, or re-query.
+- **A collect with no limit records the whole scanned interval**, including the space past the
+  last matching row. That means an insert anywhere in that range (even one that would sort after
+  everything currently returned) still wakes the subscription.
+- **A collect with `.take(n)` records only the interval actually consumed**: from the start of the
+  range up to (and including) the last row returned. A row that would sort beyond the taken window
+  doesn't wake this subscription, because the query never read that far. That's correct behavior
+  for a top-N query, but it means `.take()` and "get notified about anything appended later" don't
+  mix. If you need that, don't limit, or re-query.
 
 A query with no bounded index range at all (an unfiltered whole-table `by_creation` scan, or a
 `.where(...)` the index can't turn into a range) still gets a read set, but it degrades to
 table-level: any write to that table invalidates it. Narrowing with `.eq`/`.gt`/`.gte`/`.lt`/`.lte`
-is what keeps a query off that coarse fallback — see
+is what keeps a query off that coarse fallback. See
 [Reactivity](/docs/core-concepts/reactivity#table-level-fallback) for the mechanics of how that
 matching actually happens at commit time.
 
@@ -199,83 +204,100 @@ interface PaginationResult {
 }
 ```
 
-If you're coming from Convex: the field names differ. `hasMore` is `!isDone`; `nextCursor` is
-Convex's `continueCursor`. There's no `numItems` option either — pass `pageSize` directly, along
-with an explicit `cursor` (Convex bundles both into a `paginationOpts` object; stackbase takes them
-as plain fields).
+<Callout type="info" title="Coming from Convex?">
+
+The field names differ. `hasMore` is `!isDone`, and `nextCursor` is Convex's `continueCursor`.
+There's no `numItems` option either. Pass `pageSize` directly, along with an explicit `cursor`
+(Convex bundles both into a `paginationOpts` object; stackbase takes them as plain fields).
+
+</Callout>
 
 ### Cursors
 
-A cursor is an **opaque** string — a base64-encoded index key. Pass `cursor: null` (or omit it) for
-the first page; feed the previous page's `nextCursor` back in for the next one. Because index keys
+A cursor is an opaque string: a base64-encoded index key. Pass `cursor: null` (or omit it) for the
+first page, then feed the previous page's `nextCursor` back in for the next one. Because index keys
 are unique (every key ends in `_creationTime` then `_id`), a cursor pins an exact position in the
-keyspace: the next page resumes at "the key strictly after this one" (ascending) or "strictly before
-this one" (descending), regardless of what else has been inserted, updated, or deleted since.
+keyspace. The next page resumes at "the key strictly after this one" (ascending) or "strictly
+before this one" (descending), regardless of what else has been inserted, updated, or deleted
+since.
 
-This is what makes pages **contiguous under live edits**: querying page 1, then page 2, of a table
+This is what makes pages **contiguous under live edits**. Querying page 1, then page 2, of a table
 that's being written to concurrently still gives you a partition of the keyspace with no gap and no
-overlap between the two pages — an insert that lands between two pages' boundary keys shows up in
-whichever page now owns that span, not duplicated and not skipped. It's not a snapshot frozen at
-first-page time; it's a stable walk through the live keyspace.
+overlap between the two pages. An insert that lands between two pages' boundary keys shows up in
+whichever page now owns that span: not duplicated, not skipped. It's not a snapshot frozen at
+first-page time. It's a stable walk through the live keyspace.
 
-There is no client-side pagination hook (no `usePaginatedQuery`) — pagination is a query like any
+There's no client-side pagination hook (no `usePaginatedQuery`). Pagination is a query like any
 other. Drive it by holding the cursor as component state and calling `useQuery` with it as an
 argument, advancing the cursor when you want the next page.
 
 ### `maxScan` and `scanCapped`
 
-`maxScan` bounds how many index entries a single `.paginate()` call will *examine*, independent of
-`pageSize` (how many it *returns*). It's useful when a `.where()` post-filter is sparse — without a
+`maxScan` bounds how many index entries a single `.paginate()` call examines, independent of
+`pageSize` (how many it returns). It's useful when a `.where()` post-filter is sparse. Without a
 cap, a page could scan arbitrarily far into the index looking for `pageSize` matches. Omit it and
 the scan runs until the page fills or the range is exhausted, with no examine-count limit.
 
-When the scan stops because it hit `maxScan` before filling `pageSize`, `scanCapped` is `true` and
-`nextCursor` resumes from wherever the scan actually stopped (not from the last document it
-matched) — so paging again continues the scan rather than silently skipping the unscanned tail.
+When the scan stops because it hit `maxScan` before filling `pageSize`, `scanCapped` is `true`, and
+`nextCursor` resumes from wherever the scan actually stopped, not from the last document it
+matched. That way paging again continues the scan rather than silently skipping the unscanned tail.
 `hasMore` is also `true` in this case, since there may well be more matching rows past the cap.
 
-The dashboard's data browser uses exactly this: `maxScan: 1000` on its table-browsing query, and
-when a page comes back `scanCapped`, it shows a banner —
-*"Scan limit reached — narrow the filter to see all results."* — rather than silently returning a
-partial page with no indication anything was cut off. Any UI paginating over a heavily-filtered
-range should consider the same signal.
+The dashboard's data browser uses exactly this: `maxScan: 1000` on its table-browsing query. When a
+page comes back `scanCapped`, it shows a banner reading "Scan limit reached, narrow the filter to
+see all results," instead of silently returning a partial page with no indication anything was cut
+off. Any UI paginating over a heavily-filtered range should consider the same signal.
 
 ## Reactivity classification
 
-Not every query gets the same *kind* of reactive update. The engine classifies each query run by
-how "clean" a passthrough it is, and that classification decides whether a later write can be
+Not every query gets the same kind of reactive update. The engine classifies each query run by how
+"clean" a passthrough it is, and that classification decides whether a later write can be
 **diffed** into the existing result (cheap) or forces a **full re-run** (safe, but pays the cost of
-re-executing the whole handler and re-sending the whole result):
+re-executing the whole handler and re-sending the whole result).
 
-- **A plain single-index-range `.collect()`, returned untouched** — no `.take()`, no post-processing
-  of the array, nothing else read alongside it — is `DIFFABLE_RANGE`. A write that lands in its
-  range produces an incremental add/edit/remove/move diff instead of a full re-run. This is checked
-  by *identity*, not by content: the array `.collect()` hands back is invisibly tagged, and any
-  `.slice()`, `.filter()`, `.map()`, or `[...spread]` produces a fresh, untagged array that falls
-  back to a full re-run — even if, on the current data, the copy happens to look identical to the
-  original. (A content-based check would be unsound: a filter that's a no-op *today* could later
-  silently exclude a row a diff would otherwise have caught.)
-- **A single `.paginate()` call, returned untouched**, is `DIFFABLE_PAGE` — the same passthrough
+```mermaid
+flowchart TB
+  R["A query run"] --> C{"What did it read?"}
+  C -->|"single index-range .collect(), untouched"| D1["DIFFABLE_RANGE<br/>incremental diff"]
+  C -->|"single .paginate(), untouched"| D2["DIFFABLE_PAGE<br/>incremental diff"]
+  C -->|"ctx.db.get(id), untouched"| D3["Point read<br/>cheapest diff"]
+  C -->|"anything else"| D4["Full re-run<br/>safe, costs more"]
+```
+
+- **A plain single-index-range `.collect()`, returned untouched** (no `.take()`, no post-processing
+  of the array, nothing else read alongside it) is `DIFFABLE_RANGE`. A write that lands in its
+  range produces an incremental add/edit/remove/move diff instead of a full re-run.
+
+  This is checked by identity, not by content. The array `.collect()` hands back is invisibly
+  tagged. Any `.slice()`, `.filter()`, `.map()`, or `[...spread]` produces a fresh, untagged array
+  that falls back to a full re-run, even if the copy happens to look identical to the original on
+  the current data. (A content-based check would be unsound: a filter that's a no-op today could
+  later silently exclude a row a diff would otherwise have caught.)
+
+- **A single `.paginate()` call, returned untouched**, is `DIFFABLE_PAGE`, the same passthrough
   rule as above, applied to the whole `PaginationResult` object instead of an array. The page's
-  `[start, end)` key interval is pinned at first load and diffed the same way a range is; only
-  `.page` itself is re-derived from writes — `nextCursor`/`hasMore`/`scanCapped` stay fixed to what
-  the initial load returned. A page whose row count changes under live edits (grows on insert,
-  shrinks on delete within its bounds) is correct, expected behavior, not a bug.
-- **`ctx.db.get(id)`, returned untouched**, gets its own by-id fast path — a single point read diffs
-  to "this one document changed or didn't," the cheapest classification there is.
+  `[start, end)` key interval is pinned at first load and diffed the same way a range is. Only
+  `.page` itself is re-derived from writes: `nextCursor`, `hasMore`, and `scanCapped` stay fixed to
+  what the initial load returned. A page whose row count changes under live edits (grows on
+  insert, shrinks on delete within its bounds) is correct, expected behavior, not a bug.
+
+- **`ctx.db.get(id)`, returned untouched**, gets its own by-id fast path. A single point read diffs
+  to "this one document changed or didn't", the cheapest classification there is.
+
 - **Anything else falls back to a full re-run**: a `.take(n)`-limited collect, a handler that reads
-  more than one thing (a `.get` alongside a `.collect()`, two separate queries), a result the handler
-  transforms after reading it, or a query composed with a dynamic authz read policy. A
-  `scanCapped` page also declines the diff path — a capped scan leaves an "un-owned" gap between
+  more than one thing (a `.get` alongside a `.collect()`, or two separate queries), a result the
+  handler transforms after reading it, or a query composed with a dynamic authz read policy. A
+  `scanCapped` page also declines the diff path. A capped scan leaves an "un-owned" gap between
   where matching stopped and where scanning stopped that a diff can't safely reason about, so it's
   re-run in full instead.
 
-None of this changes what a query *returns* — it's purely how efficiently a later write's effect on
-that subscription gets computed and sent. A query classified as a full re-run is exactly as correct
-as one classified as diffable; it's simply not free. Writing queries that stay in the diffable shapes
-above — a single index-range `.collect()` or `.paginate()`, returned as-is — is how you keep your
-subscriptions cheap under load, the same way narrowing the index range in the first place is how you
-keep them precise.
+None of this changes what a query returns. It's purely about how efficiently a later write's
+effect on that subscription gets computed and sent. A query classified as a full re-run is exactly
+as correct as one classified as diffable, just not free.
+
+Writing queries that stay in the diffable shapes above (a single index-range `.collect()` or
+`.paginate()`, returned as-is) is how you keep your subscriptions cheap under load, the same way
+narrowing the index range in the first place is how you keep them precise.
 
 ## Using a query from a client
 
@@ -292,5 +314,5 @@ function Messages({ conversationId }: { conversationId: string }) {
 }
 ```
 
-The component re-renders on its own whenever the query's result changes — that is the payoff of
+The component re-renders on its own whenever the query's result changes. That's the payoff of
 everything above. The full client surface is in [Client SDK](/docs/client/client-sdk).

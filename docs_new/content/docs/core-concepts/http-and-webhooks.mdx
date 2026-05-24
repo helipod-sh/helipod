@@ -1,26 +1,43 @@
 ---
 title: HTTP and webhooks
-description: Expose a public HTTP endpoint with httpAction and a conventional http.ts router.
+description: Expose a plain HTTP endpoint for webhooks and REST calls with httpAction and a conventional http.ts router.
 ---
 
 {/* diataxis: how-to */}
 
-This page walks through exposing a plain HTTP endpoint — the shape you need for a webhook from a
-third party (Stripe, GitHub, an email provider) that can't speak the sync protocol and just wants to
-`POST` JSON at a URL, or for any public REST-shaped endpoint that isn't a query/mutation/action call
-over the client SDK.
+A webhook doesn't know or care about your sync protocol. Stripe, GitHub, and your email provider all
+want the same thing: `POST` some JSON at a URL and get a response back.
 
-## 1. Write the handler with httpAction
+`httpAction` and a conventional `http.ts` router give you exactly that: a plain HTTP endpoint, wired
+into the same reactive engine as the rest of your app. This page walks through building one.
 
-`httpAction` is an [action](/docs/core-concepts/actions) variant whose input and output are a raw Web
-`Request` and `Response`, instead of typed args and a return value. It shares the exact same
-non-deterministic execution context as a regular action:
+```mermaid
+flowchart LR
+  Ext["Third-party service (Stripe, GitHub, ...)"] -->|"POST /webhooks/..."| HA["httpAction"]
+  HA -->|"ctx.runMutation"| Mut["Mutation"]
+  Mut --> DB[("Database")]
+  DB -->|"data changed"| Query["Subscribed query"]
+  Query -->|"push update"| App["Your app"]
+```
 
-- `ctx.runQuery(ref, args)`, `ctx.runMutation(ref, args)`, `ctx.runAction(ref, args)` — each a fresh,
+<Steps>
+
+<Step>
+
+### Write the handler with httpAction
+
+`httpAction` is an [action](/docs/core-concepts/actions) that speaks raw HTTP instead of typed
+arguments. Its input is a Web `Request`, its output is a `Response`, but everything else about it is
+a regular action:
+
+- `ctx.runQuery(ref, args)`, `ctx.runMutation(ref, args)`, `ctx.runAction(ref, args)`, each a fresh,
   independent top-level run, exactly as in an action.
-- Native `fetch`, `Date.now()`, `Math.random()`, timers — all work normally.
-- **No `ctx.db`.** An `httpAction` isn't part of any transaction, so the only way it touches data is
-  by calling a query/mutation/action through the three methods above.
+- Native `fetch`, `Date.now()`, `Math.random()`, timers all work normally.
+
+<Callout type="warn" title="No ctx.db">
+  An `httpAction` isn't part of any transaction, so the only way it touches data is by calling a
+  query, mutation, or action through the three methods above.
+</Callout>
 
 ```ts title="convex/http.ts"
 import { httpAction, httpRouter } from "./_generated/server";
@@ -35,20 +52,24 @@ export const receiveWebhook = httpAction(async (ctx, request) => {
 });
 ```
 
-`httpAction` takes either a bare handler function or `{ handler }` — there's no `args`/`returns`
+`httpAction` takes either a bare handler function or `{ handler }`. There's no `args`/`returns`
 validator option the way `query`/`mutation`/`action` have one, because the input is a `Request`, not a
 validated argument object. Parse and validate the body yourself, the same as you would in any HTTP
 framework.
 
-Because the handler has no `ctx.db`, its actual write goes through `ctx.runMutation` — that mutation
-is what produces a write-set and fans out to any subscription reading the `messages` table (see
+Because the handler has no `ctx.db`, its actual write goes through `ctx.runMutation`. That mutation is
+what produces a write set and fans out to any subscription reading the `messages` table (see
 [Reactivity](/docs/core-concepts/reactivity)). This is the shape every webhook in stackbase takes:
-**HTTP in, mutation for the write, reactive fan-out for free.**
+HTTP in, mutation for the write, reactive fan-out for free.
 
-## 2. Register it in http.ts
+</Step>
 
-A conventional `convex/http.ts` **default-exports** an `httpRouter()` populated with `route()` calls —
-this is how the engine discovers your endpoints at load time:
+<Step>
+
+### Register it in http.ts
+
+A conventional `convex/http.ts` default-exports an `httpRouter()` populated with `route()` calls. This
+is how the engine discovers your endpoints at load time:
 
 ```ts title="convex/http.ts"
 import { httpRouter } from "./_generated/server";
@@ -61,33 +82,38 @@ http.route({ path: "/webhooks/messages", method: "POST", handler: receiveWebhook
 export default http;
 ```
 
-Each `route()` call takes **exactly one** of `path` or `pathPrefix`, plus a `method`:
+Each `route()` call takes exactly one of `path` or `pathPrefix`, plus a `method`:
 
-- **`{ path, method, handler }`** — an exact match. The request's path must equal `path` character
-  for character.
-- **`{ pathPrefix, method, handler }`** — a prefix match. The request's path must *start with*
-  `pathPrefix` (e.g. `pathPrefix: "/webhooks/"` matches `/webhooks/messages`, `/webhooks/anything`).
+- **`{ path, method, handler }`**: an exact match. The request's path must equal `path` character for
+  character.
+- **`{ pathPrefix, method, handler }`**: a prefix match. The request's path must start with
+  `pathPrefix` (so `pathPrefix: "/webhooks/"` matches `/webhooks/messages` and
+  `/webhooks/anything`).
 
 Passing both, or neither, throws at registration time: ``http.route requires exactly one of `path`
 or `pathPrefix` ``.
 
-The `handler` must be a named export of an app module (something `httpAction(...)` produced) —
-registering an inline arrow function or an unresolvable reference fails project loading with:
+The `handler` must be a named export of an app module, something `httpAction(...)` produced.
+Registering an inline arrow function or an unresolvable reference fails project loading with:
 
 ```
 http.route handler for "/webhooks/messages" must be an exported httpAction
 (declare it as a named export of an app module)
 ```
 
-## 3. Match precedence
+</Step>
+
+<Step>
+
+### Understand match precedence
 
 When a request could match more than one registered route, resolution is deterministic:
 
-1. **Method must always match.** A route registered for `POST` never matches a `GET` request to the
-   same path, regardless of exact/prefix.
-2. **An exact `path` match wins outright**, over every `pathPrefix` route, no matter how specific the
+1. Method must always match. A route registered for `POST` never matches a `GET` request to the same
+   path, regardless of exact or prefix.
+2. An exact `path` match wins outright over every `pathPrefix` route, no matter how specific the
    prefix. This is checked first and returns immediately.
-3. **Among `pathPrefix` routes, the longest matching prefix wins.** `pathPrefix: "/webhooks/stripe/"`
+3. Among `pathPrefix` routes, the longest matching prefix wins. `pathPrefix: "/webhooks/stripe/"`
    beats `pathPrefix: "/webhooks/"` for a request to `/webhooks/stripe/invoice`.
 
 ```ts title="convex/http.ts"
@@ -97,34 +123,46 @@ http.route({ pathPrefix: "/webhooks/", method: "POST", handler: genericHook });
 ```
 
 A `POST /webhooks/stripe/invoice` matches `stripeHook` (longer prefix beats shorter), not
-`genericHook`. A `GET /webhooks/stripe/health` matches `healthCheck` — the exact match — even though
-it also satisfies no `pathPrefix` route (different method anyway). There is no support for named path
-parameters (`/webhooks/:id`) — a route only ever knows the exact path or a prefix it starts with; a
-handler that needs to read the rest of the path does so itself, from `new URL(request.url).pathname`.
+`genericHook`. A `GET /webhooks/stripe/health` matches `healthCheck`, the exact match, even though it
+also satisfies no `pathPrefix` route (different method anyway).
 
-An unmatched `{method, path}` combination — no exact match, no prefix match, or one of the reserved
-built-ins below already claimed it — falls through to a plain `404`.
+There's no support for named path parameters (`/webhooks/:id`). A route only ever knows the exact
+path or a prefix it starts with, so a handler that needs the rest of the path reads it itself, from
+`new URL(request.url).pathname`.
 
-## 4. Reserved paths
+An unmatched `{method, path}` combination, whether there's no exact match, no prefix match, or one of
+the reserved built-ins below already claimed it, falls through to a plain `404`.
 
-`/api/*` and any path whose first segment starts with `_` (e.g. `/_dashboard`, `/_admin/anything`)
-belong to the engine: the sync WebSocket, `/api/run`, `/api/health`, file storage's
-`/api/storage/*`, the admin API, and the dashboard all live there. `route()` rejects a conflicting
-registration **at registration time** — before your `http.ts` can ever shadow a built-in:
+</Step>
+
+<Step>
+
+### Know the reserved paths
+
+`/api/*` and any path whose first segment starts with `_` (for example `/_dashboard`,
+`/_admin/anything`) belong to the engine: the sync WebSocket, `/api/run`, `/api/health`, file
+storage's `/api/storage/*`, the admin API, and the dashboard all live there.
+
+`route()` rejects a conflicting registration at registration time, before your `http.ts` can ever
+shadow a built-in:
 
 ```ts
 http.route({ path: "/api/foo", method: "GET", handler: whatever });
 // throws: http.route path "/api/foo" is reserved (/api/* and /_* belong to the engine)
 ```
 
-This means a malformed `http.ts` fails loudly and immediately, rather than silently never firing or,
-worse, intercepting traffic meant for the engine. The reservation is a single predicate — the path
-is `/api`, or starts with `/api/`, or matches `/^\/_/` — so `/apix` is fine (it doesn't start with
-`/api/`), but `/api`, `/api/`, and anything under `/api/...` are all rejected.
+A malformed `http.ts` fails loudly and immediately this way, rather than silently never firing or,
+worse, intercepting traffic meant for the engine. The reservation is a single predicate: the path is
+`/api`, starts with `/api/`, or matches `/^\/_/`. So `/apix` is fine (it doesn't start with `/api/`),
+but `/api`, `/api/`, and anything under `/api/...` are all rejected.
 
-## 5. Call it
+</Step>
 
-The endpoint is just HTTP — no client SDK required:
+<Step>
+
+### Call it
+
+The endpoint is just HTTP. No client SDK required:
 
 ```bash
 curl -X POST https://your-deployment/webhooks/messages \
@@ -132,41 +170,51 @@ curl -X POST https://your-deployment/webhooks/messages \
   -d '{"author": "webhook", "body": "hello from the webhook"}'
 ```
 
-Any client already subscribed to a query over the `messages` table — a `useQuery(api.messages.list)`
-in a running app, for example — receives the update the moment this request's inner mutation commits,
-with no polling and no extra wiring on the client side. This is the same reactive fan-out any mutation
-gets, whether it's called from the client SDK, another function, the scheduler, or — as here — a
-webhook.
+Any client already subscribed to a query over the `messages` table, a `useQuery(api.messages.list)`
+in a running app, for example, receives the update the moment this request's inner mutation commits.
+No polling, no extra wiring on the client side. This is the same reactive fan-out any mutation gets,
+whether it's called from the client SDK, another function, the scheduler, or, as here, a webhook.
+
+</Step>
+
+</Steps>
 
 ## Reading the caller's identity
 
-If the request carries an `Authorization: Bearer <token>` header, that raw token is passed straight
-through to the handler's context as its identity — **there is no built-in verification or resolution
-step.** stackbase does not decode, validate, or look up the token for you; it's handed to your handler
-exactly as the caller sent it.
+<Callout type="warn" title="No built-in verification">
+  If the request carries an `Authorization: Bearer <token>` header, that raw token is passed straight
+  through to the handler's context as its identity. stackbase does not decode, validate, or look up
+  the token for you. It's handed to your handler exactly as the caller sent it.
+</Callout>
 
-If you need to check a webhook's authenticity — an HMAC signature, a shared secret, a provider's own
-signing scheme (Stripe's `Stripe-Signature` header, GitHub's `X-Hub-Signature-256`, etc.) — verify it
+If you need to check a webhook's authenticity (an HMAC signature, a shared secret, a provider's own
+signing scheme like Stripe's `Stripe-Signature` header or GitHub's `X-Hub-Signature-256`), verify it
 yourself inside the handler, reading whatever header the provider actually signs with, before calling
-`ctx.runMutation`. This is exactly what you'd do in any other HTTP framework; `httpAction` doesn't add
+`ctx.runMutation`. This is exactly what you'd do in any other HTTP framework. `httpAction` doesn't add
 or remove anything here.
 
 ## Hot reload
 
 `stackbase dev`'s watch loop re-resolves `http.ts` on every save, exactly like it reloads your
-queries/mutations/actions. The dev server exposes a `setRoutes(routes)` method that the reload path
-calls with the freshly-resolved route table; the very next request sees the new routes. Nothing in the
-running WebSocket sync connections, active subscriptions, or in-flight mutations is disturbed — only
-the HTTP route table itself is swapped in place.
+queries, mutations, and actions. The dev server exposes a `setRoutes(routes)` method that the reload
+path calls with the freshly-resolved route table, and the very next request sees the new routes.
+Nothing in the running WebSocket sync connections, active subscriptions, or in-flight mutations is
+disturbed. Only the HTTP route table itself is swapped in place.
 
-This means you can add, remove, or repoint a `http.route()` call and see it live within one reload
-cycle, with no server restart — the same DX as editing a query or mutation.
+You can add, remove, or repoint a `http.route()` call and see it live within one reload cycle, with no
+server restart. Same DX as editing a query or mutation.
 
-## Components can contribute reserved routes
+## Going deeper
 
-An opt-in composed component (declared via `stackbase.config.ts`) can register its **own** reserved
-routes — e.g. an OAuth provider's callback endpoint, or a notification provider's delivery webhook —
-through a `httpRoutes` entry on its component definition:
+<Accordions type="single">
+
+<Accordion title="Components can contribute reserved routes too">
+
+You never write this yourself unless you're authoring a component, but it's worth knowing it exists.
+
+An opt-in composed component (declared via `stackbase.config.ts`) can register its own reserved
+routes, for example an OAuth provider's callback endpoint, or a notification provider's delivery
+webhook, through a `httpRoutes` entry on its component definition:
 
 ```ts
 interface ComponentHttpRoute {
@@ -177,59 +225,62 @@ interface ComponentHttpRoute {
 }
 ```
 
-These are mounted by the boot core, not by your app's `http.ts` — your app cannot declare a route
+These are mounted by the boot core, not by your app's `http.ts`. Your app cannot declare a route
 under a reserved prefix, and a component cannot declare one outside a reserved prefix. The rules,
 enforced both when the component is defined and again when it's composed into a project:
 
-- The `pathPrefix` **must** live under `/api/` or `/_` — the same reserved namespace your own routes
-  are barred from, inverted: a component route may *only* live there.
-- The `pathPrefix` must have **at least two path segments** (e.g. `/api/mycomponent/`, never bare
-  `/api/` or `/_`) — a structural floor that makes a component accidentally shadowing the *entire*
+- The `pathPrefix` must live under `/api/` or `/_`, the same reserved namespace your own routes are
+  barred from, inverted: a component route may only live there.
+- The `pathPrefix` must have at least two path segments (for example `/api/mycomponent/`, never bare
+  `/api/` or `/_`). This structural floor makes a component accidentally shadowing the entire
   reserved namespace impossible by construction, even if the engine's own reserved-prefix list is
   ever incomplete.
-- It must not collide, in **either direction**, with a built-in engine prefix (`/api/run`,
-  `/api/health`, `/api/sync`, `/api/storage/`, `/_admin/`, `/_fleet/`, `/_dashboard`) — a component
-  can't register something more specific *or* more general than any of these.
-- Two composed components' route prefixes may not overlap either (one being a prefix of the other,
-  for the same method) — that's rejected when components are composed together, so first-match-by-
+- It must not collide, in either direction, with a built-in engine prefix (`/api/run`, `/api/health`,
+  `/api/sync`, `/api/storage/`, `/_admin/`, `/_fleet/`, `/_dashboard`). A component can't register
+  something more specific or more general than any of these.
+- Two composed components' route prefixes may not overlap either, one being a prefix of the other for
+  the same method, so that's rejected when components are composed together. First-match-by-
   declaration-order is never ambiguous.
 
-Component routes are matched by prefix, in declaration order, **ahead of** your app's own `http.ts`
-routes — a component handler parses any sub-path itself (e.g. `<provider>/<phase>`), since routes
-here carry no named parameters, matching how your own routes work.
+Component routes are matched by prefix, in declaration order, ahead of your app's own `http.ts`
+routes. A component handler parses any sub-path itself (for example `<provider>/<phase>`), since
+routes here carry no named parameters, matching how your own routes work.
 
-You never write a `httpRoutes` entry yourself unless you're authoring a component — for an ordinary
-app, this is invisible: composing a component that ships one just works, without anything in your own
-`http.ts`. File storage's own `/api/storage/*` endpoints (upload, confirm, serve) are the always-on,
-built-in-rather-than-composed example of the same mechanism — see
+For an ordinary app, this is invisible: composing a component that ships one just works, without
+anything in your own `http.ts`. File storage's own `/api/storage/*` endpoints (upload, confirm, serve)
+are the always-on, built-in-rather-than-composed example of the same mechanism. See
 [File storage](/docs/core-concepts/file-storage).
+
+</Accordion>
+
+</Accordions>
 
 ## What's not here
 
-A few things a general-purpose HTTP framework offers are deliberately **not** part of `httpAction` /
-`http.ts`, and are not planned:
+A few things a general-purpose HTTP framework offers are deliberately not part of `httpAction` and
+`http.ts`, and aren't planned:
 
 - **Streaming request or response bodies.** A handler reads the whole request body and returns a
-  whole `Response` body; there's no chunked/streaming I/O in either direction.
+  whole `Response` body. There's no chunked or streaming I/O in either direction.
 - **Automatic CORS.** If a browser needs to call your endpoint cross-origin, set the
   `Access-Control-*` headers yourself in the `Response` you return (and handle `OPTIONS` yourself if
   you need a preflight).
-- **Named path parameters** (`/webhooks/:id`). Routes match on an exact path or a prefix only; read
+- **Named path parameters** (`/webhooks/:id`). Routes match on an exact path or a prefix only. Read
   anything beyond the matched prefix from the request's own URL inside the handler.
-- **Per-route middleware.** There's no chain of route-scoped `use()` handlers — cross-cutting concerns
-  (auth checks, logging, rate limiting) go inside the handler itself, or as a shared helper function
-  each handler calls.
+- **Per-route middleware.** There's no chain of route-scoped `use()` handlers. Cross-cutting concerns
+  like auth checks, logging, or rate limiting go inside the handler itself, or as a shared helper
+  function each handler calls.
 
-If you need any of these, build it inside the handler body — the primitives (`Request`, `Response`,
-`ctx.runQuery`/`runMutation`/`runAction`) are the same ones a hand-rolled Node/Bun HTTP server would
+If you need any of these, build it inside the handler body. The primitives (`Request`, `Response`,
+`ctx.runQuery`/`runMutation`/`runAction`) are the same ones a hand-rolled Node or Bun HTTP server would
 give you.
 
 ## Related
 
-- [Actions](/docs/core-concepts/actions) — the non-deterministic execution model `httpAction` shares,
+- [Actions](/docs/core-concepts/actions): the non-deterministic execution model `httpAction` shares,
   including `ctx.runQuery`/`runMutation`/`runAction` semantics.
-- [Mutations](/docs/core-concepts/mutations) — the only way a webhook's data actually gets written.
-- [Reactivity](/docs/core-concepts/reactivity) — why a write from a webhook shows up in a live query
+- [Mutations](/docs/core-concepts/mutations): the only way a webhook's data actually gets written.
+- [Reactivity](/docs/core-concepts/reactivity): why a write from a webhook shows up in a live query
   with no extra code.
-- [File storage](/docs/core-concepts/file-storage) — `_storage`'s own reserved `/api/storage/*` routes
+- [File storage](/docs/core-concepts/file-storage): `_storage`'s own reserved `/api/storage/*` routes
   are an example of the same reserved-route mechanism, built into the engine rather than a component.

@@ -1,356 +1,125 @@
 ---
 title: What is stackbase?
-description: An open-source, self-hostable reactive backend — and why reactivity changes how you build.
+description: An open-source reactive backend you host yourself.
 ---
 
 {/* diataxis: explanation */}
 
-stackbase is an open-source, **self-hostable** Backend-as-a-Service. You write your backend as
-ordinary TypeScript functions that read and write a database; stackbase runs them for you —
-transactionally, server-side — and keeps every client that is looking at the data **automatically
-up to date**, pushed over a WebSocket the instant a relevant write commits. It targets the same
-developer experience as Convex, but you deploy it yourself, on your own infrastructure, with no
-managed-cloud dependency and no vendor lock-in — a single Docker container, a standalone binary, or
-a Cloudflare Durable Object, your choice.
+stackbase is an open-source, reactive backend you host yourself. You write your backend as regular
+TypeScript functions, and stackbase keeps every user's screen up to date automatically.
 
-The defining feature is that word *automatically*. In a traditional backend you write an endpoint,
-the client calls it, and when the underlying data changes later, it is your job to notice and tell
-the client — with polling, hand-rolled WebSocket fan-out, cache-invalidation rules, or a separate
-realtime service bolted on the side. stackbase removes that job. A client subscribes to a query
-once, and stackbase re-runs and re-pushes that query whenever — and only whenever — a write actually
-affects its result.
+Think of a Google Doc. When one person types, everyone else sees the change right away, with no
+refresh button. stackbase gives your whole app that quality, for any data, and you barely have to
+think about it.
 
-## The reactive model, in one paragraph
+## The idea in one minute
 
-You write **query**, **mutation**, and **action** functions in a `convex/` directory. A query
-records exactly which tables and index ranges it reads as it runs — its **read set**. A mutation
-runs as a single serializable transaction and, on commit, produces a **write set**: exactly which
-rows it inserted, replaced, or deleted. When a mutation commits, stackbase intersects its write set
-against every live subscription's read set and re-runs and re-pushes only the queries actually
-touched — nothing is re-sent to a client whose data didn't change, and nothing is missed. That
-intersection — not the WebSocket plumbing — is the entire reactive engine; see
-[How it works](/docs/get-started/how-it-works) for the full mechanism and
-[Reactivity](/docs/core-concepts/reactivity) for how precise the matching actually is (index-range,
-not table-level).
+You write two kinds of functions. A **query** reads data. A **mutation** writes it. Your app
+subscribes to a query, like "the messages in this chat."
 
-## The three function types
+When someone sends a message, they call a mutation. stackbase notices the mutation changed data your
+query was reading, re-runs the query, and pushes the new result to everyone watching that chat. You
+never write polling, WebSocket code, or cache-invalidation logic. That part is the whole product.
 
-Everything about how you build a stackbase app falls out of the differences between these three:
+```mermaid
+flowchart LR
+  App["Your app"] -->|"subscribe"| Query["Query (reads data)"]
+  Mutation["Mutation (writes data)"] --> DB[("Database")]
+  Query --> DB
+  DB -->|"data changed"| Query
+  Query -->|"push update"| App
+```
 
-| Kind | Deterministic | `ctx.db` | Side effects (`fetch`, clock, random) | Subscribable |
-|---|---|---|---|---|
-| [**query**](/docs/core-concepts/queries) | Required | Read-only | No | Yes — the only kind a client subscribes to |
-| [**mutation**](/docs/core-concepts/mutations) | Required | Read + write | No | No (but its commit drives every subscription's re-run) |
-| [**action**](/docs/core-concepts/actions) | Not required | None at all | Yes | No |
+The developer experience is close to [Convex](https://convex.dev), with one big difference: you run
+stackbase yourself, on your own infrastructure, with no managed cloud in the middle.
 
-- **Queries** are pure, deterministic, read-only functions. They're the functions clients
-  subscribe to with `useQuery`, and determinism is what makes re-running one trustworthy — the
-  same data always produces the same result, so the engine can safely decide when a subscription
-  needs to refresh.
-- **Mutations** are the *only* way to write data. A mutation's entire handler runs as one
-  serializable transaction: all of it commits, or none of it does. That commit is the single,
-  well-defined moment the engine hooks reactivity into.
-- **Actions** are the escape hatch for everything non-deterministic — calling a third-party API,
-  sending an email, generating a real random id, reading the wall clock. An action has no `ctx.db`
-  at all; it runs entirely outside the transaction, and reaches the database only by calling a
-  query or mutation through `ctx.runQuery`/`ctx.runMutation`/`ctx.runAction`, each a fresh,
-  independent top-level run. An action's own result is never subscribed to — only queries
-  participate in reactivity.
+## You write your backend as functions
+
+Your functions live in a `convex/` folder. Here's a query that lists messages and a mutation that
+adds one:
 
 ```ts title="convex/messages.ts"
 import { v } from "@stackbase/values";
-import { query, mutation, action } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 
+// Reads data. Your app subscribes to this and gets live updates.
 export const list = query({
-  args: { conversationId: v.id("conversations") },
-  handler: (ctx, { conversationId }) =>
-    ctx.db.query("messages", "by_conversation").eq("conversationId", conversationId).collect(),
+  handler: (ctx) => ctx.db.query("messages", "by_creation").collect(),
 });
 
+// Writes data. Runs as one transaction.
 export const send = mutation({
-  args: { conversationId: v.id("conversations"), body: v.string() },
+  args: { author: v.string(), body: v.string() },
   handler: (ctx, args) => ctx.db.insert("messages", args),
 });
-
-export const notify = action({
-  args: { messageId: v.id("messages") },
-  handler: async (ctx, { messageId }) => {
-    const message = await ctx.runQuery("messages:get", { id: messageId });
-    await fetch("https://api.email.example.com/send", { method: "POST", body: JSON.stringify(message) });
-  },
-});
 ```
 
-A subscribed `list` query re-runs the instant `send` commits a matching row; `notify` never appears
-in that loop at all, because it isn't a query and has nothing a client could subscribe to.
+There are three function types in total:
 
-## Native `@stackbase/*` is the canonical surface
+- **Query** reads data. Your app subscribes to queries and they update on their own.
+- **Mutation** writes data. Each one runs as a single transaction: it all saves, or none of it does.
+- **Action** is for everything else, like calling another API or sending an email. Actions can't read
+  or write the database directly; they call your queries and mutations to do that.
 
-stackbase's function and schema model is deliberately Convex-shaped — `query`/`mutation`/`action`
-from `./_generated/server`, `defineSchema`/`defineTable` and validators from `@stackbase/values`,
-`useQuery`/`useMutation` with matching signatures — because that DX is worth keeping. But the
-**canonical, documented imports are `@stackbase/*`**, not `convex/*`. stackbase is its own product,
-not a Convex account or a drop-in replacement for one: you can't publish a package literally named
-`convex` anyway, and the two are different runtimes with different licenses and different deploy
-stories.
+You'll meet each one properly in [Queries](/docs/core-concepts/queries),
+[Mutations](/docs/core-concepts/mutations), and [Actions](/docs/core-concepts/actions). If you want
+to know *how* the live updates actually work, that's [How it works](/docs/get-started/how-it-works).
 
-Convex compatibility exists as a **migration on-ramp**, not the product's identity. `stackbase
-migrate --from convex` rewrites a Convex app's imports (`convex/values` → `@stackbase/values`,
-`convex/react` → `@stackbase/client/react`, and so on), updates `package.json`, regenerates
-`_generated/`, and writes a `MIGRATION-REPORT.md` categorizing everything else as auto-fixed,
-action-needed, or unsupported (Convex Auth, Convex Components, and `.searchIndex`/`.vectorIndex`
-usage all fall in the last bucket today). See
-[Migrate from Convex](/docs/reference/migrate-from-convex) for the full mechanics.
+## What comes with it
 
-## What actually ships today
+stackbase is a full backend, not just a database. Everything here is built and ready to use today:
 
-This is not a roadmap page — everything below is real, tested through the actual CLI/server
-entrypoints (not just unit mocks), and usable right now.
+- [File storage](/docs/core-concepts/file-storage) for uploads, images, and downloads.
+- [Authentication](/docs/components/auth): passwords, magic links, social login (Google, GitHub, and
+  more), two-factor, and passkeys.
+- [Authorization](/docs/components/authorization) for roles and permissions.
+- [Notifications](/docs/components/notifications) by email, SMS, in-app inbox, and push.
+- [Scheduled functions and crons](/docs/components/scheduling) for work that runs later or on a timer.
+- [Workflows](/docs/components/workflows) for durable, multi-step processes.
+- [Optimistic updates](/docs/client/optimistic-updates) and
+  [offline support](/docs/client/offline-sync) on the client.
+- A [dashboard](/docs/deploy/local-dev) to browse your data, read logs, and run functions.
 
-**The reactive core**
-- Schema definitions and a full validator catalog (`v.string()`, `v.number()`, `v.id(table)`,
-  `v.object()`, `v.array()`, `v.union()`, and more — see
-  [Configuration](/docs/reference/configuration)) with runtime enforcement: a write that doesn't
-  match its table's shape is rejected before it ever commits.
-- Typed codegen — `Doc<"table">`, `Id<"table">`, and a typed `api` object generated from your
-  `convex/` tree, so `api.messages.send` is real, checked, autocompleted TypeScript, not a string.
-- Index-range-precise reactive invalidation (not table-level) — see
-  [Reactivity](/docs/core-concepts/reactivity).
-- A client SDK with `useQuery`, `useMutation`, and `useAction` hooks (see
-  [Client SDK](/docs/client/client-sdk)), plus framework-agnostic primitives underneath them.
-- [**Optimistic updates**](/docs/client/optimistic-updates) — `withOptimisticUpdate` renders a
-  predicted result in the same tick as the click, then swaps to the authoritative value with no
-  flicker.
-- [**Durable offline sync**](/docs/client/offline-sync) — an opt-in outbox (IndexedDB in the
-  browser, a filesystem journal for Node/Bun/Electron/Tauri hosts) that survives a reload or crash
-  and drains in order once the connection returns, with server-side per-client receipts so a resend
-  can never double-apply.
+Auth, notifications, and the rest are *components*: you turn on only the ones you need, in one config
+file. See [Components](/docs/components/overview).
 
-**Server-side capabilities**
-- [**File storage**](/docs/core-concepts/file-storage) — a reserved `_storage` table plus
-  `ctx.storage`, always on (no opt-in), with two-phase proxied/presigned uploads over a filesystem
-  or S3-compatible backend.
-- [**Actions, scheduled functions, and crons**](/docs/components/scheduling) — `ctx.scheduler.runAfter`/
-  `runAt` and `cronJobs()` dispatch functions durably, at-most-once, driven by a background loop
-  woken by commits and a wall-clock timer.
-- [**`httpAction` and a public HTTP router**](/docs/core-concepts/http-and-webhooks) — a conventional
-  `http.ts` exposes webhook-shaped endpoints (raw `Request` → `Response`) for callers that can't
-  speak the sync protocol.
-- [**Durable workflows with saga compensation**](/docs/components/workflows) — multi-step
-  orchestration that survives a process restart via deterministic replay over a journal, with
-  per-step compensation handlers that unwind in reverse order on failure or cancellation.
-- [**Change triggers**](/docs/components/triggers) — a durable cursor over the append-only commit
-  log runs your handler on every insert/update/delete to a watched table; a missed change is
-  impossible by construction.
-- [**Authentication**](/docs/components/auth) — email + password, anonymous sign-in with in-place
-  upgrade, session rotation and reuse detection, device management, email verification/reset/
-  magic-link/OTP, social OAuth (Google, GitHub, Microsoft, Discord, Facebook, Apple), third-party
-  JWT/OIDC, TOTP MFA, and passkeys.
-- [**Authorization**](/docs/components/authorization) — RBAC with role inheritance, scoped role
-  assignments, ReBAC for sharing-style permissions, and row policies enforced through the same
-  reactive read-set mechanism as everything else.
-- [**Notifications**](/docs/components/notifications) — email/SMS/in-app/push across pluggable
-  providers, with a reactive in-app inbox (a notification is just a row in a live-queried table),
-  retries with backoff, dead-letter handling, per-user preferences, and email digests.
+## Run it anywhere
 
-**Tooling**
-- The **dashboard** — a live data browser (built on the same admin sync subscriptions as the rest
-  of the app, so edits reflect reactively), a logs viewer, and a function runner.
-- The **CLI** (`stackbase dev`, `serve`, `deploy`, `build`, `migrate`, `codegen`) — see
-  [CLI reference](/docs/reference/cli) for every command and flag.
+The same app runs, unchanged, in all of these places:
 
-## Components: opt-in, composed capability
+- On your machine with [`stackbase dev`](/docs/deploy/local-dev).
+- On a server with [Docker](/docs/deploy/self-hosting).
+- As a [single downloadable binary](/docs/deploy/deploy-and-build).
+- On [Cloudflare](/docs/deploy/cloudflare).
 
-Auth, authorization, notifications, scheduling, workflows, and triggers are not baked into the core
-engine — they're **components**: self-contained packages you compose explicitly in
-`stackbase.config.ts`. The core engine (schema, queries, mutations, reactivity) has no idea what
-auth or notifications are; a component adds its own tables (namespaced, so `scheduler/jobs` can
-never collide with your app's own `jobs` table), a `ctx.<name>` facade in your handlers, internal
-modules, and sometimes a background driver or a boot-time step.
+It stores data in SQLite by default, with no setup. When you want a managed database, point it at
+[Postgres](/docs/deploy/postgres) with one flag and change nothing else.
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineAuth, consoleEmail } from "@stackbase/auth";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow } from "@stackbase/workflow";
+## How it compares
 
-const auth = defineAuth({
-  email: { provider: consoleEmail(), from: "no-reply@example.com", baseUrl: "http://localhost:5173" },
-});
+If you know these tools, here's the short version:
 
-export default defineConfig({
-  components: [auth, defineScheduler(), defineWorkflow({ workflows: {} })],
-});
-```
+- **Convex.** Same reactive model and the same style of functions, but you self-host it and your data
+  stays yours. stackbase also adds a few things Convex hadn't, like durable workflows and a Postgres
+  option. It's a clean-room build studied from Convex's public docs, not a fork.
+- **Firebase and Supabase.** Both give you realtime, but through security rules or a stack of separate
+  services around a database. stackbase gets its live updates from your own functions, in one process.
+- **SpacetimeDB.** Its functions are written in Rust or C#. stackbase's are plain TypeScript, and it
+  runs on ordinary infrastructure.
 
-There's no `init` wizard that installs a component for you — you list exactly what your project
-needs, and every table, facade, module, and driver it contributes appears (or disappears) with that
-one line. A component can declare a dependency on another (`defineWorkflow()` requires
-`"scheduler"`, `@stackbase/authz` requires `"auth"`) and the dependency graph is resolved
-automatically at compose time. The composed component **set** is fixed at boot — adding or removing
-one needs a restart — but your app's own functions and additive schema changes still hot-swap live
-via `stackbase deploy`. See [Components overview](/docs/components/overview).
+For numbers, [Performance](/docs/get-started/performance) has a measured comparison against Convex,
+with the caveats spelled out.
 
-## Pluggable storage: the engine never imports a driver
+## A few honest limits
 
-Persistence goes through a narrow `DatabaseAdapter` interface. The engine logic — the transactor,
-the query engine, the reactive invalidation — never imports SQLite or Postgres directly; a leak of
-backend-specific behavior out of an adapter is a design bug, not a feature.
-
-- **SQLite** is the zero-config default: an embedded, MVCC, single-writer store that needs nothing
-  external — the right choice for local dev and the large majority of self-hosted production apps.
-- **Postgres** is an opt-in alternative for when you want a managed database underneath the same
-  engine: `--database-url postgres://…` (or `STACKBASE_DATABASE_URL`), no code changes. It's
-  **physically schemaless** — your app's tables and fields live as data inside a small, fixed set of
-  internal tables, so there is no `ALTER TABLE`/migration step as your `schema.ts` evolves, on either
-  backend. A `pg_advisory_lock` enforces the single-writer invariant a second engine can't violate.
-
-Switching backends is a flag, never an application-code change. See [Postgres](/docs/deploy/postgres).
-
-## Deployment surface
-
-The same `convex/` app runs, byte-identical, across every one of these:
-
-- **`stackbase dev`** — local hot-reload server: watches your functions, regenerates types, and
-  serves HTTP + WebSocket + the dashboard. See [Local development](/docs/deploy/local-dev).
-- **`stackbase serve` + `docker compose up`** — the baseline production self-host: a generic
-  `stackbase:latest` image, your `convex/` bind-mounted read-only, SQLite persisted on a named
-  volume, a required `STACKBASE_ADMIN_KEY`, graceful shutdown. See
-  [Self-hosting with Docker](/docs/deploy/self-hosting).
-- **`stackbase build`** — compiles your whole app (the Bun runtime, the engine, `bun:sqlite`, your
-  functions and schema, any composed components) into one self-contained executable via `bun build
-  --compile`, cross-compilable to Linux/macOS/Windows on x64/arm64. Only the SQLite data file lives
-  outside the binary. See [Deploy and build](/docs/deploy/deploy-and-build).
-- **`stackbase deploy`** — pushes functions and additive schema changes onto an already-running
-  `serve --allow-deploy` process, hot-swapped atomically with no restart; a destructive schema
-  change is rejected before anything swaps. The same command also provisions
-  **`--target cloudflare`**, a Durable-Object-native host via `wrangler deploy` where one DO is the
-  writer, the SQLite store, every hibernatable WebSocket, and the wake alarm that fires scheduled
-  work even while idle. See [Deploy and build](/docs/deploy/deploy-and-build) and
-  [Cloudflare](/docs/deploy/cloudflare).
-- **Postgres** as a drop-in storage backend at any of the above, unlocking a managed/durable
-  database under the identical engine. See [Postgres](/docs/deploy/postgres).
-
-## The tiered architecture
-
-stackbase is designed as tiers, not one fixed shape — the same app code runs unchanged at every one:
-
-- **Tier 0/1 — single node (free, forever).** One `stackbase serve` process — SQLite or Postgres,
-  Docker or the standalone binary — is one writer, fully serializable, with no coordination
-  overhead. This is the right shape for the overwhelming majority of apps and it's where everything
-  in [Self-hosting](/docs/deploy/self-hosting), [Postgres](/docs/deploy/postgres), and
-  [Deploy and build](/docs/deploy/deploy-and-build) lives.
-- **Tier 2 — a distributed fleet (write scale-out).** `stackbase serve --fleet` runs a small,
-  symmetric fleet of `stackbase serve` processes sharing one Postgres database — any node answers
-  any read from its own tailed replica, mutations forward to whichever node holds the write lease,
-  and the lease fails over live if the writer dies. Sharding (`.shardKey`/`shardBy`) is what
-  actually parallelizes writes across the fleet, on top of that redundancy. This tier is where the
-  `ee/`-licensed packages (`@stackbase/fleet`, and the Cloudflare-native
-  `@stackbase/runtime-cloudflare-shard`) live — see [Scaling](/docs/deploy/scaling).
-- **Tier 3 — an object-storage substrate.** A reactive multi-node backend with *no database at all*:
-  an object store (filesystem or S3-compatible, including R2) is the write-only durable log and a
-  CAS manifest is the fencing/lease mechanism, while local SQLite instances serve queryable state.
-  This is the substrate the experimental Cloudflare Containers path runs on.
-
-**The promise across every tier: moving up changes deployment configuration and adapters, never the
-`convex/` functions you wrote.**
-
-## How stackbase compares
-
-- **vs. Convex** — the same reactive DX (read sets, write sets, subscription intersection,
-  Convex-shaped `query`/`mutation`/`action` functions and codegen), but self-hostable by design with
-  no managed-cloud dependency, storage pluggable between SQLite and Postgres instead of fixed to one
-  proprietary database, and a single-binary compile for Electron/Tauri-style distribution. stackbase
-  has also grown features Convex hadn't shipped as of this comparison: durable workflows with saga
-  compensation, a Postgres storage adapter, and a durable offline mutation outbox with
-  client-supplied ids. It is a clean-room build studied against Convex's open architecture
-  documentation — not a fork, and not a decompilation of Convex's code.
-- **vs. Firebase/Supabase** — Firebase's realtime model is rules-based (security rules gate raw
-  document access, with no server-side transactional function layer); Supabase's is Postgres + a
-  ring of roughly a dozen microservices (PostgREST, Realtime, GoTrue, Storage, Studio, and more)
-  wired around row-level security. stackbase's reactivity comes from one mechanism — deterministic
-  functions with recorded read/write sets — running in one process, not a fleet of services around
-  a shared database.
-- **vs. SpacetimeDB** — SpacetimeDB's "reducers" are Rust or C# compiled to WASM, and the database
-  *is* the application server. stackbase's functions are ordinary TypeScript, and it deploys to
-  wherever you can run a container, a binary, or a Cloudflare Worker — no WASM toolchain, no
-  Rust/C# requirement.
-
-## Runtime and language
-
-TypeScript end-to-end — the engine, the CLI, and the client SDK are one language, with no Rust or
-other systems-language core to maintain alongside it. **Bun is the primary runtime**
-(`stackbase dev`/`serve` and the `bun build --compile` single-binary path), and **Node is fully
-supported** (npm packages, a Node SQLite adapter) — the engine is runtime-agnostic behind its
-storage and runtime seams either way.
-
-## Licensing: free to self-host, forever
-
-stackbase is licensed **FSL-1.1-Apache-2.0** (the Functional Source License — the same license
-Convex itself uses): free to use, modify, and self-host, including at scale, on your own
-infrastructure — the license forbids exactly one thing, offering stackbase itself as a competing
-hosted service, and each release converts to plain Apache 2.0 two years after it ships. Single-node
-self-hosting, deploying anywhere, and owning your data are free forever, not a trial.
-
-The business model is **free now, gate scale later** — the n8n/GitLab-EE pattern of selling license
-keys, not compute:
-
-- **Phase 1 (now): everything free**, including Tier 2 scale-out, to win adoption.
-- **Phase 2 (after popularity): scale + enterprise capability requires a paid license key** —
-  verified offline at boot, no phone-home. The `ee/` packages (`@stackbase/fleet`, the Cloudflare
-  multi-shard router) already live under a separate commercial license today, ready for that gate,
-  and are free to use in production in the current phase with no key required yet. A paid key would
-  unlock a *capability*, never a deployment location — you always deploy on your own infrastructure
-  either way.
-
-See [FAQ](/docs/reference/faq) for the day-to-day version of this, and the project's licensing
-decision for the full reasoning behind never having gone the fully-permissive, relicense-later route
-other infrastructure projects (Redis, Elastic, Terraform) took and were hostile-forked over.
-
-## Measured, not just claimed
-
-A same-substrate benchmark (both backends as Docker containers on the same host, driven by their
-own native WebSocket clients through identical measurement code) compared stackbase directly against
-`get-convex/convex-backend` on a matched app — one table, one index, one insert mutation, one list
-query:
-
-| metric | stackbase | Convex |
-|---|---:|---:|
-| reactive propagation p50 (50 subscribers) | **8.6 ms** | 13.4 ms |
-| reactive propagation p99 | 13.7 ms | 27.3 ms |
-
-Propagation — write commits to subscriber receives the push — is the signature reactive metric, and
-it's the fairest one to compare: a clean-room TypeScript implementation of Convex's reactive-
-transaction design lands in the same order of magnitude as (and, in this same-substrate test,
-slightly ahead of) the Rust reference it's validated against. That result is the point — it says the
-architecture is sound, not that TypeScript is faster than Rust in general; Convex is a hardened,
-feature-complete production system whose overhead buys guarantees this particular benchmark doesn't
-exercise, and the numbers are logged with their full caveats, not as a marketing claim.
-
-## What's honestly not built yet
-
-These are stated plainly, not buried — none of them are documented as shipped features anywhere
-else in these docs:
-
-- **Full-text and vector search.** Not shipped. `stackbase migrate` flags a Convex app's
-  `.searchIndex(...)`/`.vectorIndex(...)` usage as unsupported rather than pretending to translate
-  it.
-- **True V8-isolate sandboxing.** Functions run in-process today; the syscall interface is designed
-  to be isolate-ready, but the isolation boundary itself isn't wired up yet — don't run untrusted,
-  multi-tenant code on a shared deployment expecting isolate-grade sandboxing.
-- **Built-in TLS termination.** stackbase serves plain HTTP; put a reverse proxy (nginx, Caddy,
-  Traefik) in front for HTTPS.
-- **Multi-node write scale-out as a free capability.** It exists (Tier 2 — see above) and works
-  today, but it's licensed separately from the free single-node core, not a free-forever guarantee
-  the way single-node self-hosting is.
+- **No full-text or vector search yet.** It's not built.
+- **Functions run in-process**, so don't run untrusted code from different tenants on one shared
+  deployment.
+- **No built-in HTTPS.** Put a proxy like Caddy or nginx in front for that.
+- **Multi-node scaling exists but isn't free-forever** the way single-node self-hosting is.
 
 ## Where to go next
 
-- [How it works](/docs/get-started/how-it-works) — the reactive model, one level deeper: read sets,
-  write sets, and why determinism is load-bearing.
-- [Quickstart](/docs/get-started/quickstart) — install the CLI, write a function, see it update
-  live.
-- [Migrate from Convex](/docs/reference/migrate-from-convex) — if you're bringing an existing Convex
-  app across.
-- [FAQ](/docs/reference/faq) — direct answers to the questions this page raises but doesn't fully
-  resolve.
+- [Quickstart](/docs/get-started/quickstart): get a backend running and watch it update live.
+- [How it works](/docs/get-started/how-it-works): the reactive model, explained.
+- [Migrate from Convex](/docs/reference/migrate-from-convex): bring an existing app over.

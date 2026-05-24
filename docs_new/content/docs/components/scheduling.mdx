@@ -5,12 +5,16 @@ description: runAfter, runAt, and cron jobs.
 
 {/* diataxis: explanation */}
 
-`@stackbase/scheduler` runs a function later — once, at a specific time, or on a recurring cadence —
-**durably**. A scheduled job is a row in a `jobs` table, dispatched by a background driver that wakes
-reactively on every commit plus a wall-clock timer armed to the earliest pending job. Nothing polls,
-and nothing is lost to a crash between claiming a job and finishing it.
+Think of `@stackbase/scheduler` as cron built into your database, not bolted on beside it. A
+scheduled job is a row in a `jobs` table. Running it later, once, at an exact time, or on a
+recurring cadence, works the same as any other write in stackbase: durably, with nothing polling in
+the background.
 
-It's the foundation two other components build on: [`@stackbase/workflow`](/docs/components/workflows)
+A background driver dispatches the work. It wakes reactively on every commit, plus a wall-clock
+timer armed to the earliest pending job, so nothing is lost to a crash between claiming a job and
+finishing it.
+
+It's the foundation two other components build on. [`@stackbase/workflow`](/docs/components/workflows)
 dispatches every step through the scheduler's own job queue, and both `@stackbase/triggers` and
 `@stackbase/notifications` reuse the same recurring-driver seam for their own background loops.
 
@@ -23,16 +27,18 @@ import { defineScheduler } from "@stackbase/scheduler";
 export default defineConfig({ components: [defineScheduler()] });
 ```
 
-`defineScheduler()` takes no required configuration and declares no dependency on any other
-component — it's the base layer. Once composed, `ctx.scheduler` is available in every mutation, and
-— via a delegating action-mode facade — every action too, so a function scheduling work is portable
-between the two (see [Scheduling from an action](#scheduling-from-an-action) below).
+`defineScheduler()` takes no required configuration, and it declares no dependency on any other
+component. It's the base layer. Once composed, `ctx.scheduler` is available in every mutation, and
+in every action too, via a delegating action-mode facade, so a function scheduling work is portable
+between the two. More on that in [Scheduling from an action](#scheduling-from-an-action).
 
-Composing it adds three namespaced tables to your deployment — `scheduler/jobs`, `scheduler/job_args`,
-and `scheduler/crons` — browsable like any other table in the [dashboard](/docs/deploy/local-dev)'s
-data browser. `jobs` and `job_args` are split deliberately: `jobs` is the small, hot row the driver
-scans every pass (id, state, `nextTs`, attempt count); `job_args` holds the — possibly large —
-arguments and `context` payload, so scanning for due work never has to page through it.
+Composing it adds three namespaced tables to your deployment: `scheduler/jobs`, `scheduler/job_args`,
+and `scheduler/crons`. You can browse them like any other table in the
+[dashboard](/docs/deploy/local-dev)'s data browser.
+
+`jobs` and `job_args` are split on purpose. `jobs` is the small, hot row the driver scans every pass
+(id, state, `nextTs`, attempt count). `job_args` holds the arguments and `context` payload, which can
+be large, so scanning for due work never has to page through it.
 
 ## Scheduling work
 
@@ -46,28 +52,28 @@ export const notifyLater = mutation({
 });
 ```
 
-- **`ctx.scheduler.runAfter(delayMs, fnRef, args)`** — schedule `fnRef` to run `delayMs` milliseconds
-  from now. Returns the new job's id (a `string`).
-- **`ctx.scheduler.runAt(ts, fnRef, args)`** — schedule it for an absolute time. `ts` is either a
+- `ctx.scheduler.runAfter(delayMs, fnRef, args)` schedules `fnRef` to run `delayMs` milliseconds
+  from now. It returns the new job's id (a `string`).
+- `ctx.scheduler.runAt(ts, fnRef, args)` schedules it for an absolute time. `ts` is either a
   `number` (epoch milliseconds) or a `Date`.
-- **`ctx.scheduler.cancel(id)`** — cancel a still-`pending` job by id. See
+- `ctx.scheduler.cancel(id)` cancels a still-`pending` job by id. See
   [Canceling and cascading cancel](#canceling-and-cascading-cancel).
 
-Both `runAfter` and `runAt` insert the job row in the **calling mutation's own transaction** — the
-schedule commits (or rolls back) atomically with the rest of your write. Delay is clamped to
-non-negative (`Math.max(0, delayMs)`), so `runAfter(-100, …)` just means "as soon as possible," not an
-error.
+Both `runAfter` and `runAt` insert the job row in the calling mutation's own transaction. The
+schedule commits, or rolls back, atomically with the rest of your write. Delay is clamped to
+non-negative (`Math.max(0, delayMs)`), so `runAfter(-100, ...)` just means "as soon as possible,"
+not an error.
 
 `fnRef` is a bare function-path string (`"reminders:_send"`) or a codegen'd `api`/`internal`
-reference — both resolve to the same string path. The target can be a **mutation or an action**; the
+reference. Both resolve to the same string path. The target can be a mutation or an action: the
 scheduler resolves which at enqueue time (via the runtime's function registry) and dispatches
-accordingly. This matters because the two have different delivery guarantees — see
+accordingly. This matters because the two have different delivery guarantees, covered in
 [Delivery guarantees](#delivery-guarantees).
 
-## The full enqueue surface — `ctx.scheduler.enqueue`
+## The full enqueue surface: `ctx.scheduler.enqueue`
 
-`runAfter`/`runAt` are the common case and only accept a delay or a timestamp. For the rest of the
-options, call the lower-level `enqueue` method directly:
+`runAfter`/`runAt` are the common case, and they only accept a delay or a timestamp. For the rest of
+the options, call the lower-level `enqueue` method directly:
 
 ```ts
 await ctx.scheduler.enqueue(
@@ -86,46 +92,70 @@ await ctx.scheduler.enqueue(
 
 `EnqueueOpts`:
 
-| Option | Type | Behavior |
-|---|---|---|
-| `runAfter` | `number` | Relative delay in ms. Mutually exclusive in practice with `runAt` (whichever is set wins; omit both to run as soon as possible). |
-| `runAt` | `number` | Absolute epoch-ms fire time. |
-| `idempotencyKey` | `string` | **Idempotent insert-or-noop.** If a job with this key already exists, its id is returned unchanged and nothing new is inserted — no duplicate job, even if `enqueue` is called twice with the same key. This is what makes the cron cadence safe to re-trigger for the same occurrence (see [Catch-up policies](#catch-up-policies)). |
-| `onComplete` | `string` (a mutation path) | A callback fired with the job's terminal outcome. See [The `onComplete`/`context` round-trip](#the-oncomplete-context-round-trip). |
-| `context` | `JSONValue` | An opaque value round-tripped back to the `onComplete` callback verbatim — the scheduler never inspects it. |
-| `retry` | `{ maxFailures: number }` | Overrides the default retry ceiling (`4`) for this job. |
-| `name` | `string` | A human-readable label stored on the row, useful for identifying jobs in the dashboard's data browser — purely observational, not used for dispatch or dedup. |
+<TypeTable
+  type={{
+    runAfter: {
+      type: 'number',
+      description: 'Relative delay in ms. Mutually exclusive in practice with runAt: whichever is set wins, and omitting both means run as soon as possible.',
+    },
+    runAt: {
+      type: 'number',
+      description: 'Absolute epoch-ms fire time.',
+    },
+    idempotencyKey: {
+      type: 'string',
+      description: 'Idempotent insert-or-noop. If a job with this key already exists, its id is returned unchanged and nothing new is inserted, so no duplicate job even if enqueue is called twice with the same key. This is what makes the cron cadence safe to re-trigger for the same occurrence, see Catch-up policy below.',
+    },
+    onComplete: {
+      type: 'string (a mutation path)',
+      description: "A callback fired with the job's terminal outcome. See The onComplete/context round-trip below.",
+    },
+    context: {
+      type: 'JSONValue',
+      description: 'An opaque value round-tripped back to the onComplete callback verbatim. The scheduler never inspects it.',
+    },
+    retry: {
+      type: '{ maxFailures: number }',
+      description: 'Overrides the default retry ceiling (4) for this job.',
+    },
+    name: {
+      type: 'string',
+      description: "A human-readable label stored on the row, useful for identifying jobs in the dashboard's data browser. Purely observational: not used for dispatch or dedup.",
+    },
+  }}
+/>
 
-This is also the primitive other components build on: `@stackbase/workflow` schedules every step
-through this same `enqueue` path, using `onComplete`/`context` to learn when a step finished and what
-it returned.
+This is also the primitive other components build on. `@stackbase/workflow` schedules every step
+through this same `enqueue` path, using `onComplete`/`context` to learn when a step finished and
+what it returned.
 
 ## Scheduled targets: mutations vs. actions
 
-A job's target can be either kind, and the scheduler resolves which it actually is (via the runtime's
-function registry) rather than trusting the caller. The two have different delivery guarantees
-because only mutations are safely retryable:
+A job's target can be either kind, and the scheduler resolves which it actually is (via the
+runtime's function registry) rather than trusting the caller. The two have different delivery
+guarantees, because only mutations are safely retryable:
 
 - **Mutations** are deterministic and transactional, so a retry after a crash just re-runs the same
-  write — safe by construction. Scheduled mutations get retried on failure (with backoff, see
+  write. That's safe by construction. Scheduled mutations get retried on failure (with backoff, see
   [Retries and backoff](#retries-and-backoff)) and on an infra kill (see
   [Delivery guarantees](#delivery-guarantees)).
 - **Actions** have arbitrary external side effects (an HTTP call, a charge), so re-running one that
-  may have already partially executed risks doing it twice. Scheduled actions are **at-most-once**: a
+  may have already partially executed risks doing it twice. Scheduled actions are at-most-once: a
   clean failure (the action's own code threw) still retries with backoff up to the failure ceiling,
-  but a crash **mid-flight** — the process died while the action was running, before it could report
-  success or failure — dead-letters the job (`state: "failed"`) instead of blindly re-dispatching it.
+  but a crash mid-flight, meaning the process died while the action was running before it could
+  report success or failure, dead-letters the job (`state: "failed"`) instead of blindly
+  re-dispatching it.
 
-## `JobState`
+## Job states
 
-Every job row moves through:
+Every job row moves through one of five states, tracked as `JobState`:
 
 | State | Meaning |
 |---|---|
 | `pending` | Waiting for `nextTs` to arrive; eligible for the driver to claim. |
 | `inProgress` | Claimed by the driver and currently running, with a lease. |
 | `success` | Ran and returned normally. Terminal. |
-| `failed` | Dead-lettered — either it exhausted its retries, hit a non-retryable error, or (for an action) crashed mid-flight. Terminal. |
+| `failed` | Dead-lettered: either it exhausted its retries, hit a non-retryable error, or (for an action) crashed mid-flight. Terminal. |
 | `canceled` | Canceled before it ran, either directly or via cascade. Terminal. |
 
 ## Canceling and cascading cancel
@@ -136,19 +166,20 @@ await ctx.scheduler.cancel(jobId);
 
 `cancel(id)`:
 
-1. If the job is still `pending`, transitions it to `canceled` and fires its `onComplete` (if any)
+1. If the job is still `pending`, it transitions to `canceled` and fires its `onComplete` (if any)
    with `{ kind: "canceled" }`.
-2. **Cascades**: walks the job's descendants via a `by_parent` index (an iterative breadth-first walk,
-   not recursion, so a deep chain can't blow the stack) and cancels any of them still `pending` too —
-   firing each canceled descendant's own `onComplete`, if set.
-3. This walk runs regardless of whether the job itself was cancelable in step 1 — canceling doesn't
+2. It cascades: walks the job's descendants via a `by_parent` index (an iterative breadth-first
+   walk, not recursion, so a deep chain can't blow the stack) and cancels any of them still
+   `pending` too, firing each canceled descendant's own `onComplete`, if set.
+3. This walk runs regardless of whether the job itself was cancelable in step 1. Canceling doesn't
    preempt a job already `inProgress`, but its not-yet-dispatched children still shouldn't run just
    because their parent already moved on.
 
-A job scheduled while its parent is already `canceled` is **born canceled** — it never gets a chance
-to run at all. In practice, "parent" chains today come from components (like `@stackbase/workflow`,
-whose steps are chained this way) that explicitly link a `parentId`; a plain `ctx.scheduler.runAfter`
-call made from inside another job's own handler does not automatically become that job's child.
+A job scheduled while its parent is already `canceled` is born canceled: it never gets a chance to
+run at all. In practice, "parent" chains today come from components (like `@stackbase/workflow`,
+whose steps are chained this way) that explicitly link a `parentId`. A plain
+`ctx.scheduler.runAfter` call made from inside another job's own handler does not automatically
+become that job's child.
 
 ## The `onComplete`/`context` round-trip
 
@@ -161,26 +192,31 @@ await ctx.scheduler.enqueue("reports:_build", { reportId }, {
 export const _onBuildComplete = mutation({
   handler: async (ctx, { jobId, context, result }) => {
     // result: { kind: "success", value } | { kind: "failed", error } | { kind: "canceled" }
-    // context: { reportId, requestedBy } — round-tripped verbatim
+    // context: { reportId, requestedBy } - round-tripped verbatim
   },
 });
 ```
 
 If a job's `onComplete` is set, the scheduler enqueues that mutation (immediately, as soon as the
-current commit lands) with `{ jobId, context, result }` on every **terminal** transition:
+current commit lands) with `{ jobId, context, result }` on every terminal transition:
 
-- `success` — the job returned normally; `result.value` is its return value.
-- `failed` — the job was dead-lettered (retries exhausted, a non-retryable error, or an action that
+- `success`: the job returned normally; `result.value` is its return value.
+- `failed`: the job was dead-lettered (retries exhausted, a non-retryable error, or an action that
   crashed mid-flight); `result.error` is the stringified error.
-- `canceled` — the job (or an ancestor) was canceled before it ran.
+- `canceled`: the job (or an ancestor) was canceled before it ran.
 
-`onComplete` does **not** fire on the back-to-`pending` retry transition — the job isn't actually done
-yet. `context` is never interpreted by the scheduler; it's stored alongside the job's args and handed
-back byte-for-byte. This pair — a callback plus an opaque payload — is exactly what
+<Callout type="info">
+
+`onComplete` doesn't fire on the back-to-`pending` retry transition. The job isn't actually done yet.
+
+</Callout>
+
+`context` is never interpreted by the scheduler. It's stored alongside the job's args and handed
+back byte-for-byte. This pair, a callback plus an opaque payload, is exactly what
 [`@stackbase/workflow`](/docs/components/workflows) is built on: every step dispatch is a scheduled
 job whose `onComplete` advances the workflow's own journal.
 
-## Recurring jobs — `cronJobs()`
+## Recurring jobs: `cronJobs()`
 
 An app's `crons.ts` declares recurring work with a Convex-parity surface:
 
@@ -207,35 +243,55 @@ import crons from "./convex/crons";
 export default defineConfig({ components: [defineScheduler({ crons })] });
 ```
 
-`cronJobs()` itself just collects entries in-memory — nothing is scheduled until it's passed to
-`defineScheduler({ crons })`, whose boot step reconciles the registry into the `crons` table (matched
-by `name`). That reconciliation is idempotent and diff-aware: adding, removing, or editing a cron
-between restarts converges to the new schedule on the next boot without double-firing, and an
-unchanged registry restarting doesn't restart the cadence's phase.
+`cronJobs()` itself just collects entries in memory. Nothing is scheduled until it's passed to
+`defineScheduler({ crons })`, whose boot step reconciles the registry into the `crons` table
+(matched by `name`). That reconciliation is idempotent and diff-aware: adding, removing, or editing
+a cron between restarts converges to the new schedule on the next boot without double-firing, and
+an unchanged registry restarting doesn't restart the cadence's phase.
 
 The six registration methods:
 
-| Method | Signature | Notes |
-|---|---|---|
-| `interval(name, period, fnRef, args, opts?)` | `period: { seconds?, minutes?, hours? }` | Plain arithmetic — fires every `period` (summed to milliseconds) after the last fire. Must resolve to a positive duration. |
-| `cron(name, expr, fnRef, args, opts?)` | `expr: string` (cron expression) | Parsed via `cron-parser`. Accepts an optional IANA `tz` in `opts` (default `"UTC"`). |
-| `daily(name, at, fnRef, args, opts?)` | `at: { hourUTC, minuteUTC }` | Convenience wrapper over `.cron()`; always UTC-anchored. |
-| `hourly(name, at, fnRef, args, opts?)` | `at: { minuteUTC }` | Same. |
-| `weekly(name, at, fnRef, args, opts?)` | `at: { dayOfWeek, hourUTC, minuteUTC }` | `dayOfWeek` is a name (`"sunday"`…`"saturday"`), not a number. |
-| `monthly(name, at, fnRef, args, opts?)` | `at: { day, hourUTC, minuteUTC }` | `day` is the day-of-month. |
+<TypeTable
+  type={{
+    interval: {
+      type: '(name, period, fnRef, args, opts?)',
+      description: 'period: { seconds?, minutes?, hours? }. Plain arithmetic, fires every period (summed to milliseconds) after the last fire. Must resolve to a positive duration.',
+    },
+    cron: {
+      type: '(name, expr, fnRef, args, opts?)',
+      description: 'expr: a cron expression string, parsed via cron-parser. Accepts an optional IANA tz in opts (default "UTC").',
+    },
+    daily: {
+      type: '(name, at, fnRef, args, opts?)',
+      description: 'at: { hourUTC, minuteUTC }. A convenience wrapper over .cron(), always UTC-anchored.',
+    },
+    hourly: {
+      type: '(name, at, fnRef, args, opts?)',
+      description: 'at: { minuteUTC }. Same convenience wrapper as daily, UTC-anchored.',
+    },
+    weekly: {
+      type: '(name, at, fnRef, args, opts?)',
+      description: 'at: { dayOfWeek, hourUTC, minuteUTC }. dayOfWeek is a name ("sunday" through "saturday"), not a number.',
+    },
+    monthly: {
+      type: '(name, at, fnRef, args, opts?)',
+      description: 'at: { day, hourUTC, minuteUTC }. day is the day of month.',
+    },
+  }}
+/>
 
 `.cron()`'s `opts` is `{ tz?: string; catchUp?: CatchUpPolicy }`. The four UTC-anchored convenience
-methods (`.daily`/`.hourly`/`.weekly`/`.monthly`) only accept `{ catchUp? }` — they don't take a `tz`,
-since it'd be ambiguous which of their named fields it applies to; their hour/minute/day fields are
-UTC by construction. A cron `name` must be unique within one `crons.ts` — registering the same name
-twice throws at registration time.
+methods (`.daily`/`.hourly`/`.weekly`/`.monthly`) only accept `{ catchUp? }`. They don't take a
+`tz`, since it'd be ambiguous which of their named fields it applies to: their hour/minute/day
+fields are UTC by construction. A cron `name` must be unique within one `crons.ts`: registering the
+same name twice throws at registration time.
 
 ### Clock-anchored, not `now()`-anchored
 
-Every fire is computed from the cron's own **last-fired timestamp**, never from whatever instant the
-driver happens to run at. A late dispatch (a busy driver, a slow prior tick) never shifts the phase of
-later occurrences — a `"0 3 * * *"` cron that actually fires at 03:04 one day still computes its next
-occurrence as the following day's 03:00, not 03:04 plus the interval. This is why restarting a
+Every fire is computed from the cron's own last-fired timestamp, never from whatever instant the
+driver happens to run at. A late dispatch (a busy driver, a slow prior tick) never shifts the phase
+of later occurrences. A `"0 3 * * *"` cron that actually fires at 03:04 one day still computes its
+next occurrence as the following day's 03:00, not 03:04 plus the interval. This is why restarting a
 deployment with an unchanged schedule never double-fires or drifts.
 
 ### Catch-up policy
@@ -247,24 +303,24 @@ If a deployment is down when one or more occurrences would have fired, `catchUp`
 |---|---|
 | `"skip"` (default) | Discard the missed backlog entirely; resume on the normal cadence. |
 | `"fireOnce"` | Fire exactly one job, for the single most recent missed occurrence. |
-| `"fireAll"` | Fire one job per missed occurrence, oldest first — hard-capped at 1000 (`CATCHUP_CAP`) per tick. Anything beyond the cap is discarded and logged, never deferred to a later tick. |
+| `"fireAll"` | Fire one job per missed occurrence, oldest first, hard-capped at 1000 (`CATCHUP_CAP`) per tick. Anything beyond the cap is discarded and logged, never deferred to a later tick. |
 
-Every policy re-anchors the cadence past the **entire** true backlog on the same tick, regardless of
-how much of it was actually fired — so a cron's future phase never drifts, only the
-discarded/skipped occurrences are lost for good. Each fired occurrence is enqueued with
+Every policy re-anchors the cadence past the entire true backlog on the same tick, regardless of how
+much of it was actually fired, so a cron's future phase never drifts. Only the discarded or skipped
+occurrences are lost for good. Each fired occurrence is enqueued with
 `idempotencyKey: "<cronName>:<fireTs>"`, so even if the same occurrence were ever computed twice, it
 collapses into one work job rather than running twice.
 
-For `"fireAll"` on an interval spec, the occurrence count is computed in O(1) arithmetic (never by
-stepping through the backlog one at a time), so even a fast interval down for months materializes its
+For `"fireAll"` on an interval spec, the occurrence count is computed in O(1) arithmetic, never by
+stepping through the backlog one at a time, so even a fast interval down for months materializes its
 capped backlog cheaply. For a cron-expression spec, `"skip"` and `"fireOnce"` are each answered by at
-most two `cron-parser` calls — only `"fireAll"`'s materialization loop actually steps through
+most two `cron-parser` calls. Only `"fireAll"`'s materialization loop actually steps through
 occurrences, and that loop is what the 1000 cap bounds.
 
 ## Retries and backoff
 
 A failed job (mutation or action) is retried with jittered exponential backoff, up to
-`retry.maxFailures` (default **4**), then dead-lettered to `state: "failed"`. The formula
+`retry.maxFailures` (default 4), then dead-lettered to `state: "failed"`. The formula
 (`computeBackoff`):
 
 ```
@@ -273,92 +329,109 @@ delay = raw * (0.5 to 1.0 jitter)
 ```
 
 with defaults `initialBackoffMs: 250`, `base: 2` (`DEFAULT_BACKOFF_OPTIONS`). `attempts` is the
-failure count *after* this failure is recorded, so with the defaults:
+failure count after this failure is recorded, so with the defaults:
 
 | Failure # (`attempts`) | Raw backoff | Jittered range |
 |---|---|---|
-| 1 | 1,000ms | 500ms – 1,000ms |
-| 2 | 2,000ms | 1,000ms – 2,000ms |
-| 3 | 4,000ms | 2,000ms – 4,000ms |
-| 4 | — | dead-lettered (`attempts >= maxFailures`), no further retry |
+| 1 | 1,000ms | 500ms to 1,000ms |
+| 2 | 2,000ms | 1,000ms to 2,000ms |
+| 3 | 4,000ms | 2,000ms to 4,000ms |
+| 4 | n/a | dead-lettered (`attempts >= maxFailures`), no further retry |
 
 The jitter's randomness comes from the mutation's own seeded PRNG (`ctx.random`), not raw
-`Math.random()` — which is what makes a retry's delay itself replay-deterministic under the engine's
+`Math.random()`. That's what makes a retry's delay itself replay-deterministic under the engine's
 OCC-conflict replay model, and what makes tests computable rather than flaky. A non-retryable,
-deterministic error (for example a schema-violating write) skips straight to dead-lettering instead of
-burning through every remaining attempt.
+deterministic error (for example a schema-violating write) skips straight to dead-lettering instead
+of burning through every remaining attempt.
 
 ## Delivery guarantees
 
-Normal (non-crash) failures behave exactly as described above for both kinds. The distinction between
-mutations and actions matters specifically for **infra kills** — the process dies while a job is
-`inProgress`, between being claimed and finishing:
+Normal (non-crash) failures behave exactly as described above for both kinds. The distinction
+between mutations and actions matters specifically for infra kills: the process dies while a job is
+`inProgress`, between being claimed and finishing.
 
-- A claim holds a **lease** (`LEASE_MS`, 30 seconds). A background sweep (see
-  [The driver](#the-driver) below) reclaims any job still `inProgress` past its lease deadline.
-- **Mutation** jobs are reclaimed back to `pending` with `nextTs: now()` (immediate — no backoff, since
-  an infra kill isn't the job's own fault) and their attempt count incremented. Because a mutation is
-  deterministic and transactional, replaying it is safe.
-- **Action** jobs are reclaimed straight to `state: "failed"` instead — an expired lease means there's
-  no way to know whether the action's side effects already ran, so retrying could double-run them.
-  `onComplete`, if set, fires with `{ kind: "failed" }`, so a caller relying on the callback (like a
-  workflow step) still observes the terminal outcome rather than hanging forever.
+- A claim holds a lease (`LEASE_MS`, 30 seconds). A background sweep (see [The driver](#the-driver)
+  below) reclaims any job still `inProgress` past its lease deadline.
+- **Mutation** jobs are reclaimed back to `pending` with `nextTs: now()` (immediate, no backoff,
+  since an infra kill isn't the job's own fault) and their attempt count incremented. Because a
+  mutation is deterministic and transactional, replaying it is safe.
+- **Action** jobs are reclaimed straight to `state: "failed"` instead. An expired lease means
+  there's no way to know whether the action's side effects already ran, so retrying could double-run
+  them. `onComplete`, if set, fires with `{ kind: "failed" }`, so a caller relying on the callback
+  (like a workflow step) still observes the terminal outcome rather than hanging forever.
 
-Put another way: scheduled **mutations** are effectively **at-least-once** at the granularity of the
-whole job (a crash-recovered retry always eventually lands the same deterministic write); scheduled
-**actions** are **at-most-once** — they either complete, or dead-letter, never silently repeat.
+Put another way: scheduled mutations are effectively at-least-once at the granularity of the whole
+job, since a crash-recovered retry always eventually lands the same deterministic write. Scheduled
+actions are at-most-once: they either complete, or dead-letter, never silently repeat.
 
 ## The driver
 
-The scheduler's dispatch loop (`schedulerDriver`) has exactly one periodic timer; everything else is
+The scheduler's dispatch loop (`schedulerDriver`) has exactly one periodic timer. Everything else is
 event-driven:
 
-- **Reactive wake** — subscribes to the runtime's commit fan-out (`DriverContext.onCommit`) and
-  re-runs its dispatch pass whenever a commit touches any `scheduler/*` table (an enqueue, cancel, or
-  completion). A freshly-enqueued due job is picked up with effectively zero latency — no polling
+```mermaid
+flowchart LR
+  Commit["Commit touching scheduler/*"] -->|"reactive wake"| Pass["Dispatch pass"]
+  Timer["Wake timer (earliest pending nextTs)"] --> Pass
+  Sweep["Lease-reclaim sweep (every 30s)"] --> Pass
+  Pass -->|"claim up to 64 due jobs"| Run["Run each job"]
+  Run -->|"terminal state"| Complete["onComplete mutation"]
+```
+
+- **Reactive wake**: subscribes to the runtime's commit fan-out (`DriverContext.onCommit`) and
+  re-runs its dispatch pass whenever a commit touches any `scheduler/*` table (an enqueue, cancel,
+  or completion). A freshly-enqueued due job is picked up with effectively zero latency: no polling
   interval to wait out.
-- **Wake timer** — after every pass, re-arms a single wall-clock timer to the earliest still-pending
-  job's `nextTs`, so a job scheduled for the future still fires exactly when its time arrives, without
-  scanning in between.
-- **Lease-reclaim sweep** — a genuinely periodic timer (`SWEEP_MS`, 30 seconds) that's the *only*
+- **Wake timer**: after every pass, re-arms a single wall-clock timer to the earliest still-pending
+  job's `nextTs`, so a job scheduled for the future still fires exactly when its time arrives,
+  without scanning in between.
+- **Lease-reclaim sweep**: a genuinely periodic timer (`SWEEP_MS`, 30 seconds) that's the only
   polling in the whole driver, and exists purely as the infra-kill backstop described above.
 
 Each dispatch pass pulls up to `BATCH_CAP` (64) due jobs at a time via a snapshot-read query, then
-claims and runs each one. Claiming is the authoritative double-run guard: a claim only succeeds if the
-job is still observed exactly `pending` at claim time, and the single-writer transactor serializes
-concurrent claims — so even if two wake sources somehow raced, at most one ever successfully claims a
-given job. A job that throws is caught per-job (never allowed to escape the loop and wedge the whole
-batch), and a wake that lands mid-pass — say, an app mutation enqueuing a due-now job between two
-awaits — is coalesced into one more pass before the loop exits, rather than silently stranding the new
-job until some unrelated future wake.
+claims and runs each one. Claiming is the authoritative double-run guard: a claim only succeeds if
+the job is still observed exactly `pending` at claim time, and the single-writer transactor
+serializes concurrent claims, so even if two wake sources somehow raced, at most one ever
+successfully claims a given job. A job that throws is caught per-job, never allowed to escape the
+loop and wedge the whole batch. A wake that lands mid-pass (say, an app mutation enqueuing a due-now
+job between two awaits) is coalesced into one more pass before the loop exits, rather than silently
+stranding the new job until some unrelated future wake.
 
 ## Scheduling from an action
 
-`ctx.scheduler` works the same way from an action as from a mutation — `runAfter`, `runAt`, and
-`cancel`, with identical signatures — so code that schedules work doesn't need to know which kind of
-function it's running in. The mechanism differs because an action has no `ctx.db`: instead of writing
-a `jobs` row directly, each method delegates to an internal mutation (`scheduler:_enqueue` /
-`scheduler:_cancel`) via `ctx.runMutation`, which runs the identical enqueue/cancel logic inside its
-own fresh top-level transaction. The action-mode facade doesn't expose the general `enqueue(fnRef,
-args, opts)` method — only `runAfter`/`runAt`/`cancel` — so `idempotencyKey`/`onComplete`/`context`
-scheduling from inside an action means calling a mutation that does the `enqueue` call instead.
+`ctx.scheduler` works the same way from an action as from a mutation: `runAfter`, `runAt`, and
+`cancel`, with identical signatures. Code that schedules work doesn't need to know which kind of
+function it's running in.
+
+The mechanism differs because an action has no `ctx.db`. Instead of writing a `jobs` row directly,
+each method delegates to an internal mutation (`scheduler:_enqueue` / `scheduler:_cancel`) via
+`ctx.runMutation`, which runs the identical enqueue/cancel logic inside its own fresh top-level
+transaction. The action-mode facade doesn't expose the general `enqueue(fnRef, args, opts)` method,
+only `runAfter`/`runAt`/`cancel`, so `idempotencyKey`/`onComplete`/`context` scheduling from inside
+an action means calling a mutation that does the `enqueue` call instead.
 
 ## Cloudflare Containers: scheduled functions do not fire
 
-If you're deploying to [Cloudflare](/docs/deploy/cloudflare) via the **Containers** path, scheduled
-functions and crons **do not fire** — the container stops shortly after its last request, and nothing
-wakes it back up at an arbitrary future timestamp. A cron set for 03:00 only actually runs if traffic
-happens to arrive around 03:00. The **Durable-Object-native** Cloudflare host does not have this gap:
-the DO's own alarm wakes scheduled work through idle and hibernation, so `ctx.scheduler`/`cronJobs()`
-behave the same as on any other deployment target. If your app depends on this component, prefer the
-DO-native path, or a deployment target that keeps a process running continuously
-([self-hosting](/docs/deploy/self-hosting), the [standalone binary](/docs/deploy/standalone-binary)).
+<Callout type="warn" title="Scheduled functions do not fire on Cloudflare Containers">
+
+If you're deploying to [Cloudflare](/docs/deploy/cloudflare) via the Containers path, scheduled
+functions and crons do not fire. The container stops shortly after its last request, and nothing
+wakes it back up at an arbitrary future timestamp. A cron set for 03:00 only actually runs if
+traffic happens to arrive around 03:00.
+
+The Durable-Object-native Cloudflare host doesn't have this gap. The DO's own alarm wakes scheduled
+work through idle and hibernation, so `ctx.scheduler`/`cronJobs()` behave the same as on any other
+deployment target. If your app depends on this component, prefer the DO-native path, or a deployment
+target that keeps a process running continuously ([self-hosting](/docs/deploy/self-hosting), the
+[standalone binary](/docs/deploy/standalone-binary)).
+
+</Callout>
 
 ## Related
 
-- [Workflows](/docs/components/workflows) — durable multi-step orchestration built on this same job
+- [Workflows](/docs/components/workflows): durable multi-step orchestration built on this same job
   dispatch (`defineWorkflow`, `requires: ["scheduler"]`).
-- [Triggers](/docs/components/triggers) and [Notifications](/docs/components/notifications) — two
+- [Triggers](/docs/components/triggers) and [Notifications](/docs/components/notifications): two
   other components with their own recurring drivers on the same seam.
-- [Components overview](/docs/components/overview) — what a component can contribute in general, and
+- [Components overview](/docs/components/overview): what a component can contribute in general, and
   how composition works.

@@ -1,39 +1,44 @@
 ---
 title: Postgres
-description: Point stackbase at a Postgres database — a scalable single-node storage backend.
+description: Point stackbase at a Postgres database instead of SQLite, with no code changes.
 ---
 
 {/* diataxis: how-to */}
 
-SQLite is the zero-config default for `stackbase serve`. Postgres is an **opt-in** alternative
-storage backend — the same reactive engine, the same app code, no code changes required — for when
-you want a managed, externally-durable database (backups, replicas, monitoring you already run)
-instead of a SQLite file on a volume. This page covers selecting it, what happens at boot, how it's
-implemented under the hood, the single-writer guarantee, group commit, and how to reason about its
-performance.
+SQLite is the zero-config default for `stackbase serve`. It's a single file, and it needs nothing
+else installed. Postgres is the opt-in alternative: the same reactive engine, the same app code, no
+code changes, but your data lands in a database your infrastructure already backs up, replicates,
+and monitors.
 
-## Selecting Postgres
+This page covers turning it on, what happens at boot, how it works under the hood, the
+single-writer guarantee, group commit, and how to think about its performance.
 
-Point `serve` (or `dev`) at a Postgres database with `--database-url`, or the
-`STACKBASE_DATABASE_URL` environment variable. The flag wins if both are set; leave both unset and
-you get SQLite exactly as before — switching backends needs no code changes, only this one setting:
+## Turning it on
 
-```bash
-# flag
+Point `serve` (or `dev`) at a Postgres database with `--database-url`, or set the
+`STACKBASE_DATABASE_URL` environment variable instead. The flag wins if both are set. Leave both
+unset and you get SQLite exactly as before.
+
+<Tabs items={['Flag', 'Environment variable']}>
+
+```bash tab="Flag"
 stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+```
 
-# or env var
+```bash tab="Environment variable"
 STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir convex
 ```
 
-Any string matching `postgres://` or `postgresql://` selects the Postgres backend; anything else
-(including unset) falls back to SQLite. The same flag/env pair works for `stackbase dev` and for a
-compiled `stackbase build` binary — the storage backend is a boot-time choice, not something baked
-into your app code.
+</Tabs>
+
+Any string matching `postgres://` or `postgresql://` selects the Postgres backend. Anything else,
+including unset, falls back to SQLite. The same flag and env var work for `stackbase dev` and for a
+compiled `stackbase build` binary too: the storage backend is a boot-time choice, not something
+baked into your app code.
 
 ## Docker Compose with a `postgres:16` service
 
-Add a `postgres` service to `docker-compose.yml` and drop the SQLite volume in favor of
+Add a `postgres` service to `docker-compose.yml` and swap the SQLite volume for
 `STACKBASE_DATABASE_URL`:
 
 ```yaml title="docker-compose.yml"
@@ -67,60 +72,99 @@ volumes:
   postgres-data:
 ```
 
-`docker compose up` now persists to the `postgres-data` named volume instead of `stackbase-data` —
-the rest of [Self-hosting](/docs/deploy/self-hosting) (admin key, dashboard, restart persistence)
-applies unchanged.
+`docker compose up` now persists to the `postgres-data` named volume instead of `stackbase-data`.
+Everything else in [Self-hosting](/docs/deploy/self-hosting), the admin key, the dashboard, restart
+persistence, works the same way.
 
 ## What happens at boot
 
-On every boot — fresh database or existing one — the engine runs `setupSchema()`: idempotent
-`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` / `CREATE SEQUENCE IF NOT EXISTS`
-statements against a small, fixed set of internal tables (below), never against your app's own
-tables, because your app has none at the Postgres level (see [No app-schema
-migrations](#no-app-schema-migrations)). This is safe to run on every single boot — an existing
-database with those objects already in place just no-ops through each statement.
+On every boot, whether the database is fresh or already has data in it, the engine runs
+`setupSchema()`. That's a set of idempotent `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT
+EXISTS`, and `CREATE SEQUENCE IF NOT EXISTS` statements against a small, fixed set of internal
+tables (see [below](#no-app-schema-migrations)), never against your app's own tables. Your app has
+no tables at the Postgres level.
 
-After the DDL, the engine takes the single-writer advisory lock (see
-[below](#the-single-writer-invariant)) and, the very first time it ever boots against a given
-database, seeds the commit-timestamp sequence from the existing data (or from `1` on a genuinely
-fresh database) so timestamps continue seamlessly. There's no separate "initialize this database"
-step to run yourself — pointing `serve` at a blank Postgres database is enough.
+This is safe to run every single time you boot. An existing database with those objects already in
+place just no-ops through each statement.
 
-## Architecture: the `PgClient` seam
+After the DDL, the engine takes the single-writer advisory lock (more on that
+[below](#the-single-writer-invariant)). The very first time it boots against a given database, it
+also seeds the commit-timestamp sequence from the existing data, or from `1` on a genuinely fresh
+database, so timestamps continue seamlessly. There's no separate "initialize this database" step to
+run yourself. Pointing `serve` at a blank Postgres database is enough.
+
+## The single-writer invariant
+
+Exactly one stackbase engine may be connected to a given Postgres database at a time. On boot,
+inside `setupSchema()`, the engine takes a `pg_advisory_lock`, a session-level Postgres lock tied to
+that one pinned connection. A second `serve` or `dev` process pointed at the same database fails
+fast instead of silently corrupting state:
+
+```bash
+$ stackbase serve --dir convex --database-url postgres://...   # already running elsewhere
+Error: another Stackbase engine is already connected to this database (advisory lock held)
+```
+
+This is a single-node durability story: Postgres as a stronger, externally-managed database for one
+writer, not clustering or multi-node write scale-out. Running two engines against the same Postgres
+database for high availability isn't supported on this path. See [Scaling](/docs/deploy/scaling) for
+`stackbase serve --fleet`, the multi-node story built on top of this same adapter.
+
+<Callout type="warn" title="Known limitations">
+  **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
+  connection for its lifetime, the same connection the single-writer lock and transaction pinning
+  depend on. If that connection drops (a network blip, a Postgres restart, a failover), the engine
+  does not transparently reconnect. Restart the stackbase process to re-establish it.
+
+  **An unclean process kill can briefly hold the lock.** A graceful shutdown (`SIGTERM`) releases the
+  advisory lock immediately, but an unclean kill (`SIGKILL`, a crash) may leave an immediate restart
+  briefly failing with "another engine already connected" until Postgres notices the dead session,
+  typically within seconds.
+
+  Neither of these is a clustering or HA limitation. Both are consequences of the single-node,
+  single-writer durability story above, not new constraints on top of it.
+</Callout>
+
+## Going deeper
+
+<Accordions type="single">
+
+<Accordion title="Architecture: the PgClient seam">
 
 `@stackbase/docstore-postgres` implements `PostgresDocStore`, the Postgres analogue of the SQLite
-adapter's `DatabaseAdapter` — the same `DocStore` contract, a different storage substrate
-underneath. The engine itself never imports a Postgres driver directly: `PostgresDocStore` sits on a
-narrow, driver-agnostic **`PgClient`** seam whose core surface is `query`, `transaction`,
-`acquireWriterLock`, and `close`. This is the exact same "engine never imports a driver" discipline
-`docstore-sqlite` follows for SQLite — a leak of driver specifics out of the adapter package would be
-a design bug.
+adapter's `DatabaseAdapter`: the same `DocStore` contract, a different storage substrate underneath.
+The engine itself never imports a Postgres driver directly. `PostgresDocStore` sits on a narrow,
+driver-agnostic `PgClient` seam whose core surface is `query`, `transaction`, `acquireWriterLock`,
+and `close`. This is the same "engine never imports a driver" discipline `docstore-sqlite` follows
+for SQLite. A leak of driver specifics out of the adapter package would be a design bug.
 
-The shipped implementation of that seam is **`NodePgClient`**, built on the
-[`pg`](https://node-postgres.com/) (node-postgres) driver — it runs on both Node and Bun, which is
+The shipped implementation of that seam is `NodePgClient`, built on the
+[`pg`](https://node-postgres.com/) (node-postgres) driver. It runs on both Node and Bun, which is
 what lets one implementation be proven by the conformance suite, real embedded Postgres, and a real
-containerized `postgres:16` E2E all at once. **`Bun.SQL` is a reserved, seam-swappable fast-follow**
-— the interface is deliberately shaped so a `Bun.SQL`-backed client could drop in with zero changes
-to `PostgresDocStore` — but it is **not built**; it doesn't exist yet, so don't reach for it.
+containerized `postgres:16` E2E all at once. `Bun.SQL` is a reserved, seam-swappable fast-follow: the
+interface is deliberately shaped so a `Bun.SQL`-backed client could drop in with zero changes to
+`PostgresDocStore`, but it isn't built. It doesn't exist yet, so don't reach for it.
 
 A few normalization details `NodePgClient` handles so `PostgresDocStore` never has to think about the
 driver:
 
-- Postgres `int8` (an MVCC timestamp column) decodes as a JS `bigint`, not `pg`'s default string —
+- Postgres `int8` (an MVCC timestamp column) decodes as a JS `bigint`, not `pg`'s default string.
   `NodePgClient` installs a per-client type-parser override for that one OID rather than mutating
   `pg`'s types globally.
 - Postgres `bytea` (index keys, internal document ids) round-trips as `Uint8Array` in both
   directions.
-- The engine holds **one pinned connection** for its lifetime on the single-node path (not a pool) —
+- The engine holds one pinned connection for its lifetime on the single-node path, not a pool.
   `transaction()` needs `BEGIN`/`COMMIT` to land on the same session, and the single-writer invariant
   is itself a property of that one session. (Tier 2 fleet sharding opens additional per-shard commit
-  connections; that's a multi-node concern covered in [Scaling](/docs/deploy/scaling), not part of the
-  single-node path this page describes.)
+  connections. That's a multi-node concern covered in [Scaling](/docs/deploy/scaling), not part of
+  the single-node path this page describes.)
 
-## No app-schema migrations
+</Accordion>
 
-The Postgres adapter is **physically schemaless**. Your app's tables, fields, and indexes are never
-represented as Postgres DDL — they're *data* inside a small, fixed set of internal tables that never
+<Accordion title="No app-schema migrations">
+
+The Postgres adapter is physically schemaless. Your app's tables, fields, and indexes are never
+represented as Postgres DDL. They're data inside a small, fixed set of internal tables that never
 change shape as `schema.ts` evolves:
 
 ```text title="the whole physical schema (never grows)"
@@ -131,106 +175,78 @@ client_mutations (identity, client_id, seq, verdict, commit_ts, value_json, erro
 client_floors    (identity, client_id, pruned_through_seq, updated_at)  -- offline outbox receipts
 ```
 
-A table in your `schema.ts` is a `table_id` value; a field is a key inside the JSON blob in `value`;
-an index is a set of rows in `indexes`. Adding a table, adding a field, or changing an index — none
-of it requires an `ALTER TABLE`, a migration file, or any Postgres-side schema change at all. This is
-the same design Convex's own backend uses, and it's why the Postgres adapter is bounded in scope
-rather than an open-ended migrations project: there is nothing app-shaped to migrate.
+A table in your `schema.ts` is a `table_id` value. A field is a key inside the JSON blob in `value`.
+An index is a set of rows in `indexes`. Adding a table, adding a field, or changing an index needs no
+`ALTER TABLE`, no migration file, and no Postgres-side schema change at all. This is the same design
+Convex's own backend uses, and it's why the Postgres adapter is bounded in scope rather than an
+open-ended migrations project. There's nothing app-shaped to migrate.
 
-Reads over this log-shaped storage are **set-based**, not per-row round trips: `scan`/`count` use
+Reads over this log-shaped storage are set-based, not per-row round trips. `scan`/`count` use
 `SELECT DISTINCT ON (internal_id) ... ORDER BY internal_id, ts DESC` to resolve "the latest revision
-of every document" in one query; an index scan (what `.collect()`/`.paginate()` compile down to)
+of every document" in one query. An index scan (what `.collect()`/`.paginate()` compile down to)
 uses `DISTINCT ON (key)` to find each key's latest visible index entry, `LEFT JOIN LATERAL` to
-resolve each entry's document in the same query, and filters tombstoned/deleted rows out *before*
+resolve each entry's document in the same query, and filters tombstoned or deleted rows out before
 applying `LIMIT` (a raw SQL `LIMIT` there would count dead rows and silently return short pages).
 The OCC conflict check's "read the previous revision of N documents" step is similarly one round
 trip: a `VALUES` list of the N lookups, `LATERAL`-joined to each one's latest visible revision,
 instead of N separate queries.
 
-## The single-writer invariant
+</Accordion>
 
-Exactly **one** stackbase engine may be connected to a given Postgres database at a time. On boot
-(inside `setupSchema()`), the engine takes a `pg_advisory_lock` — a session-level Postgres lock tied
-to that one pinned connection. A second `serve`/`dev` process pointed at the same database fails
-fast with an "another engine already connected" error instead of silently corrupting state:
-
-```bash
-$ stackbase serve --dir convex --database-url postgres://...   # already running elsewhere
-Error: another Stackbase engine is already connected to this database (advisory lock held)
-```
-
-This is a **single-node durability** story — Postgres as a stronger, externally-managed database
-for one writer — not clustering or multi-node write scale-out. Running two engines against the same
-Postgres database for high availability is not supported on this path; see
-[Scaling](/docs/deploy/scaling) for `stackbase serve --fleet`, the multi-node story built on top of
-this same adapter.
-
-### Known limitations
-
-- **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
-  connection for its lifetime — the same connection the single-writer lock and transaction pinning
-  depend on. If that connection drops (a network blip, a Postgres restart, a failover), the engine
-  does **not** transparently reconnect; restart the stackbase process to re-establish it.
-- **An unclean process kill can briefly hold the lock.** The single-writer guard is a
-  session-level `pg_advisory_lock`. A graceful shutdown (`SIGTERM`) releases it immediately, but an
-  unclean kill (`SIGKILL`, a crash) may leave an immediate restart briefly failing with "another
-  engine already connected" until Postgres notices the dead session — typically within seconds.
-
-Neither of these is a clustering/HA limitation — they're consequences of the single-node,
-single-writer durability story above, not new constraints on top of it.
-
-## Group commit: a free write-throughput win on Postgres
+<Accordion title="Group commit: a free write-throughput win on Postgres">
 
 Every commit through the single writer normally does its own `BEGIN`/insert/`COMMIT`, which on
-Postgres means its own `fsync`. **Group commit** batches multiple concurrent commits that land in
-the same short window into one shared transaction — one `fsync` amortized across all of them —
-without changing the atomicity or ordering guarantees of any individual commit.
+Postgres means its own `fsync`. Group commit batches multiple concurrent commits that land in the
+same short window into one shared transaction: one `fsync` amortized across all of them, without
+changing the atomicity or ordering guarantees of any individual commit.
 
-Group commit **defaults ON for single-node Postgres and OFF for SQLite**, and
-`STACKBASE_GROUP_COMMIT` overrides that default in either direction (`1`/`true`/`yes`,
-case-insensitive, forces it on; any other value, including `0`/`false`, forces it off):
+Group commit defaults on for single-node Postgres and off for SQLite. `STACKBASE_GROUP_COMMIT`
+overrides that default in either direction (`1`/`true`/`yes`, case-insensitive, forces it on; any
+other value, including `0`/`false`, forces it off):
 
 ```bash
 # force it off even against Postgres
 STACKBASE_GROUP_COMMIT=0 stackbase serve --database-url postgres://... --dir convex
 
-# force it on even against SQLite (rarely useful — see the measured cost below)
+# force it on even against SQLite (rarely useful, see the measured cost below)
 STACKBASE_GROUP_COMMIT=1 stackbase serve --dir convex
 ```
 
-The store-conditional default exists because the win is store-dependent, not universal — measured
-on real containerized `postgres:16` (`fsync=on`, `synchronous_commit=on`, genuine on-disk fsync per
+The store-conditional default exists because the win is store-dependent, not universal. Measured on
+real containerized `postgres:16` (`fsync=on`, `synchronous_commit=on`, genuine on-disk fsync per
 commit):
 
-| clients | group commit OFF | group commit ON | throughput gain | p50 OFF → ON |
+| clients | group commit OFF | group commit ON | throughput gain | p50 OFF to ON |
 |---|---|---|---|---|
-| 1 | 1,149 ops/s | 1,164 ops/s | +1% (neutral) | 0.84 → 0.83 ms |
-| 8 | 1,213 ops/s | 1,686 ops/s | **+39%** | 6.55 → 4.50 ms |
-| 64 | 1,206 ops/s | 1,907 ops/s | **+58%** | 52.95 → 33.25 ms |
+| 1 | 1,149 ops/s | 1,164 ops/s | +1% (neutral) | 0.84 to 0.83 ms |
+| 8 | 1,213 ops/s | 1,686 ops/s | **+39%** | 6.55 to 4.50 ms |
+| 64 | 1,206 ops/s | 1,907 ops/s | **+58%** | 52.95 to 33.25 ms |
 
-At one client it's byte-identical latency — the "batch of 1 when idle" design adds no wait when
-there's nothing to batch with — and at real concurrency it's a strict throughput and latency win.
-The same batching measures as roughly an **8% throughput loss** on SQLite: an in-memory/CPU-bound
-store has no fsync to amortize, so group commit there is pure pipeline overhead with nothing to pay
-for it. That's the whole reason the default is per-store rather than one global switch.
+At one client it's byte-identical latency: the "batch of 1 when idle" design adds no wait when
+there's nothing to batch with. At real concurrency it's a strict throughput and latency win. The
+same batching measures as roughly an 8% throughput loss on SQLite: an in-memory, CPU-bound store has
+no fsync to amortize, so group commit there is pure pipeline overhead with nothing to pay for it.
+That's the whole reason the default is per-store rather than one global switch.
 
-## Choosing Postgres vs. SQLite
+</Accordion>
 
-- **SQLite** is the right default for local development and for a single-node deployment that
-  doesn't need an externally-managed database — zero configuration, no separate service to run, and
-  measurably the faster single-node store (an in-memory/CPU-bound commit path with no network round
-  trip or fsync-per-commit cost).
-- **Postgres** is the right choice when you want durability, backups, monitoring, and replicas
-  managed by infrastructure you already operate, or when you're headed toward the multi-node fleet
-  in [Scaling](/docs/deploy/scaling) (which requires Postgres as its shared substrate). It is still a
-  **single-writer** store at this tier — Postgres does not make stackbase's transactor multi-writer
-  by itself; you scale writes by sharding or by adding fleet nodes (Tier 2), never by adding threads
-  against one Postgres connection.
+<Accordion title="Choosing Postgres vs. SQLite">
 
-Either way, **write throughput is single-writer-bound and essentially flat across concurrency** —
-this is the OCC single-writer transactor's architectural signature, not a Postgres-specific
-artifact. Measured on the same write-throughput benchmark (embedded Postgres, 3s/cell, insert
-workload):
+SQLite is the right default for local development and for a single-node deployment that doesn't
+need an externally-managed database. It's zero configuration, there's no separate service to run,
+and it's measurably the faster single-node store: an in-memory, CPU-bound commit path with no
+network round trip or fsync-per-commit cost.
+
+Postgres is the right choice when you want durability, backups, monitoring, and replicas managed by
+infrastructure you already operate, or when you're headed toward the multi-node fleet in
+[Scaling](/docs/deploy/scaling) (which requires Postgres as its shared substrate). It's still a
+single-writer store at this tier. Postgres doesn't make stackbase's transactor multi-writer by
+itself. You scale writes by sharding or by adding fleet nodes (Tier 2), never by adding threads
+against one Postgres connection.
+
+Either way, write throughput is single-writer-bound and essentially flat across concurrency. That's
+the OCC single-writer transactor's architectural signature, not a Postgres-specific artifact.
+Measured on the same write-throughput benchmark (embedded Postgres, 3s/cell, insert workload):
 
 | concurrent clients | SQLite ops/s | SQLite p50 / p99 | Postgres ops/s | Postgres p50 / p99 |
 |---|---|---|---|---|
@@ -238,33 +254,42 @@ workload):
 | 8 | 46,553 | 0.019 / 0.041 ms | 4,617 | 1.643 / 2.678 ms |
 | 64 | 46,157 | 0.019 / 1.527 ms | 4,472 | 14.018 / 20.209 ms |
 
-1 → 8 → 64 concurrent clients barely moves either store's ops/s; only tail latency grows, as extra
-clients queue behind the one serial writer instead of adding capacity. **Postgres is roughly an
-order of magnitude slower than SQLite here, and it's fsync-bound** — the commit's real cost is the
-disk sync, not the engine's own work, which is exactly why group commit above is the effective lever
+Going from 1 to 8 to 64 concurrent clients barely moves either store's ops/s. Only tail latency
+grows, as extra clients queue behind the one serial writer instead of adding capacity. Postgres is
+roughly an order of magnitude slower than SQLite here, and it's fsync-bound: the commit's real cost
+is the disk sync, not the engine's own work. That's exactly why group commit is the effective lever
 on Postgres and not on SQLite. If your write volume genuinely exceeds what one Postgres writer
 delivers, the answer is [Scaling](/docs/deploy/scaling)'s sharding and fleet options, not tuning this
 adapter further.
 
-## How this is proven correct
+</Accordion>
 
-`PostgresDocStore` is checked against the **same shared conformance suite** SQLite runs — the
-identical set of `DocStore` assertions executed against both `SqliteDocStore` and `PostgresDocStore`
-(backed by an in-process PGlite Postgres for fast, hermetic runs), so the two backends are provably
-behaviorally interchangeable, not just similar by inspection. On top of that, a real-container ship
-gate spins up an actual `postgres:16` Docker container and drives the real `stackbase serve`
-production entrypoint (spawned as the real CLI binary, not an in-process harness) through: a
-mutation commit, its reactive fan-out to a WebSocket subscription opened *before* the write, a
-read-back via a second query, a second `serve` process rejected fast by the single-writer lock while
-the first is still up, and — after stopping the first — a third `serve` process on the same database
-seeing the earlier row still there. That's the same bar every self-host deploy path in this repo is
-held to: proven through the shipped entrypoint, not just unit-tested in isolation.
+<Accordion title="How this is proven correct">
+
+`PostgresDocStore` is checked against the same shared conformance suite SQLite runs: the identical
+set of `DocStore` assertions executed against both `SqliteDocStore` and `PostgresDocStore` (backed by
+an in-process PGlite Postgres for fast, hermetic runs), so the two backends are provably behaviorally
+interchangeable, not just similar by inspection.
+
+On top of that, a real-container ship gate spins up an actual `postgres:16` Docker container and
+drives the real `stackbase serve` production entrypoint (spawned as the real CLI binary, not an
+in-process harness) through: a mutation commit, its reactive fan-out to a WebSocket subscription
+opened before the write, a read-back via a second query, a second `serve` process rejected fast by
+the single-writer lock while the first is still up, and, after stopping the first, a third `serve`
+process on the same database seeing the earlier row still there.
+
+That's the same bar every self-host deploy path in this repo is held to: proven through the shipped
+entrypoint, not just unit-tested in isolation.
+
+</Accordion>
+
+</Accordions>
 
 ## Related
 
-- [Self-hosting with Docker](/docs/deploy/self-hosting) — the baseline `stackbase serve` +
+- [Self-hosting with Docker](/docs/deploy/self-hosting): the baseline `stackbase serve` and
   `docker compose up` this backend swaps into, unchanged: admin key, dashboard, restart persistence.
-- [Scaling](/docs/deploy/scaling) — `stackbase serve --fleet`, multiple nodes sharing this same
+- [Scaling](/docs/deploy/scaling): `stackbase serve --fleet`, multiple nodes sharing this same
   Postgres backend for multi-node write scale-out and live failover.
-- [Configuration reference](/docs/reference/configuration) — the full flag/env table, including
+- [Configuration reference](/docs/reference/configuration): the full flag/env table, including
   `STACKBASE_DATABASE_URL` and `STACKBASE_GROUP_COMMIT` alongside every other setting.

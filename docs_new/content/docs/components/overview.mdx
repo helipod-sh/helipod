@@ -5,27 +5,41 @@ description: Opt-in capabilities composed in stackbase.config.ts.
 
 {/* diataxis: explanation */}
 
-The core engine — schema, queries, mutations, actions, reactivity — has no idea what auth,
-notifications, or workflows are. Those capabilities are **components**: self-contained packages
-that plug into the engine through one seam (`ComponentDefinition`), each contributing whatever mix
-of tables, a `ctx.<name>` facade, background behavior, and HTTP routes it needs. A project composes
-exactly the components it wants in `stackbase.config.ts` — nothing is installed for you, and
-nothing runs that you didn't list.
+The core engine (schema, queries, mutations, actions, reactivity) doesn't know what auth,
+notifications, or workflows are, and it doesn't need to. Those capabilities are components:
+self-contained packages that plug into the engine through one seam, `ComponentDefinition`. Each one
+contributes whatever mix of tables, a `ctx.<name>` facade, background behavior, and HTTP routes it
+needs.
+
+A project composes exactly the components it wants in `stackbase.config.ts`. Nothing is installed
+for you, and nothing runs that you didn't list.
 
 This page explains the component model itself: what a `ComponentDefinition` can contribute, how
 composition works (ordering, namespacing, the driver seam), and what's built in today. For each
-capability's own API, see its page — [Auth](/docs/components/auth),
+capability's own API, see its page: [Auth](/docs/components/auth),
 [Authorization](/docs/components/authorization), [Scheduling](/docs/components/scheduling),
 [Workflows](/docs/components/workflows), [Triggers](/docs/components/triggers),
 [Notifications](/docs/components/notifications).
 
+```mermaid
+flowchart LR
+  Config["stackbase.config.ts"] --> Compose["composeComponents\n(topological sort by requires)"]
+  Compose --> Tables["Namespaced tables"]
+  Compose --> Modules["Namespaced modules"]
+  Compose --> Context["ctx.<name> facades"]
+  Compose --> Drivers["Background drivers"]
+  Compose --> Routes["HTTP routes"]
+```
+
 ## A component is a value
 
-A component is not a plugin class or a magic import — it's a plain data object, a
+A component is not a plugin class or a magic import. It's a plain data object, a
 `ComponentDefinition`, built by a `define*` factory function (`defineAuth()`, `defineScheduler()`,
-`defineWorkflow()`, …). The factory validates its options and hands back the object; nothing
-executes yet. Composition — reading these objects, wiring them into the running engine — happens
-once, at boot, in `packages/component`'s `composeComponents`.
+`defineWorkflow()`, and so on). The factory validates its options and hands back the object. Nothing
+executes yet.
+
+Composition (reading these objects and wiring them into the running engine) happens once, at boot,
+in `packages/component`'s `composeComponents`.
 
 ```ts title="packages/component/src/define-component.ts (shape)"
 interface ComponentDefinition {
@@ -52,110 +66,120 @@ interface ComponentDefinition {
 }
 ```
 
-Every field is optional except `name`, `schema`, and `modules` — a component can be as small as
-"a couple of tables and a background driver" (`@stackbase/triggers`) or as large as "tables, a
-facade, an action-mode facade, HTTP routes, and a boot step" (`@stackbase/auth`). Here's what each
+Every field is optional except `name`, `schema`, and `modules`. A component can be as small as "a
+couple of tables and a background driver" (`@stackbase/triggers`) or as large as "tables, a facade,
+an action-mode facade, HTTP routes, and a boot step" (`@stackbase/auth`). Here's what each
 contribution does.
 
-### `schema` — namespaced tables
+### `schema`: namespaced tables
 
 A component's `schema` is an ordinary `SchemaDefinition`, exactly like your app's `schema.ts`. At
-compose time every component table is namespaced under the component's name —
-`@stackbase/scheduler`'s `jobs` table becomes `scheduler/jobs`, `@stackbase/auth`'s `sessions`
-becomes `auth/sessions` — so a component table can never collide with one of your app's own tables
-of the same name, and two composed components can never collide with each other either. Your app's
-own tables stay bare (`messages`, not `app/messages`) — the app is "component zero" in the compose
-step, the one namespace that isn't prefixed.
+compose time, every component table is namespaced under the component's name: `@stackbase/scheduler`'s
+`jobs` table becomes `scheduler/jobs`, and `@stackbase/auth`'s `sessions` becomes `auth/sessions`.
+That means a component table can never collide with one of your app's own tables, and two composed
+components can never collide with each other either.
 
-Table numbers are allocated once, in the order components are composed (after topological sorting
-by `requires` — see below), by `composeTables` in `packages/component/src/compose.ts`. A duplicate
-table name (same full name from two sources) is a compose-time error, not a silent overwrite.
+Your app's own tables stay bare (`messages`, not `app/messages`). The app is "component zero" in the
+compose step, the one namespace that isn't prefixed.
 
-### `modules` — namespaced functions
+Table numbers are allocated once, in the order components are composed (after topological sorting by
+`requires`, see below), by `composeTables` in `packages/component/src/compose.ts`. A duplicate table
+name (the same full name from two sources) is a compose-time error, not a silent overwrite.
 
-A component's own registered functions (queries/mutations/actions/httpActions it needs internally)
-are namespaced the same way, but with `:` instead of `/`: `@stackbase/scheduler`'s internal dispatch
-mutation becomes `scheduler:_dispatch`, `@stackbase/auth`'s sign-up mutation becomes `auth:signUp`.
+### `modules`: namespaced functions
+
+A component's own registered functions (queries, mutations, actions, and httpActions it needs
+internally) are namespaced the same way, but with `:` instead of `/`. `@stackbase/scheduler`'s
+internal dispatch mutation becomes `scheduler:_dispatch`, and `@stackbase/auth`'s sign-up mutation
+becomes `auth:signUp`.
+
 This is why `ctx.scheduler.runAfter("jobs:tick", args)` and `ctx.workflow.start("workflows:sample",
-args)` reference *your app's* function paths (bare, no `:` prefix reserved) while a component's own
-internal functions live safely in their own namespace. `composeModules` rejects composing a
-component whose `name` collides with one of your app's own top-level module prefixes.
+args)` reference *your app's* function paths (bare, no `:` prefix reserved), while a component's own
+internal functions live safely in their own namespace. `composeModules` rejects composing a component
+whose `name` collides with one of your app's own top-level module prefixes.
 
-### `context` / `contextType` / `contextWrite` — the in-transaction facade
+### `context`, `contextType`, `contextWrite`: the in-transaction facade
 
 `context` is what makes `ctx.scheduler`, `ctx.auth`, `ctx.workflow`, `ctx.authz`, and
-`ctx.notifications` exist. It's a function `(cctx: ComponentContext) => object` — given the
+`ctx.notifications` exist. It's a function `(cctx: ComponentContext) => object`. Given the
 component's own namespaced view of the transaction (its own tables, its own `now()`, its own
 function-calling privileges), it returns the object that gets attached at `ctx[name]` for every
-query, mutation, and action in your app. `cctx.db` inside that builder is **read-only by default**;
-set `contextWrite: true` (as `@stackbase/scheduler` and `@stackbase/auth` do) to let the facade
-write to the component's own namespaced tables during a mutation call — still read-only during a
-query, since queries never write.
+query, mutation, and action in your app.
 
-`contextType` is separate from `context` — it's not code, it's the `{ import, type }` pair codegen
-needs to type `ctx[name]` correctly in the generated `_generated/server.ts` (e.g. `{ import:
+`cctx.db` inside that builder is read-only by default. Set `contextWrite: true` (as
+`@stackbase/scheduler` and `@stackbase/auth` do) to let the facade write to the component's own
+namespaced tables during a mutation call. It stays read-only during a query, since queries never
+write.
+
+`contextType` is separate from `context`. It isn't code: it's the `{ import, type }` pair codegen
+needs to type `ctx[name]` correctly in the generated `_generated/server.ts` (for example `{ import:
 "@stackbase/scheduler", type: "SchedulerContext" }`). Declaring `contextType` without `context` is a
-compose-time error (`defineComponent` rejects it): a typed-but-undefined `ctx.foo` is a worse
-failure mode than no type at all, so the two are enforced to travel together.
+compose-time error (`defineComponent` rejects it), because a typed-but-undefined `ctx.foo` is a worse
+failure mode than no type at all. The two are enforced to travel together.
 
-### `buildAction` — the action-mode facade
+### `buildAction`: the action-mode facade
 
-Actions don't have `ctx.db` — they run outside the transaction, non-deterministically, so a
-component whose facade is used from actions needs a second implementation with the *same method
-signatures* but no direct table access. `buildAction: (api: ActionApi) => object` builds that
-version by delegating to the component's own internal mutations/queries via `api.runMutation`/
-`api.runQuery` instead of touching `cctx.db` directly — `@stackbase/scheduler`'s
-`schedulerActionContext` and `@stackbase/workflow`'s `workflowActionContext` both follow this
-pattern (an action-mode facade delegates to an internal mutation with the same effect). This is why
-`ctx.scheduler.runAfter(...)` and `ctx.workflow.start(...)` work identically whether you call them
-from a mutation or from an action — same object shape, two different implementations underneath.
+Actions don't have `ctx.db`. They run outside the transaction, non-deterministically, so a component
+whose facade is used from actions needs a second implementation with the same method signatures but
+no direct table access.
 
-### `serverExports` — codegen re-exports
+`buildAction: (api: ActionApi) => object` builds that version by delegating to the component's own
+internal mutations and queries via `api.runMutation`/`api.runQuery`, instead of touching `cctx.db`
+directly. `@stackbase/scheduler`'s `schedulerActionContext` and `@stackbase/workflow`'s
+`workflowActionContext` both follow this pattern: an action-mode facade delegates to an internal
+mutation with the same effect.
 
-Some components want to export a helper alongside `query`/`mutation`/`action` from
+This is why `ctx.scheduler.runAfter(...)` and `ctx.workflow.start(...)` work identically whether you
+call them from a mutation or from an action. Same object shape, two different implementations
+underneath.
+
+### `serverExports`: codegen re-exports
+
+Some components want to export a helper alongside `query`, `mutation`, and `action` from
 `_generated/server.ts`, so an app file can `import { cronJobs } from "./_generated/server"` without
 a separate import from the component package. `@stackbase/scheduler` sets `serverExports:
-["cronJobs"]`, sourced from `contextType.import` (`serverExports` requires `contextType` to be set,
-since it shares that import path).
+["cronJobs"]`, sourced from `contextType.import`. `serverExports` requires `contextType` to be set,
+since it shares that import path.
 
-### `policies` / `policyContext` — row-level authorization
+### `policies` / `policyContext`: row-level authorization
 
-`policies` lets a component declare `TablePolicy` read/write rules for **your app's own tables** —
-this is how `@stackbase/authz` attaches RBAC/ReBAC row policies without your `schema.ts` knowing
-anything about authorization. `policyContext` lets a component contribute fields into every policy
-rule's evaluation context (`@stackbase/authz` adds `{ auth }` so a policy can check the caller's
-identity). A policy declared for a table that doesn't exist, or a duplicate policy for the same
-table from two components, is a compose-time error.
+`policies` lets a component declare `TablePolicy` read/write rules for your app's own tables. This is
+how `@stackbase/authz` attaches RBAC/ReBAC row policies without your `schema.ts` knowing anything
+about authorization.
 
-### `boot` — one-time startup work
+`policyContext` lets a component contribute fields into every policy rule's evaluation context
+(`@stackbase/authz` adds `{ auth }` so a policy can check the caller's identity). A policy declared
+for a table that doesn't exist, or a duplicate policy for the same table from two components, is a
+compose-time error.
+
+### `boot`: one-time startup work
 
 `boot: (ctx: BootContext) => Promise<void>` runs once per process start, namespaced and
-non-user-triggered — reconciling `crons.ts`'s declared schedules into the `jobs`/`crons` tables
-(`@stackbase/scheduler`), rebuilding an authorization index (`@stackbase/authz`'s
-`reconcileEffectivePermissions`). `BootContext` gives it `{ db, now }` — a writer and a clock, both
+non-user-triggered. `@stackbase/scheduler` uses it to reconcile `crons.ts`'s declared schedules into
+the `jobs`/`crons` tables; `@stackbase/authz` uses it to rebuild an authorization index
+(`reconcileEffectivePermissions`). `BootContext` gives it `{ db, now }`: a writer and a clock, both
 scoped to the component's own boot-time transaction.
 
-### `driver` — the recurring background seam
+### `driver`: the recurring background seam
 
 `driver: Driver` is how a component does work that isn't triggered by any single request: the
 scheduler's dispatch loop, the triggers cursor over the MVCC log, the notifications delivery sweep.
-See [The driver seam](#the-driver-seam) below — it's substantial enough to deserve its own section.
+It's substantial enough to deserve its own section: see [The driver seam](#the-driver-seam) below.
 
-### `httpRoutes` — reserved-path routes
+### `httpRoutes`: reserved-path routes
 
 `httpRoutes: ComponentHttpRoute[]` lets a component mount routes at the engine's reserved
-`/api/*`/`/_*` namespace — the same mechanism the engine's own built-in routes use, generalized so
-a component gets it too. `@stackbase/auth` uses this for its OAuth start/callback endpoints
-(`/api/auth/oauth/`), `@stackbase/notifications` for provider delivery webhooks
+`/api/*`/`/_*` namespace. It's the same mechanism the engine's own built-in routes use, generalized
+so a component gets it too. `@stackbase/auth` uses this for its OAuth start/callback endpoints
+(`/api/auth/oauth/`), and `@stackbase/notifications` uses it for provider delivery webhooks
 (`/api/notifications/webhooks/`). See [Reserved HTTP routes](#reserved-http-routes) below.
 
-### `requires` — declared dependencies
+### `requires`: declared dependencies
 
-`requires: string[]` names other components this one needs composed alongside it. `@stackbase/
-workflow` declares `requires: ["scheduler"]` because it dispatches workflow steps through the
-scheduler's job queue; `@stackbase/authz` declares `requires: ["auth"]` because permission checks
-resolve the caller's identity through `ctx.auth`. See [Dependency ordering](#dependency-ordering)
-below.
+`requires: string[]` names other components this one needs composed alongside it. `@stackbase/workflow`
+declares `requires: ["scheduler"]` because it dispatches workflow steps through the scheduler's job
+queue. `@stackbase/authz` declares `requires: ["auth"]` because permission checks resolve the
+caller's identity through `ctx.auth`. See [Dependency ordering](#dependency-ordering) below.
 
 ## Composing components
 
@@ -205,79 +229,86 @@ export default defineConfig({
 ```
 
 (Adapted from `examples/auth-demo/stackbase.config.ts`, the reference pattern real projects copy
-from. `examples/chat/stackbase.config.ts` shows the smallest possible case — a single
+from. `examples/chat/stackbase.config.ts` shows the smallest possible case: a single
 `defineTriggers({ messages: { handler: "audit:_onChange" } })` for a table audit log.)
 
 That's the entire surface. There is no separate CLI command that "installs" a component into a
-project — `packages/cli/src/load-config.ts` just does `import(stackbase.config.ts)` and reads
-`.components` off the default export. If the file is missing, the project composes zero
-components (`{ components: [] }`) and behaves as pure core engine. Add an entry to the array and
-every table, facade, module, boot step, driver, and HTTP route it contributes appears with it;
-remove the entry and all of it disappears — there's no partial or leftover state to clean up,
-because none of it was ever installed anywhere outside this one array.
+project. `packages/cli/src/load-config.ts` just does `import(stackbase.config.ts)` and reads
+`.components` off the default export. If the file is missing, the project composes zero components
+(`{ components: [] }`) and behaves as pure core engine.
+
+Add an entry to the array, and every table, facade, module, boot step, driver, and HTTP route it
+contributes appears with it. Remove the entry, and all of it disappears. There's no partial or
+leftover state to clean up, because none of it was ever installed anywhere outside this one array.
 
 ## Dependency ordering
 
-When one component `requires` another, composition needs to run the required one first — its
-tables need table numbers before the dependent's tables are allocated, and (more importantly) both
-land in the *same* topologically-consistent order across every internal structure that iterates
-`components` (table numbering, context provider list, boot steps, drivers). `composeComponents`
+When one component `requires` another, composition needs to run the required one first. Its tables
+need table numbers before the dependent's tables are allocated, and (more importantly) both land in
+the *same* topologically-consistent order across every internal structure that iterates
+`components`: table numbering, context provider list, boot steps, drivers. `composeComponents`
 handles this with `topoSortByRequires`, a stable Kahn's-algorithm topological sort:
 
-- Every component ends up **after** every component it `requires`.
-- Components with no dependency relationship between them keep their **original relative order**
-  from the `components` array you wrote — the sort only reorders when a `requires` edge forces it.
+- Every component ends up after every component it `requires`.
+- Components with no dependency relationship between them keep their original relative order from
+  the `components` array you wrote. The sort only reorders when a `requires` edge forces it.
 - Composing a component that `requires` a name not present in the array is a compose-time error:
-  `component "workflow" requires "scheduler", which is not enabled` — caught before boot, not as a
-  confusing runtime failure the first time `ctx.workflow` is touched.
+  `component "workflow" requires "scheduler", which is not enabled`. That's caught before boot, not
+  as a confusing runtime failure the first time `ctx.workflow` is touched.
 - A `requires` cycle (`A requires B`, `B requires A`) is also a compose-time error: `component
   requires form a cycle (unresolvable order): ...`.
 
-In practice this means you can list `defineWorkflow({...})` before or after `defineScheduler()` in
-your `components` array — `workflow`'s declared `requires: ["scheduler"]` is what actually decides
-the order, not array position. The example above happens to list `defineScheduler()` before
+In practice, this means you can list `defineWorkflow({...})` before or after `defineScheduler()` in
+your `components` array. `workflow`'s declared `requires: ["scheduler"]` is what actually decides the
+order, not array position. The example above happens to list `defineScheduler()` before
 `defineWorkflow(...)`, which is the readable convention, but it isn't load-bearing.
 
 ## Names are reserved
 
 A component's `name` becomes its table-namespace prefix (`scheduler/jobs`), its module-namespace
-prefix (`scheduler:_dispatch`), and its `ctx[name]` key (`ctx.scheduler`) — all three at once, which
-is why names are validated strictly. `defineComponent` (called by every `define*` factory) enforces:
+prefix (`scheduler:_dispatch`), and its `ctx[name]` key (`ctx.scheduler`), all three at once. That's
+why names are validated strictly. `defineComponent` (called by every `define*` factory) enforces:
 
-- Non-empty, and matching `^[a-zA-Z][a-zA-Z0-9_]*$` — no `/` or `:` in a component name, since those
+- Non-empty, and matching `^[a-zA-Z][a-zA-Z0-9_]*$`. No `/` or `:` in a component name, since those
   characters are the namespace separators themselves.
-- Not `"app"` and not starting with `_` — both reserved (`"app"` is the implicit name for your own
-  bare-namespace code; `_`-prefixed is the convention for internal/non-user-callable paths).
+- Not `"app"` and not starting with `_`. Both are reserved: `"app"` is the implicit name for your own
+  bare-namespace code, and `_`-prefixed is the convention for internal, non-user-callable paths.
 
 At compose time, `composeModules` additionally rejects two composed components sharing the same
-`name` (`duplicate component name: ...`), and rejects a component name that collides with one of
-your app's own top-level module prefixes (`component name "X" collides with an app module`). Both
-are compose-time errors, never a silent override of one component's contribution by another's.
+`name` (`duplicate component name: ...`), and rejects a component name that collides with one of your
+app's own top-level module prefixes (`component name "X" collides with an app module`). Both are
+compose-time errors, never a silent override of one component's contribution by another's.
 
 ## The component set is fixed at boot
 
-This is the one thing that does **not** hot-swap. `stackbase deploy` (see
-[Deploy & build](/docs/deploy/deploy-and-build)) can push a new version of your app's own functions
-and an additive schema change onto an already-running `stackbase serve`, atomically, with no
-restart — but the *set* of composed components is decided once, at process boot, from
-`stackbase.config.ts`, and baked into the running deployment's table numbers, module map, context
-providers, and drivers. Adding `defineNotifications(...)` to your config, or removing
-`defineTriggers(...)`, requires restarting the process (`stackbase serve` again, or a redeploy of a
-`stackbase build` binary) — there's no live "activate this component" admin call.
+<Callout type="warn" title="The component set doesn't hot-swap">
+
+`stackbase deploy` (see [Deploy & build](/docs/deploy/deploy-and-build)) can push a new version of
+your app's own functions and an additive schema change onto an already-running `stackbase serve`,
+atomically, with no restart. But the *set* of composed components is decided once, at process boot,
+from `stackbase.config.ts`, and baked into the running deployment's table numbers, module map,
+context providers, and drivers.
+
+Adding `defineNotifications(...)` to your config, or removing `defineTriggers(...)`, requires
+restarting the process (`stackbase serve` again, or a redeploy of a `stackbase build` binary).
+There's no live "activate this component" admin call.
+
+</Callout>
 
 This mirrors the same boundary `stackbase deploy`'s additive-schema gate draws for your own
-`schema.ts`: structure that other running state depends on (table numbers, namespaces, which
-drivers are alive) is a boot-time decision; the data and function bodies riding on top of that
-structure can still change live.
+`schema.ts`: structure that other running state depends on (table numbers, namespaces, which drivers
+are alive) is a boot-time decision. The data and function bodies riding on top of that structure can
+still change live.
 
 ## The driver seam
 
 A `driver` is how a component does background work that isn't triggered by any single client
-request — the scheduler's job-dispatch loop, `@stackbase/triggers`' cursor over the MVCC log,
-`@stackbase/notifications`' delivery sweep and retry/backoff loop. It's a **recurring runtime event
-loop**, started once after boot, woken by two things: the commit fan-out (so it reacts to writes
-immediately, not on a poll interval) and a wall-clock timer (so time-based work — a `runAt`
-schedule, a cron tick — fires even with no writes at all).
+request: the scheduler's job-dispatch loop, `@stackbase/triggers`' cursor over the MVCC log,
+`@stackbase/notifications`' delivery sweep and retry/backoff loop.
+
+It's a recurring runtime event loop, started once after boot, woken by two things. The commit
+fan-out makes it react to writes immediately, not on a poll interval. A wall-clock timer makes
+time-based work (a `runAt` schedule, a cron tick) fire even with no writes at all.
 
 ```ts title="packages/component/src/define-component.ts"
 interface Driver {
@@ -289,133 +320,140 @@ interface Driver {
 
 `DriverContext` is the capability set a driver gets to act outside a request:
 
-- **`runFunction(path, args)`** — runs a registered function privileged and namespaced, outside any
-  client request (this is how a driver actually dispatches a scheduled job or a trigger handler).
-- **`onCommit(cb)`** — taps the commit fan-out across the whole runtime (`{ tables, ranges,
-  commitTs }` per commit); returns an unsubscribe.
-- **`setTimer(atMs, cb)` / `clearTimer(handle)`** — arms a wake at an *absolute* wall-clock instant,
-  never a relative delay. Absolute-only is deliberate: a delay forces reconciling two clocks that
-  can disagree (a process that just resumed from hibernation), and would silently restart the
+- **`runFunction(path, args)`**: runs a registered function privileged and namespaced, outside any
+  client request. This is how a driver actually dispatches a scheduled job or a trigger handler.
+- **`onCommit(cb)`**: taps the commit fan-out across the whole runtime (`{ tables, ranges, commitTs }`
+  per commit) and returns an unsubscribe.
+- **`setTimer(atMs, cb)` / `clearTimer(handle)`**: arms a wake at an *absolute* wall-clock instant,
+  never a relative delay. Absolute-only is deliberate: a delay forces reconciling two clocks that can
+  disagree (a process that just resumed from hibernation), and it would silently restart the
   countdown on every cold boot. Every driver's timers are multiplexed down to a single pending wake
-  by the runtime, so a host only ever needs to implement one alarm — which is all a Durable Object
+  by the runtime, so a host only ever needs to implement one alarm, which is all a Durable Object
   gives you, for example.
-- **`now()`** — the driver's clock.
-- **`backstopMs(defaultMs)`** — the cadence for a *pure backstop* poll, as opposed to a real
-  next-work wake. Calling this is how a driver declares "this particular timer is a fallback, not
-  scheduled work" — a long-lived host returns `defaultMs` unchanged, while a host where every wake
-  costs a cold start can stretch it.
-- **`readLog({ afterTs, tables?, limit? })`** — reads committed changes from the MVCC log after a
-  timestamp, in ascending order: the durable change-feed seam `@stackbase/triggers` is built on.
-  `limit` bounds scanned revisions, not matched ones, so a cursor makes progress even over a quiet
-  watched table on a busy log; the returned `maxScannedTs` (not the last change's own `ts`) is what
-  a cursor should advance to, so scanned-but-unmatched ranges are never rescanned. `limit: 0` peeks
-  the current stable bound at O(1) cost with no scan at all — how a brand-new trigger seeds its
-  cursor at "now" without paying for a scan just to discover where that is.
-- **`functionKind?(path)`** *(optional)* — resolves a registered path's real kind
-  (`query`/`mutation`/`action`/`httpAction`), so a driver can validate a config-supplied function
-  path at start time (`@stackbase/triggers`' `handler` option) and fail with an instructive
-  "unknown path" or "wrong kind" error before ever calling it, rather than crashing on the first
-  commit.
+- **`now()`**: the driver's clock.
+- **`backstopMs(defaultMs)`**: the cadence for a *pure backstop* poll, as opposed to a real next-work
+  wake. Calling this is how a driver declares "this particular timer is a fallback, not scheduled
+  work." A long-lived host returns `defaultMs` unchanged, while a host where every wake costs a cold
+  start can stretch it.
+- **`readLog({ afterTs, tables?, limit? })`**: reads committed changes from the MVCC log after a
+  timestamp, in ascending order. This is the durable change-feed seam `@stackbase/triggers` is built
+  on. `limit` bounds scanned revisions, not matched ones, so a cursor makes progress even over a quiet
+  watched table on a busy log. The returned `maxScannedTs` (not the last change's own `ts`) is what a
+  cursor should advance to, so scanned-but-unmatched ranges are never rescanned. `limit: 0` peeks the
+  current stable bound at O(1) cost with no scan at all: how a brand-new trigger seeds its cursor at
+  "now" without paying for a scan just to discover where that is.
+- **`functionKind?(path)`** *(optional)*: resolves a registered path's real kind
+  (`query`/`mutation`/`action`/`httpAction`), so a driver can validate a config-supplied function path
+  at start time (`@stackbase/triggers`' `handler` option) and fail with an instructive "unknown path"
+  or "wrong kind" error before ever calling it, rather than crashing on the first commit.
 
-`Driver.start` is called once, after boot; `Driver.stop`, if present, is called on graceful
-shutdown. A driver's `name` is informational (surfaced in logs), not a namespace — a component's
-`name` field is what does the namespacing work.
+`Driver.start` is called once, after boot. `Driver.stop`, if present, is called on graceful shutdown.
+A driver's `name` is informational (surfaced in logs), not a namespace. A component's `name` field is
+what does the namespacing work.
 
 ## Reserved HTTP routes
 
 `ComponentHttpRoute` (`{ method, pathPrefix, handler }`) lets a component mount a route at the
 engine's reserved path space instead of your app's `http.ts` router. `handler` names a bare
 `httpAction` in the component's own `modules` (namespaced at compose time to `<component>:<handler>`
-for `runtime.runHttpAction` to resolve). Three rules are enforced, both when `defineComponent`
-builds the definition and again, defense-in-depth, when `composeComponents` composes it:
+for `runtime.runHttpAction` to resolve). Three rules are enforced, both when `defineComponent` builds
+the definition and again, defense-in-depth, when `composeComponents` composes it:
 
-1. **Must live under a reserved namespace** — `pathPrefix` must start with `/api/` or `/_`. Your
-   app's own `http.ts` mounts everywhere else, so a component route can never collide with an app
-   route.
-2. **Must have at least two path segments** — `/api/auth/` is fine, `/api/` or `/_` alone is
-   rejected, structurally ruling out a component route that could shadow an entire reserved
-   namespace even if the explicit block-list below were ever incomplete.
-3. **Must not collide with a built-in engine prefix**, checked in both directions against
+1. Must live under a reserved namespace. `pathPrefix` must start with `/api/` or `/_`. Your app's own
+   `http.ts` mounts everywhere else, so a component route can never collide with an app route.
+2. Must have at least two path segments. `/api/auth/` is fine; `/api/` or `/_` alone is rejected.
+   That structurally rules out a component route that could shadow an entire reserved namespace,
+   even if the explicit block list below were ever incomplete.
+3. Must not collide with a built-in engine prefix, checked in both directions against
    `RESERVED_ENGINE_PREFIXES` (`/api/run`, `/api/health`, `/api/sync`, `/api/storage/`, `/_admin/`,
-   `/_fleet/`, `/_dashboard`) — a component prefix can't equal, nest under, *or* be an ancestor of
-   one of these.
+   `/_fleet/`, `/_dashboard`). A component prefix can't equal, nest under, or be an ancestor of one
+   of these.
 
 At compose time, two different components' routes for the same HTTP method are also rejected if
-their prefixes overlap at all (equal, or one a prefix of the other) — dispatch is first-match by
+their prefixes overlap at all (equal, or one a prefix of the other). Dispatch is first-match by
 declaration order, so an ambiguous overlap is a compose-time error rather than silently
-order-dependent behavior. `@stackbase/auth` mounts `GET`/`POST /api/auth/oauth/` (GET for
-query-mode OAuth callbacks, POST for Apple's `form_post` callback — same handler, two methods, no
-overlap since they're keyed per-method); `@stackbase/notifications` mounts `POST
-/api/notifications/webhooks/` when a webhook-capable provider is configured.
+order-dependent behavior.
+
+`@stackbase/auth` mounts `GET`/`POST /api/auth/oauth/` (GET for query-mode OAuth callbacks, POST for
+Apple's `form_post` callback: same handler, two methods, no overlap since they're keyed per method).
+`@stackbase/notifications` mounts `POST /api/notifications/webhooks/` when a webhook-capable provider
+is configured.
 
 ## Always-on providers vs. opt-in components
 
-Not everything that adds a `ctx.<name>` facade is a component you compose. **File storage**
-(`ctx.storage`) is wired directly into every project's boot core (`packages/cli/src/boot.ts`
-splices `storageContextProvider(...)` into the runtime's context providers ahead of whatever your
-`stackbase.config.ts` composes) — every deployment gets `ctx.storage.generateUploadUrl`/`getUrl`/
-`getMetadata`/`delete`/`store`/`get`, with no entry in `stackbase.config.ts` and no way to opt out.
-It behaves like a component under the hood (its own reserved `_storage` system table, its own
-serve-side HTTP routes, its own background reaper driver) but it is not a `ComponentDefinition` —
-there's no `defineStorage()` to add or remove. See [Files](/docs/client/files) for its API.
+Not everything that adds a `ctx.<name>` facade is a component you compose.
 
-Everything else described on this page — auth, authz, scheduler, workflow, triggers,
-notifications — is opt-in: composed by name in `stackbase.config.ts`, absent from a deployment that
-doesn't list it, with zero tables, zero facades, and zero background drivers running for a
-capability you never composed.
+<Callout type="info" title="File storage is always on, not a component">
+
+`ctx.storage` is wired directly into every project's boot core. `packages/cli/src/boot.ts` splices
+`storageContextProvider(...)` into the runtime's context providers ahead of whatever your
+`stackbase.config.ts` composes. Every deployment gets
+`ctx.storage.generateUploadUrl`/`getUrl`/`getMetadata`/`delete`/`store`/`get`, with no entry in
+`stackbase.config.ts` and no way to opt out.
+
+It behaves like a component under the hood (its own reserved `_storage` system table, its own
+serve-side HTTP routes, its own background reaper driver), but it is not a `ComponentDefinition`.
+There's no `defineStorage()` to add or remove. See [Files](/docs/client/files) for its API.
+
+</Callout>
+
+Everything else described on this page (auth, authz, scheduler, workflow, triggers, notifications) is
+opt-in. Each is composed by name in `stackbase.config.ts`, absent from a deployment that doesn't list
+it, with zero tables, zero facades, and zero background drivers running for a capability you never
+composed.
 
 ## The six built-in components
 
 | Component | Package | `requires` | Facade | Driver | HTTP routes |
 |---|---|---|---|---|---|
-| Auth | `@stackbase/auth` | — | `ctx.auth` | — | `/api/auth/oauth/` (if `oauth` configured) |
-| Authorization | `@stackbase/authz` | `auth` | `ctx.authz` | — | — |
-| Scheduling | `@stackbase/scheduler` | — | `ctx.scheduler` | dispatch loop | — |
-| Workflows | `@stackbase/workflow` | `scheduler` | `ctx.workflow` | (via scheduler) | — |
-| Triggers | `@stackbase/triggers` | — | — | log-cursor loop | — |
-| Notifications | `@stackbase/notifications` | — | `ctx.notifications` | delivery sweep | `/api/notifications/webhooks/` (if a webhook provider is configured) |
+| Auth | `@stackbase/auth` | (none) | `ctx.auth` | (none) | `/api/auth/oauth/` (if `oauth` configured) |
+| Authorization | `@stackbase/authz` | `auth` | `ctx.authz` | (none) | (none) |
+| Scheduling | `@stackbase/scheduler` | (none) | `ctx.scheduler` | dispatch loop | (none) |
+| Workflows | `@stackbase/workflow` | `scheduler` | `ctx.workflow` | (via scheduler) | (none) |
+| Triggers | `@stackbase/triggers` | (none) | (none) | log-cursor loop | (none) |
+| Notifications | `@stackbase/notifications` | (none) | `ctx.notifications` | delivery sweep | `/api/notifications/webhooks/` (if a webhook provider is configured) |
 
-- **[Auth](/docs/components/auth)** (`defineAuth`) — password + hardened session authentication:
-  rotation and reuse detection, device management, anonymous sessions with in-place upgrade, email
-  verification/reset/magic-link/OTP flows, and OAuth/OIDC social + third-party-JWT sign-in (Google,
-  GitHub, Microsoft, Discord, Facebook, Apple built in). `ctx.auth.getUserId()` resolves the caller's
-  session inside the transaction — participating in the read set like any other read, so a revoked
-  session reactively invalidates whatever it was gating.
-- **[Authorization](/docs/components/authorization)** (`defineAuthz`, `requires: ["auth"]`) — RBAC/
-  ReBAC row policies declared once and enforced on every read/write to the tables they cover, with
-  `ctx.authz` for explicit checks in handler code. Depends on `auth` because policy evaluation needs
-  to resolve the caller's identity.
-- **[Scheduling](/docs/components/scheduling)** (`defineScheduler`) — `ctx.scheduler.runAfter`/
+- **[Auth](/docs/components/auth)** (`defineAuth`): password and hardened session authentication.
+  Rotation and reuse detection, device management, anonymous sessions with in-place upgrade, email
+  verification/reset/magic-link/OTP flows, and OAuth/OIDC social plus third-party-JWT sign-in
+  (Google, GitHub, Microsoft, Discord, Facebook, Apple built in). `ctx.auth.getUserId()` resolves the
+  caller's session inside the transaction, participating in the read set like any other read, so a
+  revoked session reactively invalidates whatever it was gating.
+- **[Authorization](/docs/components/authorization)** (`defineAuthz`, `requires: ["auth"]`): RBAC/
+  ReBAC row policies declared once and enforced on every read and write to the tables they cover,
+  with `ctx.authz` for explicit checks in handler code. It depends on `auth` because policy
+  evaluation needs to resolve the caller's identity.
+- **[Scheduling](/docs/components/scheduling)** (`defineScheduler`): `ctx.scheduler.runAfter`/
   `runAt`/`cancel` for one-off scheduled jobs, plus `cronJobs()`-declared recurring schedules with
   catch-up policies, retries/backoff, and cascading cancel. Its `driver` is the dispatch loop that
   makes scheduled work fire without a client ever calling in.
-- **[Workflows](/docs/components/workflows)** (`defineWorkflow`, `requires: ["scheduler"]`) —
-  durable multi-step orchestration via deterministic replay over a durable journal:
+- **[Workflows](/docs/components/workflows)** (`defineWorkflow`, `requires: ["scheduler"]`): durable
+  multi-step orchestration via deterministic replay over a durable journal.
   `step.runMutation`/`runQuery`/`runAction`/`sleep`/`sleepUntil`, `ctx.workflow.start`/`cancel`, a
   live `workflow:status` query, fan-out/fan-in parallelism, `step.waitForEvent`/
   `ctx.workflow.sendEvent` for durable external signals, and per-step saga/compensation. It has no
-  driver of its own — its steps dispatch through the scheduler's job queue, which is exactly why it
+  driver of its own. Its steps dispatch through the scheduler's job queue, which is exactly why it
   `requires: ["scheduler"]`.
-- **[Triggers](/docs/components/triggers)** (`defineTriggers`) — react to committed changes on a
-  table via a durable cursor over the MVCC log (not a queue), so a missed change is impossible by
+- **[Triggers](/docs/components/triggers)** (`defineTriggers`): react to committed changes on a table
+  via a durable cursor over the MVCC log, not a queue, so a missed change is impossible by
   construction. Delivery is at-least-once and in-order per document, with stable `changeId`s for
-  dedup on redelivery. Its `driver` is the cursor loop; it has no facade of its own for the common
-  case (you register a handler function, not something you call through `ctx`).
-- **[Notifications](/docs/components/notifications)** (`defineNotifications`) — a `Channel ×
-  Provider` seam (email/SMS/in-app/push) with at-most-once send, a queued-send driver for
-  reliability (retries, backoff, dead-letter, stuck-sending reclaim), delivery-provider webhooks
-  (Resend/Twilio) mounted via `httpRoutes`, and a reactive in-app inbox
-  (`useNotifications`/`<Inbox>`) on the client. `ctx.notifications.send(...)` is the single chokepoint
-  every send — including auth's own verification/reset/magic-link emails, when both are composed —
-  routes through.
+  dedup on redelivery. Its `driver` is the cursor loop. It has no facade of its own for the common
+  case, since you register a handler function rather than call something through `ctx`.
+- **[Notifications](/docs/components/notifications)** (`defineNotifications`): a `Channel × Provider`
+  seam (email, SMS, in-app, push) with at-most-once send, a queued-send driver for reliability
+  (retries, backoff, dead-letter, stuck-sending reclaim), delivery-provider webhooks (Resend/Twilio)
+  mounted via `httpRoutes`, and a reactive in-app inbox (`useNotifications`/`<Inbox>`) on the client.
+  `ctx.notifications.send(...)` is the single chokepoint every send routes through, including auth's
+  own verification/reset/magic-link emails when both are composed.
 
 ## Where to go next
 
-- [Auth](/docs/components/auth) — sessions, email flows, OAuth/JWT, MFA, passkeys.
-- [Authorization](/docs/components/authorization) — RBAC, ReBAC, row policies.
-- [Scheduling](/docs/components/scheduling) — `runAfter`/`runAt`/cron jobs.
-- [Workflows](/docs/components/workflows) — durable multi-step orchestration with saga compensation.
-- [Triggers](/docs/components/triggers) — react to committed table changes.
-- [Notifications](/docs/components/notifications) — email/SMS/in-app/push, the reactive inbox.
-- [Deploy & build](/docs/deploy/deploy-and-build) — what hot-swaps live (functions, additive schema)
+- [Auth](/docs/components/auth): sessions, email flows, OAuth/JWT, MFA, passkeys.
+- [Authorization](/docs/components/authorization): RBAC, ReBAC, row policies.
+- [Scheduling](/docs/components/scheduling): `runAfter`/`runAt`/cron jobs.
+- [Workflows](/docs/components/workflows): durable multi-step orchestration with saga compensation.
+- [Triggers](/docs/components/triggers): react to committed table changes.
+- [Notifications](/docs/components/notifications): email/SMS/in-app/push, the reactive inbox.
+- [Deploy & build](/docs/deploy/deploy-and-build): what hot-swaps live (functions, additive schema)
   versus what needs a restart (the composed component set).
+

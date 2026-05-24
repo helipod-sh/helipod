@@ -5,9 +5,9 @@ description: Every stackbase command and its flags.
 
 {/* diataxis: reference */}
 
-The `stackbase` command (package `@stackbase/cli`, binary `stackbase`). Every command below is
-implemented in `packages/cli/src/cli.ts` and its command modules — this page is exhaustive: every
-flag, every environment-variable equivalent, and every fail-fast check each command performs.
+Every stackbase project runs on one binary: `stackbase` (package `@stackbase/cli`). This page covers
+every command it ships, exactly as implemented in `packages/cli/src/cli.ts` and its command modules:
+every flag, every environment-variable equivalent, and every fail-fast check each command performs.
 
 ```bash
 stackbase <command> [options]
@@ -18,7 +18,7 @@ stackbase <command> [options]
 | Command | Purpose |
 |---|---|
 | [`dev`](#stackbase-dev) | Run the engine locally with hot reload, codegen, and the dashboard |
-| [`serve`](#stackbase-serve) | Run the production server — single-node, fleet (Tier 2), or object-storage (Tier 3) |
+| [`serve`](#stackbase-serve) | Run the production server, single-node, fleet (Tier 2), or object-storage (Tier 3) |
 | [`deploy`](#stackbase-deploy) | Push `convex/` to a running `serve --allow-deploy` and hot-swap it live |
 | [`build`](#stackbase-build) | Compile the app to a self-contained executable |
 | [`migrate`](#stackbase-migrate) | Migrate a Convex project into stackbase (imports + divergence report) |
@@ -29,9 +29,13 @@ stackbase <command> [options]
 | [`objectstore reshard`](#stackbase-objectstore-reshard) | Change a **stopped** object-storage deployment's shard count |
 | [`help`](#stackbase-help----help--h) / `--help` / `-h` | Print usage |
 
-Every command's flags are parsed by hand (no argument-parsing library) — an unrecognized flag is
+<Callout type="info" title="How flags get parsed">
+
+Every command's flags are parsed by hand, with no argument-parsing library. An unrecognized flag is
 silently ignored rather than rejected, and a value flag with no following argument is treated as
-absent (falls back to its default) unless a command says otherwise.
+absent, falling back to its default, unless a command says otherwise.
+
+</Callout>
 
 ## `stackbase dev`
 
@@ -49,24 +53,24 @@ stackbase dev
 | `--port <n>` | `3000` | HTTP/WebSocket port |
 | `--ip <addr>` | `127.0.0.1` | Bind address |
 | `--data <path>` | `.stackbase/data.db` | SQLite file path (ignored if `--database-url` is set) |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` env, else unset (SQLite) | Postgres connection string — see [Postgres](/docs/deploy/postgres) |
-| `--storage-bucket <name>` | unset (filesystem) | Select the S3-compatible file-storage backend — see [File storage](/docs/core-concepts/file-storage) |
+| `--database-url <url>` | `STACKBASE_DATABASE_URL` env, else unset (SQLite) | Postgres connection string, see [Postgres](/docs/deploy/postgres) |
+| `--storage-bucket <name>` | unset (filesystem) | Select the S3-compatible file-storage backend, see [File storage](/docs/core-concepts/file-storage) |
 | `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, …) |
 | `--web <dir>` | unset | Serve a static web UI directory at the site root, alongside the API |
 
-`--database-url` is the only `dev` flag with an environment fallback (`STACKBASE_DATABASE_URL`);
+`--database-url` is the only `dev` flag with an environment fallback (`STACKBASE_DATABASE_URL`).
 `--storage-bucket`/`--storage-endpoint` on `dev` do **not** fall back to
-`STACKBASE_STORAGE_BUCKET`/`STACKBASE_STORAGE_ENDPOINT` the way `serve`'s do — pass them explicitly
+`STACKBASE_STORAGE_BUCKET`/`STACKBASE_STORAGE_ENDPOINT` the way `serve`'s do. Pass them explicitly
 if you want S3 storage under `dev`.
 
 ### Admin key handling
 
-`dev` reads `STACKBASE_ADMIN_KEY` if set (blank/whitespace-only is treated as unset, with a
-warning). If it's unset, `dev` **generates an ephemeral key for this run only**. That generated key
-is embedded directly into the (otherwise unauthenticated) dashboard HTML — but **only** when the
-key is ephemeral *and* the bind address is loopback (`127.0.0.1`, `::1`, or `localhost`); a
-persistent operator-supplied key, or any non-loopback bind, never gets embedded, and the dashboard
-SPA prompts for it instead.
+`dev` reads `STACKBASE_ADMIN_KEY` if set (blank/whitespace-only counts as unset, with a warning).
+If it's unset, `dev` **generates an ephemeral key for this run only**. That generated key gets
+embedded directly into the (otherwise unauthenticated) dashboard HTML, but **only** when the key is
+ephemeral *and* the bind address is loopback (`127.0.0.1`, `::1`, or `localhost`). A persistent
+operator-supplied key, or any non-loopback bind, never gets embedded: the dashboard SPA prompts for
+it instead.
 
 ### Startup output
 
@@ -84,11 +88,11 @@ If the dashboard package isn't built, `dev` still starts and prints a note to ru
 `dev` watches `--dir` recursively (`fs.watch`, ignoring changes under `_generated`) and on any
 change: reloads `convex/`, re-runs codegen, replaces the runtime's function modules
 (`runtime.setModules`, which also re-applies the always-on `_storage:*` built-ins), and updates
-`httpAction` routes — all without restarting the process or dropping WebSocket connections. It
-prints `↻ pushed (N functions)` on success or `✗ reload failed: <message>` on a load/type error
-(the previous, still-working version keeps serving in that case).
+`httpAction` routes. All of this happens without restarting the process or dropping WebSocket
+connections. It prints `↻ pushed (N functions)` on success, or `✗ reload failed: <message>` on a
+load/type error (the previous, still-working version keeps serving in that case).
 
-The function loader is **top-level only** — it does not recurse into subdirectories of `convex/`.
+The function loader is **top-level only**: it does not recurse into subdirectories of `convex/`.
 Keep query/mutation/action modules directly under `convex/*.ts` (e.g. `convex/items.ts`), not nested
 under a subfolder (e.g. `convex/lib/items.ts`); nested modules are silently not loaded. This applies
 to `dev`, `serve`, and `deploy` alike.
@@ -111,40 +115,49 @@ STACKBASE_ADMIN_KEY=<secret> stackbase serve
 
 | Condition | Result |
 |---|---|
-| `STACKBASE_ADMIN_KEY` unset or blank | ``✗ STACKBASE_ADMIN_KEY is required for `serve` — set it to a strong secret.`` — exit 1 |
-| `<dir>/_generated/server.ts` missing | ``✗ <dir>/_generated not found — run `stackbase codegen --dir <dir>` and commit _generated/ before deploying.`` — exit 1 |
-| `--fleet` and `--object-store` both set | `✗ --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.` — exit 1 |
-| `--replica` without `--object-store` | `✗ --replica requires --object-store — …` — exit 1 |
-| `--shards > 1` without `--object-store` | `✗ --shards N (N>1) requires --object-store — …` — exit 1 |
-| `--shards > 1` with `--replica` | `✗ --shards cannot be combined with --replica — a replica is single-shard …` — exit 1 |
-| `--shards` not a positive integer | `✗ --shards must be a positive integer, got "<value>".` — exit 1 |
-| `--writer-url` without `--replica` | `✗ --writer-url only applies to --replica — …` — exit 1 |
-| `--fleet` set but `@stackbase/fleet` not installed | `✗ fleet mode requires @stackbase/fleet — install it (bun add @stackbase/fleet).` — exit 1 |
-| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (Postgres) | `✗ fleet mode requires --database-url (Postgres) — …` — exit 1 |
-| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `✗ fleet mode requires --advertise-url — the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` — exit 1 |
+| `STACKBASE_ADMIN_KEY` unset or blank | ``✗ STACKBASE_ADMIN_KEY is required for `serve`: set it to a strong secret.`` (exit 1) |
+| `<dir>/_generated/server.ts` missing | ``✗ <dir>/_generated not found: run `stackbase codegen --dir <dir>` and commit _generated/ before deploying.`` (exit 1) |
+| `--fleet` and `--object-store` both set | `✗ --object-store cannot be combined with --fleet (Tier 2): pick one write-scaling story.` (exit 1) |
+| `--replica` without `--object-store` | `✗ --replica requires --object-store: …` (exit 1) |
+| `--shards > 1` without `--object-store` | `✗ --shards N (N>1) requires --object-store: …` (exit 1) |
+| `--shards > 1` with `--replica` | `✗ --shards cannot be combined with --replica: a replica is single-shard …` (exit 1) |
+| `--shards` not a positive integer | `✗ --shards must be a positive integer, got "<value>".` (exit 1) |
+| `--writer-url` without `--replica` | `✗ --writer-url only applies to --replica: …` (exit 1) |
+| `--fleet` set but `@stackbase/fleet` not installed | `✗ fleet mode requires @stackbase/fleet: install it (bun add @stackbase/fleet).` (exit 1) |
+| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (Postgres) | `✗ fleet mode requires --database-url (Postgres): …` (exit 1) |
+| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `✗ fleet mode requires --advertise-url: the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` (exit 1) |
 
 ### Core flags
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--dir <path>` | — | `convex` | The app directory (must already contain `_generated/`) |
+| `--dir <path>` | none | `convex` | The app directory (must already contain `_generated/`) |
 | `--data <path>` | `STACKBASE_DATA_DIR` | `./data/db.sqlite` | SQLite file path (`STACKBASE_DATA_DIR` sets the *containing directory*; the filename `db.sqlite` is fixed) |
-| `--ip <addr>` | — | `0.0.0.0` | Bind address |
+| `--ip <addr>` | none | `0.0.0.0` | Bind address |
 | `--port <n>` | `PORT` | `3000` | HTTP/WebSocket port |
 | `--no-dashboard` | `STACKBASE_DASHBOARD=off` | dashboard on | Disable the dashboard entirely |
 | `--allow-deploy` | `STACKBASE_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy` for `stackbase deploy` |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` | unset (SQLite) | Postgres connection string — flag wins if both set |
+| `--database-url <url>` | `STACKBASE_DATABASE_URL` | unset (SQLite) | Postgres connection string (flag wins if both set) |
 | `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` | unset (filesystem) | Selects the S3-compatible file-storage backend |
 | `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint (MinIO, R2, …) |
 | `--web <dir>` | `STACKBASE_WEB_DIR` | unset | Serve a static web UI at the site root, on the same origin as the sync WebSocket |
 
-`STACKBASE_ADMIN_KEY` (required, no default, no flag) is read directly from the environment —
-there is deliberately no `--admin-key` flag, so the secret never shows up in `ps`/shell history.
-S3 storage settings present (`--storage-endpoint`/`STACKBASE_STORAGE_ENDPOINT`/`_REGION`/
-`_PUBLIC_URL`) without a bucket fail boot fast — this is treated as a durability
-misconfiguration (uploads would otherwise silently land on ephemeral local disk), not a fallback.
+<Callout type="info" title="Why there's no --admin-key flag">
 
-### Multi-node fleet flags (Tier 2 — Postgres write scale-out)
+`STACKBASE_ADMIN_KEY` (required, no default, no flag) is read directly from the environment. There
+is deliberately no `--admin-key` flag, so the secret never shows up in `ps`/shell history. S3
+storage settings present (`--storage-endpoint`/`STACKBASE_STORAGE_ENDPOINT`/`_REGION`/`_PUBLIC_URL`)
+without a bucket fail boot fast: this is treated as a durability misconfiguration (uploads would
+otherwise silently land on ephemeral local disk), not a fallback.
+
+</Callout>
+
+The flags above cover a single node. If you're running more than one, expand whichever setup below
+applies to you.
+
+<Accordions type="single">
+
+<Accordion title="Multi-node fleet flags (Tier 2: Postgres write scale-out)">
 
 Requires the separately-installed `@stackbase/fleet` package. See
 [Scaling](/docs/deploy/scaling) for the model (writer/sync roles, sharding, failover); this table
@@ -153,43 +166,45 @@ is the exhaustive flag reference.
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
 | `--fleet` | `STACKBASE_FLEET` (`1` or `true`, case-insensitive on `true` only) | off | Run this node as part of a symmetric fleet sharing one Postgres database |
-| `--advertise-url <url>` | `STACKBASE_ADVERTISE_URL` | — (required with `--fleet`) | The URL other fleet nodes reach *this* node at (recorded on the write lease; sync nodes forward writes/proxy `httpAction`s here when this node is the writer) |
-| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (also read fleet-side, decided once at first boot) | `8` | Shard count — persisted at first boot and **immutable** after; a later boot with a disagreeing env value fails fast naming both counts |
-| — | `STACKBASE_FLEET_LEASE_TTL_MS` | `15000` | The write-lease TTL in ms — the single knob the whole failover clock scales from (heartbeat/acquire cadences derive from it). No CLI flag; ops/test tuning only |
-| — | `STACKBASE_GROUP_COMMIT` | store-conditional: **on** for Postgres, **off** for SQLite, when unset | Batch concurrent commits into one fsync. An explicit value (`1`/`true`/`yes`, case-insensitive) always overrides the store-conditional default, in either direction |
+| `--advertise-url <url>` | `STACKBASE_ADVERTISE_URL` | none (required with `--fleet`) | The URL other fleet nodes reach *this* node at (recorded on the write lease; sync nodes forward writes/proxy `httpAction`s here when this node is the writer) |
+| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (also read fleet-side, decided once at first boot) | `8` | Shard count. Persisted at first boot and **immutable** after: a later boot with a disagreeing env value fails fast, naming both counts |
+| none | `STACKBASE_FLEET_LEASE_TTL_MS` | `15000` | The write-lease TTL in ms: the single knob the whole failover clock scales from (heartbeat/acquire cadences derive from it). No CLI flag, ops/test tuning only |
+| none | `STACKBASE_GROUP_COMMIT` | store-conditional: **on** for Postgres, **off** for SQLite, when unset | Batch concurrent commits into one fsync. An explicit value (`1`/`true`/`yes`, case-insensitive) always overrides the store-conditional default, in either direction |
 
 `STACKBASE_FLEET_MULTI_WRITER` (spreading shard *ownership* across nodes so write throughput scales
-with node count) is a `@stackbase/fleet`-side setting, not a `packages/cli` flag — see
+with node count) is a `@stackbase/fleet`-side setting, not a `packages/cli` flag. See
 [Scaling](/docs/deploy/scaling).
 
 Changing the shard count of an already-running fleet requires stopping it and running
 [`fleet reshard`](#stackbase-fleet-reshard) first.
 
-### Object-storage flags (Tier 3 — bucket-backed, no database)
+</Accordion>
 
-`--object-store` and `--fleet` are mutually exclusive — pick one write-scaling story. See
+<Accordion title="Object-storage flags (Tier 3: bucket-backed, no database)">
+
+`--object-store` and `--fleet` are mutually exclusive. Pick one write-scaling story. See
 [Cloudflare](/docs/deploy/cloudflare) for the primary use of this mode (R2-backed).
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | unset | Run this node's store on an object-storage bucket instead of SQLite/Postgres — see the URL grammar below |
-| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (only consulted when `--object-store` is set and no fleet flag is) | `1` | Number of object-storage lanes this **writer** node owns. The bucket's own persisted shard count (set by [`objectstore reshard`](#stackbase-objectstore-reshard)) is authoritative — a `--shards` that disagrees with it fails boot fast |
-| `--replica` | `STACKBASE_REPLICA` (`1`/`true`/`yes`, case-insensitive) | off | Boot as a **read-only replica** of the bucket's shard(s) instead of a writer — materializes + tails, never acquires the write lease, every mutation is rejected unless `--writer-url` is also set. Requires `--object-store` |
+| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | unset | Run this node's store on an object-storage bucket instead of SQLite/Postgres, see the URL grammar below |
+| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (only consulted when `--object-store` is set and no fleet flag is) | `1` | Number of object-storage lanes this **writer** node owns. The bucket's own persisted shard count (set by [`objectstore reshard`](#stackbase-objectstore-reshard)) is authoritative: a `--shards` that disagrees with it fails boot fast |
+| `--replica` | `STACKBASE_REPLICA` (`1`/`true`/`yes`, case-insensitive) | off | Boot as a **read-only replica** of the bucket's shard(s) instead of a writer: materializes + tails, never acquires the write lease, every mutation is rejected unless `--writer-url` is also set. Requires `--object-store` |
 | `--writer-url <url>` | `STACKBASE_WRITER_URL` | unset | Only meaningful with `--replica`: forward every mutation/action here instead of rejecting it locally. Not yet supported on a multi-shard bucket (fails fast with a clear message if the bucket has `numShards > 1`) |
-| — | `STACKBASE_OBJECTSTORE_GC_MS` | `60000` | Sweep cadence (ms) for the writer's garbage-collection driver. Env-only, no flag |
+| none | `STACKBASE_OBJECTSTORE_GC_MS` | `60000` | Sweep cadence (ms) for the writer's garbage-collection driver. Env-only, no flag |
 
 Object-store URL grammar for `--object-store`/`STACKBASE_OBJECT_STORE`:
 
 | Form | Resolves to |
 |---|---|
-| unset / empty | not requested — falls through to the normal SQLite/Postgres selection |
+| unset / empty | not requested, falls through to the normal SQLite/Postgres selection |
 | a bare filesystem path, e.g. `./objects` | `FsObjectStore` rooted at that directory |
 | `file:///var/lib/stackbase/objects` | same, `FsObjectStore` rooted at the given path |
-| `s3://[key:secret@]host[:port]/bucket[?region=…&endpoint=…&forcePathStyle=…]` | `S3ObjectStore`. Bucket is required (the URL's path). A bare host is assumed `http://` — right for MinIO/R2 run locally/in-cluster. An **empty** host (`s3:///bucket`, three slashes) means real AWS S3 via the SDK's own region-routed endpoint |
+| `s3://[key:secret@]host[:port]/bucket[?region=…&endpoint=…&forcePathStyle=…]` | `S3ObjectStore`. Bucket is required (the URL's path). A bare host is assumed `http://`, which is right for MinIO/R2 run locally/in-cluster. An **empty** host (`s3:///bucket`, three slashes) means real AWS S3 via the SDK's own region-routed endpoint |
 | `s3+http://…` / `s3+https://…` | Same as `s3://`, but the scheme itself pins the host-derived endpoint's protocol (an explicit `?endpoint=` always wins over either) |
 
 Credentials come from the URL's userinfo (`key:secret@`) if present, else
-`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (checked independently — a URL-supplied key with an
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (checked independently: a URL-supplied key with an
 env-supplied secret works). Any other `<scheme>://` (a typo like `S3://`, or an unrelated one like
 `gs://`) is **rejected** with a clear error rather than silently falling back to the filesystem
 backend. Examples:
@@ -202,7 +217,9 @@ file:///data/objects
 ./objects
 ```
 
-### The wake seam (hosts that stop the process between requests)
+</Accordion>
+
+<Accordion title="The wake seam (hosts that stop the process between requests)">
 
 For a host like Cloudflare Containers, where the process is fully suspended between requests (so a
 plain `setTimeout` for a driver's next wake never fires). See [Cloudflare](/docs/deploy/cloudflare).
@@ -210,9 +227,13 @@ plain `setTimeout` for a driver's next wake never fires). See [Cloudflare](/docs
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
 | `--wake-url <url>` | `STACKBASE_WAKE_URL` | unset (plain `setTimeout`) | POSTs the next driver wake's absolute timestamp here instead of arming an in-process timer |
-| `--backstop-min-ms <n>` | `STACKBASE_BACKSTOP_MIN_MS` | unset (identity — drivers' own 30s/60s cadence) | Floor applied to every driver's backstop poll cadence: `backstopMs = max(defaultMs, n)` |
+| `--backstop-min-ms <n>` | `STACKBASE_BACKSTOP_MIN_MS` | unset (identity, drivers' own 30s/60s cadence) | Floor applied to every driver's backstop poll cadence: `backstopMs = max(defaultMs, n)` |
 
 Both unset (every non-Cloudflare deployment) is byte-for-byte today's `setTimeout`-based behavior.
+
+</Accordion>
+
+</Accordions>
 
 ### Startup and shutdown
 
@@ -231,15 +252,15 @@ SPA prompts for it) since it binds `0.0.0.0` by default.
 `SIGTERM`/`SIGINT` trigger graceful shutdown: stop any fleet node, close the server (which stops
 every registered driver, including any object-store lease-heartbeat), release the object-store
 lease if held (best-effort, bounded to 2s so an unreachable bucket can't hang shutdown past a
-container's grace period), close the store, then `process.exit(0)` — printing
+container's grace period), close the store, then `process.exit(0)`, printing
 `{"level":"info","msg":"shutting down"}` first.
 
 ## `stackbase deploy`
 
-Pushes the local `convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it
-live — no restart. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism
-(what `applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order);
-this is the flag/behavior reference.
+Pushes the local `convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it live,
+no restart. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism (what
+`applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order); this is
+the flag/behavior reference.
 
 ```bash
 STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.example.com
@@ -247,21 +268,21 @@ STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.exampl
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--url <url>` | `STACKBASE_DEPLOY_URL` | — (required) | Target `serve` deployment's base URL |
-| `--dir <path>` | — | `convex` | The app directory to push |
+| `--url <url>` | `STACKBASE_DEPLOY_URL` | none (required) | Target `serve` deployment's base URL |
+| `--dir <path>` | none | `convex` | The app directory to push |
 
-`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the request) — unlike
-`migrate export`/`migrate import`, `deploy` has **no** `--admin-key` flag; it's env-only. The target
-must have been started with `--allow-deploy` (or `STACKBASE_ALLOW_DEPLOY=1`).
+`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the request). Unlike `migrate
+export`/`migrate import`, `deploy` has **no** `--admin-key` flag: it's env-only. The target must
+have been started with `--allow-deploy` (or `STACKBASE_ALLOW_DEPLOY=1`).
 
 What it does, in order: (1) refreshes local `_generated/` via the same
 `loadConvexDir → push → writeGenerated` pipeline `codegen` uses; (2) transpiles every `.ts` file
-under `--dir` with esbuild's `transform` (types stripped, import specifiers untouched — bare
+under `--dir` with esbuild's `transform` (types stripped, import specifiers untouched: bare
 `@stackbase/*` imports resolve against the *target's* `node_modules`, relative imports resolve
 within the pushed tree); (3) `POST`s `{files: [{path, code}]}` to `/_admin/deploy` with
 `Authorization: Bearer <adminKey>`.
 
-Schema changes must be **additive only** — new tables, new *optional* fields. A destructive change
+Schema changes must be **additive only**: new tables, new *optional* fields. A destructive change
 (dropped/renamed table, changed table number, removed field, changed field type, a field turned
 required, a new required field) is rejected and the running deployment stays completely untouched;
 nothing is swapped until both load and schema-diff succeed.
@@ -272,20 +293,20 @@ nothing is swapped until both load and schema-diff succeed.
 | Target 404s `/_admin/deploy` (deploy not enabled) | `✗ deploy not enabled on target (start serve with --allow-deploy)` | 1 |
 | Schema rejected / other server error | `✗ deploy failed: <reason>` | 1 |
 | Target unreachable | `✗ could not reach <url>: <error>` | 1 |
-| Missing `--url`/`STACKBASE_DEPLOY_URL` | `✗ missing target URL — pass --url <url> or set STACKBASE_DEPLOY_URL` | 1 |
+| Missing `--url`/`STACKBASE_DEPLOY_URL` | `✗ missing target URL: pass --url <url> or set STACKBASE_DEPLOY_URL` | 1 |
 | Missing `STACKBASE_ADMIN_KEY` | `✗ STACKBASE_ADMIN_KEY is required to deploy` | 1 |
 
-The component set (e.g. `@stackbase/scheduler`, `@stackbase/workflow`) is fixed at `serve` boot —
+The component set (e.g. `@stackbase/scheduler`, `@stackbase/workflow`) is fixed at `serve` boot.
 `deploy` can push new functions and additive schema against that fixed set, but adding/removing a
 component from `stackbase.config.ts` requires a restart.
 
 `stackbase deploy` targets a Postgres/SQLite/object-storage `serve` deployment. Cloudflare's
 Durable-Object-native host has its own separate deployment path (`wrangler`-based provisioning, not
-a hot-swap onto a running server) — see [Cloudflare](/docs/deploy/cloudflare).
+a hot-swap onto a running server). See [Cloudflare](/docs/deploy/cloudflare).
 
 ## `stackbase build`
 
-Compiles the app — engine, composed components, schema, functions, and (by default) the dashboard —
+Compiles the app (engine, composed components, schema, functions, and by default the dashboard)
 into one self-contained executable via `bun build --compile`. See
 [Deploy & build](/docs/deploy/deploy-and-build) for the full entrypoint-codegen mechanism.
 
@@ -297,7 +318,7 @@ stackbase build --target linux-x64
 |---|---|---|
 | `--dir <path>` | `convex` | The app directory to compile |
 | `--outfile <path>` | `./stackbase-server` | Output executable path (`.exe` is appended automatically when `--target windows-x64` is used and the given path doesn't already end in `.exe`) |
-| `--target <name>` | host platform | Cross-compile target — see the table below |
+| `--target <name>` | host platform | Cross-compile target, see the table below |
 | `--no-dashboard` | dashboard included | Exclude the dashboard from the binary |
 | `--verbose` | off | Stream the underlying `bun build` process's own output |
 
@@ -313,11 +334,11 @@ Any other value is rejected with `unknown target "<name>" (expected one of: linu
 darwin-x64, darwin-arm64, windows-x64)`.
 
 `build` shells out to `bun build --compile --minify` (requires `bun` on `PATH` even if the CLI
-itself is invoked under Node) — **without** `--bytecode`, because the generated entrypoint's
-top-level `await` is rejected by `--bytecode`; this trades a slower cold start for correctness,
+itself is invoked under Node), **without** `--bytecode`, because the generated entrypoint's
+top-level `await` is rejected by `--bytecode`. This trades a slower cold start for correctness,
 which is fine for a long-running server. On success it prints `✓ built <outfile> (<n>MB)`.
 
-The database file is **never** embedded — only the binary itself. At runtime the compiled binary
+The database file is **never** embedded: only the binary itself. At runtime the compiled binary
 reads its own, separate flag set (not `serve`'s flag names):
 
 | Runtime flag | Default | Meaning |
@@ -335,8 +356,8 @@ the binary prints one machine-readable line and then runs until `SIGTERM`/`SIGIN
 ```
 
 That line is meant for a parent process (Electron/Tauri sidecars, an orchestrator) to detect
-readiness. There is no live hot-swap path for a compiled binary — functions, schema, and the
-component set are fixed at compile time; use `stackbase deploy` against a `serve` process instead
+readiness. There is no live hot-swap path for a compiled binary: functions, schema, and the
+component set are fixed at compile time. Use `stackbase deploy` against a `serve` process instead
 if you need that.
 
 ## `stackbase migrate`
@@ -353,7 +374,7 @@ stackbase migrate --from convex
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--from <source>` | `convex` | Migration source — only `convex` ships today; an unknown source errors immediately |
+| `--from <source>` | `convex` | Migration source, only `convex` ships today; an unknown source errors immediately |
 | `--dir <path>` | `convex` | The app directory to migrate |
 | `--dry-run` | off | Report what would change (writes `MIGRATION-REPORT.md`) without touching any other file |
 | `--force` | off | Proceed even if the project has uncommitted git changes |
@@ -365,17 +386,17 @@ is no revert safety net in that case). If no Convex project is detected at the t
 (no `convex/schema.ts`, no Convex dependency), it errors with `no <source> project detected at
 <dir>`.
 
-On success: `migrated <n> files. <m> item(s) need manual attention — see MIGRATION-REPORT.md` (or,
+On success: `migrated <n> files. <m> item(s) need manual attention: see MIGRATION-REPORT.md` (or,
 on `--dry-run`, `[dry-run] <n> files would change, <m> scaffolded. See MIGRATION-REPORT.md`). If the
 import rewrite succeeds but the subsequent codegen fails, exit code 1 with `imports migrated, but
-codegen failed: <error>` — the report is still written, since it's written before codegen runs.
+codegen failed: <error>`. The report is still written, since it's written before codegen runs.
 
 ## `stackbase migrate export` / `stackbase migrate import`
 
-Move an app's **data** (not code) between two running deployments — e.g. between a portable
-SQLite/Postgres deployment and a Cloudflare DO-native one. Both are plain HTTP clients against a
-running deployment's bearer-gated admin endpoints (`GET /_admin/export`, `POST /_admin/import`) —
-they don't touch `convex/` at all.
+Move an app's **data** (not code) between two running deployments (e.g. a portable SQLite/Postgres
+deployment and a Cloudflare DO-native one). Both are plain HTTP clients against a running
+deployment's bearer-gated admin endpoints (`GET /_admin/export`, `POST /_admin/import`); they don't
+touch `convex/` at all.
 
 ```bash
 stackbase migrate export --url <source-url> --out dump.json
@@ -384,21 +405,21 @@ stackbase migrate import --url <target-url> --in dump.json
 
 | Flag | Applies to | Default | Meaning |
 |---|---|---|---|
-| `--url <url>` | both | — (required) | The deployment to export from / import into |
-| `--out <file>` | `export` | — (required) | Where to write the dump |
-| `--in <file>` | `import` | — (required) | The dump file to read |
-| `--admin-key <key>` | both | `STACKBASE_ADMIN_KEY` | Overrides the environment variable — unlike `deploy`, these two subcommands **do** have a flag for the admin key |
+| `--url <url>` | both | none (required) | The deployment to export from / import into |
+| `--out <file>` | `export` | none (required) | Where to write the dump |
+| `--in <file>` | `import` | none (required) | The dump file to read |
+| `--admin-key <key>` | both | `STACKBASE_ADMIN_KEY` | Overrides the environment variable, unlike `deploy`, these two subcommands **do** have a flag for the admin key |
 
 On success, `export` prints `✓ exported <n> documents, <m> index rows → <file>`; `import` prints
 `✓ imported <n> documents, <m> index rows`. A `401` from the target prints
-`✗ unauthorized — check STACKBASE_ADMIN_KEY / --admin-key`; a table-number collision or malformed
+`✗ unauthorized: check STACKBASE_ADMIN_KEY / --admin-key`; a table-number collision or malformed
 dump on import surfaces as `✗ import failed: <reason>`. Missing `--url`/file flag/admin key each
 produce their own `✗ missing …` message and exit 1 before any network call is made.
 
 ## `stackbase codegen`
 
 Regenerates `convex/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
-engine or serving anything — useful in CI to verify generated types are committed and current, or
+engine or serving anything. Useful in CI to verify generated types are committed and current, or
 before `stackbase serve` (which never generates codegen itself).
 
 ```bash
@@ -414,7 +435,7 @@ Prints `generated <dir>/_generated` on success.
 ## `stackbase fleet reshard`
 
 Changes a **stopped** Postgres fleet's shard count. This is an offline maintenance tool, not a
-live-resharding feature — every fleet node must be stopped first (an in-flight fleet leaves the
+live-resharding feature. Every fleet node must be stopped first (an in-flight fleet leaves the
 lease/shard bookkeeping inconsistent with a reshard in progress). Requires the `@stackbase/fleet`
 package (dynamic-imported; core `packages/cli` has zero static dependency on it, mirroring
 `serve --fleet`'s own gate).
@@ -425,8 +446,8 @@ stackbase fleet reshard --shards 4 --database-url postgres://...
 
 | Flag | Env equivalent | Meaning |
 |---|---|---|
-| `--shards <n>` | — | Target shard count. Required; must be an integer ≥ 1 |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` | Required; must be a Postgres URL — this command is Postgres-only |
+| `--shards <n>` | none | Target shard count. Required; must be an integer ≥ 1 |
+| `--database-url <url>` | `STACKBASE_DATABASE_URL` | Required; must be a Postgres URL, this command is Postgres-only |
 
 On success:
 
@@ -442,7 +463,7 @@ the reshard itself (e.g. the fleet is still live, or a post-reshard verification
 
 Changes a **stopped** object-storage deployment's shard count N→M: physically re-partitions every
 document's current state to its new shard lane based on the table's `.shardKey()`. Also an offline,
-non-atomic tool — back up the bucket first, and make sure no writer/replica is running against it.
+non-atomic tool: back up the bucket first, and make sure no writer/replica is running against it.
 
 ```bash
 stackbase objectstore reshard --object-store <url> --dir convex --shards 4
@@ -450,17 +471,17 @@ stackbase objectstore reshard --object-store <url> --dir convex --shards 4
 
 | Flag | Env equivalent | Meaning |
 |---|---|---|
-| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | Required — the bucket URL (same grammar as `serve --object-store`, above) |
-| `--dir <path>` | — | Default `convex`. Loaded only to read each table's `.shardKey()` off the schema — this is the reshard's only schema dependency |
-| `--shards <n>` | — | Required — target shard count, a positive integer |
+| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | Required, the bucket URL (same grammar as `serve --object-store`, above) |
+| `--dir <path>` | none | Default `convex`. Loaded only to read each table's `.shardKey()` off the schema, this is the reshard's only schema dependency |
+| `--shards <n>` | none | Required, target shard count, a positive integer |
 
 On success:
 
 ```
-✓ resharded 1 → 4 shard(s) (moved 128 doc(s); per-lane: 0=0, s1=40, s2=44, s3=44). A node booting this bucket now uses 4 shard(s) — set --shards 4 (or STACKBASE_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).
+✓ resharded 1 → 4 shard(s) (moved 128 doc(s); per-lane: 0=0, s1=40, s2=44, s3=44). A node booting this bucket now uses 4 shard(s): set --shards 4 (or STACKBASE_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).
 ```
 
-If the bucket is already at the requested count: `✓ bucket is already at <n> shard(s) — nothing to
+If the bucket is already at the requested count: `✓ bucket is already at <n> shard(s): nothing to
 do.` Any other failure (unsupported `--object-store` scheme, missing flags, a CAS-unsupported
 backend) surfaces as `✗ <message>`, exit 1. A missing `--shards`/`--object-store` value where a flag
 was given (e.g. a trailing `--dir` with nothing after it) is rejected explicitly
@@ -472,7 +493,7 @@ Prints usage and exits 0. Also the fallback for no command at all, and (with exi
 unrecognized command:
 
 ```
-stackbase — Convex-compatible reactive backend
+stackbase: Convex-compatible reactive backend
 
 Usage: stackbase <command> [options]
 
@@ -490,7 +511,7 @@ Commands:
   help       Show this help
 ```
 
-## Environment variables — full reference
+## Environment variables (full reference)
 
 Flags always win over their environment-variable equivalent when a command accepts both.
 
@@ -499,9 +520,9 @@ Flags always win over their environment-variable equivalent when a command accep
 | Variable | Read by | Meaning |
 |---|---|---|
 | `STACKBASE_ADMIN_KEY` | `serve`, `dev`, `deploy`, `migrate export/import`, compiled `build` binaries | Bearer token for the dashboard and admin/deploy/export/import endpoints. **Required** for `serve`/`build` binaries (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
-| `PORT` | `serve`, compiled `build` binaries | HTTP/WebSocket port (default `3000`) — `dev` uses `--port` only, no env fallback |
+| `PORT` | `serve`, compiled `build` binaries | HTTP/WebSocket port (default `3000`). `dev` uses `--port` only, no env fallback |
 | `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve`, `deploy` (via refreshed codegen only), compiled `build` binaries, `fleet reshard` | Postgres connection string — unset selects SQLite. See [Postgres](/docs/deploy/postgres) |
+| `STACKBASE_DATABASE_URL` | `dev`, `serve`, `deploy` (via refreshed codegen only), compiled `build` binaries, `fleet reshard` | Postgres connection string. Unset selects SQLite. See [Postgres](/docs/deploy/postgres) |
 | `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
 | `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
 | `STACKBASE_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
@@ -522,48 +543,65 @@ imply S3 intent; without a bucket that's an unambiguous misconfiguration, not a 
 falling back to local disk). Unset bucket → files live under `<data dir>/storage`. See
 [File storage](/docs/core-concepts/file-storage).
 
-### Fleet (Tier 2 — Postgres multi-node)
+The two tables above cover the common case. The rest apply only to multi-node and specialized
+hosts, expand whichever applies to you.
+
+<Accordions type="single">
+
+<Accordion title="Fleet (Tier 2: Postgres multi-node)">
 
 | Variable | Meaning |
 |---|---|
 | `STACKBASE_FLEET` | `1` or `true` → run as a fleet node (equivalent to `--fleet`) |
 | `STACKBASE_ADVERTISE_URL` | This node's URL, as reachable by other fleet nodes (equivalent to `--advertise-url`) |
-| `STACKBASE_FLEET_SHARDS` | Shard count — persisted at first boot, immutable after (equivalent to `--shards`; also consulted by `fleet reshard`'s companion, and by an `--object-store` boot when no `--shards` flag is given) |
-| `STACKBASE_FLEET_LEASE_TTL_MS` | Write-lease TTL in ms (default `15000`) — no CLI flag |
+| `STACKBASE_FLEET_SHARDS` | Shard count, persisted at first boot, immutable after (equivalent to `--shards`; also consulted by `fleet reshard`'s companion, and by an `--object-store` boot when no `--shards` flag is given) |
+| `STACKBASE_FLEET_LEASE_TTL_MS` | Write-lease TTL in ms (default `15000`), no CLI flag |
 | `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group-commit on, any other explicit value forces it off; unset → on for Postgres, off for SQLite |
 
-### Object storage (Tier 3 — bucket-backed, no database)
+</Accordion>
+
+<Accordion title="Object storage (Tier 3: bucket-backed, no database)">
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_OBJECT_STORE` | The bucket URL (equivalent to `--object-store`) — see the URL grammar above |
-| `STACKBASE_OBJECTSTORE_GC_MS` | Writer garbage-collection sweep cadence in ms (default `60000`) — no CLI flag |
+| `STACKBASE_OBJECT_STORE` | The bucket URL (equivalent to `--object-store`). See the URL grammar above |
+| `STACKBASE_OBJECTSTORE_GC_MS` | Writer garbage-collection sweep cadence in ms (default `60000`), no CLI flag |
 | `STACKBASE_REPLICA` | `1`/`true`/`yes` (case-insensitive) → boot as a read-only replica (equivalent to `--replica`) |
 | `STACKBASE_WRITER_URL` | The writer node's URL, for a replica to forward mutations to (equivalent to `--writer-url`) |
 
-### The wake seam (hosts that suspend the process between requests)
+</Accordion>
+
+<Accordion title="The wake seam (hosts that suspend the process between requests)">
 
 | Variable | Meaning |
 |---|---|
 | `STACKBASE_WAKE_URL` | Host endpoint to POST the next driver wake to, instead of `setTimeout` (equivalent to `--wake-url`) |
 | `STACKBASE_BACKSTOP_MIN_MS` | Floor for every driver's backstop poll cadence (equivalent to `--backstop-min-ms`) |
 
-### Cloudflare Durable-Object host
+</Accordion>
 
-These are read by `@stackbase/runtime-cloudflare`'s Worker itself (via `wrangler.jsonc` vars/bindings), not by `packages/cli` — they don't apply to `dev`/`serve`/`build`. See [Cloudflare](/docs/deploy/cloudflare).
+<Accordion title="Cloudflare Durable-Object host">
+
+These are read by `@stackbase/runtime-cloudflare`'s Worker itself (via `wrangler.jsonc`
+vars/bindings), not by `packages/cli`. They don't apply to `dev`/`serve`/`build`. See
+[Cloudflare](/docs/deploy/cloudflare).
 
 | Variable | Meaning |
 |---|---|
 | `STACKBASE_DO` | The `durable_objects` binding name in `wrangler.jsonc` that routes every request (HTTP and WebSocket upgrade alike) to the one stackbase Durable Object |
 | `STACKBASE_DO_LOCATION_HINT` | Pins the DO's home region to one of Cloudflare's location-hint codes, so its first cold instantiation lands near your users instead of near whichever edge first reaches it |
 
+</Accordion>
+
+</Accordions>
+
 ## See also
 
-- [Configuration](/docs/reference/configuration) — `stackbase.config.ts`, the `v.*` validator
+- [Configuration](/docs/reference/configuration): `stackbase.config.ts`, the `v.*` validator
   catalog, and this same environment-variable list presented alongside schema configuration.
 - [Local dev & dashboard](/docs/deploy/local-dev), [Self-hosting](/docs/deploy/self-hosting),
   [Postgres](/docs/deploy/postgres), [Scaling](/docs/deploy/scaling),
-  [Deploy & build](/docs/deploy/deploy-and-build), [Cloudflare](/docs/deploy/cloudflare) —
-  task-oriented walkthroughs for each of these deployment shapes.
-- [Migrate from Convex](/docs/reference/migrate-from-convex) — the full `stackbase migrate` codemod
+  [Deploy & build](/docs/deploy/deploy-and-build), [Cloudflare](/docs/deploy/cloudflare): task-oriented
+  walkthroughs for each of these deployment shapes.
+- [Migrate from Convex](/docs/reference/migrate-from-convex): the full `stackbase migrate` codemod
   and divergence report.

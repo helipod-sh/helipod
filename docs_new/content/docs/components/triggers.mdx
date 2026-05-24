@@ -5,29 +5,52 @@ description: React to table changes.
 
 {/* diataxis: explanation */}
 
-`@stackbase/triggers` runs a handler of your choosing whenever documents in a table you're watching
-are inserted, updated, or deleted — server-side, durably, with no dropped events. It fills the gap
-between mutations (synchronous, run inside the writer's own transaction, no external effects) and
-[workflows](/docs/components/workflows) (explicit, caller-initiated): denormalized counters, audit
-logs, notification fan-out, kicking off a durable workflow, syncing to an external system.
+A trigger is a small piece of code that runs itself whenever a table changes. Think of it as a
+database trigger, except it's an ordinary Stackbase function, and Stackbase runs it durably with no
+dropped events.
+
+`@stackbase/triggers` runs a handler you choose whenever documents in a table you're watching are
+inserted, updated, or deleted. It fills the gap between mutations, which are synchronous and run
+inside the writer's own transaction with no external effects, and
+[workflows](/docs/components/workflows), which are explicit and caller-initiated. A trigger reacts on
+its own to something that already happened. Use it for denormalized counters, audit logs,
+notification fan-out, kicking off a durable workflow, or syncing to an external system.
+
+<Callout type="info" title="Opt-in component">
 
 Like [`@stackbase/scheduler`](/docs/components/scheduling) and
-[`@stackbase/workflow`](/docs/components/workflows), triggers are an **opt-in component** — there's
-no CLI `init` command that installs it for you. You compose it in `stackbase.config.ts`;
+[`@stackbase/workflow`](/docs/components/workflows), triggers are an opt-in component. There's no CLI
+`init` command that installs it for you. You compose it in `stackbase.config.ts`;
 `examples/chat/stackbase.config.ts` is the reference pattern real projects copy from.
 
-## The core idea: a trigger is a durable cursor over the log, not a queue
+</Callout>
 
-Every write in Stackbase lands in an append-only MVCC log — that log **is** the change feed. A
-trigger owns one durable cursor row (`cursorTs`) recording how far it's read. A background driver
+## The core idea: a durable cursor over the log, not a queue
+
+Every write in Stackbase lands in an append-only MVCC log. That log is the change feed itself, so
+there's no separate queue for anything to fall out of.
+
+A trigger owns one durable cursor row, `cursorTs`, recording how far it has read. A background driver
 loop wakes on every commit, reads the committed revisions after the cursor for the trigger's watched
-table via a new engine seam, `DriverContext.readLog`, runs your handler with the batch, and only then
-advances the cursor. There is no separate queue table anything could be dropped from — the log is the
-single source of truth, so **a missed change is impossible by construction**. The only failure mode a
-crash can produce is **redelivering** a batch that already ran but whose cursor advance never landed.
+table (through a new engine seam, `DriverContext.readLog`), runs your handler with the batch, and only
+then advances the cursor.
 
-This is a meaningfully different guarantee from a typical "fire a webhook on write" feature: nothing
-is ever silently lost because there's nothing separate from the log to lose it from.
+Because there's no separate queue table to lose anything from, a missed change is impossible by
+construction. The only failure mode a crash can produce is redelivering a batch that already ran but
+whose cursor advance never landed.
+
+This is a meaningfully different guarantee from a typical "fire a webhook on write" feature. Nothing
+is ever silently lost, because there's nothing separate from the log to lose it from.
+
+```mermaid
+flowchart LR
+  Write["A mutation writes to the watched table"] -->|"wakes"| Loop["Trigger driver loop"]
+  Loop -->|"readLog(afterTs: cursorTs)"| Batch["Batch of changes"]
+  Batch --> Handler["Your handler runs"]
+  Handler -->|"success"| Advance["Cursor advances"]
+  Handler -->|"throws"| Retry["Retry with backoff"]
+  Retry --> Loop
+```
 
 ## Enabling and configuring a trigger
 
@@ -45,46 +68,60 @@ export default defineConfig({
 });
 ```
 
-`defineTriggers(opts)` takes a plain object; **each key is a watched table's app-visible name** (the
-name as it appears in `schema.ts`), and its value configures that one trigger:
+`defineTriggers(opts)` takes a plain object. Each key is a watched table's app-visible name (the name
+as it appears in `schema.ts`), and its value configures that one trigger.
 
-| Field | Type | Default | Meaning |
-|---|---|---|---|
-| `handler` | `string` (required) | — | The app function path to run on every batch — see [Handlers](#handlers-and-the-change-batch) below. |
-| `batchSize` | `number` | `64` | Max changes per handler invocation. |
-| `fromStart` | `boolean` | `false` | Replay the table's entire existing history from log position 0 instead of starting at the current tip. See [The cost of `fromStart`](#the-cost-of-fromstart). |
-| `maxDeliveriesPerWindow` | `number` | `1000` | The circuit breaker's threshold — see [The circuit breaker](#recursion-and-the-circuit-breaker). |
+<TypeTable
+  type={{
+    handler: {
+      type: "string (required)",
+      description: "The app function path to run on every batch. See Handlers and the change batch below.",
+    },
+    batchSize: {
+      type: "number",
+      description: "Max changes per handler invocation. Default 64.",
+    },
+    fromStart: {
+      type: "boolean",
+      description: "Replay the table's entire existing history from log position 0, instead of starting at the current tip. Default false. See The cost of fromStart below.",
+    },
+    maxDeliveriesPerWindow: {
+      type: "number",
+      description: "The circuit breaker's threshold. Default 1000. See Recursion and the circuit breaker below.",
+    },
+  }}
+/>
 
-A brand-new trigger (no `fromStart`) starts at the log's **current tip** — it only sees changes
-committed *after* it was configured, not the table's pre-existing rows. This is deliberate: silently
-replaying an entire table through a newly-added handler the first time it boots would be a surprising,
-unbounded-cost default.
+A brand-new trigger, with no `fromStart`, starts at the log's current tip. It only sees changes
+committed after it was configured, not the table's pre-existing rows. This is deliberate: silently
+replaying an entire table through a newly added handler the first time it boots would be a
+surprising, unbounded-cost default.
 
-There's no `ctx.triggers.*` facade to call from a mutation — unlike the scheduler, nothing in your
-own function code ever invokes a trigger directly. The whole surface is this declarative config plus
-the `triggers:resume` mutation for un-pausing one (see [Pausing and resuming](#failure-handling-pausing-and-resuming)
+There's no `ctx.triggers.*` facade to call from a mutation. Unlike the scheduler, nothing in your own
+function code ever invokes a trigger directly. The whole surface is this declarative config, plus the
+`triggers:resume` mutation for un-pausing one (see [Pausing and resuming](#failure-handling-pausing-and-resuming)
 below).
 
 ## Handlers and the change batch
 
-`handler` is an ordinary registered `mutation` or `action` — the same `mutation`/`action` builder from
-`./_generated/server` you'd use for anything else — whose path is **internal**: Stackbase's convention
-for "internal" is a `_`-prefixed function or module-segment name somewhere in the path (e.g.
+`handler` is an ordinary registered `mutation` or `action`, the same `mutation`/`action` builder from
+`./_generated/server` you'd use for anything else, whose path is internal. Stackbase's convention for
+"internal" is a `_`-prefixed function or module-segment name somewhere in the path (for example
 `notifications:_onMessage`, or a whole module named `_internal`), the same convention
 `@stackbase/scheduler` job targets use. There's no separate `internalMutation`/`internalAction`
-factory — the `_` prefix alone is what makes a function internal (not directly client-callable).
+factory. The `_` prefix alone is what makes a function internal, meaning not directly client-callable.
 
-This is enforced at **boot**, before the driver ever tries to dispatch to it. Three checks, and the
+This is enforced at boot, before the driver ever tries to dispatch to it. Three checks run, and the
 first violation found throws immediately with an instructive message:
 
-1. **Unknown path** — the configured `handler` doesn't resolve to any registered function at all.
-2. **Non-internal path** — the path resolves, but isn't `_`-prefixed. Trigger handlers must not be
+1. **Unknown path.** The configured `handler` doesn't resolve to any registered function at all.
+2. **Non-internal path.** The path resolves, but isn't `_`-prefixed. Trigger handlers must not be
    directly client-callable.
-3. **Wrong kind** — the path resolves and is internal, but is a `query`, not a `mutation` or `action`.
+3. **Wrong kind.** The path resolves and is internal, but is a `query`, not a `mutation` or `action`.
 
 ```
 @stackbase/triggers: trigger "messages"'s handler "notifications:onMessage" must be an internal
-function — a module or function name segment prefixed with "_" (e.g. "notifications:_onMessage").
+function: a module or function name segment prefixed with "_" (e.g. "notifications:_onMessage").
 Trigger handlers are driven only by the trigger loop and must not be directly client-callable.
 ```
 
@@ -100,18 +137,24 @@ interface LogChange {
   id: string;            // the document's id, as a string
   op: "insert" | "update" | "delete";
   newDoc: unknown | null;   // this revision's value (null for a delete)
-  oldDoc: unknown | null;   // the prior revision (null for an insert — see the tombstone edge case below)
+  oldDoc: unknown | null;   // the prior revision (null for an insert, see the tombstone edge case below)
   ts: number;               // this revision's commit timestamp
-  changeId: string;         // "<table>:<id>:<ts>" — this change's stable, immutable identity
+  changeId: string;         // "<table>:<id>:<ts>", this change's stable, immutable identity
 }
 ```
 
-### Mutation handler — writes fan out reactively
+## Writing a handler: mutation or action
 
-A mutation handler runs inside its own transaction, exactly like any other mutation: it has `ctx.db`,
-it's OCC-replayed on conflict, and any writes it makes are immediately visible and **fan out
-reactively** to any live subscription that overlaps them (the chat example's counter and audit-log
-pattern):
+A handler is either kind. Pick based on whether the reaction is itself a write, or an effect outside
+the transaction.
+
+<Tabs items={['Mutation handler', 'Action handler']}>
+
+<Tab value="Mutation handler">
+
+A mutation handler runs inside its own transaction, exactly like any other mutation. It has `ctx.db`,
+it's OCC-replayed on conflict, and any writes it makes are immediately visible and fan out reactively
+to any live subscription that overlaps them (the chat example's counter and audit-log pattern):
 
 ```ts title="convex/audit.ts"
 import { v } from "@stackbase/values";
@@ -121,7 +164,7 @@ import type { LogChange } from "@stackbase/component";
 export const _onChange = mutation({
   handler: async (ctx, { changes }: { changes: LogChange[] }) => {
     for (const change of changes) {
-      // Idempotency: dedup on changeId (see "The delivery contract" below) — a redelivered
+      // Idempotency: dedup on changeId (see "The delivery contract" below). A redelivered
       // change is a no-op, not a duplicate audit row.
       const dup = await ctx.db.query("auditLog", "by_changeId").eq("changeId", change.changeId).take(1).collect();
       if (dup.length > 0) continue;
@@ -136,13 +179,18 @@ export const _onChange = mutation({
 });
 ```
 
-This is exactly `examples/chat`'s `_onChange` handler — a durable audit log on the `messages` table,
+This is exactly `examples/chat`'s `_onChange` handler, a durable audit log on the `messages` table,
 driven entirely by `defineTriggers({ messages: { handler: "audit:_onChange" } })` in that example's
-`stackbase.config.ts`, with nothing in `messages.ts`'s own mutations aware the handler exists.
+`stackbase.config.ts`. Nothing in `messages.ts`'s own mutations is aware the handler exists.
 
-### Action handler — for side effects outside the transaction
+Reach for a mutation handler when the reaction is itself a write your app should see reactively:
+denormalized counters, an audit table, chaining into `ctx.workflow.start`.
 
-An **action** handler works the same way but runs outside the transaction — no `ctx.db`, native
+</Tab>
+
+<Tab value="Action handler">
+
+An action handler works the same way, but runs outside the transaction: no `ctx.db`, native
 `fetch`/`Date`/clock, exactly like any other [action](/docs/core-concepts/actions). This is the shape
 for notification fan-out or syncing to an external system:
 
@@ -161,116 +209,131 @@ export const _onMessage = action({
 });
 ```
 
-Use a mutation handler when the reaction is itself a write your app should see reactively
-(denormalized counters, an audit table, chaining into `ctx.workflow.start`). Use an action handler
-when the reaction is an external effect (a webhook, an email, a third-party API call) that has no
-place inside a transaction.
+Reach for an action handler when the reaction is an external effect, like a webhook, an email, or a
+third-party API call, that has no place inside a transaction.
+
+</Tab>
+
+</Tabs>
 
 ## The delivery contract
 
-Stated precisely — read this before writing a handler:
+Read this before writing a handler.
 
-> Delivery is **bounded at-least-once** and **in-order per document** — never coalesced. A crash
-> between a handler succeeding and its cursor advance landing redelivers the last batch's changes,
-> possibly *inside a larger batch* if new commits landed in the meantime (the batch boundary is not
-> stable across redelivery), but every change's `changeId` is stable. A document written twice before
-> the cursor reaches it produces both revisions in the log, not one coalesced update. There is no
-> ordering guarantee **across** different triggers, and one delivery is in flight per trigger at a
-> time — a slow handler backs up only its own trigger's backlog, never another trigger's.
-> **Handlers must be idempotent, or dedup on `changeId`.**
+<Callout type="warn" title="Delivery is bounded at-least-once, in-order per document">
 
-In practice: your handler will occasionally see a change it already processed — after a crash, or (in
-a multi-node deployment) a default-shard failover. Treat `changeId` as that change's permanent, stable
-identity, and either make writing it twice harmless (an upsert keyed off something derived from the
-document — "set counter to X," not "increment by 1") or explicitly check-and-skip a seen `changeId`,
-as the audit-log handler above does.
+Never coalesced. A crash between a handler succeeding and its cursor advance landing redelivers the
+last batch's changes, possibly inside a larger batch if new commits landed in the meantime (the batch
+boundary is not stable across redelivery), but every change's `changeId` is stable. A document written
+twice before the cursor reaches it produces both revisions in the log, not one coalesced update. There
+is no ordering guarantee across different triggers, and one delivery is in flight per trigger at a
+time: a slow handler backs up only its own trigger's backlog, never another trigger's. **Handlers must
+be idempotent, or dedup on `changeId`.**
 
-### `changeId` — the stable, redelivery-proof identity
+</Callout>
 
-`changeId` is `"<table>:<id>:<ts>"` — the change's exact log coordinate. It never changes, regardless
-of which batch a redelivery happens to place it in, which is exactly what makes dedup possible: your
-handler can't rely on stable *batch* boundaries, but it can always rely on this one field.
+In practice, your handler will occasionally see a change it already processed, after a crash, or (in a
+multi-node deployment) a default-shard failover. Treat `changeId` as that change's permanent, stable
+identity. Either make writing it twice harmless (an upsert keyed off something derived from the
+document, so it sets a counter to a value rather than incrementing it), or explicitly check-and-skip a
+seen `changeId`, as the audit-log handler above does.
 
-### Tombstone-prev edge case: delete then re-insert
+### `changeId`: the stable, redelivery-proof identity
 
-Re-inserting a document id that was previously deleted is **not** classified as a fresh `"insert"` —
-its log entry's `prev_ts` still points at the tombstone the delete left behind, so `op` reads
-`"update"`, but `oldDoc` reads back `null` (the tombstone), not the value the document held before the
-delete. If your handler diffs `oldDoc`/`newDoc`, treat a `null` `oldDoc` on an `"update"` the same as
-a fresh document, not as "nothing changed."
+`changeId` is `"<table>:<id>:<ts>"`, the change's exact log coordinate. It never changes, regardless of
+which batch a redelivery happens to place it in, which is exactly what makes dedup possible. Your
+handler can't rely on stable batch boundaries, but it can always rely on this one field.
+
+<Callout type="info" title="Edge case: delete then re-insert">
+
+Re-inserting a document id that was previously deleted is not classified as a fresh `"insert"`. Its log
+entry's `prev_ts` still points at the tombstone the delete left behind, so `op` reads `"update"`, but
+`oldDoc` reads back `null` (the tombstone), not the value the document held before the delete. If your
+handler diffs `oldDoc`/`newDoc`, treat a `null` `oldDoc` on an `"update"` the same as a fresh document,
+not as "nothing changed."
+
+</Callout>
 
 ## How the driver decides what to deliver: the durable cursor loop
 
-Under the hood, `@stackbase/triggers` runs **one independent event loop per configured trigger** —
-each trigger name gets its own coalescing state, so a slow handler on one trigger can never
-head-of-line-block another trigger's backlog. They're separate promise chains woken by the same
+Under the hood, `@stackbase/triggers` runs one independent event loop per configured trigger. Each
+trigger name gets its own coalescing state, so a slow handler on one trigger can never
+head-of-line-block another trigger's backlog. They're separate promise chains, woken by the same
 commit fan-out.
 
 Each trigger has two wake sources, with no fixed-interval polling driving normal delivery:
 
-- **Reactive**: the engine's commit fan-out (`DriverContext.onCommit`) wakes a trigger whenever a
-  commit's touched tables include its own watched table — and wakes *every* trigger whenever the
-  triggers component's own `cursors` table is touched externally (an operator calling
-  `triggers:resume`, which any paused trigger could be waiting on).
-- **Timer**: a failed delivery arms a single retry timer for that one trigger, at an exponential
+- **Reactive.** The engine's commit fan-out (`DriverContext.onCommit`) wakes a trigger whenever a
+  commit's touched tables include its own watched table, and wakes every trigger whenever the triggers
+  component's own `cursors` table is touched externally (an operator calling `triggers:resume`, which
+  any paused trigger could be waiting on).
+- **Timer.** A failed delivery arms a single retry timer for that one trigger, at an exponential
   backoff delay (`@stackbase/scheduler`'s `computeBackoff`).
 
-A trigger's own routine cursor-bookkeeping writes (`_advanceCursor`/`_recordFailure`/`_pause`) do
-**not** themselves re-wake the loop — if they did, a trigger would perpetually rediscover its own
-housekeeping as "new work" and spin forever. Only genuine external activity (a real write to the
-watched table, or an external `triggers:resume` call) wakes it.
+A trigger's own routine cursor-bookkeeping writes (`_advanceCursor`/`_recordFailure`/`_pause`) do not
+themselves re-wake the loop. If they did, a trigger would perpetually rediscover its own housekeeping
+as new work and spin forever. Only genuine external activity, a real write to the watched table, or an
+external `triggers:resume` call, wakes it.
 
-On every wake, the driver drains as much as it can: it peeks the log's current stable bound once at
-the start of the attempt, then loops `readLog({ afterTs: cursorTs, tables: [name], limit: batchSize })`
-— advancing the cursor after each successful delivery (or immediately, at no cost, across a stretch of
-the log with no matching changes at all) — until it reaches that bound, a delivery fails, or the
-breaker/max-failures trips. A wake that lands mid-drain doesn't get silently swallowed: the loop
-notices and takes one more full pass with a freshly re-peeked bound before it actually goes idle.
+On every wake, the driver drains as much as it can. It peeks the log's current stable bound once at the
+start of the attempt, then loops `readLog({ afterTs: cursorTs, tables: [name], limit: batchSize })`,
+advancing the cursor after each successful delivery (or immediately, at no cost, across a stretch of
+the log with no matching changes at all), until it reaches that bound, a delivery fails, or the breaker
+or max-failures trips. A wake that lands mid-drain doesn't get silently swallowed: the loop notices and
+takes one more full pass with a freshly re-peeked bound before it actually goes idle.
 
-### The `_initCursor`/tip-peek race, and why it can't self-chase
+<Accordions type="single">
 
-A brand-new trigger's very first pass needs to know where "now" is before it can seed its cursor at
-the tip. It peeks the log's bound **before** creating its own cursor row — not after — because
-`_initCursor` is itself a write, and a fresh peek taken *after* that write landed would see the
-trigger's own housekeeping insert and mistake it for "one more change to catch up to," a self-chasing
-loop that never settles. Capturing the bound once, up front, and reusing that exact value for both the
-cursor seed and the pass's drain target sidesteps this entirely.
+<Accordion title="The _initCursor race, and why it can't self-chase">
 
-### Fleet stable-prefix bound
+A brand-new trigger's very first pass needs to know where "now" is before it can seed its cursor at the
+tip. It peeks the log's bound before creating its own cursor row, not after, because `_initCursor` is
+itself a write. A fresh peek taken after that write landed would see the trigger's own housekeeping
+insert and mistake it for one more change to catch up to: a self-chasing loop that never settles.
+Capturing the bound once, up front, and reusing that exact value for both the cursor seed and the
+pass's drain target sidesteps this entirely.
 
-`readLog`'s "how far can I safely read" bound is not simply "the highest committed timestamp" in a
-multi-node (fleet) deployment: per-shard commits can land at the driver out of order, so a naive max-ts
-bound could let a cursor advance past a commit that's still in flight on another shard — permanently
-skipping it once the cursor moves beyond it. Instead the bound is the **stable log prefix** — in a
-fleet, the minimum frontier timestamp across shard leases; on a single node, simply the highest
-committed timestamp — so a change above an in-flight gap elsewhere in the fleet is never surfaced
+</Accordion>
+
+<Accordion title="Fleet stable-prefix bound">
+
+`readLog`'s "how far can I safely read" bound is not simply the highest committed timestamp in a
+multi-node (fleet) deployment. Per-shard commits can land at the driver out of order, so a naive
+max-ts bound could let a cursor advance past a commit that's still in flight on another shard,
+permanently skipping it once the cursor moves beyond it. Instead the bound is the stable log prefix:
+in a fleet, the minimum frontier timestamp across shard leases; on a single node, simply the highest
+committed timestamp. So a change above an in-flight gap elsewhere in the fleet is never surfaced
 early, and never silently skipped later. This is what makes triggers safe to run unmodified under
 sharding: correctness doesn't depend on which topology the driver happens to be running in.
 
+</Accordion>
+
+</Accordions>
+
 ## Failure handling, pausing, and resuming
 
-If a handler throws, the identical batch — the same `changeId`s, possibly widened by new commits that
-landed in the meantime — is retried with exponential backoff. The cursor **never advances past an
-undelivered batch**, which is exactly what makes redelivery, not loss, the failure mode.
-`failureCount` persists on the trigger's cursor row (restart-safe); the in-memory backoff delay itself
-does not, so a process restart mid-backoff retries immediately rather than waiting out the remaining
-delay — an accepted, documented gap.
+If a handler throws, the identical batch, the same `changeId`s, possibly widened by new commits that
+landed in the meantime, is retried with exponential backoff. The cursor never advances past an
+undelivered batch, which is exactly what makes redelivery, not loss, the failure mode. `failureCount`
+persists on the trigger's cursor row (restart-safe); the in-memory backoff delay itself does not, so a
+process restart mid-backoff retries immediately rather than waiting out the remaining delay, an
+accepted, documented gap.
 
-After **8 consecutive failures** (`MAX_CONSECUTIVE_FAILURES`), the trigger pauses itself
-(`state: "paused"`, `pausedReason: "max-failures"`, with an operator-visible error log) rather than
-retrying forever. A paused trigger stops consuming its backlog entirely until you call the
-`triggers:resume` mutation — directly, or from the dashboard's function runner — which clears the
-failure count and flips it back to `"running"`.
+After 8 consecutive failures (`MAX_CONSECUTIVE_FAILURES`), the trigger pauses itself (`state:
+"paused"`, `pausedReason: "max-failures"`, with an operator-visible error log) rather than retrying
+forever. A paused trigger stops consuming its backlog entirely until you call the `triggers:resume`
+mutation, directly, or from the dashboard's function runner, which clears the failure count and flips
+it back to `"running"`.
 
 Resuming isn't itself a write to the watched table, so the driver doesn't learn about it via the
 reactive commit fan-out. Instead, a periodic backstop timer (`BEAT_MS`, 30 seconds by default) wakes
 every configured trigger regardless, which is what notices an external `triggers:resume` call. A
-resumed trigger is picked back up **eventually, within about 30 seconds** — not the instant
-`triggers:resume` returns. (A host that stretches this backstop cadence — see `DriverContext.backstopMs`
-— trades a slower resume-pickup for fewer wake-ups; the documented cost is exactly that stretched
+resumed trigger is picked back up eventually, within about 30 seconds, not the instant
+`triggers:resume` returns. (A host that stretches this backstop cadence, see `DriverContext.backstopMs`,
+trades a slower resume pickup for fewer wake-ups. The documented cost is exactly that stretched
 window, nothing else.)
 
-### `triggers:cursors` — inspecting trigger state
+### `triggers:cursors`: inspecting trigger state
 
 Every configured trigger's cursor is a row you can browse (in the dashboard's data browser, or via
 `triggers:_status`, which returns every cursor row for operator introspection):
@@ -289,19 +352,19 @@ interface CursorRow {
 
 ## Recursion and the circuit breaker
 
-A trigger's own handler writing back to its **own watched table** is delivered like any other
-write — this is intentional, DB-trigger semantics: legitimate patterns need it (recomputing a field,
-normalizing a value on write, chaining a state machine forward). It also means a handler that
+A trigger's own handler writing back to its own watched table is delivered like any other write. This
+is intentional, DB-trigger semantics: legitimate patterns need it, like recomputing a field,
+normalizing a value on write, or chaining a state machine forward. It also means a handler that
 unconditionally writes to its watched table on every delivery will recurse: each of its own writes
 becomes a new change it delivers to itself.
 
-As a safety net — not a substitute for writing a well-behaved handler — each trigger tracks its own
-deliveries in a rolling window: default **1000 deliveries per 10-second window**
+As a safety net, not a substitute for writing a well-behaved handler, each trigger tracks its own
+deliveries in a rolling window: default 1000 deliveries per 10-second window
 (`DEFAULT_MAX_DELIVERIES_PER_WINDOW` / `BREAKER_WINDOW_MS`), configurable per-trigger via
 `maxDeliveriesPerWindow`. Tripping it pauses the trigger with `pausedReason: "circuit-breaker"`
-instead of spinning the node — recognizably distinct from a `"max-failures"` pause, because the
-handler may have been succeeding on every single call; it was just running far too often. Fix the
-recursive write pattern, then `triggers:resume`.
+instead of spinning the node, recognizably distinct from a `"max-failures"` pause, because the handler
+may have been succeeding on every single call. It was just running far too often. Fix the recursive
+write pattern, then `triggers:resume`.
 
 ```ts title="convex/loops.ts"
 // The recursion footgun, deliberately: this handler writes its OWN watched table on every
@@ -319,31 +382,30 @@ export const _spin = mutation({
 defineTriggers({ loops: { handler: "app:_spin", maxDeliveriesPerWindow: 8 } });
 ```
 
-Once the breaker trips, the rest of the server keeps running normally — an unrelated mutation still
+Once the breaker trips, the rest of the server keeps running normally. An unrelated mutation still
 commits fine; only the runaway trigger itself is paused.
 
 ## Batching: `batchSize` and the byte budget
 
 Each handler invocation receives at most `batchSize` changes (default 64, `DEFAULT_BATCH_SIZE`). A
-batch is also cut early — mid-batch, never mid-commit — once its serialized size crosses a **~1MB
-byte budget** (`BYTE_BUDGET`), so one giant commit touching many documents at once can't blow up a
-single delivery into an unbounded payload. The cut is measured with `JSON.stringify(...).length`
-(UTF-16 code units, a ballpark, not an exact byte count) and never splits a single commit timestamp's
-group of changes across two batches — a commit that touches multiple documents in the same watched
-table at once is either delivered whole or not yet, never half-delivered with the cursor advanced past
-the excluded half (which would silently and permanently skip them). If the very first commit-ts group
-alone already exceeds the budget — one huge document, or many documents committed together — it's
-delivered whole and unbounded rather than stalling the trigger forever waiting for something smaller.
+batch is also cut early, mid-batch, never mid-commit, once its serialized size crosses a roughly 1MB
+byte budget (`BYTE_BUDGET`), so one giant commit touching many documents at once can't blow up a single
+delivery into an unbounded payload. The cut is measured with `JSON.stringify(...).length` (UTF-16 code
+units, a ballpark, not an exact byte count) and never splits a single commit timestamp's group of
+changes across two batches. A commit that touches multiple documents in the same watched table at once
+is either delivered whole or not yet, never half-delivered with the cursor advanced past the excluded
+half (which would silently and permanently skip them). If the very first commit-ts group alone already
+exceeds the budget, one huge document, or many documents committed together, it's delivered whole and
+unbounded rather than stalling the trigger forever waiting for something smaller.
 
 ## The cost of `fromStart`
 
-Setting `fromStart: true` replays a table's **entire existing history** — every revision ever
-committed, in commit order — through your handler, honestly documented as potentially expensive: on a
-large table this can be **minutes of catch-up**, not seconds, throttled by the same `batchSize`/byte
-budget as live delivery so it never becomes one unbounded delivery. Reach for it deliberately — a new
-audit table that needs to backfill from day one, for example — not by default. The default (no
-`fromStart`) starts a brand-new trigger at the log's current tip precisely to avoid this cost by
-default.
+Setting `fromStart: true` replays a table's entire existing history: every revision ever committed, in
+commit order, through your handler. This is honestly documented as potentially expensive: on a large
+table this can be minutes of catch-up, not seconds, throttled by the same `batchSize`/byte budget as
+live delivery so it never becomes one unbounded delivery. Reach for it deliberately, for a new audit
+table that needs to backfill from day one, for example, not by default. The default (no `fromStart`)
+starts a brand-new trigger at the log's current tip precisely to avoid this cost by default.
 
 ## Composition pattern: a trigger that starts a workflow
 
@@ -383,7 +445,7 @@ export const _onOrderChange = mutation({
     for (const change of changes) {
       if (change.op !== "insert") continue;
       // ctx.workflow.start is idempotent-by-changeId here only if you make it so (e.g. checking
-      // a "workflowStarted" flag on the order) — the same at-least-once guidance applies: this
+      // a "workflowStarted" flag on the order): the same at-least-once guidance applies. This
       // handler can, per the delivery contract above, see the same insert twice.
       await ctx.workflow.start("workflows:fulfillOrder", { orderId: change.id });
     }
@@ -391,42 +453,42 @@ export const _onOrderChange = mutation({
 });
 ```
 
-Every new order insert reactively kicks off a durable `fulfillOrder` run — the trigger is the
-reactive edge (data change → workflow start), and the workflow is the durable multi-step body
-(retries, resumability, and saga-style rollback if a step declares `compensate`, all coming from
-`@stackbase/workflow` itself, not from anything triggers-specific).
+Every new order insert reactively kicks off a durable `fulfillOrder` run. The trigger is the reactive
+edge (data change to workflow start), and the workflow is the durable multi-step body: retries,
+resumability, and saga-style rollback if a step declares `compensate`, all coming from
+`@stackbase/workflow` itself, not from anything triggers-specific.
 
 ## What triggers are not
 
-- **Not effectively-once.** Delivery is bounded at-least-once; co-committing a mutation handler's
+- **Not effectively-once.** Delivery is bounded at-least-once. Co-committing a mutation handler's
   cursor advance atomically with its own effects in one transaction would need a same-transaction
-  sub-call seam that doesn't exist yet — dedup on `changeId` in the meantime.
-- **Not a field-level or predicate filter.** A trigger watches an entire table; if you only care about
+  sub-call seam that doesn't exist yet. Dedup on `changeId` in the meantime.
+- **Not a field-level or predicate filter.** A trigger watches an entire table. If you only care about
   some changes (a specific field, a specific value transition), check inside the handler.
-- **Not ordered across tables**, only within one trigger's own watched table (and only within that one
-  trigger — there's no cross-trigger ordering guarantee even on the same table).
+- **Not ordered across tables.** Only within one trigger's own watched table, and only within that one
+  trigger: there's no cross-trigger ordering guarantee even on the same table.
 - **Not dynamically registerable at runtime.** Like crons, a trigger is declared in
-  `stackbase.config.ts` and fixed for the deployment's life — adding or removing one needs a restart.
-- **Not a substitute for the scheduler or workflows.** A trigger reacts to data that already changed;
-  it doesn't schedule future work on its own (pair it with `ctx.workflow.start`/`ctx.scheduler.runAfter`
-  for that) and it doesn't orchestrate multi-step retryable logic itself (that's what workflows are
-  for).
+  `stackbase.config.ts` and fixed for the deployment's life. Adding or removing one needs a restart.
+- **Not a substitute for the scheduler or workflows.** A trigger reacts to data that already changed.
+  It doesn't schedule future work on its own (pair it with
+  `ctx.workflow.start`/`ctx.scheduler.runAfter` for that), and it doesn't orchestrate multi-step
+  retryable logic itself. That's what workflows are for.
 
 ## Renamed or dropped watched tables
 
-A cursor row is keyed by the table's **name**. Stackbase deploys are additive-only (no table
-renames/drops via `stackbase deploy`), so this mostly can't happen in the ordinary flow — but if a
-table a trigger watches does disappear from the schema (a local schema edit plus restart, say), there
-is no name-resolution error: the trigger simply stops matching any changes for that name. It goes
-quiet rather than pausing — its cursor keeps advancing along with the log (a watched-but-nonexistent
-table just never contributes a change to scan), so nothing is flagged as broken. If a trigger seems to
-have stopped delivering, check that its watched table name still exists in the current schema.
+A cursor row is keyed by the table's name. Stackbase deploys are additive-only (no table renames or
+drops via `stackbase deploy`), so this mostly can't happen in the ordinary flow. But if a table a
+trigger watches does disappear from the schema (a local schema edit plus restart, say), there is no
+name-resolution error: the trigger simply stops matching any changes for that name. It goes quiet
+rather than pausing. Its cursor keeps advancing along with the log (a watched-but-nonexistent table
+just never contributes a change to scan), so nothing is flagged as broken. If a trigger seems to have
+stopped delivering, check that its watched table name still exists in the current schema.
 
 ## Related
 
-- [Scheduling](/docs/components/scheduling) — the recurring-driver seam (`onCommit` + wall-clock
+- [Scheduling](/docs/components/scheduling): the recurring-driver seam (`onCommit` plus a wall-clock
   timer, coalescing, backoff) that triggers' own event loop is built on the same shape as.
-- [Workflows](/docs/components/workflows) — the durable multi-step body a trigger's handler commonly
+- [Workflows](/docs/components/workflows): the durable multi-step body a trigger's handler commonly
   kicks off.
-- [Queries](/docs/core-concepts/queries) and [Mutations](/docs/core-concepts/mutations) — the
+- [Queries](/docs/core-concepts/queries) and [Mutations](/docs/core-concepts/mutations): the
   reactivity model a mutation handler's own writes participate in exactly like any other write.
