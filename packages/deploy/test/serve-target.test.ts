@@ -33,6 +33,13 @@ describe("serveTarget", () => {
     let auth: string | undefined;
     server = createServer((req, res) => {
       auth = req.headers.authorization;
+      // Handle GET to /_admin/deploy/modules (from incremental push) — 404 it
+      if (req.method === "GET" && req.url === "/_admin/deploy/modules") {
+        res.statusCode = 404;
+        res.setHeader("content-type", "application/json");
+        return res.end(JSON.stringify({}));
+      }
+      // Handle POST to /_admin/deploy
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
