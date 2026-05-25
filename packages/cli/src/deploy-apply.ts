@@ -10,6 +10,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { AdminApi } from "@stackbase/admin";
 import type { ComponentDefinition } from "@stackbase/component";
+import { sha256Hex } from "@stackbase/deploy";
 import { loadConvexDir } from "./load-modules";
 import { push } from "./push-pipeline";
 import { withStorageModules } from "./boot";
@@ -23,15 +24,50 @@ export interface DeployDeps {
   components: ComponentDefinition[];
   current: () => { schemaJson: DeploySchema["schemaJson"]; tableNumbers: Record<string, number> };
   deployRoot: string;
+  /** The modules from the last successful push this server lifetime — used to resolve `unchanged`
+   *  entries in a delta payload. Empty at boot (first deploy is a full push). */
+  currentModules: Map<string, { code: string; sha: string }>;
 }
 export type DeployResult =
-  | { ok: true; rev: string; functions: number }
-  | { ok: false; kind: "load-error" | "schema-incompatible"; error: string };
+  | { ok: true; rev: string; functions: number; modules: Map<string, { code: string; sha: string }> }
+  | { ok: false; kind: "load-error" | "schema-incompatible" | "stale-base"; error: string };
+
+export type DeployPayload =
+  | { files: Array<{ path: string; code: string }> }
+  | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> };
+
+export type ReconstructResult =
+  | { ok: true; files: Array<{ path: string; code: string }> }
+  | { ok: false; error: string };
+
+/** Rebuild the full file tree from a legacy `{files}` OR a delta `{changed, unchanged}` payload.
+ *  Each `unchanged` module is resolved from `currentModules` and its sha verified; a missing path or
+ *  a sha disagreement is a `stale-base` (the client retries as a full push). The union of changed +
+ *  unchanged is the complete tree, so an unreferenced current module is dropped (deletion by omission). */
+export function reconstructFiles(
+  payload: DeployPayload,
+  currentModules: Map<string, { code: string; sha: string }>,
+): ReconstructResult {
+  if ("changed" in payload) {
+    const files = [...(payload.changed ?? [])];
+    for (const u of payload.unchanged ?? []) {
+      const cur = currentModules.get(u.path);
+      if (!cur) return { ok: false, error: `stale-base: server has no module "${u.path}"` };
+      if (cur.sha !== u.sha256) return { ok: false, error: `stale-base: module "${u.path}" hash mismatch` };
+      files.push({ path: u.path, code: cur.code });
+    }
+    return { ok: true, files };
+  }
+  return { ok: true, files: payload.files ?? [] };
+}
 
 export async function applyDeploy(
   deps: DeployDeps,
-  files: Array<{ path: string; code: string }>,
+  payload: DeployPayload,
 ): Promise<DeployResult> {
+  const rec = reconstructFiles(payload, deps.currentModules);
+  if (!rec.ok) return { ok: false, kind: "stale-base", error: rec.error };
+  const files = rec.files;
   const rev = createHash("sha256").update(JSON.stringify(files)).digest("hex").slice(0, 12);
   const dir = join(deps.deployRoot, rev, "convex");
 
@@ -68,5 +104,6 @@ export async function applyDeploy(
   deps.runtime.setTableNumbers(project.tableNumbers);
   deps.setRoutes(project.routes);
   deps.adminApi.setSchema(project.schemaJson, project.tableNumbers, project.manifest);
-  return { ok: true, rev, functions: Object.keys(project.moduleMap).length };
+  const modules = new Map(files.map((f) => [f.path, { code: f.code, sha: sha256Hex(f.code) }]));
+  return { ok: true, rev, functions: Object.keys(project.moduleMap).length, modules };
 }
