@@ -32,6 +32,13 @@ export type DeployResult =
   | { ok: true; rev: string; functions: number; modules: Map<string, { code: string; sha: string }> }
   | { ok: false; kind: "load-error" | "schema-incompatible" | "stale-base"; error: string };
 
+/** The wire-safe subset of `DeployResult` — identical shape minus `modules` (a `Map`, which must
+ *  never cross HTTP). `serve.ts`'s `deploy.apply` closure strips it before returning; this is the
+ *  type that actually travels over `/_admin/deploy`. */
+export type DeployWireResult =
+  | { ok: true; rev: string; functions: number }
+  | { ok: false; kind: "load-error" | "schema-incompatible" | "stale-base"; error: string };
+
 export type DeployPayload =
   | { files: Array<{ path: string; code: string }> }
   | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> };
