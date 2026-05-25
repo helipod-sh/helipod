@@ -135,6 +135,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
         components: [],
         current: () => liveSchema,
         deployRoot: join(base, "deployRoot"),
+        currentModules: new Map(),
       };
 
       // v1 has no `add` mutation yet.
@@ -149,7 +150,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
       write(v2SrcDir, "items.ts", ITEMS_V2);
       const filesV2 = await packageApp(v2SrcDir);
 
-      const resultV2 = await applyDeploy(deps, filesV2);
+      const resultV2 = await applyDeploy(deps, { files: filesV2 });
       expect(resultV2.ok).toBe(true);
       if (!resultV2.ok) throw new Error("unreachable");
       expect(resultV2.rev).toMatch(/^[0-9a-f]{12}$/);
@@ -172,7 +173,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
       write(v3SrcDir, "items.ts", ITEMS_V3_BROKEN);
       const filesV3 = await packageApp(v3SrcDir);
 
-      const resultV3 = await applyDeploy(deps, filesV3);
+      const resultV3 = await applyDeploy(deps, { files: filesV3 });
       expect(resultV3.ok).toBe(false);
       if (resultV3.ok) throw new Error("unreachable");
       expect(resultV3.kind).toBe("load-error");
@@ -192,7 +193,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
       write(v4SrcDir, "schema.ts", SCHEMA_V4_DESTRUCTIVE);
       const filesV4 = await packageApp(v4SrcDir);
 
-      const resultV4 = await applyDeploy(deps, filesV4);
+      const resultV4 = await applyDeploy(deps, { files: filesV4 });
       expect(resultV4.ok).toBe(false);
       if (resultV4.ok) throw new Error("unreachable");
       expect(resultV4.kind).toBe("schema-incompatible");
@@ -231,9 +232,10 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
         components: [],
         current: () => liveSchema,
         deployRoot,
+        currentModules: new Map(),
       };
 
-      const result = await applyDeploy(deps, [{ path: "../escape.js", code: "export const x = 1;" }]);
+      const result = await applyDeploy(deps, { files: [{ path: "../escape.js", code: "export const x = 1;" }] });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("unreachable");
       expect(result.kind).toBe("load-error");
@@ -270,11 +272,12 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
         components: [],
         current: () => liveSchema,
         deployRoot: join(base, "badcode-deployRoot"),
+        currentModules: new Map(),
       };
 
-      const result = await applyDeploy(deps, [
+      const result = await applyDeploy(deps, { files: [
         { path: "items.js", code: 123 as unknown as string },
-      ]);
+      ] });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("unreachable");
       expect(result.kind).toBe("load-error");
@@ -314,6 +317,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
         components: [fakeComponent],
         current: () => liveSchema,
         deployRoot: join(base, "add-table-deployRoot"),
+        currentModules: new Map(),
       };
 
       const v5SrcDir = join(base, "add-table-v5-src");
@@ -322,7 +326,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
       write(v5SrcDir, "items.ts", ITEMS_V1);
       const filesV5 = await packageApp(v5SrcDir);
 
-      const result = await applyDeploy(deps, filesV5);
+      const result = await applyDeploy(deps, { files: filesV5 });
       // Before the fix: composeTables allocates from a fresh registry positionally (all app
       // tables, THEN component tables) — adding "notes" would shift "scheduler/jobs" from 10002
       // to 10003, and diffSchema would reject this as a destructive tableNumber change on a table
