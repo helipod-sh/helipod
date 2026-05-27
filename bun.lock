@@ -913,6 +913,21 @@
         "vitest": "catalog:",
       },
     },
+    "packages/vite": {
+      "name": "@stackbase/vite",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@stackbase/cli": "workspace:*",
+        "@types/node": "catalog:",
+        "tsup": "catalog:",
+        "typescript": "catalog:",
+        "vite": "^6.0.7",
+        "vitest": "catalog:",
+      },
+      "peerDependencies": {
+        "vite": ">=5.0.0",
+      },
+    },
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-x64",
@@ -1323,6 +1338,8 @@
     "@stackbase/triggers": ["@stackbase/triggers@workspace:components/triggers"],
 
     "@stackbase/values": ["@stackbase/values@workspace:packages/values"],
+
+    "@stackbase/vite": ["@stackbase/vite@workspace:packages/vite"],
 
     "@stackbase/workflow": ["@stackbase/workflow@workspace:components/workflow"],
 
