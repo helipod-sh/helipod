@@ -45,6 +45,21 @@ upgrade), `/_dashboard`, and `/_admin` to the running engine. Your frontend code
 The child `stackbase dev` process is torn down when Vite's dev server closes (including on
 `SIGINT`/`SIGTERM`), so `Ctrl-C` cleanly stops both.
 
+## Runtime requirement
+
+The spawned `stackbase dev` loads your app's TypeScript function files at runtime via `import()`. 
+
+- **Bun** (primary) — Bun runs `.ts` files natively. If your project already uses Bun, there's nothing to configure.
+- **Node** — Importing `.ts` directly requires Node ≥ 22.6 with the `--experimental-strip-types` flag, or Node ≥ 23. On an older Node version you'll see `ERR_MODULE_NOT_FOUND` when the CLI tries to load your functions.
+
+If you're on an older Node and see that error, set the plugin's `command` option to run the CLI under Bun instead:
+
+```ts
+stackbase({
+  command: "bun ./node_modules/.bin/stackbase",
+})
+```
+
 ## What it does
 
 - Resolves a free port for the backend (or uses the one you specify).
@@ -64,7 +79,7 @@ The child `stackbase dev` process is torn down when Vite's dev server closes (in
 stackbase({
   convexDir: "convex",
   port: 3210,
-  command: "node ./node_modules/.bin/stackbase",
+  command: "bun ./node_modules/.bin/stackbase",
   args: ["--database-url", "postgres://…"],
 })
 ```
