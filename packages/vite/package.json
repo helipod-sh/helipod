@@ -16,10 +16,16 @@
   "peerDependencies": { "vite": ">=5.0.0" },
   "devDependencies": {
     "@stackbase/cli": "workspace:*",
+    "@stackbase/client": "workspace:*",
+    "@stackbase/executor": "workspace:*",
+    "@stackbase/id-codec": "workspace:*",
+    "@stackbase/values": "workspace:*",
     "@types/node": "catalog:",
+    "@types/ws": "^8.5.13",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vite": "^6.0.7",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "ws": "^8.18.0"
   }
 }

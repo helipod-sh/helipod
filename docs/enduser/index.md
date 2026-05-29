@@ -63,6 +63,7 @@ The reactive core (Build + Local development) is real and runnable — see
 ## Local development
 
 - [Dev Server](/local/dev-server) — `stackbase dev` and CLI commands. (Runtime is auto-detected; there are no `--node`/`--bun`/`--cf` flags.)
+- [Vite Plugin](/local/vite-plugin) — `@stackbase/vite`: run your Vite frontend and Stackbase backend on one origin with a single `vite` command.
 - [Dashboard](/local/dashboard) — browse data and run functions at `/_dashboard`.
 - [DevTools](/local/devtools) — browser extension for debugging.
 
