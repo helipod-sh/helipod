@@ -1,7 +1,14 @@
 # CLI Bundle-on-Load (runtime-agnostic module loading) — Design Spec
 
 **Date:** 2026-05-15
-**Status:** Design (pre-plan). Investigation + root-cause complete; awaiting user review before the implementation plan.
+**Status:** SHIPPED (merged to main). **The design below is superseded in two ways by what shipped** — the E2E surfaced gaps this pre-plan design didn't anticipate:
+1. **Externalize only `@stackbase/*`, not all packages.** This doc's `packages: "external"` inlines nothing beyond the relative graph, which left third-party CJS deps external — and a native ESM *named* import of a CJS package (e.g. `import { parseExpression } from "cron-parser"`) fails under Node. The shipped loader uses `external: ["@stackbase/*"]`: only the engine's own packages stay external (for singleton identity); **user npm deps are BUNDLED**, so esbuild does the CJS→ESM interop at bundle time. A companion fix (`components/scheduler/src/crons.ts`) default-imports `cron-parser` so `@stackbase/scheduler` itself loads under native Node.
+2. **Per-convex-dir cache namespacing.** The cache path is `.cache/stackbase/<sha256(absDir)>/<key>.mjs` (not a flat `<key>.mjs`) so two projects resolving to the same `node_modules` ancestor never collide; and `resolveCacheDir` falls back to the CLI's own `node_modules` root when the app dir has none.
+
+**Known follow-ons (not built):** an externalize-list escape hatch for user deps that can't be bundled (native `.node` bindings, `__dirname` asset reads, dynamic `require`); a CI guard that greps built dists for named imports of lexer-opaque CJS deps (turn the Bun-ism tail into a caught regression).
+
+---
+
 **Type:** Correctness fix to a load-bearing path (`loadConvexDir`), not a new feature.
 
 ## Problem (reproduced + root-caused)
