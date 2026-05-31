@@ -1,1 +1,10 @@
-{ "name": "convex", "version": "1.0.0", "type": "module", "main": "server.js" }
+{
+  "name": "convex",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "exports": {
+    ".": "./server.js",
+    "./server": "./server.js"
+  }
+}
