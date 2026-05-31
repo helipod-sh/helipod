@@ -8,6 +8,7 @@
  * so engine singletons keep their identity. Extension-agnostic: a hand-authored dev project is
  * `.ts`, a `stackbase deploy`-pushed tree is `.js` — both bundle+load the same way.
  */
+import { createHash } from "node:crypto";
 import { readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,7 +48,11 @@ function resolveCacheDir(startDir: string): string {
     }
     dir = parent;
   }
-  const cacheDir = join(dir, "node_modules", ".cache", "stackbase");
+  // Namespace per convex-dir so two projects that resolve to the SAME node_modules ancestor never
+  // collide on `<key>.mjs` (a shared path would let a parallel load of a different dir overwrite this
+  // one's bundle between write and read — a silent wrong-module load).
+  const ns = createHash("sha256").update(resolve(startDir)).digest("hex").slice(0, 16);
+  const cacheDir = join(dir, "node_modules", ".cache", "stackbase", ns);
   mkdirSync(cacheDir, { recursive: true });
   return cacheDir;
 }
