@@ -211,7 +211,7 @@ describe("stackbase deploy — incremental (delta) push end-to-end through the r
       /* body `serveTarget.push` sends — assert it's a genuine one-file delta.  */
       /* ---------------------------------------------------------------------- */
       const { result: deployV2Code, bodies } = await captureDeployPosts(() =>
-        deployCommand(["--url", round1.server.url, "--dir", v2Dir]),
+        deployCommand(["--url", round1!.server.url, "--dir", v2Dir]),
       );
       expect(deployV2Code).toBe(0);
       expect(bodies).toHaveLength(1);
