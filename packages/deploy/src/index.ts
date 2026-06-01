@@ -5,5 +5,6 @@ export { loadTarget } from "./registry";
 export { serveTarget } from "./targets/serve";
 export { cloudflareTarget } from "./targets/cloudflare";
 export { dockerTarget } from "./targets/docker";
+export { railwayTarget } from "./targets/railway";
 export { stripJsonc, reconcileWrangler, type ReconcileOpts, type ReconcileResult } from "./wrangler-reconcile";
 export { sha256Hex, partitionModules, type DeltaPush } from "./module-hash";

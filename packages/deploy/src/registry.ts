@@ -6,6 +6,7 @@ export async function loadTarget(provider: string): Promise<DeployTarget> {
     case "serve": return (await import("./targets/serve")).serveTarget;
     case "cloudflare": return (await import("./targets/cloudflare")).cloudflareTarget;
     case "docker": return (await import("./targets/docker")).dockerTarget;
-    default: throw new Error(`no deploy adapter for provider "${provider}" (v1 supports: serve, cloudflare, docker)`);
+    case "railway": return (await import("./targets/railway")).railwayTarget;
+    default: throw new Error(`no deploy adapter for provider "${provider}" (v1 supports: serve, cloudflare, docker, railway)`);
   }
 }
