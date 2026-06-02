@@ -202,6 +202,14 @@ export function embedPlugin(options: StackbaseVitePluginOptions): Plugin {
           ws.on("error", () => runtime.handler.disconnect(sessionId));
         });
       };
+      // Under `server.middlewareMode` (SSR hosts) Vite exposes no `httpServer`, so the sync WS can't
+      // attach and `stop()` (below) would never run — the engine + store would leak silently. Fail
+      // LOUD instead: warn so the operator knows the reactive socket is inert in this configuration.
+      if (!server.httpServer) {
+        server.config.logger.warn(
+          "[stackbase] embed mode needs Vite's own HTTP server — under `server.middlewareMode` the reactive /api/sync WebSocket and engine cleanup do NOT wire up. Use proxy mode, or run Vite without middlewareMode.",
+        );
+      }
       server.httpServer?.on("upgrade", onUpgrade);
 
       // ── Hot-reload convex/ — an INDEPENDENT loop from Vite HMR ─────────────────────────────────

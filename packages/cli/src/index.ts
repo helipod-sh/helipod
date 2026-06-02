@@ -28,7 +28,7 @@ export { runCli, devCommand, codegenCommand } from "./cli";
 // The shared boot core + codegen writer, re-exported so an out-of-CLI host (e.g. `@stackbase/vite`'s
 // in-process embed mode) can boot the engine and write `_generated` through the package boundary
 // rather than reaching into deep source paths. All already-existing internals — purely additive.
-export { bootProject, bootLoaded, withStorageModules, loadDashboard } from "./boot";
+export { bootProject, withStorageModules } from "./boot";
 export type { BootResult, BootProjectOptions, BootLoadedOptions } from "./boot";
 export { writeGenerated } from "@stackbase/codegen";
 
