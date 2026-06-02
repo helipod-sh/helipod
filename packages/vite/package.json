@@ -13,7 +13,12 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
-  "peerDependencies": { "vite": ">=5.0.0" },
+  "peerDependencies": { "vite": ">=5.0.0", "@stackbase/cli": "workspace:*" },
+  "peerDependenciesMeta": {
+    "@stackbase/cli": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@stackbase/cli": "workspace:*",
     "@stackbase/client": "workspace:*",
