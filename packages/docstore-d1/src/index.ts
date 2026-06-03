@@ -2,3 +2,4 @@ export type { D1Client, D1PreparedStatement, D1Session } from "./d1-client";
 export { UniqueConstraintError } from "./d1-client";
 export { columnTypeFor, isJsonColumn, tableDdl, schemaDdl } from "./ddl";
 export { docToRow, rowToDoc } from "./codec";
+export { D1DocStore, type QueryRange } from "./d1-doc-store";
