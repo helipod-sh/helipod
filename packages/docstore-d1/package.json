@@ -1,0 +1,26 @@
+{
+  "name": "@stackbase/docstore-d1",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --exclude 'test/*-e2e.test.ts'",
+    "test:e2e": "vitest run test/*-e2e.test.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": { "@stackbase/values": "workspace:*" },
+  "devDependencies": {
+    "better-sqlite3": "^11.8.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "miniflare": "^3.20241205.0",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
