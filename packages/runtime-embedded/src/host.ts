@@ -82,8 +82,17 @@ export interface ServeOptions<
    *  after storage routes, before user routes. Engine-owned `{method,pathPrefix,handler}` closures.
    *  Shares the `StorageRt` shape (`{method,pathPrefix,handler}`) — the CLI pins both to `StorageRoute`. */
   componentRoutes?: StorageRt[];
-  /** `POST /_admin/deploy` handler — present only when the server was started with deploy enabled. */
-  deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<Deploy> };
+  /** `POST /_admin/deploy` + `GET /_admin/deploy/modules` handlers — present only when deploy is
+   *  enabled. `apply` accepts a legacy `{files}` OR a delta `{changed, unchanged}` payload; `modules`
+   *  returns the current per-path hashes for the client's delta partition. */
+  deploy?: {
+    apply: (
+      payload:
+        | { files: Array<{ path: string; code: string }> }
+        | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> },
+    ) => Promise<Deploy>;
+    modules: () => Record<string, string>;
+  };
   /** Fleet node handle — present only under `serve --fleet`. Absent → byte-for-byte non-fleet. */
   fleet?: Fleet;
   /** Present only when THIS node is a `--replica` configured with `--writer-url` — arms `/api/run`'s

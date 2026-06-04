@@ -55,7 +55,8 @@
     "@embedded-postgres/darwin-x64",
     "@embedded-postgres/linux-arm64",
     "@embedded-postgres/linux-x64",
-    "@embedded-postgres/windows-x64"
+    "@embedded-postgres/windows-x64",
+    "better-sqlite3"
   ],
   "devDependencies": {
     "embedded-postgres": "16.14.0-beta.17",

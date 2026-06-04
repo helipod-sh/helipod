@@ -12,6 +12,9 @@ import { v, type PropertyValidators, type Validator, type ValidatorJSON } from "
 export interface IndexDefinitionJSON {
   indexDescriptor: string;
   fields: string[];
+  /** Column-per-field stores (D1/`.global()`) render this as `CREATE UNIQUE INDEX`. Omitted (not
+   *  `false`) for a plain index, so existing exported JSON is byte-for-byte unchanged. */
+  unique?: boolean;
 }
 export interface SearchIndexDefinitionJSON {
   indexDescriptor: string;
@@ -59,8 +62,8 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
     this.documentValidator = v.object(fields) as unknown as Validator<unknown>;
   }
 
-  index(name: string, fields: Array<Extract<keyof F, string>>): this {
-    this.indexes.push({ indexDescriptor: name, fields: fields as string[] });
+  index(name: string, fields: Array<Extract<keyof F, string>>, opts?: { unique?: boolean }): this {
+    this.indexes.push({ indexDescriptor: name, fields: fields as string[], ...(opts?.unique ? { unique: true } : {}) });
     return this;
   }
 

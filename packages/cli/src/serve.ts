@@ -459,10 +459,18 @@ export async function startServe(
   // request, by which time it is set. `current` reads AdminApi's live schema — no serve-side
   // bookkeeping to keep in sync.
   let server: DevServer;
+  // The modules from the last successful push this server lifetime — starts empty, so the first
+  // deploy after (re)start is a full push and every later one is a true delta. Holds code (for
+  // reconstructing `unchanged` entries) — NEVER serialized to the wire.
+  let currentPushedModules = new Map<string, { code: string; sha: string }>();
   const deploy = opts.allowDeploy
     ? {
-        apply: (files: Array<{ path: string; code: string }>) =>
-          applyDeploy(
+        apply: async (
+          payload:
+            | { files: Array<{ path: string; code: string }> }
+            | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> },
+        ) => {
+          const result = await applyDeploy(
             {
               runtime,
               adminApi,
@@ -473,9 +481,16 @@ export async function startServe(
                 return { schemaJson: toDeploySchema(live.schemaJson), tableNumbers: live.tableNumbers };
               },
               deployRoot: join(process.cwd(), ".stackbase-deploy"),
+              currentModules: currentPushedModules,
             },
-            files,
-          ),
+            payload,
+          );
+          if (!result.ok) return result; // { ok:false, kind, error } — wire-safe (no Map)
+          currentPushedModules = result.modules; // update state; strip the Map from the wire result
+          return { ok: true as const, rev: result.rev, functions: result.functions };
+        },
+        modules: (): Record<string, string> =>
+          Object.fromEntries([...currentPushedModules].map(([p, v]) => [p, v.sha])),
       }
     : undefined;
   // Reach serving through the RuntimeHost seam (Slice 1) — serve() never touches Bun.serve/node:http.

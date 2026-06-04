@@ -1,7 +1,7 @@
 import type { ComponentDefinition } from "./define-component";
 
 export interface TargetConfig {
-  /** "serve" | "cloudflare" | "docker" | ... — selects the deploy adapter. */
+  /** "serve" | "cloudflare" | "docker" | "railway" | ... — selects the deploy adapter. */
   provider: string;
   /** Per-environment overrides, merged over the shared settings; --env selects one. */
   environments?: Record<string, Record<string, unknown>>;

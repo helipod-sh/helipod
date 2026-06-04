@@ -6,7 +6,7 @@ export interface FileTree { files: Array<{ path: string; code: string }>; }
 
 export interface ResolvedTarget {
   targetName: string;                    // the --target value, e.g. "cloudflare"
-  provider: string;                      // "serve" | "cloudflare" | "docker"
+  provider: string;                      // "serve" | "cloudflare" | "docker" | "railway"
   env: string;                           // resolved environment name, e.g. "production"
   settings: Record<string, unknown>;     // shared config merged with the env override
 }
@@ -26,7 +26,7 @@ export interface DeployContext {
 export interface DeployResult { ok: boolean; url?: string; detail?: string; error?: string; }
 
 export interface DeployTarget {
-  readonly name: string;                 // "serve" | "cloudflare" | "docker"
+  readonly name: string;                 // "serve" | "cloudflare" | "docker" | "railway"
   preflight(ctx: DeployContext): Promise<void>;
   package(ctx: DeployContext): Promise<void>;
   push(ctx: DeployContext): Promise<DeployResult>;

@@ -14,7 +14,7 @@ import type { AdminApi } from "@stackbase/admin";
 import type { StorageRoute } from "@stackbase/storage";
 import { handleHttpRequest, type ServerInfo, type FleetHandles } from "./http-handler";
 import type { ResolvedRoute } from "./project";
-import type { DeployResult } from "./deploy-apply";
+import type { DeployWireResult } from "./deploy-apply";
 import { detectRuntime } from "./dev-options";
 
 const SYNC_PATH = "/api/sync";
@@ -61,7 +61,7 @@ const CONTENT_TYPES: Record<string, string> = {
 // NOTE: `componentRoutes` (reserved routes contributed by composed components, e.g. auth's OAuth
 // callbacks) lives on the seam's `ServeOptions` alongside `storageRoutes` — see `host.ts`.
 export type DevServer = ServerHandle<ResolvedRoute>;
-export type DevServerOptions = ServeOptions<ResolvedRoute, AdminApi, StorageRoute, DeployResult, FleetHandles>;
+export type DevServerOptions = ServeOptions<ResolvedRoute, AdminApi, StorageRoute, DeployWireResult, FleetHandles>;
 
 /** Content-type for an embedded dashboard asset, derived from its extension. */
 const EMBEDDED_CONTENT_TYPES: Record<string, string> = {
@@ -473,7 +473,7 @@ export function startDevServer(runtime: EmbeddedRuntime, options: DevServerOptio
  * `serve` is a thin delegation to {@link startDevServer}, which stays exported for tests/benches.
  */
 export class ProcessRuntimeHost
-  implements RuntimeHost<ResolvedRoute, AdminApi, StorageRoute, DeployResult, FleetHandles>
+  implements RuntimeHost<ResolvedRoute, AdminApi, StorageRoute, DeployWireResult, FleetHandles>
 {
   serve(runtime: EmbeddedRuntime, options: DevServerOptions): Promise<DevServer> {
     return startDevServer(runtime, options);

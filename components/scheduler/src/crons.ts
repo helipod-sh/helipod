@@ -21,7 +21,12 @@
  * arithmetic (interval specs) — the one function `_cronTick` (`./modules.ts`) calls to advance
  * the cadence, always from the last-fired anchor, never from `now()` (clock-anchored, no drift).
  */
-import { parseExpression } from "cron-parser";
+// `cron-parser` ships CommonJS; a NAMED esm import (`import { parseExpression }`) only works under
+// Bun's lenient interop — native Node ESM can't statically detect a CJS package's named exports and
+// throws `does not provide an export named 'parseExpression'`. Import the default (the CJS
+// module.exports) and read the member off it, which works on Bun and Node alike.
+import cronParser from "cron-parser";
+const { parseExpression } = cronParser;
 import type { JSONValue } from "@stackbase/values";
 import type { BootContext } from "@stackbase/component";
 import { GuestDatabaseWriter } from "@stackbase/executor";

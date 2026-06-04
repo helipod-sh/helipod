@@ -129,4 +129,33 @@ describe("generateShardWorkerEntrySource", () => {
     const on = generateShardWorkerEntrySource({ ...inputs, regionPrefixedKeys: true });
     expect(on).toContain("regionPrefixedKeys: true");
   });
+
+  it("wires an R2 blob store into the shard-DO's appConfig when r2BindingName is set", () => {
+    const withR2 = generateShardWorkerEntrySource({ ...inputs, r2BindingName: "STORAGE_BUCKET" });
+    expect(withR2).toContain(`import { R2BlobStore } from "@stackbase/blobstore-r2";`);
+    expect(withR2).toContain(`env["STORAGE_BUCKET"]`);
+    expect(withR2).toContain(`new R2BlobStore({ bucket: __bucket })`);
+    expect(withR2).not.toMatch(/\bawait\b/); // Worker top level must stay synchronous
+  });
+
+  it("omits the R2 import + blobStore when r2BindingName is absent (byte-less deploy)", () => {
+    const src = generateShardWorkerEntrySource(inputs);
+    expect(src).not.toContain("@stackbase/blobstore-r2");
+    expect(src).not.toContain("R2BlobStore");
+  });
+
+  it("composes R2 wiring with hash-mode + regionPrefixedKeys without interference", () => {
+    const src = generateShardWorkerEntrySource({
+      ...inputs,
+      mode: "hash",
+      numShards: 4,
+      regionPrefixedKeys: true,
+      r2BindingName: "STORAGE_BUCKET",
+    });
+    expect(src).toContain('mode: "hash"');
+    expect(src).toContain("numShards: 4");
+    expect(src).toContain("regionPrefixedKeys: true");
+    expect(src).toContain(`import { R2BlobStore } from "@stackbase/blobstore-r2";`);
+    expect(src).toContain(`new R2BlobStore({ bucket: __bucket })`);
+  });
 });

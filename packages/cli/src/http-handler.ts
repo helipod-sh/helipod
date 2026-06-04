@@ -10,7 +10,7 @@ import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
 import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { handleAdminRequest, verifyAdminKey, type AdminApi } from "@stackbase/admin";
 import type { ResolvedRoute } from "./project";
-import type { DeployResult } from "./deploy-apply";
+import type { DeployWireResult } from "./deploy-apply";
 
 export interface HttpRequest {
   method: string;
@@ -147,7 +147,14 @@ export async function handleHttpRequest(
   info: ServerInfo,
   admin?: { api: AdminApi; key: string },
   routes?: ResolvedRoute[],
-  deploy?: { apply: (files: Array<{ path: string; code: string }>) => Promise<DeployResult> },
+  deploy?: {
+    apply: (
+      payload:
+        | { files: Array<{ path: string; code: string }> }
+        | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> },
+    ) => Promise<DeployWireResult>;
+    modules: () => Record<string, string>;
+  },
   fleet?: FleetHandles,
   /**
    * Tier 3 Slice 8 follow-on (replica write-forwarding): set only when THIS node is itself a
@@ -300,16 +307,23 @@ export async function handleHttpRequest(
       return json(getHttpStatus(err), { error: err.message, code: err.code, errorJson: err.toJSON() });
     }
   }
+  if (admin && deploy && req.method === "GET" && req.path === "/_admin/deploy/modules") {
+    if (!verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { ok: false, error: "unauthorized" });
+    return json(200, deploy.modules());
+  }
   if (admin && deploy && req.method === "POST" && req.path === "/_admin/deploy") {
     if (!verifyAdminKey(admin.key, bearer(req.authorization))) return json(401, { ok: false, error: "unauthorized" });
-    let files: Array<{ path: string; code: string }>;
+    let payload:
+      | { files: Array<{ path: string; code: string }> }
+      | { changed: Array<{ path: string; code: string }>; unchanged: Array<{ path: string; sha256: string }> };
     try {
-      files = (JSON.parse(req.body ?? "{}") as { files?: Array<{ path: string; code: string }> }).files ?? [];
+      payload = JSON.parse(req.body ?? "{}");
     } catch {
       return json(400, { ok: false, kind: "load-error", error: "invalid deploy payload" });
     }
-    const result = await deploy.apply(files);
-    return json(result.ok ? 200 : result.kind === "schema-incompatible" ? 409 : 400, result);
+    const result = await deploy.apply(payload);
+    const status = result.ok ? 200 : result.kind === "schema-incompatible" || result.kind === "stale-base" ? 409 : 400;
+    return json(status, result);
   }
   // The wake seam's firing half (`serve --wake-url`): the host's alarm went off and is telling this
   // process to run whatever driver timers are due. It CAN'T be a direct call — the alarm lives in the
