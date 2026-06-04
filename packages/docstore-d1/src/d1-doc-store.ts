@@ -2,7 +2,7 @@ import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/value
 import type { D1Client } from "./d1-client";
 import { UniqueConstraintError } from "./d1-client";
 import { schemaDdl } from "./ddl";
-import { docToRow, rowToDoc } from "./codec";
+import { docToRow, rowToDoc, encodeColumnValue } from "./codec";
 
 export interface QueryRange { index: string; eq?: Record<string, unknown>; limit?: number; }
 
@@ -75,14 +75,21 @@ export class D1DocStore {
   }
 
   async queryByIndex(table: string, range: QueryRange): Promise<Record<string, unknown>[]> {
+    const t = this.table(table);
+    const doct = t.documentType;
+    const fieldDefs = doct.type === "object" ? doct.value : {};
     const eq = range.eq ?? {};
     const keys = Object.keys(eq);
     const where = keys.length ? `WHERE ${keys.map((k) => `${q(k)} = ?`).join(" AND ")}` : "";
     const limit = range.limit ? ` LIMIT ${Number(range.limit)}` : "";
+    const bound = keys.map((k) => {
+      const def = (fieldDefs as Record<string, { fieldType: import("@stackbase/values").ValidatorJSON; optional: boolean }>)[k];
+      return def ? encodeColumnValue(def.fieldType, eq[k]) : eq[k]; // system columns (_id/_creationTime) pass raw
+    });
     const { results } = await this.client
       .prepare(`SELECT * FROM ${q(table)} ${where}${limit}`)
-      .bind(...keys.map((k) => eq[k]))
+      .bind(...bound)
       .all();
-    return (results as Record<string, unknown>[]).map((r) => rowToDoc(this.table(table), r));
+    return (results as Record<string, unknown>[]).map((r) => rowToDoc(t, r));
   }
 }

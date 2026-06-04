@@ -13,7 +13,9 @@ const schema = defineSchema({
     bio: v.optional(v.string()),
   })
     .index("by_email", ["email"], { unique: true })
-    .index("by_age", ["age"]),
+    .index("by_age", ["age"])
+    .index("by_active", ["active"])
+    .index("by_score", ["score"]),
 }).export();
 
 /** The shared D1 store behavior suite — run against any D1Client substrate. */
@@ -66,6 +68,16 @@ export function d1BehaviorSuite(name: string, makeClient: () => D1Client | Promi
       await s.insert("users", { _id: "u3", _creationTime: 3, email: "c", age: 99, tags: [], active: false, score: 3n });
       const rows = await s.queryByIndex("users", { index: "by_age", eq: { age: 20 } });
       expect(rows.map((r) => r._id).sort()).toEqual(["u1", "u2"]);
+    });
+
+    it("queryByIndex encodes boolean and bigint eq values (write/read symmetry)", async () => {
+      const s = await store();
+      await s.insert("users", { _id: "u1", _creationTime: 1, email: "a", age: 5, tags: [], active: true, score: 100n });
+      await s.insert("users", { _id: "u2", _creationTime: 2, email: "b", age: 6, tags: [], active: false, score: 200n });
+      const activeRows = await s.queryByIndex("users", { index: "by_active", eq: { active: true } });
+      expect(activeRows.map((r) => r._id)).toEqual(["u1"]);
+      const scoreRows = await s.queryByIndex("users", { index: "by_score", eq: { score: 200n } });
+      expect(scoreRows.map((r) => r._id)).toEqual(["u2"]);
     });
   });
 }

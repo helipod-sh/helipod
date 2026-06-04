@@ -1,25 +1,31 @@
-import type { TableDefinitionJSON } from "@stackbase/values";
+import type { TableDefinitionJSON, ValidatorJSON } from "@stackbase/values";
 import { isJsonColumn } from "./ddl";
 
-function fields(table: TableDefinitionJSON): Array<[string, { fieldType: import("@stackbase/values").ValidatorJSON; optional: boolean }]> {
+function fields(table: TableDefinitionJSON): Array<[string, { fieldType: ValidatorJSON; optional: boolean }]> {
   const doc = table.documentType;
   if (doc.type !== "object") throw new Error("docstore-d1: documentType must be an object");
   return Object.entries(doc.value);
+}
+
+/** Encode a single app value to its SQLite cell form for the given field validator.
+ *  boolean→0/1, bigint→decimal string, nested (array/record/object/union/any)→JSON string,
+ *  everything else passes through unchanged. `null`/`undefined` → null. */
+export function encodeColumnValue(fieldType: ValidatorJSON, value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  return isJsonColumn(fieldType)
+    ? JSON.stringify(value)
+    : fieldType.type === "boolean"
+      ? (value ? 1 : 0)
+      : fieldType.type === "bigint"
+        ? String(value)
+        : value;
 }
 
 /** App doc → a SQLite row: booleans→0/1, bigint→string, nested (array/object/…)→JSON, absent→null. */
 export function docToRow(table: TableDefinitionJSON, doc: Record<string, unknown>): Record<string, unknown> {
   const row: Record<string, unknown> = { _id: doc._id, _creationTime: doc._creationTime };
   for (const [field, def] of fields(table)) {
-    const val = doc[field];
-    if (val === undefined || val === null) { row[field] = null; continue; }
-    row[field] = isJsonColumn(def.fieldType)
-      ? JSON.stringify(val)
-      : def.fieldType.type === "boolean"
-        ? (val ? 1 : 0)
-        : def.fieldType.type === "bigint"
-          ? String(val)
-          : val;
+    row[field] = encodeColumnValue(def.fieldType, doc[field]);
   }
   return row;
 }
