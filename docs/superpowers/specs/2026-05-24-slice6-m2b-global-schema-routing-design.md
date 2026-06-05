@@ -107,6 +107,24 @@ schema declares .unique() on a .shardBy table          ──►  rejected at sc
 - New serial-lane E2E under the CF runtime rig (miniflare DO + D1).
 - **Untouched:** the client SDK / wire protocol (no bookmark field — decision 2), `ee/packages/runtime-cloudflare-shard/src/worker.ts` (routing to D1 is DO-internal).
 
+## Grounding-driven refinements (added 2026-05-24 after mapping the actual engine seams)
+
+A full read of `kernel.ts`, `catalog.ts`, `compose.ts`, `shard-writer.ts`, the M2a store, and the CF DO boot path (captured in `.superpowers/sdd/m2b-grounding.md`) tightened several points the initial design left optimistic:
+
+1. **Global-table READS are a separate path and are equality-only in M2b.** Local reads flow through two distinct objects on `KernelContext`: point reads via `ctx.txn.get(id)` and scans/queries via `ctx.queryRuntime.collect/paginate(...)` — the latter deeply tied to the MVCC index keyspace. A global table has neither. M2b routes `ctx.db.get(id)` on a global table to `D1DocStore.get`, and an **equality** index query (`.withIndex(ix).eq(field, value)`) to `D1DocStore.queryByIndex` (which today supports only `{ eq, limit }`). **Range queries, ordering, filters beyond equality, and pagination on `.global()` tables are DEFERRED** (a documented M2b limitation) — mapping the full MVCC query surface onto D1 SQL is its own slice. A global-table query using an unsupported feature fails fast with a clear "not yet supported on global tables" error.
+
+2. **Global writes bypass MVCC index maintenance.** Every local write handler calls `maintainIndexes(...) → ctx.txn.stageIndexUpdates(...)`, which is MVCC-log-index-keyed. Global writes must NOT enter that — D1 enforces indexes at the SQL level (M2a's `CREATE [UNIQUE] INDEX`). The `meta.mode === "global"` branch in each handler skips both `ctx.txn.put/delete` AND `maintainIndexes`, staging into the global overlay instead.
+
+3. **The global-write overlay is a parallel object on `KernelContext`, not a widening of `ctx.txn`.** `TransactionContextImpl` is a concrete, non-pluggable class. Rather than widen it, add a per-mutation global buffer reached through a new optional `KernelContext` member (parallel to how `ctx.queryRuntime` already sits alongside `ctx.txn`), e.g. `ctx.globalTxn?: GlobalTxn` with `stage(op)/get(table,id)/queryByIndex(...)` serving read-your-own-writes from the buffer-then-D1. Absent (no D1 binding) → a `.global()` op fails fast.
+
+4. **A global-only mutation commits via a D1 batch flush, separate from the MVCC OCC commit.** Because co-writes are forbidden (decision 1), a mutation is EITHER local-only OR global-only. The commit logic branches: local writes present → the existing MVCC `commit()` (unchanged); global writes present → flush the global overlay as one atomic `D1DocStore` batch; neither → no-op. A global-only mutation produces NO oplog and NO local-reactivity fan-out (correct — global reactivity is M2c). This keeps the delicate MVCC OCC/group-commit paths **untouched** for global mutations rather than threading a second store through them. `CrossStoreWriteError` (the co-write guard) guarantees the two buffers are never both non-empty at commit.
+
+5. **Injection point needs one more grounding pass.** The D1 store is injected mirroring the existing `blobStore?: BlobStore` precedent: `DurableObjectAppConfig.d1?` (filled by the codegen'd DO subclass from `env.DB`) → `DurableObjectBootInput` → `bootDurableObjectRuntime` constructs `new D1DocStore(bindingD1Client(env.DB), schemaJson)` and `applyDdl()`s it → `createEmbeddedRuntime`. **`createEmbeddedRuntime` (`@stackbase/runtime-embedded`) is where `ShardWriter`/`TransactionContextImpl`/the `KernelContext` are actually constructed from the `store`, and was NOT yet read** — the implementation plan requires a grounding pass on `packages/runtime-embedded/src/*` to pin exactly where the global store + overlay thread onto `KernelContext`. This is the one open mapping before the plan's injection tasks can carry accurate code.
+
+6. **`db.replace` is the only mutate-existing syscall** (no `handleDbPatch`); `.patch()` desugars above the kernel. The global routing branch is needed in `handleDbGet`/`handleDbInsert`/`handleDbReplace`/`handleDbDelete` and the query/paginate handlers — five/six sites, all keyed off `meta.mode`.
+
+7. **`D1Client.batch()` and a `D1DocStore` batch-write are genuinely new** (M2a shipped neither; `run()` returns `{ changes }`, keep that flat shape). The batch is the atomic commit-flush primitive.
+
 ## Non-goals (explicit — these are M2c–M2e or deferred)
 - **Global reactivity** (live subscription updates on `.global()` tables, poll-based invalidation) — **M2c**.
 - **Cross-shard `fanOut` reads** — **M2d**.
@@ -114,4 +132,5 @@ schema declares .unique() on a .shardBy table          ──►  rejected at sc
 - **Real-Cloudflare production proof** — a required checkpoint before M2c, not built in M2b (decision 3).
 - **`.global()` on the SQLite/Postgres (non-Cloudflare) runtimes** — M2b's `.global()` is Cloudflare-D1-only; broadening it is a separate future decision.
 - **Relaxing the co-write restriction** (allowing sharded+global in one mutation via 2PC/saga) — future, only if a real use case appears.
+- **Range / sorted / paginated / non-equality queries on `.global()` tables** — deferred (refinement 1); M2b global reads are `get(id)` + equality-index only.
 - **Schema migrations / `ALTER` on D1 tables** — deferred (M2a is create-only).
