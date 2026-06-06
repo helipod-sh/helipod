@@ -1,1 +1,1 @@
-{ "title": "Client", "pages": ["client-sdk", "optimistic-updates", "offline-sync"] }
+{ "title": "Client", "icon": "AppWindow", "pages": ["client-sdk", "optimistic-updates", "offline-sync"] }

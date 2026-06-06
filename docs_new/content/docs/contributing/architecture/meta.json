@@ -1,5 +1,6 @@
 {
   "title": "Architecture",
+  "icon": "Network",
   "pages": [
     "system-design",
     "storage",

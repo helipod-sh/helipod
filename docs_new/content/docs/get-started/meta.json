@@ -1,5 +1,6 @@
 {
   "title": "Get Started",
+  "icon": "Rocket",
   "pages": [
     "what-is-stackbase",
     "how-it-works",

@@ -1,5 +1,6 @@
 {
   "title": "The codebase",
+  "icon": "FolderTree",
   "pages": [
     "monorepo",
     "development"

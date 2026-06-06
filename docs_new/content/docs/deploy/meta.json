@@ -1,1 +1,1 @@
-{ "title": "Deploy & Operate", "pages": ["local-dev", "self-hosting", "postgres", "deploy-and-build", "cloudflare", "scaling"] }
+{ "title": "Deploy & Operate", "icon": "Ship", "pages": ["local-dev", "self-hosting", "postgres", "deploy-and-build", "cloudflare", "scaling"] }

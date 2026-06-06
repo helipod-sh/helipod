@@ -1,1 +1,14 @@
-{ "pages": ["index", "get-started", "core-concepts", "client", "components", "deploy", "reference"] }
+{
+  "pages": [
+    "index",
+    "get-started",
+    "---Build---",
+    "core-concepts",
+    "client",
+    "components",
+    "---Deploy & operate---",
+    "deploy",
+    "---Reference---",
+    "reference"
+  ]
+}
