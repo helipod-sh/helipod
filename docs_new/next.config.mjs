@@ -10,6 +10,17 @@ const config = {
   turbopack: {
     root: import.meta.dirname,
   },
+  // The docs root has no page of its own (the old "home" duplicated
+  // "What is stackbase?"). Send /docs to that page instead.
+  async redirects() {
+    return [
+      {
+        source: '/docs',
+        destination: '/docs/get-started/what-is-stackbase',
+        permanent: false,
+      },
+    ];
+  },
 };
 
 export default withMDX(config);
