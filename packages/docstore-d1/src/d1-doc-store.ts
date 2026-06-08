@@ -31,6 +31,40 @@ export class D1DocStore {
     for (const stmt of schemaDdl(this.schema)) await this.client.exec(stmt);
   }
 
+  buildInsert(table: string, doc: Record<string, unknown>): { sql: string; params: unknown[] } {
+    const row = docToRow(this.table(table), doc);
+    const cols = Object.keys(row);
+    return { sql: `INSERT INTO ${q(table)} (${cols.map(q).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, params: cols.map((c) => row[c]) };
+  }
+  buildReplace(table: string, id: string, doc: Record<string, unknown>): { sql: string; params: unknown[] } {
+    const row = docToRow(this.table(table), { ...doc, _id: id });
+    const cols = Object.keys(row).filter((c) => c !== "_id");
+    return { sql: `UPDATE ${q(table)} SET ${cols.map((c) => `${q(c)} = ?`).join(", ")} WHERE ${q("_id")} = ?`, params: [...cols.map((c) => row[c]), id] };
+  }
+  buildDelete(table: string, id: string): { sql: string; params: unknown[] } {
+    return { sql: `DELETE FROM ${q(table)} WHERE ${q("_id")} = ?`, params: [id] };
+  }
+
+  async commitBatch(ops: Array<
+    | { kind: "insert"; table: string; doc: Record<string, unknown> }
+    | { kind: "replace"; table: string; id: string; doc: Record<string, unknown> }
+    | { kind: "delete"; table: string; id: string }
+  >): Promise<void> {
+    const stmts = ops.map((op) =>
+      op.kind === "insert" ? this.buildInsert(op.table, op.doc)
+        : op.kind === "replace" ? this.buildReplace(op.table, op.id, op.doc)
+          : this.buildDelete(op.table, op.id),
+    );
+    // Determine which table's unique index a failure names (mapError already parses the SQLite msg).
+    try {
+      await this.client.batch(stmts);
+    } catch (e) {
+      // ops all share... not necessarily one table; mapError needs a table name. Use the first op's
+      // table as the reporting context; mapError extracts the real column from the SQLite message.
+      mapError(e, ops[0]?.table ?? "");
+    }
+  }
+
   async insert(table: string, doc: Record<string, unknown>, bookmark?: string): Promise<{ bookmark?: string }> {
     const session = this.client.withSession(bookmark);
     const row = docToRow(this.table(table), doc);

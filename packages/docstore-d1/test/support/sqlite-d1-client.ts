@@ -26,6 +26,12 @@ export function sqliteD1Client(): D1Client {
     prepare: (sql) => stmt(sql, []),
     exec: async (sql) => { db.exec(sql); },
     withSession: (_bookmark?: string): D1Session => ({ client, latestBookmark: () => undefined }),
+    batch: async (statements) => {
+      const run = db.transaction((stmts: { sql: string; params: unknown[] }[]) => {
+        for (const s of stmts) db.prepare(s.sql).run(...s.params);
+      });
+      run(statements); // throws (and rolls back) on a constraint violation; the raw SQLite message propagates
+    },
   };
   return client;
 }
