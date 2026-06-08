@@ -49,7 +49,7 @@ function addSchema(
     seen.add(fullName);
     const info = registry.allocate(fullName, { shardKey: tableDef.shardKey });
     tableNumbers[fullName] = info.tableNumber;
-    catalog.addTable(fullName, info.tableNumber, tableDef.documentType, schemaJson.schemaValidation, tableDef.shardKey);
+    catalog.addTable(fullName, info.tableNumber, tableDef.documentType, schemaJson.schemaValidation, tableDef.shardKey, tableDef.global);
     catalog.addIndex({
       table: fullName,
       tableNumber: info.tableNumber,
@@ -58,6 +58,13 @@ function addSchema(
       indexId: encodeStorageIndexId(info.tableNumber, DEFAULT_INDEX),
     });
     for (const idx of tableDef.indexes) {
+      if (idx.unique && tableDef.shardKey && !tableDef.global) {
+        throw new Error(
+          `table "${fullName}" is sharded by '${tableDef.shardKey}' and cannot declare a unique index ` +
+            `("${idx.indexDescriptor}"): a per-shard store can't enforce a global-unique constraint. ` +
+            `Move the table to .global() (D1) if you need global uniqueness.`,
+        );
+      }
       catalog.addIndex({
         table: fullName,
         tableNumber: info.tableNumber,
