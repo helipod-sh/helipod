@@ -72,4 +72,41 @@ describe("GlobalTxn", () => {
     const rows = await g.queryByIndex("users", { index: "by_email", eq: { n: 5 } });
     expect(rows.map((r) => r._id).sort()).toEqual(["u2"]); // u1 deleted, u2 staged
   });
+
+  // RYOW regression: previously `queryByIndex` forwarded the caller's `limit` straight to the base
+  // D1 fetch, which applies LIMIT before the overlay merge. When the base table alone already has
+  // >= limit matching rows, those base rows filled the whole result and the final `.slice(0, limit)`
+  // silently dropped a staged insert appended after them — a mutation could fail to see its own
+  // just-inserted row on a later limited query in the same handler.
+  it("queryByIndex under a limit still surfaces a staged insert when the base already fills the window (RYOW)", async () => {
+    const store = await freshStore();
+    // 3 base rows already match `n: 5` and, on their own, exactly fill a limit of 3.
+    await store.commitBatch([
+      { kind: "insert", table: "users", doc: { _id: "u1", _creationTime: 1, email: "a", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u2", _creationTime: 2, email: "b", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u3", _creationTime: 3, email: "c", n: 5 } },
+    ]);
+    const g = new GlobalTxn(store);
+    g.stageInsert("users", { _id: "u4", _creationTime: 4, email: "d", n: 5 }); // this mutation's own new row
+    const rows = await g.queryByIndex("users", { index: "by_email", eq: { n: 5 }, limit: 3 });
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r._id)).toContain("u4"); // must be visible to the mutation that just wrote it
+  });
+
+  it("queryByIndex under a limit backfills from remaining base rows when a top-window row is staged-deleted", async () => {
+    const store = await freshStore();
+    // 5 base rows match `n: 5`; a limit of 3 would naturally select the first 3 by scan order.
+    await store.commitBatch([
+      { kind: "insert", table: "users", doc: { _id: "u1", _creationTime: 1, email: "a", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u2", _creationTime: 2, email: "b", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u3", _creationTime: 3, email: "c", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u4", _creationTime: 4, email: "d", n: 5 } },
+      { kind: "insert", table: "users", doc: { _id: "u5", _creationTime: 5, email: "e", n: 5 } },
+    ]);
+    const g = new GlobalTxn(store);
+    g.stageDelete("users", "u1"); // delete a row that would otherwise be in the top-3 window
+    const rows = await g.queryByIndex("users", { index: "by_email", eq: { n: 5 }, limit: 3 });
+    expect(rows).toHaveLength(3); // still filled to `limit` from the remaining base rows
+    expect(rows.map((r) => r._id)).not.toContain("u1"); // the deleted row is never visible
+  });
 });
