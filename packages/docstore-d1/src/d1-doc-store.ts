@@ -55,13 +55,16 @@ export class D1DocStore {
         : op.kind === "replace" ? this.buildReplace(op.table, op.id, op.doc)
           : this.buildDelete(op.table, op.id),
     );
-    // Determine which table's unique index a failure names (mapError already parses the SQLite msg).
+    // A batch can span multiple tables — attribute a UNIQUE violation to the table the SQLite/D1
+    // error message actually names (`UNIQUE constraint failed: <table>.<column>`), not to
+    // ops[0]'s table, since a later op in the batch may target a different table entirely.
     try {
       await this.client.batch(stmts);
     } catch (e) {
-      // ops all share... not necessarily one table; mapError needs a table name. Use the first op's
-      // table as the reporting context; mapError extracts the real column from the SQLite message.
-      mapError(e, ops[0]?.table ?? "");
+      const msg = e instanceof Error ? e.message : String(e);
+      const m = /UNIQUE constraint failed:\s*([^.]+)\.(\w+)/.exec(msg);
+      if (m) throw new UniqueConstraintError(m[1]!, m[2]!); // attribute to the ACTUAL violating table+column
+      mapError(e, ops[0]?.table ?? ""); // non-UNIQUE errors: existing behavior
     }
   }
 

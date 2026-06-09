@@ -31,4 +31,24 @@ describe("D1DocStore.commitBatch", () => {
     ])).rejects.toMatchObject({ name: "UniqueConstraintError", table: "users", field: "email" });
     expect(await s.get("users", "u1")).toBeNull(); // rolled back — the first insert did NOT persist
   });
+
+  it("attributes a UNIQUE violation to the ACTUAL violating table, not ops[0]'s table", async () => {
+    const multiSchema = defineSchema({
+      users: defineTable({ email: v.string(), n: v.number() }).index("by_email", ["email"], { unique: true }),
+      teams: defineTable({ slug: v.string() }).index("by_slug", ["slug"], { unique: true }),
+    }).export();
+    const s = new D1DocStore(sqliteD1Client(), multiSchema);
+    await s.applyDdl();
+    // Seed a team so the second op's insert collides on teams.slug, not users.email.
+    await s.commitBatch([
+      { kind: "insert", table: "teams", doc: { _id: "t1", _creationTime: 1, slug: "acme" } },
+    ]);
+    // First op targets "users" (fine, no conflict) — second op targets "teams" and violates by_slug.
+    // ops[0].table is "users"; the thrown error must still say "teams".
+    await expect(s.commitBatch([
+      { kind: "insert", table: "users", doc: { _id: "u1", _creationTime: 2, email: "a", n: 1 } },
+      { kind: "insert", table: "teams", doc: { _id: "t2", _creationTime: 3, slug: "acme" } }, // violates by_slug
+    ])).rejects.toMatchObject({ name: "UniqueConstraintError", table: "teams", field: "slug" });
+    expect(await s.get("users", "u1")).toBeNull(); // rolled back — the first insert did NOT persist either
+  });
 });
