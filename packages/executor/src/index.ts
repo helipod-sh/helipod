@@ -31,3 +31,6 @@ export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink"
 export { InMemoryLogSink, NoopLogSink } from "./log-sink";
 
 export * from "./policy";
+
+export type { GlobalWriteOp } from "./global-txn";
+export { GlobalTxn } from "./global-txn";
