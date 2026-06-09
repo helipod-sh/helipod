@@ -52,6 +52,21 @@ import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
 import type { PolicyRegistry, RuleContext, RelationRegistry } from "./policy";
 import { evalWritePolicy, mergeReadPolicy, resolveReadPolicy } from "./policy";
+import { GlobalTxn } from "./global-txn";
+
+/**
+ * M2b co-write guard: a mutation may write `.global()` (D1) tables or sharded/root (MVCC) tables,
+ * but never both in one mutation — a single mutation isn't atomic across two independent storage
+ * engines (the MVCC log commits under OCC; a D1 batch commits separately, after). Thrown by
+ * {@link markWrite} the moment a second store is touched, regardless of which store was written
+ * first (see `handleDbInsert`/`handleDbReplace`/`handleDbDelete`'s `markWrite` calls).
+ */
+export class CrossStoreWriteError extends Error {
+  constructor() {
+    super("a mutation may write global (.global()) tables or sharded/root tables, but not both in one mutation");
+    this.name = "CrossStoreWriteError";
+  }
+}
 
 /**
  * DLR Stage 2b: one `db.query` collect's metadata, captured by `handleDbQuery` for the
@@ -198,6 +213,12 @@ export interface KernelContext {
    * well-behaved query that awaits all its reads, so the drain is a no-op there.
    */
   readonly inflight?: Set<Promise<string>>;
+  /** M2b: per-mutation D1 write overlay for `.global()` tables. Present only when a global store is
+   *  injected (Cloudflare + a D1 binding). Absent → a `.global()` op fails fast. */
+  readonly globalTxn?: GlobalTxn;
+  /** M2b co-write guard: which stores this mutation has WRITTEN. A mutation may write local OR global,
+   *  never both. Mutable, shared across handler calls within one mutation. */
+  readonly writeStores?: { local: boolean; global: boolean };
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -256,6 +277,25 @@ function requireTable(ctx: KernelContext, name: string): { tableNumber: number; 
   const meta = ctx.catalog.getTable(fullName);
   if (!meta) throw new FunctionNotFoundError(`unknown table: ${name}`);
   return { tableNumber: meta.tableNumber, fullName };
+}
+
+/** M2b co-write guard: record that this mutation wrote `store`; throws {@link CrossStoreWriteError}
+ *  the moment BOTH `local` and `global` have been written by the same mutation. A no-op when
+ *  `ctx.writeStores` isn't armed (queries, and any context that doesn't track cross-store writes). */
+function markWrite(ctx: KernelContext, store: "local" | "global"): void {
+  const w = ctx.writeStores;
+  if (!w) return;
+  w[store] = true;
+  if (w.local && w.global) throw new CrossStoreWriteError();
+}
+
+/** M2b: resolve the per-mutation `GlobalTxn` for a `.global()` table, failing fast when no D1
+ *  store is injected — a `.global()` op must never silently fall through to the local store. */
+function requireGlobalTxn(ctx: KernelContext, table: string): GlobalTxn {
+  if (!ctx.globalTxn) {
+    throw new ForbiddenOperationError(`table "${table}" is .global() but no D1 binding is configured (global tables require Cloudflare D1)`);
+  }
+  return ctx.globalTxn;
 }
 
 /** Validate a user-provided document value against the table's schema validator (if any). */
@@ -454,6 +494,11 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
+  if (meta.mode === "global") {
+    const g = requireGlobalTxn(ctx, meta.name);
+    const doc = await g.get(meta.name, id);
+    return JSON.stringify(doc === null ? null : convexToJson(doc as unknown as Value));
+  }
   const value = await ctx.txn.get(internalId);
   if (value !== null) enforceShardGet(ctx, meta, value as DocumentValue);
   if (value !== null && !ctx.privileged && ctx.getRuleContext) {
@@ -472,6 +517,17 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   const { tableNumber, fullName } = requireTable(ctx, table);
   const meta = ctx.catalog.getTable(fullName);
   const converted = jsonToConvex(value) as DocumentValue;
+
+  if (meta?.mode === "global") {
+    markWrite(ctx, "global");
+    const g = requireGlobalTxn(ctx, table);
+    const { _id: suppliedId2, ...userVal } = converted as DocumentValue & { _id?: unknown };
+    validateDocumentForWrite(meta, fullName, userVal as DocumentValue);
+    const id = suppliedId2 !== undefined ? String(suppliedId2) : encodeInternalDocumentId(newDocumentId(tableNumber));
+    const doc: DocumentValue = { ...(userVal as DocumentValue), _id: id, _creationTime: Number(ctx.snapshotTs) };
+    g.stageInsert(fullName, doc as Record<string, unknown>);
+    return JSON.stringify({ id });
+  }
 
   // Client-supplied _id (spec: client-supplied ids): extracted BEFORE validation, same system-field
   // discipline handleDbReplace applies. _creationTime in an insert value stays rejected as today.
@@ -532,6 +588,7 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   };
   if (meta) enforceShardWrite(ctx, meta, doc, "insert");
   await enforceWrite(ctx, fullName, doc);
+  markWrite(ctx, "local");
   ctx.txn.put(id, doc);
   maintainIndexes(ctx, fullName, null, doc, id);
   return JSON.stringify({ id: docId });
@@ -544,6 +601,15 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
+  if (meta.mode === "global") {
+    markWrite(ctx, "global");
+    const g = requireGlobalTxn(ctx, meta.name);
+    const converted = jsonToConvex(value) as DocumentValue;
+    const { _id: _oi, _creationTime: _oc, ...userFields } = converted;
+    validateDocumentForWrite(meta, meta.name, userFields as DocumentValue);
+    g.stageReplace(meta.name, id, converted as Record<string, unknown>);
+    return "{}";
+  }
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
   await enforceWrite(ctx, meta.name, oldDoc);
@@ -558,6 +624,7 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   enforceShardKeyImmutable(ctx, meta, oldDoc as DocumentValue, newDoc);
   enforceShardWrite(ctx, meta, newDoc, "replace");
   await enforceWrite(ctx, meta.name, newDoc); // post-image: the result must also satisfy the write policy
+  markWrite(ctx, "local");
   ctx.txn.put(internalId, newDoc);
   maintainIndexes(ctx, meta.name, oldDoc, newDoc, internalId);
   return "{}";
@@ -570,11 +637,17 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   const meta = ctx.catalog.getTableByNumber(internalId.tableNumber);
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
+  if (meta.mode === "global") {
+    markWrite(ctx, "global");
+    requireGlobalTxn(ctx, meta.name).stageDelete(meta.name, id);
+    return "{}";
+  }
   const oldDoc = await ctx.txn.get(internalId);
   if (oldDoc !== null) {
     enforceShardWrite(ctx, meta, oldDoc as DocumentValue, "delete");
     await enforceWrite(ctx, meta.name, oldDoc);
   }
+  markWrite(ctx, "local");
   ctx.txn.delete(internalId);
   maintainIndexes(ctx, meta.name, oldDoc, null, internalId);
   return "{}";
@@ -595,6 +668,21 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
   const tableMeta = ctx.catalog.getTable(tableName);
+  if (tableMeta?.mode === "global") {
+    const g = requireGlobalTxn(ctx, tableName);
+    // Equality-only in M2b: reject range/order/non-eq filters/pagination on a global table.
+    const eqOnly = (spec.range ?? []).every((r) => r.operator === "eq");
+    if (!eqOnly || (spec.filters && spec.filters.length > 0)) {
+      throw new ForbiddenOperationError(
+        `global table "${tableName}": only equality index queries are supported (range/filter/order on .global() tables is not yet available)`,
+      );
+    }
+    const eq: Record<string, unknown> = {};
+    for (const r of spec.range ?? []) eq[r.field] = jsonToConvex(r.value);
+    const rows = await g.queryByIndex(tableName, { index: spec.index, eq, limit: spec.limit });
+    const docsJson = rows.map((d) => convexToJson(d as unknown as Value));
+    return JSON.stringify({ docs: docsJson }); // no collectTrace: global tables aren't reactive in M2b
+  }
   enforceShardScan(ctx, tableMeta, indexSpec, spec.range);
 
   const query: Query = {
@@ -665,6 +753,9 @@ const handleDbPaginate: SyscallHandler = async (ctx, argJson) => {
   const indexSpec = ctx.catalog.getIndex(tableName, spec.index);
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
   const tableMeta = ctx.catalog.getTable(tableName);
+  if (tableMeta?.mode === "global") {
+    throw new ForbiddenOperationError('pagination on .global() tables is not yet supported');
+  }
   enforceShardScan(ctx, tableMeta, indexSpec, spec.range);
 
   const query: Query = {
