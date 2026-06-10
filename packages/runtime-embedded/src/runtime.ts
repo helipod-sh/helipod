@@ -261,6 +261,14 @@ export interface EmbeddedRuntimeOptions {
    */
   queryStore?: DocStore;
   /**
+   * M2b: the D1 store for `.global()` tables, pre-built by the boot layer (which holds
+   * `schemaJson`). Mirrors the `queryStore` precedent above — handed in already-constructed,
+   * not built inside `create()`. Threaded straight into `ExecutorDeps.globalStore`. Absent →
+   * `.global()` ops fail fast in the kernel (`requireGlobalTxn`), byte-identical to before this
+   * option existed. NOT `DocStore`-shaped; it never enters a transactor/`QueryRuntime`.
+   */
+  globalStore?: import("@stackbase/docstore-d1").D1DocStore;
+  /**
    * The AUTHORITATIVE receipts store for the `Connect` resume handshake — where the outbox verdict
    * classification (`classifyClientMutation`) and ack-prune (`pruneClientMutations`) reads/writes
    * land (verdict §(c): "the classification read runs where the commit runs... never against a
@@ -493,7 +501,7 @@ export class EmbeddedRuntime {
         numShards,
       });
     };
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter, queryPath });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter, queryPath, globalStore: options.globalStore });
     executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
