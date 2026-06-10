@@ -798,6 +798,7 @@
         "@stackbase/cli": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/docstore-do-sqlite": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",

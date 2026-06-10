@@ -21,6 +21,7 @@
 import type { LoadedProject } from "@stackbase/cli/project";
 import type { ComponentDefinition } from "@stackbase/component";
 import type { BlobStore } from "@stackbase/blobstore";
+import type { D1Client } from "@stackbase/docstore-d1";
 import { bootDurableObjectRuntime, type DurableObjectBoot } from "./boot";
 import { DurableObjectRuntimeHost } from "./host";
 import { DoAlarmWakeHost } from "./wake";
@@ -44,6 +45,12 @@ export interface DurableObjectAppConfig {
    *  subclass. Injected, never imported — the engine stays blob-store-neutral. Absent → file storage
    *  is inert (`ctx.storage` has no provider; `/api/storage/*` 404s), everything else unchanged. */
   blobStore?: BlobStore;
+  /** M2b: the Cloudflare D1 binding (`env.DB`) for `.global()` tables, supplied by the concrete DO
+   *  subclass (wrapping its raw `env.DB` with `@stackbase/docstore-d1`'s `bindingD1Client`). Injected,
+   *  never imported from a raw Cloudflare type here — mirrors `blobStore` (env.R2). Absent → `.global()`
+   *  tables are unavailable: a schema declaring one fails DO boot fast (see `bootDurableObjectRuntime`),
+   *  rather than letting a `.global()` op fail confusingly deep inside some later mutation. */
+  d1?: D1Client;
   /** Stretch pure-backstop driver cadences (Cloudflare: `(d) => Math.max(d, 900_000)`). */
   backstopMs?: (defaultMs: number) => number;
   /** Injected clock (tests). */
@@ -85,6 +92,7 @@ export abstract class StackbaseDurableObject {
           adminKey: cfg.adminKey,
           wakeHost: new DoAlarmWakeHost(this.ctx.storage),
           ...(cfg.blobStore ? { blobStore: cfg.blobStore } : {}),
+          ...(cfg.d1 ? { d1: cfg.d1 } : {}),
           ...(cfg.backstopMs ? { backstopMs: cfg.backstopMs } : {}),
           ...(cfg.now ? { now: cfg.now } : {}),
         });

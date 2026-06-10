@@ -18,6 +18,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:e2e": "vitest run --config vitest.workers.config.ts test-workers/*-e2e.test.ts",
     "typecheck": "tsc --noEmit --project tsconfig.json",
     "clean": "rm -rf dist .turbo"
   },
@@ -27,6 +28,7 @@
     "@stackbase/cli": "workspace:*",
     "@stackbase/component": "workspace:*",
     "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-d1": "workspace:*",
     "@stackbase/docstore-do-sqlite": "workspace:*",
     "@stackbase/docstore-sqlite": "workspace:*",
     "@stackbase/executor": "workspace:*",
