@@ -23,4 +23,43 @@ describe("composeTables + .global()", () => {
       u: defineTable({ email: v.string() }).global().index("by_email", ["email"], { unique: true }),
     })) as never)).not.toThrow();
   });
+
+  // ── Whole-branch review Fix 2: .global() is app-schema-only, not component-schema ────────────
+  it("rejects a .global() table declared inside a COMPONENT schema at compose time", () => {
+    const componentSchema = defineSchema({
+      widgets: defineTable({ label: v.string() }).global(),
+    });
+    const input = {
+      app: { schemaJson: defineSchema({}).export(), moduleMap: {} } as never,
+      components: [
+        {
+          name: "acme",
+          schema: componentSchema,
+          modules: {},
+        },
+      ] as never[],
+    };
+    expect(() => composeTables(input as never)).toThrow(
+      /\.global\(\) tables are only supported in the app schema.*table "widgets".*component "acme"/is,
+    );
+  });
+
+  it("does NOT throw for a .global() table declared in the APP schema alongside a component", () => {
+    const input = {
+      app: {
+        schemaJson: defineSchema({
+          users: defineTable({ email: v.string() }).global(),
+        }).export(),
+        moduleMap: {},
+      } as never,
+      components: [
+        {
+          name: "acme",
+          schema: defineSchema({ local: defineTable({ n: v.number() }) }),
+          modules: {},
+        },
+      ] as never[],
+    };
+    expect(() => composeTables(input as never)).not.toThrow();
+  });
 });

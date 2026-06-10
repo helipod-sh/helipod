@@ -527,8 +527,14 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
     }
     const g = requireGlobalTxn(ctx, table);
     const { _id: suppliedId2, ...userVal } = converted as DocumentValue & { _id?: unknown };
+    if (suppliedId2 !== undefined) {
+      throw new InvalidClientIdError(
+        `client-supplied ids are not yet supported on .global() tables in M2b ("${table}"); omit _id and let ` +
+          `the server mint one`,
+      );
+    }
     validateDocumentForWrite(meta, fullName, userVal as DocumentValue);
-    const id = suppliedId2 !== undefined ? String(suppliedId2) : encodeInternalDocumentId(newDocumentId(tableNumber));
+    const id = encodeInternalDocumentId(newDocumentId(tableNumber));
     const doc: DocumentValue = { ...(userVal as DocumentValue), _id: id, _creationTime: Number(ctx.snapshotTs) };
     markWrite(ctx, "global");
     g.stageInsert(fullName, doc as Record<string, unknown>);

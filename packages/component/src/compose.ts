@@ -46,6 +46,12 @@ function addSchema(
       throw new Error(`table name "${tableName}" may not contain "/" or ":"`);
     const fullName = getFullTableName(tableName, componentName); // "" → bare; else "component/name"
     if (seen.has(fullName)) throw new Error(`duplicate table: ${fullName}`);
+    if (tableDef.global && componentName !== "") {
+      throw new Error(
+        `.global() tables are only supported in the app schema, not in components (table "${tableName}" in ` +
+          `component "${componentName}")`,
+      );
+    }
     seen.add(fullName);
     const info = registry.allocate(fullName, { shardKey: tableDef.shardKey });
     tableNumbers[fullName] = info.tableNumber;

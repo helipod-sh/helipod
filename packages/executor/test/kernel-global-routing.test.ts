@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { defineSchema, defineTable, v } from "@stackbase/values";
-import { DocumentNotFoundError } from "@stackbase/errors";
+import { DocumentNotFoundError, InvalidClientIdError } from "@stackbase/errors";
 import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@stackbase/docstore-d1";
 import { DEFAULT_SHARD, encodeInternalDocumentId, encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
 import type { DocumentValue, InternalDocumentId } from "@stackbase/docstore";
@@ -491,5 +491,35 @@ describe("kernel routing of .global() tables to GlobalTxn (M2b Task 6)", () => {
     await router.dispatch(ctx, "db.insert", JSON.stringify({ table: "notes", value: { text: "ok" } }));
     expect(calls.put).toBe(true);
     expect(writeStores.local).toBe(true);
+  });
+
+  // ── Whole-branch review Fix 1: a client-supplied _id on a .global() insert is rejected ────────
+  describe("client-supplied _id on a .global() insert (whole-branch review fix)", () => {
+    it("db.insert on a global table WITH a client-supplied _id throws InvalidClientIdError", async () => {
+      const ctx = baseCtx({ catalog, globalTxn });
+      await expect(
+        router.dispatch(
+          ctx,
+          "db.insert",
+          JSON.stringify({ table: "counters", value: { key: "cid", value: 1, _id: "some-client-id" } }),
+        ),
+      ).rejects.toThrow(InvalidClientIdError);
+      expect(globalTxn.hasWrites()).toBe(false); // rejected before staging
+    });
+
+    it("db.insert on a global table WITHOUT a supplied _id still succeeds and mints a server id", async () => {
+      const ctx = baseCtx({ catalog, globalTxn });
+      const res = await router.dispatch(
+        ctx,
+        "db.insert",
+        JSON.stringify({ table: "counters", value: { key: "no-cid", value: 1 } }),
+      );
+      const { id } = JSON.parse(res) as { id: string };
+      expect(typeof id).toBe("string");
+      expect(id.length).toBeGreaterThan(0);
+
+      const inserted = globalTxn.ops[0]! as Extract<(typeof globalTxn.ops)[number], { kind: "insert" }>;
+      expect(inserted.doc._id).toBe(id);
+    });
   });
 });
