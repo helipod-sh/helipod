@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { defineSchema, defineTable, v } from "@stackbase/values";
+import { DocumentNotFoundError } from "@stackbase/errors";
 import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@stackbase/docstore-d1";
 import { DEFAULT_SHARD, encodeInternalDocumentId, encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
 import type { DocumentValue, InternalDocumentId } from "@stackbase/docstore";
@@ -28,6 +29,8 @@ import {
   MUTATION_PROFILE,
   createSeededRandom,
   type KernelContext,
+  type TablePolicy,
+  type RuleContext,
 } from "../src/index";
 
 // ── in-memory D1Client (mirrors packages/docstore-d1/test/support/sqlite-d1-client.ts) ─────────
@@ -68,6 +71,7 @@ const globalSchema = defineSchema({
 
 const COUNTERS_TABLE_NUMBER = 30001;
 const NOTES_TABLE_NUMBER = 30002;
+const STRICT_TABLE_NUMBER = 30003;
 
 // ── minimal stub TransactionContext for the LOCAL (MVCC) store ─────────────────────────────────
 function makeStubTxn(calls: { put: boolean; delete: boolean }): TransactionContext {
@@ -147,7 +151,11 @@ describe("kernel routing of .global() tables to GlobalTxn (M2b Task 6)", () => {
         fields: ["key"],
         indexId: encodeStorageIndexId(COUNTERS_TABLE_NUMBER, "by_key"),
       })
-      .addTable("notes", NOTES_TABLE_NUMBER, undefined, false, null, false);
+      .addTable("notes", NOTES_TABLE_NUMBER, undefined, false, null, false)
+      // A global table WITH a document validator, for the guard-ordering test: a validation
+      // failure must not falsely mark `writeStores.global`. Never registered in the D1 store's own
+      // schema — validation throws before `stageInsert` is ever reached, so the store is untouched.
+      .addTable("strict", STRICT_TABLE_NUMBER, v.object({ n: v.number() }).toJSON(), true, null, true);
   });
 
   it("db.insert on a global table stages into GlobalTxn, not ctx.txn", async () => {
@@ -280,5 +288,120 @@ describe("kernel routing of .global() tables to GlobalTxn (M2b Task 6)", () => {
   it("a query context (no writeStores) never trips the co-write guard", async () => {
     const ctx = baseCtx({ profile: QUERY_PROFILE, catalog, globalTxn, writeStores: undefined });
     await expect(router.dispatch(ctx, "db.get", JSON.stringify({ id: encodeInternalDocumentId(newDocumentId(COUNTERS_TABLE_NUMBER)) }))).resolves.toBeDefined();
+  });
+
+  // ── Fix 1: global reads fail-closed on a registered read policy ──────────────────────────────
+  describe("global read paths fail-closed on a registered read policy", () => {
+    const readPolicy: TablePolicy = { read: () => true };
+    const getRuleContext = async (): Promise<RuleContext> => ({}) as RuleContext; // never actually invoked — the throw precedes it
+
+    it("db.get on a global table WITH a read policy throws, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn }); // privileged: true, to stage the row
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "p", value: 1 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const readCtx = baseCtx({
+        catalog,
+        globalTxn,
+        privileged: false,
+        getRuleContext,
+        policyRegistry: new Map([["counters", readPolicy]]),
+      });
+      await expect(router.dispatch(readCtx, "db.get", JSON.stringify({ id }))).rejects.toThrow(
+        /read policies are not yet supported/,
+      );
+    });
+
+    it("db.get on the SAME global table WITHOUT a policy still returns data, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "q", value: 2 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const readCtx = baseCtx({ catalog, globalTxn, privileged: false, getRuleContext, policyRegistry: new Map() });
+      const doc = JSON.parse(await router.dispatch(readCtx, "db.get", JSON.stringify({ id }))) as Record<string, unknown>;
+      expect(doc).toMatchObject({ key: "q", value: 2 });
+    });
+
+    it("db.query on a global table WITH a read policy throws, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "r", value: 3 } }));
+
+      const readCtx = baseCtx({
+        catalog,
+        globalTxn,
+        privileged: false,
+        getRuleContext,
+        policyRegistry: new Map([["counters", readPolicy]]),
+      });
+      await expect(
+        router.dispatch(
+          readCtx,
+          "db.query",
+          JSON.stringify({ table: "counters", index: "by_key", range: [{ field: "key", operator: "eq", value: "r" }] }),
+        ),
+      ).rejects.toThrow(/read policies are not yet supported/);
+    });
+
+    it("db.query on the SAME global table WITHOUT a policy still returns data, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "s", value: 4 } }));
+
+      const readCtx = baseCtx({ catalog, globalTxn, privileged: false, getRuleContext, policyRegistry: new Map() });
+      const res = await router.dispatch(
+        readCtx,
+        "db.query",
+        JSON.stringify({ table: "counters", index: "by_key", range: [{ field: "key", operator: "eq", value: "s" }] }),
+      );
+      const { docs } = JSON.parse(res) as { docs: Record<string, unknown>[] };
+      expect(docs).toHaveLength(1);
+      expect(docs[0]).toMatchObject({ key: "s", value: 4 });
+    });
+  });
+
+  // ── Fix 2: global replace preserves _creationTime and throws on a missing document ───────────
+  describe("global db.replace matches local replace semantics", () => {
+    it("a replace value omitting _creationTime keeps the OLD doc's _creationTime staged", async () => {
+      const ctx = baseCtx({ catalog, globalTxn });
+      const insertRes = await router.dispatch(ctx, "db.insert", JSON.stringify({ table: "counters", value: { key: "t", value: 5 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+      const inserted = globalTxn.ops[0]! as Extract<(typeof globalTxn.ops)[number], { kind: "insert" }>;
+      const originalCreationTime = inserted.doc._creationTime;
+      expect(originalCreationTime).toBeTypeOf("number");
+
+      // The replace value below omits `_creationTime` entirely, as a real `.replace()` call does.
+      await router.dispatch(ctx, "db.replace", JSON.stringify({ id, value: { key: "t", value: 50 } }));
+
+      const replaceOp = globalTxn.ops.find((o) => o.kind === "replace")!;
+      expect(replaceOp.doc._creationTime).toBe(originalCreationTime);
+      expect(replaceOp.doc._id).toBe(id);
+      expect(replaceOp.doc.value).toBe(50);
+    });
+
+    it("replacing a missing _id throws DocumentNotFoundError", async () => {
+      const ctx = baseCtx({ catalog, globalTxn });
+      const missingId = encodeInternalDocumentId(newDocumentId(COUNTERS_TABLE_NUMBER));
+      await expect(
+        router.dispatch(ctx, "db.replace", JSON.stringify({ id: missingId, value: { key: "u", value: 1 } })),
+      ).rejects.toThrow(DocumentNotFoundError);
+    });
+  });
+
+  // ── Fix 3: the co-write guard marks AFTER validation on a global insert ──────────────────────
+  it("a global insert that FAILS validation does not mark writeStores.global (so a later local write doesn't falsely throw)", async () => {
+    const calls = { put: false, delete: false };
+    const writeStores = { local: false, global: false };
+    const ctx = baseCtx({ txn: makeStubTxn(calls), catalog, globalTxn, writeStores });
+
+    await expect(
+      router.dispatch(ctx, "db.insert", JSON.stringify({ table: "strict", value: { n: "not-a-number" } })),
+    ).rejects.toThrow();
+    expect(writeStores.global).toBe(false);
+    expect(globalTxn.hasWrites()).toBe(false);
+
+    // A subsequent LOCAL write in the same mutation must not be falsely rejected by the co-write
+    // guard, since the failed global insert never actually staged anything.
+    await router.dispatch(ctx, "db.insert", JSON.stringify({ table: "notes", value: { text: "ok" } }));
+    expect(calls.put).toBe(true);
+    expect(writeStores.local).toBe(true);
   });
 });

@@ -495,6 +495,9 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   if (meta.mode === "global") {
+    if (!ctx.privileged && ctx.getRuleContext && ctx.policyRegistry.get(meta.name)?.read) {
+      throw new ForbiddenOperationError(`read policies are not yet supported on .global() tables ("${meta.name}")`);
+    }
     const g = requireGlobalTxn(ctx, meta.name);
     const doc = await g.get(meta.name, id);
     return JSON.stringify(doc === null ? null : convexToJson(doc as unknown as Value));
@@ -519,12 +522,12 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   const converted = jsonToConvex(value) as DocumentValue;
 
   if (meta?.mode === "global") {
-    markWrite(ctx, "global");
     const g = requireGlobalTxn(ctx, table);
     const { _id: suppliedId2, ...userVal } = converted as DocumentValue & { _id?: unknown };
     validateDocumentForWrite(meta, fullName, userVal as DocumentValue);
     const id = suppliedId2 !== undefined ? String(suppliedId2) : encodeInternalDocumentId(newDocumentId(tableNumber));
     const doc: DocumentValue = { ...(userVal as DocumentValue), _id: id, _creationTime: Number(ctx.snapshotTs) };
+    markWrite(ctx, "global");
     g.stageInsert(fullName, doc as Record<string, unknown>);
     return JSON.stringify({ id });
   }
@@ -602,12 +605,19 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   if (meta.mode === "global") {
-    markWrite(ctx, "global");
     const g = requireGlobalTxn(ctx, meta.name);
+    const old = await g.get(meta.name, id); // RYOW-aware existence read
+    if (old === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
     const converted = jsonToConvex(value) as DocumentValue;
     const { _id: _oi, _creationTime: _oc, ...userFields } = converted;
     validateDocumentForWrite(meta, meta.name, userFields as DocumentValue);
-    g.stageReplace(meta.name, id, converted as Record<string, unknown>);
+    markWrite(ctx, "global"); // after validation + existence check, matching the local path
+    const newDoc = {
+      ...(userFields as Record<string, unknown>),
+      _id: id,
+      _creationTime: (old._creationTime as number) ?? Number(ctx.snapshotTs),
+    };
+    g.stageReplace(meta.name, id, newDoc);
     return "{}";
   }
   const oldDoc = await ctx.txn.get(internalId);
@@ -669,6 +679,9 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
   if (!indexSpec) throw new FunctionNotFoundError(`unknown index: ${spec.table}.${spec.index}`);
   const tableMeta = ctx.catalog.getTable(tableName);
   if (tableMeta?.mode === "global") {
+    if (!ctx.privileged && ctx.getRuleContext && ctx.policyRegistry.get(tableName)?.read) {
+      throw new ForbiddenOperationError(`read policies are not yet supported on .global() tables ("${tableName}")`);
+    }
     const g = requireGlobalTxn(ctx, tableName);
     // Equality-only in M2b: reject range/order/non-eq filters/pagination on a global table.
     const eqOnly = (spec.range ?? []).every((r) => r.operator === "eq");
