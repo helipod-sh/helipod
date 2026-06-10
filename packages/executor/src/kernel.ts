@@ -522,6 +522,9 @@ const handleDbInsert: SyscallHandler = async (ctx, argJson) => {
   const converted = jsonToConvex(value) as DocumentValue;
 
   if (meta?.mode === "global") {
+    if (!ctx.privileged && ctx.getRuleContext && ctx.policyRegistry.get(fullName)?.write) {
+      throw new ForbiddenOperationError(`write policies are not yet supported on .global() tables ("${fullName}")`);
+    }
     const g = requireGlobalTxn(ctx, table);
     const { _id: suppliedId2, ...userVal } = converted as DocumentValue & { _id?: unknown };
     validateDocumentForWrite(meta, fullName, userVal as DocumentValue);
@@ -605,6 +608,9 @@ const handleDbReplace: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   if (meta.mode === "global") {
+    if (!ctx.privileged && ctx.getRuleContext && ctx.policyRegistry.get(meta.name)?.write) {
+      throw new ForbiddenOperationError(`write policies are not yet supported on .global() tables ("${meta.name}")`);
+    }
     const g = requireGlobalTxn(ctx, meta.name);
     const old = await g.get(meta.name, id); // RYOW-aware existence read
     if (old === null) throw new DocumentNotFoundError(`cannot replace missing document ${id}`);
@@ -648,6 +654,9 @@ const handleDbDelete: SyscallHandler = async (ctx, argJson) => {
   if (!meta) throw new FunctionNotFoundError(`unknown table for id ${id}`);
   requireOwnTable(ctx, meta.name);
   if (meta.mode === "global") {
+    if (!ctx.privileged && ctx.getRuleContext && ctx.policyRegistry.get(meta.name)?.write) {
+      throw new ForbiddenOperationError(`write policies are not yet supported on .global() tables ("${meta.name}")`);
+    }
     markWrite(ctx, "global");
     requireGlobalTxn(ctx, meta.name).stageDelete(meta.name, id);
     return "{}";

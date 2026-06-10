@@ -358,6 +358,94 @@ describe("kernel routing of .global() tables to GlobalTxn (M2b Task 6)", () => {
     });
   });
 
+  // ── Fix: global writes fail-closed on a registered write policy (mirrors the read-policy fix) ──
+  describe("global write paths fail-closed on a registered write policy", () => {
+    const writePolicy: TablePolicy = { write: () => true };
+    const getRuleContext = async (): Promise<RuleContext> => ({}) as RuleContext; // never actually invoked — the throw precedes it
+
+    it("db.insert on a global table WITH a write policy throws, non-privileged", async () => {
+      const ctx = baseCtx({
+        catalog,
+        globalTxn,
+        privileged: false,
+        getRuleContext,
+        policyRegistry: new Map([["counters", writePolicy]]),
+      });
+      await expect(
+        router.dispatch(ctx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-insert", value: 1 } })),
+      ).rejects.toThrow(/write policies are not yet supported/);
+      expect(globalTxn.hasWrites()).toBe(false); // rejected before staging
+    });
+
+    it("db.insert on the SAME global table WITHOUT a policy still stages the write, non-privileged", async () => {
+      const ctx = baseCtx({ catalog, globalTxn, privileged: false, getRuleContext, policyRegistry: new Map() });
+      const res = await router.dispatch(ctx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-insert-ok", value: 1 } }));
+      const { id } = JSON.parse(res) as { id: string };
+      expect(typeof id).toBe("string");
+      expect(globalTxn.hasWrites()).toBe(true);
+    });
+
+    it("db.replace on a global table WITH a write policy throws, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn }); // privileged: true, to stage the row
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-replace", value: 1 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const opsBefore = globalTxn.ops.length;
+      const replaceCtx = baseCtx({
+        catalog,
+        globalTxn,
+        privileged: false,
+        getRuleContext,
+        policyRegistry: new Map([["counters", writePolicy]]),
+      });
+      await expect(
+        router.dispatch(replaceCtx, "db.replace", JSON.stringify({ id, value: { key: "wp-replace", value: 2 } })),
+      ).rejects.toThrow(/write policies are not yet supported/);
+      expect(globalTxn.ops.length).toBe(opsBefore); // rejected before staging
+    });
+
+    it("db.replace on the SAME global table WITHOUT a policy still stages the write, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-replace-ok", value: 1 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const replaceCtx = baseCtx({ catalog, globalTxn, privileged: false, getRuleContext, policyRegistry: new Map() });
+      await router.dispatch(replaceCtx, "db.replace", JSON.stringify({ id, value: { key: "wp-replace-ok", value: 2 } }));
+      const afterReplace = JSON.parse(await router.dispatch(insertCtx, "db.get", JSON.stringify({ id }))) as Record<string, unknown>;
+      expect(afterReplace.value).toBe(2);
+    });
+
+    it("db.delete on a global table WITH a write policy throws, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-delete", value: 1 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const opsBefore = globalTxn.ops.length;
+      const deleteCtx = baseCtx({
+        catalog,
+        globalTxn,
+        privileged: false,
+        getRuleContext,
+        policyRegistry: new Map([["counters", writePolicy]]),
+      });
+      await expect(router.dispatch(deleteCtx, "db.delete", JSON.stringify({ id }))).rejects.toThrow(
+        /write policies are not yet supported/,
+      );
+      expect(globalTxn.ops.length).toBe(opsBefore); // rejected before staging
+    });
+
+    it("db.delete on the SAME global table WITHOUT a policy still stages the write, non-privileged", async () => {
+      const insertCtx = baseCtx({ catalog, globalTxn });
+      const insertRes = await router.dispatch(insertCtx, "db.insert", JSON.stringify({ table: "counters", value: { key: "wp-delete-ok", value: 1 } }));
+      const { id } = JSON.parse(insertRes) as { id: string };
+
+      const deleteCtx = baseCtx({ catalog, globalTxn, privileged: false, getRuleContext, policyRegistry: new Map() });
+      await router.dispatch(deleteCtx, "db.delete", JSON.stringify({ id }));
+      const afterDelete = JSON.parse(await router.dispatch(insertCtx, "db.get", JSON.stringify({ id })));
+      expect(afterDelete).toBeNull();
+    });
+  });
+
   // ── Fix 2: global replace preserves _creationTime and throws on a missing document ───────────
   describe("global db.replace matches local replace semantics", () => {
     it("a replace value omitting _creationTime keeps the OLD doc's _creationTime staged", async () => {
