@@ -1,6 +1,41 @@
 import { PGlite } from "@electric-sql/pglite";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "../src/pg-client";
-import { ADVISORY_LOCK_KEY } from "../src/pg-client";
+import { ADVISORY_LOCK_KEY, STREAM_BATCH } from "../src/pg-client";
+
+/**
+ * Encode `$1..$n` placeholders in `sql` as typed SQL literals, substituting `params` positionally.
+ *
+ * `DECLARE ... CURSOR` can't bind `$n` parameters over PGlite/PG's simple query path, so a
+ * streaming query must inline its params as literals before issuing DECLARE. Longest-match-first
+ * (`$10` before `$1`) so a two-digit placeholder is never partially replaced by its single-digit
+ * prefix.
+ */
+function inlineParams(sql: string, params: readonly PgValue[]): string {
+  let out = sql;
+  for (let i = params.length; i >= 1; i--) {
+    const value = params[i - 1];
+    out = out.split(`$${i}`).join(literalFor(value));
+  }
+  return out;
+}
+
+function literalFor(value: PgValue | undefined): string {
+  if (value === null || value === undefined) return "NULL";
+  if (value instanceof Uint8Array) {
+    let hex = "";
+    for (const b of value) hex += b.toString(16).padStart(2, "0");
+    return `'\\x${hex}'::bytea`;
+  }
+  if (typeof value === "bigint" || typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "string") {
+    if (value.includes("$$")) {
+      throw new Error("inlineParams: string param contains '$$', cannot dollar-quote safely");
+    }
+    return `$$${value}$$`;
+  }
+  throw new Error("inlineParams: unsupported param type");
+}
 
 /**
  * Test-only PgClient over PGlite (real Postgres in WASM, in-process, single connection).
@@ -21,6 +56,30 @@ export class PgliteClient implements PgClient {
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
     const res = await this.pg.query(text, params as unknown[] | undefined);
     return res.rows as PgRow[];
+  }
+
+  /**
+   * Stream rows via a server-side cursor (`DECLARE`/`FETCH`), batched at `STREAM_BATCH` rows per
+   * round trip. `DECLARE ... CURSOR` doesn't support `$n` bind params over the simple protocol, so
+   * `inlineParams` encodes them as typed literals directly into the SQL text first.
+   *
+   * PGlite is a single in-process connection, so the cursor's lifetime is wrapped in its own
+   * BEGIN/COMMIT. The `finally` always CLOSEs the cursor and COMMITs — including on an early
+   * `break`/throw from the consumer — so the connection is never left mid-transaction.
+   */
+  async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+    await this.query("BEGIN");
+    try {
+      await this.query(`DECLARE sbc NO SCROLL CURSOR FOR ${inlineParams(sql, params ?? [])}`);
+      for (;;) {
+        const rows = await this.query(`FETCH ${STREAM_BATCH} FROM sbc`);
+        if (rows.length === 0) break;
+        for (const r of rows) yield r;
+      }
+    } finally {
+      await this.query("CLOSE sbc").catch(() => {});
+      await this.query("COMMIT").catch(() => {});
+    }
   }
 
   async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {
