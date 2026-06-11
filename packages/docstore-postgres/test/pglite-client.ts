@@ -6,17 +6,13 @@ import { ADVISORY_LOCK_KEY, STREAM_BATCH } from "../src/pg-client";
  * Encode `$1..$n` placeholders in `sql` as typed SQL literals, substituting `params` positionally.
  *
  * `DECLARE ... CURSOR` can't bind `$n` parameters over PGlite/PG's simple query path, so a
- * streaming query must inline its params as literals before issuing DECLARE. Longest-match-first
- * (`$10` before `$1`) so a two-digit placeholder is never partially replaced by its single-digit
- * prefix.
+ * streaming query must inline its params as literals before issuing DECLARE. A single pass over
+ * the ORIGINAL `sql` string via a global regex — never an iterative split/join over a growing
+ * output string — because a string literal substituted early (e.g. a dollar-quoted `$$1abc$$`)
+ * would otherwise be re-scanned and corrupted by a later, lower-index substitution.
  */
 function inlineParams(sql: string, params: readonly PgValue[]): string {
-  let out = sql;
-  for (let i = params.length; i >= 1; i--) {
-    const value = params[i - 1];
-    out = out.split(`$${i}`).join(literalFor(value));
-  }
-  return out;
+  return sql.replace(/\$(\d+)/g, (_m, n: string) => literalFor(params[Number(n) - 1]));
 }
 
 function literalFor(value: PgValue | undefined): string {

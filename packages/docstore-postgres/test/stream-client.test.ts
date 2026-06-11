@@ -25,4 +25,19 @@ describe("PgliteClient.queryStream", () => {
     expect(after[0]!.c).toBe(20); // client still works after an early-broken stream
     await c.close();
   });
+
+  it("inlineParams handles string params containing digit sequences (no placeholder corruption)", async () => {
+    const c = new PgliteClient();
+    await c.query(`CREATE TABLE s (a INT, b TEXT)`);
+    await c.query(`INSERT INTO s VALUES ($1, $2)`, [42, "1abc"]);
+    await c.query(`INSERT INTO s VALUES ($1, $2)`, [7, "123-path"]);
+    const buffered = await c.query(`SELECT b FROM s WHERE a = $1 AND b = $2 ORDER BY b`, [42, "1abc"]);
+    const streamed: unknown[] = [];
+    for await (const r of c.queryStream!(`SELECT b FROM s WHERE a = $1 AND b = $2 ORDER BY b`, [42, "1abc"])) {
+      streamed.push(r);
+    }
+    expect((streamed as { b: string }[]).map((r) => r.b)).toEqual((buffered as { b: string }[]).map((r) => r.b));
+    expect((streamed as { b: string }[]).map((r) => r.b)).toEqual(["1abc"]);
+    await c.close();
+  });
 });
