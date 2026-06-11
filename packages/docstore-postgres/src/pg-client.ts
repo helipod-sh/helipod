@@ -11,7 +11,14 @@ export type PgRow = Record<string, PgValue>;
 export interface PgQuerier {
   /** Run a parameterized query ($1,$2,…); returns normalized rows. */
   query(text: string, params?: readonly PgValue[]): Promise<PgRow[]>;
+  /** Optional streaming query — yields rows lazily from a server-side cursor. Closing the returned
+   *  iterator early (consumer break) MUST stop fetching and release the cursor/connection. A client
+   *  that omits this simply doesn't stream; callers fall back to buffered `query`. */
+  queryStream?(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow>;
 }
+
+/** Batch size a `queryStream?` implementation fetches per cursor round trip. */
+export const STREAM_BATCH = 100;
 
 /** A querier that can also open its own BEGIN/COMMIT on a specific pinned connection — what a
  *  per-shard commit connection hands back so `commitWrite` runs entirely on that shard's session. */

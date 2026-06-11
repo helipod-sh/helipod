@@ -25,11 +25,12 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "pg": "^8.13.1",
     "@stackbase/docstore": "workspace:*",
-    "@stackbase/values": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*"
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/values": "workspace:*",
+    "pg": "^8.13.1",
+    "pg-cursor": "^2.21.0"
   },
   "devDependencies": {
     "@stackbase/test": "workspace:*",
