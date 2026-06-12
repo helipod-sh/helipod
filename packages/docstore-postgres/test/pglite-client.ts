@@ -52,6 +52,17 @@ export class PgliteClient implements PgClient {
    *  connection (e.g. a mutation's own read alongside a background driver's sweep — both real in
    *  `@stackbase/test`'s embedded runtime) never collide on a cursor name. See `queryStream` below. */
   private cursorSeq = 0;
+  /** Promise-chain mutex serializing `queryStream` calls on the single shared PGlite connection.
+   *  See `queryStream` below for why this — not `WITH HOLD` — is the fix for cursor collisions. */
+  private streamLock: Promise<void> = Promise.resolve();
+
+  private async acquireStreamLock(): Promise<() => void> {
+    const prev = this.streamLock;
+    let release!: () => void;
+    this.streamLock = new Promise((r) => (release = r));
+    await prev;
+    return release;
+  }
 
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
     const res = await this.pg.query(text, params as unknown[] | undefined);
@@ -63,38 +74,46 @@ export class PgliteClient implements PgClient {
    * round trip. `DECLARE ... CURSOR` doesn't support `$n` bind params over the simple protocol, so
    * `inlineParams` encodes them as typed literals directly into the SQL text first.
    *
-   * PGlite is a single in-process connection — there is only ONE session, so two logically
-   * independent `queryStream` calls can be in flight at once on it (e.g. a mutation's RYOW query
-   * racing a background driver's own scan). Two things make that safe:
-   *   1. Every cursor gets a unique, per-instance name (`sbc_<n>`) — a fixed name would let a
-   *      second concurrent DECLARE collide with the first's still-open cursor ("cursor already
-   *      exists"), which is exactly what a fixed name did before this fix.
-   *   2. The cursor is declared `WITH HOLD` and its declaring BEGIN/COMMIT is scoped to JUST the
-   *      DECLARE — so a concurrent caller's COMMIT (interleaved on this same shared session, since
-   *      Postgres has no real nested transactions) can never prematurely close a cursor this
-   *      generator is still FETCHing from; only an explicit CLOSE does. FETCH/CLOSE run outside any
-   *      explicit transaction (each is its own implicit auto-commit statement).
-   * The `finally` always CLOSEs the cursor — including on an early `break`/throw from the consumer
-   * — so it's never leaked for the life of the connection.
+   * The cursor MUST be non-holdable (lazy, plain `DECLARE ... CURSOR`, no `WITH HOLD`) — a `WITH
+   * HOLD` cursor materializes its ENTIRE result into a tuplestore at COMMIT time, so the query
+   * runs to completion regardless of how few rows the caller actually FETCHes before breaking.
+   * That defeats the whole point of streaming: the executor is supposed to produce only as many
+   * rows as get consumed, so an early `break` after one batch means the remaining range is never
+   * computed. A non-holdable cursor stays lazy — `FETCH 100` then `CLOSE` genuinely stops server
+   * work early — but it only works inside an open transaction, so the transaction must stay open
+   * across the whole FETCH loop instead of being scoped to just the DECLARE.
+   *
+   * PGlite is a single in-process connection — there is only ONE session — so a transaction held
+   * open across an entire generator's lifetime can't tolerate a second, logically independent
+   * `queryStream` call (e.g. a mutation's RYOW query racing a background driver's own scan)
+   * interleaving its own BEGIN/DECLARE/COMMIT on the same session; Postgres has no real nested
+   * transactions. So concurrent `queryStream` calls are serialized with `streamLock`, a
+   * promise-chain mutex: each call fully runs its BEGIN..FETCH-loop..CLOSE..COMMIT before the next
+   * queued call's BEGIN can start. This is safe (not a bottleneck) because the query engine only
+   * ever drains one index_scan/collect/paginate at a time per logical operation; the per-instance
+   * unique cursor name (`sbc_<n>`) remains as defense in depth. The `finally` chain always CLOSEs
+   * the cursor, COMMITs (or best-effort no-throws on cleanup), and releases the lock — including on
+   * an early `break`/throw from the consumer (an async generator's `finally` runs on `.return()`
+   * too) — so nothing is leaked and the lock can never deadlock the connection.
    */
   async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+    const release = await this.acquireStreamLock();
     const cursor = `sbc_${++this.cursorSeq}`;
-    await this.query("BEGIN");
     try {
-      await this.query(`DECLARE ${cursor} NO SCROLL CURSOR WITH HOLD FOR ${inlineParams(sql, params ?? [])}`);
-      await this.query("COMMIT");
-    } catch (e) {
-      await this.query("ROLLBACK").catch(() => {});
-      throw e;
-    }
-    try {
-      for (;;) {
-        const rows = await this.query(`FETCH ${STREAM_BATCH} FROM ${cursor}`);
-        if (rows.length === 0) break;
-        for (const r of rows) yield r;
+      await this.query("BEGIN");
+      try {
+        await this.query(`DECLARE ${cursor} NO SCROLL CURSOR FOR ${inlineParams(sql, params ?? [])}`);
+        for (;;) {
+          const rows = await this.query(`FETCH ${STREAM_BATCH} FROM ${cursor}`);
+          if (rows.length === 0) break;
+          for (const r of rows) yield r;
+        }
+      } finally {
+        await this.query(`CLOSE ${cursor}`).catch(() => {});
+        await this.query("COMMIT").catch(() => {});
       }
     } finally {
-      await this.query(`CLOSE ${cursor}`).catch(() => {});
+      release();
     }
   }
 
