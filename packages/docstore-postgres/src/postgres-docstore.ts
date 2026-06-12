@@ -479,6 +479,16 @@ export class PostgresDocStore implements DocStore {
     limit?: number,
   ): AsyncGenerator<readonly [Uint8Array, LatestDocument]> {
     const { sql, params } = this.buildIndexScanSql(indexId, tableId, readTimestamp, interval, order, limit);
+    // Stream via a server-side cursor when the underlying client supports it, so a consumer that
+    // breaks early (e.g. `collect()`/`paginate()` stopping at a limit) never pulls the rest of the
+    // range out of Postgres. A client without `queryStream` (e.g. a pool driver that hasn't wired
+    // one up) falls back to the buffered path — same rows, just fetched in one round trip.
+    if (this.db.queryStream) {
+      for await (const row of this.db.queryStream(sql, params)) {
+        yield this.mapIndexRow(row);
+      }
+      return;
+    }
     const rows = await this.db.query(sql, params);
     for (const row of rows) {
       yield this.mapIndexRow(row);

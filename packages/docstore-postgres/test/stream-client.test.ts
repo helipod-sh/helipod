@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { PgliteClient } from "./pglite-client";
+import { PostgresDocStore } from "../src/postgres-docstore";
+import { STREAM_BATCH } from "../src/pg-client";
+import type { PgRow, PgValue } from "../src/pg-client";
+import { newDocumentId, encodeStorageIndexId } from "@stackbase/id-codec";
+import { encodeIndexKey } from "@stackbase/index-key-codec";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@stackbase/docstore";
 
 async function drain<T>(it: AsyncIterable<T>, n?: number): Promise<T[]> {
   const out: T[] = [];
@@ -39,5 +45,75 @@ describe("PgliteClient.queryStream", () => {
     expect((streamed as { b: string }[]).map((r) => r.b)).toEqual((buffered as { b: string }[]).map((r) => r.b));
     expect((streamed as { b: string }[]).map((r) => r.b)).toEqual(["1abc"]);
     await c.close();
+  });
+});
+
+/** Counts rows returned by `FETCH ...` cursor round trips — proves how much a consumer's early
+ *  `break` actually stopped `queryStream` from pulling out of the cursor, as opposed to just
+ *  stopping the caller from CONSUMING an already-fully-buffered result. */
+class SpyPglite extends PgliteClient {
+  fetchedRows = 0;
+  override async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
+    const rows = await super.query(text, params);
+    if (text.trimStart().startsWith("FETCH")) this.fetchedRows += rows.length;
+    return rows;
+  }
+}
+
+describe("PostgresDocStore.index_scan streaming", () => {
+  const TABLE = 20001;
+  const INDEX_ID = encodeStorageIndexId(TABLE, "by_key");
+  const FULL: Interval = { start: new Uint8Array(), end: null };
+  const TOTAL = 500;
+
+  function seedIndexEntries(): { documents: DocumentLogEntry[]; indexUpdates: IndexWrite[] } {
+    const documents: DocumentLogEntry[] = [];
+    const indexUpdates: IndexWrite[] = [];
+    for (let i = 0; i < TOTAL; i++) {
+      const id: InternalDocumentId = newDocumentId(TABLE);
+      const key = encodeIndexKey([i]);
+      documents.push({ ts: 1n, id, prev_ts: null, value: { id, value: { n: i } } });
+      indexUpdates.push({ ts: 1n, update: { indexId: INDEX_ID, key, value: { type: "NonClustered", docId: id } } });
+    }
+    return { documents, indexUpdates };
+  }
+
+  async function collect<T>(g: AsyncGenerator<T>, n?: number): Promise<T[]> {
+    const out: T[] = [];
+    for await (const x of g) {
+      out.push(x);
+      if (n !== undefined && out.length >= n) break;
+    }
+    return out;
+  }
+
+  it("streams via a cursor and stops fetching on an early break, matching the buffered result", async () => {
+    const { documents, indexUpdates } = seedIndexEntries();
+
+    // Reference: a full buffered scan on a plain (non-streaming-instrumented) store.
+    const refStore = new PostgresDocStore(new PgliteClient());
+    await refStore.setupSchema();
+    await refStore.write(documents, indexUpdates, "Error");
+    const full = await collect(refStore.index_scan(INDEX_ID, "", 5n, FULL, "asc"));
+    expect(full.length).toBe(TOTAL);
+
+    // Subject: the spy-instrumented store, broken after 3 rows.
+    const spy = new SpyPglite();
+    const store = new PostgresDocStore(spy);
+    await store.setupSchema();
+    await store.write(documents, indexUpdates, "Error");
+
+    const partial = await collect(store.index_scan(INDEX_ID, "", 5n, FULL, "asc"), 3);
+    expect(partial.map(([key]) => key)).toEqual(full.slice(0, 3).map(([key]) => key));
+
+    // Proof: an early break must fetch far fewer rows than the full 500-row range — at most one
+    // cursor batch, not the whole scan.
+    expect(spy.fetchedRows).toBeGreaterThan(0);
+    expect(spy.fetchedRows).toBeLessThanOrEqual(STREAM_BATCH);
+    expect(spy.fetchedRows).toBeLessThan(TOTAL);
+
+    // The store must still be usable after the early break (cursor closed, txn ended).
+    const again = await collect(store.index_scan(INDEX_ID, "", 5n, FULL, "asc"));
+    expect(again.length).toBe(TOTAL);
   });
 });
