@@ -250,6 +250,20 @@ export class NodePgClient implements PgClient {
    */
   async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
     const conn = this.buildClient(this.applicationName ? `${this.applicationName}-stream` : undefined);
+    // `pg.Client` extends EventEmitter and emits 'error' on connection-level failures (socket
+    // ECONNRESET, backend killed via pg_terminate_backend, mid-stream disconnect) IN ADDITION to
+    // routing the failure into the active query/cursor. With zero 'error' listeners, Node/Bun
+    // throws an unhandled 'error' event as an uncaught exception, which can crash the whole
+    // process. Swallow it here — the try/finally below already surfaces the query-level error to
+    // the caller (via cursor.read()'s rejection) and tears down the cursor + connection; this
+    // listener only exists to stop the EventEmitter-level throw. Mirrors the pinned connection
+    // (`this.client.on("error", ...)` in `ensure()`) and the per-shard commit connections
+    // (`fireShardConnectionLost`) elsewhere in this file.
+    conn.on("error", () => {});
+    // Deliberately skips the fleet `sessionTimeouts` (statement_timeout /
+    // idle_in_transaction_session_timeout) applied to the pinned connection in `ensure()` — a v1
+    // omission, not an oversight: a stream may legitimately want a longer (or no) statement
+    // timeout than a normal write transaction.
     await conn.connect();
     const cursor = conn.query(new Cursor(sql, toDriverParams(params) ?? []));
     try {

@@ -21,6 +21,14 @@ interface FakeClientInstance {
   opts: { connectionString: string; application_name?: string };
   connected: boolean;
   ended: boolean;
+  /** Number of listeners registered for `event` — lets a test assert an `'error'` handler was
+   *  actually attached (not just that `.on()` was called-and-discarded by a no-op stub). */
+  listenerCount(event: string): number;
+  /** Fires registered listeners for `event`, mirroring Node's `EventEmitter` contract closely
+   *  enough for this test: emitting `'error'` with zero registered listeners THROWS (the same
+   *  "unhandled 'error' event" crash the real `pg.Client`/Node `EventEmitter` produces), so a test
+   *  can prove the production code's listener is real by emitting without it blowing up. */
+  emit(event: string, ...args: unknown[]): void;
 }
 
 const state = vi.hoisted(() => ({
@@ -42,13 +50,30 @@ vi.mock("pg", () => {
   class FakeClient implements FakeClientInstance {
     connected = false;
     ended = false;
+    private readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>();
     constructor(public opts: { connectionString: string; application_name?: string }) {
       state.clientInstances.push(this);
     }
     async connect(): Promise<void> {
       this.connected = true;
     }
-    on(_event: string, _cb: (...args: unknown[]) => void): void {}
+    on(event: string, cb: (...args: unknown[]) => void): void {
+      const arr = this.handlers.get(event) ?? [];
+      arr.push(cb);
+      this.handlers.set(event, arr);
+    }
+    listenerCount(event: string): number {
+      return this.handlers.get(event)?.length ?? 0;
+    }
+    emit(event: string, ...args: unknown[]): void {
+      const arr = this.handlers.get(event) ?? [];
+      if (event === "error" && arr.length === 0) {
+        // Mirrors real Node `EventEmitter`/`pg.Client`: an 'error' event emitted with zero
+        // registered listeners throws — the exact process-crash shape this whole fix guards.
+        throw args[0] instanceof Error ? args[0] : new Error(String(args[0]));
+      }
+      for (const cb of arr) cb(...args);
+    }
     query(config: unknown, params?: unknown[]): unknown {
       // Mirrors pg's own `typeof config.submit === "function"` branch (see file doc comment): a
       // Submittable (our FakeCursor) is returned AS-IS, synchronously, not run as SQL text/params.
@@ -151,6 +176,28 @@ describe("NodePgClient.queryStream — connection lifecycle (pg + pg-cursor mock
     expect(state.clientInstances).toHaveLength(2);
     expect(state.clientInstances[1]!.ended).toBe(true); // no leaked connection on error
     expect(state.cursorInstances[0]!.closed).toBe(true); // and the cursor was still closed
+  });
+
+  it("attaches an 'error' listener on the stream connection so a connection-level failure can't crash the process, and still cleans up", async () => {
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    state.readQueue.push([{ a: 1 }], []);
+
+    const rows = await drain(client.queryStream("SELECT a FROM t"));
+    expect(rows).toEqual([{ a: 1 }]);
+
+    const streamConn = state.clientInstances[1]!;
+    // An 'error' listener WAS registered on the dedicated stream connection — mirrors the pinned
+    // connection's `this.client.on("error", ...)` in `ensure()` and the per-shard commit
+    // connections' `fireShardConnectionLost` wiring. Without this, a connection-level failure
+    // (socket ECONNRESET, backend killed via pg_terminate_backend, mid-stream disconnect) would be
+    // an unhandled 'error' event and crash the whole process.
+    expect(streamConn.listenerCount("error")).toBeGreaterThan(0);
+    // Proves the listener is real, not a no-op stub swallowed by the mock itself: emitting 'error'
+    // must NOT throw (the FakeClient's own `emit()` throws precisely when zero listeners are
+    // registered — the crash shape being guarded against).
+    expect(() => streamConn.emit("error", new Error("simulated connection reset"))).not.toThrow();
+    // The connection is still torn down normally.
+    expect(streamConn.ended).toBe(true);
   });
 
   it("passes the SQL text and params straight through to the cursor", async () => {
