@@ -1,16 +1,42 @@
 import { describe, it, expect } from "vitest";
 import { runDocStoreConformance } from "@stackbase/docstore/test-support/conformance";
 import { newDocumentId } from "@stackbase/id-codec";
-import type { PgRow, PgValue } from "../src/pg-client";
+import type { PgClient, PgRow, PgValue } from "../src/pg-client";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { NodePgClient } from "../src/node-pg-client";
 import { PgliteClient } from "./pglite-client";
 
 // Always: hermetic PGlite (real Postgres semantics, no Docker, runs under Node).
+// Coverage split for `index_scan`'s streaming-vs-buffered branch (see `postgres-docstore.ts`,
+// `if (this.db.queryStream) { ... streaming ... } else { ... buffered ... }`):
+// this run's client is a plain `PgliteClient`, which DOES define `queryStream` (see
+// `test/pglite-client.ts`), so every `index_scan` here already takes the STREAMING branch.
+// The buffered fallback is exercised separately below by `BufferedPglite`.
 runDocStoreConformance(
   "postgres (pglite)",
   async () => {
     const s = new PostgresDocStore(new PgliteClient());
+    await s.setupSchema();
+    return s;
+  },
+  async (s) => {
+    await (s as PostgresDocStore).close();
+  },
+);
+
+// Buffered-path coverage: a `PgliteClient` subclass with `queryStream` undefined, so
+// `index_scan`'s `if (this.db.queryStream)` check is falsy and every scan in this run takes the
+// buffered `await this.db.query(...)` branch instead — same conformance contract, other branch.
+class BufferedPglite extends PgliteClient {
+  // @ts-expect-error — narrowing PgliteClient's concrete `queryStream` method to `undefined` so
+  // `index_scan`'s `if (this.db.queryStream)` check is falsy; PgClient itself declares the method
+  // optional, only PgliteClient's own (non-subclass) type narrows it to always-present.
+  override queryStream: PgClient["queryStream"] = undefined;
+}
+runDocStoreConformance(
+  "postgres (pglite, buffered index_scan)",
+  async () => {
+    const s = new PostgresDocStore(new BufferedPglite());
     await s.setupSchema();
     return s;
   },
