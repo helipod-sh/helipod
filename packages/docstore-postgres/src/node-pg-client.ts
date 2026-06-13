@@ -21,10 +21,21 @@
  * into a single BEGIN/COMMIT and corrupt atomicity. Each commit connection gets the same session
  * timeouts (hazard (a)), routes its loss to that shard's lease (hazard (b)), and hosts that slot's
  * session-scoped advisory lock (hazard (c)). LISTEN keeps its own separate connection, unchanged.
+ *
+ * `queryStream` (Task 4) is a SECOND exception, for the same reason LISTEN is: a `pg-cursor` portal
+ * occupies its connection's query slot for the cursor's ENTIRE lifetime (every intervening `read()`
+ * round trip), so running it on the pinned connection would stall every other query/write/transaction
+ * on that connection until the stream finishes or is closed — and would outright corrupt an
+ * in-progress writer transaction if a caller streamed mid-`transaction()`. So each `queryStream` call
+ * opens its OWN dedicated `pg.Client` (via the same `buildClient` helper — same int8→bigint type map,
+ * same `application_name` convention as everywhere else), uses it for exactly one cursor, and tears
+ * it down in `finally`. This also sidesteps any need for the mutex the PGlite test client uses to
+ * serialize concurrent streams on its one shared session — real `pg` connections are independent.
  */
 import pg from "pg";
+import Cursor from "pg-cursor";
 import type { PgClient, PgQuerier, PgRow, PgTransactionalQuerier, PgValue } from "./pg-client";
-import { ADVISORY_LOCK_KEY, SHARD_ADVISORY_LOCK_CLASS } from "./pg-client";
+import { ADVISORY_LOCK_KEY, SHARD_ADVISORY_LOCK_CLASS, STREAM_BATCH } from "./pg-client";
 
 const { Client, types } = pg;
 
@@ -220,6 +231,37 @@ export class NodePgClient implements PgClient {
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
     await this.ensure();
     return this.queryOn(this.client, text, params);
+  }
+
+  /**
+   * Stream rows via a real server-side cursor (`pg-cursor`, the extended-query-protocol Parse/Bind/
+   * Describe/Execute portal — NOT SQL `DECLARE ... CURSOR`, and critically NOT `WITH HOLD`: a holdable
+   * cursor materializes its entire result into a tuplestore at commit time regardless of how few rows
+   * the caller actually reads, which defeats the whole point of streaming — an early `break` must
+   * leave the remaining range genuinely uncomputed by the server). Batches at `STREAM_BATCH` rows per
+   * `cursor.read()` round trip, exactly the `pg-cursor` reference shape.
+   *
+   * Runs on its OWN dedicated connection (see the class doc comment) — opened here, closed in
+   * `finally` on every exit path: full drain, an early consumer `break` (an async generator's
+   * `finally` runs on the implicit `.return()` that produces), or a thrown error. `cursor.close()`
+   * closes the portal and syncs the session; `conn.end()` then physically closes the socket so
+   * nothing is left pooled or leaked. Both are best-effort (`.catch(() => {})`) so a failure tearing
+   * down an already-broken connection can't mask the real error/or block cleanup of the other.
+   */
+  async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+    const conn = this.buildClient(this.applicationName ? `${this.applicationName}-stream` : undefined);
+    await conn.connect();
+    const cursor = conn.query(new Cursor(sql, toDriverParams(params) ?? []));
+    try {
+      for (;;) {
+        const rows = await cursor.read(STREAM_BATCH);
+        if (rows.length === 0) break;
+        for (const r of normalizeRows(rows as Record<string, unknown>[])) yield r;
+      }
+    } finally {
+      await cursor.close().catch(() => {});
+      await conn.end().catch(() => {});
+    }
   }
 
   async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {
