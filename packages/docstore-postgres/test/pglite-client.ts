@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "../src/pg-client";
-import { ADVISORY_LOCK_KEY, STREAM_BATCH } from "../src/pg-client";
+import { ADVISORY_LOCK_KEY, STREAM_BATCH_INITIAL, STREAM_BATCH_MAX } from "../src/pg-client";
 
 /**
  * Encode `$1..$n` placeholders in `sql` as typed SQL literals, substituting `params` positionally.
@@ -70,8 +70,10 @@ export class PgliteClient implements PgClient {
   }
 
   /**
-   * Stream rows via a server-side cursor (`DECLARE`/`FETCH`), batched at `STREAM_BATCH` rows per
-   * round trip. `DECLARE ... CURSOR` doesn't support `$n` bind params over the simple protocol, so
+   * Stream rows via a server-side cursor (`DECLARE`/`FETCH`), batched adaptively — starting at
+   * `STREAM_BATCH_INITIAL` rows per round trip and doubling after each fetch up to
+   * `STREAM_BATCH_MAX` — cheap on an early break, few round trips on a full drain.
+   * `DECLARE ... CURSOR` doesn't support `$n` bind params over the simple protocol, so
    * `inlineParams` encodes them as typed literals directly into the SQL text first.
    *
    * The cursor MUST be non-holdable (lazy, plain `DECLARE ... CURSOR`, no `WITH HOLD`) — a `WITH
@@ -103,10 +105,12 @@ export class PgliteClient implements PgClient {
       await this.query("BEGIN");
       try {
         await this.query(`DECLARE ${cursor} NO SCROLL CURSOR FOR ${inlineParams(sql, params ?? [])}`);
+        let batch = STREAM_BATCH_INITIAL;
         for (;;) {
-          const rows = await this.query(`FETCH ${STREAM_BATCH} FROM ${cursor}`);
+          const rows = await this.query(`FETCH ${batch} FROM ${cursor}`);
           if (rows.length === 0) break;
           for (const r of rows) yield r;
+          batch = Math.min(batch * 2, STREAM_BATCH_MAX);
         }
       } finally {
         await this.query(`CLOSE ${cursor}`).catch(() => {});

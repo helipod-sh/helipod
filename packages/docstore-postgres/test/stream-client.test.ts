@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PgliteClient } from "./pglite-client";
 import { PostgresDocStore } from "../src/postgres-docstore";
-import { STREAM_BATCH } from "../src/pg-client";
+import { STREAM_BATCH_INITIAL } from "../src/pg-client";
 import type { PgRow, PgValue } from "../src/pg-client";
 import { newDocumentId, encodeStorageIndexId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
@@ -106,16 +106,16 @@ describe("PostgresDocStore.index_scan streaming", () => {
     const partial = await collect(store.index_scan(INDEX_ID, "", 5n, FULL, "asc"), 3);
     expect(partial.map(([key]) => key)).toEqual(full.slice(0, 3).map(([key]) => key));
 
-    // Proof: an early break must fetch far fewer rows than the full 500-row range — at most one
-    // cursor batch, not the whole scan. This metric is only meaningful because `queryStream`'s
-    // cursor is non-holdable (lazy): the executor genuinely produces only the rows FETCHed before
-    // CLOSE, so `fetchedRows` reflects server compute avoided, not just client-side transfer. A
-    // `WITH HOLD` cursor would materialize the ENTIRE 500-row result into a tuplestore at COMMIT
-    // time regardless of how few rows get FETCHed — this assertion would still pass (client only
-    // transfers `STREAM_BATCH` rows) while the server did all 500 rows of work, making the metric
-    // meaningless as a work-avoidance proof.
+    // Proof: an early break must fetch far fewer rows than the full 500-row range — at most the
+    // FIRST (smallest) adaptive batch, not the whole scan. This metric is only meaningful because
+    // `queryStream`'s cursor is non-holdable (lazy): the executor genuinely produces only the rows
+    // FETCHed before CLOSE, so `fetchedRows` reflects server compute avoided, not just client-side
+    // transfer. A `WITH HOLD` cursor would materialize the ENTIRE 500-row result into a tuplestore
+    // at COMMIT time regardless of how few rows get FETCHed — this assertion would still pass
+    // (client only transfers `STREAM_BATCH_INITIAL` rows) while the server did all 500 rows of
+    // work, making the metric meaningless as a work-avoidance proof.
     expect(spy.fetchedRows).toBeGreaterThan(0);
-    expect(spy.fetchedRows).toBeLessThanOrEqual(STREAM_BATCH);
+    expect(spy.fetchedRows).toBeLessThanOrEqual(STREAM_BATCH_INITIAL);
     expect(spy.fetchedRows).toBeLessThan(TOTAL);
 
     // The store must still be usable after the early break (cursor closed, txn ended).

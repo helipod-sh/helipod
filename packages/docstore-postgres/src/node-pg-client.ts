@@ -35,7 +35,12 @@
 import pg from "pg";
 import Cursor from "pg-cursor";
 import type { PgClient, PgQuerier, PgRow, PgTransactionalQuerier, PgValue } from "./pg-client";
-import { ADVISORY_LOCK_KEY, SHARD_ADVISORY_LOCK_CLASS, STREAM_BATCH } from "./pg-client";
+import {
+  ADVISORY_LOCK_KEY,
+  SHARD_ADVISORY_LOCK_CLASS,
+  STREAM_BATCH_INITIAL,
+  STREAM_BATCH_MAX,
+} from "./pg-client";
 
 const { Client, types } = pg;
 
@@ -238,8 +243,10 @@ export class NodePgClient implements PgClient {
    * Describe/Execute portal — NOT SQL `DECLARE ... CURSOR`, and critically NOT `WITH HOLD`: a holdable
    * cursor materializes its entire result into a tuplestore at commit time regardless of how few rows
    * the caller actually reads, which defeats the whole point of streaming — an early `break` must
-   * leave the remaining range genuinely uncomputed by the server). Batches at `STREAM_BATCH` rows per
-   * `cursor.read()` round trip, exactly the `pg-cursor` reference shape.
+   * leave the remaining range genuinely uncomputed by the server). Batches adaptively: starts at
+   * `STREAM_BATCH_INITIAL` rows per `cursor.read()` round trip and doubles after each fetch up to
+   * `STREAM_BATCH_MAX` — cheap on an early `break` (only the first small batch is ever computed),
+   * few round trips on a full drain.
    *
    * Runs on its OWN dedicated connection (see the class doc comment) — opened here, closed in
    * `finally` on every exit path: full drain, an early consumer `break` (an async generator's
@@ -266,11 +273,13 @@ export class NodePgClient implements PgClient {
     // timeout than a normal write transaction.
     await conn.connect();
     const cursor = conn.query(new Cursor(sql, toDriverParams(params) ?? []));
+    let batch = STREAM_BATCH_INITIAL;
     try {
       for (;;) {
-        const rows = await cursor.read(STREAM_BATCH);
+        const rows = await cursor.read(batch);
         if (rows.length === 0) break;
         for (const r of normalizeRows(rows as Record<string, unknown>[])) yield r;
+        batch = Math.min(batch * 2, STREAM_BATCH_MAX);
       }
     } finally {
       await cursor.close().catch(() => {});

@@ -3,7 +3,8 @@
  * can't boot in this sandbox; see `test-support/embedded-pg.ts`'s availability gate).
  *
  * `PostgresDocStore.index_scan` streams via `db.queryStream` when the client provides one
- * (`PgliteClient` does — a non-holdable `DECLARE ... CURSOR` + `FETCH ${STREAM_BATCH}` loop, see
+ * (`PgliteClient` does — a non-holdable `DECLARE ... CURSOR` + an ADAPTIVE `FETCH` loop that
+ * starts at `STREAM_BATCH_INITIAL` rows and doubles each round trip up to `STREAM_BATCH_MAX`, see
  * `test/pglite-client.ts`'s doc comment), else falls back to one buffered `db.query()` call that
  * returns the WHOLE matched range. `paginate()` (`packages/query-engine/src/query-runtime.ts`)
  * calls `index_scan` with NO SQL `LIMIT` and instead `break`s its consuming loop once it has
