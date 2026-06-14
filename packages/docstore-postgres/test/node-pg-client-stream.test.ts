@@ -26,7 +26,7 @@
  * Real concurrent borrow/wait/release behavior against a live Postgres is unvalidated — see the task
  * report for the explicit real-PG-smoke follow-up.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 interface FakeClientInstance {
   opts: { connectionString: string; application_name?: string };
@@ -168,7 +168,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     const mainConn = state.clientInstances[0]!;
 
     state.readQueue.push([{ a: 1 }, { a: 2 }], []); // one batch, then the empty-batch end signal
-    const rows = await drain(client.queryStream("SELECT a FROM t"));
+    const rows = await drain(client.queryStream!("SELECT a FROM t"));
 
     expect(rows).toEqual([{ a: 1 }, { a: 2 }]);
     expect(state.clientInstances).toHaveLength(2); // a SECOND, dedicated connection was opened
@@ -185,12 +185,12 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     const client = new NodePgClient({ connectionString: "postgres://fake" });
 
     state.readQueue.push([{ a: 1 }], []);
-    await drain(client.queryStream("SELECT a FROM t"));
+    await drain(client.queryStream!("SELECT a FROM t"));
     expect(state.clientInstances).toHaveLength(2); // pinned + one stream connection built
     const streamConn = state.clientInstances[1]!;
 
     state.readQueue.push([{ a: 2 }], []);
-    const rows2 = await drain(client.queryStream("SELECT a FROM t"));
+    const rows2 = await drain(client.queryStream!("SELECT a FROM t"));
 
     expect(rows2).toEqual([{ a: 2 }]);
     expect(state.clientInstances).toHaveLength(2); // SAME connection reused — no fresh handshake
@@ -205,7 +205,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     state.readQueue.push([{ a: 1 }], [{ a: 2 }], [{ a: 3 }]);
 
     const seen: unknown[] = [];
-    for await (const row of client.queryStream("SELECT a FROM t")) {
+    for await (const row of client.queryStream!("SELECT a FROM t")) {
       seen.push(row);
       break; // consumer bails after the first row — triggers the generator's implicit .return()
     }
@@ -218,7 +218,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
 
     // Proves it's actually reusable: a subsequent call doesn't open a third connection.
     state.readQueue.push([]);
-    await drain(client.queryStream("SELECT a FROM t"));
+    await drain(client.queryStream!("SELECT a FROM t"));
     expect(state.clientInstances).toHaveLength(2);
   });
 
@@ -227,7 +227,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     const boom = new Error("simulated cursor read failure");
     state.readQueue.push(boom);
 
-    await expect(drain(client.queryStream("SELECT a FROM t"))).rejects.toThrow("simulated cursor read failure");
+    await expect(drain(client.queryStream!("SELECT a FROM t"))).rejects.toThrow("simulated cursor read failure");
 
     expect(state.clientInstances).toHaveLength(2);
     const brokenConn = state.clientInstances[1]!;
@@ -236,7 +236,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
 
     // The NEXT stream call must build a fresh connection rather than reuse the broken one.
     state.readQueue.push([]);
-    await drain(client.queryStream("SELECT a FROM t"));
+    await drain(client.queryStream!("SELECT a FROM t"));
     expect(state.clientInstances).toHaveLength(3);
     expect(state.clientInstances[2]).not.toBe(brokenConn);
   });
@@ -245,7 +245,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     state.readQueue.push([{ a: 1 }]); // one batch; hold off the empty-batch terminator
 
-    const iter = client.queryStream("SELECT a FROM t")[Symbol.asyncIterator]();
+    const iter = client.queryStream!("SELECT a FROM t")[Symbol.asyncIterator]();
     const first = await iter.next();
     expect(first.value).toEqual({ a: 1 });
     expect(first.done).toBeFalsy();
@@ -272,7 +272,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
 
     // A subsequent stream must NOT reuse the broken connection — it builds a fresh one.
     state.readQueue.push([]);
-    await drain(client.queryStream("SELECT a FROM t"));
+    await drain(client.queryStream!("SELECT a FROM t"));
     expect(state.clientInstances).toHaveLength(3);
     expect(state.clientInstances[2]).not.toBe(streamConn);
   });
@@ -280,7 +280,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
   it("(c) close() ends every idle pooled connection", async () => {
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     state.readQueue.push([{ a: 1 }], []);
-    await drain(client.queryStream("SELECT a FROM t"));
+    await drain(client.queryStream!("SELECT a FROM t"));
 
     const streamConn = state.clientInstances[1]!;
     expect(streamConn.ended).toBe(false); // idle, not yet ended
@@ -292,7 +292,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
   it("passes the SQL text and params straight through to the cursor", async () => {
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     state.readQueue.push([]);
-    await drain(client.queryStream("SELECT * FROM t WHERE id = $1", [42]));
+    await drain(client.queryStream!("SELECT * FROM t WHERE id = $1", [42]));
 
     expect(state.cursorInstances[0]!.text).toBe("SELECT * FROM t WHERE id = $1");
     expect(state.cursorInstances[0]!.values).toEqual([42]);
@@ -311,7 +311,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
       // cursor.read() — their connections stay borrowed until we resolve that read.
       const holderSettled = new Array(READ_POOL_MAX).fill(false);
       const holders = Array.from({ length: READ_POOL_MAX }, (_, i) =>
-        drain(client.queryStream("SELECT a FROM t")).then((rows) => {
+        drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
           holderSettled[i] = true;
           return rows;
         }),
@@ -322,7 +322,7 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
       // The (MAX+1)th call: pool is full and nothing is idle, so it must block on `readPoolWaiters`
       // rather than build a fifth connection.
       let waiterSettled = false;
-      const waiterDrain = drain(client.queryStream("SELECT a FROM t")).then((rows) => {
+      const waiterDrain = drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
         waiterSettled = true;
         return rows;
       });
@@ -363,14 +363,14 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
 
       // Saturate the pool exactly as above.
       const holders = Array.from({ length: READ_POOL_MAX }, () =>
-        drain(client.queryStream("SELECT a FROM t")).catch((e) => e as Error),
+        drain(client.queryStream!("SELECT a FROM t")).catch((e) => e as Error),
       );
       await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
 
       // Queue the (MAX+1)th call: it must block on the waiter queue (pool is full).
       let waiterSettled = false;
       let waiterError: Error | undefined;
-      const waiterDrain = drain(client.queryStream("SELECT a FROM t")).then(
+      const waiterDrain = drain(client.queryStream!("SELECT a FROM t")).then(
         (rows) => {
           waiterSettled = true;
           return rows;
@@ -405,11 +405,66 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
       // queryStream call still succeeds instead of hanging on `readPoolWaiters` forever.
       state.useManualReads = false;
       state.readQueue.push([]);
-      await expect(drain(client.queryStream("SELECT a FROM t"))).resolves.toEqual([]);
+      await expect(drain(client.queryStream!("SELECT a FROM t"))).resolves.toEqual([]);
 
       // Clean up the remaining held streams.
       while (state.manualReads.length > 0) state.manualReads.shift()!.resolve([]);
       await Promise.all(holders);
     }, 5000); // explicit timeout: pre-fix, this HANGS (the leaked slot deadlocks the waiter forever)
+  });
+});
+
+describe("NodePgClient — STACKBASE_PG_STREAM kill switch", () => {
+  const ENV_KEY = "STACKBASE_PG_STREAM";
+  let savedValue: string | undefined;
+  let hadKey: boolean;
+
+  beforeEach(() => {
+    hadKey = ENV_KEY in process.env;
+    savedValue = process.env[ENV_KEY];
+  });
+
+  afterEach(() => {
+    if (hadKey) {
+      process.env[ENV_KEY] = savedValue;
+    } else {
+      delete process.env[ENV_KEY];
+    }
+    state.clientInstances.length = 0;
+    state.cursorInstances.length = 0;
+    state.readQueue.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('does NOT advertise queryStream when STACKBASE_PG_STREAM="0"', () => {
+    process.env[ENV_KEY] = "0";
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    expect(client.queryStream).toBeFalsy();
+  });
+
+  it('does NOT advertise queryStream when STACKBASE_PG_STREAM="false"', () => {
+    process.env[ENV_KEY] = "false";
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    expect(client.queryStream).toBeFalsy();
+  });
+
+  it("advertises a working queryStream when STACKBASE_PG_STREAM is unset (default ON)", async () => {
+    delete process.env[ENV_KEY];
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    expect(client.queryStream).toBeTruthy();
+
+    state.readQueue.push([{ a: 1 }], []);
+    const rows = await drain(client.queryStream!("SELECT a FROM t"));
+    expect(rows).toEqual([{ a: 1 }]);
+  });
+
+  it('advertises a working queryStream when STACKBASE_PG_STREAM="1"', async () => {
+    process.env[ENV_KEY] = "1";
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    expect(client.queryStream).toBeTruthy();
+
+    state.readQueue.push([{ a: 1 }], []);
+    const rows = await drain(client.queryStream!("SELECT a FROM t"));
+    expect(rows).toEqual([{ a: 1 }]);
   });
 });

@@ -56,6 +56,19 @@ const INT8_OID = 20;
  *  can exist concurrently, reused across calls instead of opened-and-torn-down per call. */
 const READ_POOL_MAX = 4;
 
+/**
+ * Kill switch for the pg-cursor + bounded-read-pool streaming path (Task 9). This production path
+ * has never run against a real Postgres in CI (only PGlite/embedded substrates) — set
+ * `STACKBASE_PG_STREAM=0` (or `"false"`) to make `NodePgClient` NOT advertise `queryStream`, so
+ * `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` gate falls through to the proven
+ * buffered `query` path, with no redeploy needed to recover from an unforeseen streaming-path
+ * incident. Default (unset, or any other value) is streaming ON.
+ */
+function resolveStreamingEnabled(): boolean {
+  const v = process.env.STACKBASE_PG_STREAM;
+  return v !== "0" && v !== "false";
+}
+
 /** Bounded-writer-session timeouts (Fenced Frontier B1, D4). Applied ONLY to fleet writer-capable
  *  connections (see `prepareFleetNode`) — a non-fleet single-node `NodePgClient` passes no
  *  `sessionTimeouts` and runs unbounded, exactly as before. */
@@ -155,6 +168,13 @@ export class NodePgClient implements PgClient {
   readonly tryAcquireShardLock?: (slot: number) => Promise<boolean>;
   readonly releaseShardLock?: (slot: number) => Promise<void>;
 
+  /** Present (bound in the constructor) only when the {@link resolveStreamingEnabled} kill switch is
+   *  ON (the default) — absent (`undefined`) when `STACKBASE_PG_STREAM=0`/`"false"` disables it, so
+   *  `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` truthiness check correctly falls
+   *  through to buffered `query`. A field (not a method), so it can be conditionally assigned/omitted
+   *  per instance rather than always being present on the prototype. */
+  readonly queryStream?: (sql: string, params?: readonly PgValue[]) => AsyncIterable<PgRow>;
+
   constructor(opts: {
     connectionString: string;
     applicationName?: string;
@@ -177,6 +197,11 @@ export class NodePgClient implements PgClient {
       };
       this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
       this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
+    }
+    // Kill switch (STACKBASE_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
+    // falsy — `index_scan`'s `if (this.db.queryStream)` gate then falls through to buffered `query`.
+    if (resolveStreamingEnabled()) {
+      this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
     }
   }
 
@@ -372,7 +397,7 @@ export class NodePgClient implements PgClient {
    * a failure closing an already-broken cursor can't mask the real error or block releasing the
    * connection.
    */
-  async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+  private async *queryStreamImpl(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
     const conn = await this.acquireReadConn();
     const cursor = conn.query(new Cursor(sql, toDriverParams(params) ?? []));
     let batch = STREAM_BATCH_INITIAL;

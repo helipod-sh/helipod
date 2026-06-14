@@ -86,17 +86,27 @@ export class PgliteClient implements PgClient {
    * across the whole FETCH loop instead of being scoped to just the DECLARE.
    *
    * PGlite is a single in-process connection — there is only ONE session — so a transaction held
-   * open across an entire generator's lifetime can't tolerate a second, logically independent
-   * `queryStream` call (e.g. a mutation's RYOW query racing a background driver's own scan)
-   * interleaving its own BEGIN/DECLARE/COMMIT on the same session; Postgres has no real nested
-   * transactions. So concurrent `queryStream` calls are serialized with `streamLock`, a
-   * promise-chain mutex: each call fully runs its BEGIN..FETCH-loop..CLOSE..COMMIT before the next
-   * queued call's BEGIN can start. This is safe (not a bottleneck) because the query engine only
-   * ever drains one index_scan/collect/paginate at a time per logical operation; the per-instance
-   * unique cursor name (`sbc_<n>`) remains as defense in depth. The `finally` chain always CLOSEs
-   * the cursor, COMMITs (or best-effort no-throws on cleanup), and releases the lock — including on
-   * an early `break`/throw from the consumer (an async generator's `finally` runs on `.return()`
-   * too) — so nothing is leaked and the lock can never deadlock the connection.
+   * open across an entire generator's lifetime can't tolerate a SECOND, logically independent
+   * `queryStream` call interleaving its own BEGIN/DECLARE/COMMIT on the same session; Postgres has
+   * no real nested transactions. So concurrent `queryStream` calls are serialized with
+   * `streamLock`, a promise-chain mutex: each call fully runs its BEGIN..FETCH-loop..CLOSE..COMMIT
+   * before the next queued call's BEGIN can start. The per-instance unique cursor name (`sbc_<n>`)
+   * remains as defense in depth.
+   *
+   * Scope, stated honestly: `streamLock` serializes STREAMING READS against each other only — it
+   * does NOT guard `query()`/`transaction()` (writes), which share this same PGlite connection and
+   * are NOT routed through the lock. A write interleaved with an open streaming `index_scan` (e.g.
+   * a mutation's `query()` racing a background driver's `queryStream()` sweep) would corrupt the
+   * open cursor's transaction — deliberately not fixed here, because routing `query`/`transaction`
+   * through the lock too risks a deadlock (a consumer that issues a read mid-stream, from inside
+   * the same logical operation that's draining the stream, would block on its own lock). This is a
+   * TEST-SUBSTRATE constraint only, with zero production impact: `NodePgClient` streams over
+   * independent pool/pinned connections (see its own doc comment), `@stackbase/test` defaults to
+   * `SqliteDocStore` (unaffected), and the conformance suite that exercises this client runs
+   * sequentially. The `finally` chain always CLOSEs the cursor, COMMITs (or best-effort no-throws
+   * on cleanup), and releases the lock — including on an early `break`/throw from the consumer (an
+   * async generator's `finally` runs on `.return()` too) — so nothing is leaked and the lock can
+   * never deadlock a legitimate stream-vs-stream sequence.
    */
   async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
     const release = await this.acquireStreamLock();
