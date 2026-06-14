@@ -26,11 +26,15 @@
  * occupies its connection's query slot for the cursor's ENTIRE lifetime (every intervening `read()`
  * round trip), so running it on the pinned connection would stall every other query/write/transaction
  * on that connection until the stream finishes or is closed — and would outright corrupt an
- * in-progress writer transaction if a caller streamed mid-`transaction()`. So each `queryStream` call
- * opens its OWN dedicated `pg.Client` (via the same `buildClient` helper — same int8→bigint type map,
- * same `application_name` convention as everywhere else), uses it for exactly one cursor, and tears
- * it down in `finally`. This also sidesteps any need for the mutex the PGlite test client uses to
- * serialize concurrent streams on its one shared session — real `pg` connections are independent.
+ * in-progress writer transaction if a caller streamed mid-`transaction()`. So `queryStream` borrows a
+ * connection from a small BOUNDED READ POOL (Task 9) instead of the pinned one — up to `READ_POOL_MAX`
+ * dedicated `pg.Client`s (same `buildClient` helper: same int8→bigint type map, same `application_name`
+ * convention), built lazily and REUSED across calls rather than opened-and-torn-down per call (a fresh
+ * TCP+auth handshake per read was a real regression for small/typical reads). A connection that errors
+ * mid-stream is discarded (never returned to the pool — it may have a dangling cursor/transaction);
+ * a healthy one is returned to the idle pool for the next caller. `close()` drains the whole pool. This
+ * also sidesteps any need for the mutex the PGlite test client uses to serialize concurrent streams on
+ * its one shared session — real `pg` connections are independent.
  */
 import pg from "pg";
 import Cursor from "pg-cursor";
@@ -46,6 +50,11 @@ const { Client, types } = pg;
 
 // int8 (OID 20) → bigint (pg defaults to string). Set on a per-client type map, not globally.
 const INT8_OID = 20;
+
+/** Bounded read-connection pool size for `queryStream` (Task 9). A cursor needs its own dedicated
+ *  connection (can't share the pinned writer mid-transaction) — this caps how many such connections
+ *  can exist concurrently, reused across calls instead of opened-and-torn-down per call. */
+const READ_POOL_MAX = 4;
 
 /** Bounded-writer-session timeouts (Fenced Frontier B1, D4). Applied ONLY to fleet writer-capable
  *  connections (see `prepareFleetNode`) — a non-fleet single-node `NodePgClient` passes no
@@ -120,6 +129,22 @@ export class NodePgClient implements PgClient {
   /** Lazily-opened per-shard commit connections (pool mode only). */
   private readonly commitConns = new Map<string, ShardCommitConn>();
   private readonly shardConnectionLostCbs: Array<(shardId: string) => void> = [];
+
+  // ---- Bounded read-connection pool for queryStream (Task 9) --------------------------------
+  /** Idle, healthy, ready-to-borrow read connections. */
+  private readonly readPoolIdle: pg.Client[] = [];
+  /** Count of read connections that exist (idle + currently borrowed) — bounds total pool size
+   *  without needing a separate "in use" list. */
+  private readPoolTotal = 0;
+  /** Connections an `on("error")` fired on — checked (and cleared) at release time so an errored
+   *  connection is discarded instead of returned to the idle pool, even if the borrower didn't
+   *  itself notice (e.g. the error landed after the last `read()` but before release). */
+  private readonly readPoolBroken = new WeakSet<pg.Client>();
+  /** FIFO of waiters blocked on `acquireReadConn` when the pool is at `READ_POOL_MAX`. Woken (or
+   *  rejected, on `close()`) by `releaseReadConn`/`close()`. */
+  private readonly readPoolWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+  /** Set by `close()`; makes any further `acquireReadConn` reject instead of hanging forever. */
+  private readPoolClosed = false;
 
   // The three pool capabilities are PRESENT (bound in the constructor) only when a `commitPool` is
   // configured, and absent otherwise — so `PostgresDocStore.commitWrite`'s `if (db.commitQuerierFor)`
@@ -239,6 +264,62 @@ export class NodePgClient implements PgClient {
   }
 
   /**
+   * Borrow a connection from the bounded read pool (Task 9), building a new one lazily if under
+   * `READ_POOL_MAX` and none is idle, or waiting for a release if the pool is already full. Every
+   * connection this builds gets its own `on("error")` listener — attached ONCE, for the connection's
+   * whole pooled lifetime (not per-borrow) — for the same reason the pinned connection and per-shard
+   * commit connections do (`ensure()`/`fireShardConnectionLost`): with zero 'error' listeners, Node/Bun
+   * throws an unhandled 'error' event as an uncaught exception on a connection-level failure (socket
+   * ECONNRESET, backend killed via pg_terminate_backend, mid-stream disconnect). The listener just
+   * marks the connection broken in `readPoolBroken`; `releaseReadConn` is what actually discards it.
+   *
+   * Deliberately skips the fleet `sessionTimeouts` (statement_timeout / idle_in_transaction_session_timeout)
+   * applied to the pinned connection in `ensure()` — a v1 omission, not an oversight: a stream may
+   * legitimately want a longer (or no) statement timeout than a normal write transaction.
+   */
+  private async acquireReadConn(): Promise<pg.Client> {
+    for (;;) {
+      if (this.readPoolClosed) throw new Error("NodePgClient: read pool closed");
+      const idle = this.readPoolIdle.pop();
+      if (idle) return idle;
+      if (this.readPoolTotal < READ_POOL_MAX) {
+        this.readPoolTotal++;
+        const conn = this.buildClient(this.applicationName ? `${this.applicationName}-stream` : undefined);
+        conn.on("error", () => {
+          this.readPoolBroken.add(conn);
+        });
+        await conn.connect();
+        return conn;
+      }
+      // Pool is at capacity: block until a release wakes us, then loop back and re-check (a
+      // released-broken connection frees a `readPoolTotal` slot rather than enqueuing to idle, so
+      // the re-check may build fresh instead of finding something idle).
+      await new Promise<void>((resolve, reject) => this.readPoolWaiters.push({ resolve, reject }));
+    }
+  }
+
+  /**
+   * Return a borrowed read connection to the pool — or discard it if `broken` (explicitly, because
+   * the caller's read loop errored) or if an `on("error")` already flagged it in `readPoolBroken`
+   * (a connection-level failure the caller's read loop never itself observed). A discarded connection
+   * is `end()`ed and its `readPoolTotal` slot freed; a healthy one goes back on the idle stack. Either
+   * way, wakes one waiter (if any) — always called from `queryStream`'s `finally`, so a borrowed
+   * connection is never permanently lost and a waiter is never left hanging.
+   */
+  private releaseReadConn(conn: pg.Client, opts?: { broken?: boolean }): void {
+    const broken = (opts?.broken ?? false) || this.readPoolBroken.has(conn);
+    this.readPoolBroken.delete(conn);
+    if (broken || this.readPoolClosed) {
+      this.readPoolTotal = Math.max(0, this.readPoolTotal - 1);
+      conn.end().catch(() => {});
+    } else {
+      this.readPoolIdle.push(conn);
+    }
+    const waiter = this.readPoolWaiters.shift();
+    waiter?.resolve();
+  }
+
+  /**
    * Stream rows via a real server-side cursor (`pg-cursor`, the extended-query-protocol Parse/Bind/
    * Describe/Execute portal — NOT SQL `DECLARE ... CURSOR`, and critically NOT `WITH HOLD`: a holdable
    * cursor materializes its entire result into a tuplestore at commit time regardless of how few rows
@@ -248,32 +329,20 @@ export class NodePgClient implements PgClient {
    * `STREAM_BATCH_MAX` — cheap on an early `break` (only the first small batch is ever computed),
    * few round trips on a full drain.
    *
-   * Runs on its OWN dedicated connection (see the class doc comment) — opened here, closed in
-   * `finally` on every exit path: full drain, an early consumer `break` (an async generator's
-   * `finally` runs on the implicit `.return()` that produces), or a thrown error. `cursor.close()`
-   * closes the portal and syncs the session; `conn.end()` then physically closes the socket so
-   * nothing is left pooled or leaked. Both are best-effort (`.catch(() => {})`) so a failure tearing
-   * down an already-broken connection can't mask the real error/or block cleanup of the other.
+   * Borrows a connection from the bounded read pool (see `acquireReadConn`/the class doc comment)
+   * instead of opening a fresh one per call. Released in `finally` on every exit path: full drain, an
+   * early consumer `break` (an async generator's `finally` runs on the implicit `.return()` that
+   * produces), or a thrown error — marked `broken` on the error path, since a connection that failed
+   * mid-cursor may have a dangling portal/transaction and must not be handed to the next borrower.
+   * `cursor.close()` closes the portal and syncs the session; it's best-effort (`.catch(() => {})`) so
+   * a failure closing an already-broken cursor can't mask the real error or block releasing the
+   * connection.
    */
   async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
-    const conn = this.buildClient(this.applicationName ? `${this.applicationName}-stream` : undefined);
-    // `pg.Client` extends EventEmitter and emits 'error' on connection-level failures (socket
-    // ECONNRESET, backend killed via pg_terminate_backend, mid-stream disconnect) IN ADDITION to
-    // routing the failure into the active query/cursor. With zero 'error' listeners, Node/Bun
-    // throws an unhandled 'error' event as an uncaught exception, which can crash the whole
-    // process. Swallow it here — the try/finally below already surfaces the query-level error to
-    // the caller (via cursor.read()'s rejection) and tears down the cursor + connection; this
-    // listener only exists to stop the EventEmitter-level throw. Mirrors the pinned connection
-    // (`this.client.on("error", ...)` in `ensure()`) and the per-shard commit connections
-    // (`fireShardConnectionLost`) elsewhere in this file.
-    conn.on("error", () => {});
-    // Deliberately skips the fleet `sessionTimeouts` (statement_timeout /
-    // idle_in_transaction_session_timeout) applied to the pinned connection in `ensure()` — a v1
-    // omission, not an oversight: a stream may legitimately want a longer (or no) statement
-    // timeout than a normal write transaction.
-    await conn.connect();
+    const conn = await this.acquireReadConn();
     const cursor = conn.query(new Cursor(sql, toDriverParams(params) ?? []));
     let batch = STREAM_BATCH_INITIAL;
+    let broken = false;
     try {
       for (;;) {
         const rows = await cursor.read(batch);
@@ -281,9 +350,12 @@ export class NodePgClient implements PgClient {
         for (const r of normalizeRows(rows as Record<string, unknown>[])) yield r;
         batch = Math.min(batch * 2, STREAM_BATCH_MAX);
       }
+    } catch (e) {
+      broken = true;
+      throw e;
     } finally {
       await cursor.close().catch(() => {});
-      await conn.end().catch(() => {});
+      this.releaseReadConn(conn, { broken });
     }
   }
 
@@ -492,5 +564,18 @@ export class NodePgClient implements PgClient {
       }
     }
     this.commitConns.clear();
+
+    // Drain the read pool: mark closed FIRST so any `queryStream` finishing concurrently releases
+    // its connection as end()-and-discard (see `releaseReadConn`) rather than back to idle, then end
+    // every currently-idle connection and reject every waiter (best-effort for in-use connections —
+    // they're the concurrently-finishing case just described, not silently dropped).
+    this.readPoolClosed = true;
+    const idleConns = this.readPoolIdle.splice(0);
+    for (const conn of idleConns) {
+      this.readPoolTotal = Math.max(0, this.readPoolTotal - 1);
+      await conn.end().catch(() => {});
+    }
+    const waiters = this.readPoolWaiters.splice(0);
+    for (const w of waiters) w.reject(new Error("NodePgClient: closed"));
   }
 }
