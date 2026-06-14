@@ -49,6 +49,15 @@ const state = vi.hoisted(() => ({
    *  shared across cursors in a test (each test only ever opens one). An `Error` entry makes that
    *  `.read()` call reject instead of resolve. */
   readQueue: [] as Array<unknown[] | Error>,
+  /** When true, `FakeCursor.read()` returns a manually-controllable deferred instead of consuming
+   *  `readQueue` — used to hold multiple concurrent `queryStream` calls open at will, so a test can
+   *  drive the bounded read pool's waiter queue (borrow N, block the (N+1)th, release one, observe
+   *  the waiter wake). One deferred per `.read()` call, appended to `manualReads` in call order. */
+  useManualReads: false,
+  manualReads: [] as Array<{ resolve: (rows: unknown[]) => void; reject: (e: Error) => void }>,
+  /** When true, the NEXT `FakeClient.connect()` call rejects once (then resets to false) — models a
+   *  network blip/auth hiccup on a freshly-built read-pool connection. */
+  failNextConnect: false,
 }));
 
 interface FakeCursorInstance {
@@ -66,6 +75,10 @@ vi.mock("pg", () => {
       state.clientInstances.push(this);
     }
     async connect(): Promise<void> {
+      if (state.failNextConnect) {
+        state.failNextConnect = false;
+        throw new Error("simulated connect failure");
+      }
       this.connected = true;
     }
     on(event: string, cb: (...args: unknown[]) => void): void {
@@ -111,6 +124,11 @@ vi.mock("pg-cursor", () => {
       // are self-contained and don't need a live connection to answer.
     }
     async read(_maxRows: number): Promise<unknown[]> {
+      if (state.useManualReads) {
+        return new Promise<unknown[]>((resolve, reject) => {
+          state.manualReads.push({ resolve, reject });
+        });
+      }
       const next = state.readQueue.shift();
       if (next === undefined) return [];
       if (next instanceof Error) throw next;
@@ -138,6 +156,9 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
     state.clientInstances.length = 0;
     state.cursorInstances.length = 0;
     state.readQueue.length = 0;
+    state.useManualReads = false;
+    state.manualReads.length = 0;
+    state.failNextConnect = false;
     vi.clearAllMocks();
   });
 
@@ -275,5 +296,120 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
 
     expect(state.cursorInstances[0]!.text).toBe("SELECT * FROM t WHERE id = $1");
     expect(state.cursorInstances[0]!.values).toEqual([42]);
+  });
+
+  describe("bounded read pool: waiter queue + connect-failure (Task 9 bug fix)", () => {
+    // Mirrors the private `READ_POOL_MAX` in `src/node-pg-client.ts` — kept in sync manually since
+    // it's intentionally not exported (an internal sizing detail, not part of the `PgClient` seam).
+    const READ_POOL_MAX = 4;
+
+    it("blocks the (MAX+1)th concurrent queryStream on the waiter queue until a release wakes it", async () => {
+      const client = new NodePgClient({ connectionString: "postgres://fake" });
+      state.useManualReads = true;
+
+      // Saturate the pool: READ_POOL_MAX drains, each parked in its own manually-controlled
+      // cursor.read() — their connections stay borrowed until we resolve that read.
+      const holderSettled = new Array(READ_POOL_MAX).fill(false);
+      const holders = Array.from({ length: READ_POOL_MAX }, (_, i) =>
+        drain(client.queryStream("SELECT a FROM t")).then((rows) => {
+          holderSettled[i] = true;
+          return rows;
+        }),
+      );
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // pinned + exactly MAX stream conns
+
+      // The (MAX+1)th call: pool is full and nothing is idle, so it must block on `readPoolWaiters`
+      // rather than build a fifth connection.
+      let waiterSettled = false;
+      const waiterDrain = drain(client.queryStream("SELECT a FROM t")).then((rows) => {
+        waiterSettled = true;
+        return rows;
+      });
+
+      // Give the waiter every chance to (wrongly) proceed before we release anything.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(waiterSettled).toBe(false); // still pending — proves it's genuinely blocked, not just slow
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // did NOT build a 5th connection
+
+      // Complete ONE held stream (empty batch = clean end of stream) — releases its connection and
+      // wakes exactly one queued waiter.
+      state.manualReads.shift()!.resolve([]);
+      await vi.waitFor(() => expect(holderSettled[0]).toBe(true));
+
+      // The woken waiter reuses the just-freed connection (no new client built) and parks on its own
+      // manual read.
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // reused, not rebuilt
+      expect(waiterSettled).toBe(false); // it's running now, but hasn't finished its own read yet
+
+      // Finish the newly-woken waiter specifically — it pushed its manual read LAST (after all the
+      // original holders), so it's the tail of the FIFO, not the head; `.pop()` (not `.shift()`)
+      // targets it directly instead of completing an arbitrary still-parked holder by accident.
+      state.manualReads.pop()!.resolve([]);
+      await vi.waitFor(() => expect(waiterSettled).toBe(true));
+      expect(await waiterDrain).toEqual([]);
+
+      // Clean up the rest of the still-parked holders so nothing leaks into the next test.
+      while (state.manualReads.length > 0) state.manualReads.shift()!.resolve([]);
+      await Promise.all(holders);
+    }, 5000); // explicit timeout: a regression here is a HANG (waiter never wakes), not a slow pass
+
+    it("frees the read-pool slot and wakes a waiter when a fresh conn.connect() rejects — no permanent deadlock (fails against the pre-fix code)", async () => {
+      const client = new NodePgClient({ connectionString: "postgres://fake" });
+      state.useManualReads = true;
+
+      // Saturate the pool exactly as above.
+      const holders = Array.from({ length: READ_POOL_MAX }, () =>
+        drain(client.queryStream("SELECT a FROM t")).catch((e) => e as Error),
+      );
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+
+      // Queue the (MAX+1)th call: it must block on the waiter queue (pool is full).
+      let waiterSettled = false;
+      let waiterError: Error | undefined;
+      const waiterDrain = drain(client.queryStream("SELECT a FROM t")).then(
+        (rows) => {
+          waiterSettled = true;
+          return rows;
+        },
+        (e: Error) => {
+          waiterSettled = true;
+          waiterError = e;
+          throw e;
+        },
+      );
+      waiterDrain.catch(() => {}); // observed via the assertion below; suppress unhandled-rejection noise
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(waiterSettled).toBe(false);
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // hasn't attempted a build yet
+
+      // Kill ONE held connection via a genuine read FAILURE (not a clean end). This is the only way
+      // to free a `readPoolTotal` slot WITHOUT handing the freed connection back to `readPoolIdle` —
+      // a clean end would let the waiter grab the idle connection directly, never calling connect()
+      // again, which would not exercise this bug at all. `releaseReadConn(conn, { broken: true })`
+      // ends+discards the killed connection and wakes the queued waiter, which must then build (and
+      // connect()) a brand-new connection to satisfy itself — exactly the connect() call armed below.
+      state.failNextConnect = true;
+      state.manualReads.shift()!.reject(new Error("held stream read failure"));
+
+      // (a) the waiter's queryStream call rejects — it does NOT hang forever (the pre-fix deadlock).
+      await vi.waitFor(() => expect(waiterSettled).toBe(true), { timeout: 2000 });
+      expect(waiterError?.message).toBe("simulated connect failure");
+      await expect(waiterDrain).rejects.toThrow("simulated connect failure");
+
+      // (b) `readPoolTotal` did not leak: the failed connect()'s reserved slot was freed, so a fresh
+      // queryStream call still succeeds instead of hanging on `readPoolWaiters` forever.
+      state.useManualReads = false;
+      state.readQueue.push([]);
+      await expect(drain(client.queryStream("SELECT a FROM t"))).resolves.toEqual([]);
+
+      // Clean up the remaining held streams.
+      while (state.manualReads.length > 0) state.manualReads.shift()!.resolve([]);
+      await Promise.all(holders);
+    }, 5000); // explicit timeout: pre-fix, this HANGS (the leaked slot deadlocks the waiter forever)
   });
 });

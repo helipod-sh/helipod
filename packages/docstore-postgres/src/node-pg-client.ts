@@ -276,11 +276,30 @@ export class NodePgClient implements PgClient {
    * Deliberately skips the fleet `sessionTimeouts` (statement_timeout / idle_in_transaction_session_timeout)
    * applied to the pinned connection in `ensure()` — a v1 omission, not an oversight: a stream may
    * legitimately want a longer (or no) statement timeout than a normal write transaction.
+   *
+   * A `conn.connect()` rejection is caught here (not left to propagate): the `readPoolTotal++` above
+   * reserves a slot BEFORE connecting, so an uncaught rejection would leak that slot forever — enough
+   * consecutive failures (network blip, auth hiccup) would drive `readPoolTotal` to `READ_POOL_MAX`
+   * with zero live connections, permanently deadlocking every future `acquireReadConn` on
+   * `readPoolWaiters` (nothing could ever release to wake them). On failure the slot is freed, the
+   * dead client is `end()`ed, one waiter (if any) is woken to retry a fresh build, and the error is
+   * rethrown to this call's own caller. Mirrors `ensureShardConn`'s connect-failure eviction.
    */
   private async acquireReadConn(): Promise<pg.Client> {
     for (;;) {
       if (this.readPoolClosed) throw new Error("NodePgClient: read pool closed");
-      const idle = this.readPoolIdle.pop();
+      // Pop past any idle connection that fired 'error' while sitting unused — `readPoolBroken` is
+      // only actually acted on at release time normally, but an idle (not-currently-borrowed)
+      // connection has no pending release to catch it, so it must be filtered HERE instead of handed
+      // straight to the next borrower. Keep popping until a healthy idle conn is found or the idle
+      // list is exhausted, then fall through to build/wait below.
+      let idle = this.readPoolIdle.pop();
+      while (idle && this.readPoolBroken.has(idle)) {
+        this.readPoolBroken.delete(idle);
+        this.readPoolTotal = Math.max(0, this.readPoolTotal - 1);
+        idle.end().catch(() => {});
+        idle = this.readPoolIdle.pop();
+      }
       if (idle) return idle;
       if (this.readPoolTotal < READ_POOL_MAX) {
         this.readPoolTotal++;
@@ -288,7 +307,22 @@ export class NodePgClient implements PgClient {
         conn.on("error", () => {
           this.readPoolBroken.add(conn);
         });
-        await conn.connect();
+        try {
+          await conn.connect();
+        } catch (e) {
+          // connect() failed: the slot reserved by `readPoolTotal++` above must be freed here, or
+          // enough consecutive connect failures (network blip, auth hiccup) drive `readPoolTotal` to
+          // `READ_POOL_MAX` with zero live connections, permanently hanging every future
+          // `acquireReadConn` on `readPoolWaiters` (nothing left could ever release to wake them).
+          // Mirrors `ensureShardConn`'s connect-failure eviction (~line 409-434) for the same reason.
+          this.readPoolTotal = Math.max(0, this.readPoolTotal - 1);
+          this.readPoolBroken.delete(conn);
+          conn.end().catch(() => {});
+          // Wake one waiter (if any) so it retries a fresh build against the now-freed slot instead
+          // of hanging forever on a release that will never come for this failed connection.
+          this.readPoolWaiters.shift()?.resolve();
+          throw e;
+        }
         return conn;
       }
       // Pool is at capacity: block until a release wakes us, then loop back and re-check (a
