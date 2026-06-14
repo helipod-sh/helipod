@@ -95,8 +95,13 @@ if (REAL_PG) {
     async () => {
       const s = new PostgresDocStore(new NodePgClient({ connectionString: REAL_PG }));
       await s.setupSchema();
-      // isolate: truncate the three tables so each test starts clean
-      await (s as any).db.query("TRUNCATE documents, indexes, persistence_globals");
+      // isolate: truncate ALL persisted tables so each test starts clean. Must include the
+      // Receipted-Outbox tables (client_mutations, client_floors) — omitting them lets those
+      // tables accumulate across tests on a persistent server, breaking the table-wide
+      // sweep/prune count assertions (PGlite gets a fresh in-process DB per test and never hit this).
+      await (s as any).db.query(
+        "TRUNCATE documents, indexes, persistence_globals, client_mutations, client_floors",
+      );
       return s;
     },
     async (s) => {
