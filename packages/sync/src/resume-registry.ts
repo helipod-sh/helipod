@@ -23,6 +23,9 @@ export function regKey(identity: string | null, path: string, argsJson: JSONValu
 interface ResumeEntry {
   readRanges: readonly SerializedKeyRange[];
   tables: readonly string[];
+  /** M2c: global (D1) tables this entry's query read — carried through resume so a resumed sub
+   *  keeps its global-table membership. Not yet indexed here (Task 4 adds the matching side). */
+  globalTables: readonly string[];
   lastInvalidatedTs: number;
   wasDiffable: boolean;
   refCount: number;
@@ -33,6 +36,7 @@ interface ResumeEntry {
 export interface ResumeLookup {
   readRanges: readonly SerializedKeyRange[];
   tables: readonly string[];
+  globalTables: readonly string[];
   lastInvalidatedTs: number;
   wasDiffable: boolean;
 }
@@ -50,12 +54,13 @@ export class ResumeRegistry {
     tables: readonly string[],
     atTs: number,
     wasDiffable: boolean,
+    globalTables: readonly string[] = [],
   ): void {
     const existing = this.entries.get(key);
     const lastInvalidatedTs = Math.max(existing?.lastInvalidatedTs ?? atTs, atTs);
     const refCount = existing?.refCount ?? 0;
     this.unindex(key); // drop old range/table membership before re-indexing (ranges may have changed)
-    this.entries.set(key, { readRanges, tables, lastInvalidatedTs, wasDiffable, refCount, expiresAtMs: undefined });
+    this.entries.set(key, { readRanges, tables, globalTables, lastInvalidatedTs, wasDiffable, refCount, expiresAtMs: undefined });
     this.index(key, readRanges, tables);
   }
 
@@ -110,7 +115,7 @@ export class ResumeRegistry {
   lookup(key: string): ResumeLookup | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
-    return { readRanges: entry.readRanges, tables: entry.tables, lastInvalidatedTs: entry.lastInvalidatedTs, wasDiffable: entry.wasDiffable };
+    return { readRanges: entry.readRanges, tables: entry.tables, globalTables: entry.globalTables, lastInvalidatedTs: entry.lastInvalidatedTs, wasDiffable: entry.wasDiffable };
   }
 
   retain(key: string): void {

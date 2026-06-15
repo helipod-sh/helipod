@@ -30,11 +30,11 @@ class MockExecutor implements SyncUdfExecutor {
     return `${clientId}:${seq}`;
   }
 
-  async runQuery(): Promise<{ value: Value; tables: string[]; readRanges: [] }> {
-    return { value: null as unknown as Value, tables: [], readRanges: [] };
+  async runQuery(): Promise<{ value: Value; tables: string[]; readRanges: []; globalTables: [] }> {
+    return { value: null as unknown as Value, tables: [], readRanges: [], globalTables: [] };
   }
-  async runAdminQuery(): Promise<{ value: Value; tables: string[]; readRanges: [] }> {
-    return { value: null as unknown as Value, tables: [], readRanges: [] };
+  async runAdminQuery(): Promise<{ value: Value; tables: string[]; readRanges: []; globalTables: [] }> {
+    return { value: null as unknown as Value, tables: [], readRanges: [], globalTables: [] };
   }
   async runAction(): Promise<{ value: Value }> {
     return { value: null as unknown as Value };

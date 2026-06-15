@@ -88,7 +88,7 @@ export type RunMutationResult = MutationRan | MutationReplay;
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /**
    * `origin` (G4, client-sync verdict §(d) item 2): the committing session's id, threaded onto the
    * commit's `OplogDelta.origin` so the fan-out can advance THAT session's own `version.ts` past its
@@ -105,7 +105,7 @@ export interface SyncUdfExecutor {
    * any node, incl. a fleet follower; the read must run where the commit runs — verdict §(c) repair 3).
    */
   runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string, dedup?: ClientMutationRef): Promise<RunMutationResult>;
-  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
+  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
   /**
@@ -378,6 +378,12 @@ export class SyncProtocolHandler {
     return this.resumeRegistry;
   }
 
+  /** @internal test/debug only — the live SubscriptionManager (M2c), for tests to assert
+   *  registration wiring (e.g. `globalTables`) without duplicating its internals. */
+  get __subscriptions(): SubscriptionManager {
+    return this.subscriptions;
+  }
+
   private send(session: Session, msg: ServerMessage): void {
     // MutationResponse/ActionResponse are undroppable under backpressure (§(d) item 4 of the
     // client-sync verdict): a dropped Transition self-heals via the version-gap resync, but a
@@ -434,7 +440,7 @@ export class SyncProtocolHandler {
   }
 
   /** Run a subscription's query — privileged for _admin:* on a privileged session; else identity-scoped. */
-  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }> {
+  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }> {
     if (udfPath.startsWith("_admin:")) {
       if (!session.privileged) throw new Error("Forbidden: admin subscription requires admin auth");
       return this.executor.runAdminQuery(udfPath, args);
@@ -492,6 +498,7 @@ export class SyncProtocolHandler {
               args: q.args,
               tables: [...entry.tables],
               readRanges: entry.readRanges,
+              globalTables: [...entry.globalTables],
               byId: undefined,
               resumeKey: rrKey,
             });
@@ -500,7 +507,7 @@ export class SyncProtocolHandler {
             continue;
           }
         }
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
@@ -512,12 +519,12 @@ export class SyncProtocolHandler {
         // release uses the SAME key `upsert` created it under — even if `SetAuth` later mutates
         // `session.identity` in place (a re-derived key would miss the entry → permanent leak).
         const rrKey = regKey(session.identity, q.udfPath, q.args);
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range, resumeKey: rrKey });
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: rrKey });
         // Populate the resume registry for this (identity, path, args). ALWAYS pair `upsert` with
         // `retain` — an `upsert` on a refCount-0 TTL-pending entry clears `expiresAtMs`; without a
         // paired `retain` it would leak (never swept again).
         const wasDiffable = !!(diffableRange || diffablePage || byId);
-        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable);
+        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable, globalTables);
         this.resumeRegistry.retain(rrKey);
         const json = convexToJson(value);
         if (page && session.supportsQueryDiff) {
@@ -1041,7 +1048,7 @@ export class SyncProtocolHandler {
           modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
           continue;
         }
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — a query whose read shape changes across a
         // refresh (data/identity-dependent branching) must not keep carrying a `byId`/`range` that
@@ -1055,7 +1062,7 @@ export class SyncProtocolHandler {
         // `...sub`'s spread below), permanently reverting it to RERUN even once `writtenDocs` starts
         // flowing again on a later commit.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range }); // refresh the read set
+        this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range }); // refresh the read set
         // DLR Stage 3 (whole-branch review fix): keep the resume registry's read-set in LOCKSTEP with
         // this fresh re-run. A data/identity-dependent query can shift its read ranges here (e.g.
         // `get(user)` then a range keyed on `user.currentRoom`); a registry still frozen at the
@@ -1065,7 +1072,7 @@ export class SyncProtocolHandler {
         // this commit, so the ts is a no-op — only the ranges/tables/wasDiffable change. (No `retain`:
         // the sub is live, so refCount ≥ 1 and `expiresAtMs` is already unset — no leak.)
         if (sub.resumeKey) {
-          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId);
+          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId, globalTables);
         }
         // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
         // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
@@ -1154,7 +1161,7 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — an identity change can change WHAT a query
         // reads (e.g. an identity-scoped `db.get`, or an identity-scoped range's bounds/filters),
@@ -1175,12 +1182,12 @@ export class SyncProtocolHandler {
         // under the new identity now finds the migrated entry; a reconnect under the OLD identity
         // misses (its entry TTL-sweeps) → re-run, never a stale skip.
         const newResumeKey = regKey(session.identity, sub.udfPath, sub.args);
-        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId);
+        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId, globalTables);
         if (sub.resumeKey !== newResumeKey) {
           this.resumeRegistry.retain(newResumeKey);
           if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
         }
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range, resumeKey: newResumeKey });
+        this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: newResumeKey });
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {

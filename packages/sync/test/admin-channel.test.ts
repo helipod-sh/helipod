@@ -5,9 +5,9 @@ function mkExec(): SyncUdfExecutor & { adminCalls: string[] } {
   const adminCalls: string[] = [];
   return {
     adminCalls,
-    async runQuery(path) { return { value: `user:${path}` as never, tables: ["t"], readRanges: [] }; },
+    async runQuery(path) { return { value: `user:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] }; },
     async runMutation() { return { value: null as never, tables: [], writeRanges: [], commitTs: 1 }; },
-    async runAdminQuery(path) { adminCalls.push(path); return { value: `admin:${path}` as never, tables: ["t"], readRanges: [] }; },
+    async runAdminQuery(path) { adminCalls.push(path); return { value: `admin:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] }; },
     async runAction(path) { return { value: `acted:${path}` as never }; },
   };
 }

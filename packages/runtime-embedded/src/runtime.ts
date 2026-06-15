@@ -546,6 +546,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          globalTables: r.globalTables ?? [],
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
           ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };
@@ -625,6 +626,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          globalTables: r.globalTables ?? [],
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
           ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };

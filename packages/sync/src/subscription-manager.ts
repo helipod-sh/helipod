@@ -20,6 +20,13 @@ export interface Subscription {
   tables: string[];
   /** Precise read ranges (range-level match key — surgical invalidation). */
   readRanges: readonly SerializedKeyRange[];
+  /**
+   * M2c: global (D1) tables this subscription's read set touched (a `.global()` read produces no
+   * `readRanges` entry, so these are NOT already covered by `tables`/`readRanges` above). Field +
+   * threading only — NOT yet indexed/matched here; Task 4 adds the dedicated `byGlobalTable` index,
+   * `findAffectedByRanges` matching, and a `subscribedGlobalTables()` accessor that read it.
+   */
+  globalTables?: string[];
   /** DIFFABLE_BYID marker + the by-id read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */
   byId?: import("./classify").ByIdRead;
   /** DIFFABLE_RANGE marker + the range read descriptor; absent ⇒ RERUN. Set at subscribe (classify). */

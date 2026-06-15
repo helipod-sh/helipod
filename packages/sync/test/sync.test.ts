@@ -83,7 +83,7 @@ beforeEach(async () => {
   const syncExec: SyncUdfExecutor = {
     async runQuery(path, args) {
       const r = await exec.run(modules[path]!, jsonToConvex(args));
-      return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange) };
+      return { value: r.value as Value, tables: writtenTablesFromRanges(r.readRanges), readRanges: r.readRanges.map(serializeKeyRange), globalTables: [] };
     },
     async runMutation(path, args) {
       const r = await exec.run(modules[path]!, jsonToConvex(args));
