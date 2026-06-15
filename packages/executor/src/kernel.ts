@@ -219,6 +219,9 @@ export interface KernelContext {
   /** M2b co-write guard: which stores this mutation has WRITTEN. A mutation may write local OR global,
    *  never both. Mutable, shared across handler calls within one mutation. */
   readonly writeStores?: { local: boolean; global: boolean };
+  /** M2c: the .global() tables this run READ (armed on the top-level query AND mutation context).
+   *  Feeds the sub's globalTables for the version-poll invalidation match. */
+  readonly globalReads?: Set<string>;
 }
 
 export type SyscallHandler = (ctx: KernelContext, argJson: string) => Promise<string>;
@@ -296,6 +299,13 @@ function requireGlobalTxn(ctx: KernelContext, table: string): GlobalTxn {
     throw new ForbiddenOperationError(`table "${table}" is .global() but no D1 binding is configured (global tables require Cloudflare D1)`);
   }
   return ctx.globalTxn;
+}
+
+/** M2c: record that this run READ `.global()` table `table`, feeding `UdfResult.globalTables` for
+ *  the version-poll invalidation match. A no-op when `ctx.globalReads` isn't armed (actions, and
+ *  any context that doesn't track global reads). */
+function recordGlobalRead(ctx: KernelContext, table: string): void {
+  ctx.globalReads?.add(table);
 }
 
 /** Validate a user-provided document value against the table's schema validator (if any). */
@@ -499,6 +509,7 @@ const handleDbGet: SyscallHandler = async (ctx, argJson) => {
       throw new ForbiddenOperationError(`read policies are not yet supported on .global() tables ("${meta.name}")`);
     }
     const g = requireGlobalTxn(ctx, meta.name);
+    recordGlobalRead(ctx, meta.name);
     const doc = await g.get(meta.name, id);
     return JSON.stringify(doc === null ? null : convexToJson(doc as unknown as Value));
   }
@@ -709,7 +720,8 @@ const handleDbQuery: SyscallHandler = async (ctx, argJson) => {
     for (const r of spec.range ?? []) eq[r.field] = jsonToConvex(r.value);
     const rows = await g.queryByIndex(tableName, { index: spec.index, eq, limit: spec.limit });
     const docsJson = rows.map((d) => convexToJson(d as unknown as Value));
-    return JSON.stringify({ docs: docsJson }); // no collectTrace: global tables aren't reactive in M2b
+    recordGlobalRead(ctx, tableName); // M2c: stash for UdfResult.globalTables (no collectTrace: not range-diffable)
+    return JSON.stringify({ docs: docsJson });
   }
   enforceShardScan(ctx, tableMeta, indexSpec, spec.range);
 

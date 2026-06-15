@@ -298,6 +298,12 @@ export interface UdfResult<T = unknown> {
   commitTs: bigint;
   /** Read set (for the sync tier to subscribe on). */
   readRanges: KeyRange[];
+  /**
+   * M2c: the `.global()` (D1) tables this run READ, for the version-poll invalidation match — a
+   * parallel channel to `readRanges` since a `.global()` table has no local key range at all.
+   * Absent for actions; empty for a run that touched no `.global()` table.
+   */
+  globalTables?: string[];
   /** Write delta (for mutations); null for pure reads. */
   oplog: OplogDelta | null;
   /**
@@ -536,6 +542,7 @@ export class InlineUdfExecutor {
             committed: false,
             commitTs: fwd.replay.commitTs !== undefined ? BigInt(fwd.replay.commitTs) : 0n,
             readRanges: [],
+            globalTables: [],
             oplog: null,
             clientReplay: fwd.replay,
           };
@@ -546,6 +553,7 @@ export class InlineUdfExecutor {
           committed: true,
           commitTs: fwd.commitTs !== undefined ? BigInt(fwd.commitTs) : 0n,
           readRanges: [],
+          globalTables: [],
           oplog: null,
         };
       } catch (e) {
@@ -638,7 +646,11 @@ export class InlineUdfExecutor {
         // (a floating `.collect()` whose result the handler discarded) are still captured — see the
         // drain below and `KernelContext.inflight`.
         const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight };
+        // M2c: arm for BOTH query and mutation contexts (unlike collectTrace/paginateTrace, which
+        // are query-only) — a mutation's own .global() reads need to feed globalTables too, even
+        // though the write already invalidates via the version-bump path.
+        const globalReads = fn.type === "query" || fn.type === "mutation" ? new Set<string>() : undefined;
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight, globalReads };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
@@ -658,6 +670,7 @@ export class InlineUdfExecutor {
           value: value as T,
           logs: kctx.logs,
           readRanges: txn.reads.toArray(),
+          globalTables: kctx.globalReads ? [...kctx.globalReads] : [],
           collectTrace: kctx.collectTrace,
           paginateTrace: kctx.paginateTrace,
           // M2b: surface this ATTEMPT's staged global ops so the executor can flush them as one
@@ -704,6 +717,7 @@ export class InlineUdfExecutor {
         committed: commit.committed,
         commitTs: commit.commitTs,
         readRanges: commit.value.readRanges,
+        globalTables: commit.value.globalTables ?? [],
         oplog: commit.oplog,
         ...(diffableRange ? { diffableRange } : {}),
         ...(diffablePage ? { diffablePage } : {}),
@@ -760,7 +774,7 @@ export class InlineUdfExecutor {
     try {
       const value = await fn.handler(actionCtx, args);
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
-      return { value: value as T, logs: [], committed: false, commitTs: maxCommitTs, readRanges: [], oplog: null };
+      return { value: value as T, logs: [], committed: false, commitTs: maxCommitTs, readRanges: [], globalTables: [], oplog: null };
     } catch (e) {
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;
