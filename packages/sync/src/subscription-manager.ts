@@ -50,6 +50,16 @@ export class SubscriptionManager {
   private readonly byRange = new IntervalIndex<string>();
   private readonly tableFallbackKeys = new Set<string>();
   private readonly deserializedRanges = new Map<string, KeyRange[]>();
+  /**
+   * M2c: index from global (D1) table name -> subscription keys whose read set touched it, via
+   * `Subscription.globalTables`. Populated UNCONDITIONALLY in `add` (independent of
+   * `readRanges`/`tableFallbackKeys`) so a MIXED subscription — one with both local `readRanges`
+   * and a global-table read — still lands here. Matched by a THIRD, ungated loop in
+   * `findAffectedByRanges`; the existing table-fallback loop is gated on `tableFallbackKeys`
+   * precisely because it must NOT fire for a sub with non-empty `readRanges`, but global-table
+   * reads have no `readRanges` entry of their own, so that gate would wrongly exclude a mixed sub.
+   */
+  private readonly byGlobalTable = new Map<string, Set<string>>();
 
   add(sub: Subscription): void {
     const key = subKey(sub.sessionId, sub.queryId);
@@ -67,6 +77,11 @@ export class SubscriptionManager {
     } else {
       this.tableFallbackKeys.add(key);
     }
+    for (const t of sub.globalTables ?? []) {
+      let s = this.byGlobalTable.get(t);
+      if (!s) { s = new Set(); this.byGlobalTable.set(t, s); }
+      s.add(key);
+    }
   }
 
   private removeKey(key: string): void {
@@ -79,6 +94,11 @@ export class SubscriptionManager {
     }
     this.tableFallbackKeys.delete(key);
     for (const table of existing.tables) this.byTable.get(table)?.delete(key);
+    for (const t of existing.globalTables ?? []) {
+      const s = this.byGlobalTable.get(t);
+      s?.delete(key);
+      if (s && s.size === 0) this.byGlobalTable.delete(t);
+    }
     this.byKey.delete(key);
   }
 
@@ -113,6 +133,12 @@ export class SubscriptionManager {
       if (!set) continue;
       for (const key of set) if (this.tableFallbackKeys.has(key)) keys.add(key);
     }
+    // Global-table subs (M2c): ungated by tableFallbackKeys — a mixed sub (non-empty readRanges
+    // PLUS a global-table read) must still match, since the global read left no readRanges entry.
+    for (const table of writeTables) {
+      const set = this.byGlobalTable.get(table);
+      if (set) for (const key of set) keys.add(key);
+    }
     const out: Subscription[] = [];
     for (const key of keys) {
       const sub = this.byKey.get(key);
@@ -145,5 +171,10 @@ export class SubscriptionManager {
 
   get size(): number {
     return this.byKey.size;
+  }
+
+  /** Global (D1) table names with at least one live subscriber (M2c). */
+  subscribedGlobalTables(): string[] {
+    return [...this.byGlobalTable.keys()];
   }
 }
