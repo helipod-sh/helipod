@@ -1,7 +1,7 @@
 import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
 import type { D1Client } from "./d1-client";
 import { UniqueConstraintError } from "./d1-client";
-import { schemaDdl } from "./ddl";
+import { schemaDdl, GLOBAL_VERSIONS_DDL } from "./ddl";
 import { docToRow, rowToDoc, encodeColumnValue } from "./codec";
 
 export interface QueryRange { index: string; eq?: Record<string, unknown>; limit?: number; }
@@ -28,6 +28,7 @@ export class D1DocStore {
   }
 
   async applyDdl(): Promise<void> {
+    await this.client.exec(GLOBAL_VERSIONS_DDL);
     for (const stmt of schemaDdl(this.schema)) await this.client.exec(stmt);
   }
 
@@ -55,6 +56,15 @@ export class D1DocStore {
         : op.kind === "replace" ? this.buildReplace(op.table, op.id, op.doc)
           : this.buildDelete(op.table, op.id),
     );
+    // Bump each distinct written table's version counter ONCE, atomically in the SAME batch — a
+    // failed batch rolls back the bump too (M2c global reactivity change signal).
+    const touchedTables = [...new Set(ops.map((op) => op.table))];
+    for (const table of touchedTables) {
+      stmts.push({
+        sql: `INSERT INTO "_global_versions" ("table_name","version") VALUES (?,1) ON CONFLICT("table_name") DO UPDATE SET "version"="version"+1`,
+        params: [table],
+      });
+    }
     // A batch can span multiple tables — attribute a UNIQUE violation to the table the SQLite/D1
     // error message actually names (`UNIQUE constraint failed: <table>.<column>`), not to
     // ops[0]'s table, since a later op in the batch may target a different table entirely.
@@ -128,5 +138,19 @@ export class D1DocStore {
       .bind(...bound)
       .all();
     return (results as Record<string, unknown>[]).map((r) => rowToDoc(t, r));
+  }
+
+  /** Read the current `_global_versions` counter for each of `tables` (M2c change signal). A table
+   *  with no writes yet has no row — absent from the result, not 0. */
+  async readVersions(tables: string[]): Promise<Record<string, number>> {
+    if (tables.length === 0) return {};
+    const placeholders = tables.map(() => "?").join(", ");
+    const { results } = await this.client
+      .prepare(`SELECT "table_name","version" FROM "_global_versions" WHERE "table_name" IN (${placeholders})`)
+      .bind(...tables)
+      .all<{ table_name: string; version: number }>();
+    const out: Record<string, number> = {};
+    for (const r of results) out[r.table_name] = Number(r.version);
+    return out;
   }
 }

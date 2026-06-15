@@ -41,3 +41,8 @@ export function tableDdl(name: string, table: TableDefinitionJSON): string[] {
 export function schemaDdl(schema: SchemaDefinitionJSON): string[] {
   return Object.entries(schema.tables).flatMap(([n, t]) => tableDdl(n, t));
 }
+
+/** Internal per-table version counter table (M2c global reactivity). NOT part of schemaDdl (which is
+ *  driven by user tables) — always emitted alongside it by applyDdl. */
+export const GLOBAL_VERSIONS_DDL =
+  `CREATE TABLE IF NOT EXISTS "_global_versions" ("table_name" TEXT PRIMARY KEY, "version" INTEGER NOT NULL)`;
