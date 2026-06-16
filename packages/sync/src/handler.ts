@@ -288,11 +288,14 @@ export class SyncProtocolHandler {
    */
   private readonly resumeRegistry = new ResumeRegistry();
   /**
-   * M2c fix: callbacks registered via {@link onGlobalSubscribe}, fired from `doModifyQuerySet`
-   * whenever a subscription registers with a non-empty `globalTables` read set (fresh subscribe OR
-   * a resume-skip carrying a retained global-table read set). See `DriverContext.onGlobalSubscribe`'s
-   * doc comment (`@stackbase/component`) for why this exists — closing the busy-DO-late-subscribe gap
-   * in the M2c global-reactivity poller.
+   * M2c fix: callbacks registered via {@link onGlobalSubscribe}, fired whenever a subscription is
+   * (re-)registered with a non-empty `globalTables` read set — from `doModifyQuerySet` (fresh
+   * subscribe, or a resume-skip carrying a retained global-table read set), from `handleSetAuth`'s
+   * re-exec (an identity flip can make a query newly read a global table), and from
+   * `sendSessionTransition`'s live-re-run (a data/identity-dependent query can shift onto a global
+   * table across a RERUN refresh). See `DriverContext.onGlobalSubscribe`'s doc comment
+   * (`@stackbase/component`) for why this exists — closing the busy-DO-late-subscribe gap in the
+   * M2c global-reactivity poller.
    */
   private readonly globalSubscribeListeners: Array<() => void> = [];
   private readonly verifyAdmin: (key: string) => boolean;
@@ -405,9 +408,11 @@ export class SyncProtocolHandler {
   }
 
   /**
-   * M2c fix: register `cb` to fire whenever `doModifyQuerySet` registers a subscription with a
-   * non-empty global-table read set. A driver (e.g. `GlobalReactivityPollerDriver`) uses this to
-   * arm itself on a late subscribe, rather than relying solely on a boot-time force-arm that a busy
+   * M2c fix: register `cb` to fire whenever a subscription is (re-)registered with a non-empty
+   * global-table read set — a fresh `doModifyQuerySet` subscribe/resume, a `handleSetAuth` re-exec,
+   * or a `sendSessionTransition` live-re-run (see the `globalSubscribeListeners` field doc for all
+   * three sites). A driver (e.g. `GlobalReactivityPollerDriver`) uses this to arm itself on any of
+   * these late/renewed subscribes, rather than relying solely on a boot-time force-arm that a busy
    * (never-hibernating) DO may never repeat. Not unsubscribed — callers are drivers with the same
    * lifetime as this handler.
    */
@@ -1114,6 +1119,10 @@ export class SyncProtocolHandler {
         // flowing again on a later commit.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
         this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range }); // refresh the read set
+        // M2c fix: this live-re-run can register a sub whose `globalTables` just turned non-empty
+        // (a data/identity-dependent branch newly reads a global table) — a driver that disarmed
+        // itself needs the same wake-up the fresh-subscribe/resume-skip paths above already give.
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         // DLR Stage 3 (whole-branch review fix): keep the resume registry's read-set in LOCKSTEP with
         // this fresh re-run. A data/identity-dependent query can shift its read ranges here (e.g.
         // `get(user)` then a range keyed on `user.currentRoom`); a registry still frozen at the
@@ -1239,6 +1248,10 @@ export class SyncProtocolHandler {
           if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
         }
         this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: newResumeKey });
+        // M2c fix: an identity flip (SetAuth) can change WHAT a query reads (see the comment on
+        // `byId`/`range` above) — including newly reading a global table it didn't before. Wake any
+        // disarmed driver the same way the fresh-subscribe/live-re-run paths already do.
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {

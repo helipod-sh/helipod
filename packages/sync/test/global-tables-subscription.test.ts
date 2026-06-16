@@ -135,3 +135,114 @@ describe("SyncProtocolHandler: globalTables threading (M2c Task 3)", () => {
     expect(sub!.globalTables).toContain("users");
   });
 });
+
+/** A query that never reads a global table — used as the negative-case executor below. */
+function makeNonGlobalExecutor(): SyncUdfExecutor {
+  return {
+    async runQuery() {
+      return {
+        value: [{ _id: "notes|a", box: "a" }] as unknown as Value,
+        tables: ["notes"],
+        readRanges: [RANGE_A],
+        globalTables: [],
+      };
+    },
+    async runMutation() {
+      throw new Error("not used in this test");
+    },
+    async runAdminQuery() {
+      throw new Error("not used in this test");
+    },
+    async runAction() {
+      throw new Error("not used in this test");
+    },
+  };
+}
+
+/**
+ * Whole-branch-review fix: `fireGlobalSubscribe()` must also fire from the two OTHER paths that
+ * (re-)register a subscription — `handleSetAuth`'s re-exec and `sendSessionTransition`'s live-re-run
+ * (the RERUN branch a non-diffable sub takes on an intersecting write). Both mirror the
+ * fresh-subscribe arm-on-subscribe fix (`fc9da93`, `doModifyQuerySet`'s `onGlobalSubscribe` hook) but
+ * were left unwired — a subscription that gains a global table on an identity flip or a
+ * data-dependent re-run branch would otherwise register with nothing to re-arm a disarmed poller.
+ */
+describe("SyncProtocolHandler: onGlobalSubscribe fires on SetAuth re-exec + live-re-run (whole-branch review fix)", () => {
+  it("fires onGlobalSubscribe when a SetAuth re-exec refreshes a sub with non-empty globalTables", async () => {
+    const handler = new SyncProtocolHandler(makeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+
+    let fireCount = 0;
+    handler.onGlobalSubscribe(() => {
+      fireCount++;
+    });
+
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user123" }));
+
+    expect(fireCount).toBe(1);
+  });
+
+  it("does NOT fire onGlobalSubscribe when a SetAuth re-exec refreshes a sub with empty globalTables", async () => {
+    const handler = new SyncProtocolHandler(makeNonGlobalExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+
+    let fireCount = 0;
+    handler.onGlobalSubscribe(() => {
+      fireCount++;
+    });
+
+    await handler.handleMessage("s1", JSON.stringify({ type: "SetAuth", token: "user123" }));
+
+    expect(fireCount).toBe(0);
+  });
+
+  it("fires onGlobalSubscribe when a live-re-run (RERUN branch, intersecting write) refreshes a sub with non-empty globalTables", async () => {
+    const handler = new SyncProtocolHandler(makeExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+
+    let fireCount = 0;
+    handler.onGlobalSubscribe(() => {
+      fireCount++;
+    });
+
+    const inv: WriteInvalidation = { tables: ["notes"], ranges: [RANGE_A], commitTs: 99 };
+    await handler.notifyWrites(inv);
+
+    expect(fireCount).toBe(1);
+  });
+
+  it("does NOT fire onGlobalSubscribe when a live-re-run refreshes a sub with empty globalTables", async () => {
+    const handler = new SyncProtocolHandler(makeNonGlobalExecutor());
+    const socket = new MockSocket();
+    handler.connect("s1", socket);
+    await handler.handleMessage(
+      "s1",
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "notes:list", args: { box: "a" } }], remove: [] }),
+    );
+
+    let fireCount = 0;
+    handler.onGlobalSubscribe(() => {
+      fireCount++;
+    });
+
+    const inv: WriteInvalidation = { tables: ["notes"], ranges: [RANGE_A], commitTs: 99 };
+    await handler.notifyWrites(inv);
+
+    expect(fireCount).toBe(0);
+  });
+});
