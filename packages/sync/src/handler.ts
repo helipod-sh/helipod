@@ -384,6 +384,18 @@ export class SyncProtocolHandler {
     return this.subscriptions;
   }
 
+  /**
+   * M2c Task 6: global (D1-backed) table names with at least one live subscriber right now —
+   * delegates to `SubscriptionManager.subscribedGlobalTables()`. This is the ONLY thing a
+   * `GlobalReactivityPoller` needs from the sync tier to decide which tables are worth polling D1
+   * for (its other dependency, `notifyWrites`, already exists on this class). A public method
+   * (unlike `__subscriptions` above) because it is a real runtime dependency wired onto
+   * `DriverContext`, not a test-only escape hatch.
+   */
+  subscribedGlobalTables(): string[] {
+    return this.subscriptions.subscribedGlobalTables();
+  }
+
   private send(session: Session, msg: ServerMessage): void {
     // MutationResponse/ActionResponse are undroppable under backpressure (§(d) item 4 of the
     // client-sync verdict): a dropped Transition self-heals via the version-gap resync, but a

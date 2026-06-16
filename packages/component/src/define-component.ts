@@ -97,6 +97,24 @@ export interface DriverContext {
    * a `jobs` row already carries) can ignore it entirely; existing drivers/fakes are unaffected.
    */
   functionKind?(path: string): "query" | "mutation" | "action" | "httpAction" | undefined;
+  /**
+   * M2c: re-run/re-push every live subscription whose read set intersects `inv` — table-level
+   * invalidation only (`ranges: []`), the shape a GLOBAL (D1-backed) table's change signal takes
+   * (a `.global()` write leaves no local MVCC range to intersect; see
+   * `@stackbase/runtime-cloudflare`'s `GlobalReactivityPoller`). Delegates to
+   * `SyncProtocolHandler.notifyWrites`, already in scope wherever `DriverContext` is built.
+   * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
+   * writes through the normal `runFunction`/transaction path instead (nearly all of them) never
+   * needs to invalidate a subscription directly and can ignore this entirely.
+   */
+  notifyWrites?(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }): Promise<void>;
+  /**
+   * M2c: global (D1-backed) table names with at least one live subscriber right now — the only
+   * thing a `GlobalReactivityPoller` needs to decide which tables are worth polling D1 for.
+   * Delegates to `SubscriptionManager.subscribedGlobalTables()` (via `SyncProtocolHandler`).
+   * Optional, same reasoning as `notifyWrites` above.
+   */
+  subscribedGlobalTables?(): string[];
 }
 
 /** A recurring runtime seam: started once after boot, woken by commits and/or timers. */
