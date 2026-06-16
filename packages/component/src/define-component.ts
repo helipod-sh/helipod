@@ -115,6 +115,25 @@ export interface DriverContext {
    * Optional, same reasoning as `notifyWrites` above.
    */
   subscribedGlobalTables?(): string[];
+  /**
+   * M2c fix: registers `cb` to fire whenever the sync tier registers a NEW subscription whose read
+   * set touches at least one global (D1-backed) table (`ModifyQuerySet` → `doModifyQuerySet`,
+   * both the fresh-execSub and the resume-skip registration paths). Delegates to
+   * `SyncProtocolHandler.onGlobalSubscribe`.
+   *
+   * Exists to close a silent-reactivity-death gap: `GlobalReactivityPollerDriver` only re-arms its
+   * own timer (a) once at boot and (b) in its tick's `finally`, gated on `subscribedGlobalTables()`
+   * being non-empty. A busy DO that never hibernates can tick with zero global subscribers, disarm,
+   * and then have a client `.global()`-subscribe on the SAME live instance (a `ModifyQuerySet`, no
+   * constructor re-run) — with nothing to re-arm the poller, that subscription is initially delivered
+   * but never reactively invalidated again. This hook lets the driver arm itself (if idle) the moment
+   * such a subscription registers, instead of waiting on a full DO reconstruction (which a busy DO may
+   * never get).
+   *
+   * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that doesn't
+   * poll a global store can ignore this entirely; existing drivers/fakes are unaffected.
+   */
+  onGlobalSubscribe?(cb: () => void): void;
 }
 
 /** A recurring runtime seam: started once after boot, woken by commits and/or timers. */

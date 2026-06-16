@@ -9,12 +9,25 @@
  * `startReplicaReactiveTailer` uses for a long-lived Node/Bun process, which is explicitly the WRONG
  * shape here: a DO with idle-but-open WebSocket subscriptions can hibernate, and a free timer would
  * keep it artificially alive). This mirrors `@stackbase/storage`'s `storageReaper` almost exactly
- * (`ctx.setTimer`/`ctx.clearTimer`/`ctx.backstopMs`, a `stopped`-guarded `wake()`/`armTimer()` pair,
- * a `__tick` test seam) — the one addition this driver needs beyond `DriverContext`'s existing
- * surface is `notifyWrites`/`subscribedGlobalTables` (added to `DriverContext` alongside this file;
- * both are plain delegations to the already-constructed `SyncProtocolHandler`, so no chicken-and-egg
- * problem the way a boot-layer-constructed poller reaching for `runtime.handler` would have — see
- * `runtime.ts`'s `driverCtx` construction).
+ * (`ctx.setTimer`/`ctx.clearTimer`, a `stopped`-guarded `wake()`/`armTimer()` pair, a `__tick` test
+ * seam) — EXCEPT cadence: unlike the reaper, this driver's re-arm is a plain `intervalMs`, never
+ * routed through `ctx.backstopMs` (see `armTimer`'s doc — global reactivity is latency-sensitive, and
+ * `backstopMs` on Cloudflare floors at 15 minutes, tuned for the reaper's idle-cost tradeoff, not this
+ * driver's). The one addition this driver needs beyond `DriverContext`'s existing surface is
+ * `notifyWrites`/`subscribedGlobalTables`/`onGlobalSubscribe` (added to `DriverContext` alongside this
+ * file; all three are plain delegations to the already-constructed `SyncProtocolHandler`, so no
+ * chicken-and-egg problem the way a boot-layer-constructed poller reaching for `runtime.handler` would
+ * have — see `runtime.ts`'s `driverCtx` construction).
+ *
+ * M2c review fix: `start()` also registers `ctx.onGlobalSubscribe?.(() => armIfIdle())` — arming the
+ * timer (if currently idle) the moment a NEW subscription with a global-table read set registers.
+ * Without this, a busy DO (open local-table subscriptions/mutations, so it never hibernates) that
+ * ticks with zero global subscribers disarms — and nothing but a full DO reconstruction would ever
+ * re-arm it, since re-arm otherwise happens ONLY in the tick's own `finally`. A later `.global()`
+ * subscribe on that SAME live instance (a `ModifyQuerySet`, no constructor re-run) would then be
+ * delivered its initial result but never reactively invalidated again — silent reactivity death. A
+ * genuinely idle/hibernated DO still heals via the existing bootstrap force-arm on reconstruction;
+ * this fix specifically covers the live/busy-DO late-subscribe path that force-arm can't reach.
  *
  * `readVersions` is NOT threaded through `DriverContext` — unlike `notifyWrites`/
  * `subscribedGlobalTables`, it comes from the `D1DocStore` (`globalStore`), which the CALLER
@@ -69,8 +82,8 @@ export function globalReactivityPollerDriver(
    * `start()` time would see zero subscribers (nothing has rehydrated yet) and never arm anything,
    * even though real subscribers are about to exist a few lines later in the SAME boot sequence.
    * Forcing exactly one bootstrap timer sidesteps this without needing a new "poke me after
-   * rehydrate" hook: by the time it FIRES (`intervalMs`/`backstopMs` out — rehydrate is synchronous
-   * local work, done long before then), `subscribedGlobalTables()` correctly reflects reality, and
+   * rehydrate" hook: by the time it FIRES (`intervalMs` out — rehydrate is synchronous local work,
+   * done long before then), `subscribedGlobalTables()` correctly reflects reality, and
    * every SUBSEQUENT re-arm (from `wake()`'s `.finally`) is the real, subscriber-gated decision —
    * so a genuinely idle DO (no `.global()` subscribers at all) still settles back to nothing armed
    * after this one bootstrap check, and can hibernate.
@@ -82,10 +95,28 @@ export function globalReactivityPollerDriver(
       timer = null;
     }
     if (!opts2?.force && (ctx.subscribedGlobalTables?.() ?? []).length === 0) return;
-    // A pure backstop poll (no "next work" signal exists locally for a foreign write to a D1 table
-    // another node made) — `backstopMs` is the call site that declares that, letting a host stretch
-    // it (e.g. to reduce cold-wake cost) without this driver knowing or caring.
-    timer = ctx.setTimer(ctx.now() + ctx.backstopMs(intervalMs), wake);
+    // Fix 2 (M2c review): deliberately NOT routed through `ctx.backstopMs`. `backstopMs` is a host's
+    // knob for stretching a PURE backstop cadence (nothing locally signals "there's next work" — see
+    // the storage reaper) to cut cold-wake cost; on Cloudflare it floors at 900_000ms (15min), tuned
+    // for that idle-reaper case. Global reactivity is latency-sensitive (a foreign D1 write should
+    // show up in low seconds, not up to 15 minutes later), so its cadence is the plain `intervalMs`
+    // unconditionally — a host stretching `backstopMs` for its OTHER drivers must not silently stretch
+    // this one too.
+    timer = ctx.setTimer(ctx.now() + intervalMs, wake);
+  }
+
+  /**
+   * M2c review fix: arm the timer ONLY if nothing is currently armed — the `onGlobalSubscribe`
+   * callback. Guarding on `timer !== null` (rather than unconditionally force-arming on every
+   * subscribe) is what keeps repeated global subscribes from stacking/resetting timers: if a wake is
+   * already pending, it already covers this newly-registered subscription (subscriptions registered
+   * between "now" and the pending wake are picked up by that same wake's `tick()`, which re-reads
+   * `subscribedGlobalTables()` fresh), so there's nothing to do. Only a driver that had genuinely gone
+   * idle (`timer === null` — the busy-DO-late-subscribe case this hook exists for) gets a fresh arm.
+   */
+  function armIfIdle(): void {
+    if (stopped || timer !== null) return;
+    armTimer({ force: true });
   }
 
   function wake(): void {
@@ -119,6 +150,10 @@ export function globalReactivityPollerDriver(
         notifyWrites,
         now: () => c.now(),
       });
+      // M2c review fix: arm on a late global subscribe (see the module doc + `armIfIdle`'s doc above).
+      // Optional on `DriverContext` — a bespoke fake that predates this fix simply never heals the
+      // busy-DO-late-subscribe path, same as before.
+      c.onGlobalSubscribe?.(() => armIfIdle());
       armTimer({ force: true });
     },
     stop() {

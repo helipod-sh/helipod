@@ -287,6 +287,14 @@ export class SyncProtocolHandler {
    * only keeps it correctly populated.
    */
   private readonly resumeRegistry = new ResumeRegistry();
+  /**
+   * M2c fix: callbacks registered via {@link onGlobalSubscribe}, fired from `doModifyQuerySet`
+   * whenever a subscription registers with a non-empty `globalTables` read set (fresh subscribe OR
+   * a resume-skip carrying a retained global-table read set). See `DriverContext.onGlobalSubscribe`'s
+   * doc comment (`@stackbase/component`) for why this exists — closing the busy-DO-late-subscribe gap
+   * in the M2c global-reactivity poller.
+   */
+  private readonly globalSubscribeListeners: Array<() => void> = [];
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -394,6 +402,29 @@ export class SyncProtocolHandler {
    */
   subscribedGlobalTables(): string[] {
     return this.subscriptions.subscribedGlobalTables();
+  }
+
+  /**
+   * M2c fix: register `cb` to fire whenever `doModifyQuerySet` registers a subscription with a
+   * non-empty global-table read set. A driver (e.g. `GlobalReactivityPollerDriver`) uses this to
+   * arm itself on a late subscribe, rather than relying solely on a boot-time force-arm that a busy
+   * (never-hibernating) DO may never repeat. Not unsubscribed — callers are drivers with the same
+   * lifetime as this handler.
+   */
+  onGlobalSubscribe(cb: () => void): void {
+    this.globalSubscribeListeners.push(cb);
+  }
+
+  /** Fire every registered {@link onGlobalSubscribe} listener. Swallows listener throws (never let a
+   *  driver's own bug break subscription registration). */
+  private fireGlobalSubscribe(): void {
+    for (const cb of this.globalSubscribeListeners) {
+      try {
+        cb();
+      } catch (e) {
+        console.error("[sync] onGlobalSubscribe listener threw:", e);
+      }
+    }
   }
 
   private send(session: Session, msg: ServerMessage): void {
@@ -515,6 +546,10 @@ export class SyncProtocolHandler {
               resumeKey: rrKey,
             });
             this.resumeRegistry.retain(rrKey);
+            // M2c fix: a resumed sub retaining a non-empty global-table read set is still a live
+            // global subscription — a driver that disarmed itself (e.g. zero subscribers at its last
+            // tick) needs the same wake-up this path's fresh-subscribe sibling gives below.
+            if (entry.globalTables.length > 0) this.fireGlobalSubscribe();
             modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
             continue;
           }
@@ -532,6 +567,10 @@ export class SyncProtocolHandler {
         // `session.identity` in place (a re-derived key would miss the entry → permanent leak).
         const rrKey = regKey(session.identity, q.udfPath, q.args);
         this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: rrKey });
+        // M2c fix: a fresh subscription touching at least one global table wakes any listener (e.g.
+        // the global-reactivity poller driver) that wants to arm itself on a late subscribe — the
+        // busy-DO-late-subscribe gap this hook exists to close (see `onGlobalSubscribe`'s doc comment).
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         // Populate the resume registry for this (identity, path, args). ALWAYS pair `upsert` with
         // `retain` — an `upsert` on a refCount-0 TTL-pending entry clears `expiresAtMs`; without a
         // paired `retain` it would leak (never swept again).

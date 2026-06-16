@@ -212,6 +212,109 @@ describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
     expect(state.storage.peekAlarm()).toBeNull();
   });
 
+  it("arms itself on a late global subscribe on a live (never-hibernating) DO instance — busy-DO late-subscribe fix", async () => {
+    let clock = 1_000_000;
+    class TestDO extends StackbaseDurableObject {
+      protected appConfig(): DurableObjectAppConfig {
+        return { loaded, adminKey: ADMIN_KEY, d1: nodeSqliteD1Client(), now: () => clock };
+      }
+    }
+    const state = new FakeDoState();
+    const doInstance = new TestDO(state, {});
+
+    // Boot with NO subscribers at all — the bootstrap force-arm (driver `start()`) still arms one
+    // timer, same as the "disarms itself" test above.
+    await doInstance.fetch(new Request("https://do.test/api/health"));
+    expect(state.storage.peekAlarm()).not.toBeNull();
+
+    // Fire it: zero global subscribers -> the driver's post-tick `armTimer()` does not re-arm,
+    // settling back to nothing armed. On a real BUSY DO (open local-table subscriptions/mutations
+    // keeping it from ever hibernating), nothing else would EVER re-arm this timer — that's the gap
+    // the fix under test closes.
+    clock += DEFAULT_GLOBAL_REACTIVITY_POLL_MS;
+    await fireAlarm(state, doInstance);
+    await waitFor(() => state.storage.peekAlarm() === null);
+    expect(state.storage.peekAlarm()).toBeNull();
+
+    // NOW subscribe on the SAME live DO instance via `ModifyQuerySet` — no reconstruction, no
+    // rehydrate, no bootstrap force-arm. Before the fix, nothing would ever re-arm the poller from
+    // here, and this subscription's `.global()` read would be permanently non-reactive.
+    const ws = makeSocket(state, "connA");
+    await doInstance.webSocketMessage(
+      ws,
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "counters:getByKey", args: { key: "k1" } }], remove: [] }),
+    );
+    await waitFor(() => ws.framesOfType("Transition").length > 0);
+    expect(ws.framesOfType("Transition").length).toBe(1); // initial (empty) result, delivered synchronously
+
+    // The arm-on-subscribe hook must have armed a fresh wake — this is the direct proof of the fix.
+    // Before it, `peekAlarm()` would still be `null` here (no timer, nothing scheduled).
+    expect(state.storage.peekAlarm()).toBe(clock + DEFAULT_GLOBAL_REACTIVITY_POLL_MS);
+
+    // This freshly-armed wake is the poller's FIRST-EVER tick with a non-empty `subscribedGlobalTables()`
+    // (every earlier tick, before the subscribe, no-op'd on zero subscribers) — so it establishes the
+    // baseline version for `counters` rather than invalidating anything (Task 5's documented
+    // first-seen semantics; see `global-reactivity-poller.ts`'s header doc). Fire it before writing,
+    // exactly like the "polls D1 on the alarm seam" test above does for its own bootstrap tick.
+    clock += DEFAULT_GLOBAL_REACTIVITY_POLL_MS;
+    await fireAlarm(state, doInstance);
+    await waitFor(() => state.storage.peekAlarm() === clock + DEFAULT_GLOBAL_REACTIVITY_POLL_MS);
+    expect(ws.framesOfType("Transition").length).toBe(1); // unchanged — baseline tick, no push
+
+    // A write to the global table, then firing the NEXT alarm, must reactively push — this would NOT
+    // happen before the fix (the poller stayed disarmed forever after the first 0-subscriber tick, so
+    // this subscription's `.global()` read was permanently non-reactive).
+    const beforeWrite = ws.sent.length;
+    const runRes = await doInstance.fetch(post("/api/run", { path: "counters:create", args: { key: "k1", value: 1 } }));
+    expect(runRes.status).toBe(200);
+    expect(ws.sent.length).toBe(beforeWrite); // no push from the commit path itself (global writes never touch local MVCC)
+
+    clock += DEFAULT_GLOBAL_REACTIVITY_POLL_MS;
+    await fireAlarm(state, doInstance);
+    await waitFor(() => ws.sent.length > beforeWrite);
+    const pushed = ws.framesOfType("Transition");
+    expect(pushed.length).toBe(2);
+    expect(JSON.stringify(pushed[1])).toContain("k1");
+  });
+
+  it("the poll cadence is a fixed ~intervalMs re-arm, decoupled from a host's backstopMs floor", async () => {
+    let clock = 1_000_000;
+    class TestDO extends StackbaseDurableObject {
+      protected appConfig(): DurableObjectAppConfig {
+        return {
+          loaded,
+          adminKey: ADMIN_KEY,
+          d1: nodeSqliteD1Client(),
+          now: () => clock,
+          // The real Cloudflare host wires exactly this floor for its OTHER pure-backstop drivers
+          // (the storage reaper) — see `DurableObjectAppConfig.backstopMs`'s doc comment. Global
+          // reactivity must NOT ride it (Fix 2): a 15-minute-stale `.global()` subscription would
+          // otherwise be an acceptable-looking but silently broken deploy.
+          backstopMs: (d: number) => Math.max(d, 900_000),
+        };
+      }
+    }
+    const state = new FakeDoState();
+    const doInstance = new TestDO(state, {});
+
+    const ws = makeSocket(state, "connA");
+    await doInstance.webSocketMessage(
+      ws,
+      JSON.stringify({ type: "ModifyQuerySet", add: [{ queryId: 1, udfPath: "counters:getByKey", args: { key: "k1" } }], remove: [] }),
+    );
+    await waitFor(() => ws.framesOfType("Transition").length > 0);
+
+    // Fire the bootstrap tick (establishes the baseline, doesn't invalidate — Task 5 semantics) and
+    // assert the driver's own post-tick re-arm — the steady-state cadence — is exactly
+    // `clock + intervalMs`. Before Fix 2 this would instead be `clock + 900_000` (the backstop
+    // floor), and this assertion would time out waiting for a value that never arrives.
+    clock += DEFAULT_GLOBAL_REACTIVITY_POLL_MS;
+    await fireAlarm(state, doInstance);
+    await waitFor(() => state.storage.peekAlarm() === clock + DEFAULT_GLOBAL_REACTIVITY_POLL_MS);
+    expect(state.storage.peekAlarm()).toBe(clock + DEFAULT_GLOBAL_REACTIVITY_POLL_MS);
+    expect(state.storage.peekAlarm()).not.toBe(clock + 900_000);
+  });
+
   it("additive: no `d1` binding composes no poller driver (unchanged from before M2c Task 6)", async () => {
     class TestDO extends StackbaseDurableObject {
       protected appConfig(): DurableObjectAppConfig {

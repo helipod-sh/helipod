@@ -937,6 +937,9 @@ export class EmbeddedRuntime {
       // `createEmbeddedRuntime` RETURNS; this closure runs before that, with `handler` already live).
       notifyWrites: (inv) => handler.notifyWrites(inv),
       subscribedGlobalTables: () => handler.subscribedGlobalTables(),
+      // M2c fix: plain delegation, same reasoning as the two hooks above — `handler` is already
+      // constructed by the time this `driverCtx` object is built.
+      onGlobalSubscribe: (cb) => handler.onGlobalSubscribe(cb),
     };
 
     // Inverse of `tableNumbers` (tableNumber → fullTableName), seeded here from
