@@ -11,13 +11,13 @@ import { SyncProtocolHandler, type SyncUdfExecutor, type ServerMessage } from ".
 function mkExec(commitTs: number, runMutationOverride?: SyncUdfExecutor["runMutation"]): SyncUdfExecutor {
   return {
     async runQuery(path) {
-      return { value: `user:${path}` as never, tables: ["t"], readRanges: [] };
+      return { value: `user:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] };
     },
     runMutation:
       runMutationOverride ??
       (async () => ({ value: "ok" as never, tables: ["t"], writeRanges: [], commitTs })),
     async runAdminQuery(path) {
-      return { value: `admin:${path}` as never, tables: ["t"], readRanges: [] };
+      return { value: `admin:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] };
     },
     async runAction(path) {
       return { value: `acted:${path}` as never };

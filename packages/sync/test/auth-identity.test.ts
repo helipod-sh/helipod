@@ -13,14 +13,14 @@ class RecordingExecutor implements SyncUdfExecutor {
   calls: Array<{ path: string; identity: string | null | undefined }> = [];
   async runQuery(path: string, _args: JSONValue, identity?: string | null) {
     this.calls.push({ path, identity });
-    return { value: (identity ?? "anon") as unknown as Value, tables: ["t"], readRanges: [] };
+    return { value: (identity ?? "anon") as unknown as Value, tables: ["t"], readRanges: [], globalTables: [] };
   }
   async runMutation(_p: string, _a: JSONValue, _i?: string | null) {
     return { value: null as unknown as Value, tables: [], writeRanges: [], commitTs: 1 };
   }
   async runAdminQuery(_p: string, _a: JSONValue) {
     throw new Error("admin modules not configured");
-    return { value: null as unknown as Value, tables: [], readRanges: [] };
+    return { value: null as unknown as Value, tables: [], readRanges: [], globalTables: [] };
   }
   async runAction(path: string) {
     return { value: `acted:${path}` as unknown as Value };

@@ -40,6 +40,7 @@ import {
   type StorageRoute,
   type StorageRouteDeps,
 } from "@stackbase/storage";
+import { globalReactivityPollerDriver } from "./global-reactivity-driver";
 
 export interface DurableObjectBootInput {
   /** The statically-bundled app: its schema default-export + `path:name → module` map (§4.2). */
@@ -67,6 +68,10 @@ export interface DurableObjectBootInput {
   storageUploadTtlMs?: number;
   /** Storage orphan-reaper sweep cadence override (ms). Defaults to the reaper's 60s. */
   storageReaperSweepMs?: number;
+  /** M2c: `GlobalReactivityPoller` cadence override (ms) — how often a `.global()` table with a live
+   *  subscriber is polled for a version bump. Defaults to the driver's 2000ms. Only meaningful when
+   *  `d1` is also set; ignored otherwise (no `.global()` tables → no poller wired at all). */
+  globalReactivityPollMs?: number;
   /** The host's single alarm (the DO's `setAlarm`), for driver wake (scheduler/triggers). Optional —
    *  a DO without composed drivers needs no wake. */
   wakeHost?: WakeHost;
@@ -155,12 +160,25 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
     tableNumbers: project.tableNumbers,
     bootSteps: project.bootSteps,
     ...(globalStore ? { globalStore } : {}),
-    drivers: blobStore
-      ? [
-          storageReaper(blobStore, input.storageReaperSweepMs !== undefined ? { sweepMs: input.storageReaperSweepMs } : undefined),
-          ...project.drivers,
-        ]
-      : project.drivers,
+    // M2c: the global-reactivity poller rides the SAME wake seam as the storage reaper/scheduler/
+    // triggers below — additive, only composed when a `globalStore` exists (no D1 binding / no
+    // `.global()` table → this array is byte-identical to before Task 6). Ordered ahead of
+    // `project.drivers` for the same reason `storageReaper` is: an engine-owned driver, not a
+    // component's.
+    drivers: [
+      ...(blobStore
+        ? [storageReaper(blobStore, input.storageReaperSweepMs !== undefined ? { sweepMs: input.storageReaperSweepMs } : undefined)]
+        : []),
+      ...(globalStore
+        ? [
+            globalReactivityPollerDriver(
+              globalStore.readVersions.bind(globalStore),
+              input.globalReactivityPollMs !== undefined ? { intervalMs: input.globalReactivityPollMs } : undefined,
+            ),
+          ]
+        : []),
+      ...project.drivers,
+    ],
     // Single-shard by mandate (roadmap Global Constraints). Sharding is Slice 6.
     numShards: 1,
     // Decision 6 / §8.1: no process-shaped `setInterval` sweep, no per-session ping heartbeat.

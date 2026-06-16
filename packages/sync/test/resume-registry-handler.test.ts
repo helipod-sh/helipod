@@ -34,6 +34,7 @@ function makeExecutor(): SyncUdfExecutor {
         value: [{ _id: "notes|a", box: "a" }] as unknown as Value,
         tables: ["notes"],
         readRanges: [RANGE_A],
+        globalTables: [],
       };
     },
     async runMutation() {
@@ -59,6 +60,7 @@ function makeByIdExecutor(): SyncUdfExecutor {
         value: { _id: "docs|a", n: 1 } as unknown as Value,
         tables: ["table:3"],
         readRanges: [POINT_A],
+        globalTables: [],
       };
     },
     async runMutation() {
@@ -334,6 +336,7 @@ describe("SyncProtocolHandler: resume registry lockstep (DLR Stage 3, whole-bran
           value: [{ _id: "notes|x", box: n === 1 ? "a" : "b" }] as unknown as Value,
           tables: ["notes"],
           readRanges: [n === 1 ? RANGE_A : RANGE_B],
+          globalTables: [],
         };
       },
       async runMutation() {

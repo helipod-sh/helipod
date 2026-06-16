@@ -38,13 +38,13 @@ function mkExec(opts: {
     async runQuery() {
       if (opts.shouldFail?.()) throw new Error("boom");
       const value = (opts.queryValue?.() ?? "v") as never;
-      return { value, tables: opts.queryTables ?? ["t"], readRanges: opts.queryRanges ?? [] };
+      return { value, tables: opts.queryTables ?? ["t"], readRanges: opts.queryRanges ?? [], globalTables: [] };
     },
     async runMutation() {
       return { value: "ok" as never, tables: [], writeRanges: [], commitTs: 0 };
     },
     async runAdminQuery() {
-      return { value: "admin" as never, tables: ["t"], readRanges: [] };
+      return { value: "admin" as never, tables: ["t"], readRanges: [], globalTables: [] };
     },
     async runAction() {
       return { value: "acted" as never };

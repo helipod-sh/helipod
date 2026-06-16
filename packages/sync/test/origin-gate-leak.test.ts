@@ -78,7 +78,7 @@ describe("origin-response-gate leak — commitThenThrow must not wedge node-wide
     let handler!: SyncProtocolHandler;
     const exec: SyncUdfExecutor = {
       async runQuery() {
-        return { value: "v" as never, tables: ["t"], readRanges: [] };
+        return { value: "v" as never, tables: ["t"], readRanges: [], globalTables: [] };
       },
       async runMutation(_path, _args, _identity, origin) {
         handler.registerOriginResponseGate(COMMIT_TS, origin); // commit-time registration
@@ -87,7 +87,7 @@ describe("origin-response-gate leak — commitThenThrow must not wedge node-wide
         throw commitThenThrowError("failed-login recorded", COMMIT_TS);
       },
       async runAdminQuery() {
-        return { value: "admin" as never, tables: ["t"], readRanges: [] };
+        return { value: "admin" as never, tables: ["t"], readRanges: [], globalTables: [] };
       },
       async runAction() {
         return { value: "acted" as never };
@@ -129,7 +129,7 @@ describe("origin-response-gate leak — commitThenThrow must not wedge node-wide
     let handler!: SyncProtocolHandler;
     const exec: SyncUdfExecutor = {
       async runQuery() {
-        return { value: "v" as never, tables: ["t"], readRanges: [] };
+        return { value: "v" as never, tables: ["t"], readRanges: [], globalTables: [] };
       },
       async runMutation(_path, _args, _identity, origin) {
         handler.registerOriginResponseGate(COMMIT_TS, origin);
@@ -137,7 +137,7 @@ describe("origin-response-gate leak — commitThenThrow must not wedge node-wide
         throw commitThenThrowError("no-affected-sub", COMMIT_TS);
       },
       async runAdminQuery() {
-        return { value: "admin" as never, tables: ["t"], readRanges: [] };
+        return { value: "admin" as never, tables: ["t"], readRanges: [], globalTables: [] };
       },
       async runAction() {
         return { value: "acted" as never };
@@ -165,13 +165,13 @@ describe("origin-response-gate leak — commitThenThrow must not wedge node-wide
     const handler = new SyncProtocolHandler(
       {
         async runQuery() {
-          return { value: "v" as never, tables: ["t"], readRanges: [] };
+          return { value: "v" as never, tables: ["t"], readRanges: [], globalTables: [] };
         },
         async runMutation() {
           return { value: "ok" as never, tables: [], writeRanges: [], commitTs: 0 };
         },
         async runAdminQuery() {
-          return { value: "admin" as never, tables: ["t"], readRanges: [] };
+          return { value: "admin" as never, tables: ["t"], readRanges: [], globalTables: [] };
         },
         async runAction() {
           return { value: "acted" as never };

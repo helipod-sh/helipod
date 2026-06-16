@@ -55,6 +55,16 @@ export interface DurableObjectAppConfig {
   backstopMs?: (defaultMs: number) => number;
   /** Injected clock (tests). */
   now?: () => number;
+  /** M2c Task 7: `GlobalReactivityPoller` cadence override (ms) — passed straight through to
+   *  `bootDurableObjectRuntime`'s `globalReactivityPollMs` (see there). Exists so a real-workerd test
+   *  can drive the poller deterministically via `runDurableObjectAlarm` (`cloudflare:test`) without a
+   *  real wall-clock sleep: `runDurableObjectAlarm` force-clears+re-fires whatever alarm is CURRENTLY
+   *  scheduled on the DO, but the runtime's own `fireDueTimers` still gates on its in-process
+   *  `atMs <= now()` due-check — an injected test `now` can't be shared across the DO's own isolated
+   *  module scope from outside, so a near-zero interval (rather than a controllable clock) is what
+   *  makes an explicit force-fire land as genuinely due, deterministically, with no sleep. Defaults to
+   *  the driver's 2000ms (unchanged behavior for every existing DO subclass). */
+  globalReactivityPollMs?: number;
 }
 
 const SYNC_PATH = "/api/sync";
@@ -95,6 +105,7 @@ export abstract class StackbaseDurableObject {
           ...(cfg.d1 ? { d1: cfg.d1 } : {}),
           ...(cfg.backstopMs ? { backstopMs: cfg.backstopMs } : {}),
           ...(cfg.now ? { now: cfg.now } : {}),
+          ...(cfg.globalReactivityPollMs !== undefined ? { globalReactivityPollMs: cfg.globalReactivityPollMs } : {}),
         });
         // Wire the RuntimeHost seam over the freshly-booted runtime (Task 2). Port 0 (portless DO),
         // no-op close, working setRoutes — HTTP dispatch flows through `this.runtimeHost.fetch`.

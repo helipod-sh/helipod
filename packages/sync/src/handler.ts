@@ -88,7 +88,7 @@ export type RunMutationResult = MutationRan | MutationReplay;
 
 /** Runs UDFs for the sync tier. Backed by the executor; returns table sets + precise read ranges for matching. */
 export interface SyncUdfExecutor {
-  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
+  runQuery(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /**
    * `origin` (G4, client-sync verdict §(d) item 2): the committing session's id, threaded onto the
    * commit's `OplogDelta.origin` so the fan-out can advance THAT session's own `version.ts` past its
@@ -105,7 +105,7 @@ export interface SyncUdfExecutor {
    * any node, incl. a fleet follower; the read must run where the commit runs — verdict §(c) repair 3).
    */
   runMutation(udfPath: string, args: JSONValue, identity?: string | null, origin?: string, dedup?: ClientMutationRef): Promise<RunMutationResult>;
-  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
+  runAdminQuery(udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }>;
   /** One-shot, non-reactive: an action has no read/write set of its own to fan out. */
   runAction(udfPath: string, args: JSONValue, identity?: string | null): Promise<{ value: Value }>;
   /**
@@ -131,6 +131,19 @@ export interface WriteInvalidation {
   commitTs: number;
   /** Written docs for local row-diffing (§DLR 2a). Absent → affected DIFFABLE subs fall back to RERUN. */
   writtenDocs?: WrittenDoc[];
+  /**
+   * M2c Critical fix: true for a GLOBAL (D1-backed) table invalidation, sourced from
+   * `GlobalReactivityPoller` rather than the local MVCC commit path. Global reactivity has its OWN
+   * clock (D1's `_global_versions` counter) — `commitTs` on a global invalidation is a harmless
+   * placeholder (`0`), never an oracle-issued local timestamp. A `global` invalidation is
+   * FRONTIER-NEUTRAL: it must never advance `session.version.ts` (the client-facing local-ts
+   * frontier) or the local-ts `ResumeRegistry` — mixing the two clock domains on that one shared
+   * scalar silently breaks local optimistic-update gating and local reconnect-resume for any
+   * session with both a local and a global subscription (see `doNotifyWrites`, `sendSessionTransition`,
+   * and `doModifyQuerySet`'s `globalTables.length > 0` reconnect bypass). Absent/false = a normal
+   * local commit — byte-identical to pre-M2c behavior.
+   */
+  global?: boolean;
 }
 
 export interface SyncProtocolHandlerOptions {
@@ -287,6 +300,17 @@ export class SyncProtocolHandler {
    * only keeps it correctly populated.
    */
   private readonly resumeRegistry = new ResumeRegistry();
+  /**
+   * M2c fix: callbacks registered via {@link onGlobalSubscribe}, fired whenever a subscription is
+   * (re-)registered with a non-empty `globalTables` read set — from `doModifyQuerySet` (fresh
+   * subscribe, or a resume-skip carrying a retained global-table read set), from `handleSetAuth`'s
+   * re-exec (an identity flip can make a query newly read a global table), and from
+   * `sendSessionTransition`'s live-re-run (a data/identity-dependent query can shift onto a global
+   * table across a RERUN refresh). See `DriverContext.onGlobalSubscribe`'s doc comment
+   * (`@stackbase/component`) for why this exists — closing the busy-DO-late-subscribe gap in the
+   * M2c global-reactivity poller.
+   */
+  private readonly globalSubscribeListeners: Array<() => void> = [];
   private readonly verifyAdmin: (key: string) => boolean;
   /** Periodic drain sweep — drains recovered clients and abandons terminally-slow queues. */
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -378,6 +402,49 @@ export class SyncProtocolHandler {
     return this.resumeRegistry;
   }
 
+  /** @internal test/debug only — the live SubscriptionManager (M2c), for tests to assert
+   *  registration wiring (e.g. `globalTables`) without duplicating its internals. */
+  get __subscriptions(): SubscriptionManager {
+    return this.subscriptions;
+  }
+
+  /**
+   * M2c Task 6: global (D1-backed) table names with at least one live subscriber right now —
+   * delegates to `SubscriptionManager.subscribedGlobalTables()`. This is the ONLY thing a
+   * `GlobalReactivityPoller` needs from the sync tier to decide which tables are worth polling D1
+   * for (its other dependency, `notifyWrites`, already exists on this class). A public method
+   * (unlike `__subscriptions` above) because it is a real runtime dependency wired onto
+   * `DriverContext`, not a test-only escape hatch.
+   */
+  subscribedGlobalTables(): string[] {
+    return this.subscriptions.subscribedGlobalTables();
+  }
+
+  /**
+   * M2c fix: register `cb` to fire whenever a subscription is (re-)registered with a non-empty
+   * global-table read set — a fresh `doModifyQuerySet` subscribe/resume, a `handleSetAuth` re-exec,
+   * or a `sendSessionTransition` live-re-run (see the `globalSubscribeListeners` field doc for all
+   * three sites). A driver (e.g. `GlobalReactivityPollerDriver`) uses this to arm itself on any of
+   * these late/renewed subscribes, rather than relying solely on a boot-time force-arm that a busy
+   * (never-hibernating) DO may never repeat. Not unsubscribed — callers are drivers with the same
+   * lifetime as this handler.
+   */
+  onGlobalSubscribe(cb: () => void): void {
+    this.globalSubscribeListeners.push(cb);
+  }
+
+  /** Fire every registered {@link onGlobalSubscribe} listener. Swallows listener throws (never let a
+   *  driver's own bug break subscription registration). */
+  private fireGlobalSubscribe(): void {
+    for (const cb of this.globalSubscribeListeners) {
+      try {
+        cb();
+      } catch (e) {
+        console.error("[sync] onGlobalSubscribe listener threw:", e);
+      }
+    }
+  }
+
   private send(session: Session, msg: ServerMessage): void {
     // MutationResponse/ActionResponse are undroppable under backpressure (§(d) item 4 of the
     // client-sync verdict): a dropped Transition self-heals via the version-gap resync, but a
@@ -434,7 +501,7 @@ export class SyncProtocolHandler {
   }
 
   /** Run a subscription's query — privileged for _admin:* on a privileged session; else identity-scoped. */
-  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }> {
+  private async execSub(session: Session, udfPath: string, args: JSONValue): Promise<{ value: Value; tables: string[]; readRanges: readonly SerializedKeyRange[]; globalTables: string[]; diffableRange?: DiffableRange; diffablePage?: DiffablePage }> {
     if (udfPath.startsWith("_admin:")) {
       if (!session.privileged) throw new Error("Forbidden: admin subscription requires admin auth");
       return this.executor.runAdminQuery(udfPath, args);
@@ -480,7 +547,16 @@ export class SyncProtocolHandler {
         if (q.sinceTs !== undefined) {
           const rrKey = regKey(session.identity, q.udfPath, q.args);
           const entry = this.resumeRegistry.lookup(rrKey);
-          if (entry && !entry.wasDiffable && entry.lastInvalidatedTs <= q.sinceTs) {
+          // M2c Critical fix: a query that reads at least one GLOBAL (D1-backed) table can never take
+          // this compute-skip. `entry.lastInvalidatedTs` lives in the LOCAL-ts domain (advanced only
+          // by local commits — see `doNotifyWrites`'s `!invalidation.global` guard), so it structurally
+          // cannot reflect a global-table change (the poller never advances it, by design). A
+          // global-reading query — pure-global or mixed local+global — therefore ALWAYS re-runs on
+          // (re)subscribe/reconnect; this is always safe (never stale), at the documented cost of
+          // forgoing the compute-skip for global reads (a deferred v2 optimization, not built here —
+          // see the M2c critical-fix brief's scope discipline). A pure-local query (`globalTables`
+          // empty) is unaffected and keeps the existing skip below.
+          if (entry && !entry.wasDiffable && entry.globalTables.length === 0 && entry.lastInvalidatedTs <= q.sinceTs) {
             // The skipped sub registers with the RETAINED read set — correct, since an unchanged
             // result means an unchanged read set. Must carry the SAME `rrKey` as both `resumeKey` (so
             // a later release targets the right entry) and the `retain` below (paired with THIS
@@ -492,15 +568,20 @@ export class SyncProtocolHandler {
               args: q.args,
               tables: [...entry.tables],
               readRanges: entry.readRanges,
+              globalTables: [...entry.globalTables],
               byId: undefined,
               resumeKey: rrKey,
             });
             this.resumeRegistry.retain(rrKey);
+            // M2c fix: a resumed sub retaining a non-empty global-table read set is still a live
+            // global subscription — a driver that disarmed itself (e.g. zero subscribers at its last
+            // tick) needs the same wake-up this path's fresh-subscribe sibling gives below.
+            if (entry.globalTables.length > 0) this.fireGlobalSubscribe();
             modifications.push({ type: "QueryUnchanged", queryId: q.queryId });
             continue;
           }
         }
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, q.udfPath, q.args);
         // Subscription registration is UNCONDITIONAL and always fresh, whether or not the result
         // turns out unchanged below — a write-after-Unchanged-resume must still invalidate.
         const byId = classifyByIdRead(value, readRanges) ?? undefined;
@@ -512,12 +593,16 @@ export class SyncProtocolHandler {
         // release uses the SAME key `upsert` created it under — even if `SetAuth` later mutates
         // `session.identity` in place (a re-derived key would miss the entry → permanent leak).
         const rrKey = regKey(session.identity, q.udfPath, q.args);
-        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, byId, range: page ?? range, resumeKey: rrKey });
+        this.subscriptions.add({ sessionId: session.sessionId, queryId: q.queryId, udfPath: q.udfPath, args: q.args, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: rrKey });
+        // M2c fix: a fresh subscription touching at least one global table wakes any listener (e.g.
+        // the global-reactivity poller driver) that wants to arm itself on a late subscribe — the
+        // busy-DO-late-subscribe gap this hook exists to close (see `onGlobalSubscribe`'s doc comment).
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         // Populate the resume registry for this (identity, path, args). ALWAYS pair `upsert` with
         // `retain` — an `upsert` on a refCount-0 TTL-pending entry clears `expiresAtMs`; without a
         // paired `retain` it would leak (never swept again).
         const wasDiffable = !!(diffableRange || diffablePage || byId);
-        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable);
+        this.resumeRegistry.upsert(rrKey, readRanges, tables, session.version.ts, wasDiffable, globalTables);
         this.resumeRegistry.retain(rrKey);
         const json = convexToJson(value);
         if (page && session.supportsQueryDiff) {
@@ -850,7 +935,18 @@ export class SyncProtocolHandler {
     // an entry with zero live subscribers (TTL-retained across a disconnect "gap") must still see
     // its `lastInvalidatedTs` advance, or a resuming client would wrongly trust a stale result.
     // Piggyback a bounded opportunistic sweep here too (no separate timer needed).
-    this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    //
+    // M2c Critical fix: a GLOBAL invalidation's `commitTs` is a harmless placeholder in the local-ts
+    // domain (see `WriteInvalidation.global`'s doc), not a real local commit timestamp — advancing
+    // the LOCAL-TS resume registry with it would corrupt every entry's `lastInvalidatedTs` (including
+    // pure-local entries whose read set happens to intersect via the table-fallback match, though a
+    // global table name never collides with a local one in practice) with a clock the local-ts
+    // reconnect-skip (`doModifyQuerySet`) doesn't understand. A global-reading entry never uses this
+    // registry for its resume decision anyway (Change 4 always re-runs it), so skipping the advance
+    // here costs nothing. `sweep` is unrelated bookkeeping (TTL eviction) — it still runs either way.
+    if (!invalidation.global) {
+      this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    }
     this.resumeRegistry.sweep(Date.now());
 
     // Use surgical range-level matching: only re-run subscriptions whose read ranges overlap the write ranges.
@@ -922,20 +1018,30 @@ export class SyncProtocolHandler {
       await this.sendSessionTransition(originSession, originSubs, invalidation);
     }
 
-    // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
-    // advance past its commit. If this commit touched some of ITS subscriptions it is in `bySession`
-    // and the loop above already advanced its ts alongside the write's own modifications — so the ts
-    // advance NEVER precedes the modifications it confirms (ordering correct by construction). Only
-    // when the commit touched NOTHING it subscribes to (absent from `bySession`) do we emit a
-    // standalone empty (`modifications: []`) ts-advancing Transition here.
-    this.advanceOriginFrontier(originSessionId, bySession, invalidation.commitTs);
+    // M2c Critical fix: both of these (`advanceOriginFrontier`/`sweepPendingFrontiers`) advance
+    // `session.version.ts` from `invalidation.commitTs` via `emitEmptyFrontier` — the SAME local-ts
+    // frontier `sendSessionTransition` is guarded for above. A GLOBAL invalidation never has a real
+    // local origin session (the poller never threads one through `notifyWrites`) and its `commitTs`
+    // is always the harmless placeholder `0` (Change 5), so in practice neither of these fires for a
+    // global invalidation today — but gate both explicitly anyway: the invariant this fix establishes
+    // ("a global invalidation never advances the local-ts frontier") must hold structurally, not by
+    // incidentally relying on every current caller happening to pass `commitTs: 0`/no origin.
+    if (!invalidation.global) {
+      // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
+      // advance past its commit. If this commit touched some of ITS subscriptions it is in `bySession`
+      // and the loop above already advanced its ts alongside the write's own modifications — so the ts
+      // advance NEVER precedes the modifications it confirms (ordering correct by construction). Only
+      // when the commit touched NOTHING it subscribes to (absent from `bySession`) do we emit a
+      // standalone empty (`modifications: []`) ts-advancing Transition here.
+      this.advanceOriginFrontier(originSessionId, bySession, invalidation.commitTs);
 
-    // G4 fleet fallback: a FORWARDED mutation's commit fanned out on the OWNER node, so its origin
-    // tag never reached this forwarding node — `handleMutation` recorded a pending frontier instead.
-    // Now that the drain has locally processed a commit at `invalidation.commitTs` (the drain's
-    // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
-    // subscription update this drain didn't already cover.
-    this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+      // G4 fleet fallback: a FORWARDED mutation's commit fanned out on the OWNER node, so its origin
+      // tag never reached this forwarding node — `handleMutation` recorded a pending frontier instead.
+      // Now that the drain has locally processed a commit at `invalidation.commitTs` (the drain's
+      // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
+      // subscription update this drain didn't already cover.
+      this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+    }
   }
 
   /**
@@ -1041,7 +1147,7 @@ export class SyncProtocolHandler {
           modifications.push({ type: "QueryDiff", queryId: sub.queryId, changes, checksum: driftChecksum(next) });
           continue;
         }
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — a query whose read shape changes across a
         // refresh (data/identity-dependent branching) must not keep carrying a `byId`/`range` that
@@ -1055,7 +1161,11 @@ export class SyncProtocolHandler {
         // `...sub`'s spread below), permanently reverting it to RERUN even once `writtenDocs` starts
         // flowing again on a later commit.
         const page = diffablePage ? pageReadFromDiffable(diffablePage) : undefined;
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range }); // refresh the read set
+        this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range }); // refresh the read set
+        // M2c fix: this live-re-run can register a sub whose `globalTables` just turned non-empty
+        // (a data/identity-dependent branch newly reads a global table) — a driver that disarmed
+        // itself needs the same wake-up the fresh-subscribe/resume-skip paths above already give.
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         // DLR Stage 3 (whole-branch review fix): keep the resume registry's read-set in LOCKSTEP with
         // this fresh re-run. A data/identity-dependent query can shift its read ranges here (e.g.
         // `get(user)` then a range keyed on `user.currentRoom`); a registry still frozen at the
@@ -1065,7 +1175,7 @@ export class SyncProtocolHandler {
         // this commit, so the ts is a no-op — only the ranges/tables/wasDiffable change. (No `retain`:
         // the sub is live, so refCount ≥ 1 and `expiresAtMs` is already unset — no leak.)
         if (sub.resumeKey) {
-          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId);
+          this.resumeRegistry.upsert(sub.resumeKey, readRanges, tables, Number(invalidation.commitTs), !!(page ?? range) || !!byId, globalTables);
         }
         // Reset-semantics follow-up: if the sub's byId just transitioned away from what it was
         // (or vanished entirely), drop any old byIdRowMap entry — it's keyed to a byId this
@@ -1098,7 +1208,15 @@ export class SyncProtocolHandler {
       }
     }
     const start = session.version;
-    const end: StateVersion = { querySet: start.querySet, ts: invalidation.commitTs };
+    // M2c Critical fix: a GLOBAL invalidation's `commitTs` lives in D1's version-counter domain, not
+    // the local-ts domain `session.version.ts` represents — advancing the frontier from it would leap
+    // the client's observed local-ts arbitrarily (e.g. contaminating local optimistic-update gating
+    // and local reconnect resume; see `WriteInvalidation.global`'s doc). Deliver the fresh
+    // modifications (the client still gets its `QueryUpdated`) but keep `endVersion` at the session's
+    // CURRENT local-ts frontier — a no-op advance. The client's `observedTs = max(observedTs, endTs)`
+    // handles `endTs === observedTs` as a pure no-op, so this is wire-compatible with an unmodified
+    // client.
+    const end: StateVersion = { querySet: start.querySet, ts: invalidation.global ? start.ts : invalidation.commitTs };
     session.version = end;
     this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
   }
@@ -1154,7 +1272,7 @@ export class SyncProtocolHandler {
     const modifications: StateModification[] = [];
     for (const sub of subs) {
       try {
-        const { value, tables, readRanges, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
+        const { value, tables, readRanges, globalTables, diffableRange, diffablePage } = await this.execSub(session, sub.udfPath, sub.args);
         // Recompute `byId`/`range` from THIS fresh (value, readRanges, diffableRange) instead of
         // spreading the sub's stale classification — an identity change can change WHAT a query
         // reads (e.g. an identity-scoped `db.get`, or an identity-scoped range's bounds/filters),
@@ -1175,12 +1293,16 @@ export class SyncProtocolHandler {
         // under the new identity now finds the migrated entry; a reconnect under the OLD identity
         // misses (its entry TTL-sweeps) → re-run, never a stale skip.
         const newResumeKey = regKey(session.identity, sub.udfPath, sub.args);
-        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId);
+        this.resumeRegistry.upsert(newResumeKey, readRanges, tables, session.version.ts, !!(page ?? range) || !!byId, globalTables);
         if (sub.resumeKey !== newResumeKey) {
           this.resumeRegistry.retain(newResumeKey);
           if (sub.resumeKey) this.resumeRegistry.release(sub.resumeKey, Date.now());
         }
-        this.subscriptions.add({ ...sub, tables, readRanges, byId, range: page ?? range, resumeKey: newResumeKey });
+        this.subscriptions.add({ ...sub, tables, readRanges, globalTables, byId, range: page ?? range, resumeKey: newResumeKey });
+        // M2c fix: an identity flip (SetAuth) can change WHAT a query reads (see the comment on
+        // `byId`/`range` above) — including newly reading a global table it didn't before. Wake any
+        // disarmed driver the same way the fresh-subscribe/live-re-run paths already do.
+        if (globalTables.length > 0) this.fireGlobalSubscribe();
         const key = subKey(session.sessionId, sub.queryId);
         const json = convexToJson(value);
         if (byId && session.supportsQueryDiff) {
