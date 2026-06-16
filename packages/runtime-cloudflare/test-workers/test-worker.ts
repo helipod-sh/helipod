@@ -57,6 +57,11 @@ export { StorageDO } from "./storage-fixture";
 // module for workerd to instantiate it.
 export { GlobalD1DO } from "./global-d1-fixture";
 
+// M2c Task 7 `.global()` reactivity fixture (near-zero poll interval for deterministic
+// `runDurableObjectAlarm`-driven tests) — a DO class must be exported from the Worker's main module
+// for workerd to instantiate it.
+export { GlobalReactivityDO } from "./global-reactivity-fixture";
+
 // A Worker needs a default handler even when tests drive the DOs directly.
 export default {
   async fetch(): Promise<Response> {
