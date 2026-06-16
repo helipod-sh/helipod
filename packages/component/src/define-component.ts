@@ -106,8 +106,14 @@ export interface DriverContext {
    * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
    * writes through the normal `runFunction`/transaction path instead (nearly all of them) never
    * needs to invalidate a subscription directly and can ignore this entirely.
+   *
+   * `global` (M2c Critical fix): set `true` for an invalidation whose `commitTs` is NOT a real local
+   * MVCC timestamp (e.g. `GlobalReactivityPoller`'s D1 version-counter poll) — the sync handler never
+   * advances the client-facing local-ts frontier or the local-ts resume registry from a `global`
+   * invalidation's `commitTs`, so a caller sourcing `commitTs` from anything but the local oracle MUST
+   * set this. Absent/false = a normal local commit, byte-identical to pre-M2c behavior.
    */
-  notifyWrites?(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number }): Promise<void>;
+  notifyWrites?(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number; global?: boolean }): Promise<void>;
   /**
    * M2c: global (D1-backed) table names with at least one live subscriber right now — the only
    * thing a `GlobalReactivityPoller` needs to decide which tables are worth polling D1 for.

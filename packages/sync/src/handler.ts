@@ -131,6 +131,19 @@ export interface WriteInvalidation {
   commitTs: number;
   /** Written docs for local row-diffing (§DLR 2a). Absent → affected DIFFABLE subs fall back to RERUN. */
   writtenDocs?: WrittenDoc[];
+  /**
+   * M2c Critical fix: true for a GLOBAL (D1-backed) table invalidation, sourced from
+   * `GlobalReactivityPoller` rather than the local MVCC commit path. Global reactivity has its OWN
+   * clock (D1's `_global_versions` counter) — `commitTs` on a global invalidation is a harmless
+   * placeholder (`0`), never an oracle-issued local timestamp. A `global` invalidation is
+   * FRONTIER-NEUTRAL: it must never advance `session.version.ts` (the client-facing local-ts
+   * frontier) or the local-ts `ResumeRegistry` — mixing the two clock domains on that one shared
+   * scalar silently breaks local optimistic-update gating and local reconnect-resume for any
+   * session with both a local and a global subscription (see `doNotifyWrites`, `sendSessionTransition`,
+   * and `doModifyQuerySet`'s `globalTables.length > 0` reconnect bypass). Absent/false = a normal
+   * local commit — byte-identical to pre-M2c behavior.
+   */
+  global?: boolean;
 }
 
 export interface SyncProtocolHandlerOptions {
@@ -534,7 +547,16 @@ export class SyncProtocolHandler {
         if (q.sinceTs !== undefined) {
           const rrKey = regKey(session.identity, q.udfPath, q.args);
           const entry = this.resumeRegistry.lookup(rrKey);
-          if (entry && !entry.wasDiffable && entry.lastInvalidatedTs <= q.sinceTs) {
+          // M2c Critical fix: a query that reads at least one GLOBAL (D1-backed) table can never take
+          // this compute-skip. `entry.lastInvalidatedTs` lives in the LOCAL-ts domain (advanced only
+          // by local commits — see `doNotifyWrites`'s `!invalidation.global` guard), so it structurally
+          // cannot reflect a global-table change (the poller never advances it, by design). A
+          // global-reading query — pure-global or mixed local+global — therefore ALWAYS re-runs on
+          // (re)subscribe/reconnect; this is always safe (never stale), at the documented cost of
+          // forgoing the compute-skip for global reads (a deferred v2 optimization, not built here —
+          // see the M2c critical-fix brief's scope discipline). A pure-local query (`globalTables`
+          // empty) is unaffected and keeps the existing skip below.
+          if (entry && !entry.wasDiffable && entry.globalTables.length === 0 && entry.lastInvalidatedTs <= q.sinceTs) {
             // The skipped sub registers with the RETAINED read set — correct, since an unchanged
             // result means an unchanged read set. Must carry the SAME `rrKey` as both `resumeKey` (so
             // a later release targets the right entry) and the `retain` below (paired with THIS
@@ -913,7 +935,18 @@ export class SyncProtocolHandler {
     // an entry with zero live subscribers (TTL-retained across a disconnect "gap") must still see
     // its `lastInvalidatedTs` advance, or a resuming client would wrongly trust a stale result.
     // Piggyback a bounded opportunistic sweep here too (no separate timer needed).
-    this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    //
+    // M2c Critical fix: a GLOBAL invalidation's `commitTs` is a harmless placeholder in the local-ts
+    // domain (see `WriteInvalidation.global`'s doc), not a real local commit timestamp — advancing
+    // the LOCAL-TS resume registry with it would corrupt every entry's `lastInvalidatedTs` (including
+    // pure-local entries whose read set happens to intersect via the table-fallback match, though a
+    // global table name never collides with a local one in practice) with a clock the local-ts
+    // reconnect-skip (`doModifyQuerySet`) doesn't understand. A global-reading entry never uses this
+    // registry for its resume decision anyway (Change 4 always re-runs it), so skipping the advance
+    // here costs nothing. `sweep` is unrelated bookkeeping (TTL eviction) — it still runs either way.
+    if (!invalidation.global) {
+      this.resumeRegistry.advanceOnCommit(invalidation.ranges ?? [], invalidation.tables, invalidation.commitTs);
+    }
     this.resumeRegistry.sweep(Date.now());
 
     // Use surgical range-level matching: only re-run subscriptions whose read ranges overlap the write ranges.
@@ -985,20 +1018,30 @@ export class SyncProtocolHandler {
       await this.sendSessionTransition(originSession, originSubs, invalidation);
     }
 
-    // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
-    // advance past its commit. If this commit touched some of ITS subscriptions it is in `bySession`
-    // and the loop above already advanced its ts alongside the write's own modifications — so the ts
-    // advance NEVER precedes the modifications it confirms (ordering correct by construction). Only
-    // when the commit touched NOTHING it subscribes to (absent from `bySession`) do we emit a
-    // standalone empty (`modifications: []`) ts-advancing Transition here.
-    this.advanceOriginFrontier(originSessionId, bySession, invalidation.commitTs);
+    // M2c Critical fix: both of these (`advanceOriginFrontier`/`sweepPendingFrontiers`) advance
+    // `session.version.ts` from `invalidation.commitTs` via `emitEmptyFrontier` — the SAME local-ts
+    // frontier `sendSessionTransition` is guarded for above. A GLOBAL invalidation never has a real
+    // local origin session (the poller never threads one through `notifyWrites`) and its `commitTs`
+    // is always the harmless placeholder `0` (Change 5), so in practice neither of these fires for a
+    // global invalidation today — but gate both explicitly anyway: the invariant this fix establishes
+    // ("a global invalidation never advances the local-ts frontier") must hold structurally, not by
+    // incidentally relying on every current caller happening to pass `commitTs: 0`/no origin.
+    if (!invalidation.global) {
+      // G4 primary origin-frontier guarantee: the committing session must see its own `version.ts`
+      // advance past its commit. If this commit touched some of ITS subscriptions it is in `bySession`
+      // and the loop above already advanced its ts alongside the write's own modifications — so the ts
+      // advance NEVER precedes the modifications it confirms (ordering correct by construction). Only
+      // when the commit touched NOTHING it subscribes to (absent from `bySession`) do we emit a
+      // standalone empty (`modifications: []`) ts-advancing Transition here.
+      this.advanceOriginFrontier(originSessionId, bySession, invalidation.commitTs);
 
-    // G4 fleet fallback: a FORWARDED mutation's commit fanned out on the OWNER node, so its origin
-    // tag never reached this forwarding node — `handleMutation` recorded a pending frontier instead.
-    // Now that the drain has locally processed a commit at `invalidation.commitTs` (the drain's
-    // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
-    // subscription update this drain didn't already cover.
-    this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+      // G4 fleet fallback: a FORWARDED mutation's commit fanned out on the OWNER node, so its origin
+      // tag never reached this forwarding node — `handleMutation` recorded a pending frontier instead.
+      // Now that the drain has locally processed a commit at `invalidation.commitTs` (the drain's
+      // last-processed ts), satisfy any pending frontier at-or-below it that a session's own
+      // subscription update this drain didn't already cover.
+      this.sweepPendingFrontiers(invalidation.commitTs, bySession);
+    }
   }
 
   /**
@@ -1165,7 +1208,15 @@ export class SyncProtocolHandler {
       }
     }
     const start = session.version;
-    const end: StateVersion = { querySet: start.querySet, ts: invalidation.commitTs };
+    // M2c Critical fix: a GLOBAL invalidation's `commitTs` lives in D1's version-counter domain, not
+    // the local-ts domain `session.version.ts` represents — advancing the frontier from it would leap
+    // the client's observed local-ts arbitrarily (e.g. contaminating local optimistic-update gating
+    // and local reconnect resume; see `WriteInvalidation.global`'s doc). Deliver the fresh
+    // modifications (the client still gets its `QueryUpdated`) but keep `endVersion` at the session's
+    // CURRENT local-ts frontier — a no-op advance. The client's `observedTs = max(observedTs, endTs)`
+    // handles `endTs === observedTs` as a pure no-op, so this is wire-compatible with an unmodified
+    // client.
+    const end: StateVersion = { querySet: start.querySet, ts: invalidation.global ? start.ts : invalidation.commitTs };
     session.version = end;
     this.send(session, { type: "Transition", startVersion: start, endVersion: end, modifications });
   }

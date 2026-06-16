@@ -18,8 +18,17 @@
  *
  * This poller must NOT touch the MVCC oracle or `observeTimestamp` — it only ever calls
  * `notifyWrites` with an empty `ranges` (table-level invalidation only; global tables have no
- * range-precise read-set tracking) and a plain monotone `commitTs` (a wall-clock/counter value, not
- * an oracle-issued timestamp).
+ * range-precise read-set tracking), `global: true`, and a harmless placeholder `commitTs: 0`.
+ *
+ * M2c Critical fix (whole-branch review): a global invalidation's `commitTs` used to be sourced from
+ * a wall-clock/counter clock (`now`) and fed straight into `SyncProtocolHandler`'s shared per-session
+ * `version.ts` — the client-facing LOCAL-ts frontier. Global reactivity has its own clock (D1's
+ * `_global_versions` counter); mixing the two on one shared scalar silently corrupted local
+ * optimistic-update gating and local reconnect-resume for any session with both a local and a global
+ * subscription. The fix: `commitTs` on a global invalidation is now WRITE-ONLY NOISE (`0`,
+ * unconditionally) — `SyncProtocolHandler` never reads it for a `global: true` invalidation (see
+ * `WriteInvalidation.global`'s doc in `@stackbase/sync`), so the `now` clock this poller used to need
+ * exists nowhere anymore and has been removed from {@link GlobalReactivityDeps} entirely.
  */
 
 export interface GlobalReactivityDeps {
@@ -28,14 +37,11 @@ export interface GlobalReactivityDeps {
   /** Task 4: `SubscriptionManager.subscribedGlobalTables()` — global tables with a live subscriber. */
   subscribedGlobalTables(): string[];
   /** `SyncProtocolHandler.notifyWrites` (or a narrowed facade over it). */
-  notifyWrites(inv: { tables: string[]; ranges: never[]; commitTs: number }): Promise<void>;
-  /** Clock for `commitTs`. Defaults to a monotone in-process counter (never the MVCC oracle). */
-  now?(): number;
+  notifyWrites(inv: { tables: string[]; ranges: never[]; commitTs: number; global: true }): Promise<void>;
 }
 
 export class GlobalReactivityPoller {
   private readonly lastSeen = new Map<string, number>();
-  private seq = 0;
 
   constructor(private readonly deps: GlobalReactivityDeps) {}
 
@@ -66,7 +72,10 @@ export class GlobalReactivityPoller {
       }
       if (v > prev) {
         this.lastSeen.set(t, v);
-        await this.deps.notifyWrites({ tables: [t], ranges: [], commitTs: this.deps.now?.() ?? ++this.seq });
+        // M2c Critical fix: `commitTs: 0` is a harmless placeholder — a `global: true` invalidation
+        // never has its `commitTs` read by `SyncProtocolHandler` (see this file's header doc + the
+        // `WriteInvalidation.global` doc in `@stackbase/sync`), so there is no clock to source here.
+        await this.deps.notifyWrites({ tables: [t], ranges: [], commitTs: 0, global: true });
       }
     }
   }

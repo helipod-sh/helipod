@@ -72,7 +72,14 @@ describe("SyncProtocolHandler: globalTables threading (M2c Task 3)", () => {
     expect(entry!.globalTables).toContain("users");
   });
 
-  it("a QueryUnchanged reconnect resume carries globalTables forward onto the fresh sub", async () => {
+  it("a reconnect resume of a MIXED (local+global) query always re-runs (M2c Critical fix), and the fresh sub still carries globalTables", async () => {
+    // M2c Critical fix (whole-branch review): this query mixes a local range read (`notes`) with a
+    // global-table read (`users`, via `makeExecutor()`'s fixed `globalTables: ["users"]`). Before the
+    // fix, the reconnect compute-skip (`doModifyQuerySet`) only looked at `lastInvalidatedTs` — a
+    // LOCAL-ts value the global-reactivity poller never advances — so a mixed query wrongly took the
+    // `QueryUnchanged` fast path on resume and could miss a foreign global-table change that happened
+    // during the gap. The fix bypasses the skip for any query whose resume-registry entry has a
+    // non-empty `globalTables` (Change 4), so this now ALWAYS re-runs on resume instead.
     const handler = new SyncProtocolHandler(makeExecutor());
     const socket1 = new MockSocket();
     handler.connect("s1", socket1);
@@ -95,9 +102,10 @@ describe("SyncProtocolHandler: globalTables threading (M2c Task 3)", () => {
       }),
     );
 
-    // The compute-skip branch fired (QueryUnchanged), but the resumed sub still carries globalTables.
+    // The skip branch is BYPASSED (a fresh QueryUpdated, not QueryUnchanged) precisely because this
+    // sub's globalTables is non-empty — but the resumed sub still carries globalTables forward.
     const resumeTransition = socket2.messages.at(-1) as Extract<ServerMessage, { type: "Transition" }>;
-    expect(resumeTransition.modifications).toEqual([{ type: "QueryUnchanged", queryId: 2 }]);
+    expect(resumeTransition.modifications).toEqual([expect.objectContaining({ type: "QueryUpdated", queryId: 2 })]);
     const sub = handler.__subscriptions.get("s2", 2);
     expect(sub!.globalTables).toContain("users");
   });

@@ -148,7 +148,6 @@ export function globalReactivityPollerDriver(
         readVersions,
         subscribedGlobalTables,
         notifyWrites,
-        now: () => c.now(),
       });
       // M2c review fix: arm on a late global subscribe (see the module doc + `armIfIdle`'s doc above).
       // Optional on `DriverContext` — a bespoke fake that predates this fix simply never heals the

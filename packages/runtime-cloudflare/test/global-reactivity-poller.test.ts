@@ -14,7 +14,7 @@ function makeHarness(initialTables: string[] = ["users"]) {
     if (versionScript.length === 0) throw new Error("readVersions called with no scripted response left");
     return versionScript.shift()!;
   });
-  const notifyWrites = vi.fn(async (_inv: { tables: string[]; ranges: never[]; commitTs: number }) => {});
+  const notifyWrites = vi.fn(async (_inv: { tables: string[]; ranges: never[]; commitTs: number; global: true }) => {});
 
   const poller = new GlobalReactivityPoller({
     readVersions,
@@ -56,10 +56,14 @@ describe("GlobalReactivityPoller.tick", () => {
     await h.poller.tick();
 
     expect(h.notifyWrites).toHaveBeenCalledTimes(1);
+    // M2c Critical fix: `commitTs` is a harmless placeholder (0) on a global invalidation — never a
+    // wall-clock/counter value fed into the local-ts frontier — and `global: true` is set so the sync
+    // handler treats it as frontier-neutral. See `WriteInvalidation.global`'s doc in `@stackbase/sync`.
     expect(h.notifyWrites).toHaveBeenCalledWith({
       tables: ["users"],
       ranges: [],
-      commitTs: expect.any(Number),
+      commitTs: 0,
+      global: true,
     });
   });
 
@@ -108,7 +112,7 @@ describe("GlobalReactivityPoller.tick", () => {
     h.script({ users: 3 });
     await h.poller.tick();
     expect(h.notifyWrites).toHaveBeenCalledTimes(1);
-    expect(h.notifyWrites).toHaveBeenCalledWith({ tables: ["users"], ranges: [], commitTs: expect.any(Number) });
+    expect(h.notifyWrites).toHaveBeenCalledWith({ tables: ["users"], ranges: [], commitTs: 0, global: true });
   });
 
   it("multiple subscribed tables are diffed independently in one tick", async () => {
@@ -120,25 +124,26 @@ describe("GlobalReactivityPoller.tick", () => {
     await h.poller.tick();
 
     expect(h.notifyWrites).toHaveBeenCalledTimes(1);
-    expect(h.notifyWrites).toHaveBeenCalledWith({ tables: ["users"], ranges: [], commitTs: expect.any(Number) });
+    expect(h.notifyWrites).toHaveBeenCalledWith({ tables: ["users"], ranges: [], commitTs: 0, global: true });
   });
 
-  it("uses a supplied now() for commitTs when provided", async () => {
-    let clock = 100;
-    const notifyWrites = vi.fn(async () => {});
+  it("M2c Critical fix: commitTs is always the placeholder 0, regardless of poll count/timing — there is no clock to source it from anymore", async () => {
+    const notifyWrites = vi.fn(async (_inv: { tables: string[]; ranges: never[]; commitTs: number; global: true }) => {});
     const readVersions = vi.fn(async () => versions.shift()!);
-    const versions: Record<string, number>[] = [{ users: 1 }, { users: 2 }];
+    const versions: Record<string, number>[] = [{ users: 1 }, { users: 2 }, { users: 3 }];
     const poller = new GlobalReactivityPoller({
       readVersions,
       subscribedGlobalTables: () => ["users"],
       notifyWrites,
-      now: () => clock,
     });
 
-    await poller.tick();
-    clock = 200;
-    await poller.tick();
+    await poller.tick(); // baseline
+    await poller.tick(); // bump 1 -> 2
+    await poller.tick(); // bump 2 -> 3
 
-    expect(notifyWrites).toHaveBeenCalledWith({ tables: ["users"], ranges: [], commitTs: 200 });
+    expect(notifyWrites).toHaveBeenCalledTimes(2);
+    for (const call of notifyWrites.mock.calls) {
+      expect(call[0]).toMatchObject({ commitTs: 0, global: true });
+    }
   });
 });
