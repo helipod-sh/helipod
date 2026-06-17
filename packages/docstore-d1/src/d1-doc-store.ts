@@ -61,7 +61,7 @@ export class D1DocStore {
     const touchedTables = [...new Set(ops.map((op) => op.table))];
     for (const table of touchedTables) {
       stmts.push({
-        sql: `INSERT INTO "_global_versions" ("table_name","version") VALUES (?,1) ON CONFLICT("table_name") DO UPDATE SET "version"="version"+1`,
+        sql: `INSERT INTO ${q("_global_versions")} (${q("table_name")},${q("version")}) VALUES (?,1) ON CONFLICT(${q("table_name")}) DO UPDATE SET ${q("version")}=${q("version")}+1`,
         params: [table],
       });
     }
@@ -146,7 +146,7 @@ export class D1DocStore {
     if (tables.length === 0) return {};
     const placeholders = tables.map(() => "?").join(", ");
     const { results } = await this.client
-      .prepare(`SELECT "table_name","version" FROM "_global_versions" WHERE "table_name" IN (${placeholders})`)
+      .prepare(`SELECT ${q("table_name")},${q("version")} FROM ${q("_global_versions")} WHERE ${q("table_name")} IN (${placeholders})`)
       .bind(...tables)
       .all<{ table_name: string; version: number }>();
     const out: Record<string, number> = {};
