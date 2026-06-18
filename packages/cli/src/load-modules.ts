@@ -66,19 +66,36 @@ function resolveCacheDir(startDir: string): string {
   return cacheDir;
 }
 
+/** Extra bare specifiers to keep EXTERNAL during bundle-on-load, beyond `@stackbase/*` — the
+ *  escape hatch for a dep that must NOT be bundled/inlined: e.g. a package relied on for singleton
+ *  identity across function modules (the same reason `@stackbase/*` itself is external — an
+ *  inlined copy would break `instanceof`/module-level state shared across files), or one with
+ *  native bindings esbuild can't bundle cleanly. `STACKBASE_BUNDLE_EXTERNAL` is a comma-separated
+ *  list of esbuild `external` patterns (same glob syntax as esbuild's own option, e.g.
+ *  `"sharp,@foo/*"`); unset means no extra externals — today's behavior is the default. */
+function extraBundleExternals(): string[] {
+  const raw = process.env.STACKBASE_BUNDLE_EXTERNAL;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 /** Bundle one module and import it. The relative graph (`./_generated/*`, siblings) AND third-party
  *  npm deps are INLINED — esbuild does the CJS→ESM interop at bundle time (like the deploy bundler),
  *  so a convention like `import { parseExpression } from "cron-parser"` (a CJS package) works under
- *  native Node ESM too. Only `@stackbase/*` stays EXTERNAL: those are the engine's own packages, and
+ *  native Node ESM too. `@stackbase/*` stays EXTERNAL: those are the engine's own packages, and
  *  they must resolve to the ONE instance the running engine loaded (inlining them would give each
- *  module its own copy and break singleton identity — `query`/`mutation`/the db registry). Node
- *  builtins are external automatically under `platform: "node"`. Resolution happens at bundle time —
- *  runtime-agnostic. */
+ *  module its own copy and break singleton identity — `query`/`mutation`/the db registry). A caller
+ *  can widen the external set via `STACKBASE_BUNDLE_EXTERNAL` (see `extraBundleExternals`) for a
+ *  dep with the same singleton concern. Node builtins are external automatically under
+ *  `platform: "node"`. Resolution happens at bundle time — runtime-agnostic. */
 async function bundleAndImport(file: string, key: string, cacheDir: string): Promise<Record<string, unknown>> {
   const result = await build({
     entryPoints: [file],
     bundle: true,
-    external: ["@stackbase/*"],
+    external: ["@stackbase/*", ...extraBundleExternals()],
     format: "esm",
     platform: "node",
     write: false,
