@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import type { LoadedProject } from "@stackbase/cli/project";
 import { resolveShard } from "../src/route";
 import { shardDoName, DEFAULT_SHARD_DO_NAME } from "../src/canonical";
-import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED, INVALID_REGION_HINT } from "../src/errors";
+import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED, INVALID_REGION_HINT, FANOUT_REQUIRES_FIXED_SHARDS } from "../src/errors";
 
 // A minimal LoadedProject whose only job is to expose function metadata to the derive path. `schema`
 // is unused by routing, so a cast is honest here.
@@ -110,16 +110,16 @@ describe("resolveShard — derive from POST /api/run args (source #2)", () => {
 });
 
 describe("resolveShard — cross-shard is refused, never fanned out (M1 non-goal)", () => {
-  it("rejects an X-Stackbase-Fanout header", async () => {
+  it("rejects an X-Stackbase-Fanout header (mode 'key' has no enumerable shard set)", async () => {
     const r = await resolveShard(get("/api/run", { "x-stackbase-fanout": "true" }));
     expect(r.kind).toBe("error");
-    if (r.kind === "error") expect(r.body.error.code).toBe(CROSS_SHARD_UNSUPPORTED);
+    if (r.kind === "error") expect(r.body.error.code).toBe(FANOUT_REQUIRES_FIXED_SHARDS);
   });
 
-  it("rejects a ?fanout=1 query param", async () => {
+  it("rejects a ?fanout=1 query param (mode 'key' has no enumerable shard set)", async () => {
     const r = await resolveShard(get("/api/run?fanout=1"));
     expect(r.kind).toBe("error");
-    if (r.kind === "error") expect(r.body.error.code).toBe(CROSS_SHARD_UNSUPPORTED);
+    if (r.kind === "error") expect(r.body.error.code).toBe(FANOUT_REQUIRES_FIXED_SHARDS);
   });
 
   it("rejects a multi-valued (comma) shard key", async () => {

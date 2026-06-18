@@ -45,6 +45,12 @@ export function createShardWorkerHandler(bindingName: string, opts: ShardRouting
       if (resolution.kind === "error") {
         return json(resolution.status, resolution.body);
       }
+      if (resolution.kind === "fanout") {
+        // TODO(M2d Task 3): fan `request` out to every `resolution.shardIds` DO, merge the results.
+        // Placeholder only — added so M2d Task 2 (this resolution kind) can ship without breaking the
+        // build; Task 3 replaces this with the real fan-out + merge.
+        return json(501, { error: "fanout worker branch not yet implemented" });
+      }
       const id = ns.idFromName(resolution.name);
       // Place a NEWLY-created shard-DO near its audience (source a/b/c). Only the FIRST `get()` for this
       // id honors the hint — a DO is single-homed and pinned thereafter — so the router derives the SAME

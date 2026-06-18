@@ -55,12 +55,12 @@ describe("createShardWorkerHandler — forwarding", () => {
     expect(routed[0]!.name).toBe(DEFAULT_SHARD_NAME);
   });
 
-  it("returns the typed cross-shard error WITHOUT forwarding", async () => {
+  it("returns the typed fan-out error WITHOUT forwarding (mode 'key' has no enumerable shard set)", async () => {
     const handler = createShardWorkerHandler("STACKBASE_DO");
     const { ns, routed } = fakeNamespace();
     const res = await handler.fetch(new Request("https://w.test/api/run?fanout=1"), { STACKBASE_DO: ns });
     expect(res.status).toBe(400);
-    expect((await res.json()).error.code).toBe("CROSS_SHARD_UNSUPPORTED");
+    expect((await res.json()).error.code).toBe("FANOUT_REQUIRES_FIXED_SHARDS");
     expect(routed).toHaveLength(0); // never reached a DO
   });
 
