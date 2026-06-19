@@ -34,6 +34,7 @@ import {
   FANOUT_REQUIRES_FIXED_SHARDS,
   FANOUT_WITH_SHARD_KEY,
   FANOUT_NOT_SUBSCRIBABLE,
+  FANOUT_NOT_A_QUERY,
   routingError,
   type ShardRoutingErrorBody,
 } from "./errors";
@@ -141,6 +142,20 @@ function deriveShardFromRun(loaded: LoadedProject, path: string, args: unknown):
   return { sharded: true, value, hasValue: value !== undefined && value !== null };
 }
 
+/** Classify a `path:name` function's declared `type` (`"query"` / `"mutation"` / `"action"` / …) from
+ *  the loaded module set — the SAME lookup `deriveShardFromRun` uses (split the path, index into
+ *  `loaded.modules`), reused here so fanOut's read-only guard agrees with the shard-key deriver about
+ *  what a "sharded mutation" even is. Returns `undefined` when the type cannot be determined (a
+ *  malformed path or an unknown function) — callers MUST treat `undefined` as "not a query" (fail
+ *  closed), never as "assume query". */
+function classifyFunctionType(loaded: LoadedProject, path: string): string | undefined {
+  const split = splitFunctionPath(path);
+  if (!split) return undefined;
+  const [modulePath, name] = split;
+  const fn = loaded.modules[modulePath]?.[name] as { type?: unknown } | undefined;
+  return typeof fn?.type === "string" ? fn.type : undefined;
+}
+
 /**
  * Resolve the owning shard-DO name for a request (or a typed rejection). Reads the request body only
  * when needed (a `POST /api/run` with no explicit key + a `loaded` project); callers MUST forward the
@@ -215,8 +230,15 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
         ),
       };
     }
-    // fanOut of a sharded MUTATION is nonsensical (fanOut is a read). Reject a POST /api/run whose
-    // function is a .shardBy mutation (reuse the derive helper's mutation detection).
+    // fanOut is READ-ONLY (C1): reject anything that isn't a resolved `query` — a plain mutation, a
+    // `.shardBy` sharded mutation, or an action would otherwise fall through here and get fanned out
+    // to every shard-DO, each of which RUNS AND COMMITS it via the unmodified DO — turning one
+    // logical write into N. Classify the target the same way `deriveShardFromRun` looks up the
+    // function; a target whose type can't be PROVEN to be "query" (no `loaded`, an unparseable body,
+    // a request shape other than `POST /api/run`, or an unknown path) fails CLOSED under the same
+    // code — never fanned out on the assumption that it might be a query.
+    let fanoutTargetType: string | undefined;
+    let fanoutPath: string | undefined;
     if (opts.loaded && request.method === "POST" && url.pathname === "/api/run") {
       let body: { path?: unknown; args?: unknown } | undefined;
       try {
@@ -224,16 +246,22 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
       } catch {
         body = undefined;
       }
-      if (body && typeof body.path === "string" && deriveShardFromRun(opts.loaded, body.path, body.args).sharded) {
-        return {
-          kind: "error",
-          status: 400,
-          body: routingError(
-            FANOUT_WITH_SHARD_KEY,
-            `"${body.path}" is a sharded mutation; fanOut is a non-reactive READ across shards, not a write. Issue the write per shard key.`,
-          ),
-        };
+      if (body && typeof body.path === "string") {
+        fanoutPath = body.path;
+        fanoutTargetType = classifyFunctionType(opts.loaded, body.path);
       }
+    }
+    if (fanoutTargetType !== "query") {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          FANOUT_NOT_A_QUERY,
+          fanoutPath !== undefined
+            ? `"${fanoutPath}" is not a query (fanOut is read-only; only queries may fan out across shards).`
+            : "fanOut requires a POST /api/run request naming a resolvable query function; the target's type could not be determined.",
+        ),
+      };
     }
     return { kind: "fanout", shardIds: shardIdList(numShards) };
   }

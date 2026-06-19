@@ -36,6 +36,11 @@ const fanoutReq = () =>
     body: JSON.stringify({ path: "reports:allUsers", args: {} }),
   });
 
+// C1: `resolveShard` now classifies the fanOut target and fails closed unless it can prove a
+// `query`, so every handler in this file must carry a `loaded` module set classifying
+// `reports:allUsers` as a query — otherwise the route guard rejects before ever reaching a shard.
+const loaded = { modules: { reports: { allUsers: { type: "query" } } } } as never;
+
 describe("createShardWorkerHandler — fanOut", () => {
   it("concatenates two shards' arrays, no partial", async () => {
     const rowA = { _id: "a", n: 1 };
@@ -44,7 +49,7 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(200, { value: [rowB] }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2 });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
     const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { value: unknown[]; partial?: unknown };
@@ -60,7 +65,7 @@ describe("createShardWorkerHandler — fanOut", () => {
         throw new Error("boom");
       },
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2 });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
     const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -80,7 +85,7 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(500, { error: "internal" }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2 });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
     const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -97,7 +102,7 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(200, { value: { not: "an array" } }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2 });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
     const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -109,6 +114,43 @@ describe("createShardWorkerHandler — fanOut", () => {
     expect(body.partial!.failedShards).toHaveLength(1);
     expect(body.partial!.failedShards[0]!.shardId).toBe("s1");
     expect(body.partial!.failedShards[0]!.error).toContain("not an array");
+  });
+
+  it("I1: ALL shards failing → status 502 (not 200), body still carries failedShards", async () => {
+    // e.g. every shard 401s on an invalid bearer token, or the whole cluster is down. A total
+    // failure must not look like a successful empty read.
+    const { ns } = scriptedNamespace({
+      default: () => jsonRes(401, { error: "unauthorized" }),
+      s1: () => jsonRes(401, { error: "unauthorized" }),
+    });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as {
+      value: unknown[];
+      partial?: { failedShards: Array<{ shardId: string; error: string }> };
+    };
+    expect(body.value).toEqual([]);
+    expect(body.partial).toBeDefined();
+    expect(body.partial!.failedShards).toHaveLength(2);
+    expect(body.partial!.failedShards.map((f) => f.shardId).sort()).toEqual(["default", "s1"]);
+  });
+
+  it("I1 regression: a PARTIAL failure (some shards ok) still returns 200, not 502", async () => {
+    const rowA = { _id: "a", n: 1 };
+    const { ns } = scriptedNamespace({
+      default: () => jsonRes(200, { value: [rowA] }),
+      s1: () => jsonRes(500, { error: "internal" }),
+    });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      value: unknown[];
+      partial?: { failedShards: Array<{ shardId: string; error: string }> };
+    };
+    expect(body.value).toEqual([rowA]);
+    expect(body.partial!.failedShards).toHaveLength(1);
   });
 
   it("does not exceed the concurrency cap in-flight (bounded pool over many shards)", async () => {
@@ -127,7 +169,7 @@ describe("createShardWorkerHandler — fanOut", () => {
       };
     }
     const { ns } = scriptedNamespace(script);
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: N });
+    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: N, loaded });
     const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { value: unknown[] };

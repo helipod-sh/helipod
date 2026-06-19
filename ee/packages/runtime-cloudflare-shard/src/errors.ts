@@ -39,13 +39,22 @@ export const FANOUT_WITH_SHARD_KEY = "FANOUT_WITH_SHARD_KEY";
  *  the one-shot `POST /api/run` path. */
 export const FANOUT_NOT_SUBSCRIBABLE = "FANOUT_NOT_SUBSCRIBABLE";
 
+/** A `fanOut` request's target is not a resolved `query` — a mutation (sharded or not), an action,
+ *  or a function whose type could not be classified at all (no `loaded` module set at resolve time,
+ *  an unparseable/non-`POST /api/run` request, or an unknown `path`). fanOut is READ-ONLY: fanning a
+ *  mutation or action out to every shard-DO would multiply ONE logical write into N commits/side
+ *  effects, one per shard. An unclassifiable target fails CLOSED under this same code — a request
+ *  that cannot be PROVEN to name a query is never fanned out on the assumption that it might be one. */
+export const FANOUT_NOT_A_QUERY = "FANOUT_NOT_A_QUERY";
+
 export type ShardRoutingErrorCode =
   | typeof SHARD_KEY_REQUIRED
   | typeof CROSS_SHARD_UNSUPPORTED
   | typeof INVALID_REGION_HINT
   | typeof FANOUT_REQUIRES_FIXED_SHARDS
   | typeof FANOUT_WITH_SHARD_KEY
-  | typeof FANOUT_NOT_SUBSCRIBABLE;
+  | typeof FANOUT_NOT_SUBSCRIBABLE
+  | typeof FANOUT_NOT_A_QUERY;
 
 export interface ShardRoutingErrorBody {
   error: { code: ShardRoutingErrorCode; message: string };

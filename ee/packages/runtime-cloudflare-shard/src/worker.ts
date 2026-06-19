@@ -91,6 +91,13 @@ const FANOUT_SHARD_TIMEOUT_MS = 10_000;
  * concatenation is naturally capped at `shardIds.length * n`. A caller that needs a hard GLOBAL cap
  * slices the returned `value` client-side; threading a `?fanoutLimit=` router param is left for a
  * later slice if this proves insufficient in practice.
+ *
+ * Status (I1): a PARTIAL failure (some shards ok, some failed) stays 200 with `value`/`partial` —
+ * failures-as-data is the intended contract for a degraded-but-usable result. But when EVERY shard
+ * failed (e.g. an invalid bearer token 401s every shard, or the whole cluster is down), `value` would
+ * otherwise be `[]` with status 200 — indistinguishable from a genuinely empty table to a caller that
+ * doesn't inspect `partial`. A TOTAL failure instead returns 502, with `partial.failedShards` still in
+ * the body so the caller can see which shards failed and why.
  */
 async function fanOut(ns: DurableObjectNamespaceLike, shardIds: string[], request: Request): Promise<Response> {
   const value: unknown[] = [];
@@ -126,7 +133,11 @@ async function fanOut(ns: DurableObjectNamespaceLike, shardIds: string[], reques
 
   await Promise.all(Array.from({ length: Math.min(FANOUT_CONCURRENCY, shardIds.length) }, () => worker()));
 
-  return json(200, failedShards.length ? { value, partial: { failedShards } } : { value });
+  // Total failure (every shard failed) must not look like a successful empty read — see the I1 note
+  // above. `shardIds.length > 0` guards a degenerate empty shard set from spuriously counting as
+  // "all failed" (0 === 0).
+  const allShardsFailed = shardIds.length > 0 && failedShards.length === shardIds.length;
+  return json(allShardsFailed ? 502 : 200, failedShards.length ? { value, partial: { failedShards } } : { value });
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
