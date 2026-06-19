@@ -32,6 +32,10 @@ interface FakeClientInstance {
   opts: { connectionString: string; application_name?: string };
   connected: boolean;
   ended: boolean;
+  /** Every plain-SQL-text `.query()` call this instance received, in order — lets a test assert
+   *  which `SET` statements (if any) were issued on a given connection, e.g. the session-timeout
+   *  `SET`s a pooled read connection should now install post-connect when configured. */
+  queries: string[];
   /** Number of listeners registered for `event` — lets a test assert an `'error'` handler was
    *  actually attached (not just that `.on()` was called-and-discarded by a no-op stub). */
   listenerCount(event: string): number;
@@ -70,6 +74,7 @@ vi.mock("pg", () => {
   class FakeClient implements FakeClientInstance {
     connected = false;
     ended = false;
+    queries: string[] = [];
     private readonly handlers = new Map<string, Array<(...args: unknown[]) => void>>();
     constructor(public opts: { connectionString: string; application_name?: string }) {
       state.clientInstances.push(this);
@@ -104,6 +109,7 @@ vi.mock("pg", () => {
       if (config !== null && typeof config === "object" && typeof (config as { submit?: unknown }).submit === "function") {
         return config;
       }
+      if (typeof config === "string") this.queries.push(config);
       return Promise.resolve({ rows: [] });
     }
     async end(): Promise<void> {
@@ -143,7 +149,7 @@ vi.mock("pg-cursor", () => {
 
 // Imported AFTER both vi.mock(...) calls — vitest hoists mocks above imports regardless of source
 // order, but keeping the imports below keeps the file readable in the order things actually happen.
-import { NodePgClient } from "../src/node-pg-client";
+import { NodePgClient, pgSessionTimeoutStatements } from "../src/node-pg-client";
 
 async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {
   const out: T[] = [];
@@ -411,6 +417,135 @@ describe("NodePgClient.queryStream — connection lifecycle + read pool (pg + pg
       while (state.manualReads.length > 0) state.manualReads.shift()!.resolve([]);
       await Promise.all(holders);
     }, 5000); // explicit timeout: pre-fix, this HANGS (the leaked slot deadlocks the waiter forever)
+
+    it("(FIFO fairness) hands a released connection DIRECTLY to the oldest queued waiter — later waiters and a fresh non-waiting caller never jump the line", async () => {
+      const client = new NodePgClient({ connectionString: "postgres://fake" });
+      state.useManualReads = true;
+
+      // Saturate the pool exactly as the other pool tests do.
+      const holderSettled = new Array(READ_POOL_MAX).fill(false);
+      const holders = Array.from({ length: READ_POOL_MAX }, (_, i) =>
+        drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
+          holderSettled[i] = true;
+          return rows;
+        }),
+      );
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX);
+
+      // Queue W1, then W2 — both block on `readPoolWaiters` in that order (pool full, nothing idle).
+      // The synchronous prefix of `acquireReadConn` (the `readPoolWaiters.push(...)` inside the
+      // blocking-wait `new Promise` executor) runs the moment each call is made — before any
+      // `await` — so W1's push is guaranteed to land before W2's simply by calling them in order.
+      let w1Settled = false;
+      let w2Settled = false;
+      const w1 = drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
+        w1Settled = true;
+        return rows;
+      });
+      const w2 = drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
+        w2Settled = true;
+        return rows;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(w1Settled).toBe(false);
+      expect(w2Settled).toBe(false);
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // neither built a connection — both queued
+
+      // Release exactly ONE held connection, and — in the SAME synchronous turn, before the release's
+      // own microtask chain (cursor.read() resolve -> loop break -> cursor.close() -> releaseReadConn)
+      // has run at all — start a brand-new, never-queued caller. This is the exact "steal in the gap"
+      // shape the fix closes: under the old push-to-idle-then-wake implementation, a healthy release
+      // pushed the connection to `readPoolIdle` and only THEN woke a waiter, leaving a window where any
+      // synchronous idle-pop (including a fresh caller's own) could grab it first and re-park the
+      // rightful (oldest) waiter behind it. Direct hand-off means there is no idle push to race against.
+      state.manualReads.shift()!.resolve([]);
+      let freshSettled = false;
+      const fresh = drain(client.queryStream!("SELECT a FROM t")).then((rows) => {
+        freshSettled = true;
+        return rows;
+      });
+
+      await vi.waitFor(() => expect(holderSettled[0]).toBe(true));
+
+      // W1 — the oldest waiter — must be the one who got the freed connection: it re-parks on its OWN
+      // manual read using the handed-off connection, so `manualReads` grows back to MAX with NO new
+      // connection built (a steal-then-rebuild would show up as clientInstances growing past 1+MAX).
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX);
+      expect(w1Settled).toBe(false); // running now, hasn't finished its own read yet
+      expect(w2Settled).toBe(false); // NOT woken — only one connection was freed, and W1 got it
+      expect(freshSettled).toBe(false); // did NOT steal it either — queued behind W2, not ahead of it
+
+      // Release a SECOND connection: FIFO says W2 (queued strictly before the fresh caller) must be
+      // the one who gets it next — never the fresh caller.
+      state.manualReads.shift()!.resolve([]);
+      await vi.waitFor(() => expect(holderSettled[1]).toBe(true));
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // still reused, not rebuilt
+      expect(w2Settled).toBe(false); // running now, hasn't finished its own read yet
+      expect(freshSettled).toBe(false); // STILL hasn't gotten a connection — proves it never jumped W2
+
+      // Release a THIRD connection: only the fresh caller is left waiting now, so it finally gets one.
+      state.manualReads.shift()!.resolve([]);
+      await vi.waitFor(() => expect(holderSettled[2]).toBe(true));
+      await vi.waitFor(() => expect(state.manualReads).toHaveLength(READ_POOL_MAX));
+      expect(state.clientInstances).toHaveLength(1 + READ_POOL_MAX); // reused for the fresh caller too
+
+      // Clean up: no waiters remain queued at this point, so a plain drain finishes everything.
+      while (state.manualReads.length > 0) state.manualReads.shift()!.resolve([]);
+      await Promise.all([...holders, w1, w2, fresh]);
+      expect(w1Settled).toBe(true);
+      expect(w2Settled).toBe(true);
+      expect(freshSettled).toBe(true);
+    }, 5000); // explicit timeout: a regression here is a HANG or a silent starvation reordering
+  });
+});
+
+describe("NodePgClient read-pool connections — statement_timeout / idle_in_transaction_session_timeout (pool hardening)", () => {
+  afterEach(() => {
+    state.clientInstances.length = 0;
+    state.cursorInstances.length = 0;
+    state.readQueue.length = 0;
+    vi.clearAllMocks();
+  });
+
+  const timeouts = { idleInTransactionMs: 5000, statementMs: 3000 };
+
+  it("issues the configured SET statements on a freshly-built pooled read connection, before it is ever handed to a caller", async () => {
+    const client = new NodePgClient({ connectionString: "postgres://fake", sessionTimeouts: timeouts });
+    state.readQueue.push([{ a: 1 }], []);
+    const rows = await drain(client.queryStream!("SELECT a FROM t"));
+
+    expect(rows).toEqual([{ a: 1 }]); // the stream still worked
+    const streamConn = state.clientInstances[1]!; // pinned + one pooled read connection
+    // Same builder the pinned connection's `ensure()` uses — same GUCs, same order.
+    expect(streamConn.queries).toEqual(pgSessionTimeoutStatements(timeouts));
+  });
+
+  it("does NOT issue any SET when sessionTimeouts is unset — pooled connections stay unbounded by default, exactly as before", async () => {
+    const client = new NodePgClient({ connectionString: "postgres://fake" });
+    state.readQueue.push([]);
+    await drain(client.queryStream!("SELECT a FROM t"));
+
+    const streamConn = state.clientInstances[1]!;
+    expect(streamConn.queries).toEqual([]);
+  });
+
+  it("does not re-issue the SET statements when a pooled connection is REUSED across calls (installed once, at build time)", async () => {
+    const client = new NodePgClient({ connectionString: "postgres://fake", sessionTimeouts: timeouts });
+    state.readQueue.push([{ a: 1 }], []);
+    await drain(client.queryStream!("SELECT a FROM t"));
+    const streamConn = state.clientInstances[1]!;
+    expect(streamConn.queries).toEqual(pgSessionTimeoutStatements(timeouts));
+
+    state.readQueue.push([{ a: 2 }], []);
+    await drain(client.queryStream!("SELECT a FROM t"));
+
+    expect(state.clientInstances).toHaveLength(2); // same connection reused, not rebuilt
+    expect(streamConn.queries).toEqual(pgSessionTimeoutStatements(timeouts)); // not issued a second time
   });
 });
 
