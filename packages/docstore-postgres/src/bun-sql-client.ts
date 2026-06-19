@@ -1,12 +1,11 @@
 /**
  * The "Bun is primary" native `PgClient` over `Bun.SQL` — Bun's built-in Postgres driver
  * (measured ~10-15% faster p50 per query than `pg` on a local server; see the package's smoke
- * benchmark). Implements the CORE (single-node) `PgClient` surface only: `query`, `transaction`,
- * `acquireWriterLock`/`tryAcquireWriterLock`, `close`, and a best-effort `onConnectionLost`. The
- * fleet/sharding surface (`commitQuerierFor`/`tryAcquireShardLock`/`releaseShardLock`/
- * `onShardConnectionLost`) is intentionally NOT implemented here — v1 is single-node; a fleet-mode
- * commit pool for `Bun.SQL` (mirroring `NodePgClient`'s per-shard dedicated connections) is a
- * deferred follow-up, same as `queryStream` below.
+ * benchmark). Implements the full `PgClient` surface: `query`, `transaction`,
+ * `acquireWriterLock`/`tryAcquireWriterLock`, `close`, a best-effort `onConnectionLost`, streaming
+ * `queryStream`, and the fleet/sharding surface (`commitQuerierFor`/`tryAcquireShardLock`/
+ * `releaseShardLock`/`onShardConnectionLost`) mirroring `NodePgClient`'s per-shard dedicated
+ * connections.
  *
  * ## The type codec (verified against a real `postgres:16`, not assumed — see the package's
  * `test/bun-sql-smoke.ts`)
@@ -36,9 +35,30 @@
  * MUST `release()` a still-reserved connection first: `sql.end()` hangs forever waiting for every
  * reserved connection to be returned (verified empirically — see `test/bun-sql-smoke.ts`'s close
  * path), which `NodePgClient` has no equivalent hazard for (`pg.Client` isn't pooled).
+ *
+ * ## queryStream (verified empirically against a real `postgres:16` — `Bun.SQL` exposes NO
+ * `.cursor()`/async-iterator API on its `Query` object; confirmed by inspecting the returned
+ * object's prototype at runtime, see the task report). Falls back to plain SQL-level cursors
+ * instead: `DECLARE ... NO SCROLL CURSOR FOR <query>` / `FETCH <n> FROM <cursor>` / `CLOSE
+ * <cursor>` issued as ordinary `unsafe()` statements — this works because DECLARE/FETCH are just
+ * SQL, not a driver feature, and non-holdable (NO SCROLL, no WITH HOLD) cursors are cheap: an
+ * early `break` leaves the remaining range genuinely uncomputed by the server, same as
+ * `NodePgClient`'s `pg-cursor` portal. Each `queryStream` call reserves its OWN dedicated
+ * connection (`sql.reserve()`) rather than sharing the pooled session — avoids needing an async
+ * mutex to serialize concurrent streams, at the cost of a fresh handshake per call (no bounded
+ * reuse pool like `NodePgClient`'s `READ_POOL_MAX`; a deferred follow-up if streaming becomes hot
+ * on the Bun path). Released in `finally` on every exit (full drain, early break, or error).
+ *
+ * ## `.code` normalization (verified empirically — see the task report / `test/bun-sql-smoke.ts`)
+ * `Bun.SQL`'s `PostgresError.code` is a generic Bun/Node-style code (`ERR_POSTGRES_SERVER_ERROR`),
+ * NOT the pg-style SQLSTATE `NodePgClient`'s `pg` driver puts on `.code` (`23505`/`42P07`/etc.).
+ * The actual SQLSTATE lives on `.errno` instead. `PostgresDocStore.setupSchema`'s duplicate-object
+ * race swallow reads `(e as {code?}).code` expecting a SQLSTATE string — so every genuine
+ * `PostgresError` this client throws (`query`/`transaction`/`queryStream`/the fleet paths) is
+ * re-tagged here, overwriting `.code` with `.errno`'s SQLSTATE, before it ever reaches a caller.
  */
-import type { PgClient, PgQuerier, PgRow, PgValue } from "./pg-client";
-import { ADVISORY_LOCK_KEY } from "./pg-client";
+import type { PgClient, PgQuerier, PgRow, PgTransactionalQuerier, PgValue } from "./pg-client";
+import { ADVISORY_LOCK_KEY, SHARD_ADVISORY_LOCK_CLASS, STREAM_BATCH_INITIAL, STREAM_BATCH_MAX } from "./pg-client";
 
 // ── Minimal local ambient typing for the slice of Bun.SQL this file uses ──────────────────────────
 // `bun-types` isn't installed in this workspace (this package's tsconfig only pulls in "node"
@@ -67,6 +87,13 @@ interface BunSQLCtor {
    *  that distinction (verified empirically against a `pg_terminate_backend`-killed connection). */
   PostgresError: abstract new (...args: never[]) => Error;
 }
+/** The shape of a genuine `Bun.SQL.PostgresError` this file cares about: `.code` is a generic
+ *  Bun/Node-style code (`ERR_POSTGRES_SERVER_ERROR`), `.errno` is the real pg SQLSTATE string
+ *  (`"23505"`/`"42P07"`/…) — see the class doc comment's `.code` normalization section. */
+interface BunPostgresErrorShape {
+  code?: string;
+  errno?: string;
+}
 function getBunSql(): BunSQLCtor {
   const Bun = (globalThis as unknown as { Bun?: { SQL: BunSQLCtor } }).Bun;
   if (!Bun) {
@@ -90,19 +117,62 @@ function normalizeRows(rows: readonly BunSQLRow[]): PgRow[] {
   });
 }
 
+/** One shard's dedicated commit connection (mirrors `NodePgClient`'s `ShardCommitConn`).
+ *  `connPromise` is memoized per shard; `lostFired` guards a single per-shard loss fire. */
+interface ShardCommitConn {
+  readonly shardId: string;
+  connPromise?: Promise<BunSQLReservedConnection>;
+  lostFired: boolean;
+}
+
 export class BunSqlClient implements PgClient {
   private readonly sql: BunSQLHandle;
   private readonly PostgresErrorCtor: BunSQLCtor["PostgresError"];
   private pinnedPromise?: Promise<BunSQLReservedConnection>;
   private readonly connectionLostCbs: Array<() => void> = [];
   private connectionLostFired = false;
+  private nextStreamCursorId = 0;
 
-  constructor(opts: { connectionString: string }) {
+  /** Ordered commit-pool shard list (index = slot), or undefined for a non-pool (single-shard)
+   *  client — mirrors `NodePgClient.commitPoolShards`. */
+  private readonly commitPoolShards?: readonly string[];
+  /** Lazily-opened per-shard commit connections (pool mode only). */
+  private readonly commitConns = new Map<string, ShardCommitConn>();
+  private readonly shardConnectionLostCbs: Array<(shardId: string) => void> = [];
+
+  // The four pool capabilities are PRESENT (bound in the constructor) only when a `commitPool` is
+  // configured, and absent otherwise — same presence-equals-capability contract `NodePgClient` uses,
+  // so `PostgresDocStore.commitWrite`'s `if (db.commitQuerierFor)` check correctly keeps a poolless
+  // single-node client on the pinned path.
+  readonly commitQuerierFor?: (shardId: string) => Promise<PgTransactionalQuerier>;
+  readonly onShardConnectionLost?: (cb: (shardId: string) => void) => void;
+  readonly tryAcquireShardLock?: (slot: number) => Promise<boolean>;
+  readonly releaseShardLock?: (slot: number) => Promise<void>;
+
+  readonly queryStream: (sql: string, params?: readonly PgValue[]) => AsyncIterable<PgRow>;
+
+  constructor(opts: {
+    connectionString: string;
+    /** Per-shard commit-connection pool (mirrors `NodePgClient`'s `commitPool` option). `shards` is
+     *  the ordered slot list — `shards[slot]` is the shard id `tryAcquireShardLock(slot)` locks.
+     *  Unset → single pinned connection, byte-identical to before this option existed. */
+    commitPool?: { shards: readonly string[] };
+  }) {
     const SQL = getBunSql();
     // `bigint: true` is the whole int8 codec fix (see the class doc comment) — every other type
     // (bytea/boolean/text/null) already round-trips correctly under Bun.SQL's defaults.
     this.sql = new SQL({ url: opts.connectionString, bigint: true });
     this.PostgresErrorCtor = SQL.PostgresError;
+    this.commitPoolShards = opts.commitPool ? [...opts.commitPool.shards] : undefined;
+    if (this.commitPoolShards) {
+      this.commitQuerierFor = (shardId) => this.commitQuerierForImpl(shardId);
+      this.onShardConnectionLost = (cb) => {
+        this.shardConnectionLostCbs.push(cb);
+      };
+      this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
+      this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
+    }
+    this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
   }
 
   /** Lazily reserve — and memoize — the ONE dedicated connection the writer lock and every
@@ -111,9 +181,20 @@ export class BunSqlClient implements PgClient {
     return (this.pinnedPromise ??= this.sql.reserve());
   }
 
+  /** Re-tag a genuine `Bun.SQL.PostgresError`'s `.code` with its `.errno` (the real pg SQLSTATE) —
+   *  see the class doc comment's `.code` normalization section. A non-`PostgresError` (connection
+   *  loss, a plain `Error`) passes through untouched — it never had a SQLSTATE to begin with. */
+  private normalizeError(e: unknown): unknown {
+    if (e instanceof this.PostgresErrorCtor) {
+      const errno = (e as unknown as BunPostgresErrorShape).errno;
+      if (typeof errno === "string") (e as unknown as BunPostgresErrorShape).code = errno;
+    }
+    return e;
+  }
+
   /** Run one statement on the pinned connection, routing a non-`PostgresError` failure (the
    *  connection-loss shape, not an ordinary SQL error) to the best-effort `onConnectionLost`
-   *  callbacks before rethrowing. */
+   *  callbacks before rethrowing (with `.code` normalized to the SQLSTATE). */
   private async pinnedUnsafe(
     pinned: BunSQLReservedConnection,
     text: string,
@@ -123,7 +204,7 @@ export class BunSqlClient implements PgClient {
       return await pinned.unsafe(text, params);
     } catch (e) {
       if (!(e instanceof this.PostgresErrorCtor)) this.fireConnectionLost();
-      throw e;
+      throw this.normalizeError(e);
     }
   }
 
@@ -147,8 +228,12 @@ export class BunSqlClient implements PgClient {
    *  connects/borrows lazily per call, no explicit `ensure()` needed (unlike `NodePgClient`'s
    *  single unpooled connection). */
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
-    const rows = await this.sql.unsafe(text, params);
-    return normalizeRows(rows);
+    try {
+      const rows = await this.sql.unsafe(text, params);
+      return normalizeRows(rows);
+    } catch (e) {
+      throw this.normalizeError(e);
+    }
   }
 
   async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {
@@ -185,10 +270,145 @@ export class BunSqlClient implements PgClient {
     return rows[0]?.ok === true;
   }
 
-  // No `queryStream` in v1: Bun.SQL cursor support is unverified, so this simply stays undefined —
-  // `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` gate falls through to the proven
-  // buffered `query` path (correct, just without the streaming benefit `NodePgClient` gets from
-  // `pg-cursor`). Follow-up, tracked alongside the fleet/sharding methods above.
+  /**
+   * Stream rows via a SQL-level, non-holdable cursor (`DECLARE ... NO SCROLL CURSOR FOR <sql>` /
+   * `FETCH <n> FROM <cursor>` / `CLOSE <cursor>`, issued as ordinary `unsafe()` statements on a
+   * dedicated `sql.reserve()` connection — see the class doc comment's queryStream section for why
+   * `Bun.SQL` needs this instead of a native cursor API). Batches adaptively: starts at
+   * `STREAM_BATCH_INITIAL` rows per `FETCH` and doubles after each fetch up to `STREAM_BATCH_MAX`,
+   * matching `NodePgClient`'s `pg-cursor` batching exactly.
+   *
+   * The reserved connection is released in `finally` on every exit path (full drain, an early
+   * consumer `break` — an async generator's `finally` runs on the implicit `.return()` that
+   * produces — or a thrown error). A non-holdable cursor is implicitly dropped when its transaction
+   * ends, but `CLOSE` is issued explicitly first for clarity/symmetry with `NodePgClient`. On error,
+   * `ROLLBACK` (not `COMMIT`) — this path never writes, so either is transactionally safe, but
+   * `ROLLBACK` is the honest outcome for a broken stream.
+   */
+  private async *queryStreamImpl(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+    const reserved = await this.sql.reserve();
+    const cursorName = `stackbase_stream_${this.nextStreamCursorId++}`;
+    let batch = STREAM_BATCH_INITIAL;
+    let broken = false;
+    try {
+      await reserved.unsafe("BEGIN");
+      await reserved.unsafe(`DECLARE ${cursorName} NO SCROLL CURSOR FOR ${sql}`, params);
+      for (;;) {
+        const rows = await reserved.unsafe(`FETCH ${batch} FROM ${cursorName}`);
+        if (rows.length === 0) break;
+        for (const r of normalizeRows(rows)) yield r;
+        batch = Math.min(batch * 2, STREAM_BATCH_MAX);
+      }
+    } catch (e) {
+      broken = true;
+      throw this.normalizeError(e);
+    } finally {
+      await reserved.unsafe(`CLOSE ${cursorName}`).catch(() => {});
+      await reserved.unsafe(broken ? "ROLLBACK" : "COMMIT").catch(() => {});
+      reserved.release();
+    }
+  }
+
+  // ---- Per-shard commit pool (mirrors NodePgClient's Fenced Frontier B2a support) --------------
+
+  /** Resolve the (lazily-created, lazily-reserved) commit connection for `shardId`. A rejected
+   *  reservation evicts the whole cache entry (mirrors `NodePgClient.ensureShardConn`) so the NEXT
+   *  call for this shard builds fresh instead of replaying the same rejection forever. */
+  private ensureShardConn(shardId: string): ShardCommitConn {
+    if (!this.commitPoolShards) throw new Error("BunSqlClient: commit pool not configured (no commitPool option)");
+    if (!this.commitPoolShards.includes(shardId)) {
+      throw new Error(`BunSqlClient: '${shardId}' is not a configured commit-pool shard`);
+    }
+    let conn = this.commitConns.get(shardId);
+    if (!conn) {
+      conn = { shardId, lostFired: false };
+      this.commitConns.set(shardId, conn);
+    }
+    const c = conn;
+    c.connPromise ??= this.sql.reserve().catch((e: unknown) => {
+      if (this.commitConns.get(shardId) === c) this.commitConns.delete(shardId);
+      throw e;
+    });
+    return c;
+  }
+
+  private shardSlotToId(slot: number): string {
+    if (!this.commitPoolShards) throw new Error("BunSqlClient: commit pool not configured (no commitPool option)");
+    const shardId = this.commitPoolShards[slot];
+    if (shardId === undefined) {
+      throw new Error(`BunSqlClient: shard slot ${slot} out of range (pool has ${this.commitPoolShards.length} shards)`);
+    }
+    return shardId;
+  }
+
+  /** Run one statement on a shard's dedicated commit connection, routing a non-`PostgresError`
+   *  failure to that shard's connection-lost callbacks before rethrowing (`.code` normalized). */
+  private async shardUnsafe(conn: ShardCommitConn, text: string, params?: readonly PgValue[]): Promise<BunSQLRow[]> {
+    const reserved = await conn.connPromise!;
+    try {
+      return await reserved.unsafe(text, params);
+    } catch (e) {
+      if (!(e instanceof this.PostgresErrorCtor)) this.fireShardConnectionLost(conn);
+      throw this.normalizeError(e);
+    }
+  }
+
+  private async commitQuerierForImpl(shardId: string): Promise<PgTransactionalQuerier> {
+    const conn = this.ensureShardConn(shardId);
+    await conn.connPromise; // surface a connect failure here, before handing back a querier
+    // A querier whose query() and transaction() BOTH run on THIS shard's dedicated connection, so the
+    // whole commitWrite (nextval → inserts → guard → COMMIT) is one atomic session, concurrent with
+    // other shards' commits on their own connections.
+    const querier: PgQuerier = {
+      query: async (text, params) => normalizeRows(await this.shardUnsafe(conn, text, params)),
+    };
+    return {
+      ...querier,
+      transaction: async <T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> => {
+        await this.shardUnsafe(conn, "BEGIN");
+        try {
+          const result = await fn(querier);
+          await this.shardUnsafe(conn, "COMMIT");
+          return result;
+        } catch (e) {
+          await this.shardUnsafe(conn, "ROLLBACK");
+          throw e;
+        }
+      },
+    };
+  }
+
+  private fireShardConnectionLost(conn: ShardCommitConn): void {
+    if (conn.lostFired) return;
+    conn.lostFired = true;
+    for (const cb of this.shardConnectionLostCbs) {
+      try {
+        cb(conn.shardId);
+      } catch {
+        // A misbehaving callback must not mask the loss for the others (mirrors the pinned path).
+      }
+    }
+  }
+
+  private async tryAcquireShardLockImpl(slot: number): Promise<boolean> {
+    const shardId = this.shardSlotToId(slot);
+    const conn = this.ensureShardConn(shardId);
+    // Two-int form ON the shard's commit connection → the lock is bound to that session; the
+    // connection's death releases exactly this slot, nothing else.
+    const rows = normalizeRows(
+      await this.shardUnsafe(conn, `SELECT pg_try_advisory_lock($1, $2) AS ok`, [SHARD_ADVISORY_LOCK_CLASS, slot]),
+    );
+    return rows[0]?.ok === true;
+  }
+
+  /** Release slot `slot`'s per-shard advisory lock — the exact mirror of `tryAcquireShardLockImpl`.
+   *  A slot with no lock held resolves as a no-op (the caller doesn't need the boolean
+   *  `pg_advisory_unlock` returns). */
+  private async releaseShardLockImpl(slot: number): Promise<void> {
+    const shardId = this.shardSlotToId(slot);
+    const conn = this.ensureShardConn(shardId);
+    await this.shardUnsafe(conn, `SELECT pg_advisory_unlock($1, $2) AS ok`, [SHARD_ADVISORY_LOCK_CLASS, slot]);
+  }
 
   async close(): Promise<void> {
     if (this.pinnedPromise) {
@@ -198,6 +418,16 @@ export class BunSqlClient implements PgClient {
       pinned?.release();
       this.pinnedPromise = undefined;
     }
+    // Tear down every commit-pool connection the same way — set the per-shard fired-guard FIRST so
+    // a graceful close never trips a spurious per-shard connection-lost fire (mirrors the pinned path).
+    for (const conn of this.commitConns.values()) {
+      conn.lostFired = true;
+      if (conn.connPromise) {
+        const reserved = await conn.connPromise.catch(() => undefined);
+        reserved?.release();
+      }
+    }
+    this.commitConns.clear();
     await this.sql.end();
   }
 }
