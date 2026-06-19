@@ -8,8 +8,11 @@
  *      query on key "B"'s DO (physical isolation, not a leak);
  *   2. each shard's reactive subscribe → commit → push works, and the reactivity is shard-ISOLATED
  *      (a commit on B's DO does NOT wake a subscriber on A's DO);
- *   3. a cross-shard fan-out is REJECTED with the typed `CROSS_SHARD_UNSUPPORTED` (never served
- *      partial data), and a `.shardBy` mutation missing its key is `SHARD_KEY_REQUIRED`;
+ *   3. a cross-shard fan-out against this mode-"key" fixture is REJECTED with the typed
+ *      `FANOUT_REQUIRES_FIXED_SHARDS` (mode "key" addresses a new DO per key value with no enumerable
+ *      shard set, so "all shards" is undefined here — never served partial data), and a `.shardBy`
+ *      mutation missing its key is `SHARD_KEY_REQUIRED`. (fanOut SUCCEEDING against a fixed-shard-count
+ *      mode-"hash" deployment is proven separately, in `fanout.worker.test.ts`.)
  *   4. two writes to two different shard keys commit independently (separate single-threaded DOs =
  *      the actual N× write scale-out claim).
  *
@@ -59,11 +62,11 @@ describe("M1 multi-shard on REAL workerd", () => {
     expect(await bodies(await SELF.fetch(list("roomA", "roomB")))).toEqual([]);
   });
 
-  it("rejects a cross-shard fan-out with the typed error, serving no data", async () => {
+  it("rejects a cross-shard fan-out with the typed error, serving no data (mode \"key\" has no fixed shard set)", async () => {
     const res = await SELF.fetch(post("/api/run?fanout=1", { path: "messages:list", args: { roomId: "roomA" } }));
     expect(res.status).toBe(400);
     const j = (await res.json()) as { error?: { code?: string }; value?: unknown };
-    expect(j.error?.code).toBe("CROSS_SHARD_UNSUPPORTED");
+    expect(j.error?.code).toBe("FANOUT_REQUIRES_FIXED_SHARDS");
     expect(j.value).toBeUndefined();
   });
 

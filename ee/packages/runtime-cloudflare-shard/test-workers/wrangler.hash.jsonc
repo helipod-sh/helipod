@@ -1,0 +1,13 @@
+{
+  // The wrangler config for the mode-"hash" fanOut fixture (M2d) — a SIBLING of wrangler.jsonc (mode
+  // "key"), loaded by its own vitest-pool-workers project (vitest.workers.hash.config.ts) so the two
+  // fixtures run in separate workerd instances rather than colliding inside one `SELF`/one Worker.
+  "name": "stackbase-do-shard-workers-tests-hash",
+  "main": "test-worker-hash.ts",
+  "compatibility_date": "2024-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDOHash" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDOHash"] }]
+}
