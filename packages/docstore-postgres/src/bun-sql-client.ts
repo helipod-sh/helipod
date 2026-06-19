@@ -47,7 +47,15 @@
  * connection (`sql.reserve()`) rather than sharing the pooled session — avoids needing an async
  * mutex to serialize concurrent streams, at the cost of a fresh handshake per call (no bounded
  * reuse pool like `NodePgClient`'s `READ_POOL_MAX`; a deferred follow-up if streaming becomes hot
- * on the Bun path). Released in `finally` on every exit (full drain, early break, or error).
+ * on the Bun path). Released in `finally` on every exit (full drain, early break, or error) — AND
+ * tracked in `streamReservations` for the duration it's outstanding, so `close()` can force-release
+ * a reservation whose consumer stopped iterating (no `break`, no drain) without ever reaching that
+ * `finally`: an abandoned generator sits forever suspended at its `yield`, and `sql.end()` hangs
+ * forever waiting for a reserved connection nobody will ever return otherwise (verified empirically
+ * — see `test/bun-sql-smoke.ts`'s close-while-streaming case). A `STACKBASE_PG_STREAM=0`/`"false"`
+ * env var (mirroring `NodePgClient`'s identical kill switch) disables `queryStream` entirely — the
+ * field is left `undefined` in the constructor so `PostgresDocStore.index_scan`'s truthiness check
+ * falls back to buffered `query`.
  *
  * ## `.code` normalization (verified empirically — see the task report / `test/bun-sql-smoke.ts`)
  * `Bun.SQL`'s `PostgresError.code` is a generic Bun/Node-style code (`ERR_POSTGRES_SERVER_ERROR`),
@@ -94,6 +102,18 @@ interface BunPostgresErrorShape {
   code?: string;
   errno?: string;
 }
+/**
+ * Kill switch for the DECLARE/FETCH cursor streaming path, mirroring `NodePgClient`'s
+ * `resolveStreamingEnabled` exactly (same env var, same semantics): `STACKBASE_PG_STREAM=0` (or
+ * `"false"`) makes this client NOT advertise `queryStream`, so `PostgresDocStore.index_scan`'s
+ * `if (this.db.queryStream)` gate falls through to the buffered `query` path. Default (unset, or
+ * any other value) is streaming ON.
+ */
+function resolveStreamingEnabled(): boolean {
+  const v = process.env.STACKBASE_PG_STREAM;
+  return v !== "0" && v !== "false";
+}
+
 function getBunSql(): BunSQLCtor {
   const Bun = (globalThis as unknown as { Bun?: { SQL: BunSQLCtor } }).Bun;
   if (!Bun) {
@@ -132,6 +152,12 @@ export class BunSqlClient implements PgClient {
   private readonly connectionLostCbs: Array<() => void> = [];
   private connectionLostFired = false;
   private nextStreamCursorId = 0;
+  /** Every `queryStream` call's reserved connection, tracked for the duration it's outstanding
+   *  (added on `sql.reserve()`, removed in the generator's `finally` right after `release()`) — so
+   *  `close()` can force-release any still-in-flight stream reservation before `sql.end()`, which
+   *  otherwise hangs forever waiting for a reserved connection that a paused/never-drained consumer
+   *  will never return on its own (see the class doc comment's RISK 2 hang, and `close()` below). */
+  private readonly streamReservations = new Set<BunSQLReservedConnection>();
 
   /** Ordered commit-pool shard list (index = slot), or undefined for a non-pool (single-shard)
    *  client — mirrors `NodePgClient.commitPoolShards`. */
@@ -149,7 +175,11 @@ export class BunSqlClient implements PgClient {
   readonly tryAcquireShardLock?: (slot: number) => Promise<boolean>;
   readonly releaseShardLock?: (slot: number) => Promise<void>;
 
-  readonly queryStream: (sql: string, params?: readonly PgValue[]) => AsyncIterable<PgRow>;
+  /** Present (bound in the constructor) only when the {@link resolveStreamingEnabled} kill switch is
+   *  ON (the default) — absent (`undefined`) when `STACKBASE_PG_STREAM=0`/`"false"` disables it, so
+   *  `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` truthiness check correctly falls
+   *  through to buffered `query`, mirroring `NodePgClient`'s same field/gate exactly. */
+  readonly queryStream?: (sql: string, params?: readonly PgValue[]) => AsyncIterable<PgRow>;
 
   constructor(opts: {
     connectionString: string;
@@ -172,7 +202,11 @@ export class BunSqlClient implements PgClient {
       this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
       this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
     }
-    this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
+    // Kill switch (STACKBASE_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
+    // falsy — `index_scan`'s `if (this.db.queryStream)` gate then falls through to buffered `query`.
+    if (resolveStreamingEnabled()) {
+      this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
+    }
   }
 
   /** Lazily reserve — and memoize — the ONE dedicated connection the writer lock and every
@@ -287,6 +321,7 @@ export class BunSqlClient implements PgClient {
    */
   private async *queryStreamImpl(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
     const reserved = await this.sql.reserve();
+    this.streamReservations.add(reserved);
     const cursorName = `stackbase_stream_${this.nextStreamCursorId++}`;
     let batch = STREAM_BATCH_INITIAL;
     let broken = false;
@@ -306,6 +341,7 @@ export class BunSqlClient implements PgClient {
       await reserved.unsafe(`CLOSE ${cursorName}`).catch(() => {});
       await reserved.unsafe(broken ? "ROLLBACK" : "COMMIT").catch(() => {});
       reserved.release();
+      this.streamReservations.delete(reserved);
     }
   }
 
@@ -428,6 +464,20 @@ export class BunSqlClient implements PgClient {
       }
     }
     this.commitConns.clear();
+    // Force-release any still-outstanding queryStream reservation — e.g. a consumer mid-iteration
+    // that stopped calling `.next()` without draining or `break`ing (so the generator's own
+    // `finally` never runs to release it itself). `sql.end()` hangs forever waiting for a reserved
+    // connection nobody will ever return otherwise (RISK 2, see the class doc comment). Best-effort:
+    // the generator may still be suspended holding an open cursor/transaction on this connection,
+    // but releasing it back to the pool unblocks `sql.end()` regardless of that generator's fate.
+    for (const reserved of this.streamReservations) {
+      try {
+        reserved.release();
+      } catch {
+        // A release failure here must not block sql.end() from completing.
+      }
+    }
+    this.streamReservations.clear();
     await this.sql.end();
   }
 }

@@ -263,6 +263,77 @@ async function testQueryStream(): Promise<void> {
   await store.close();
 }
 
+// ── close-while-streaming: close() must NOT hang when a queryStream is mid-iteration and never
+//    drained/broken (the shutdown-hang this fix closes — sql.end() otherwise waits forever for the
+//    stream's reserved connection, which an abandoned generator will never itself release) ────────
+async function testCloseWhileStreaming(): Promise<void> {
+  const STREAM_TABLE = 20003;
+  const client = new BunSqlClient({ connectionString: URL });
+  const store = new PostgresDocStore(client);
+  await store.setupSchema();
+
+  const N = 10;
+  for (let i = 0; i < N; i++) {
+    const id = newDocumentId(STREAM_TABLE);
+    await store.write([rev(id, BigInt(2000 + i), null, `cw${i}`)], [], "Error");
+  }
+
+  const sql = `SELECT internal_id, ts, value FROM documents WHERE table_id = $1 ORDER BY ts ASC`;
+  const params = [encodeStorageTableId(STREAM_TABLE)];
+
+  // Consume exactly one row via `.next()` directly (bypassing `for await`, which would trigger an
+  // implicit `.return()`/`finally` on `break` — that's the already-covered early-break case in
+  // `testQueryStream`). Then deliberately ABANDON the generator: never call `.next()`/`.return()`
+  // again. This is the case whose `finally` never runs on its own, so the reserved connection can
+  // only be recovered by `close()`'s own force-release (the hang this fix closes).
+  const iter = client.queryStream!(sql, params)[Symbol.asyncIterator]();
+  const first = await iter.next();
+  assert.equal(first.done, false, "sanity: the stream yielded a row before being abandoned");
+  // `iter` is now deliberately leaked/abandoned — never `.return()`ed, never drained.
+
+  const closeStart = Date.now();
+  const closeTimeoutMs = 5000;
+  await Promise.race([
+    store.close(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`close() did not return within ${closeTimeoutMs}ms — shutdown hang`)), closeTimeoutMs),
+    ),
+  ]);
+  const closeElapsedMs = Date.now() - closeStart;
+  ok(`close-while-streaming: close() returned in ${closeElapsedMs}ms (< ${closeTimeoutMs}ms) despite an abandoned, undrained queryStream`);
+}
+
+// ── kill switch: STACKBASE_PG_STREAM=0/"false" disables queryStream on the Bun path, mirroring
+//    NodePgClient's identical env var ────────────────────────────────────────────────────────────
+async function testKillSwitch(): Promise<void> {
+  const original = process.env.STACKBASE_PG_STREAM;
+  try {
+    process.env.STACKBASE_PG_STREAM = "0";
+    const disabled = new BunSqlClient({ connectionString: URL });
+    assert.equal(disabled.queryStream, undefined, "STACKBASE_PG_STREAM=0 must leave queryStream unassigned");
+    await disabled.close();
+
+    process.env.STACKBASE_PG_STREAM = "false";
+    const disabled2 = new BunSqlClient({ connectionString: URL });
+    assert.equal(disabled2.queryStream, undefined, 'STACKBASE_PG_STREAM="false" must leave queryStream unassigned');
+    await disabled2.close();
+
+    delete process.env.STACKBASE_PG_STREAM;
+    const enabledUnset = new BunSqlClient({ connectionString: URL });
+    assert.equal(typeof enabledUnset.queryStream, "function", "unset STACKBASE_PG_STREAM must default queryStream ON");
+    await enabledUnset.close();
+
+    process.env.STACKBASE_PG_STREAM = "1";
+    const enabledOne = new BunSqlClient({ connectionString: URL });
+    assert.equal(typeof enabledOne.queryStream, "function", 'STACKBASE_PG_STREAM="1" (any non-"0"/"false" value) must leave queryStream ON');
+    await enabledOne.close();
+  } finally {
+    if (original === undefined) delete process.env.STACKBASE_PG_STREAM;
+    else process.env.STACKBASE_PG_STREAM = original;
+  }
+  ok("kill switch: STACKBASE_PG_STREAM=0/\"false\" disables queryStream; unset/\"1\" leaves it enabled");
+}
+
 // ── fleet: commitQuerierFor gives independent per-shard sessions; shard locks are session-scoped
 //    and mutually exclusive across clients ─────────────────────────────────────────────────────
 async function testFleet(): Promise<void> {
@@ -367,5 +438,7 @@ async function benchmark(): Promise<void> {
 await main();
 await testErrorCodeNormalization();
 await testQueryStream();
+await testCloseWhileStreaming();
+await testKillSwitch();
 await testFleet();
 await benchmark();
