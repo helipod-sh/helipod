@@ -123,3 +123,106 @@ describe("PostgresDocStore.index_scan streaming", () => {
     expect(again.length).toBe(TOTAL);
   });
 });
+
+/**
+ * Pins the `streamLock` serialization documented on `PgliteClient.queryStream`: two `index_scan`
+ * streams initiated concurrently on ONE store (one shared PGlite connection) must never collide on
+ * a cursor name or corrupt each other's transaction — the root cause of a real ryow-runtime
+ * regression fixed earlier. Both streams must still complete with the correct, complete, mutually
+ * uncontaminated result sets, with no "cursor already exists"/"cursor does not exist"/transaction
+ * error thrown.
+ */
+describe("PostgresDocStore.index_scan concurrent streams (single store, single PGlite connection)", () => {
+  const TABLE_A = 20101;
+  const TABLE_B = 20102;
+  const INDEX_A = encodeStorageIndexId(TABLE_A, "by_key");
+  const INDEX_B = encodeStorageIndexId(TABLE_B, "by_key");
+  const FULL: Interval = { start: new Uint8Array(), end: null };
+  const TOTAL = 200; // large enough to span multiple adaptive FETCH batches
+
+  function seedIndexEntries(
+    table: number,
+    indexId: string,
+  ): { documents: DocumentLogEntry[]; indexUpdates: IndexWrite[] } {
+    const documents: DocumentLogEntry[] = [];
+    const indexUpdates: IndexWrite[] = [];
+    for (let i = 0; i < TOTAL; i++) {
+      const id: InternalDocumentId = newDocumentId(table);
+      const key = encodeIndexKey([i]);
+      documents.push({ ts: 1n, id, prev_ts: null, value: { id, value: { n: i } } });
+      indexUpdates.push({ ts: 1n, update: { indexId, key, value: { type: "NonClustered", docId: id } } });
+    }
+    return { documents, indexUpdates };
+  }
+
+  /** Logs the first SQL keyword of every `query()` call on the shared connection, so the test can
+   *  assert the two concurrent streams' BEGIN..COMMIT blocks never interleave on the single PGlite
+   *  session — i.e. that `streamLock` genuinely serializes them — rather than merely asserting the
+   *  end result happens to be correct. `PgliteClient.transaction()` (used by `store.write`) calls
+   *  the underlying `this.pg.query` directly, bypassing this override, so only `queryStream`'s own
+   *  BEGIN/DECLARE/FETCH/CLOSE/COMMIT calls (which go through `this.query`) are captured. */
+  class LoggingPglite extends PgliteClient {
+    log: string[] = [];
+    override async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
+      const trimmed = text.trimStart();
+      const tag = trimmed.startsWith("DECLARE")
+        ? "DECLARE"
+        : trimmed.startsWith("FETCH")
+          ? "FETCH"
+          : trimmed.startsWith("CLOSE")
+            ? "CLOSE"
+            : trimmed.split(/\s+/)[0]!;
+      this.log.push(tag);
+      return super.query(text, params);
+    }
+  }
+
+  it("two concurrently-initiated index_scan streams on one store both complete correctly, with no cursor collision or transaction corruption", async () => {
+    const a = seedIndexEntries(TABLE_A, INDEX_A);
+    const b = seedIndexEntries(TABLE_B, INDEX_B);
+
+    const client = new LoggingPglite();
+    const store = new PostgresDocStore(client);
+    await store.setupSchema();
+    await store.write(a.documents, a.indexUpdates, "Error");
+    await store.write(b.documents, b.indexUpdates, "Error");
+
+    // Sequential ground truth, computed before the concurrent run so the assertions below don't
+    // just compare the two concurrent streams against each other.
+    const refA = await drain(store.index_scan(INDEX_A, "", 5n, FULL, "asc"));
+    const refB = await drain(store.index_scan(INDEX_B, "", 5n, FULL, "asc"));
+    expect(refA.length).toBe(TOTAL);
+    expect(refB.length).toBe(TOTAL);
+    client.log.length = 0; // reset: only the concurrent run below is under test
+
+    // Concurrent initiation: both generators are created and their drains kicked off together
+    // (neither `await`ed before the other starts), so their first `.next()` calls race for
+    // `streamLock` and genuinely overlap in initiation order from the caller's perspective — the
+    // mutex may still fully serialize the actual DB work underneath; that's the behavior being
+    // pinned here, not defeated.
+    const genA = store.index_scan(INDEX_A, "", 5n, FULL, "asc");
+    const genB = store.index_scan(INDEX_B, "", 5n, FULL, "asc");
+    const [resultsA, resultsB] = await Promise.all([drain(genA), drain(genB)]);
+
+    // Correct + complete: both streams got their full, independent result set back.
+    expect(resultsA.length).toBe(TOTAL);
+    expect(resultsB.length).toBe(TOTAL);
+    expect(resultsA.map(([key]) => key)).toEqual(refA.map(([key]) => key));
+    expect(resultsB.map(([key]) => key)).toEqual(refB.map(([key]) => key));
+
+    // No cross-contamination: every row A yielded really belongs to TABLE_A, and likewise for B —
+    // a corrupted shared cursor/transaction would be the way rows from one stream leak into, or
+    // are lost from, the other.
+    for (const [, doc] of resultsA) expect(doc.value.id.tableNumber).toBe(TABLE_A);
+    for (const [, doc] of resultsB) expect(doc.value.id.tableNumber).toBe(TABLE_B);
+
+    // Serialization proof: the two streams' BEGIN..COMMIT blocks never interleave on the shared
+    // PGlite session — one fully completes (BEGIN, DECLARE, FETCH*, CLOSE, COMMIT) before the
+    // other's BEGIN, even though both were initiated concurrently above.
+    const beginIdx = client.log.reduce<number[]>((acc, tag, i) => (tag === "BEGIN" ? [...acc, i] : acc), []);
+    const commitIdx = client.log.reduce<number[]>((acc, tag, i) => (tag === "COMMIT" ? [...acc, i] : acc), []);
+    expect(beginIdx.length).toBe(2);
+    expect(commitIdx.length).toBe(2);
+    expect(beginIdx[1]!).toBeGreaterThan(commitIdx[0]!); // second txn starts only after the first ends
+  });
+});
