@@ -24,13 +24,14 @@
  */
 import { SqliteDocStore } from "@stackbase/docstore-sqlite";
 import { DoSqliteAdapter, type SqlStorageLike, type TransactionSyncFn } from "@stackbase/docstore-do-sqlite";
+import { D1DocStore, type D1Client } from "@stackbase/docstore-d1";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { InMemoryLogSink } from "@stackbase/executor";
 import { AdminApi, systemModules, browseTableModule, verifyAdminKey } from "@stackbase/admin";
 import { loadProject, type LoadedProject, type ProjectArtifacts } from "@stackbase/cli/project";
 import type { ComponentDefinition, WakeHost } from "@stackbase/component";
 import type { BlobStore } from "@stackbase/blobstore";
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue, SchemaDefinitionJSON } from "@stackbase/values";
 import {
   storageContextProvider,
   storageReaper,
@@ -39,6 +40,7 @@ import {
   type StorageRoute,
   type StorageRouteDeps,
 } from "@stackbase/storage";
+import { globalReactivityPollerDriver } from "./global-reactivity-driver";
 
 export interface DurableObjectBootInput {
   /** The statically-bundled app: its schema default-export + `path:name → module` map (§4.2). */
@@ -57,10 +59,19 @@ export interface DurableObjectBootInput {
    *  `@stackbase/blobstore-r2`), never imported — the engine stays blob-store-neutral. Absent → file
    *  storage is inert (no `ctx.storage` provider, no reaper, no `/api/storage/*` routes). */
   blobStore?: BlobStore;
+  /** M2b: the Cloudflare D1 binding (`env.DB`) for `.global()` tables, wired here into a `D1DocStore`
+   *  (built from `project.schemaJson`, since this layer holds it) and passed to `createEmbeddedRuntime`
+   *  as `globalStore`. Absent + no `.global()` table declared → unchanged, D1 untouched. Absent WITH a
+   *  `.global()` table declared → `bootDurableObjectRuntime` throws (fail-fast; see below). */
+  d1?: D1Client;
   /** Storage upload-URL / capability-token TTL override (ms). Defaults to the provider's 1h. */
   storageUploadTtlMs?: number;
   /** Storage orphan-reaper sweep cadence override (ms). Defaults to the reaper's 60s. */
   storageReaperSweepMs?: number;
+  /** M2c: `GlobalReactivityPoller` cadence override (ms) — how often a `.global()` table with a live
+   *  subscriber is polled for a version bump. Defaults to the driver's 2000ms. Only meaningful when
+   *  `d1` is also set; ignored otherwise (no `.global()` tables → no poller wired at all). */
+  globalReactivityPollMs?: number;
   /** The host's single alarm (the DO's `setAlarm`), for driver wake (scheduler/triggers). Optional —
    *  a DO without composed drivers needs no wake. */
   wakeHost?: WakeHost;
@@ -100,6 +111,27 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
   // Idempotent DDL — safe to call on every cold wake; `createEmbeddedRuntime` also calls it.
   await store.setupSchema();
 
+  // M2b: `.global()` tables → a D1-backed store. Constructed here (we hold `project.schemaJson`) and
+  // handed to the runtime pre-built, mirroring the primary store above. `applyDdl` is create-only +
+  // idempotent, safe on every cold wake. WITHOUT a `d1` binding, a `.global()` table would otherwise
+  // fail confusingly deep inside its first mutation (`requireGlobalTxn` in the kernel) — fail fast at
+  // boot instead, with a clear message naming the actual gap.
+  //
+  // `D1DocStore` is handed ONLY the `.global()`-table slice of the schema, not the whole app schema:
+  // it DDLs (`CREATE TABLE`/`CREATE INDEX`) every table its schema contains, and D1 must never host a
+  // sharded/root table's own DDL (wasted, and can outright fail — e.g. an empty-fields index, legal on
+  // the primary MVCC store, is not valid `CREATE INDEX ... ()` SQL). Safe: the kernel/`GlobalTxn` only
+  // ever address this store by a `.global()` table's name (routed via `meta.mode === "global"`).
+  let globalStore: D1DocStore | undefined;
+  if (input.d1) {
+    globalStore = new D1DocStore(input.d1, globalOnlySchema(project.schemaJson));
+    await globalStore.applyDdl();
+  } else if (schemaHasGlobalTable(project.schemaJson)) {
+    throw new Error(
+      "this app declares a .global() table but no D1 binding (env.DB) is configured on the Durable Object",
+    );
+  }
+
   // File storage (`ctx.storage`) — composed ONLY when a `blobStore` is injected (an R2 binding on the
   // DO). Mirrors the container `boot.ts`: the `_storage:*` built-ins go in BOTH `modules` (reached by
   // the action-mode facade's `invoke` and the reaper's `runFunction`) and `systemModules` (reached by
@@ -127,12 +159,26 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
       : project.contextProviders,
     tableNumbers: project.tableNumbers,
     bootSteps: project.bootSteps,
-    drivers: blobStore
-      ? [
-          storageReaper(blobStore, input.storageReaperSweepMs !== undefined ? { sweepMs: input.storageReaperSweepMs } : undefined),
-          ...project.drivers,
-        ]
-      : project.drivers,
+    ...(globalStore ? { globalStore } : {}),
+    // M2c: the global-reactivity poller rides the SAME wake seam as the storage reaper/scheduler/
+    // triggers below — additive, only composed when a `globalStore` exists (no D1 binding / no
+    // `.global()` table → this array is byte-identical to before Task 6). Ordered ahead of
+    // `project.drivers` for the same reason `storageReaper` is: an engine-owned driver, not a
+    // component's.
+    drivers: [
+      ...(blobStore
+        ? [storageReaper(blobStore, input.storageReaperSweepMs !== undefined ? { sweepMs: input.storageReaperSweepMs } : undefined)]
+        : []),
+      ...(globalStore
+        ? [
+            globalReactivityPollerDriver(
+              globalStore.readVersions.bind(globalStore),
+              input.globalReactivityPollMs !== undefined ? { intervalMs: input.globalReactivityPollMs } : undefined,
+            ),
+          ]
+        : []),
+      ...project.drivers,
+    ],
     // Single-shard by mandate (roadmap Global Constraints). Sharding is Slice 6.
     numShards: 1,
     // Decision 6 / §8.1: no process-shaped `setInterval` sweep, no per-session ping heartbeat.
@@ -183,4 +229,20 @@ export async function bootDurableObjectRuntime(input: DurableObjectBootInput): P
   }));
 
   return { runtime, adminApi, store, project, logSink, adminKey: input.adminKey, storageRoutes: routesForStorage, componentRoutes };
+}
+
+/** True when the composed schema declares at least one `.global()` table — drives the fail-fast
+ *  check above (a `.global()` table with no D1 binding must never silently become "unavailable"). */
+function schemaHasGlobalTable(schemaJson: SchemaDefinitionJSON): boolean {
+  return Object.values(schemaJson.tables).some((t) => t.global === true);
+}
+
+/** The `.global()`-only slice of the composed schema — see the `D1DocStore` construction above for
+ *  why the full app schema must never be handed to it. */
+function globalOnlySchema(schemaJson: SchemaDefinitionJSON): SchemaDefinitionJSON {
+  const tables: SchemaDefinitionJSON["tables"] = {};
+  for (const [name, t] of Object.entries(schemaJson.tables)) {
+    if (t.global === true) tables[name] = t;
+  }
+  return { tables, schemaValidation: schemaJson.schemaValidation };
 }

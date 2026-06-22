@@ -31,11 +31,16 @@ import {
   SHARD_KEY_REQUIRED,
   CROSS_SHARD_UNSUPPORTED,
   INVALID_REGION_HINT,
+  FANOUT_REQUIRES_FIXED_SHARDS,
+  FANOUT_WITH_SHARD_KEY,
+  FANOUT_NOT_SUBSCRIBABLE,
+  FANOUT_NOT_A_QUERY,
   routingError,
   type ShardRoutingErrorBody,
 } from "./errors";
 import { deriveLocationHint } from "./location";
 import { LOCATION_HINTS } from "@stackbase/runtime-cloudflare";
+import { shardIdList } from "@stackbase/id-codec";
 
 export interface ShardRoutingOptions {
   /** Routing mode: "key" (A, default — one DO per key) or "hash" (B — fixed-N jump-hash). §1.1. */
@@ -65,6 +70,12 @@ export type ShardResolution =
        *  a/b/c). Absent ⇒ the router forwards with NO options bag (byte-identical to the pre-hint
        *  behavior; Cloudflare places the DO near the first requester). */
       locationHint?: string;
+    }
+  | {
+      kind: "fanout";
+      /** Every shard-DO name to fan this request out to (mode "hash" only — the enumerable
+       *  `shardIdList(numShards)`, e.g. `["default", "s1", "s2", …]`). */
+      shardIds: string[];
     }
   | { kind: "error"; status: number; body: ShardRoutingErrorBody };
 
@@ -131,6 +142,20 @@ function deriveShardFromRun(loaded: LoadedProject, path: string, args: unknown):
   return { sharded: true, value, hasValue: value !== undefined && value !== null };
 }
 
+/** Classify a `path:name` function's declared `type` (`"query"` / `"mutation"` / `"action"` / …) from
+ *  the loaded module set — the SAME lookup `deriveShardFromRun` uses (split the path, index into
+ *  `loaded.modules`), reused here so fanOut's read-only guard agrees with the shard-key deriver about
+ *  what a "sharded mutation" even is. Returns `undefined` when the type cannot be determined (a
+ *  malformed path or an unknown function) — callers MUST treat `undefined` as "not a query" (fail
+ *  closed), never as "assume query". */
+function classifyFunctionType(loaded: LoadedProject, path: string): string | undefined {
+  const split = splitFunctionPath(path);
+  if (!split) return undefined;
+  const [modulePath, name] = split;
+  const fn = loaded.modules[modulePath]?.[name] as { type?: unknown } | undefined;
+  return typeof fn?.type === "string" ? fn.type : undefined;
+}
+
 /**
  * Resolve the owning shard-DO name for a request (or a typed rejection). Reads the request body only
  * when needed (a `POST /api/run` with no explicit key + a `loaded` project); callers MUST forward the
@@ -168,18 +193,77 @@ export async function resolveShard(request: Request, opts: ShardRoutingOptions =
     return derived.hint !== undefined ? { kind: "shard", name, locationHint: derived.hint } : { kind: "shard", name };
   };
 
-  // Fan-out / cross-shard is refused up front (M1 non-goal). A caller that wants to span shards gets a
-  // clear code, never a silently-partial merge.
+  // Fan-out (M2d): a non-reactive one-shot read across every shard of a fixed-shard-count (mode
+  // "hash") deployment. Guarded up front, before the explicit/derived/default branches below, since
+  // fan-out addresses ALL shards rather than resolving to exactly one.
   if (isFanoutRequested(url, headers)) {
-    return {
-      kind: "error",
-      status: 400,
-      body: routingError(
-        CROSS_SHARD_UNSUPPORTED,
-        "cross-shard fan-out is not supported in this deployment: a query or mutation must be scoped to a single shard key. " +
-          "Move genuinely-global data to a `.global()` table, or issue one request per shard key.",
-      ),
-    };
+    // fanOut needs an enumerable shard set — only mode "hash" (a fixed numShards) has one.
+    if (mode !== "hash") {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          FANOUT_REQUIRES_FIXED_SHARDS,
+          "fanOut requires a fixed-shard-count deployment (routing mode \"hash\"); this deployment addresses a Durable Object per key value with no enumerable shard set.",
+        ),
+      };
+    }
+    // fanOut + a shard key is contradictory — target one shard OR fan out all, not both.
+    if (explicitShardKey(url, headers) !== null) {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          FANOUT_WITH_SHARD_KEY,
+          "a request may either fan out across all shards or name one shard key, not both.",
+        ),
+      };
+    }
+    // fanOut is non-reactive — a WebSocket subscribe can't fan out.
+    if (url.pathname === "/api/sync" || headers.get("upgrade")?.toLowerCase() === "websocket") {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          FANOUT_NOT_SUBSCRIBABLE,
+          "fanOut is a non-reactive one-shot read and cannot be used on a WebSocket (/api/sync) subscription.",
+        ),
+      };
+    }
+    // fanOut is READ-ONLY (C1): reject anything that isn't a resolved `query` — a plain mutation, a
+    // `.shardBy` sharded mutation, or an action would otherwise fall through here and get fanned out
+    // to every shard-DO, each of which RUNS AND COMMITS it via the unmodified DO — turning one
+    // logical write into N. Classify the target the same way `deriveShardFromRun` looks up the
+    // function; a target whose type can't be PROVEN to be "query" (no `loaded`, an unparseable body,
+    // a request shape other than `POST /api/run`, or an unknown path) fails CLOSED under the same
+    // code — never fanned out on the assumption that it might be a query.
+    let fanoutTargetType: string | undefined;
+    let fanoutPath: string | undefined;
+    if (opts.loaded && request.method === "POST" && url.pathname === "/api/run") {
+      let body: { path?: unknown; args?: unknown } | undefined;
+      try {
+        body = (await request.clone().json()) as { path?: unknown; args?: unknown };
+      } catch {
+        body = undefined;
+      }
+      if (body && typeof body.path === "string") {
+        fanoutPath = body.path;
+        fanoutTargetType = classifyFunctionType(opts.loaded, body.path);
+      }
+    }
+    if (fanoutTargetType !== "query") {
+      return {
+        kind: "error",
+        status: 400,
+        body: routingError(
+          FANOUT_NOT_A_QUERY,
+          fanoutPath !== undefined
+            ? `"${fanoutPath}" is not a query (fanOut is read-only; only queries may fan out across shards).`
+            : "fanOut requires a POST /api/run request naming a resolvable query function; the target's type could not be determined.",
+        ),
+      };
+    }
+    return { kind: "fanout", shardIds: shardIdList(numShards) };
   }
 
   // (1) Explicit envelope key.

@@ -42,6 +42,9 @@ export interface TableDefinitionJSON {
   vectorIndexes: VectorIndexDefinitionJSON[];
   /** The document field used as the shard key (seam #1), or null. */
   shardKey: string | null;
+  /** D1-resident global table (`.global()`). Omitted (not `false`) for a normal table, so existing
+   *  exported JSON is byte-for-byte unchanged. Mutually exclusive with `shardKey`. */
+  global?: boolean;
   /** Declared to-many relations (scale-seam #2 / row-policy relation predicates). */
   relations: RelationJSON[];
 }
@@ -56,6 +59,7 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
   private readonly searchIndexes: SearchIndexDefinitionJSON[] = [];
   private readonly vectorIndexes: VectorIndexDefinitionJSON[] = [];
   private shardKeyField: string | null = null;
+  private globalMode = false;
   private readonly relationsList: RelationJSON[] = [];
 
   constructor(readonly fields: F) {
@@ -98,7 +102,16 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
 
   /** Mark a field as this table's shard key (scale-seam #1). */
   shardKey(field: Extract<keyof F, string>): this {
+    if (this.globalMode) throw new Error("a table cannot be both .shardKey() and .global() (global data is not sharded)");
     this.shardKeyField = field;
+    return this;
+  }
+
+  /** Mark this table as D1-resident global data (cross-shard, global-unique). Mutually exclusive
+   *  with `.shardKey()`. */
+  global(): this {
+    if (this.shardKeyField !== null) throw new Error("a table cannot be both .global() and .shardKey() (global data is not sharded)");
+    this.globalMode = true;
     return this;
   }
 
@@ -115,6 +128,7 @@ export class TableDefinition<F extends PropertyValidators = PropertyValidators> 
       searchIndexes: this.searchIndexes,
       vectorIndexes: this.vectorIndexes,
       shardKey: this.shardKeyField,
+      ...(this.globalMode ? { global: true } : {}),
       relations: this.relationsList,
     };
   }

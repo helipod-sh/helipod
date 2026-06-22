@@ -79,7 +79,7 @@ export default defineConfig({
   `deploy` block) to keep the original slice-6b `stackbase deploy --url <url>` flow working with
   zero config.
 - **`targets`** — keyed by the name you pass to `--target`. Each entry has a `provider` (which
-  adapter runs it: `"serve"` | `"cloudflare"` | `"docker"`), any shared settings, and an
+  adapter runs it: `"serve"` | `"cloudflare"` | `"docker"` | `"railway"` | `"fly"` | `"aws"`), any shared settings, and an
   `environments` map. `--env <name>` selects one of those; its fields are merged **over** the
   target's shared settings.
 - **`env(name, fallback?)`** — a deferred, Supabase-style env-var read (from `@stackbase/component`).
@@ -136,10 +136,11 @@ subprocess; tests inject a fake that records calls and returns canned output, so
 fully unit-testable with no real provider CLI or network), and `packageApp()`/`codegen()` closures
 supplied by the CLI (the shared esbuild-transpile-and-codegen machinery every target reuses).
 
-**v1 ships `serve`, `cloudflare`, and `docker`.** `railway`, `fly`, and `aws` adapters are
-documented follow-ons — the same shape (`preflight` checks the provider CLI/token, `package` builds
-the image, `push` shells `railway up` / `flyctl deploy` / the provider's own tool), not yet built.
-Adapters are lazy-loaded (`loadTarget(provider)` dynamically imports the target module), so an
+**v1 ships `serve`, `cloudflare`, `docker`, `railway`, `fly`, and `aws`.** Each provision adapter is
+the same shape — `preflight` checks the provider CLI is installed and (in CI) a token is set, then
+the deploy shells the provider's own tool: `railway up`, `fly deploy`, or `aws apprunner
+start-deployment` (App Runner, service + ECR image provisioned out-of-band, like `cloudflare`'s
+wrangler resources). Adapters are lazy-loaded (`loadTarget(provider)` dynamically imports the target module), so an
 unused provider's dependencies — e.g. `cloudflare`'s dependency on `@stackbase/runtime-cloudflare` —
 never load unless that target is actually selected.
 

@@ -7,6 +7,7 @@ export interface D1Binding {
   prepare(sql: string): D1BindingStatement;
   exec(sql: string): Promise<unknown>;
   withSession?(bookmark?: string): D1Binding & { getBookmark?(): string | null };
+  batch(stmts: D1BindingStatement[]): Promise<unknown>;
 }
 
 /** Adapt a real Cloudflare D1 binding (`env.DB`) to the D1Client seam. Uses D1's Sessions API for
@@ -23,6 +24,9 @@ export function bindingD1Client(db: D1Binding): D1Client {
     withSession: (bookmark?: string): D1Session => {
       const s = binding.withSession ? binding.withSession(bookmark) : binding;
       return { client: wrap(s, s as { getBookmark?(): string | null }), latestBookmark: () => (s as { getBookmark?(): string | null }).getBookmark?.() ?? undefined };
+    },
+    batch: async (statements) => {
+      await binding.batch(statements.map((s) => binding.prepare(s.sql).bind(...s.params)));
     },
   });
   return wrap(db);

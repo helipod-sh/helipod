@@ -10,13 +10,13 @@ import { SyncProtocolHandler, type SyncUdfExecutor, type SyncWebSocket } from ".
 
 const noopExecutor: SyncUdfExecutor = {
   async runQuery() {
-    return { value: null, tables: [], readRanges: [] };
+    return { value: null, tables: [], readRanges: [], globalTables: [] };
   },
   async runMutation() {
     return { value: null, tables: [], writeRanges: [], commitTs: 1 };
   },
   async runAdminQuery() {
-    return { value: null, tables: [], readRanges: [] };
+    return { value: null, tables: [], readRanges: [], globalTables: [] };
   },
   async runAction() {
     return { value: null };

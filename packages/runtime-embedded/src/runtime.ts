@@ -261,6 +261,14 @@ export interface EmbeddedRuntimeOptions {
    */
   queryStore?: DocStore;
   /**
+   * M2b: the D1 store for `.global()` tables, pre-built by the boot layer (which holds
+   * `schemaJson`). Mirrors the `queryStore` precedent above — handed in already-constructed,
+   * not built inside `create()`. Threaded straight into `ExecutorDeps.globalStore`. Absent →
+   * `.global()` ops fail fast in the kernel (`requireGlobalTxn`), byte-identical to before this
+   * option existed. NOT `DocStore`-shaped; it never enters a transactor/`QueryRuntime`.
+   */
+  globalStore?: import("@stackbase/docstore-d1").D1DocStore;
+  /**
    * The AUTHORITATIVE receipts store for the `Connect` resume handshake — where the outbox verdict
    * classification (`classifyClientMutation`) and ack-prune (`pruneClientMutations`) reads/writes
    * land (verdict §(c): "the classification read runs where the commit runs... never against a
@@ -493,7 +501,7 @@ export class EmbeddedRuntime {
         numShards,
       });
     };
-    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter, queryPath });
+    const executor = new InlineUdfExecutor({ transactor, queryRuntime, catalog: options.catalog, logSink: options.logSink, now: options.now, invoke, writeRouter: options.writeRouter, queryPath, globalStore: options.globalStore });
     executorRef = executor;
 
     // Run component boot steps once, before serving: a namespaced, non-user mutation per step.
@@ -538,6 +546,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          globalTables: r.globalTables ?? [],
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
           ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };
@@ -617,6 +626,7 @@ export class EmbeddedRuntime {
           value: r.value as Value,
           tables: writtenTablesFromRanges(r.readRanges),
           readRanges: r.readRanges.map(serializeKeyRange),
+          globalTables: r.globalTables ?? [],
           ...(r.diffableRange ? { diffableRange: r.diffableRange } : {}),
           ...(r.diffablePage ? { diffablePage: r.diffablePage } : {}),
         };
@@ -920,6 +930,16 @@ export class EmbeddedRuntime {
 
         return { changes, maxScannedTs: Number(maxScannedTs) };
       },
+      // M2c Task 6: `handler` (the `SyncProtocolHandler` instance) is already constructed above
+      // (`const handler = new SyncProtocolHandler(...)`) by the time this `driverCtx` object is
+      // built, so both hooks are plain delegations — no chicken-and-egg problem the way a
+      // boot-layer-constructed poller would have (`runtime.handler` doesn't exist until
+      // `createEmbeddedRuntime` RETURNS; this closure runs before that, with `handler` already live).
+      notifyWrites: (inv) => handler.notifyWrites(inv),
+      subscribedGlobalTables: () => handler.subscribedGlobalTables(),
+      // M2c fix: plain delegation, same reasoning as the two hooks above — `handler` is already
+      // constructed by the time this `driverCtx` object is built.
+      onGlobalSubscribe: (cb) => handler.onGlobalSubscribe(cb),
     };
 
     // Inverse of `tableNumbers` (tableNumber → fullTableName), seeded here from

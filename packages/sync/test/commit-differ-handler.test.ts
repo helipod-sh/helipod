@@ -85,12 +85,14 @@ function makeExecutor(): SyncUdfExecutor {
           value: [{ _id: "docs|a", n: 1 }, { _id: "docs|b", n: 2 }] as unknown as Value,
           tables: ["table:3"],
           readRanges: [SPAN],
+          globalTables: [],
         };
       }
       return {
         value: { _id: "docs|a", n: 1 } as unknown as Value,
         tables: ["table:3"],
         readRanges: [POINT_A],
+        globalTables: [],
       };
     },
     async runMutation() {
@@ -226,12 +228,14 @@ function makeIdentityFlipExecutor(): SyncUdfExecutor {
           value: { _id: "docs|u2", n: 100 } as unknown as Value,
           tables: ["table:3"],
           readRanges: [POINT_U2],
+          globalTables: [],
         };
       }
       return {
         value: { _id: "docs|a", n: 1 } as unknown as Value,
         tables: ["table:3"],
         readRanges: [POINT_A],
+        globalTables: [],
       };
     },
     async runMutation() {
@@ -318,6 +322,7 @@ function makeRangeExecutor(): SyncUdfExecutor {
         value: [DOC_A, DOC_B] as unknown as Value,
         tables: ["table:3"],
         readRanges: [CHANNEL_RANGE.bounds],
+        globalTables: [],
         diffableRange: CHANNEL_RANGE,
       };
     },
@@ -506,6 +511,7 @@ function makeRangeIdentityFlipExecutor(): SyncUdfExecutor {
           value: [DOC_D] as unknown as Value,
           tables: ["table:3"],
           readRanges: [CHANNEL_D_RANGE.bounds],
+          globalTables: [],
           diffableRange: CHANNEL_D_RANGE,
         };
       }
@@ -513,6 +519,7 @@ function makeRangeIdentityFlipExecutor(): SyncUdfExecutor {
         value: [DOC_A, DOC_B] as unknown as Value,
         tables: ["table:3"],
         readRanges: [CHANNEL_RANGE.bounds],
+        globalTables: [],
         diffableRange: CHANNEL_RANGE,
       };
     },
@@ -610,6 +617,7 @@ function makePageExecutor(): SyncUdfExecutor {
         value: { page: [DOC_A, DOC_B], nextCursor: "X", hasMore: true, scanCapped: false } as unknown as Value,
         tables: ["table:3"],
         readRanges: [CHANNEL_RANGE.bounds],
+        globalTables: [],
         diffablePage: PAGE_RANGE as unknown as DiffablePage,
       };
     },
@@ -717,6 +725,7 @@ function makePageIdentityFlipExecutor(): SyncUdfExecutor {
           value: { page: [DOC_D], nextCursor: "Y", hasMore: false, scanCapped: true } as unknown as Value,
           tables: ["table:3"],
           readRanges: [CHANNEL_D_RANGE.bounds],
+          globalTables: [],
           diffablePage: PAGE_D_RANGE as unknown as DiffablePage,
         };
       }
@@ -724,6 +733,7 @@ function makePageIdentityFlipExecutor(): SyncUdfExecutor {
         value: { page: [DOC_A, DOC_B], nextCursor: "X", hasMore: true, scanCapped: false } as unknown as Value,
         tables: ["table:3"],
         readRanges: [CHANNEL_RANGE.bounds],
+        globalTables: [],
         diffablePage: PAGE_RANGE as unknown as DiffablePage,
       };
     },

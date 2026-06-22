@@ -84,13 +84,37 @@ suite proves the hint is threaded and the routing is O(1), not the latency delta
 - **Cross-shard global-unique** → Milestone 2 (`.global()`/D1). Uniqueness **within one shard key** is
   free (a per-DO local index).
 - A `.shardBy` mutation whose args omit the shard key → rejected with `SHARD_KEY_REQUIRED`.
-- **`.global()`/D1** and the opt-in **non-reactive fan-out read** → Milestone 2.
+- **`.global()`/D1** → Milestone 2 (not yet built).
+
+## Cross-shard `fanOut` reads (Milestone 2d — shipped)
+
+A **non-reactive, one-shot** cross-shard read: `POST /api/run?fanout=1 { path, args }` (or
+`X-Stackbase-Fanout: true`) fans the SAME request out to every shard-DO, concatenates each shard's
+`{ value: [...] }` array, and returns one merged `{ value }` response. It requires a **fixed shard
+count** — routing mode `"hash"` (`shardIdList(numShards)` is the enumerable shard set); mode `"key"`
+(one DO per arbitrary key, no directory) has no way to enumerate "every shard", so it's rejected
+`FANOUT_REQUIRES_FIXED_SHARDS`. Also rejected: `fanOut` + an explicit `?shard=` key
+(`FANOUT_WITH_SHARD_KEY` — target one shard OR fan out, never both), `fanOut` on the WebSocket
+`/api/sync` upgrade (`FANOUT_NOT_SUBSCRIBABLE` — fanOut is one-shot, not reactive), and `fanOut` of a
+`.shardBy` mutation (fanOut is a read). A shard that throws, times out, responds non-200, or returns a
+non-array `value` is **failures-as-data**: recorded in a `partial.failedShards` entry rather than
+failing the whole request, so a slow/broken shard degrades the read instead of blocking it. v1 is a
+plain concatenation (no ordered k-way merge, no global result limit — each shard already applies its
+own query's `.take(n)`); the fan-out pool is bounded (`FANOUT_CONCURRENCY`) with a per-shard timeout.
 
 ## Proof
 
-- **Node unit suite** (`bun run test`): routing, canonicalization, and the one-way licensing gate.
-- **Real-workerd suite** (`bun run test:workers`, via `@cloudflare/vitest-pool-workers`): the full
-  Worker→shard-DO path on genuine Durable Objects — distinct keys → distinct DOs, shard isolation,
-  shard-scoped reactive push + isolation, cross-shard rejection, independent commits.
+- **Node unit suite** (`bun run test`): routing, canonicalization, `fanOut` routing/worker guards
+  (scripted fake namespace), and the one-way licensing gate.
+- **Real-workerd suite** (`bun run test:workers`, via `@cloudflare/vitest-pool-workers`): chains TWO
+  projects — `vitest.workers.config.ts` (mode `"key"` fixture, `test-workers/*.worker.test.ts`): the
+  full Worker→shard-DO path on genuine Durable Objects — distinct keys → distinct DOs, shard isolation,
+  shard-scoped reactive push + isolation, `fanOut` rejection (`FANOUT_REQUIRES_FIXED_SHARDS`, no fixed
+  shard set), independent commits; and `vitest.workers.hash.config.ts` (a SEPARATE mode-`"hash"`,
+  `numShards: 4` fixture — `test-workers/test-worker-hash.ts` / `wrangler.hash.jsonc` —
+  `fanOut` needs an enumerable shard set the mode-`"key"` fixture structurally doesn't have):
+  `test-workers/fanout.worker.test.ts` proves the union-across-shards concat, both rejection guards, and
+  a GENUINE single-shard failure (one shard-DO's own query handler throws for real, not a mocked
+  namespace) degrading to `partial.failedShards` — all on real Durable Objects.
 - **Deploy rig** (`rig/`): the human-run real-Cloudflare multi-shard E2E (this worktree has no CF
   login) — see [`rig/README.md`](./rig/README.md).

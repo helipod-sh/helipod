@@ -77,6 +77,7 @@ The reactive core (Build + Local development) is real and runnable — see
 - [Standalone Binary](/deploy/standalone-binary) — single-file builds for Linux/macOS/Windows.
 - [Deploy Targets](/deploy/targets) — the multi-provider `stackbase deploy --target/--env` seam.
 - [Cloudflare](/deploy/cloudflare) — `stackbase deploy --target cloudflare`, the Durable-Object-native host. Scheduler/crons/triggers work here.
+- [Global Tables (Cloudflare D1)](/global-tables) — `.global()` tables for cross-shard, globally-unique data, reactive via poll-based invalidation. Cloudflare-only.
 - [Cloudflare via Containers](/deploy/cloudflare-containers) — the alternative hand-wired path (portable `serve` image in a Container). **Experimental**, with a scheduler gap.
 - [GitHub Actions](/deploy/ci-github-actions) — a copy-paste CI deploy workflow.
 - [Scaling Blueprint](/deploy/scaling) — multi-region topology and sharding.

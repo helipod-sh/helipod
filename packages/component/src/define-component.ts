@@ -97,6 +97,49 @@ export interface DriverContext {
    * a `jobs` row already carries) can ignore it entirely; existing drivers/fakes are unaffected.
    */
   functionKind?(path: string): "query" | "mutation" | "action" | "httpAction" | undefined;
+  /**
+   * M2c: re-run/re-push every live subscription whose read set intersects `inv` — table-level
+   * invalidation only (`ranges: []`), the shape a GLOBAL (D1-backed) table's change signal takes
+   * (a `.global()` write leaves no local MVCC range to intersect; see
+   * `@stackbase/runtime-cloudflare`'s `GlobalReactivityPoller`). Delegates to
+   * `SyncProtocolHandler.notifyWrites`, already in scope wherever `DriverContext` is built.
+   * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
+   * writes through the normal `runFunction`/transaction path instead (nearly all of them) never
+   * needs to invalidate a subscription directly and can ignore this entirely.
+   *
+   * `global` (M2c Critical fix): set `true` for an invalidation whose `commitTs` is NOT a real local
+   * MVCC timestamp (e.g. `GlobalReactivityPoller`'s D1 version-counter poll) — the sync handler never
+   * advances the client-facing local-ts frontier or the local-ts resume registry from a `global`
+   * invalidation's `commitTs`, so a caller sourcing `commitTs` from anything but the local oracle MUST
+   * set this. Absent/false = a normal local commit, byte-identical to pre-M2c behavior.
+   */
+  notifyWrites?(inv: { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number; global?: boolean }): Promise<void>;
+  /**
+   * M2c: global (D1-backed) table names with at least one live subscriber right now — the only
+   * thing a `GlobalReactivityPoller` needs to decide which tables are worth polling D1 for.
+   * Delegates to `SubscriptionManager.subscribedGlobalTables()` (via `SyncProtocolHandler`).
+   * Optional, same reasoning as `notifyWrites` above.
+   */
+  subscribedGlobalTables?(): string[];
+  /**
+   * M2c fix: registers `cb` to fire whenever the sync tier registers a NEW subscription whose read
+   * set touches at least one global (D1-backed) table (`ModifyQuerySet` → `doModifyQuerySet`,
+   * both the fresh-execSub and the resume-skip registration paths). Delegates to
+   * `SyncProtocolHandler.onGlobalSubscribe`.
+   *
+   * Exists to close a silent-reactivity-death gap: `GlobalReactivityPollerDriver` only re-arms its
+   * own timer (a) once at boot and (b) in its tick's `finally`, gated on `subscribedGlobalTables()`
+   * being non-empty. A busy DO that never hibernates can tick with zero global subscribers, disarm,
+   * and then have a client `.global()`-subscribe on the SAME live instance (a `ModifyQuerySet`, no
+   * constructor re-run) — with nothing to re-arm the poller, that subscription is initially delivered
+   * but never reactively invalidated again. This hook lets the driver arm itself (if idle) the moment
+   * such a subscription registers, instead of waiting on a full DO reconstruction (which a busy DO may
+   * never get).
+   *
+   * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that doesn't
+   * poll a global store can ignore this entirely; existing drivers/fakes are unaffected.
+   */
+  onGlobalSubscribe?(cb: () => void): void;
 }
 
 /** A recurring runtime seam: started once after boot, woken by commits and/or timers. */

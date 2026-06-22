@@ -40,7 +40,7 @@ function makeCountingExecutor(): { executor: SyncUdfExecutor; runQueryCalls: () 
   const executor: SyncUdfExecutor = {
     async runQuery() {
       n++;
-      return { value: [{ _id: "notes|a", box: "a" }] as unknown as Value, tables: ["notes"], readRanges: [RANGE_A] };
+      return { value: [{ _id: "notes|a", box: "a" }] as unknown as Value, tables: ["notes"], readRanges: [RANGE_A], globalTables: [] };
     },
     async runMutation() { throw new Error("unused"); },
     async runAdminQuery() { throw new Error("unused"); },

@@ -21,6 +21,7 @@
 import type { LoadedProject } from "@stackbase/cli/project";
 import type { ComponentDefinition } from "@stackbase/component";
 import type { BlobStore } from "@stackbase/blobstore";
+import type { D1Client } from "@stackbase/docstore-d1";
 import { bootDurableObjectRuntime, type DurableObjectBoot } from "./boot";
 import { DurableObjectRuntimeHost } from "./host";
 import { DoAlarmWakeHost } from "./wake";
@@ -44,10 +45,26 @@ export interface DurableObjectAppConfig {
    *  subclass. Injected, never imported — the engine stays blob-store-neutral. Absent → file storage
    *  is inert (`ctx.storage` has no provider; `/api/storage/*` 404s), everything else unchanged. */
   blobStore?: BlobStore;
+  /** M2b: the Cloudflare D1 binding (`env.DB`) for `.global()` tables, supplied by the concrete DO
+   *  subclass (wrapping its raw `env.DB` with `@stackbase/docstore-d1`'s `bindingD1Client`). Injected,
+   *  never imported from a raw Cloudflare type here — mirrors `blobStore` (env.R2). Absent → `.global()`
+   *  tables are unavailable: a schema declaring one fails DO boot fast (see `bootDurableObjectRuntime`),
+   *  rather than letting a `.global()` op fail confusingly deep inside some later mutation. */
+  d1?: D1Client;
   /** Stretch pure-backstop driver cadences (Cloudflare: `(d) => Math.max(d, 900_000)`). */
   backstopMs?: (defaultMs: number) => number;
   /** Injected clock (tests). */
   now?: () => number;
+  /** M2c Task 7: `GlobalReactivityPoller` cadence override (ms) — passed straight through to
+   *  `bootDurableObjectRuntime`'s `globalReactivityPollMs` (see there). Exists so a real-workerd test
+   *  can drive the poller deterministically via `runDurableObjectAlarm` (`cloudflare:test`) without a
+   *  real wall-clock sleep: `runDurableObjectAlarm` force-clears+re-fires whatever alarm is CURRENTLY
+   *  scheduled on the DO, but the runtime's own `fireDueTimers` still gates on its in-process
+   *  `atMs <= now()` due-check — an injected test `now` can't be shared across the DO's own isolated
+   *  module scope from outside, so a near-zero interval (rather than a controllable clock) is what
+   *  makes an explicit force-fire land as genuinely due, deterministically, with no sleep. Defaults to
+   *  the driver's 2000ms (unchanged behavior for every existing DO subclass). */
+  globalReactivityPollMs?: number;
 }
 
 const SYNC_PATH = "/api/sync";
@@ -85,8 +102,10 @@ export abstract class StackbaseDurableObject {
           adminKey: cfg.adminKey,
           wakeHost: new DoAlarmWakeHost(this.ctx.storage),
           ...(cfg.blobStore ? { blobStore: cfg.blobStore } : {}),
+          ...(cfg.d1 ? { d1: cfg.d1 } : {}),
           ...(cfg.backstopMs ? { backstopMs: cfg.backstopMs } : {}),
           ...(cfg.now ? { now: cfg.now } : {}),
+          ...(cfg.globalReactivityPollMs !== undefined ? { globalReactivityPollMs: cfg.globalReactivityPollMs } : {}),
         });
         // Wire the RuntimeHost seam over the freshly-booted runtime (Task 2). Port 0 (portless DO),
         // no-op close, working setRoutes — HTTP dispatch flows through `this.runtimeHost.fetch`.

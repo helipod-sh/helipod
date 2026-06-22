@@ -78,6 +78,7 @@ function makeRangeExecutor(): SyncUdfExecutor {
         value: [DOC_A, DOC_B] as unknown as Value,
         tables: ["table:3"],
         readRanges: [CHANNEL_RANGE.bounds],
+        globalTables: [],
         diffableRange: CHANNEL_RANGE,
       };
     },
@@ -101,6 +102,7 @@ function makeByIdExecutor(): SyncUdfExecutor {
         value: { _id: "docs|a", n: 1 } as unknown as Value,
         tables: ["table:3"],
         readRanges: [POINT_A],
+        globalTables: [],
       };
     },
     async runMutation() {

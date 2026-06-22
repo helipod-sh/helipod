@@ -8,7 +8,7 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
   test: {
-    include: ["test-workers/**/*.worker.test.ts"],
+    include: ["test-workers/**/*.worker.test.ts", "test-workers/**/*-e2e.test.ts"],
     poolOptions: {
       workers: {
         // A live reactive WebSocket keeps the DO busy across the test boundary, which the default

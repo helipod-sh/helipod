@@ -414,14 +414,15 @@ export class PostgresDocStore implements DocStore {
     };
   }
 
-  async *index_scan(
+  /** Builds the `index_scan` SQL + params — see {@link index_scan} for the query shape rationale. */
+  private buildIndexScanSql(
     indexId: string,
     _tableId: string,
     readTimestamp: bigint,
     interval: Interval,
     order: Order,
     limit?: number,
-  ): AsyncGenerator<readonly [Uint8Array, LatestDocument]> {
+  ): { sql: string; params: PgValue[] } {
     const dir = order === "desc" ? "DESC" : "ASC";
     const params: PgValue[] = [indexId, interval.start, readTimestamp];
     let endClause = "";
@@ -452,19 +453,45 @@ export class PostgresDocStore implements DocStore {
       sql += ` LIMIT $${params.length + 1}`;
       params.push(Number(limit));
     }
+    return { sql, params };
+  }
 
+  /** Maps one `index_scan` result row to the `[key, LatestDocument]` shape callers expect. */
+  private mapIndexRow(row: PgRow): readonly [Uint8Array, LatestDocument] {
+    const docId: InternalDocumentId = {
+      tableNumber: decodeStorageTableId(row.table_id as string),
+      internalId: row.internal_id as Uint8Array,
+    };
+    const doc: LatestDocument = {
+      ts: asBigInt(row.ts),
+      prev_ts: asBigIntOrNull(row.prev_ts),
+      value: { id: docId, value: this.parseValue(row.value as string) },
+    };
+    return [row.key as Uint8Array, doc] as const;
+  }
+
+  async *index_scan(
+    indexId: string,
+    tableId: string,
+    readTimestamp: bigint,
+    interval: Interval,
+    order: Order,
+    limit?: number,
+  ): AsyncGenerator<readonly [Uint8Array, LatestDocument]> {
+    const { sql, params } = this.buildIndexScanSql(indexId, tableId, readTimestamp, interval, order, limit);
+    // Stream via a server-side cursor when the underlying client supports it, so a consumer that
+    // breaks early (e.g. `collect()`/`paginate()` stopping at a limit) never pulls the rest of the
+    // range out of Postgres. A client without `queryStream` (e.g. a pool driver that hasn't wired
+    // one up) falls back to the buffered path — same rows, just fetched in one round trip.
+    if (this.db.queryStream) {
+      for await (const row of this.db.queryStream(sql, params)) {
+        yield this.mapIndexRow(row);
+      }
+      return;
+    }
     const rows = await this.db.query(sql, params);
     for (const row of rows) {
-      const docId: InternalDocumentId = {
-        tableNumber: decodeStorageTableId(row.table_id as string),
-        internalId: row.internal_id as Uint8Array,
-      };
-      const doc: LatestDocument = {
-        ts: asBigInt(row.ts),
-        prev_ts: asBigIntOrNull(row.prev_ts),
-        value: { id: docId, value: this.parseValue(row.value as string) },
-      };
-      yield [row.key as Uint8Array, doc] as const;
+      yield this.mapIndexRow(row);
     }
   }
 

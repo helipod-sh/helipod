@@ -17,6 +17,8 @@ export interface TableMeta {
   /** The document field this table is sharded by (`schema.ts` `.shardKey(field)`), or null when
    *  unsharded. Null short-circuits every kernel shard guard → zero overhead for unsharded apps. */
   shardKey?: string | null;
+  /** "global" → D1-resident (`.global()`); "shard" → sharded (`shardKey` set); "root" → neither. */
+  mode: "root" | "shard" | "global";
 }
 
 export interface IndexCatalog {
@@ -38,11 +40,13 @@ export class SimpleIndexCatalog implements IndexCatalog {
     documentType?: ValidatorJSON,
     schemaValidation?: boolean,
     shardKey?: string | null,
+    global?: boolean,
   ): this {
     const enabled = schemaValidation !== false;
     const documentValidator =
       enabled && documentType && documentType.type === "object" ? validatorFromJson(documentType) : null;
-    const meta: TableMeta = { name, tableNumber, documentValidator, schemaValidation: enabled, shardKey: shardKey ?? null };
+    const mode: TableMeta["mode"] = global ? "global" : shardKey ? "shard" : "root";
+    const meta: TableMeta = { name, tableNumber, documentValidator, schemaValidation: enabled, shardKey: shardKey ?? null, mode };
     this.tables.set(name, meta);
     this.tablesByNumber.set(tableNumber, meta);
     if (!this.indexesByTable.has(name)) this.indexesByTable.set(name, []);

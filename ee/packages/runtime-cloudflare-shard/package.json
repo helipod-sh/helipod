@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
-    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:workers": "vitest run --config vitest.workers.config.ts && vitest run --config vitest.workers.hash.config.ts",
     "typecheck": "tsc --noEmit --project tsconfig.json",
     "clean": "rm -rf dist .turbo"
   },
@@ -30,6 +30,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.5.40",
     "@cloudflare/workers-types": "^4.20241127.0",
+    "@stackbase/docstore-d1": "workspace:*",
     "@stackbase/executor": "workspace:*",
     "@stackbase/values": "workspace:*",
     "@types/node": "catalog:",

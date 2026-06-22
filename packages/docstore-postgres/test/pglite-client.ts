@@ -1,6 +1,37 @@
 import { PGlite } from "@electric-sql/pglite";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "../src/pg-client";
-import { ADVISORY_LOCK_KEY } from "../src/pg-client";
+import { ADVISORY_LOCK_KEY, STREAM_BATCH_INITIAL, STREAM_BATCH_MAX } from "../src/pg-client";
+
+/**
+ * Encode `$1..$n` placeholders in `sql` as typed SQL literals, substituting `params` positionally.
+ *
+ * `DECLARE ... CURSOR` can't bind `$n` parameters over PGlite/PG's simple query path, so a
+ * streaming query must inline its params as literals before issuing DECLARE. A single pass over
+ * the ORIGINAL `sql` string via a global regex — never an iterative split/join over a growing
+ * output string — because a string literal substituted early (e.g. a dollar-quoted `$$1abc$$`)
+ * would otherwise be re-scanned and corrupted by a later, lower-index substitution.
+ */
+function inlineParams(sql: string, params: readonly PgValue[]): string {
+  return sql.replace(/\$(\d+)/g, (_m, n: string) => literalFor(params[Number(n) - 1]));
+}
+
+function literalFor(value: PgValue | undefined): string {
+  if (value === null || value === undefined) return "NULL";
+  if (value instanceof Uint8Array) {
+    let hex = "";
+    for (const b of value) hex += b.toString(16).padStart(2, "0");
+    return `'\\x${hex}'::bytea`;
+  }
+  if (typeof value === "bigint" || typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "string") {
+    if (value.includes("$$")) {
+      throw new Error("inlineParams: string param contains '$$', cannot dollar-quote safely");
+    }
+    return `$$${value}$$`;
+  }
+  throw new Error("inlineParams: unsupported param type");
+}
 
 /**
  * Test-only PgClient over PGlite (real Postgres in WASM, in-process, single connection).
@@ -17,10 +48,87 @@ import { ADVISORY_LOCK_KEY } from "../src/pg-client";
  */
 export class PgliteClient implements PgClient {
   private readonly pg = new PGlite({ parsers: { 20: (v: string) => BigInt(v) } });
+  /** Monotonic per-instance counter so concurrent `queryStream` callers on this ONE shared
+   *  connection (e.g. a mutation's own read alongside a background driver's sweep — both real in
+   *  `@stackbase/test`'s embedded runtime) never collide on a cursor name. See `queryStream` below. */
+  private cursorSeq = 0;
+  /** Promise-chain mutex serializing `queryStream` calls on the single shared PGlite connection.
+   *  See `queryStream` below for why this — not `WITH HOLD` — is the fix for cursor collisions. */
+  private streamLock: Promise<void> = Promise.resolve();
+
+  private async acquireStreamLock(): Promise<() => void> {
+    const prev = this.streamLock;
+    let release!: () => void;
+    this.streamLock = new Promise((r) => (release = r));
+    await prev;
+    return release;
+  }
 
   async query(text: string, params?: readonly PgValue[]): Promise<PgRow[]> {
     const res = await this.pg.query(text, params as unknown[] | undefined);
     return res.rows as PgRow[];
+  }
+
+  /**
+   * Stream rows via a server-side cursor (`DECLARE`/`FETCH`), batched adaptively — starting at
+   * `STREAM_BATCH_INITIAL` rows per round trip and doubling after each fetch up to
+   * `STREAM_BATCH_MAX` — cheap on an early break, few round trips on a full drain.
+   * `DECLARE ... CURSOR` doesn't support `$n` bind params over the simple protocol, so
+   * `inlineParams` encodes them as typed literals directly into the SQL text first.
+   *
+   * The cursor MUST be non-holdable (lazy, plain `DECLARE ... CURSOR`, no `WITH HOLD`) — a `WITH
+   * HOLD` cursor materializes its ENTIRE result into a tuplestore at COMMIT time, so the query
+   * runs to completion regardless of how few rows the caller actually FETCHes before breaking.
+   * That defeats the whole point of streaming: the executor is supposed to produce only as many
+   * rows as get consumed, so an early `break` after one batch means the remaining range is never
+   * computed. A non-holdable cursor stays lazy — `FETCH 100` then `CLOSE` genuinely stops server
+   * work early — but it only works inside an open transaction, so the transaction must stay open
+   * across the whole FETCH loop instead of being scoped to just the DECLARE.
+   *
+   * PGlite is a single in-process connection — there is only ONE session — so a transaction held
+   * open across an entire generator's lifetime can't tolerate a SECOND, logically independent
+   * `queryStream` call interleaving its own BEGIN/DECLARE/COMMIT on the same session; Postgres has
+   * no real nested transactions. So concurrent `queryStream` calls are serialized with
+   * `streamLock`, a promise-chain mutex: each call fully runs its BEGIN..FETCH-loop..CLOSE..COMMIT
+   * before the next queued call's BEGIN can start. The per-instance unique cursor name (`sbc_<n>`)
+   * remains as defense in depth.
+   *
+   * Scope, stated honestly: `streamLock` serializes STREAMING READS against each other only — it
+   * does NOT guard `query()`/`transaction()` (writes), which share this same PGlite connection and
+   * are NOT routed through the lock. A write interleaved with an open streaming `index_scan` (e.g.
+   * a mutation's `query()` racing a background driver's `queryStream()` sweep) would corrupt the
+   * open cursor's transaction — deliberately not fixed here, because routing `query`/`transaction`
+   * through the lock too risks a deadlock (a consumer that issues a read mid-stream, from inside
+   * the same logical operation that's draining the stream, would block on its own lock). This is a
+   * TEST-SUBSTRATE constraint only, with zero production impact: `NodePgClient` streams over
+   * independent pool/pinned connections (see its own doc comment), `@stackbase/test` defaults to
+   * `SqliteDocStore` (unaffected), and the conformance suite that exercises this client runs
+   * sequentially. The `finally` chain always CLOSEs the cursor, COMMITs (or best-effort no-throws
+   * on cleanup), and releases the lock — including on an early `break`/throw from the consumer (an
+   * async generator's `finally` runs on `.return()` too) — so nothing is leaked and the lock can
+   * never deadlock a legitimate stream-vs-stream sequence.
+   */
+  async *queryStream(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
+    const release = await this.acquireStreamLock();
+    const cursor = `sbc_${++this.cursorSeq}`;
+    try {
+      await this.query("BEGIN");
+      try {
+        await this.query(`DECLARE ${cursor} NO SCROLL CURSOR FOR ${inlineParams(sql, params ?? [])}`);
+        let batch = STREAM_BATCH_INITIAL;
+        for (;;) {
+          const rows = await this.query(`FETCH ${batch} FROM ${cursor}`);
+          if (rows.length === 0) break;
+          for (const r of rows) yield r;
+          batch = Math.min(batch * 2, STREAM_BATCH_MAX);
+        }
+      } finally {
+        await this.query(`CLOSE ${cursor}`).catch(() => {});
+        await this.query("COMMIT").catch(() => {});
+      }
+    } finally {
+      release();
+    }
   }
 
   async transaction<T>(fn: (tx: PgQuerier) => Promise<T>): Promise<T> {

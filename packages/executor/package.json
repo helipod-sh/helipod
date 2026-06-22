@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@stackbase/docstore": "workspace:*",
+    "@stackbase/docstore-d1": "workspace:*",
     "@stackbase/errors": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
     "@stackbase/index-key-codec": "workspace:*",
@@ -31,6 +32,8 @@
   },
   "devDependencies": {
     "@stackbase/docstore-sqlite": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "better-sqlite3": "^11.8.0",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

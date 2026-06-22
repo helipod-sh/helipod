@@ -10,7 +10,7 @@ export type { SeededRandom } from "./seeded-random";
 export { createSeededRandom } from "./seeded-random";
 
 export type { KernelContext, SyscallHandler, SyscallChannel, CollectTrace, PaginateTrace } from "./kernel";
-export { SyscallRouter, InlineSyscallChannel, createKernelRouter, COLLECT_BRAND } from "./kernel";
+export { SyscallRouter, InlineSyscallChannel, createKernelRouter, COLLECT_BRAND, CrossStoreWriteError } from "./kernel";
 
 export type { IndexCatalog, TableMeta } from "./catalog";
 export { SimpleIndexCatalog } from "./catalog";
@@ -31,3 +31,6 @@ export type { LogKind, ExecutionLogEntry, LogFilter, LogSink } from "./log-sink"
 export { InMemoryLogSink, NoopLogSink } from "./log-sink";
 
 export * from "./policy";
+
+export type { GlobalWriteOp } from "./global-txn";
+export { GlobalTxn } from "./global-txn";

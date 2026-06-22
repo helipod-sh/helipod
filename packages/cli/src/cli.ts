@@ -123,7 +123,7 @@ function printHelp(): void {
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
       "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
-      "  deploy     Deploy the app: --target <serve|cloudflare|docker|railway> --env <name> [--dry-run] [--check]",
+      "  deploy     Deploy the app: --target <serve|cloudflare|docker|railway|fly|aws> --env <name> [--dry-run] [--check]",
       "  build      Compile the app to a self-contained executable (bun build --compile)",
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  migrate export --url <src> --out dump.json   Export app data to a portable dump",

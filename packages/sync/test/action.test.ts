@@ -3,9 +3,9 @@ import { SyncProtocolHandler, type SyncUdfExecutor } from "../src/index";
 
 function mkExec(runAction: SyncUdfExecutor["runAction"]): SyncUdfExecutor {
   return {
-    async runQuery(path) { return { value: `user:${path}` as never, tables: ["t"], readRanges: [] }; },
+    async runQuery(path) { return { value: `user:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] }; },
     async runMutation() { return { value: null as never, tables: [], writeRanges: [], commitTs: 1 }; },
-    async runAdminQuery(path) { return { value: `admin:${path}` as never, tables: ["t"], readRanges: [] }; },
+    async runAdminQuery(path) { return { value: `admin:${path}` as never, tables: ["t"], readRanges: [], globalTables: [] }; },
     runAction,
   };
 }

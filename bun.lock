@@ -260,6 +260,7 @@
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.5.40",
         "@cloudflare/workers-types": "^4.20241127.0",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/values": "workspace:*",
         "@types/node": "catalog:",
@@ -636,6 +637,7 @@
         "@stackbase/index-key-codec": "workspace:*",
         "@stackbase/values": "workspace:*",
         "pg": "^8.13.1",
+        "pg-cursor": "^2.21.0",
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
@@ -643,6 +645,7 @@
         "@stackbase/test": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
+        "@types/pg-cursor": "^2.7.2",
         "embedded-postgres": "16.14.0-beta.17",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -679,6 +682,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/errors": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
         "@stackbase/index-key-codec": "workspace:*",
@@ -688,6 +692,8 @@
       },
       "devDependencies": {
         "@stackbase/docstore-sqlite": "workspace:*",
+        "@types/better-sqlite3": "^7.6.12",
+        "better-sqlite3": "^11.8.0",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
@@ -795,6 +801,7 @@
         "@stackbase/cli": "workspace:*",
         "@stackbase/component": "workspace:*",
         "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/docstore-do-sqlite": "workspace:*",
         "@stackbase/docstore-sqlite": "workspace:*",
         "@stackbase/executor": "workspace:*",
@@ -822,6 +829,7 @@
       "dependencies": {
         "@stackbase/component": "workspace:*",
         "@stackbase/docstore": "workspace:*",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/errors": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/id-codec": "workspace:*",
@@ -833,6 +841,8 @@
       },
       "devDependencies": {
         "@stackbase/docstore-sqlite": "workspace:*",
+        "@types/better-sqlite3": "^7.6.12",
+        "better-sqlite3": "^11.8.0",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
@@ -1426,6 +1436,8 @@
 
     "@types/pg": ["@types/pg@8.20.0", "", { "dependencies": { "@types/node": "*", "pg-protocol": "*", "pg-types": "^2.2.0" } }, "sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow=="],
 
+    "@types/pg-cursor": ["@types/pg-cursor@2.7.2", "", { "dependencies": { "@types/node": "*", "@types/pg": "*" } }, "sha512-m3xT8bVFCvx98LuzbvXyuCdT/Hjdd/v8ml4jL4K1QF70Y8clOfCFdgoaEB1FWdcSwcpoFYZTJQaMD9/GQ27efQ=="],
+
     "@types/prop-types": ["@types/prop-types@15.7.15", "", {}, "sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw=="],
 
     "@types/react": ["@types/react@18.3.31", "", { "dependencies": { "@types/prop-types": "*", "csstype": "^3.2.2" } }, "sha512-vfEqpXTvwT91yhmwdfouStN2hSKwTvyRs8qpLfADyrq/kxDw0hZM7Wk9Ug1FELj8hIby+S/+kQCSRFF32nv2Qw=="],
@@ -1797,6 +1809,8 @@
     "pg-cloudflare": ["pg-cloudflare@1.4.0", "", {}, "sha512-Vo7z/6rrQYxpNRylp4Tlob2elzbh+N/MOQbxFVWCxS7oEx6jF53GTJFxK2WWpKuBRkmiin4Mt+xofFDjx09R0A=="],
 
     "pg-connection-string": ["pg-connection-string@2.14.0", "", {}, "sha512-XwWDGcLRGCXAR8F/AM5bG7Q+A3Wm2s6QeEjlOKZLlH3UYcguiqCWKyWXVag5TLTIjR7oOJUY8kcADaZgWPyLeg=="],
+
+    "pg-cursor": ["pg-cursor@2.21.0", "", { "peerDependencies": { "pg": "^8" } }, "sha512-IYvk/j+Suhtbo/C3uOf4JLsLK/gWxOTUOmYbDsbKnLaVJDq+KwhwK6ngpRfiCk8eDMS3AmGQABZCv0cREEzHQw=="],
 
     "pg-int8": ["pg-int8@1.0.1", "", {}, "sha512-WCtabS6t3c8SkpDBUlb1kjOs7l66xsGdKpIPZsg4wR+B3+u9UAum2odSsF9tnvxg80h4ZxLWMy4pRjOsFIqQpw=="],
 

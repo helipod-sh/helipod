@@ -9,15 +9,23 @@
       { "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDO" },
       { "name": "SQL_PROBE", "class_name": "SqlProbeDO" },
       { "name": "AUDIT_DO", "class_name": "AuditDO" },
-      { "name": "STORAGE_DO", "class_name": "StorageDO" }
+      { "name": "STORAGE_DO", "class_name": "StorageDO" },
+      { "name": "GLOBAL_D1_DO", "class_name": "GlobalD1DO" },
+      { "name": "GLOBAL_REACTIVITY_DO", "class_name": "GlobalReactivityDO" }
     ]
   },
   // The R2 bucket bound to the file-storage fixture DO (`StorageDO` reads `env.STORAGE_BUCKET`).
   // vitest-pool-workers/miniflare provides an in-memory R2 emulation, so no real bucket is needed.
   "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "stackbase-test-bucket" }],
+  // The D1 database bound to the `.global()`-table fixture DO (`GlobalD1DO` reads `env.DB`).
+  // vitest-pool-workers/miniflare provides a REAL local D1 (workerd's actual SQLite dialect) — the
+  // `database_id` is a placeholder UUID (no real Cloudflare account needed for local/test D1).
+  "d1_databases": [{ "binding": "DB", "database_name": "stackbase-test-global-db", "database_id": "00000000-0000-0000-0000-000000000001" }],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO", "SqlProbeDO"] },
     { "tag": "v2", "new_sqlite_classes": ["AuditDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["StorageDO"] }
+    { "tag": "v3", "new_sqlite_classes": ["StorageDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["GlobalD1DO"] },
+    { "tag": "v5", "new_sqlite_classes": ["GlobalReactivityDO"] }
   ]
 }

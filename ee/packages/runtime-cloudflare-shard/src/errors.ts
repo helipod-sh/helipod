@@ -25,10 +25,36 @@ export const CROSS_SHARD_UNSUPPORTED = "CROSS_SHARD_UNSUPPORTED";
  *  name the fix, exactly the same discipline the shard guards use. */
 export const INVALID_REGION_HINT = "INVALID_REGION_HINT";
 
+/** A `fanOut` request hit a deployment with no enumerable shard set — routing mode "key" (the
+ *  default) addresses a new DO per key value with no directory, and Cloudflare has no DO-listing API,
+ *  so "all shards" is undefined. fanOut requires a fixed-shard-count deployment (mode "hash"). */
+export const FANOUT_REQUIRES_FIXED_SHARDS = "FANOUT_REQUIRES_FIXED_SHARDS";
+
+/** A request asked to `fanOut` AND named a shard key. You either target one shard (a shard key) OR
+ *  fan out across all shards, never both. */
+export const FANOUT_WITH_SHARD_KEY = "FANOUT_WITH_SHARD_KEY";
+
+/** A `fanOut` was requested on the WebSocket `/api/sync` upgrade. fanOut is a non-reactive one-shot
+ *  read (fanning invalidation across every shard reactively is out of scope) — it works only over
+ *  the one-shot `POST /api/run` path. */
+export const FANOUT_NOT_SUBSCRIBABLE = "FANOUT_NOT_SUBSCRIBABLE";
+
+/** A `fanOut` request's target is not a resolved `query` — a mutation (sharded or not), an action,
+ *  or a function whose type could not be classified at all (no `loaded` module set at resolve time,
+ *  an unparseable/non-`POST /api/run` request, or an unknown `path`). fanOut is READ-ONLY: fanning a
+ *  mutation or action out to every shard-DO would multiply ONE logical write into N commits/side
+ *  effects, one per shard. An unclassifiable target fails CLOSED under this same code — a request
+ *  that cannot be PROVEN to name a query is never fanned out on the assumption that it might be one. */
+export const FANOUT_NOT_A_QUERY = "FANOUT_NOT_A_QUERY";
+
 export type ShardRoutingErrorCode =
   | typeof SHARD_KEY_REQUIRED
   | typeof CROSS_SHARD_UNSUPPORTED
-  | typeof INVALID_REGION_HINT;
+  | typeof INVALID_REGION_HINT
+  | typeof FANOUT_REQUIRES_FIXED_SHARDS
+  | typeof FANOUT_WITH_SHARD_KEY
+  | typeof FANOUT_NOT_SUBSCRIBABLE
+  | typeof FANOUT_NOT_A_QUERY;
 
 export interface ShardRoutingErrorBody {
   error: { code: ShardRoutingErrorCode; message: string };

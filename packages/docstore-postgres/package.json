@@ -25,11 +25,12 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "pg": "^8.13.1",
     "@stackbase/docstore": "workspace:*",
-    "@stackbase/values": "workspace:*",
     "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*"
+    "@stackbase/index-key-codec": "workspace:*",
+    "@stackbase/values": "workspace:*",
+    "pg": "^8.13.1",
+    "pg-cursor": "^2.21.0"
   },
   "devDependencies": {
     "@stackbase/test": "workspace:*",
@@ -37,6 +38,7 @@
     "@electric-sql/pglite": "^0.2.17",
     "embedded-postgres": "16.14.0-beta.17",
     "@types/pg": "^8.11.10",
+    "@types/pg-cursor": "^2.7.2",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

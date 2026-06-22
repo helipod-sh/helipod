@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
+import { NodePgClient, BunSqlClient, PostgresDocStore, type PgClient } from "@stackbase/docstore-postgres";
 import type { DocStore } from "@stackbase/docstore";
 import {
   createEmbeddedRuntime,
@@ -49,9 +49,20 @@ export function isPostgresUrl(s: string | undefined): boolean {
   return !!s && /^postgres(ql)?:\/\//.test(s);
 }
 
+/**
+ * Build the `PgClient` for a postgres `--database-url`/`STACKBASE_DATABASE_URL`. Under the Bun
+ * runtime (the single-binary/`serve` production runtime) uses `BunSqlClient` — native `Bun.SQL`,
+ * ~10-17% faster than the `pg` driver; under Node (or any non-Bun host) falls back to `NodePgClient`.
+ * Both implement the same `PgClient` seam, so `PostgresDocStore` and everything downstream is
+ * unaffected by which one gets picked.
+ */
+export function makePgClient(connectionString: string): PgClient {
+  return detectRuntime() === "bun" ? new BunSqlClient({ connectionString }) : new NodePgClient({ connectionString });
+}
+
 export function makeStore(opts: { dataPath: string; databaseUrl?: string }): DocStore {
   if (isPostgresUrl(opts.databaseUrl)) {
-    return new PostgresDocStore(new NodePgClient({ connectionString: opts.databaseUrl! }));
+    return new PostgresDocStore(makePgClient(opts.databaseUrl!));
   }
   mkdirSync(dirname(resolve(opts.dataPath)), { recursive: true });
   const adapter =

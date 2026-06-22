@@ -45,6 +45,9 @@ export function createShardWorkerHandler(bindingName: string, opts: ShardRouting
       if (resolution.kind === "error") {
         return json(resolution.status, resolution.body);
       }
+      if (resolution.kind === "fanout") {
+        return fanOut(ns, resolution.shardIds, request);
+      }
       const id = ns.idFromName(resolution.name);
       // Place a NEWLY-created shard-DO near its audience (source a/b/c). Only the FIRST `get()` for this
       // id honors the hint — a DO is single-homed and pinned thereafter — so the router derives the SAME
@@ -62,5 +65,93 @@ function json(status: number, value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+/** Bounded-concurrency in-flight cap on the fan-out pool (§ below) — a fixed, deliberately small
+ *  ceiling so a wide `numShards` deployment can't open hundreds of simultaneous subrequests from one
+ *  Worker invocation. */
+const FANOUT_CONCURRENCY = 8;
+/** Per-shard fetch timeout — a single slow/hung shard-DO must not hang the whole fan-out; it is
+ *  recorded as a failed shard instead (failures-as-data, never a thrown fan-out failure). */
+const FANOUT_SHARD_TIMEOUT_MS = 10_000;
+
+/**
+ * Fan `request` out to every DO named in `shardIds`, concatenate each shard's `{ value: [...] }`
+ * array, and return ONE merged `Response`. A shard that throws, times out, responds non-200, or
+ * returns a non-array `value` becomes a `failedShard` entry — failures-as-data, never a thrown
+ * fan-out failure — so a slow or broken shard degrades the result instead of failing the whole read.
+ *
+ * Concurrency is bounded by a simple index-cursor worker pool (`FANOUT_CONCURRENCY` workers each
+ * pulling the next `shardIds` index) rather than `Promise.all`-ing every shard at once, so the number
+ * of simultaneously in-flight subrequests is capped regardless of `shardIds.length`.
+ *
+ * v1 concat: no global result limit is applied here. Each shard already applies its own query's
+ * `.take(n)` inside its own engine (the fanned-out request is byte-identical per shard), so the
+ * concatenation is naturally capped at `shardIds.length * n`. A caller that needs a hard GLOBAL cap
+ * slices the returned `value` client-side; threading a `?fanoutLimit=` router param is left for a
+ * later slice if this proves insufficient in practice.
+ *
+ * Status (I1): a PARTIAL failure (some shards ok, some failed) stays 200 with `value`/`partial` —
+ * failures-as-data is the intended contract for a degraded-but-usable result. But when EVERY shard
+ * failed (e.g. an invalid bearer token 401s every shard, or the whole cluster is down), `value` would
+ * otherwise be `[]` with status 200 — indistinguishable from a genuinely empty table to a caller that
+ * doesn't inspect `partial`. A TOTAL failure instead returns 502, with `partial.failedShards` still in
+ * the body so the caller can see which shards failed and why.
+ */
+async function fanOut(ns: DurableObjectNamespaceLike, shardIds: string[], request: Request): Promise<Response> {
+  const value: unknown[] = [];
+  const failedShards: Array<{ shardId: string; error: string }> = [];
+
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = cursor++;
+      if (i >= shardIds.length) return;
+      const shardId = shardIds[i]!;
+      try {
+        const stub = ns.get(ns.idFromName(shardId));
+        const res = await withTimeout(stub.fetch(request.clone()), FANOUT_SHARD_TIMEOUT_MS);
+        if (!res.ok) {
+          failedShards.push({ shardId, error: `shard responded ${res.status}` });
+          continue;
+        }
+        const body = (await res.json()) as { value?: unknown };
+        if (!Array.isArray(body.value)) {
+          failedShards.push({
+            shardId,
+            error: "shard result is not an array (fanOut requires a query returning a list)",
+          });
+          continue;
+        }
+        value.push(...body.value);
+      } catch (e) {
+        failedShards.push({ shardId, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(FANOUT_CONCURRENCY, shardIds.length) }, () => worker()));
+
+  // Total failure (every shard failed) must not look like a successful empty read — see the I1 note
+  // above. `shardIds.length > 0` guards a degenerate empty shard set from spuriously counting as
+  // "all failed" (0 === 0).
+  const allShardsFailed = shardIds.length > 0 && failedShards.length === shardIds.length;
+  return json(allShardsFailed ? 502 : 200, failedShards.length ? { value, partial: { failedShards } } : { value });
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`shard fetch timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
   });
 }

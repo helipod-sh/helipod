@@ -13,7 +13,9 @@ import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
 import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
 import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
 import { ArgumentValidationError } from "@stackbase/errors";
+import type { D1DocStore } from "@stackbase/docstore-d1";
 import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type PaginateTrace, type SyscallRouter } from "./kernel";
+import { GlobalTxn, type GlobalWriteOp } from "./global-txn";
 import { profileFor } from "./profile";
 import { createSeededRandom } from "./seeded-random";
 import { GuestDatabaseReader, GuestDatabaseWriter, type FunctionReference } from "./guest";
@@ -103,6 +105,15 @@ export interface ExecutorDeps {
    * primary pair, byte-identical to before this seam existed.
    */
   queryPath?: { transactor: Transactor; queryRuntime: QueryRuntime };
+  /**
+   * M2b: the D1 store for `.global()` tables (pre-built, handed in by the boot layer). A fresh
+   * `GlobalTxn` over this store is built per transaction attempt inside `run()`'s
+   * `runInTransaction` callback (see there). Absent → a `.global()` op fails fast in the kernel
+   * (`requireGlobalTxn`); every other path is byte-identical to before this field existed. NOT
+   * `DocStore`-shaped and never enters the transactor — its writes are flushed as one atomic
+   * `commitBatch` AFTER the MVCC transaction resolves, not staged into `ctx.txn`.
+   */
+  globalStore?: D1DocStore;
 }
 
 export interface ComponentContext {
@@ -287,6 +298,12 @@ export interface UdfResult<T = unknown> {
   commitTs: bigint;
   /** Read set (for the sync tier to subscribe on). */
   readRanges: KeyRange[];
+  /**
+   * M2c: the `.global()` (D1) tables this run READ, for the version-poll invalidation match — a
+   * parallel channel to `readRanges` since a `.global()` table has no local key range at all.
+   * Absent for actions; empty for a run that touched no `.global()` table.
+   */
+  globalTables?: string[];
   /** Write delta (for mutations); null for pure reads. */
   oplog: OplogDelta | null;
   /**
@@ -525,6 +542,7 @@ export class InlineUdfExecutor {
             committed: false,
             commitTs: fwd.replay.commitTs !== undefined ? BigInt(fwd.replay.commitTs) : 0n,
             readRanges: [],
+            globalTables: [],
             oplog: null,
             clientReplay: fwd.replay,
           };
@@ -535,6 +553,7 @@ export class InlineUdfExecutor {
           committed: true,
           commitTs: fwd.commitTs !== undefined ? BigInt(fwd.commitTs) : 0n,
           readRanges: [],
+          globalTables: [],
           oplog: null,
         };
       } catch (e) {
@@ -555,6 +574,13 @@ export class InlineUdfExecutor {
 
     try {
       const commit = await txPath.transactor.runInTransaction(async (txn) => {
+        // M2b: a fresh `GlobalTxn` (and co-write guard flag) built PER ATTEMPT, inside this
+        // callback — `runInTransaction` may retry this callback on OCC conflict (deterministic
+        // replay), and each attempt must stage its `.global()` writes independently so a retried
+        // attempt never flushes ops staged by an earlier, abandoned attempt. Undefined when no D1
+        // store is configured, so every `.global()` op fails fast in the kernel.
+        const globalTxn = this.deps.globalStore ? new GlobalTxn(this.deps.globalStore) : undefined;
+        const writeStores = { local: false, global: false };
         // Base context: NO policy enforcement. Used for the facade readers and the rule-context's own
         // db reader, so a policy's internal reads are never themselves re-gated (no re-entrancy).
         const baseKctx: KernelContext = {
@@ -575,6 +601,8 @@ export class InlineUdfExecutor {
           shardId,
           numShards,
           shardDeclared,
+          globalTxn,
+          writeStores,
         };
 
         const reserved = new Set(["db", "random", "now"]);
@@ -618,7 +646,11 @@ export class InlineUdfExecutor {
         // (a floating `.collect()` whose result the handler discarded) are still captured — see the
         // drain below and `KernelContext.inflight`.
         const inflight = fn.type === "query" ? new Set<Promise<string>>() : undefined;
-        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight };
+        // M2c: arm for BOTH query and mutation contexts (unlike collectTrace/paginateTrace, which
+        // are query-only) — a mutation's own .global() reads need to feed globalTables too, even
+        // though the write already invalidates via the version-bump path.
+        const globalReads = fn.type === "query" || fn.type === "mutation" ? new Set<string>() : undefined;
+        const kctx: KernelContext = { ...baseKctx, policyRegistry: options.policyRegistry ?? new Map(), getRuleContext, relationRegistry: options.relationRegistry ?? baseKctx.relationRegistry, collectTrace, paginateTrace, inflight, globalReads };
         const channel = new InlineSyscallChannel(this.router, kctx);
         const db = fn.type === "query" ? new GuestDatabaseReader(channel) : new GuestDatabaseWriter(channel);
         guestCtx.db = db;
@@ -634,8 +666,33 @@ export class InlineUdfExecutor {
             for (const p of pending) inflight.delete(p);
           }
         }
-        return { value: value as T, logs: kctx.logs, readRanges: txn.reads.toArray(), collectTrace: kctx.collectTrace, paginateTrace: kctx.paginateTrace };
+        return {
+          value: value as T,
+          logs: kctx.logs,
+          readRanges: txn.reads.toArray(),
+          globalTables: kctx.globalReads ? [...kctx.globalReads] : [],
+          collectTrace: kctx.collectTrace,
+          paginateTrace: kctx.paginateTrace,
+          // M2b: surface this ATTEMPT's staged global ops so the executor can flush them as one
+          // atomic D1 batch AFTER the transaction resolves. `commit.value` below is exactly this
+          // object as returned by the SUCCESSFUL (final, post-retry) attempt — `runInTransaction`
+          // discards a failed attempt's return value entirely (it throws instead), so there is no
+          // risk of flushing a stale/abandoned attempt's ops.
+          globalOps: globalTxn?.hasWrites() ? globalTxn.ops : undefined,
+        };
       }, { shardId, commitMeta: options.commitMeta, origin: options.origin });
+      // M2b: flush buffered `.global()` writes as ONE atomic D1 batch. Sequenced AFTER the MVCC
+      // transaction resolves (so a callback throw — which rejects `runInTransaction` before ever
+      // returning — never reaches here, leaving D1 untouched); for a global-only mutation the MVCC
+      // commit wrote nothing (empty staged set), so this batch IS the mutation's durable effect. A
+      // throw here fails the whole run (the handler's return value is discarded below) — abort-safe.
+      // Placed BEFORE the `CommitThenThrow` check so a persist-then-throw mutation's global writes
+      // are flushed the same as its local writes. The co-write guard (kernel.ts) guarantees a single
+      // mutation never stages both non-empty local writes AND global ops, so this never races/
+      // duplicates a local commit's own effect.
+      if (commit.value.globalOps && commit.value.globalOps.length > 0) {
+        await this.deps.globalStore!.commitBatch(commit.value.globalOps as GlobalWriteOp[]);
+      }
       // A mutation may return CommitThenThrow to persist its writes (e.g. a failed-attempt
       // counter) while still surfacing an error to the caller. The transaction is already
       // committed at this point, so throwing here is safe.
@@ -660,6 +717,7 @@ export class InlineUdfExecutor {
         committed: commit.committed,
         commitTs: commit.commitTs,
         readRanges: commit.value.readRanges,
+        globalTables: commit.value.globalTables ?? [],
         oplog: commit.oplog,
         ...(diffableRange ? { diffableRange } : {}),
         ...(diffablePage ? { diffablePage } : {}),
@@ -716,7 +774,7 @@ export class InlineUdfExecutor {
     try {
       const value = await fn.handler(actionCtx, args);
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "ok" });
-      return { value: value as T, logs: [], committed: false, commitTs: maxCommitTs, readRanges: [], oplog: null };
+      return { value: value as T, logs: [], committed: false, commitTs: maxCommitTs, readRanges: [], globalTables: [], oplog: null };
     } catch (e) {
       this.deps.logSink?.push({ path: options.path ?? "<anonymous>", kind: logKind, ts: startedAt, durationMs: clock() - startedAt, status: "error", error: String(e) });
       throw e;

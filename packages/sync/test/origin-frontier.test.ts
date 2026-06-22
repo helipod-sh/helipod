@@ -48,13 +48,13 @@ function mkExec(opts: {
       if (opts.beforeRunQuery) await opts.beforeRunQuery();
       const value = (opts.queryValue?.() ?? "v") as never;
       opts.onRunQueryEnd?.();
-      return { value, tables: opts.queryTables ?? ["t"], readRanges: opts.queryRanges ?? [] };
+      return { value, tables: opts.queryTables ?? ["t"], readRanges: opts.queryRanges ?? [], globalTables: [] };
     },
     async runMutation() {
       return { value: "ok" as never, tables: [], writeRanges: [], commitTs: 0 };
     },
     async runAdminQuery() {
-      return { value: "admin" as never, tables: ["t"], readRanges: [] };
+      return { value: "admin" as never, tables: ["t"], readRanges: [], globalTables: [] };
     },
     async runAction() {
       return { value: "acted" as never };
