@@ -16,7 +16,7 @@
  *      to a query routed to roomB's DO (physical isolation across shards, not a leak)
  *   3. a shard-scoped WebSocket on roomR gets a reactive push for a roomR commit, and is NOT woken by
  *      a commit on another shard (reactivity does not cross the DO boundary)
- *   4. a cross-shard fan-out is REJECTED with the typed CROSS_SHARD_UNSUPPORTED (no partial data)
+ *   4. a cross-shard fan-out is REJECTED with the typed FANOUT_REQUIRES_FIXED_SHARDS (no partial data)
  *   5. MEASURE aggregate write throughput across shards (concurrent commits to distinct keys)
  *
  * Requires `ws` (already a repo devDep). Run from this dir with node ≥18.
@@ -115,10 +115,13 @@ async function main() {
     body: JSON.stringify({ path: "messages:list", args: { roomId: roomA } }),
   });
   const fanBody = await fan.json();
-  if (fan.status !== 400 || fanBody?.error?.code !== "CROSS_SHARD_UNSUPPORTED") {
+  // Post-M2d: a `?fanout=1` on a mode-"key" deployment (one DO per key, no enumerable shard set) is
+  // rejected with the precise FANOUT_REQUIRES_FIXED_SHARDS — fanOut needs a fixed-shard-count ("hash")
+  // deployment. (Pre-M2d this was the blanket CROSS_SHARD_UNSUPPORTED.)
+  if (fan.status !== 400 || fanBody?.error?.code !== "FANOUT_REQUIRES_FIXED_SHARDS") {
     throw new Error(`cross-shard fan-out not rejected as expected: ${fan.status} ${JSON.stringify(fanBody)}`);
   }
-  console.log("✓ cross-shard fan-out rejected with CROSS_SHARD_UNSUPPORTED (no partial data)");
+  console.log("✓ cross-shard fan-out rejected with FANOUT_REQUIRES_FIXED_SHARDS (no partial data)");
 
   // 5. aggregate throughput across shards (concurrent commits to distinct keys → distinct DOs)
   const N = 20;
