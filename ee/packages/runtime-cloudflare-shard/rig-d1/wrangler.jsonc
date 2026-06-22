@@ -1,0 +1,25 @@
+{
+  // Deploy config for the REAL-Cloudflare multi-shard + `.global()`/D1 E2E (human-run). ONE shard-DO
+  // class addressed by shard-key name, PLUS a shared D1 database (`env.DB`) that every shard-DO binds
+  // for `.global()` tables. `nodejs_compat` for the handler's node:crypto fingerprint; a
+  // `new_sqlite_classes` migration for the DO-SQLite storage. The D1 `.global()` tables/indexes are
+  // auto-created on first DO boot — no D1 migration here.
+  "name": "stackbase-do-shard-d1-fixture",
+  "main": "fixture/worker.ts",
+  "compatibility_date": "2024-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
+  },
+  // The shared D1 database the `.global()` `counters` table lives in. Provision once with
+  // `wrangler d1 create stackbase-shard-d1` and paste the real `database_id` below (the DB is shared
+  // across ALL shard-DOs — that shared-ness is exactly what the E2E proves).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "stackbase-shard-d1",
+      "database_id": "8915387b-dfda-4ecd-a419-efc016c7113d"
+    }
+  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StackbaseDO"] }]
+}

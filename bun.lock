@@ -260,6 +260,7 @@
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.5.40",
         "@cloudflare/workers-types": "^4.20241127.0",
+        "@stackbase/docstore-d1": "workspace:*",
         "@stackbase/executor": "workspace:*",
         "@stackbase/values": "workspace:*",
         "@types/node": "catalog:",
