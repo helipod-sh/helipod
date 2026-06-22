@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-06-06
+
+**Cloudflare deployment tier — validated on real Cloudflare.** Stackbase now runs
+natively on Cloudflare's Durable-Object platform, from a single global DO up to a
+multi-shard fleet with a shared global table in D1. The tier was built as a seam
+(the engine never learns it's on Cloudflare) across the preceding week; this
+release is the point at which all three tiers were **deployed to and proven on
+real Cloudflare**, not just the local `workerd`/miniflare emulator.
+
+### Added
+
+- **Durable-Object-native host** (`@stackbase/runtime-cloudflare`). A `StackbaseDurableObject` co-locates the single-writer transactor, storage, WebSockets, and the subscription index in one DO. Storage is `@stackbase/docstore-do-sqlite` (`DoSqliteAdapter` over `ctx.storage.sql`, full docstore-conformance parity); file storage is `@stackbase/blobstore-r2` (a Workers-safe R2 `BlobStore`, wired into `ctx.storage`). A `RuntimeHost` seam extracted the serve/single-writer/wake/storage responsibilities out of the CLI with zero behavior change, so the same engine hosts on a process or a DO. Includes a portable⇄DO-native data-migration tool (dump codec + admin endpoints + CLI).
+- **Multi-shard writers** (`@stackbase/runtime-cloudflare-shard`, EE). `.shardBy(key)` routes each key to its own DO (one single-threaded writer + 10 GB DO-SQLite each) via a stateless router — `"key"` mode (one DO per key value) or `"hash"` mode (fixed-N jump-hash). Geographic `locationHint` placement. Write throughput and storage both scale with the number of active shard keys.
+- **Global tables in Cloudflare D1** (`@stackbase/docstore-d1` + `.global()` schema mode). A `.global()` table lives in one shared D1 database, readable and writable from every shard-DO — write-through with read-your-own-writes, an additive-only unique-index gate, and a co-write guard (a single mutation cannot write both a sharded and a global table). Global reactivity is poll-based (an alarm-driven poller over a `_global_versions` counter); a push/CDC upgrade is deferred.
+- **Cross-shard `fanOut` reads** (M2d). An opt-in, non-reactive, HTTP-only query (`POST /api/run?fanout=1`) that reads a sharded table across every shard of a fixed-shard-count (`"hash"`) deployment and concatenates the results, with bounded concurrency, a per-shard timeout, and failures-as-data (`partial.failedShards`). Read-only by construction: a mutation or action sent to the fan-out is rejected (`FANOUT_NOT_A_QUERY`), and a total-failure fan-out returns 502 rather than masking auth/outage as an empty result.
+- **Turnkey `cloudflare` deploy target** (`stackbase deploy --target cloudflare`). Reconciles `wrangler.jsonc` bindings (DO + `new_sqlite_classes` migration + `nodejs_compat`, optional R2) and shells `wrangler deploy`; never bundles a provider SDK.
+
+### Validated
+
+- **All three Cloudflare tiers proven on a real deployment** (not the emulator), each via a committed deploy rig + E2E:
+  - **Single-DO host** — in-CF write latency **155.7 ms** (vs ≈1500 ms for the container→R2 WAN path), reactive push across a real DO, real-R2 file storage with `Range` support, persistence across requests.
+  - **Multi-shard scale-out** — shard isolation, shard-scoped reactivity (no cross-shard wake), and **20 concurrent commits to 20 distinct shard-DOs in ~1.4 s**.
+  - **Multi-shard + `.global()`/D1 composed** (a first) — a `.global()` row written through one shard-DO is read back through another (shared D1, read-your-writes across shards), and the D1 unique index is enforced across shard boundaries. New rig at `ee/packages/runtime-cloudflare-shard/rig-d1/`.
+
+### Fixed
+
+- **`fanOut` read-only enforcement** — the guard now permits only `query` functions to fan out and fails closed when a function's type can't be classified, closing a hole where a non-sharded mutation or an action sent with `?fanout=1` would have been committed on every shard (N-way write/side-effect amplification).
+- **Shard deploy-E2E assertion** — the multi-shard rig's E2E expected the pre-M2d `CROSS_SHARD_UNSUPPORTED`; a mode-`"key"` `?fanout=1` now correctly returns `FANOUT_REQUIRES_FIXED_SHARDS` (caught by the first real-Cloudflare run of the rig).
+
 ## [1.5.0] — 2026-05-15
 
 Authentication hardening and notification delivery. `@stackbase/auth` gains TOTP
