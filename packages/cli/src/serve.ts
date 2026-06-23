@@ -5,7 +5,7 @@
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
+import { PostgresDocStore } from "@stackbase/docstore-postgres";
 import type { DevServer } from "./server";
 import { ProcessRuntimeHost } from "./server";
 import {
@@ -15,6 +15,7 @@ import {
   loadDashboard,
   resolveNumShards,
   parseNumShards,
+  makePgClient,
 } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import { httpWakeHost } from "./wake-host";
@@ -257,8 +258,9 @@ function parseLeaseTtlMs(raw: string | undefined): number | undefined {
  * Shards B2a (T5): resolve (and, on a fresh deployment, persist) NUM_SHARDS BEFORE
  * `prepareFleetNode` runs — it needs the final count up front to size the per-shard
  * commit-connection pool, well before `bootProject`'s `createEmbeddedRuntime` ever calls
- * `setupSchema()` on the real runtime store. Opens its own short-lived `NodePgClient` (no commit
- * pool — this is a one-shot KV read/maybe-write, not a shard writer) against the SAME database
+ * `setupSchema()` on the real runtime store. Opens its own short-lived PgClient (via `makePgClient` —
+ * `BunSqlClient` under Bun, `NodePgClient` elsewhere; no commit pool — this is a one-shot KV
+ * read/maybe-write, not a shard writer) against the SAME database
  * `--database-url`/`STACKBASE_DATABASE_URL` names, runs `setupSchema()` (idempotent DDL only —
  * `readOnly: true` skips just the writer-lock/ts-seq seeding, not the DDL, so `persistence_globals`
  * is guaranteed to exist afterward even on a brand-new database) and delegates to the shared
@@ -267,7 +269,7 @@ function parseLeaseTtlMs(raw: string | undefined): number | undefined {
  * `writeGlobalIfAbsent` are plain KV ops, not gated by the store's read-only flag.
  */
 async function resolveFleetNumShards(databaseUrl: string, envValue: number | undefined): Promise<number> {
-  const client = new NodePgClient({ connectionString: databaseUrl });
+  const client = makePgClient(databaseUrl);
   try {
     const probe = new PostgresDocStore(client, { readOnly: true });
     await probe.setupSchema();

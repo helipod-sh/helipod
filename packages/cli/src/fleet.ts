@@ -5,8 +5,7 @@
  * `@stackbase/fleet` — it's loaded only via dynamic `import()`, mirroring `serve --fleet`'s gate
  * (`serve.ts`'s `fleetSpecifier`/`FLEET_ERR_NO_PACKAGE`).
  */
-import { NodePgClient } from "@stackbase/docstore-postgres";
-import { isPostgresUrl } from "./boot";
+import { isPostgresUrl, makePgClient } from "./boot";
 
 /** The slice of `@stackbase/fleet`'s reshard surface `fleetCommand` consumes (via dynamic import).
  *  Declared locally (structural, not imported) for the same reason `serve.ts`'s `FleetModule` is —
@@ -65,7 +64,8 @@ export function parseReshardArgs(args: string[]): { ok: true; args: ReshardArgs 
 }
 
 /** `fleet reshard --shards M --database-url <pg>`: dynamically import `@stackbase/fleet`, open a
- *  short-lived `NodePgClient`, run `reshardFleet`, and print a clear result. Returns the process exit
+ *  short-lived PgClient (via `makePgClient` — `BunSqlClient` under Bun, `NodePgClient` elsewhere),
+ *  run `reshardFleet`, and print a clear result. Returns the process exit
  *  code (0 on success, 1 on any validation/refusal/error). */
 async function reshardCommand(args: string[]): Promise<number> {
   const parsed = parseReshardArgs(args);
@@ -86,7 +86,7 @@ async function reshardCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  const client = new NodePgClient({ connectionString: databaseUrl });
+  const client = makePgClient(databaseUrl);
   try {
     const result = await fleetModule.reshardFleet(client, { targetShards });
     process.stdout.write(
