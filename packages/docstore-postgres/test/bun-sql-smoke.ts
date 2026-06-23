@@ -17,7 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { PostgresDocStore } from "../src/postgres-docstore";
-import { BunSqlClient } from "../src/bun-sql-client";
+import { BunSqlClient, STREAM_POOL_MAX } from "../src/bun-sql-client";
 import { NodePgClient } from "../src/node-pg-client";
 import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
 import { encodeIndexKey } from "@stackbase/index-key-codec";
@@ -303,6 +303,201 @@ async function testCloseWhileStreaming(): Promise<void> {
   ok(`close-while-streaming: close() returned in ${closeElapsedMs}ms (< ${closeTimeoutMs}ms) despite an abandoned, undrained queryStream`);
 }
 
+// ── stream pool: more concurrent queryStreams than STREAM_POOL_MAX all complete correctly, and
+//    the number of DISTINCT reserved connections built never exceeds STREAM_POOL_MAX ─────────────
+async function testStreamPoolBounded(): Promise<void> {
+  const STREAM_TABLE = 20004;
+  const client = new BunSqlClient({ connectionString: URL });
+  const store = new PostgresDocStore(client);
+  await store.setupSchema();
+
+  const N = 50; // enough rows per stream that several FETCH round trips overlap across callers
+  for (let i = 0; i < N; i++) {
+    const id = newDocumentId(STREAM_TABLE);
+    await store.write([rev(id, BigInt(3000 + i), null, `p${i}`)], [], "Error");
+  }
+  const sql = `SELECT internal_id, ts, value FROM documents WHERE table_id = $1 ORDER BY ts ASC`;
+  const params = [encodeStorageTableId(STREAM_TABLE)];
+
+  const CONCURRENT = STREAM_POOL_MAX * 2; // more concurrent callers than pool slots
+  let maxTotalSeen = 0;
+  const sampler = setInterval(() => {
+    maxTotalSeen = Math.max(maxTotalSeen, client.streamPoolStats.total);
+  }, 2);
+
+  const counts = await Promise.all(
+    Array.from({ length: CONCURRENT }, async () => {
+      let n = 0;
+      for await (const _row of client.queryStream!(sql, params)) n++;
+      return n;
+    }),
+  );
+
+  clearInterval(sampler);
+
+  assert.ok(counts.every((n) => n === N), `every one of ${CONCURRENT} concurrent queryStreams must see all ${N} rows`);
+  assert.ok(maxTotalSeen >= 1, "sanity: the sampler must have observed at least one live pool reservation");
+  assert.ok(
+    maxTotalSeen <= STREAM_POOL_MAX,
+    `pool must never build more than STREAM_POOL_MAX=${STREAM_POOL_MAX} distinct reservations, saw ${maxTotalSeen}`,
+  );
+  assert.equal(
+    client.streamPoolStats.total,
+    client.streamPoolStats.idle,
+    "after every concurrent call fully drains, every pooled reservation must be idle again (none leaked/borrowed)",
+  );
+  ok(
+    `stream pool bounded reuse: ${CONCURRENT} concurrent queryStreams (> STREAM_POOL_MAX=${STREAM_POOL_MAX}) all completed correctly, ` +
+      `reused ≤ ${STREAM_POOL_MAX} distinct reservations (peak observed ${maxTotalSeen})`,
+  );
+
+  await store.close();
+}
+
+// ── errored stream: its reservation is DISCARDED, never handed back to the idle pool for reuse ───
+async function testStreamErrorDiscardsConn(): Promise<void> {
+  const client = new BunSqlClient({ connectionString: URL });
+  assert.deepEqual(client.streamPoolStats, { total: 0, idle: 0 }, "sanity: a fresh client's stream pool starts empty");
+
+  let threw = false;
+  try {
+    // The table doesn't exist — fails on the DECLARE ... CURSOR FOR statement itself.
+    for await (const _row of client.queryStream!(`SELECT * FROM stackbase_stream_error_probe_missing_table`)) {
+      // never reached
+    }
+  } catch {
+    threw = true;
+  }
+  assert.ok(threw, "a malformed queryStream query must throw");
+  assert.deepEqual(
+    client.streamPoolStats,
+    { total: 0, idle: 0 },
+    "an errored stream's reservation must be DISCARDED (its slot freed), not left sitting idle for reuse",
+  );
+  ok("queryStream error path: a broken reservation is discarded, not returned to the idle pool");
+
+  // Prove the pool recovers cleanly afterward: a subsequent healthy stream still works, building a
+  // fresh reservation (the broken one is gone, not silently reused).
+  const STREAM_TABLE = 20005;
+  const store = new PostgresDocStore(client);
+  await store.setupSchema();
+  const id = newDocumentId(STREAM_TABLE);
+  await store.write([rev(id, 9000n, null, "recover")], [], "Error");
+  const sql = `SELECT internal_id, ts, value FROM documents WHERE table_id = $1 ORDER BY ts ASC`;
+  const rows: unknown[] = [];
+  for await (const row of client.queryStream!(sql, [encodeStorageTableId(STREAM_TABLE)])) rows.push(row);
+  assert.equal(rows.length, 1, "a fresh stream after a discarded broken reservation must still work");
+  assert.deepEqual(
+    client.streamPoolStats,
+    { total: 1, idle: 1 },
+    "the recovery stream built exactly one fresh, now-idle reservation",
+  );
+  ok("stream pool recovers after a discarded broken reservation: the next call builds a fresh healthy connection");
+
+  await store.close();
+}
+
+// ── close() while MULTIPLE stream-pool reservations are outstanding (one idle-pooled from a fully
+//    drained prior call, several abandoned mid-iteration) must still return promptly, no hang ────
+async function testCloseWhileStreamingPool(): Promise<void> {
+  const STREAM_TABLE = 20006;
+  const client = new BunSqlClient({ connectionString: URL });
+  const store = new PostgresDocStore(client);
+  await store.setupSchema();
+
+  const N = 20;
+  for (let i = 0; i < N; i++) {
+    const id = newDocumentId(STREAM_TABLE);
+    await store.write([rev(id, BigInt(4000 + i), null, `q${i}`)], [], "Error");
+  }
+  const sql = `SELECT internal_id, ts, value FROM documents WHERE table_id = $1 ORDER BY ts ASC`;
+  const params = [encodeStorageTableId(STREAM_TABLE)];
+
+  // One reservation parked idle in the pool from a fully-drained prior call.
+  for await (const _row of client.queryStream!(sql, params)) {
+    // drain fully
+  }
+  assert.equal(client.streamPoolStats.idle, 1, "sanity: the drained call left one idle pooled reservation");
+
+  // Several reservations abandoned mid-iteration (never `.return()`ed/drained) — the case close()'s
+  // force-release exists for.
+  const abandonedDone = await Promise.all(
+    Array.from({ length: 3 }, async () => {
+      const iter = client.queryStream!(sql, params)[Symbol.asyncIterator]();
+      const first = await iter.next();
+      return first.done;
+      // `iter` is now deliberately leaked/abandoned — never `.return()`ed, never drained.
+    }),
+  );
+  assert.ok(
+    abandonedDone.every((done) => done === false),
+    "sanity: each abandoned stream yielded at least one row before being abandoned",
+  );
+
+  const closeStart = Date.now();
+  const closeTimeoutMs = 5000;
+  await Promise.race([
+    store.close(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`close() did not return within ${closeTimeoutMs}ms — shutdown hang`)), closeTimeoutMs),
+    ),
+  ]);
+  ok(
+    `close-while-streaming (pool): close() returned in ${Date.now() - closeStart}ms with 1 idle + 3 abandoned in-flight ` +
+      `stream-pool reservations outstanding`,
+  );
+}
+
+// ── priority inversion check: a pinned/commit reservation must still succeed promptly while every
+//    stream-pool slot is saturated by concurrent queryStreams — proves the stream pool no longer
+//    shares an unbounded queue with the pinned/commit connections ─────────────────────────────────
+async function testPinnedUnderStreamLoad(): Promise<void> {
+  const STREAM_TABLE = 20007;
+  const client = new BunSqlClient({ connectionString: URL });
+  const store = new PostgresDocStore(client);
+  await store.setupSchema();
+
+  const N = 300; // large enough that STREAM_POOL_MAX concurrent full drains take real, overlapping time
+  for (let i = 0; i < N; i++) {
+    const id = newDocumentId(STREAM_TABLE);
+    await store.write([rev(id, BigInt(5000 + i), null, `r${i}`)], [], "Error");
+  }
+  const sql = `SELECT internal_id, ts, value FROM documents WHERE table_id = $1 ORDER BY ts ASC`;
+  const params = [encodeStorageTableId(STREAM_TABLE)];
+
+  // Saturate every stream-pool slot concurrently.
+  const streamPromises = Array.from({ length: STREAM_POOL_MAX }, async () => {
+    let count = 0;
+    for await (const _row of client.queryStream!(sql, params)) count++;
+    return count;
+  });
+
+  // While all STREAM_POOL_MAX slots are busy, a pinned-connection operation (transaction(), the
+  // same path acquireWriterLock/commit use) must still complete promptly — it reserves from
+  // Bun.SQL's general pool independently of `streamPoolTotal`/`streamPoolWaiters`, so it must never
+  // queue behind the stream reservations.
+  const pinnedStart = Date.now();
+  await client.transaction(async (tx) => {
+    await tx.query(`SELECT 1`);
+  });
+  const pinnedElapsedMs = Date.now() - pinnedStart;
+  const pinnedTimeoutMs = 3000;
+  assert.ok(
+    pinnedElapsedMs < pinnedTimeoutMs,
+    `a pinned transaction() under concurrent stream-pool saturation must complete quickly (no priority ` +
+      `inversion), took ${pinnedElapsedMs}ms (budget ${pinnedTimeoutMs}ms)`,
+  );
+
+  const counts = await Promise.all(streamPromises);
+  assert.ok(counts.every((c) => c === N), `every saturating stream must still see all ${N} rows`);
+  ok(
+    `pinned/commit under stream load: transaction() completed in ${pinnedElapsedMs}ms while all ` +
+      `${STREAM_POOL_MAX} stream-pool slots were concurrently saturated`,
+  );
+
+  await store.close();
+}
+
 // ── kill switch: STACKBASE_PG_STREAM=0/"false" disables queryStream on the Bun path, mirroring
 //    NodePgClient's identical env var ────────────────────────────────────────────────────────────
 async function testKillSwitch(): Promise<void> {
@@ -439,6 +634,10 @@ await main();
 await testErrorCodeNormalization();
 await testQueryStream();
 await testCloseWhileStreaming();
+await testStreamPoolBounded();
+await testStreamErrorDiscardsConn();
+await testCloseWhileStreamingPool();
+await testPinnedUnderStreamLoad();
 await testKillSwitch();
 await testFleet();
 await benchmark();

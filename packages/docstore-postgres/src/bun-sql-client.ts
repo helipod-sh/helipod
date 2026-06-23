@@ -43,19 +43,37 @@
  * <cursor>` issued as ordinary `unsafe()` statements — this works because DECLARE/FETCH are just
  * SQL, not a driver feature, and non-holdable (NO SCROLL, no WITH HOLD) cursors are cheap: an
  * early `break` leaves the remaining range genuinely uncomputed by the server, same as
- * `NodePgClient`'s `pg-cursor` portal. Each `queryStream` call reserves its OWN dedicated
- * connection (`sql.reserve()`) rather than sharing the pooled session — avoids needing an async
- * mutex to serialize concurrent streams, at the cost of a fresh handshake per call (no bounded
- * reuse pool like `NodePgClient`'s `READ_POOL_MAX`; a deferred follow-up if streaming becomes hot
- * on the Bun path). Released in `finally` on every exit (full drain, early break, or error) — AND
- * tracked in `streamReservations` for the duration it's outstanding, so `close()` can force-release
- * a reservation whose consumer stopped iterating (no `break`, no drain) without ever reaching that
- * `finally`: an abandoned generator sits forever suspended at its `yield`, and `sql.end()` hangs
- * forever waiting for a reserved connection nobody will ever return otherwise (verified empirically
- * — see `test/bun-sql-smoke.ts`'s close-while-streaming case). A `STACKBASE_PG_STREAM=0`/`"false"`
- * env var (mirroring `NodePgClient`'s identical kill switch) disables `queryStream` entirely — the
- * field is left `undefined` in the constructor so `PostgresDocStore.index_scan`'s truthiness check
- * falls back to buffered `query`.
+ * `NodePgClient`'s `pg-cursor` portal.
+ *
+ * Stream reservations are drawn from a small BOUNDED REUSE POOL (`STREAM_POOL_MAX`), mirroring
+ * `NodePgClient`'s bounded read pool (`READ_POOL_MAX`/`acquireReadConn`/`releaseReadConn`) rather
+ * than reserving a fresh `sql.reserve()` connection per call: an unbounded per-call reserve shares
+ * `Bun.SQL`'s own general pool with the pinned writer/commit reservations, so a burst of concurrent
+ * `queryStream` callers could starve out a pinned reservation behind a queue of reader reservations
+ * (priority inversion). `acquireStreamConn`/`releaseStreamConn` (below) implement the identical
+ * shape: an idle stack, a `streamPoolTotal` slot counter (bounds total pool size without a separate
+ * "in use" list), a FIFO waiter queue for callers blocked at capacity, and a broken-connection path
+ * that discards (never returns to idle) and frees its slot instead. A `sql.reserve()` failure frees
+ * the slot and wakes one waiter with no connection (so it loops back and retries the freed slot)
+ * before rethrowing — the exact `acquireReadConn` connect-failure-deadlock lesson: without this, a
+ * transient reserve() failure would permanently leak a pool slot. `releaseStreamConn` hands a
+ * healthy release DIRECTLY to the oldest waiter (never via the idle stack) for the same FIFO-
+ * fairness reason `releaseReadConn`'s doc comment explains (a synchronous new caller could otherwise
+ * steal a just-freed connection out from under an older waiter in the microtask gap between "push to
+ * idle" and the woken waiter's continuation actually running). `queryStreamImpl` acquires from this
+ * pool at the top and releases in its `finally` (`broken: true` on the error path, since a
+ * connection that failed mid-cursor may have a dangling portal/transaction). Released in `finally`
+ * on every exit (full drain, early break, or error) — AND tracked in `streamReservations` for the
+ * duration it's outstanding (now: while pooled *or* borrowed), so `close()` can force-release/drain
+ * every stream reservation, pooled-idle or still-borrowed by a consumer that stopped iterating
+ * without a `break`/drain: an abandoned generator sits forever suspended at its `yield`, and
+ * `sql.end()` hangs forever waiting for a reserved connection nobody will ever return otherwise
+ * (verified empirically — see `test/bun-sql-smoke.ts`'s close-while-streaming case). `STREAM_POOL_MAX`
+ * is sized well under `Bun.SQL`'s own default pool `max: 10`, leaving headroom for the pinned writer
+ * reservation and any commit-pool shard reservations to always get a slot. A `STACKBASE_PG_STREAM=0`/
+ * `"false"` env var (mirroring `NodePgClient`'s identical kill switch) disables `queryStream`
+ * entirely — the field is left `undefined` in the constructor so `PostgresDocStore.index_scan`'s
+ * truthiness check falls back to buffered `query`.
  *
  * ## `.code` normalization (verified empirically — see the task report / `test/bun-sql-smoke.ts`)
  * `Bun.SQL`'s `PostgresError.code` is a generic Bun/Node-style code (`ERR_POSTGRES_SERVER_ERROR`),
@@ -102,6 +120,13 @@ interface BunPostgresErrorShape {
   code?: string;
   errno?: string;
 }
+/** Bounded reuse-pool size for `queryStream` reservations (mirrors `NodePgClient`'s `READ_POOL_MAX`).
+ *  `Bun.SQL`'s own general pool defaults to `max: 10` connections total; this cap leaves headroom
+ *  under that so the pinned writer reservation (`ensurePinned`) and any commit-pool shard
+ *  reservations always have a slot available even when every stream slot is in use. Exported so
+ *  `test/bun-sql-smoke.ts` can assert against the real bound instead of a hardcoded duplicate. */
+export const STREAM_POOL_MAX = 4;
+
 /**
  * Kill switch for the DECLARE/FETCH cursor streaming path, mirroring `NodePgClient`'s
  * `resolveStreamingEnabled` exactly (same env var, same semantics): `STACKBASE_PG_STREAM=0` (or
@@ -152,12 +177,41 @@ export class BunSqlClient implements PgClient {
   private readonly connectionLostCbs: Array<() => void> = [];
   private connectionLostFired = false;
   private nextStreamCursorId = 0;
-  /** Every `queryStream` call's reserved connection, tracked for the duration it's outstanding
-   *  (added on `sql.reserve()`, removed in the generator's `finally` right after `release()`) — so
-   *  `close()` can force-release any still-in-flight stream reservation before `sql.end()`, which
-   *  otherwise hangs forever waiting for a reserved connection that a paused/never-drained consumer
-   *  will never return on its own (see the class doc comment's RISK 2 hang, and `close()` below). */
+  /** Every `queryStream` reservation this client currently holds — pooled-idle OR borrowed by an
+   *  in-flight generator — tracked for the duration it's outstanding (added when a reservation is
+   *  first created in `acquireStreamConn`, removed only when actually released back to Postgres) —
+   *  so `close()` can drain the whole pool and force-release any still-borrowed reservation before
+   *  `sql.end()`, which otherwise hangs forever waiting for a reserved connection that a paused/
+   *  never-drained consumer will never return on its own (see the class doc comment's RISK 2 hang,
+   *  and `close()` below). */
   private readonly streamReservations = new Set<BunSQLReservedConnection>();
+
+  // ---- Bounded reuse pool for queryStream reservations (mirrors NodePgClient's read pool) ------
+  /** Idle, healthy, ready-to-borrow stream reservations. */
+  private readonly streamPoolIdle: BunSQLReservedConnection[] = [];
+  /** Count of stream reservations that exist (idle + currently borrowed) — bounds total pool size
+   *  without needing a separate "in use" list. */
+  private streamPoolTotal = 0;
+  /** FIFO of waiters blocked on `acquireStreamConn` when the pool is at `STREAM_POOL_MAX`. `resolve`
+   *  takes an OPTIONAL connection: a healthy release hands the connection DIRECTLY to the oldest
+   *  waiter (`resolve(conn)`, see `releaseStreamConn`'s FIFO-fairness note); a discard (broken
+   *  connection, or a failed fresh `sql.reserve()`) instead wakes with no connection
+   *  (`resolve(undefined)`) so the waiter loops back and retries the now-freed slot itself. */
+  private readonly streamPoolWaiters: Array<{
+    resolve: (conn?: BunSQLReservedConnection) => void;
+    reject: (e: Error) => void;
+  }> = [];
+  /** Set by `close()`; makes any further `acquireStreamConn` reject instead of hanging forever. */
+  private streamPoolClosed = false;
+
+  /** Test/debug-only introspection of the stream pool's current occupancy: `total` is the count of
+   *  distinct reservations created so far (idle + currently borrowed), never exceeding
+   *  `STREAM_POOL_MAX` by construction — this is what `test/bun-sql-smoke.ts` asserts against to
+   *  prove concurrent `queryStream` callers reuse a bounded set of connections rather than opening
+   *  one per call. Not part of the `PgClient` seam. */
+  get streamPoolStats(): { total: number; idle: number } {
+    return { total: this.streamPoolTotal, idle: this.streamPoolIdle.length };
+  }
 
   /** Ordered commit-pool shard list (index = slot), or undefined for a non-pool (single-shard)
    *  client — mirrors `NodePgClient.commitPoolShards`. */
@@ -305,23 +359,99 @@ export class BunSqlClient implements PgClient {
   }
 
   /**
+   * Borrow a reservation from the bounded stream pool (see the class doc comment's queryStream
+   * section), building a new one lazily via `sql.reserve()` if under `STREAM_POOL_MAX` and none is
+   * idle, or waiting for a release if the pool is already full. A `sql.reserve()` failure frees the
+   * slot it reserved (`streamPoolTotal--`) and wakes one waiter with NO connection (so it loops back
+   * and retries the now-freed slot itself) before rethrowing — without this, a transient reserve()
+   * failure would permanently leak a pool slot, eventually deadlocking every future
+   * `acquireStreamConn` (mirrors `NodePgClient.acquireReadConn`'s identical connect-failure lesson).
+   */
+  private async acquireStreamConn(): Promise<BunSQLReservedConnection> {
+    for (;;) {
+      if (this.streamPoolClosed) throw new Error("BunSqlClient: stream pool closed");
+      const idle = this.streamPoolIdle.pop();
+      if (idle) return idle;
+      if (this.streamPoolTotal < STREAM_POOL_MAX) {
+        this.streamPoolTotal++;
+        try {
+          const reserved = await this.sql.reserve();
+          this.streamReservations.add(reserved);
+          return reserved;
+        } catch (e) {
+          // The slot reserved by `streamPoolTotal++` above must be freed here, or enough
+          // consecutive failures drive `streamPoolTotal` to `STREAM_POOL_MAX` with zero live
+          // reservations, permanently hanging every future `acquireStreamConn` on
+          // `streamPoolWaiters` (nothing left could ever release to wake them).
+          this.streamPoolTotal = Math.max(0, this.streamPoolTotal - 1);
+          this.streamPoolWaiters.shift()?.resolve(undefined);
+          throw e;
+        }
+      }
+      // Pool is at capacity: block until a release either hands us a connection DIRECTLY (FIFO-fair
+      // healthy release, see `releaseStreamConn`) or wakes us with none (a discard freed a slot
+      // instead) — in which case loop back and re-check, since the re-check may now build fresh.
+      const handed = await new Promise<BunSQLReservedConnection | undefined>((resolve, reject) =>
+        this.streamPoolWaiters.push({ resolve, reject }),
+      );
+      if (handed) return handed;
+    }
+  }
+
+  /**
+   * Return a borrowed stream reservation to the pool — or discard it if `broken` (the caller's
+   * cursor loop errored, so the reservation may have a dangling portal/transaction and must not be
+   * handed to the next borrower). Always called from `queryStreamImpl`'s `finally`, so a borrowed
+   * reservation is never permanently lost and a waiter is never left hanging.
+   *
+   * FIFO fairness: a HEALTHY release hands the reservation DIRECTLY to the oldest queued waiter
+   * (`waiter.resolve(conn)`) instead of pushing it to `streamPoolIdle` and merely waking the waiter
+   * to go re-pop idle itself — closing the same microtask-gap starvation hole
+   * `NodePgClient.releaseReadConn`'s doc comment documents (a brand-new, never-waited caller's own
+   * synchronous `acquireStreamConn()` idle-pop could otherwise win the race and steal the
+   * just-freed connection). Only when there is no waiter does a healthy reservation go back on the
+   * idle stack.
+   */
+  private releaseStreamConn(conn: BunSQLReservedConnection, opts?: { broken?: boolean }): void {
+    const broken = opts?.broken ?? false;
+    if (broken || this.streamPoolClosed) {
+      this.streamPoolTotal = Math.max(0, this.streamPoolTotal - 1);
+      this.streamReservations.delete(conn);
+      try {
+        conn.release();
+      } catch {
+        // A release failure here must not mask the original stream error, nor block shutdown — a
+        // concurrent close() may already have released this exact connection (best-effort overlap,
+        // mirrors close()'s own try/catch around its force-release loop below).
+      }
+      this.streamPoolWaiters.shift()?.resolve(undefined);
+      return;
+    }
+    const waiter = this.streamPoolWaiters.shift();
+    if (waiter) {
+      waiter.resolve(conn); // direct hand-off — never touches streamPoolIdle, no gap to steal through
+    } else {
+      this.streamPoolIdle.push(conn);
+    }
+  }
+
+  /**
    * Stream rows via a SQL-level, non-holdable cursor (`DECLARE ... NO SCROLL CURSOR FOR <sql>` /
    * `FETCH <n> FROM <cursor>` / `CLOSE <cursor>`, issued as ordinary `unsafe()` statements on a
-   * dedicated `sql.reserve()` connection — see the class doc comment's queryStream section for why
-   * `Bun.SQL` needs this instead of a native cursor API). Batches adaptively: starts at
-   * `STREAM_BATCH_INITIAL` rows per `FETCH` and doubles after each fetch up to `STREAM_BATCH_MAX`,
-   * matching `NodePgClient`'s `pg-cursor` batching exactly.
+   * reservation borrowed from the bounded stream pool — see the class doc comment's queryStream
+   * section for why `Bun.SQL` needs this instead of a native cursor API, and why the pool exists).
+   * Batches adaptively: starts at `STREAM_BATCH_INITIAL` rows per `FETCH` and doubles after each
+   * fetch up to `STREAM_BATCH_MAX`, matching `NodePgClient`'s `pg-cursor` batching exactly.
    *
-   * The reserved connection is released in `finally` on every exit path (full drain, an early
-   * consumer `break` — an async generator's `finally` runs on the implicit `.return()` that
-   * produces — or a thrown error). A non-holdable cursor is implicitly dropped when its transaction
-   * ends, but `CLOSE` is issued explicitly first for clarity/symmetry with `NodePgClient`. On error,
-   * `ROLLBACK` (not `COMMIT`) — this path never writes, so either is transactionally safe, but
-   * `ROLLBACK` is the honest outcome for a broken stream.
+   * The reservation is released back to the pool in `finally` on every exit path (full drain, an
+   * early consumer `break` — an async generator's `finally` runs on the implicit `.return()` that
+   * produces — or a thrown error, `broken: true`). A non-holdable cursor is implicitly dropped when
+   * its transaction ends, but `CLOSE` is issued explicitly first for clarity/symmetry with
+   * `NodePgClient`. On error, `ROLLBACK` (not `COMMIT`) — this path never writes, so either is
+   * transactionally safe, but `ROLLBACK` is the honest outcome for a broken stream.
    */
   private async *queryStreamImpl(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
-    const reserved = await this.sql.reserve();
-    this.streamReservations.add(reserved);
+    const reserved = await this.acquireStreamConn();
     const cursorName = `stackbase_stream_${this.nextStreamCursorId++}`;
     let batch = STREAM_BATCH_INITIAL;
     let broken = false;
@@ -340,8 +470,7 @@ export class BunSqlClient implements PgClient {
     } finally {
       await reserved.unsafe(`CLOSE ${cursorName}`).catch(() => {});
       await reserved.unsafe(broken ? "ROLLBACK" : "COMMIT").catch(() => {});
-      reserved.release();
-      this.streamReservations.delete(reserved);
+      this.releaseStreamConn(reserved, { broken });
     }
   }
 
@@ -464,12 +593,19 @@ export class BunSqlClient implements PgClient {
       }
     }
     this.commitConns.clear();
-    // Force-release any still-outstanding queryStream reservation — e.g. a consumer mid-iteration
-    // that stopped calling `.next()` without draining or `break`ing (so the generator's own
-    // `finally` never runs to release it itself). `sql.end()` hangs forever waiting for a reserved
-    // connection nobody will ever return otherwise (RISK 2, see the class doc comment). Best-effort:
-    // the generator may still be suspended holding an open cursor/transaction on this connection,
-    // but releasing it back to the pool unblocks `sql.end()` regardless of that generator's fate.
+    // Drain the stream pool: mark closed FIRST so any `queryStreamImpl` finishing concurrently
+    // releases its reservation via `releaseStreamConn`'s discard path (release-and-decrement, not
+    // back to idle) rather than racing to hand off to a waiter that's about to be rejected anyway —
+    // mirrors `NodePgClient`'s `readPoolClosed` ordering. `streamReservations` tracks every
+    // reservation this client currently holds (pooled-idle AND still-borrowed by an in-flight/
+    // abandoned generator — e.g. a consumer mid-iteration that stopped calling `.next()` without
+    // draining or `break`ing, whose own `finally` never runs to release it), so force-releasing all
+    // of them here is what unblocks `sql.end()`, which otherwise hangs forever waiting for a
+    // reserved connection nobody will ever return on its own (RISK 2, see the class doc comment).
+    // Best-effort for a still-borrowed one: its generator may still be suspended holding an open
+    // cursor/transaction on this connection, but releasing it back to the pool unblocks `sql.end()`
+    // regardless of that generator's fate.
+    this.streamPoolClosed = true;
     for (const reserved of this.streamReservations) {
       try {
         reserved.release();
@@ -478,6 +614,10 @@ export class BunSqlClient implements PgClient {
       }
     }
     this.streamReservations.clear();
+    this.streamPoolIdle.length = 0;
+    this.streamPoolTotal = 0;
+    const streamWaiters = this.streamPoolWaiters.splice(0);
+    for (const w of streamWaiters) w.reject(new Error("BunSqlClient: stream pool closed"));
     await this.sql.end();
   }
 }
