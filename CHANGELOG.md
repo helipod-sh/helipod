@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-06-06
+
+**Postgres read performance and a native Bun.SQL client.** The Postgres adapter's
+read path now streams, and a second driver — Bun's native `Bun.SQL` — ships as the
+default client under the Bun runtime. Both live entirely beneath the `DocStore` seam:
+the engine is unchanged, and a SQLite deployment is byte-identical to before.
+Validated end-to-end against real PostgreSQL 16.
+
+### Added
+
+- **Streaming `index_scan` for Postgres** (`@stackbase/docstore-postgres`, default-on; kill switch `STACKBASE_PG_STREAM=0`). Paginated/limited reads (`paginate`, `.take(n)`, `.first()`) now stream from a server-side cursor that stops fetching the moment the query engine breaks early, instead of materializing the whole index range — measured **−92% p50 wall-clock and ≈1000× fewer rows fetched** at 100k rows on the paginated shape (PGlite substrate; the win is work-avoided, not just transfer). `NodePgClient` streams via `pg-cursor` over a bounded read-connection pool; the cursor is non-holdable/lazy with adaptive `FETCH` batching (64→2048). Reactivity is unchanged — the recorded read-set already tracked loop consumption, not fetch. A client without cursor support transparently falls back to buffered reads, so results are always identical (proven by running the full docstore conformance suite over both the streaming and buffered paths).
+- **Native Bun.SQL Postgres client** (`BunSqlClient`, selected automatically under the Bun runtime; `NodePgClient`/`pg` stays the client on Node). ≈10–17% faster per query on a local server, a per-query constant that applies to every query. Implements the full `PgClient` seam: pinned-connection single-writer advisory lock, per-shard commit connections + two-int shard advisory locks (fleet), a bounded stream-reservation pool, and `queryStream` (built on `DECLARE`/`FETCH`, since Bun.SQL exposes no native cursor API). Type-codec parity with `pg`: `bigint: true` for int8 columns, bytea → `Uint8Array`, and SQLSTATE re-tagged from Bun.SQL's `.errno` onto `.code` so the shared duplicate-object race-swallow works. `stackbase serve`'s fleet shard-count probe and `fleet reshard` also select it under Bun.
+
+### Fixed
+
+- **Read-pool waiter starvation** — a released read connection is now handed directly to the oldest queued waiter (FIFO) instead of returned to idle where a fresh caller could steal it in the microtask gap; pooled read connections also apply `statement_timeout`/`idle_in_transaction_session_timeout` so a runaway scan can't pin a pool slot indefinitely.
+- **`BunSqlClient.close()` shutdown hang** — an in-flight `queryStream` reservation is now tracked and force-released on `close()`, so graceful shutdown can't block indefinitely on `sql.end()`.
+- **Real-Postgres conformance isolation** — the docstore conformance suite's per-test reset now truncates the Receipted-Outbox tables (`client_mutations`/`client_floors`) too. Their omission had let state accumulate across tests on a persistent server, breaking the table-wide `sweepExpiredClientMutations`/`pruneClientMutations` count assertions — surfaced the first time the suite ran against a real PostgreSQL server rather than in-process PGlite (the production reaper code was correct).
+
 ## [1.6.0] — 2026-06-06
 
 **Cloudflare deployment tier — validated on real Cloudflare.** Stackbase now runs
