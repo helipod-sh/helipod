@@ -75,6 +75,19 @@
  * entirely — the field is left `undefined` in the constructor so `PostgresDocStore.index_scan`'s
  * truthiness check falls back to buffered `query`.
  *
+ * Honest gap vs. `NodePgClient`'s read pool: `NodePgClient.acquireReadConn` proactively filters a
+ * broken IDLE connection via a per-connection `pg.Client.on("error", ...)` listener
+ * (`readPoolBroken`), so a connection that dies while sitting idle never gets handed to the next
+ * borrower. `Bun.SQL` has no equivalent — its reserved-connection object (`ReservedSQL`) exposes no
+ * per-connection error/close event, only pool-wide `onclose`/`onconnect` constructor callbacks that
+ * fire for ANY connection in the pool with no way to identify which one, so they can't be used to
+ * mark one specific idle reservation broken. `acquireStreamConn` therefore pops an idle reservation
+ * WITHOUT a liveness check; a reservation that dies while idle (server `idle_session_timeout`, an
+ * LB/pgbouncer reap, a network blip) is only detected LAZILY, on next use — its `BEGIN`/`DECLARE`
+ * throws, `queryStreamImpl`'s `catch`/`finally` marks it `broken`, and `releaseStreamConn` discards
+ * it and frees the slot. This is self-healing (one spurious caller-visible error, then the pool
+ * recovers), never a hang or a leak — just not proactive the way the read pool is.
+ *
  * ## `.code` normalization (verified empirically — see the task report / `test/bun-sql-smoke.ts`)
  * `Bun.SQL`'s `PostgresError.code` is a generic Bun/Node-style code (`ERR_POSTGRES_SERVER_ERROR`),
  * NOT the pg-style SQLSTATE `NodePgClient`'s `pg` driver puts on `.code` (`23505`/`42P07`/etc.).
@@ -385,7 +398,7 @@ export class BunSqlClient implements PgClient {
           // `streamPoolWaiters` (nothing left could ever release to wake them).
           this.streamPoolTotal = Math.max(0, this.streamPoolTotal - 1);
           this.streamPoolWaiters.shift()?.resolve(undefined);
-          throw e;
+          throw this.normalizeError(e);
         }
       }
       // Pool is at capacity: block until a release either hands us a connection DIRECTLY (FIFO-fair
@@ -606,6 +619,12 @@ export class BunSqlClient implements PgClient {
     // cursor/transaction on this connection, but releasing it back to the pool unblocks `sql.end()`
     // regardless of that generator's fate.
     this.streamPoolClosed = true;
+    // A reservation whose `acquireStreamConn` is still awaiting `sql.reserve()` when this loop runs
+    // isn't in `streamReservations` yet, so it isn't force-released here — but it self-cleans: once
+    // the reserve() resolves, `queryStreamImpl` runs BEGIN/DECLARE on it, that fails against a
+    // closing pool, and its own `finally` sees `streamPoolClosed` and discards it via
+    // `releaseStreamConn`'s broken path. So this drain loop doesn't need to (and can't) wait for it,
+    // and `close()` doesn't hang on it.
     for (const reserved of this.streamReservations) {
       try {
         reserved.release();
