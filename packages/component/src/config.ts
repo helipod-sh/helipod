@@ -19,6 +19,11 @@ export interface DeployConfig {
 export interface StackbaseConfig {
   components: ComponentDefinition[];
   deploy?: DeployConfig;
+  /**
+   * Backend functions directory, relative to the project root. Defaults to "stackbase".
+   * A `--dir` flag on any command wins over this value.
+   */
+  functionsDir?: string;
 }
 
 export function defineConfig(config: StackbaseConfig): StackbaseConfig {

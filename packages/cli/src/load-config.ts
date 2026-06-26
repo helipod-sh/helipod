@@ -16,5 +16,5 @@ export async function loadConfig(projectDir: string): Promise<StackbaseConfig> {
     default?: StackbaseConfig;
   } & StackbaseConfig;
   const cfg = (mod.default ?? mod) as StackbaseConfig;
-  return { components: cfg.components ?? [], deploy: cfg.deploy };
+  return { components: cfg.components ?? [], deploy: cfg.deploy, functionsDir: cfg.functionsDir };
 }
