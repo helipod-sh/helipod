@@ -179,15 +179,12 @@ export const _complete = mutation(async (ctx: MutationCtx, args: { jobId: string
   }
 
   // result.kind === "failed" — retry with backoff, or dead-letter at maxFailures.
-  // TODO(action-slice): actions now execute (CLAUDE.md build-order #5 — `driver.ts` no longer
-  // special-cases `kind:"action"`, it dispatches through this same path a mutation uses), so this
-  // gap is live, not hypothetical: a "failed" result from a CLEANLY-failed action (its own code
-  // threw/rejected, as opposed to an infra kill — that's `_reclaim`'s job below) still blind-retries
-  // through this same backoff path. An action's side effects aren't transactional like a
-  // mutation's, so retrying one that already ran partway could re-run those side effects — this
-  // branch's blanket "retry up to maxFailures" is only actually safe for `kind:"mutation"`.
-  // Revisit this branch (and `_reclaim`'s, which has the same gap) — not done as part of the
-  // guard-removal task.
+  // Action safety lives in the job's OWN `maxFailures`, not a kind-check here: `enqueueInternal`
+  // (`./facade.ts`) defaults `kind:"action"` jobs to `maxFailures: 1`, so a CLEANLY-failed action
+  // (its own code threw — its side effects may have partially run) dead-letters on the first
+  // failure below rather than blind-retrying, while an explicit `retry: { maxFailures }` (the
+  // author's opt-in that the target is safe to re-run, e.g. a workflow step's `maxAttempts`)
+  // retries actions through this same backoff path like any mutation.
   const attempts = (job.attempts as number) + 1;
   const maxFailures = job.maxFailures as number;
   const lastError = args.result.error;
@@ -494,15 +491,18 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
  * `inProgress` jobs whose lease has expired (`leaseExpiresAt < now` — the process that `_claim`ed
  * them died, or is at least still holding a lease well past its promised deadline) and reclaims
  * each:
- *  - `kind:"mutation"` → safe to retry (mutations are deterministic/idempotent-by-replay in this
- *    engine's model): `attempts += 1`, back to `state:"pending"` with `nextTs: now()` (immediate —
- *    no backoff; an infra kill isn't the job's own fault).
- *  - `kind:"action"` → NOT safe to blindly retry (actions have arbitrary external side effects,
- *    so at-most-once is the only safe default without idempotency-key support): `attempts += 1`,
- *    terminal `state:"failed"` (dead-letter) with `lastError`. Fires `onComplete` (if set) with a
- *    `"failed"` result — same as `_complete`'s dead-letter branch — so a caller relying on the
- *    onComplete round-trip (e.g. `@stackbase/workflow`'s `_stepDone`) actually observes the
- *    terminal failure instead of hanging forever waiting for a callback that never fires.
+ *  - `kind:"mutation"` with attempts left → safe to retry (mutations are deterministic/
+ *    idempotent-by-replay in this engine's model): `attempts += 1`, back to `state:"pending"` with
+ *    `nextTs: now()` (immediate — no backoff; an infra kill isn't the job's own fault). Bounded by
+ *    the job's `maxFailures`, the same budget `_complete`'s failed path spends, so a mutation that
+ *    crash-loops its host process dead-letters once the budget is spent instead of retrying forever.
+ *  - `kind:"action"` (always), or a mutation out of attempts → terminal `state:"failed"`
+ *    (dead-letter) with `lastError`. Actions are never reclaim-retried — even with an explicit
+ *    `retry` opt-in — because an expired lease can't tell us whether the action's side effects
+ *    already ran. Fires `onComplete` (if set) with a `"failed"` result — same as `_complete`'s
+ *    dead-letter branch — so a caller relying on the onComplete round-trip (e.g.
+ *    `@stackbase/workflow`'s `_stepDone`) actually observes the terminal failure instead of
+ *    hanging forever waiting for a callback that never fires.
  *
  * Uses the `by_next_ts` index (`["state","nextTs"]`) to scan `state:"inProgress"` cheaply, then a
  * post-filter on `leaseExpiresAt` (not part of that index) — `inProgress` job counts are expected
@@ -524,15 +524,11 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
     const jobId = job._id as string;
     const attempts = (job.attempts as number) + 1;
     const lastError = "lease expired: driver did not complete the job before its lease deadline (infra kill)";
-    if (job.kind === "mutation") {
-      // Deliberate gap, ticket-worthy: unlike `_complete`'s failed-path retry (which dead-letters
-      // once `attempts >= maxFailures`), this reclaim path has no such cap — a mutation that
-      // reliably crashes the process it's claimed on (rather than throwing, which `_complete`
-      // would catch) gets reclaimed to `pending` and re-dispatched forever, incrementing
-      // `attempts` each time but never comparing it to `maxFailures` here. A true crash-loop
-      // (not just a slow/flaky job) would retry indefinitely rather than dead-lettering. Bounding
-      // this (e.g. dead-letter once `attempts >= maxFailures` here too) is future work, not done
-      // in this task.
+    if (job.kind === "mutation" && attempts < (job.maxFailures as number)) {
+      // Reclaim-retry, bounded by the same `maxFailures` budget `_complete`'s failed path uses: a
+      // mutation that reliably CRASHES the process it's claimed on (rather than throwing, which
+      // `_complete` would catch) burns one attempt per reclaim and dead-letters below once the
+      // budget is spent, instead of being re-dispatched forever.
       await ctx.db.replace(
         jobId,
         compact({
@@ -546,8 +542,11 @@ export const _reclaim = mutation(async (ctx: MutationCtx): Promise<{ reclaimed: 
         }),
       );
     } else {
-      // kind:"action" — at-most-once: an expired lease means we can't tell whether the action's
-      // side effects already ran, so retrying could double-run them. Dead-letter instead.
+      // Dead-letter. Two ways here: a mutation whose reclaim budget is spent (crash-loop, above),
+      // or `kind:"action"` — always at-most-once on an expired lease, even with an explicit
+      // `retry` opt-in: the lease expiring means we can't tell whether the action's side effects
+      // already ran (unlike a clean failure, where the author's opt-in covers the re-run), so
+      // retrying could double-run them.
       await ctx.db.replace(
         jobId,
         compact({

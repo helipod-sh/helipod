@@ -45,7 +45,9 @@ export function getFunctionPath(ref: FnRef): string {
 export type JobState = "pending" | "inProgress" | "success" | "failed" | "canceled";
 
 export interface EnqueueOpts {
+  /** Relative delay in ms from the enqueueing call's `now()`. `runAt` wins when both are set. */
   runAfter?: number;
+  /** Absolute due time (epoch ms). Takes precedence over `runAfter`. */
   runAt?: number;
   retry?: { maxFailures: number };
   name?: string;
@@ -146,15 +148,26 @@ export async function enqueueInternal(
     parentCanceled = parent !== null && parent.state === "canceled";
   }
   const bornState: JobState = parentCanceled ? "canceled" : "pending";
+  const kind = kindOf(fnPath);
+  // Due time: absolute `runAt` wins; else relative `runAfter` (clamped to non-negative, matching
+  // the facade's own `runAfter` method); else immediately due.
+  const nextTs = opts.runAt ?? (opts.runAfter !== undefined ? now() + Math.max(0, opts.runAfter) : now());
   const jobId = await db.insert(
     tables.jobs,
     compact({
       fnPath,
-      kind: kindOf(fnPath),
+      kind,
       state: bornState,
-      nextTs: opts.runAt ?? now(),
+      nextTs,
       attempts: 0,
-      maxFailures: opts.retry?.maxFailures ?? 4,
+      // Retry budget. Mutations are transactional (a failed one committed nothing), so retrying is
+      // always safe: default 4. Actions have arbitrary external side effects, so a CLEANLY-failed
+      // action (its own code threw after possibly running partway) must NOT be blindly re-run:
+      // default 1, i.e. dead-letter on the first failure (`_complete`'s `attempts >= maxFailures`
+      // check). An explicit `opts.retry` is the author's opt-in that the target is safe to re-run
+      // (e.g. `@stackbase/workflow` threading a step's declared `maxAttempts` through here) and is
+      // honored as-is for both kinds.
+      maxFailures: opts.retry?.maxFailures ?? (kind === "action" ? 1 : 4),
       leaseHolder: undefined,
       leaseExpiresAt: undefined,
       idempotencyKey: opts.idempotencyKey,

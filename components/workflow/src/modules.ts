@@ -283,7 +283,9 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
         // `sleep`/`sleepUntil` step's due time) and `maxAttempts` (-> the scheduler's own
         // `retry.maxFailures` backoff/dead-letter dispatch; not a new retry mechanism). Both are
         // `undefined` for a plain `runMutation`/`runQuery` step, matching the pre-Task-4 behavior
-        // (`enqueueInternal` defaults `runAt` to `now()` and `retry.maxFailures` to 4).
+        // (`enqueueInternal` defaults `runAt` to `now()` and `retry.maxFailures` to 4 for
+        // mutations, 1 for actions — an undeclared `maxAttempts` on an action step means
+        // at-most-once, per the scheduler's clean-failure contract).
         const jobId = await sched.enqueue(ns.name, ns.args, {
           runAt: ns.opts?.runAt,
           retry: ns.opts?.maxAttempts !== undefined ? { maxFailures: ns.opts.maxAttempts } : undefined,
