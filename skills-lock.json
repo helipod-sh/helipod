@@ -12,11 +12,23 @@
       "skillPath": "skills/cloudflare/SKILL.md",
       "computedHash": "a1646a6a2fb7cc683de5bf8357e5d6ae02db6fd0bf771d633c1890318e25bff2"
     },
+    "documentation-writer": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "skillPath": "skills/documentation-writer/SKILL.md",
+      "computedHash": "ee53d65b163cd7eb953a930c95841cfe398cc2c0bd24c06508bbaa07c432be35"
+    },
     "durable-objects": {
       "source": "cloudflare/skills",
       "sourceType": "github",
       "skillPath": "skills/durable-objects/SKILL.md",
       "computedHash": "72efa2277fea08f43b393c74abaacc9fa575e20bc63bdc9d46829b8a39352852"
+    },
+    "human-writing": {
+      "source": "factory-ai/factory-plugins",
+      "sourceType": "github",
+      "skillPath": "plugins/droid-evolved/skills/human-writing/SKILL.md",
+      "computedHash": "a5c8f7e609a3cd321437e0f745778b23cacd2a0dfb48aa46ab07cdde22ad146e"
     },
     "workers-best-practices": {
       "source": "cloudflare/skills",
