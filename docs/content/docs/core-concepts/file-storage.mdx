@@ -53,8 +53,11 @@ perfectly ordinary transactional write. So an upload splits into two phases:
 
 1. A **mutation** reserves the upload. It inserts a `pending` `_storage` row and returns a target
    describing where the bytes should go.
-2. The **byte transfer** happens outside any transaction, either through the engine's own HTTP
-   endpoint or straight to a bucket, and finishes by confirming, which flips the row to `ready`.
+2. The **byte transfer** happens outside any transaction, and finishes by confirming, which flips
+   the row to `ready`. It takes one of two shapes depending on the backend: **proxied** (bytes go
+   through the engine's own HTTP endpoint) or **presigned** (bytes go straight to the bucket). Both
+   are covered under [`generateUploadUrl`'s two return
+   shapes](#generateuploadurls-two-return-shapes) below.
 
 ```mermaid
 flowchart LR
@@ -193,7 +196,9 @@ async function uploadFile(client, baseUrl: string, file: Blob, contentType: stri
 Either branch ends the same way: a `ready` `_storage` row, whose id you then persist into your own
 document (`ctx.db.insert("photos", { caption, image: storageId })`).
 
-### Why `generateUploadUrl` is safe inside a mutation
+<Accordions type="single">
+
+<Accordion title="Why generateUploadUrl is safe inside a mutation">
 
 Minting an upload target inside a mutation looks like it should be non-deterministic. URLs usually
 embed a timestamp or a random token. But every input it derives from is transaction-local:
@@ -209,6 +214,10 @@ embed a timestamp or a random token. But every input it derives from is transact
 That's also why `getUrl` is safe to call from a *query*. It needs to mint a fresh capability token
 for a private file on every call (see below), and it does so off `cctx.now`, never wall-clock. So
 two calls to the same query at the same logical read still see a consistent, replay-safe result.
+
+</Accordion>
+
+</Accordions>
 
 ## `ctx.storage` in actions
 

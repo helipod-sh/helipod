@@ -3,9 +3,9 @@
   "icon": "Rocket",
   "pages": [
     "what-is-stackbase",
-    "how-it-works",
-    "performance",
     "quickstart",
-    "tutorial"
+    "tutorial",
+    "how-it-works",
+    "performance"
   ]
 }

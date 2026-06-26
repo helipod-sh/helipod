@@ -166,9 +166,9 @@ Same identity and dedup machinery as the other two, every mutation still gets a 
 still gets exact-once server receipts, still gets the FIFO drain-on-reconnect behavior, backed by
 a plain `Map` instead of a disk. Nothing survives a reload.
 
-It's the default a client with no `outbox` option effectively behaves as (byte-for-byte, since none
-of this machinery's runtime branches are exercised at all). It's also the right tool for two
-deliberate use cases:
+Don't mistake it for "the same as no outbox," though. A client with no `outbox` option sends no
+`clientId`/`seq` at all and gets no server-side dedup; only the lack of cross-reload durability is
+equivalent. `memoryOutbox()` is the right tool for two deliberate use cases:
 
 - SSR or tests that want the reconnect-safe delivery guarantees without touching disk.
 - Coexisting with an external mutation or retry library. Configure `outbox: memoryOutbox()` and
@@ -210,7 +210,7 @@ configured. It's written to disk regardless of connection state.
 The safe **parking** of a mutation that was already *sent* when the connection dropped, the case
 where the outcome is genuinely unknown, works differently. It only activates once the client has
 connected at least once and the server has proven, via `ConnectAck`, that it speaks this protocol
-(this is the "S4 park-swap" arming). Before that first successful handshake in a tab session, a
+(that first handshake is what arms the parking behavior). Before that first successful handshake in a tab session, a
 dropped in-flight mutation still rejects with `MutationUndeliveredError`, exactly as it would with
 no outbox at all. Pointed at an older server that predates this feature, the client simply never
 arms: the same fail-fast behavior forever, no special handling required on your end.
@@ -224,12 +224,18 @@ Once armed, reconnect drives the drain:
    it can't (see [`onClientReset`](#onclientreset-a-server-disowned-timeline) below).
 3. The drain flushes the durable queue **FIFO by persisted order**, as `MutationBatch` chunks of 50
    entries each: one unacked chunk in flight at a time, never several concurrently.
-4. Each chunk's `MutationResponse`s settle per entry. `applied` dequeues and resolves. A **coded**
-   (terminal, server-recorded) failure settles the promise as a rejection, and by default the
-   drain keeps going past it (see [poisonPolicy](#poison-handling-poisonpolicy)). A **codeless**
-   (transient/infra) failure backs off (jittered exponential, capped at 30s) and resends starting
-   from the failed unit: every unit *after* it in that chunk got no response either, and re-sends
-   too.
+4. Each chunk's `MutationResponse`s settle per entry. `applied` dequeues and resolves. A coded
+   failure settles the promise as a rejection, and by default the drain keeps going past it. A
+   codeless failure backs off (jittered exponential, capped at 30s) and resends starting from the
+   failed unit: every unit *after* it in that chunk got no response either, and re-sends too.
+
+That last step leans on a distinction worth pulling out of the list, because everything downstream
+(the poison policy, the conflict taxonomy) rests on it. A **coded** failure is terminal and
+server-recorded: your handler deterministically failed (validation, authorization, a typed thrown
+error), and retrying changes nothing. A **codeless** failure is transient infrastructure: nothing
+was recorded, so a retry is always safe. The drain settles coded failures and retries codeless
+ones, and [poisonPolicy](#poison-handling-poisonpolicy) governs how loudly a coded one interrupts
+the queue.
 
 Reconnecting itself is cheap independent of the outbox. Every server-pushed query result carries a
 content fingerprint, and a resubscribe echoes back the fingerprint it last saw. If a fresh re-run
@@ -515,6 +521,10 @@ self.addEventListener("sync", (event) => {
 });
 ```
 
+<Accordions type="single">
+
+<Accordion title="Every drainOutboxOnce option">
+
 <TypeTable
   type={{
     url: {
@@ -534,8 +544,13 @@ self.addEventListener("sync", (event) => {
     },
     getAuthToken: {
       description:
-        "A Service Worker has no access to your app's in-memory auth state; this reads from wherever the SW itself can reach it (IndexedDB, a Cache entry). Providing and refreshing that store is your app's job.",
-      type: "() => Promise<string>",
+        "A Service Worker has no access to your app's in-memory auth state; this reads from wherever the SW itself can reach it (IndexedDB, a Cache entry). Providing and refreshing that store is your app's job. Resolve null for no token.",
+      type: "() => Promise<string | null>",
+    },
+    getSessionId: {
+      description:
+        "Resolves the persisted SessionInfo.sessionId a createAuthClient-managed session wrote (the \"stackbase.session\" storage row), via any SW-reachable channel. With a managed session this is effectively REQUIRED: without it every entry that session stamped looks foreign to the drain and terminal-fails OFFLINE_IDENTITY_CHANGED. When it resolves non-null it takes priority over getAuthToken's token-hash fingerprint (the token still governs SetAuth on the wire). Omit it for a client that never adopted a managed session.",
+      type: "() => Promise<string | null>",
     },
     poisonPolicy: {
       description:
@@ -555,6 +570,20 @@ self.addEventListener("sync", (event) => {
     },
   }}
 />
+
+</Accordion>
+
+</Accordions>
+
+<Callout type="warn" title="Using createAuthClient? Pass getSessionId">
+
+A live tab with a managed session fingerprints outbox entries by the stable `sessionId`, not the
+rotating token. A headless drain that only gets `getAuthToken` computes a token-hash fingerprint
+instead, sees every one of those entries as belonging to someone else, and terminal-fails each with
+`OFFLINE_IDENTITY_CHANGED`. Wire `getSessionId` to the same persisted session your auth client
+writes and the fingerprints line up.
+
+</Callout>
 
 It returns `{drained, failed, remaining}`. No queries, no optimistic layers, nothing UI-shaped. If
 a live tab already holds the leader lock, a concurrent `drainOutboxOnce` call is a safe, cheap
@@ -729,6 +758,13 @@ a platform eviction cliff. The queue itself won't warn you.
 
 ## Performance
 
+The short version: turning the outbox on costs essentially nothing online, and a large offline
+backlog drains fast without blocking the UI thread.
+
+<Accordions type="single">
+
+<Accordion title="The four benchmark axes">
+
 Headline numbers from the four-axis benchmark (`docs/dev/research/offline-outbox/benchmark.md`,
 generated by the flagship E2E driving a real client against a real server, treat the *shape*, not
 the exact figures, as the takeaway; they're machine- and load-dependent):
@@ -744,6 +780,10 @@ the exact figures, as the takeaway; they're machine- and load-dependent):
 - **Durable storage cost: ~2 to 3 logical storage operations per mutation** across the full
   lifecycle (append at enqueue, one status transition, one dequeue), write-behind-batched per
   microtask so the physical transaction count is bounded further still.
+
+</Accordion>
+
+</Accordions>
 
 ## Related
 

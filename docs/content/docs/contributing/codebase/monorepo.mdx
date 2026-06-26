@@ -17,30 +17,112 @@ Think of the repo as four buckets, each with a different job:
 
 | Bucket | What lives there | How many | Opt-in? |
 |---|---|---|---|
-| `packages/` | The engine, the client SDK, and the CLI | ~30 packages | No, this is the product |
+| `packages/` | The engine, the client SDK, and the CLI | 32 packages | No, this is the product |
 | `components/` | Self-contained mini-backends (auth, scheduler, ...) | 6 packages | Yes, per project |
 | `ee/packages/` | Paid, scale-out features under a separate license | 3 packages | Yes, and separately licensed |
 | `apps/` + `examples/` | The dashboard app, and runnable sample apps | 1 app, 4 examples | n/a |
 
 `apps/dashboard` is the live data browser, logs viewer, and function runner you get with every `stackbase dev`/`serve`. `examples/` (`chat`, `auth-demo`, `offline-demo`, `optimistic-demo`) double as end-to-end integration tests that run against the real CLI. A regression in wiring the pieces together shows up there, not just in unit tests.
 
-Here's the real `packages/` list, as of this writing:
+Here's the real `packages/` list, as of this writing, grouped by role:
 
-```
-packages/
-  values                  errors                  id-codec
-  index-key-codec         docstore                docstore-sqlite
-  docstore-postgres       docstore-do-sqlite       transactor
-  query-engine            executor                sync
-  runtime-embedded        runtime-cloudflare       component
-  blobstore               blobstore-fs             blobstore-s3
-  blobstore-r2            storage                  objectstore
-  objectstore-fs          objectstore-s3           receipts
-  codegen                 admin                     client
-  deploy                  test                     cli
-```
+<Files>
 
-That's about 30 packages. Most are small on purpose, a few hundred lines each. A small package is easy to read start to finish, and it's also the only thing a dependency-direction rule (below) needs to check.
+<Folder name="packages" defaultOpen>
+
+<Folder name="pure contracts" defaultOpen>
+
+<File name="values" />
+
+<File name="errors" />
+
+<File name="id-codec" />
+
+<File name="index-key-codec" />
+
+</Folder>
+
+<Folder name="storage seam + adapters" defaultOpen>
+
+<File name="docstore" />
+
+<File name="docstore-sqlite" />
+
+<File name="docstore-postgres" />
+
+<File name="docstore-do-sqlite" />
+
+<File name="docstore-d1" />
+
+<File name="objectstore" />
+
+<File name="objectstore-fs" />
+
+<File name="objectstore-s3" />
+
+</Folder>
+
+<Folder name="engine" defaultOpen>
+
+<File name="transactor" />
+
+<File name="query-engine" />
+
+<File name="executor" />
+
+<File name="sync" />
+
+<File name="receipts" />
+
+</Folder>
+
+<Folder name="hosts + composition" defaultOpen>
+
+<File name="runtime-embedded" />
+
+<File name="runtime-cloudflare" />
+
+<File name="component" />
+
+</Folder>
+
+<Folder name="file storage" defaultOpen>
+
+<File name="storage" />
+
+<File name="blobstore" />
+
+<File name="blobstore-fs" />
+
+<File name="blobstore-s3" />
+
+<File name="blobstore-r2" />
+
+</Folder>
+
+<Folder name="the top" defaultOpen>
+
+<File name="client" />
+
+<File name="cli" />
+
+<File name="codegen" />
+
+<File name="admin" />
+
+<File name="deploy" />
+
+<File name="vite" />
+
+<File name="test" />
+
+</Folder>
+
+</Folder>
+
+</Files>
+
+That's 32 packages. Most are small on purpose, a few hundred lines each. A small package is easy to read start to finish, and it's also the only thing a dependency-direction rule (below) needs to check.
 
 <Callout title="A note if you've read the old design docs" type="warn">
 An earlier internal design note (`docs/dev/architecture/foundation/monorepo-tooling-skeleton.md`) describes a single `@stackbase/contracts` package holding all the cross-package interfaces. **That package was never built.** The repo evolved differently as it grew. What actually shipped:
@@ -59,7 +141,7 @@ The single most useful thing to internalize about this repo is that packages for
 From the bottom up:
 
 1. **Pure contracts**: `values`, `errors`, `id-codec`, `index-key-codec`. No dependencies on anything else in the repo. These define the vocabulary everyone else speaks: what a `Value` is, what an `Id` looks like, how errors are shaped.
-2. **The storage seam**: `docstore` (the interface) plus its adapters `docstore-sqlite`, `docstore-postgres`, `docstore-do-sqlite` (the implementations). This is where "which database am I talking to" gets decided, and nowhere else.
+2. **The storage seam**: `docstore` (the interface) plus its adapters `docstore-sqlite`, `docstore-postgres`, `docstore-do-sqlite`, and `docstore-d1` (the implementations). This is where "which database am I talking to" gets decided, and nowhere else. `docstore-d1` is the odd one out worth knowing about: it's the first *schema-ful* adapter, laying documents out relationally (a real column per field, real `CREATE UNIQUE INDEX`) on Cloudflare D1, where the other three share the schemaless MVCC-log layout.
 3. **`transactor`**: the single-writer transaction manager. It assigns commit order and runs optimistic-concurrency retries.
 4. **`query-engine`**: executes queries, tracks what they read, and handles cursor pagination.
 5. **`executor`**: the sandboxed runtime that actually calls your query/mutation/action functions.
@@ -73,7 +155,7 @@ From the bottom up:
 ```mermaid
 flowchart BT
   L0["values, errors, id-codec, index-key-codec"]
-  L1["docstore + adapters (sqlite / postgres / do-sqlite)"]
+  L1["docstore + adapters (sqlite / postgres / do-sqlite / d1)"]
   L2["transactor"]
   L3["query-engine"]
   L4["executor"]
@@ -143,7 +225,7 @@ You won't need all of these on day one, but here's what to reach for when you ne
 | `admin` | The API the dashboard app talks to |
 | `receipts` | The Receipted Outbox's server-side TTL reaper: sweeps expired dedup rows off `DocStore` |
 
-If a name isn't in this table, it's either a leaf adapter (`docstore-postgres`, `blobstore-s3`, ...) whose job is obvious from its name, or test-only scaffolding (`test`).
+If a name isn't in this table, it's either a leaf adapter (`docstore-postgres`, `blobstore-s3`, ...) whose job is obvious from its name, test-only scaffolding (`test`), or a tooling integration (`vite`, the `@stackbase/vite` plugin that boots the stackbase dev backend alongside a Vite dev server).
 
 ## Components: opt-in mini-backends
 
@@ -158,7 +240,7 @@ Three packages live under `ee/packages/`: **fleet** (distributed Tier 2 scale-ou
 ## The tooling
 
 - **Bun workspaces**: Bun is both the package manager and the runtime. The workspace globs (`packages/*`, `components/*`, `ee/packages/*`, `apps/*`, `examples/*`, plus `benchmarks/convex-comparison` and `benchmarks/runner`) and a shared dependency **catalog** (pinned versions for things like `typescript` and `vitest`, so every package asks for the same version) both live in the root `package.json`. Internal cross-package dependencies use `workspace:*`, so they always resolve to the local source, not a published version.
-- **Turborepo**: `turbo.json` defines the task graph: `build`, `test`, `typecheck`, `lint`, `dev`. The key line is `"dependsOn": ["^build"]` on the `test` and `typecheck` tasks. The `^` means "build my dependencies first," which is what makes `bun run build` (and `bun run test`) run every package in the right order automatically, instead of you having to know the order yourself.
+- **Turborepo**: `turbo.json` defines the task graph: `build`, `test`, `typecheck`, `lint`, `dev`. The `build` and `typecheck` tasks declare `"dependsOn": ["^build"]`, where the `^` means "build my dependencies first"; that's what makes `bun run build` run every package in the right order automatically. `test` (and `test:e2e`) instead depend on `["build"]`, the package's *own* build, which together with `^build` on `build` itself still guarantees a package's dependencies are built before its tests run.
 - **vitest, run under Node**: even though Bun is the primary runtime, the test suite runs under Node via vitest. That means a test that only works with a Bun-specific API won't get caught by the normal `bun run test`, worth knowing if you're testing something Bun-only.
 
 <Callout title="Rebuild after editing a dependency" type="warn">

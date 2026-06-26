@@ -90,7 +90,7 @@ place just no-ops through each statement.
 After the DDL, the engine takes the single-writer advisory lock (more on that
 [below](#the-single-writer-invariant)). The very first time it boots against a given database, it
 also seeds the commit-timestamp sequence from the existing data, or from `1` on a genuinely fresh
-database, so timestamps continue seamlessly. There's no separate "initialize this database" step to
+database, so timestamps continue where they left off. There's no separate "initialize this database" step to
 run yourself. Pointing `serve` at a blank Postgres database is enough.
 
 ## The single-writer invariant
@@ -138,26 +138,28 @@ driver-agnostic `PgClient` seam whose core surface is `query`, `transaction`, `a
 and `close`. This is the same "engine never imports a driver" discipline `docstore-sqlite` follows
 for SQLite. A leak of driver specifics out of the adapter package would be a design bug.
 
-The shipped implementation of that seam is `NodePgClient`, built on the
-[`pg`](https://node-postgres.com/) (node-postgres) driver. It runs on both Node and Bun, which is
-what lets one implementation be proven by the conformance suite, real embedded Postgres, and a real
-containerized `postgres:16` E2E all at once. `Bun.SQL` is a reserved, seam-swappable fast-follow: the
-interface is deliberately shaped so a `Bun.SQL`-backed client could drop in with zero changes to
-`PostgresDocStore`, but it isn't built. It doesn't exist yet, so don't reach for it.
+Two implementations of that seam ship, and the engine picks one automatically by runtime. Under
+Bun (the primary production runtime, including the compiled single binary), it uses `BunSqlClient`,
+built on Bun's native `Bun.SQL` and measured roughly 10 to 17% faster per query than the `pg`
+driver. Under Node, or any other non-Bun host, it uses `NodePgClient`, built on the
+[`pg`](https://node-postgres.com/) (node-postgres) driver. Both implement the full seam, both pass
+the same conformance suite, and nothing downstream of `PgClient` knows or cares which one it got.
 
-A few normalization details `NodePgClient` handles so `PostgresDocStore` never has to think about the
+A few normalization details the clients handle so `PostgresDocStore` never has to think about the
 driver:
 
-- Postgres `int8` (an MVCC timestamp column) decodes as a JS `bigint`, not `pg`'s default string.
+- Postgres `int8` (an MVCC timestamp column) decodes as a JS `bigint`, not a string.
   `NodePgClient` installs a per-client type-parser override for that one OID rather than mutating
-  `pg`'s types globally.
+  `pg`'s types globally; `BunSqlClient` passes `bigint: true` to `Bun.SQL`.
 - Postgres `bytea` (index keys, internal document ids) round-trips as `Uint8Array` in both
   directions.
-- The engine holds one pinned connection for its lifetime on the single-node path, not a pool.
-  `transaction()` needs `BEGIN`/`COMMIT` to land on the same session, and the single-writer invariant
-  is itself a property of that one session. (Tier 2 fleet sharding opens additional per-shard commit
-  connections. That's a multi-node concern covered in [Scaling](/docs/deploy/scaling), not part of
-  the single-node path this page describes.)
+- The writer lock and `transaction()` live on one pinned connection for the client's lifetime.
+  `BEGIN`/`COMMIT` must land on the same session, and the single-writer invariant is itself a
+  property of that one session. Reads are not confined to it: streaming index scans (see the next
+  section) run on a small bounded pool of extra connections, a `pg` read pool on Node and a
+  reuse pool of reserved `Bun.SQL` connections under Bun. (Tier 2 fleet sharding opens additional
+  per-shard commit connections. That's a multi-node concern covered in
+  [Scaling](/docs/deploy/scaling), not part of the single-node path this page describes.)
 
 </Accordion>
 
@@ -190,6 +192,25 @@ applying `LIMIT` (a raw SQL `LIMIT` there would count dead rows and silently ret
 The OCC conflict check's "read the previous revision of N documents" step is similarly one round
 trip: a `VALUES` list of the N lookups, `LATERAL`-joined to each one's latest visible revision,
 instead of N separate queries.
+
+</Accordion>
+
+<Accordion title="Streaming index scans: fast paginated reads">
+
+Paginated and limited reads (`.paginate()`, `.take(n)`, `.first()`) stream rows from a server-side
+Postgres cursor instead of materializing the whole index range up front. The moment the query
+engine stops consuming, because the page is full or the limit is hit, the cursor stops fetching.
+Measured at 100k rows on the paginated shape, that's about a 92% cut in p50 wall-clock and roughly
+1000x fewer rows fetched: the win is work avoided on the server, not just bytes saved on the wire.
+
+This is on by default and needs no configuration. Set `STACKBASE_PG_STREAM=0` (or `false`) to
+disable it; the adapter then falls back to the buffered read path, which returns identical results
+(the full docstore conformance suite runs over both paths to prove that). Under the hood,
+`NodePgClient` streams via `pg-cursor` with adaptive fetch batching, and `BunSqlClient` uses
+`DECLARE`/`FETCH` cursors, since `Bun.SQL` has no native cursor API. One honest caveat on the Bun
+side: a pooled streaming connection that dies while idle is only detected on its next use. That
+surfaces as one spurious error, after which the pool discards the connection and recovers on its
+own.
 
 </Accordion>
 

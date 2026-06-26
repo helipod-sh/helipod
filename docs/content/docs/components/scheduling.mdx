@@ -60,9 +60,11 @@ export const notifyLater = mutation({
   [Canceling and cascading cancel](#canceling-and-cascading-cancel).
 
 Both `runAfter` and `runAt` insert the job row in the calling mutation's own transaction. The
-schedule commits, or rolls back, atomically with the rest of your write. Delay is clamped to
-non-negative (`Math.max(0, delayMs)`), so `runAfter(-100, ...)` just means "as soon as possible,"
-not an error.
+schedule commits, or rolls back, atomically with the rest of your write. In a mutation, delay is
+clamped to non-negative (`Math.max(0, delayMs)`), so `runAfter(-100, ...)` just means "as soon as
+possible," not an error. (The action-mode facade skips the clamp and computes an absolute time
+instead, so a negative delay there resolves to a moment already past, which also dispatches as soon
+as possible.)
 
 `fnRef` is a bare function-path string (`"reminders:_send"`) or a codegen'd `api`/`internal`
 reference. Both resolve to the same string path. The target can be a mutation or an action: the
@@ -70,10 +72,21 @@ scheduler resolves which at enqueue time (via the runtime's function registry) a
 accordingly. This matters because the two have different delivery guarantees, covered in
 [Delivery guarantees](#delivery-guarantees).
 
-## The full enqueue surface: `ctx.scheduler.enqueue`
+## The lower-level `enqueue` method
 
-`runAfter`/`runAt` are the common case, and they only accept a delay or a timestamp. For the rest of
-the options, call the lower-level `enqueue` method directly:
+`runAfter`/`runAt` are the common case, and they only accept a delay or a timestamp. The facade also
+carries a lower-level `enqueue(fnRef, args, opts)` method for the rest of the options. The code
+marks it internal: it exists as the primitive component authors build on (it's how
+`@stackbase/workflow` schedules every step), and its option surface is narrower than the type
+suggests.
+
+<Callout type="info" title="runAt wins over runAfter">
+
+You can delay an enqueue call either way: an absolute `runAt` timestamp or a relative `runAfter`
+delay. If you pass both, `runAt` wins. A negative `runAfter` clamps to "as soon as possible", the
+same as the top-level `ctx.scheduler.runAfter` method.
+
+</Callout>
 
 ```ts
 await ctx.scheduler.enqueue(
@@ -96,11 +109,11 @@ await ctx.scheduler.enqueue(
   type={{
     runAfter: {
       type: 'number',
-      description: 'Relative delay in ms. Mutually exclusive in practice with runAt: whichever is set wins, and omitting both means run as soon as possible.',
+      description: 'Relative delay in ms from the enqueueing call. Ignored when runAt is also set.',
     },
     runAt: {
       type: 'number',
-      description: 'Absolute epoch-ms fire time.',
+      description: 'Absolute epoch-ms fire time. Wins over runAfter. Omitting both means run as soon as possible.',
     },
     idempotencyKey: {
       type: 'string',
@@ -116,7 +129,7 @@ await ctx.scheduler.enqueue(
     },
     retry: {
       type: '{ maxFailures: number }',
-      description: 'Overrides the default retry ceiling (4) for this job.',
+      description: 'Overrides the default retry ceiling for this job (4 for mutations, 1 for actions). For an action target this is your explicit opt-in that it is safe to re-run on a clean failure.',
     },
     name: {
       type: 'string',
@@ -140,11 +153,16 @@ guarantees, because only mutations are safely retryable:
   [Retries and backoff](#retries-and-backoff)) and on an infra kill (see
   [Delivery guarantees](#delivery-guarantees)).
 - **Actions** have arbitrary external side effects (an HTTP call, a charge), so re-running one that
-  may have already partially executed risks doing it twice. Scheduled actions are at-most-once: a
-  clean failure (the action's own code threw) still retries with backoff up to the failure ceiling,
-  but a crash mid-flight, meaning the process died while the action was running before it could
-  report success or failure, dead-letters the job (`state: "failed"`) instead of blindly
-  re-dispatching it.
+  may have already partially executed risks doing it twice. Scheduled actions are at most once by
+  default: whether the process died mid-flight (an infra kill) or the action's own code threw after
+  doing external work, the job dead-letters (`state: "failed"`) instead of being re-dispatched.
+
+Retries for an action are opt-in. Passing `retry: { maxFailures }` on the lower-level `enqueue`
+path (which is how `@stackbase/workflow` threads a step's declared `maxAttempts` through) is your
+statement that the target is safe to re-run, and a cleanly-failed action then retries with backoff
+exactly like a mutation. An infra kill still dead-letters even with the opt-in, because an expired
+lease can't tell the scheduler whether the side effects already ran. Make any action you opt into
+retries for idempotent.
 
 ## Job states
 
@@ -176,10 +194,13 @@ await ctx.scheduler.cancel(jobId);
    because their parent already moved on.
 
 A job scheduled while its parent is already `canceled` is born canceled: it never gets a chance to
-run at all. In practice, "parent" chains today come from components (like `@stackbase/workflow`,
-whose steps are chained this way) that explicitly link a `parentId`. A plain
-`ctx.scheduler.runAfter` call made from inside another job's own handler does not automatically
-become that job's child.
+run at all. One honest note on scope, though: nothing in production sets `parentId` today. The
+schema field, the `by_parent` cascade walk, and the born-canceled check all exist and work, but
+`@stackbase/workflow` cancels its step jobs directly via `scheduler.cancel` rather than chaining
+them, and a plain `ctx.scheduler.runAfter` call made from inside another job's own handler is a
+top-level job, not a child. The mechanism is wired for a future slice that threads a real "current
+job id" through the driver; until then, the cascade only reaches jobs whose `parentId` was set
+explicitly.
 
 ## The `onComplete`/`context` round-trip
 
@@ -313,15 +334,29 @@ collapses into one work job rather than running twice.
 
 For `"fireAll"` on an interval spec, the occurrence count is computed in O(1) arithmetic, never by
 stepping through the backlog one at a time, so even a fast interval down for months materializes its
-capped backlog cheaply. For a cron-expression spec, `"skip"` and `"fireOnce"` are each answered by at
-most two `cron-parser` calls. Only `"fireAll"`'s materialization loop actually steps through
-occurrences, and that loop is what the 1000 cap bounds.
+capped backlog cheaply. For a cron-expression spec, `"skip"` and `"fireOnce"` are each answered by a
+bounded handful of `cron-parser` calls (at most four), regardless of backlog length. Only
+`"fireAll"`'s materialization loop actually steps through occurrences, and that loop is what the
+1000 cap bounds.
 
 ## Retries and backoff
 
-A failed job (mutation or action) is retried with jittered exponential backoff, up to
-`retry.maxFailures` (default 4), then dead-lettered to `state: "failed"`. The formula
-(`computeBackoff`):
+A failed job is retried with jittered exponential backoff, up to `retry.maxFailures`, then
+dead-lettered to `state: "failed"`. The default ceiling is 4 for mutations and 1 for actions, so a
+cleanly-failed action dead-letters on its first failure unless you opt into retries explicitly (see
+[Scheduled targets](#scheduled-targets-mutations-vs-actions)). A non-retryable, deterministic error
+(for example a schema-violating write) skips straight to dead-lettering instead of burning through
+every remaining attempt.
+
+The jitter's randomness comes from the mutation's own seeded PRNG (`ctx.random`), not raw
+`Math.random()`. That's what makes a retry's delay itself replay-deterministic under the engine's
+OCC-conflict replay model, and what makes tests computable rather than flaky.
+
+<Accordions type="single">
+
+<Accordion title="The backoff formula and schedule">
+
+The formula (`computeBackoff`):
 
 ```
 raw = initialBackoffMs * base ** (attempts + 1)
@@ -338,11 +373,9 @@ failure count after this failure is recorded, so with the defaults:
 | 3 | 4,000ms | 2,000ms to 4,000ms |
 | 4 | n/a | dead-lettered (`attempts >= maxFailures`), no further retry |
 
-The jitter's randomness comes from the mutation's own seeded PRNG (`ctx.random`), not raw
-`Math.random()`. That's what makes a retry's delay itself replay-deterministic under the engine's
-OCC-conflict replay model, and what makes tests computable rather than flaky. A non-retryable,
-deterministic error (for example a schema-violating write) skips straight to dead-lettering instead
-of burning through every remaining attempt.
+</Accordion>
+
+</Accordions>
 
 ## Delivery guarantees
 
@@ -354,15 +387,20 @@ between mutations and actions matters specifically for infra kills: the process 
   below) reclaims any job still `inProgress` past its lease deadline.
 - **Mutation** jobs are reclaimed back to `pending` with `nextTs: now()` (immediate, no backoff,
   since an infra kill isn't the job's own fault) and their attempt count incremented. Because a
-  mutation is deterministic and transactional, replaying it is safe.
-- **Action** jobs are reclaimed straight to `state: "failed"` instead. An expired lease means
-  there's no way to know whether the action's side effects already ran, so retrying could double-run
-  them. `onComplete`, if set, fires with `{ kind: "failed" }`, so a caller relying on the callback
-  (like a workflow step) still observes the terminal outcome rather than hanging forever.
+  mutation is deterministic and transactional, replaying it is safe. The reclaim spends the same
+  `maxFailures` budget the normal failure path does, so a mutation that reliably crashes the whole
+  process (rather than throwing, which the normal path would catch) dead-letters once the budget is
+  spent instead of being re-dispatched forever.
+- **Action** jobs are reclaimed straight to `state: "failed"` instead, even if they opted into
+  retries. An expired lease means there's no way to know whether the action's side effects already
+  ran, so retrying could double-run them. `onComplete`, if set, fires with `{ kind: "failed" }`, so
+  a caller relying on the callback (like a workflow step) still observes the terminal outcome
+  rather than hanging forever.
 
 Put another way: scheduled mutations are effectively at-least-once at the granularity of the whole
-job, since a crash-recovered retry always eventually lands the same deterministic write. Scheduled
-actions are at-most-once: they either complete, or dead-letter, never silently repeat.
+job (bounded by `maxFailures`), since a crash-recovered retry always eventually lands the same
+deterministic write. Scheduled actions are at most once unless you explicitly opt into retries, and
+at most once for the crash case no matter what.
 
 ## The driver
 
@@ -385,8 +423,10 @@ flowchart LR
 - **Wake timer**: after every pass, re-arms a single wall-clock timer to the earliest still-pending
   job's `nextTs`, so a job scheduled for the future still fires exactly when its time arrives,
   without scanning in between.
-- **Lease-reclaim sweep**: a genuinely periodic timer (`SWEEP_MS`, 30 seconds) that's the only
-  polling in the whole driver, and exists purely as the infra-kill backstop described above.
+- **Lease-reclaim sweep**: a genuinely periodic timer (`SWEEP_MS`, 30 seconds by default) that's the
+  only polling in the whole driver, and exists purely as the infra-kill backstop described above.
+  The driver declares it as a backstop (via the driver seam's `backstopMs`), so a host where every
+  wake costs a cold start can stretch the cadence.
 
 Each dispatch pass pulls up to `BATCH_CAP` (64) due jobs at a time via a snapshot-read query, then
 claims and runs each one. Claiming is the authoritative double-run guard: a claim only succeeds if
@@ -423,7 +463,7 @@ The Durable-Object-native Cloudflare host doesn't have this gap. The DO's own al
 work through idle and hibernation, so `ctx.scheduler`/`cronJobs()` behave the same as on any other
 deployment target. If your app depends on this component, prefer the DO-native path, or a deployment
 target that keeps a process running continuously ([self-hosting](/docs/deploy/self-hosting), the
-[standalone binary](/docs/deploy/standalone-binary)).
+[standalone binary](/docs/deploy/deploy-and-build)).
 
 </Callout>
 

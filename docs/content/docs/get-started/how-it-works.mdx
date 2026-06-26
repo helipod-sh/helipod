@@ -35,11 +35,11 @@ a bound instead of a single key. `ctx.db.get(id)` records a range that is a sing
 `ctx.db.query(table, index).collect()` with no `.eq`/bound at all records the whole index interval:
 a read set as wide as the index itself.
 
-Not every read can be expressed as a bounded range. A query whose predicate the planner can't turn
-into a key range still gets a read set, but it degrades to **table-level**: any write to that table
-invalidates it. This isn't a mode you opt into. It's simply what happens when a read can't be bounded
-to a range. The narrower your query, the narrower its read set, and the fewer writes can ever touch
-it.
+Even an unbounded scan records a range, just a maximally wide one. A separate **table-level**
+fallback exists for the rare read that records no range at all: a subscription with zero recorded
+ranges is matched by table instead, so any write to that table invalidates it. Either way the rule
+of thumb holds: the narrower your query, the narrower its read set, and the fewer writes can ever
+touch it.
 
 ## Write sets: mutations are the only writers
 
@@ -62,18 +62,34 @@ makes intersection possible: a read set and a write set are the same kind of obj
 range), so comparing them is a range-overlap check, not a semantic guess about what a query "means."
 
 Commits are serialized through a single logical writer per shard (see [The single-writer
-ceiling](#the-single-writer-ceiling-and-how-it-scales) below) under **3-phase optimistic concurrency
-control**:
+ceiling](#the-single-writer-ceiling-and-how-it-scales) below) under **optimistic concurrency
+control**: validate first, then land everything in one atomic step.
 
-1. **Validate**: has any commit landed since this mutation's snapshot that wrote something this
-   mutation *read*? The check runs against the mutation's own validated read set (built from every
-   `ctx.db.get`/`.collect()`/`.paginate()` call the handler made), not a lock taken up front. The
-   handler runs optimistically, without blocking other commits.
-2. **Allocate**: if validation passes, the store allocates one commit timestamp, atomically, inside
-   its own atomicity domain, so there's never a window where a timestamp is allocated but not yet
-   landed.
-3. **Apply**: every staged row lands at that timestamp in one atomic batch, and the write set is
-   emitted for the reactive fan-out.
+<Steps>
+
+<Step>
+
+### Validate
+
+Has any commit landed since this mutation's snapshot that wrote something this mutation *read*?
+The check runs against the mutation's own validated read set (built from every
+`ctx.db.get`/`.collect()`/`.paginate()` call the handler made), not a lock taken up front. The
+handler runs optimistically, without blocking other commits.
+
+</Step>
+
+<Step>
+
+### Apply and allocate, atomically
+
+If validation passes, the store allocates the commit timestamp and lands every staged row at that
+timestamp in one atomic step, inside its own atomicity domain. There's never a window where a
+timestamp is allocated but its writes aren't yet landed. The write set is then emitted for the
+reactive fan-out.
+
+</Step>
+
+</Steps>
 
 If validation fails (a conflicting write landed first), the engine throws a conflict error and the
 caller **replays the mutation's handler from scratch** against the new snapshot. This is only safe
@@ -117,9 +133,8 @@ backend.
 
 This is the heart of the system. A subscription is a query plus the read set it recorded when it
 last ran. When a mutation commits with write set `W`, the engine finds every live subscription whose
-read set **intersects** `W`, re-runs (or diffs, see [Beyond
-re-run](#beyond-re-run-differential-log-tail-reactivity) below) exactly those, and pushes the new
-result.
+read set **intersects** `W`, re-runs (or diffs, see [Going deeper](#going-deeper) below) exactly
+those, and pushes the new result.
 
 Every other subscription (including ten thousand others on the same table but a different key range)
 is untouched: not re-run, not even inspected individually.
@@ -130,7 +145,7 @@ intersection *is* the notification.
 ```mermaid
 flowchart TB
   Sub["Subscribe: query runs, records readRanges"] --> Reg["Subscription registry (keyed by keyspace + range)"]
-  Write["Write"] --> TX["Single-writer transactor (3-phase OCC, assigns ts)"]
+  Write["Write"] --> TX["Single-writer transactor (OCC commit, assigns ts)"]
   TX -->|"emits commitTs, writeRanges, writeTables"| Check{"Overlaps a subscription's ranges?"}
   Reg --> Check
   Check -->|"yes"| Push["Re-run or diff, then push"]
@@ -148,8 +163,14 @@ value, or made a network call), the engine couldn't reason about whether its res
 subscription could show stale or wrong data. A replayed mutation could double-charge a card it
 already charged once.
 
-So queries and mutations run under a frozen capability profile that makes non-determinism
-unreachable, not just discouraged:
+So queries and mutations run under a declared **capability profile**: `ctx` never grants them a
+clock, randomness, or the network. Today, functions run in-process, so the JavaScript globals
+(`Date.now`, `Math.random`, `fetch`) are still physically reachable. Calling one isn't caught at
+runtime, it just silently breaks the reactivity and replay guarantees, so treat the profile as a
+hard rule. A planned V8-isolate executor will enforce it at the engine level (see [The syscall
+boundary](#going-deeper) under Going deeper below).
+
+The profile itself:
 
 | Capability | Query / Mutation | Action |
 |---|---|---|
@@ -166,66 +187,73 @@ can't be made deterministic this way (a real network call, a webhook, sending an
 [action](/docs/core-concepts/actions), which runs *outside* the transaction with native capabilities,
 has no read set or write set of its own, and is never part of a subscription.
 
-## Finding affected subscriptions without scanning all of them
+## Going deeper
+
+Three internals worth knowing about, none required to use the system. See
+[Reactivity](/docs/core-concepts/reactivity) for the full subscription-matching story.
+
+<Accordions type="single">
+
+<Accordion title="Finding affected subscriptions without scanning all of them">
 
 Computing "does this write's range overlap this subscription's range" for *one pair* is cheap. Doing
 it against every live subscription, on every write, is not. An early benchmark caught exactly that
-cost: at 10,000 live subscriptions, a write that should touch **exactly one** subscriber
-(`subsMatchedAvg = 1.0`) still cost **9.14 ms p50 / 12.97 ms p99**. Deciding which subscription to
-re-run required inspecting all 10,000, not just the one that mattered, so write throughput degraded
-with subscription count, independent of how selective any individual write actually was.
+cost: at 10,000 live subscriptions, a write that should touch **exactly one** subscriber still
+required inspecting all 10,000, so write throughput degraded with subscription count.
 
 The fix is a data-structure change, not more threads. Read ranges are indexed in a **per-keyspace
 augmented interval tree** (a treap keyed by range start, each node carrying its subtree's maximum
 end), bucketed first by keyspace, since a write range can only ever overlap subscriptions on the
-*same* table-and-index. A write range's affected subscriptions are then found by a tree query, not a
-sweep of every live subscription: cost scales with the number of matches, not the number of
-subscribers. Subscriptions on the table-level fallback path (above) are kept in a separate per-table
-set and matched directly. It's cheap, just coarse in what triggers them.
+*same* table-and-index. A write's affected subscriptions are found by a tree query: cost scales with
+the number of matches, not the number of subscribers. Subscriptions on the table-level fallback path
+are kept in a separate per-table set and matched directly. It's cheap, just coarse in what triggers
+them.
 
-The same benchmark, re-run after indexing, shows the effect directly on that pathological cell:
+The same benchmark, re-run after indexing, shows the effect on that pathological cell:
 
 | subscriptions | before (linear scan) | after (interval-indexed) |
 |--------------:|----------------------:|---------------------------:|
 | 10,000 (one write, one matching subscriber) | 6.72 ms p50 | 0.24 ms p50 (−96.4%) |
 
-A deployment holding tens of thousands of live subscriptions now pays for the write it actually made,
+A deployment holding tens of thousands of live subscriptions pays for the write it actually made,
 not for the subscriptions it didn't touch.
 
-## Beyond re-run: differential log-tail reactivity
+</Accordion>
 
-The mechanism above answers *which* subscriptions to recompute. What a recomputed subscription
-actually receives is either a full re-run of its query handler, or, for the common, narrow shapes a
-subscription's read set can take, an incremental **diff** instead of a full result.
+<Accordion title="Beyond re-run: differential log-tail reactivity">
+
+The matcher above answers *which* subscriptions to recompute. What a recomputed subscription
+actually receives is either a full re-run of its query handler, or, for the common narrow shapes a
+read set can take, an incremental **diff** instead of a full result.
 
 Stackbase's queries are arbitrary imperative TypeScript, not a declarative query language, so there is
 no operator graph to update incrementally the way a fully compiled dataflow engine would. The query
-handler itself stays exactly what you wrote. What changes is what happens *around* it:
+handler stays exactly what you wrote. What changes is what happens *around* it:
 
 1. **Classify**: at subscribe time, a subscription whose read set is a single `ctx.db.get(id)`
-   point-read, or a single bounded index range/page, is marked diffable. Anything else (a filter the
-   planner can't express as a range, a multi-range read) falls back to the full re-run path. This is a
-   safe default: misclassifying something as "must re-run" never produces wrong data, only a wider
-   payload.
-2. **Re-run is always the ground-truth oracle**: a diffable subscription's incremental changes are
-   still computed *from* a real re-run of the affected range, never invented from the write alone, so
-   a diff can never diverge from what a full re-run would have produced.
+   point-read, or a single bounded index range/page, is marked diffable. Anything else falls back to
+   the full re-run path. This is a safe default: misclassifying something as "must re-run" never
+   produces wrong data, only a wider payload.
+2. **Re-run is always the ground-truth oracle**: a diff is still computed *from* a real re-run of
+   the affected range, never invented from the write alone, so it can never diverge from what a full
+   re-run would have produced.
 3. **Drift checksum**: every diffable subscription's materialized rows carry an order-independent
-   checksum, computed identically on server and client. If a client's checksum ever mismatches the
-   server's (a missed message, a client-side bug), that one subscription resyncs. It never silently
-   serves stale or wrong data.
-4. **Shared apply**: the same `applyChanges(rows, changes)` function materializes a diff into a row
-   map on both the server (to compute the next checksum) and the client (to update the UI), so the two
-   sides cannot drift in how a diff is interpreted.
-5. **Log-ts resume**: because the underlying data model is already an ordered, timestamped log,
-   resuming a subscription after a reconnect is a question the log answers directly: "has anything
-   changed since timestamp `T`?" A client that already holds an unchanged result gets back a tiny
-   marker instead of a full resend.
+   checksum, computed identically on server and client. A mismatch resyncs that one subscription. It
+   never silently serves stale or wrong data.
+4. **Shared apply**: the same `applyChanges(rows, changes)` function materializes a diff on both the
+   server (to compute the next checksum) and the client (to update the UI), so the two sides cannot
+   drift in how a diff is interpreted.
+5. **Log-ts resume**: because the data model is an ordered, timestamped log, resuming a subscription
+   after a reconnect is a question the log answers directly: "has anything changed since timestamp
+   `T`?" A client that already holds an unchanged result gets back a tiny marker instead of a full
+   resend.
 
 The net effect: unchanged data on reconnect and narrow, targeted writes cost proportionally little.
 Stackbase never compiles your query into anything other than the TypeScript function you wrote.
 
-## The syscall boundary is isolate-ready
+</Accordion>
+
+<Accordion title="The syscall boundary is isolate-ready">
 
 User code never touches storage, indexes, or the transaction directly. Every `ctx.db` call crosses a
 narrow syscall boundary (a string operation name plus a JSON argument) into a host-side kernel that
@@ -234,16 +262,21 @@ strings in both directions, the same host-side handlers work whether the guest e
 is today's in-process inline executor or, later, a real V8 isolate with its own globals. The boundary
 doesn't need to change shape to support hard sandboxing, only the guest side does.
 
-That separation is also where the determinism profiles above are enforced today. The inline executor
-wires a seeded PRNG and a fixed transaction-time clock into `ctx`, and simply never grants `fetch` or
-`Date.now()` to a query/mutation's context. True per-function global sandboxing (overriding the
-guest's own `Math.random`/`Date.now`/`fetch` at the JS-engine level, for hard multi-tenant isolation)
-is the job of a V8-isolate executor as a drop-in successor to the inline one. The syscall ABI is
-already shaped so that swap doesn't touch the host side.
+That separation is also where the determinism profiles above live today. The inline executor wires a
+seeded PRNG and a fixed transaction-time clock into `ctx`, and simply never grants `fetch` or
+`Date.now()` to a query/mutation's context. It does not override the guest's own globals, which is
+why the contract framing above matters. True per-function global sandboxing (overriding
+`Math.random`/`Date.now`/`fetch` at the JS-engine level, for hard multi-tenant isolation) is the job
+of a V8-isolate executor as a drop-in successor to the inline one. The syscall ABI is already shaped
+so that swap doesn't touch the host side.
+
+</Accordion>
+
+</Accordions>
 
 ## The single-writer ceiling and how it scales
 
-Every commit passes through one logical writer *per shard*: the 3-phase OCC pipeline above is
+Every commit passes through one logical writer *per shard*: the OCC commit pipeline above is
 strictly serialized, one commit at a time, because serializing writes is precisely what makes conflict
 validation cheap and the commit log's timestamp ordering meaningful. That means write throughput on a
 single shard has a ceiling. You cannot get more total write throughput by adding threads or CPU cores
@@ -261,8 +294,9 @@ threads. See [Scaling](/docs/deploy/scaling) for how sharding is configured in a
 
 1. A client **subscribes** to a query. The engine runs it, records its read set (as precise
    keyspace/range pairs, or a table-level fallback), and returns the result.
-2. Later, a **mutation commits**. Its handler ran as one serializable transaction, validated against
-   its own read set via 3-phase OCC (replaying on conflict), and its write set is computed on commit.
+2. Later, a **mutation commits**. Its handler ran as one serializable transaction, was validated
+   against its own read set (replaying on conflict), and landed atomically with its commit
+   timestamp. Its write set is computed on commit.
 3. The engine looks up which subscriptions the write set touches, via the interval-indexed matcher,
    not a scan of every live subscription.
 4. Each affected subscription is **re-run or diffed and pushed** over the WebSocket connection; every

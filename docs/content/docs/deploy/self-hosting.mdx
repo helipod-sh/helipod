@@ -385,6 +385,67 @@ volume) via a `pg_advisory_lock` single-writer guard, not multi-node scale-out. 
 app-schema migrations as `schema.ts` evolves. See [Postgres](/docs/deploy/postgres) for the full
 compose example, the single-writer constraint, and its known limitations.
 
+## Other platforms (Railway, Fly.io)
+
+Any platform that can run a long-lived process with WebSocket support and a persistent disk can
+host `stackbase serve`; Docker is the baseline, not a requirement. The checklist is always the
+same: set `STACKBASE_ADMIN_KEY` as a platform secret (never in a config file), mount a persistent
+volume for the data directory, and point health checks at `GET /api/health`.
+
+<Tabs items={['Railway', 'Fly.io']}>
+
+<Tab value="Railway">
+
+```toml title="railway.toml"
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "stackbase serve --dir ./convex --data /app/data/db.sqlite"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+
+[[mounts]]
+source = "data"
+destination = "/app/data"
+```
+
+Set `STACKBASE_ADMIN_KEY` in the service's Railway variables. Railway terminates TLS for you.
+
+</Tab>
+
+<Tab value="Fly.io">
+
+```toml title="fly.toml"
+app = "my-stackbase-app"
+primary_region = "iad"
+
+[mounts]
+source = "data"
+destination = "/app/data"
+
+[http_service]
+internal_port = 3000
+force_https = true
+
+[[http_service.checks]]
+interval = "10s"
+timeout = "2s"
+path = "/api/health"
+```
+
+Set the secret with `fly secrets set STACKBASE_ADMIN_KEY=...`, and start the process as
+`stackbase serve --dir ./convex --data /app/data/db.sqlite`. Fly terminates TLS at its edge.
+
+</Tab>
+
+</Tabs>
+
+A managed Postgres on either platform works through the same `STACKBASE_DATABASE_URL` as anywhere
+else. Both platforms also have an automated push path: `stackbase deploy --target railway` and
+`--target fly` shell out to the platform's own CLI (`railway up`, `fly deploy`) after refreshing
+codegen. See [Deploy and build](/docs/deploy/deploy-and-build#the-six-deploy-targets).
+
 ## Reverse proxy / TLS
 
 <Callout type="warn" title="No built-in TLS">

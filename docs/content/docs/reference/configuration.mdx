@@ -251,19 +251,70 @@ export default defineConfig({
 });
 ```
 
-`StackbaseConfig` is exactly one field:
+`StackbaseConfig` is two fields, one required and one optional:
 
 ```ts
 export interface StackbaseConfig {
   components: ComponentDefinition[];
+  deploy?: DeployConfig;
 }
 
 export function defineConfig(config: StackbaseConfig): StackbaseConfig; // identity, just gives the file a typed default export
 ```
 
-Each entry is a component's own `define*()` call: `defineScheduler()`, `defineWorkflow()`,
-`defineAuth()`, `defineAuthz()`, `defineTriggers()`, `defineNotifications()`. Every one of them
-returns a plain `ComponentDefinition`, so nothing besides `components: [...]` belongs in this file.
+Each `components` entry is a component's own `define*()` call: `defineScheduler()`,
+`defineWorkflow()`, `defineAuth()`, `defineAuthz()`, `defineTriggers()`, `defineNotifications()`.
+Every one of them returns a plain `ComponentDefinition`.
+
+### The `deploy` block
+
+`deploy` holds `stackbase deploy`'s target configuration, so a deploy needs no flags beyond
+`stackbase deploy` itself:
+
+```ts
+export interface DeployConfig {
+  /** Used when --target is omitted. Effective default is "serve". */
+  defaultTarget?: string;
+  /** Keyed by target name (the --target value). */
+  targets?: Record<string, TargetConfig>;
+}
+
+export interface TargetConfig {
+  /** "serve" | "cloudflare" | "docker" | "railway" | "fly" | "aws": selects the deploy adapter. */
+  provider: string;
+  /** Per-environment overrides, merged over the shared settings; --env selects one. */
+  environments?: Record<string, Record<string, unknown>>;
+  /** Any other field is a provider-specific setting (url, adminKey, serviceArn, ...). */
+  [k: string]: unknown;
+}
+```
+
+The `env()` helper (also from `@stackbase/component`) reads an environment variable at config-load
+time, for wiring secrets into target settings without hardcoding them. It never throws: unset with
+no fallback resolves to `""`, and the target's own `preflight` is what fails fast on a genuinely
+missing credential, so the config still loads when no `.env` is present.
+
+```ts title="stackbase.config.ts"
+import { defineConfig, env } from "@stackbase/component";
+
+export default defineConfig({
+  components: [],
+  deploy: {
+    defaultTarget: "serve",
+    targets: {
+      serve: {
+        provider: "serve",
+        url: env("STACKBASE_DEPLOY_URL", "https://my-deployment.example.com"),
+        adminKey: env("STACKBASE_ADMIN_KEY"),
+      },
+      cloudflare: { provider: "cloudflare" },
+    },
+  },
+});
+```
+
+See [`stackbase deploy`](/docs/reference/cli#stackbase-deploy) for the flags this block feeds and
+[Deploy & build](/docs/deploy/deploy-and-build) for each target's own settings.
 
 See each component's own page under [Components](/docs/components/overview) for its `define*()`
 options: `defineAuth(options?)`, `defineAuthz(config)`, `defineWorkflow(opts)`,
@@ -433,7 +484,8 @@ equivalent.
 | `STACKBASE_ADMIN_KEY` | `serve`, `dev` (optional) | Bearer token for the dashboard and every admin/deploy endpoint. Required for `serve`: it fails fast (exit 1) if unset or blank. `dev` generates an ephemeral one per run if unset (printed to stdout on startup), or warns and does the same if the variable is set but blank. |
 | `PORT` | `serve` | HTTP/WebSocket port, default `3000`. Not `STACKBASE_`-prefixed: a bare `PORT` is the conventional PaaS variable. `dev` takes `--port` instead, with no env fallback. |
 | `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file, written to `<dir>/db.sqlite`. `dev` takes `--data <path>` instead (default `.stackbase/data.db`), with no env fallback. |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve`, `deploy`(fleet) | A Postgres connection string. Unset → SQLite. `--database-url` wins over this. See [Postgres](/docs/deploy/postgres). |
+| `STACKBASE_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | A Postgres connection string. Unset → SQLite. `--database-url` wins over this. See [Postgres](/docs/deploy/postgres). |
+| `STACKBASE_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads); the adapter falls back to buffered reads with identical results. Any other value, including unset, leaves streaming on. See [Postgres](/docs/deploy/postgres). |
 | `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`). Any other value (including unset) leaves it on. |
 | `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy`, `stackbase deploy`'s hot-swap target (equivalent to `--allow-deploy`). Off by default. |
 | `STACKBASE_WEB_DIR` | `serve` | A static web UI directory to serve at the site root, alongside the sync WebSocket and API, so a same-origin client SPA needs no separate backend-URL config. Equivalent to `--web`. |
@@ -465,7 +517,7 @@ Opt into a symmetric fleet of `serve` processes sharing one Postgres database vi
 | `STACKBASE_FLEET_SHARDS` | Number of shards the fleet runs (default 8 in `@stackbase/fleet`). Persisted once at first boot and immutable after: a later mismatched value fails boot fast. Also read (without fleet) as the lane count for a single-node `--object-store --shards N` writer. |
 | `STACKBASE_FLEET_LEASE_TTL_MS` | The write lease's TTL in milliseconds, the one knob the whole failover clock (heartbeat and acquire cadence) scales from. Unset → fleet default (15000ms). Ops/test tuning knob, no CLI flag. |
 | `STACKBASE_FLEET_MULTI_WRITER` | `1`/`true`/`yes` opts into multi-writer scale-out (sharded writes across more than one writer node against the same Postgres database). Off by default. |
-| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` enables group commit (batches concurrent commits through a staged two-buffer committer), an opt-in throughput mode for both fleet and non-fleet single-node Postgres deployments. Off (structurally zero-cost) by default. |
+| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group commit on (batching concurrent commits through a staged two-buffer committer, one fsync amortized across them); any other explicit value forces it off. Unset, the default is topology-dependent: **on** for single-node (non-fleet) Postgres, **off** for SQLite, and **off** on a fleet node. |
 
 ### Object storage (Tier 3: bucket-backed, no database)
 

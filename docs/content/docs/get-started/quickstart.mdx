@@ -114,9 +114,12 @@ npx stackbase dev
 file, serves a dashboard, and reloads whenever you edit a file. It prints its URL and a dev admin key:
 
 ```
-stackbase dev  →  http://127.0.0.1:3000   (dashboard: /_dashboard)
-admin key      →  sk_dev_3f8a1c...
+stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+admin key → 3q2xN7vRkYw8pTzL5mA9cB1dE6fGhJ0u
 ```
+
+The admin key is a fresh random value on each run (unless you set `STACKBASE_ADMIN_KEY` yourself).
+Yours will differ.
 
 </Step>
 
@@ -132,9 +135,10 @@ subscription:
 3. Open the **function runner** and call `messages:send` with `{ "author": "Ada", "body": "hello" }`.
 4. The new row shows up in the data browser right away, with no refresh.
 
-That live view is a subscription to `messages:list`, the same thing a real app holds. A mutation wrote
-a row, and every subscription reading that table refreshed on its own. You wrote no polling and no
-invalidation code.
+That live view is a real reactive subscription (the dashboard subscribes to a built-in admin query,
+`_admin:browseTable`, over the same sync connection your app would use). A mutation wrote a row, and
+every subscription reading that table refreshed on its own, the dashboard's included. You wrote no
+polling and no invalidation code.
 
 </Step>
 
@@ -215,6 +219,7 @@ See [Client SDK](/docs/client/client-sdk) for the full hook surface, and
 | `--web` | (none) | Serve a built web UI alongside the API |
 | `--database-url` | (SQLite) | Use Postgres instead |
 | `--storage-bucket` | (local disk) | Use S3-compatible file storage |
+| `--storage-endpoint` | (none) | S3-compatible endpoint URL (MinIO, R2, a non-default AWS region) |
 
 Run `stackbase help` for every command and flag.
 

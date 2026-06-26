@@ -76,7 +76,7 @@ Setting `STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` without a bucket is a
 and `stackbase dev` refuses to boot from it. Otherwise it would silently write uploads to local disk
 when you meant to configure S3. Set the bucket too, or drop the other settings.
 
-See [File storage](/docs/data/file-storage) for the full byte-storage story.
+See [File storage](/docs/core-concepts/file-storage) for the full byte-storage story.
 
 </Callout>
 
@@ -95,7 +95,7 @@ bun stackbase dev
 ```
 
 ```bash tab="Node"
-node stackbase dev
+npx stackbase dev
 ```
 
 </Tabs>
@@ -275,7 +275,9 @@ real `STACKBASE_ADMIN_KEY` before it will even start.
 - [Self-hosting with Docker](/docs/deploy/self-hosting): `stackbase serve`, the production
   counterpart of `stackbase dev` (no codegen, required admin key, binds `0.0.0.0`, dashboard served
   key-less).
-- [Deploying without a restart](/docs/deploy/deploying): `stackbase deploy`, for pushing a schema
-  and function change to an already-running `serve` without hot-reload's dev-only watch loop.
+- [Deploying without a restart](/docs/deploy/deploy-and-build): `stackbase deploy`, for pushing a
+  schema and function change to an already-running `serve` without hot-reload's dev-only watch loop.
+- [Vite plugin](/docs/deploy/vite-plugin): a Vite app can run `stackbase dev` for you as part of
+  its own dev server.
 - [Queries](/docs/core-concepts/queries): the `.paginate()`/`scanCapped` contract the data browser
   itself relies on.

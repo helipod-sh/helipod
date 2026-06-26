@@ -1,6 +1,6 @@
 ---
 title: Reactivity
-description: How read-sets and write-sets are actually matched, index-range precision, the interval-indexed matcher, incremental row diffs, and reconnect resume.
+description: What makes a subscribed query re-run, which query shapes get the cheapest live updates, and what happens on reconnect.
 ---
 
 {/* diataxis: explanation */}
@@ -8,541 +8,153 @@ description: How read-sets and write-sets are actually matched, index-range prec
 [How it works](/docs/get-started/how-it-works) covers the core idea: a subscribed query re-runs
 only when a committed write intersects its recorded read-set.
 
-This page goes several levels deeper. You'll see what a read-set is actually made of, how the
-engine finds affected subscriptions without scanning every live one, how it skips re-running a
-query's handler entirely when it can prove nothing relevant changed, and what determinism buys you
-in exchange.
+This page goes one level deeper, from the app developer's seat. You'll see exactly what makes a
+query re-run, which query shapes get the cheapest incremental updates, and why reconnecting after
+a dropped connection is nearly free.
 
-Everything below describes the engine that ships today. Nothing here is aspirational.
+Everything below describes the engine that ships today. If you want the internals (the data
+structures, the wire protocol, the source files), see the contributor-facing
+[Reactivity & sync](/docs/contributing/architecture/reactivity) page instead.
 
-## A read-set is index-range-precise, not table-level
+## Read-sets are range-precise, not table-level
 
 When a query reads through `ctx.db.query(table, index).eq(field, value)`, the engine doesn't
-record "this query touched the `messages` table." It records the exact **keyspace** (the table and
-index) and the **key range** the scan covered. For `.eq("conversationId", id)`, that's the single
-narrow span of the `by_conversation` index belonging to that one conversation. `.gt`/`.gte`/`.lt`/`.lte`
-narrow it further to a bound rather than a single key. `ctx.db.get(id)` records a range that's a
-single point (a `table:` keyspace point range, not an `index:` range).
-
-That precision is what [Queries](/docs/core-concepts/queries) means when it says the shape of your
-query determines how it reacts: a narrow read range means only writes landing in that same narrow
-range can ever invalidate it.
-
-## Table-level fallback
-
-Not every read can be expressed as a bounded key range. A query with no index bound at all
-(scanning a whole table, or applying a `.where(...)` filter the engine can't turn into a range)
-still gets a read-set. It just degrades to **table-level** matching: any write to that table
-invalidates it, the same coarse behavior as if ranges didn't exist.
-
-This isn't a mode you opt into. It's simply what happens when a read genuinely can't be bounded to
-a range. Writing queries that scope down to an index range, as in the example above, is what keeps
-them off this fallback path.
-
-## The `SubscriptionManager`: finding affected subscriptions without scanning all of them
-
-At commit, a mutation's write-set is also a set of key ranges (or tables, for writes that don't
-narrow to a range). The engine's `SubscriptionManager` (`packages/sync/src/subscription-manager.ts`)
-is what turns "does this write touch any live subscription?" into a cheap question instead of an
-expensive one.
-
-Every range-bearing subscription is inserted into a per-keyspace **augmented interval index**
-(`IntervalIndex`, `packages/index-key-codec/src/interval-index.ts`): a treap keyed by each range's
-`start` byte-key, with every node augmented with its subtree's maximum `end` so an overlap query
-can prune whole subtrees it can prove don't contain a match.
-
-Node priorities are a deterministic FNV-1a hash of the entry's own identity, never
-`Math.random()`. That keeps the tree's shape a pure, reproducible function of its contents, while
-still staying balanced in expectation regardless of insertion order.
-
-Read ranges are deserialized **once**, at subscribe time (`SubscriptionManager.add`), and never
-re-parsed per write. A subscription with no bounded range at all (the table-level fallback above)
-instead goes into a plain `byTable: Map<string, Set<key>>`: cheap to check, just coarse in what
-triggers it.
-
-`findAffectedByRanges(writeRanges, writeTables)` is the one method the sync handler calls on every
-commit. For each range in the write-set, it queries the matching keyspace's interval index for
-overlaps. For each table in the write-set, it looks up the table-fallback set. The union, deduped,
-is exactly the set of subscriptions this commit must re-run or re-diff.
-
-Because the interval index prunes by subtree-max-`end`, this costs roughly `O(log N + k)` per write
-range, where `N` is the number of subscriptions *in that keyspace* and `k` is the number that
-actually match. Not a scan of every live subscription on the node.
-
-```ts title="packages/sync/src/subscription-manager.ts (shape, not user code)"
-findAffectedByRanges(
-  writeRanges: readonly SerializedKeyRange[],
-  writeTables: readonly string[],
-): Subscription[]
-```
-
-### Why this mattered: the O(N) wall DLR Stage 1 removed
-
-Before this indexed matcher existed, `findAffectedByRanges` was a **linear scan of every live
-subscription**: deserializing each one's stored ranges and checking overlap in a `for` loop, on
-every single write, even when the write's own write-set was a single narrow range that could only
-ever match one subscriber.
-
-The `bench:reactive fanout-selective-10000` scenario (`packages/test`'s `runFanoutBench`) made the
-cost visible. At 10,000 live subscriptions, with exactly one subscription matching every write,
-propagation p50 was **6.72 ms**, a roughly 30x latency increase over 100 subscriptions for 100x
-more subscribers, even though only one of them ever needed recomputing (see
-`docs/dev/research/reactivity/fanout-benchmark.md`).
-
-The fix, **DLR Stage 1**, was this per-keyspace interval index, not more threads or worker
-parallelism. The deployment shape where this cost is paid (multi-node, Postgres-backed) is
-I/O-bound, not CPU-bound, so Bun Workers were evaluated and explicitly rejected as the wrong tool
-for it (same benchmark doc).
-
-Same-machine before and after: `fanout-selective-10000` propagation p50 went from **6.72 ms to
-0.24 ms** (−96.4%).
-
-## What exactly triggers a re-run
-
-Putting the two together, a subscription is affected when, and only when:
-
-1. Its query recorded a read-set (a set of keyspace/range pairs, or a table-level fallback) at
-   subscribe time.
-2. A mutation committed a write-set (rows inserted, replaced, or deleted, expressed as ranges or
-   tables). See [Mutations](/docs/core-concepts/mutations).
-3. The `SubscriptionManager`'s interval index or table-fallback set finds at least one overlap
-   between the two.
-
-Everything else, every other live subscription with no overlap, is untouched. Not re-run, not even
-inspected individually. There's no polling, no periodic sweep, and no per-write cost proportional
-to the number of unrelated subscribers.
-
-Being "affected," though, no longer always means "fully re-run the query handler and resend the
-whole result." The rest of this page, **Differential Log-Tail Reactivity (DLR)**, covers two
-further optimizations layered on top of that guarantee: sending only the *rows that changed*
-instead of the whole result, and on reconnect, sometimes sending nothing at all.
-
-## Differential Log-Tail Reactivity (DLR)
-
-DLR is not full incremental view maintenance. There's no operator DAG: queries stay imperative
-TypeScript, executed by the same engine as always. It's a staged set of optimizations layered on
-top of the read-set/write-set/intersect model above, each one narrowing what has to happen once a
-subscription is known to be affected.
-
-| Stage | What it does |
-|---|---|
-| **Stage 1** | Interval-indexed matcher: finding *which* subscriptions are affected is `O(log N + k)`, not `O(N)`. Covered above. |
-| **Stage 2a** | `DIFFABLE_BYID`: a `db.get(id)` subscription gets an incremental row diff instead of a full re-send. |
-| **Stage 2b** | `DIFFABLE_RANGE`: a single-index-range `collect()` subscription gets an incremental row diff. |
-| **Stage 2c** | `DIFFABLE_PAGE`: a `.paginate()` subscription's page gets an incremental row diff, pinned to a fixed key interval. |
-| **Stage 3** | Reconnect resume, compute half: a resubscribe whose read-set provably wasn't touched skips re-executing the handler entirely. |
-
-Every stage falls back safely to the pre-DLR behavior (full re-run, full resend) whenever it can't
-prove the shortcut is correct. Nothing here changes what a query returns, only how cheaply the
-engine can prove that value is still correct, or compute what changed about it.
-
-```mermaid
-flowchart TD
-  W["Write commits"] --> M{"Read-set overlaps write-set?"}
-  M -->|"no"| U["Untouched, no work at all"]
-  M -->|"yes"| C{"Classified diffable?"}
-  C -->|"no (RERUN)"| R["Full re-run, full resend"]
-  C -->|"yes"| D["Diff changed rows only, send QueryDiff"]
-```
-
-### Stage 2a: `DIFFABLE_BYID`, the by-id diff
-
-A subscription whose entire read-set is exactly one point range in a table's primary keyspace, and
-whose query returned exactly one document (or `null`), the shape of `ctx.db.get(id)`, is classified
-`DIFFABLE_BYID`. On a commit that writes to that same `(keyspace, key)`, the server derives the row
-change directly from the commit's own written document. No store re-read, no re-running the query
-handler:
-
-```ts title="packages/sync/src/commit-differ.ts (shape, not user code)"
-function byIdChangesFor(
-  byId: ByIdRead,
-  prev: Map<string, RowVersion>,
-  wd: WrittenDoc | undefined,
-): { changes: Change[]; next: Map<string, RowVersion> }
-```
-
-`wd.newRow === null` becomes a `remove`. A doc newly present becomes an `add`. Anything else is an
-`edit`. This is the smallest possible diff (0 or 1 rows), so it doesn't reduce wire bytes much on
-its own. Its purpose was to prove every piece of the pipeline (classifier, differ, wire
-`QueryDiff`, client materialized cache, drift-checksum self-heal) end-to-end before the shape that
-actually matters, Stage 2b, which is built on it.
-
-### Stage 2b: `DIFFABLE_RANGE`, the single-index-range `collect()` differ
-
-A subscription is classified `DIFFABLE_RANGE` only when **all** of the following hold for that run:
-
-- Exactly one `.collect()` over one index range executed. No second read, no `db.get` alongside it.
-- The collect used no `.take()`/limit. A truncated top-N window can't be soundly diffed: a later
-  write that should newly qualify for the top N would never be noticed by a range differ.
-- No dynamic read-policy (row-level authz) was merged into the scan.
-- The handler's **returned value is the exact, unmodified array the collect call itself returned**,
-  proven by object *identity*, not content. The engine brands the array the collect syscall hands
-  back with a non-enumerable token. Any `.slice()`, `.filter()`, `.map()`, or spread produces a
-  fresh, unbranded array and correctly falls back to a full re-run.
-
-  This is deliberately conservative. Content equality was rejected because a JS post-op that
-  happens to be a no-op *on the current data* (for example, `docs.filter(d => d.big)` when every
-  row currently is `big`) is indistinguishable from a real passthrough today, yet would silently
-  exclude a future row the differ would otherwise emit. That would be a permanent, silent wrong
-  answer no checksum could catch, since both sides would agree on the same wrong set.
-
-When classified, the write-set's written documents in that table are diffed directly against the
-subscription's membership map. No store re-read:
-
-```ts title="packages/sync/src/commit-differ.ts (shape, not user code)"
-function rangeChangesFor(
-  range: RangeRead,
-  prev: Map<string, RowVersion>,
-  writtenDocs: readonly WrittenDoc[],
-): { changes: Change[]; next: Map<string, RowVersion> }
-```
-
-For each written document: **not previously in the map, now in-bounds and filter-passing** →
-`add`. **Previously in the map, still in-bounds and filter-passing** → `edit` (this covers a
-reorder too, see the vocabulary section below). **Previously in the map, no longer qualifying**
-(deleted, or written outside the range or filter) → `remove`. Anything that was never in and still
-isn't → no change at all.
-
-Measured: `bench:reactive`'s `diffbytes-scan` scenario went from **2647 to 482 bytes/update**
-(−82%). The important part: the cost is now proportional to what changed, not to the size of the
-collection, so the saving *grows* with list size (`CHANGELOG.md` 1.1.0).
-
-### Stage 2c: `DIFFABLE_PAGE`, the key-range-pinned pagination differ
-
-`.paginate()` gets the same treatment via `DIFFABLE_PAGE`, with the identical passthrough-identity
-guard extended from the collect array to the whole `PaginationResult` object. A `.page` pull, a
-`{...result}` spread, or reading twice, all decline to a full re-run.
-
-There's one more guard specific to pagination: a page whose scan hit its `maxScan` cap before
-filling (`scanCapped`) is never diffable, because a capped scan's `nextCursor` can resume from
-further out than the page's own diffable bounds reach. That would leave an "un-owned" gap a differ
-would silently miss. (See [Pagination](/docs/core-concepts/queries) and
-[Schema & tables](/docs/core-concepts/schema-and-tables) for `.paginate()`/`maxScan` themselves.)
-
-The key design move: rather than diffing a *count*-bounded page (which has a "pull-in" problem: a
-deleted row would need to pull in whatever the next unseen row past the page boundary is, and that
-means a store read, which DLR forbids), a page is pinned at load to the fixed
-**`[startBound, endBound)` key interval** it actually covers. It's then reactively diffed as a
-two-sided-bound `DIFFABLE_RANGE`, reusing `rangeChangesFor` unchanged.
-
-`nextCursor`/`hasMore`/`scanCapped` are fixed metadata captured at that load and carried through
-every incremental diff unchanged. They only move on the next real reset (a fresh subscribe, or a
-resync).
-
-A page's row count can drift from its original page size under live edits. That's correct reactive
-behavior, not a bug: an insert inside the pinned bounds grows the page, a delete shrinks it, and the
-boundary itself never moves underneath page N+1.
-
-Measured: `diffbytes-paginate` is **475 bytes/update**, matching the range differ's per-update
-cost: proportional to the change, not the page size (`CHANGELOG.md` 1.2.0).
-
-## The `QueryDiff` vocabulary
-
-Every diffable stage (2a/2b/2c) emits the same shared row-change vocabulary
-(`packages/sync/src/change.ts`), applied identically on server and client by the one shared
-`applyChanges` function. That's what keeps the two sides from drifting in how a diff materializes:
-
-```ts title="packages/sync/src/change.ts"
-export type Change =
-  | { t: "add"; key: string; row: JSONValue; ts: number; orderKey?: string }
-  | { t: "remove"; key: string }
-  | { t: "edit"; key: string; row: JSONValue; ts: number; orderKey?: string };
-```
-
-`key` is the document's `_id`. There is **no separate `"move"` wire type**. A reorder within a
-range (a write that changes the field or fields a range is sorted by, without adding or removing
-the row from the result set) is represented as an `edit` whose `orderKey` differs from the row's
-previous `orderKey`. The client applies it the same way it applies any edit. The sort happens on
-render (see below), so a changed `orderKey` is what actually moves the row.
-
-`orderKey` is the row's **index-entry key** for the subscription's sort. It's produced by the same
-`extractIndexKey` function the query engine itself uses to build real index entries, so it already
-includes the system tiebreak fields (`_creationTime`, then `_id`) that make ties deterministic.
-It's present on `add`/`edit` for a range or page subscription, and absent for a by-id subscription,
-which has no ordering to speak of.
-
-### The drift checksum
-
-Every `QueryDiff` carries a `checksum`: an order-independent FNV-1a XOR fold over `(key, ts,
-orderKey)` for every row currently in the subscription's materialized map.
-
-```ts title="packages/sync/src/change.ts"
-export function driftChecksum(rows: Map<string, RowVersion>): string
-```
-
-The client recomputes the same fold after applying the diff and compares it to the server's.
-Folding `orderKey` in specifically means a **missed reorder**, not just a missed add/edit/remove,
-gets caught too: two maps could agree on every key, row, and timestamp and still disagree on sort
-order, and the checksum would still catch that.
-
-A mismatch triggers a scoped resync of that one query. The drift checksum is the safety net that
-makes the diffable path safe to ship, even though the classifiers above are what actually prevent
-wrong data. (See Stage 2b's passthrough-identity reasoning: the checksum *cannot* catch a
-misclassified handler, since a checksum over an already-wrong value is internally self-consistent.
-The classifier's conservatism is the real defense. The checksum only catches an honest bug in the
-differ or the apply path itself.)
-
-## The client materialized cache
-
-The client mirrors each diffable subscription's server-side row-map as its own keyed
-`Map<docId, RowVersion>` (`packages/client/src/layered-store.ts`'s `LayeredQueryStore`), and
-renders it into the value your `useQuery` hook actually sees:
-
-- **By-id** (`renderByIdValue`): the sole entry's row, or `undefined` if the map is empty.
-- **Range** (`renderRangeValue`): every row, sorted by `orderKey` via `compareKeyBytes` (a byte
-  comparator, not a string or numeric one, so it reproduces the engine's own index-key ordering
-  exactly), reversed for `order: "desc"`.
-- **Page** (`renderPageValue`): the same sorted-array render as range, wrapped back into
-  `{ page, nextCursor, hasMore, scanCapped }`, with the pagination metadata pinned from the last
-  reset rather than re-derived from the row-map on every apply.
-
-`orderKey` travels as base64 on the wire and is decoded with `base64ToBytes`, the exact
-decoder-half of the same codec the server's `orderKeyFor` encodes through. That's what keeps
-client and server from silently diverging on what "sorted" means by each rolling their own byte
-encoding.
-
-Every render mints a fresh array or object, never mutating a previous one, so a listener always
-observes a distinct reference on change. This is the same reference-inequality contract the whole
-optimistic-update layer relies on. See [Optimistic updates](/docs/client/optimistic-updates).
-
-A `QueryDiff` whose `reset` field is present (the initial subscribe answer to a diffable
-subscription, or any later full re-baseline, for example after a `SetAuth` identity switch) tells
-the client to discard its old map and rebuild from an empty one before applying `changes`. An
-ordinary incremental diff, with `reset` absent, merges onto the running map instead.
-
-## `DIFFABLE` vs `RERUN`: the exact classification rule
-
-A subscription only ever gets a diffable classification when the engine can *prove* it's safe. Any
-doubt falls back to a full re-run (`RERUN`), the same behavior every subscription had before DLR
-existed. Concretely, a run is diffable only if:
-
-- Exactly **one** read syscall of the matching shape executed (one `collect()`, or one
-  `paginate()`), verified against the run's own recorded read-set, so an extra `db.get` alongside
-  it disqualifies it too.
-- No dynamic read-policy (row-level authz) was merged into that read.
-- No `.take()`/limit for a range, and no `maxScan`-truncated or `scanCapped` page. Both leave an
-  "un-owned" gap a differ can't soundly reason about.
-- The handler's returned value is **identity-verified** as the untouched result of that one read,
-  never content-equality. Any post-processing (a filter, a map, a manual re-shape, reading the same
-  data twice) falls back to `RERUN`.
-
-Everything that fails any of these checks (a query that filters or transforms its result in code,
-joins multiple reads, applies row-level authorization, or paginates past a scan cap) still works
-exactly as it always has: a full re-run, a full `QueryUpdated` resend.
-
-DLR is additive. It never changes what your query returns. Writing a query in whatever shape is
-natural for your app never breaks correctness, it only opts you out of the wire and compute savings
-above.
-
-<Callout type="info" title="DLR is a performance layer, not a correctness contract">
-
-Write your queries however is natural for your app. If a query can't be classified diffable, it
-still gets a full re-run and full resend, exactly like every query got before DLR shipped. Nothing
-about what your query returns ever depends on which path it takes.
+record "this query touched the `messages` table." It records the exact slice of the index the
+scan covered. For `.eq("conversationId", id)`, that's the single narrow span of the
+`by_conversation` index belonging to that one conversation. Adding `.gt`/`.gte`/`.lt`/`.lte`
+narrows it further. `ctx.db.get(id)` records a single point.
+
+That precision is what [Queries](/docs/core-concepts/queries) means when it says the shape of
+your query determines how it reacts: a narrow read range means only writes landing in that same
+narrow range can ever invalidate it. A busy app can commit thousands of writes to other
+conversations without your subscription doing any work at all.
+
+An unbounded scan, say `ctx.db.query("messages", "by_creation").collect()`, still records a
+range: the full interval of that index. That's correct, not a penalty. A query that reads
+everything genuinely depends on everything, including rows that don't exist yet, so any write to
+the table has to re-run it. Scoping reads down to an index range is what keeps a query's
+reactive footprint small.
+
+## What triggers a re-run
+
+A subscription re-runs when, and only when:
+
+1. Its query recorded a read-set (the ranges above) when it last ran.
+2. A mutation committed a write-set: the rows it inserted, replaced, or deleted. See
+   [Mutations](/docs/core-concepts/mutations).
+3. The two overlap.
+
+Everything else, every live subscription with no overlap, is untouched. There's no polling, no
+periodic sweep, and no per-write cost proportional to the number of unrelated subscribers. The
+engine finds the affected subscriptions with an indexed matcher, so a write that affects one
+subscription out of ten thousand only pays for that one.
+
+There's one fallback: a subscription that recorded no ranges at all matches at the table level
+instead, so any write to a table it read re-runs it. Coarse, but it can never under-report and
+silently miss a write.
+
+## Keep queries in these shapes for cheap updates
+
+Being affected no longer always means "re-run the handler and resend the whole result." For a few
+provably safe query shapes, the engine derives the exact changed rows straight from the commit
+itself and sends just those rows as a diff. Your `useQuery` hook sees the same value either way.
+The difference is cost, not correctness.
+
+You get the diff path when the query is one of these shapes:
+
+- **A single `ctx.db.get(id)`,** returned as-is. A write to that one document becomes a
+  single-row update on the wire.
+- **A single `.collect()` over one index range,** returned as-is, with no `.take()`. A write
+  becomes an add, edit, or remove of just the affected rows. The wire cost is proportional to
+  what changed, not to the size of the list, so the saving grows as the list grows.
+- **A single `.paginate()` page,** returned as-is. Same row-level diffs, pinned to the page's own
+  key range, so writes elsewhere in the list don't touch it.
+
+And you fall back to a full re-run and full resend (the exact behavior every query had before
+this optimization existed) when the query:
+
+- post-processes the result (`.filter()`, `.map()`, `.slice()`, a spread, any re-shaping),
+- makes more than one read (a `get` plus a `collect`, a join, reading twice),
+- uses `.take()` or hits a `maxScan` cap while paginating,
+- or reads tables with row-level read policies applied.
+
+<Callout type="info" title="A performance layer, not a correctness contract">
+
+Write your queries however is natural for your app. A query that can't take the diff path still
+works exactly as it always has. Nothing about what your query returns ever depends on which path
+it takes. There's also no flag to force it: the engine proves safety per run, or falls back.
 
 </Callout>
 
-## Reconnect resume: the bandwidth half
+Every diffed update also carries a small checksum, computed independently on the server and the
+client. If they ever disagree, that one query quietly resyncs from a full re-run. Wrong data is
+never shown for more than a beat, and nothing else is affected.
 
-Every `QueryUpdated` (and every diffable `reset`) carries a server-minted content fingerprint:
+## Reconnect resume: coming back is nearly free
 
-```ts title="packages/sync/src/handler.ts (shape, not user code)"
-function hashValue(value: JSONValue): string // "sha256:" + hex of JSON.stringify(value)
-```
+A client that drops offline and comes back (a laptop lid, a train tunnel) resubscribes to
+everything it was watching. Naively that would mean re-downloading every result just to learn
+most of them didn't change. Stackbase avoids both the bytes and most of the work, automatically,
+with no configuration:
 
-The client stores it (`Subscription.lastHash`) and echoes it back as `resultHash` on the matching
-`QueryRequest` when it resubscribes after a reconnect. If the server's fresh run hashes identically,
-it answers with a tiny marker instead of resending the value:
+- **The bandwidth half.** Every pushed result carries a content fingerprint. On reconnect, the
+  client echoes back the last fingerprint it saw for each query. If the fresh result matches, the
+  server answers with a tiny "unchanged" marker instead of the value. In the measured
+  all-unchanged ceiling case this cuts reconnect bandwidth by roughly 99%.
+- **The compute half.** For a query the server can prove wasn't touched by any commit during the
+  disconnect (it keeps each query's read-set indexed for about a minute after the last subscriber
+  leaves), it skips re-executing the handler entirely. In the measured benchmark, 50 unchanged
+  subscriptions re-execute zero handlers on reconnect; if exactly one was touched during the gap,
+  exactly one re-runs.
 
-```ts title="packages/sync/src/protocol.ts"
-| { type: "QueryUnchanged"; queryId: number }
-```
+Both halves are conservative: any doubt (an evicted entry, a write during the gap, a reconnect
+that lands on a different node in a multi-node fleet) falls back to a normal re-run. A resume is
+never allowed to serve stale data.
 
-This is a **subscribe-answer-only** mechanism. It only ever fires from `ModifyQuerySet` handling (a
-resubscribe), never from a reactive push mid-session. A live invalidation always sends the real
-value.
+## Why determinism makes this safe
 
-Measured effect, at the all-unchanged ceiling (nothing wrote to any of the 50 subscribed queries
-during the disconnect): **310,882 bytes to 2,052 bytes**, a 99.3% reduction
-(`docs/dev/research/reconnect-resume-benchmark.md`). A real deployment's reconnect will land
-somewhere between this ceiling and 0% depending on how much actually changed while the client was
-away. This is the best case, measured deliberately to isolate the mechanism.
+Everything above (trusting a re-run, deriving a diff from a commit without re-reading the store,
+skipping a re-run on the strength of a timestamp) rests on one rule: a query is a pure function
+of the data it reads. Same rows in, same output out, every time.
 
-<Callout type="warn" title="This saves bandwidth, not compute">
+That's why queries and mutations can't call `fetch`, read `Date.now()`, or call `Math.random()`.
+When you genuinely need the current time or a random value, `ctx.now()` and `ctx.random()` are
+the deterministic substitutes: both are fixed for the life of a transaction and any replay of it.
+Anything that can't be made deterministic, like a real network call, belongs in an
+[action](/docs/core-concepts/actions), which runs outside the transaction and is never part of a
+subscription.
 
-Every subscribed query still fully re-executes its handler and re-hashes the fresh result on every
-resubscribe. `QueryUnchanged` only replaces the *outgoing value* with a marker once the hashes
-match, it doesn't skip the re-run itself. Server CPU and I/O cost of a resume is identical whether
-the marker fires or not. Stage 3, below, closes that gap.
+The same determinism is what lets a mutation be safely replayed after an optimistic-concurrency
+conflict. See [Mutations](/docs/core-concepts/mutations).
 
-</Callout>
+## Honest boundaries
 
-## Reconnect resume: the compute half (Stage 3)
+- **The compute-saving reconnect skip is per-node.** The server keeps that bookkeeping in memory,
+  so in a multi-node fleet a reconnect that lands on a different node re-runs its queries
+  normally. Correct by falling back, never by guessing.
+- **There's no way to force the diff path.** The engine decides per run, from what it can prove
+  about that run's read shape. The list of shapes above is the whole contract.
+- **In a fleet, a write forwarded from another node re-runs affected queries in full** rather
+  than diffing them. This affects wire savings only, never correctness.
 
-Stage 3 lets the server skip **re-executing the query handler at all** on a resubscribe, when it
-can *prove* nothing relevant changed, without needing the client to have kept anything beyond a
-single number.
+## Measured
 
-### The mechanism
+| Metric | Before | After |
+|---|---|---|
+| Propagation p50, 10,000 live subscriptions, one affected per write | 6.72 ms | 0.24 ms (a 96% cut) |
+| Wire bytes per update, live `.collect()` list | 2,647 B | 482 B (an 82% cut) |
+| Wire bytes per update, live `.paginate()` page | ~2.6 KB | 475 B |
+| Reconnect bandwidth, nothing changed while away | full resend | roughly 99% less |
+| Handler re-executions on reconnect, 50 unchanged subscriptions | 50 | 0 |
 
-On reconnect, the client stamps each resubscribe with a scalar checkpoint: its own maximum observed
-commit timestamp.
+Sources: the project `CHANGELOG.md`, versions 1.0.0 through 1.3.0, each with the benchmark
+scenario named. All figures are single-node, developer-laptop measurements. The shape of each win
+(cost proportional to what changed, re-execution eliminated) is what travels to other hardware,
+not the absolute numbers.
 
-```ts title="packages/sync/src/protocol.ts"
-export interface QueryRequest {
-  queryId: number;
-  udfPath: string;
-  args: JSONValue;
-  resultHash?: string;
-  sinceTs?: number; // present only on a resume resubscribe
-}
-```
+## Going deeper
 
-Server-side, a `ResumeRegistry` (`packages/sync/src/resume-registry.ts`) tracks, per `(identity,
-path, args)`, the read set that query last ran with and the timestamp through which its result is
-*known-current*:
-
-```ts title="packages/sync/src/resume-registry.ts (shape, not user code)"
-interface ResumeEntry {
-  readRanges: readonly SerializedKeyRange[];
-  tables: readonly string[];
-  lastInvalidatedTs: number;
-  wasDiffable: boolean;
-  refCount: number;
-  expiresAtMs?: number;
-}
-```
-
-`advanceOnCommit(writtenRanges, writtenTables, commitTs)` runs on **every commit**, using the exact
-same interval-index/table-fallback matcher `SubscriptionManager` uses. It advances
-`lastInvalidatedTs` for a matching entry **even when that entry currently has zero live
-subscribers**.
-
-Entries are TTL-retained for 60 seconds (`TTL_MS`) after their last subscriber disconnects, rather
-than evicted immediately, precisely so a reconnect within that window can still resume off them.
-They have to stay indexed the whole time. Otherwise a write landing during the disconnect "gap"
-would silently go unrecorded, and a resuming client would trust a stale result.
-
-On a resubscribe carrying `sinceTs`, if the registry has an entry for that `(identity, path, args)`
-and:
-
-- the query is **not** diffable (`wasDiffable === false`: a diffable subscription keeps its own
-  fingerprint/`QueryDiff` resume path instead, to avoid mixing the two reset-seeding invariants),
-  and
-- `entry.lastInvalidatedTs <= sinceTs` (nothing that could affect this query committed since the
-  client last saw it),
-
-then the server registers the subscription straight from the **retained read-set** and answers
-`QueryUnchanged`, with **no call into the query executor at all**.
-
-A missing entry (evicted past its TTL), a `lastInvalidatedTs` above `sinceTs` (something did commit
-during the gap), or a diffable subscription all fall straight through to a normal re-run. The skip
-is conservative by construction.
-
-Measured, via `bench:reactive`'s `resume-compute` A/B (N = 50 RERUN subscriptions, nothing changed
-during the disconnect): handler re-executions on reconnect go from **50 with the skip off to 0
-with the skip on**. A partial-change variant, where one of the 50 was touched during the gap,
-re-executes **exactly 1** (`CHANGELOG.md` 1.3.0).
-
-### Why the registry has to track the live read-set, not just the subscribe-time one
-
-A query whose read-set can shift across a live re-run, for example `ctx.db.get(user)` followed by
-a range keyed on `user.currentRoom`, has to keep the registry's tracked ranges in lockstep with
-whatever it actually read *last*, not what it read when it first subscribed.
-
-If the registry only ever indexed the original subscribe-time ranges, a gap write to a *new* range
-the query started reading later would never intersect the stale registry entry. `lastInvalidatedTs`
-would never advance for it, and a reconnecting client could be told `QueryUnchanged` for a result
-that is, in fact, stale, silently, with no drift checksum to catch it (drift checksums only exist
-for the diffable path; a `RERUN` subscription has no comparable self-heal).
-
-The engine re-upserts the registry entry on every live re-run (`sendSessionTransition`) and re-keys
-it on an identity change (`SetAuth`) for exactly this reason.
-
-## Why determinism is what makes any of this safe
-
-Everything above (re-running a query and trusting the result, deriving a row diff from a commit's
-written docs without re-reading the store, skipping a re-run entirely on the strength of a
-timestamp comparison) depends on one thing: a query is a pure function of the data it reads. Same
-rows in, same output out, every time.
-
-That's why queries and mutations can't call `fetch`, read `Date.now()`, or call `Math.random()`. If
-a query's answer could differ between two runs against identical data, none of "re-run it," "diff
-it," or "skip it" could be trusted. Each of those shortcuts assumes a stronger guarantee than the
-last, and every one collapses without determinism underneath it.
-
-This isn't only about pushing correct updates to subscribers. The same determinism requirement is
-what lets a mutation be **replayed** after an optimistic-concurrency conflict and still produce the
-correct result. See [Mutations](/docs/core-concepts/mutations).
-
-When a query or mutation genuinely needs the current time or a random value, `ctx.now()` and
-`ctx.random()` are the deterministic substitutes. Both are fixed for the life of a transaction, and
-any replay of it, so the same inputs always produce the same read-set, write-set, and result.
-Anything that can't be made deterministic this way, like a real network call or true randomness,
-belongs in an [action](/docs/core-concepts/actions), which runs outside the transaction and is
-never part of a subscription.
-
-## The frontier guarantees: your own commit is never stale
-
-Two invariants, informally named G1 and G4 in the engine's own design history, keep a session's
-view of *its own* mutation from ever appearing to lag behind what it just did, even though
-subscribing and reactive fan-out are otherwise independent, concurrent code paths:
-
-- **G1 (subscribe/notify serialization).** Handling a `ModifyQuerySet` (a subscribe or unsubscribe)
-  is enqueued onto the exact same serial queue (`notifyTail`) a commit's reactive fan-out runs on,
-  per handler, rather than run inline against whatever state happens to be current. Without this, a
-  concurrent invalidation could push a *newer* value to a session and then have an in-flight
-  subscribe response deliver an *older* one under contiguous version brackets: a silent regression
-  with no protocol signal. With optimistic updates in play, that regression is user-visible: your
-  own already-confirmed write would appear to vanish for a moment. Serializing the two closes it.
-- **G4 (origin-frontier).** After a session's own mutation commits, that session's observed version
-  must advance to at least the commit's timestamp, and never before it has actually been sent every
-  modification that commit implies for its own subscriptions. If the commit touched some of the
-  session's own subscriptions, the ordinary reactive push already satisfies this, since the ts
-  advance never precedes the modifications it confirms. If the commit touched **none** of the
-  session's subscriptions, the engine still emits a standalone, empty, ts-advancing `Transition`
-  for it, so a client's own commit is never invisible to its own optimistic-update gate just
-  because nothing it's subscribed to happened to change. A forwarded (fleet, cross-node) mutation
-  whose origin tag can't ride the local fan-out is handled by a pending-frontier fallback that
-  satisfies the same guarantee once the local drain catches up to that commit.
-
-Together with the response-before-Transition ordering the diffable path added at Stage 2b (a
-diff-capable session's own reactive `Transition` for a commit it just made is held behind that
-commit's `MutationResponse` on the wire, via a per-commit microtask gate, never a timer, which a
-tight mutation loop can starve), these are what make
-[Optimistic updates](/docs/client/optimistic-updates)'s no-flicker guarantee hold even under the
-diffable and resume machinery this page describes.
-
-## Boundaries
-
-- **`ResumeRegistry` is per-node, in-memory.** In a single-node deployment this is exactly the
-  registry a reconnect resumes off. In a multi-node fleet, a reconnect that lands on a *different*
-  node than the one it was last connected to finds no entry for that `(identity, path, args)` and
-  safely falls through to a normal re-run, never a wrong skip. Cross-node reconnect is correct by
-  falling back, not by resuming. Per-shard resume fragments across a fleet are an explicitly
-  deferred future stage, not built.
-- **The compute-saving skip (Stage 3) is single-node only**, for the same reason as above: it's
-  scoped to what one node's in-memory registry can prove.
-- **The diffable classifiers (2a/2b/2c) are conservative by construction**, not by configuration.
-  There is no flag to force a query diffable. The engine decides per-run from what it can prove
-  about that run's own read shape and result identity.
-- **Fleet-forwarded mutations fall back to `RERUN`** for the diffable path specifically: a commit's
-  written docs only ride the in-process fan-out on the node that owns the write. A forwarded write
-  has no local `writtenDocs` to diff against, so affected subscriptions on the receiving node
-  re-run in full rather than diff. This doesn't affect correctness, only which of the wire-savings
-  paths above a given commit gets to use.
-
-## Measured, end to end
-
-| Metric | Before | After | Source |
-|---|---|---|---|
-| `fanout-selective-10000` propagation p50 (Stage 1 matcher) | 6.72 ms | 0.24 ms (−96.4%) | `docs/dev/research/reactivity/fanout-benchmark.md` |
-| `diffbytes-scan` bytes/update (Stage 2b range differ) | 2,647 B | 482 B (−82%) | `CHANGELOG.md` 1.1.0 |
-| `diffbytes-paginate` bytes/update (Stage 2c page differ) | ~2.6 KB | 475 B | `CHANGELOG.md` 1.2.0 |
-| Reconnect bytes, 50 unchanged subscriptions (resume, bandwidth half) | 310,882 B | 2,052 B (−99.3%) | `docs/dev/research/reconnect-resume-benchmark.md` |
-| Reconnect handler re-executions, 50 unchanged subscriptions (resume, compute half, Stage 3) | 50 | 0 | `CHANGELOG.md` 1.3.0 |
-
-All figures are single-node, developer-laptop measurements (see each source doc for hardware and
-methodology caveats). The *shape* of each win, the scaling behavior, the proportional-to-change
-cost, the full elimination of re-execution, is what should travel to other hardware, not the
-absolute millisecond or byte values.
+The machinery behind this page (the interval-indexed subscription matcher, the diff classifier
+and its identity checks, the drift checksum, the resume registry, and the wire protocol) is
+documented for contributors in
+[Reactivity & sync](/docs/contributing/architecture/reactivity).

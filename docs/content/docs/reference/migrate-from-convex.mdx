@@ -414,9 +414,8 @@ always depends on `convex`) is unaffected.
 
 ## Moving data between deployments
 
-`stackbase migrate` (the command above) ports **code**. A separate pair of verbs under the same
-command ports **data**: `stackbase migrate export` and `stackbase migrate import` move an app's
-actual rows between two running deployments. Most commonly this means moving between a portable
+`stackbase migrate export` and `stackbase migrate import` move an app's actual rows between two
+running deployments. Most commonly this means moving between a portable
 SQLite/Postgres/container deployment and a Cloudflare DO-native one, since [those two store data in
 physically different topologies](/docs/deploy/cloudflare#moving-data-between-hosts) and data never
 teleports between them on its own.
@@ -542,6 +541,31 @@ and add its packages to `package.json`.
 </Step>
 
 </Steps>
+
+## Compatibility at a glance
+
+One table for "will my app port?". Every "not available" row is exactly what the
+[divergence scan](#the-divergence-scan) flags at the call site, so nothing here surprises you at
+runtime.
+
+| Feature | Convex | stackbase |
+|---|---|---|
+| Queries / mutations / actions / internal functions | Yes | Shipped, same `./_generated/server` authoring shape |
+| Argument and return validators (`v.*`) | Yes | Shipped |
+| `ctx.db.get` / `insert` / `replace` / `delete` | Yes | Shipped |
+| `ctx.db.patch` | Yes | Not available: read, spread-merge, `replace` |
+| `.withIndex` / `.filter(q => ...)` / `.first()` / `.unique()` | Yes | Not available: chain `.eq`/`.gt`/`.gte`/`.lt`/`.lte`/`.order`/`.where`/`.take(n)` on `ctx.db.query(table, index)` |
+| Pagination | `{ page, isDone, continueCursor }` | Shipped, named `{ page, hasMore, nextCursor, scanCapped }` |
+| Reactive subscriptions | Yes | Shipped, range-precise invalidation |
+| Optimistic updates | Yes | Shipped, Convex-verbatim `withOptimisticUpdate` (promise resolves at commit, see below) |
+| Durable offline mutations | No first-party equivalent | Shipped: durable outbox, client-supplied ids, cross-tab rendering |
+| HTTP actions (`httpRouter`/`httpAction`) | Yes | Shipped (no automatic CORS, path params, or middleware, by design) |
+| `ctx.scheduler.runAfter`/`runAt` and crons | Yes | Shipped via the `@stackbase/scheduler` component, composed explicitly |
+| Durable workflows | `@convex-dev/workflow` | Shipped via `@stackbase/workflow`, including saga/compensation |
+| File storage (`ctx.storage`) | Yes | Shipped (two-phase uploads; `store`/`get` are action-only) |
+| Auth | Convex Auth, or third-party JWT | `@stackbase/auth` (sessions, OAuth, JWT/OIDC, MFA, passkeys); Convex Auth itself doesn't port |
+| Convex Components (`app.use`) | Yes | Different model: compose `@stackbase/*` components in `stackbase.config.ts` |
+| Full-text search / vector search | Yes | Not built; the migrator flags usage as `unsupported` |
 
 ## Honest compatibility notes
 

@@ -107,7 +107,7 @@ At minimum a normal code review. For anything touching more than one package, ad
 
 ### Land
 
-Merged on a branch, never committed straight to `main`.
+For an external contribution, the intended path is a PR from your branch, merged after review.
 
 </Step>
 
@@ -240,12 +240,13 @@ including commercially, but you may not offer stackbase itself as a competing ho
 each release converts to Apache 2.0 two years after it ships). Full detail on why, and on the
 free-forever guarantees, lives on the [Licensing page](/docs/contributing/licensing).
 
-<Callout type="warn" title="CLA or DCO required, day one">
+<Callout type="warn" title="A CLA or DCO will be required">
 
-A CLA or DCO is required on every contribution, from the start. This exists to preserve the
-project's ability to relicense or dual-license code later (for example, to keep the `ee/` split
-clean). It's impossible to add retroactively: it has to be in place before a contribution lands,
-not requested after. Expect to sign it as part of your first PR.
+The project's policy is that a CLA or DCO is required on every contribution, from the start. This
+exists to preserve the project's ability to relicense or dual-license code later (for example, to
+keep the `ee/` split clean). It's impossible to add retroactively: it has to be in place before a
+contribution lands, not requested after. The signing tooling itself is still being set up in the
+repository, so until it lands, expect a maintainer to ask for a DCO-style sign-off on your PR.
 
 </Callout>
 
@@ -259,7 +260,8 @@ the wrong license. See the decision tree above.
 
 A few basics that keep the history clean and the project easy to pick back up:
 
-- **Branch off `main`; never commit to `main` directly.** Open a PR from your branch.
+- **Branch off `main` and open a PR from your branch.** That's the intended process for external
+  contributions; don't expect a direct push to `main` to be an option.
 - **Keep the spec (and any relevant internal notes) updated with what actually shipped.** A spec
   that describes a design that was later changed during implementation is worse than no spec at
   all. Update it so it stays the source of truth.

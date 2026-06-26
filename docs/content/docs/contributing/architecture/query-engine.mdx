@@ -8,7 +8,7 @@ description: "How a declarative query becomes a storage scan, and a precise read
 ## The one-sentence version
 
 You write a declarative query, something like
-`db.query("messages").withIndex("by_author", (q) => q.eq("author", "alice")).order("desc").paginate(...)`.
+`ctx.db.query("messages", "by_author").eq("author", "alice").order("desc").paginate(...)`.
 The query engine turns that into two things at once: an actual storage scan,
 and the exact key ranges that scan depended on.
 
@@ -34,9 +34,9 @@ Here's the whole pipeline at a glance, before we go through each stage:
 
 ```mermaid
 flowchart LR
-    Q["query() + withIndex + filter"] --> P["Planner: table-scan\nor index-range?"]
-    P --> S["Bound predicates become\na [start, end) scan interval"]
-    P --> F["Residual predicates become\na post-filter"]
+    Q["ctx.db.query(table, index)\n+ .eq/.gt/... + .where()"] --> P["Planner: table-scan\nor index-range?"]
+    P --> S["Range calls become\na [start, end) scan interval"]
+    P --> F["where() predicates become\na post-filter"]
     S --> G["index_scan generator\nreads matching rows"]
     F --> G
     G --> R["Read set records the\nscanned interval"]
@@ -45,13 +45,14 @@ flowchart LR
 Two things happen in parallel here, and keeping them straight is the key to
 understanding this whole component:
 
-- Anything you expressed through `.withIndex(...)` (an equality or a range
-  bound on an indexed field) gets compiled into a **scan interval**: a
-  contiguous slice of the index the storage layer can jump straight to. Rows
-  outside that slice are never even read.
-- Anything else (a `.filter(...)` call, an `or`, arithmetic) becomes a
-  **post-filter**: a check run on each row *after* it's already been read out
-  of the scan interval.
+- The **range calls** on the builder (`.eq(field, value)`, and one
+  `.gt`/`.gte`/`.lt`/`.lte` bound per direction on the next indexed field)
+  get compiled into a **scan interval**: a contiguous slice of the index the
+  storage layer can jump straight to. Rows outside that slice are never even
+  read.
+- Anything else (a `.where(op, field, value)` call, including on fields the
+  index doesn't cover) becomes a **post-filter**: a check run on each row
+  *after* it's already been read out of the scan interval.
 
 This distinction matters because only the scan interval determines what gets
 recorded as "read." A post-filter that rejects 999 out of 1000 rows in the
@@ -161,25 +162,28 @@ below.
 ## Turning a query into a scan interval
 
 The planner's job (`packages/query-engine/src/plan.ts`, function
-`buildIndexInterval`) is to walk the index's field list in order and fold your
-`.withIndex(...)` constraints into a single `[start, end)` interval:
-
-1. Consume leading **equality** constraints one field at a time. Each one
-   fixes that position in the key, narrowing the range.
-2. At the first field that isn't pinned by an equality, allow **one bound in
-   each direction**: a lower bound (`gt`/`gte`) and an upper bound
-   (`lt`/`lte`) on that same field.
-3. Stop. Fields after that aren't used to narrow the scan at all. If your
-   query still references them, that part becomes a post-filter instead.
-
-A few worked examples, for an index on `(conversationId, _creationTime, _id)`:
+`buildIndexInterval`) is to fold the builder's range calls into a single
+`[start, end)` interval. Concrete examples first, for a `messages` table with
+an index `by_conversation` on `(conversationId, _creationTime, _id)`:
 
 | You wrote | Scan interval |
 |---|---|
-| `q.eq("conversationId", c1)` | `[key(c1), key(c1)+1]` (everything with that conversation id) |
-| `q.eq("conversationId", c1).gt("_creationTime", T)` | starts just after `(c1, T)`, ends at the end of `c1`'s range |
-| `q.eq("conversationId", c1).gte("_creationTime", A).lt("_creationTime", B)` | `[key(c1,A), key(c1,B))` (a time window within one conversation) |
-| no `.withIndex(...)` at all | the whole table, in creation order (a **table scan**) |
+| `ctx.db.query("messages", "by_conversation").eq("conversationId", c1)` | everything with that conversation id |
+| `...eq("conversationId", c1).gt("_creationTime", T)` | starts just after `(c1, T)`, ends at the end of `c1`'s range |
+| `...eq("conversationId", c1).gte("_creationTime", A).lt("_creationTime", B)` | `[key(c1,A), key(c1,B))` (a time window within one conversation) |
+| `ctx.db.query("messages", "by_creation")` with no range calls | the whole table, in creation order (a **table scan**, via the default `by_creation` index every table gets) |
+
+The rule that produces those intervals is a walk down the index's field list,
+in order:
+
+1. Consume leading **equality** constraints (`.eq`) one field at a time. Each
+   one fixes that position in the key, narrowing the range.
+2. At the first field that isn't pinned by an equality, allow **one bound in
+   each direction**: a lower bound (`.gt`/`.gte`) and an upper bound
+   (`.lt`/`.lte`) on that same field.
+3. Stop. Fields after that aren't used to narrow the scan at all. If your
+   query still needs to constrain them, that part becomes a `.where(...)`
+   post-filter instead.
 
 The important asymmetry to notice: `gt`/`lt` are *exclusive*, so the engine
 computes a bound that's the very next possible key after (or before) the
@@ -251,23 +255,27 @@ document's *old* encoded key against its *new* one, per index:
 - **Insert** (no old document): add the new key.
 - **Delete** (no new document): tombstone the old key.
 - **Update**, and the key **changed**: tombstone the old key, add the new one.
-- **Update**, and the key is **byte-identical** to before: do nothing at all.
+- **Update**, and the key is **byte-identical** to before: skip the
+  tombstone, but still write a fresh entry at that same key.
 
 ```mermaid
 flowchart LR
     U["update: old doc -> new doc"] --> C{"encoded key\nchanged?"}
     C -->|"yes"| W["tombstone old key\n+ add new key"]
-    C -->|"no (byte-identical)"| N["no index write,\nno invalidation"]
+    C -->|"no (byte-identical)"| N["skip the tombstone,\nwrite a fresh entry\nat the same key"]
 ```
 
-That last case is a deliberate optimization, and it matters more than it
-looks. If you update a message's `text` field but the index is only on
-`author`, the author-index key hasn't moved, so no index write happens, and
-critically, **no subscription watching that index range gets invalidated**
-either. Without this check, editing any field on any row would look
-indistinguishable from moving it in every index that doesn't even reference
-that field. That's a lot of unnecessary write amplification and unnecessary
-reactive churn.
+That last case deserves spelling out, because it's easy to misread as "no
+index write at all." Indexes are versioned the same way documents are (see
+[Storage & the MVCC log](/docs/contributing/architecture/storage)), so every
+new document revision needs an index entry stamped at the new commit
+timestamp regardless: `computeIndexUpdates` always emits a fresh
+`NonClustered` entry pointing at the document whenever the new document
+exists. What the byte-identical check saves is the *tombstone*: when the key
+hasn't moved, there's no delete-then-recreate churn at the old key. Update a
+message's `text` field with the index on `author`, and the author-index key
+stays put; the write is one superseding entry at the same key, not a
+tombstone plus an add.
 
 ## Cursors: pagination that survives concurrent writes
 
@@ -297,11 +305,11 @@ and [Pagination](/docs/core-concepts/queries) for the developer-facing API.
 
 ## Filters and ordering, briefly
 
-Anything that didn't make it into the scan interval (an `.filter(...)` call,
-an `or`, arithmetic on a field) is represented as a small expression tree
-(`FilterExpr` in `filter.ts`): comparisons, `and`/`or`/`not`, and dotted field
-paths like `"author.name"`. It's evaluated per document, after the row comes
-back from the scan.
+Anything that didn't make it into the scan interval (a `.where(op, field,
+value)` call, including comparisons like `neq` an index range can't express)
+is represented as a small expression tree (`FilterExpr` in `filter.ts`):
+comparisons, `and`/`or`/`not`, and dotted field paths like `"author.name"`.
+It's evaluated per document, after the row comes back from the scan.
 
 One rule ties this back to everything above: filter comparisons use the same
 canonical value comparison the codec's ordering is built on
@@ -316,11 +324,12 @@ check can never quietly disagree with each other about which of two values is
   Everything else depends on this being exactly right.
 - Every index secretly ends in `(_creationTime, _id)` so every key is unique
   and totally ordered.
-- A query's `.withIndex(...)` bounds become one `[start, end)` scan interval;
-  everything else becomes a post-filter applied per row.
+- A query's `.eq`/`.gt`/`.gte`/`.lt`/`.lte` range calls become one
+  `[start, end)` scan interval; `.where(...)` becomes a post-filter applied
+  per row.
 - The read set records the scanned interval, not the surviving rows. That's
   what makes reactive invalidation both correct and precise.
-- Writes keep indexes in sync, skipping the update entirely when a document's
-  key in that index didn't actually move.
+- Writes keep indexes in sync, skipping the tombstone (but never the fresh
+  entry) when a document's key in that index didn't actually move.
 - Cursors pin an exact `(key, _id)` position, so pagination is gapless and
   stable even while other writes are happening concurrently.

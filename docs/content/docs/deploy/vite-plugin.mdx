@@ -1,0 +1,265 @@
+---
+title: Vite plugin
+description: Run your frontend and the stackbase backend with one vite command, on one origin.
+---
+
+{/* diataxis: how-to */}
+
+Normally a Vite app and a stackbase backend are two terminals: `vite` in one, `stackbase dev` in the
+other, plus a hand-written proxy so the browser can reach both. `@stackbase/vite` collapses that to
+one command. You run `vite`, and the plugin brings the backend up with it, on the same browser
+origin.
+
+One origin matters more than one terminal. The client connects to `${location.host}/api/sync`, so
+when the engine answers on the same host and port as your frontend, there is no proxy config to
+write and no CORS to think about. It just works.
+
+The plugin has two modes behind the same `stackbase()` call:
+
+- **Proxy mode** (the default) spawns `stackbase dev` as a child process and wires Vite's proxy to
+  it. The backend behaves exactly as if you had started it yourself.
+- **Embed mode** boots the engine inside Vite's own process. No child process, no proxy hop: the
+  engine answers as Vite middleware, and the reactive WebSocket shares Vite's HTTP server.
+
+## Set up
+
+<Steps>
+
+<Step>
+
+### Install the plugin
+
+`@stackbase/vite` goes next to your existing dev dependencies. It needs `vite` 5 or newer, and it
+drives `@stackbase/cli` (already a dev dependency if you followed the
+[quickstart](/docs/get-started/quickstart)):
+
+<Tabs items={['npm', 'pnpm', 'bun']}>
+
+```bash tab="npm"
+npm install -D @stackbase/vite
+```
+
+```bash tab="pnpm"
+pnpm add -D @stackbase/vite
+```
+
+```bash tab="bun"
+bun add -d @stackbase/vite
+```
+
+</Tabs>
+
+</Step>
+
+<Step>
+
+### Add it to vite.config.ts
+
+```ts title="vite.config.ts"
+import { defineConfig } from "vite";
+import { stackbase } from "@stackbase/vite";
+
+export default defineConfig({
+  plugins: [stackbase()],
+});
+```
+
+That's the whole configuration. No options are required.
+
+</Step>
+
+<Step>
+
+### Run vite
+
+```bash
+npx vite
+```
+
+The backend starts with the dev server. Its log lines appear in the same terminal, prefixed
+`[stackbase]`. Open your app at the Vite URL, and the engine's surfaces are there too, on the same
+origin:
+
+- `/api/*` is the engine's HTTP API, and `/api/sync` is the reactive WebSocket.
+- `/_dashboard` is the [dashboard](/docs/deploy/local-dev#the-dashboard).
+- `/_admin/*` is the admin API the dashboard runs on.
+
+Everything else is your Vite app, untouched.
+
+</Step>
+
+</Steps>
+
+## The two modes
+
+<Tabs items={['Proxy (default)', 'Embed']}>
+
+<Tab value="Proxy (default)">
+
+Proxy mode spawns `stackbase dev` as a child process on a free port and injects three entries into
+Vite's dev-server proxy: `/api` (WebSocket-aware, so `/api/sync` upgrades pass through), `/_dashboard`,
+and `/_admin`. Vite merges these with any `server.proxy` entries of your own, so your unrelated proxy
+rules are preserved.
+
+Because the child is the real `stackbase dev`, everything on the
+[local development](/docs/deploy/local-dev) page holds verbatim: codegen runs on start, the child
+watches `convex/` and hot-reloads your functions on every save, and the ephemeral admin key is
+printed in its (piped) output.
+
+Some mechanics worth knowing:
+
+- **CLI resolution.** The plugin runs your app's local `node_modules/.bin/stackbase` if it exists,
+  and falls back to `npx stackbase`. Override with the `command` option.
+- **Readiness.** Vite waits for the backend to accept TCP connections before serving (polled every
+  200ms, 30 second timeout). If the child exits early or never comes up, `vite` fails with a clear
+  error instead of serving a dead proxy.
+- **Cleanup.** The child is killed when the Vite server closes and on `SIGINT`/`SIGTERM`/process
+  exit, so a stopped `vite` never leaves an orphaned backend behind.
+- **Extra flags.** Anything `stackbase dev` accepts can be forwarded through `args`, for example
+  `args: ["--database-url", "postgres://..."]`.
+
+</Tab>
+
+<Tab value="Embed">
+
+Embed mode is opt-in:
+
+```ts title="vite.config.ts"
+export default defineConfig({
+  plugins: [stackbase({ mode: "embed" })],
+});
+```
+
+Instead of spawning a child, the plugin boots the engine inside Vite's process, using
+`@stackbase/cli`'s shared boot core (reached via a dynamic import; if `@stackbase/cli` isn't
+installed, embed mode fails at startup with a clear message). The engine paths are served as
+connect middleware, and `/api/sync` gets its own WebSocket upgrade listener that coexists with
+Vite's HMR socket on the same server. There is no second process and no proxy hop.
+
+Startup writes `convex/_generated/` and logs the admin key:
+
+```
+[stackbase] embed → engine in-process on Vite's origin (admin key: ...)
+```
+
+The database is SQLite at `<project root>/.stackbase/dev.db` by default. Point `dataPath` somewhere
+else, or set `databaseUrl` to a `postgres://` connection string to use
+[Postgres](/docs/deploy/postgres) instead. The admin key is a fresh ephemeral key per run unless you
+pass `adminKey`.
+
+The component set (your `stackbase.config.ts` composition) is fixed at boot, exactly as
+`stackbase dev` and `stackbase serve` behave. Adding or removing a component means restarting
+`vite`.
+
+<Callout type="info" title="A different database file than stackbase dev">
+
+Embed mode's default SQLite path is `.stackbase/dev.db`, while `stackbase dev` (and so proxy mode)
+defaults to `.stackbase/data.db`. Switch modes and you're looking at a different, initially empty
+database. If you want the same data in both, point `dataPath` (embed) and `--data` (proxy, via
+`args`) at the same file, but never run both modes against it at once: the engine is
+single-writer.
+
+</Callout>
+
+</Tab>
+
+</Tabs>
+
+## Options
+
+All options are optional. `mode` and `convexDir` apply to both modes; the rest belong to one mode
+and are ignored by the other.
+
+<TypeTable
+  type={{
+    mode: {
+      type: '"proxy" | "embed"',
+      default: '"proxy"',
+      description:
+        'How the backend runs alongside Vite. "proxy" spawns stackbase dev as a child and proxies to it; "embed" boots the engine inside Vite\'s own process.',
+    },
+    convexDir: {
+      type: "string",
+      default: '"convex"',
+      description:
+        "Where your schema and functions live, relative to the Vite root. Passed to the backend as --dir. Shared by both modes.",
+    },
+    port: {
+      type: "number",
+      default: "an OS-assigned free port",
+      description:
+        "Proxy mode only: the port the spawned stackbase dev listens on (the browser never sees it; everything goes through Vite's port).",
+    },
+    command: {
+      type: "string",
+      default: 'local node_modules/.bin/stackbase, else "npx stackbase"',
+      description:
+        "Proxy mode only: how to invoke the CLI. A whitespace-split command string, e.g. \"bun stackbase\".",
+    },
+    args: {
+      type: "string[]",
+      default: "[]",
+      description:
+        'Proxy mode only: extra flags appended to stackbase dev, e.g. ["--database-url", "postgres://..."].',
+    },
+    dataPath: {
+      type: "string",
+      default: "<root>/.stackbase/dev.db",
+      description:
+        "Embed mode only: the SQLite database file for the in-process engine, resolved against the Vite root.",
+    },
+    databaseUrl: {
+      type: "string",
+      default: "unset (SQLite)",
+      description:
+        "Embed mode only: a postgres:// connection string. When set, the in-process engine uses Postgres instead of SQLite.",
+    },
+    adminKey: {
+      type: "string",
+      default: "a per-run ephemeral key",
+      description:
+        "Embed mode only: the admin key protecting the in-process engine's /_admin API and dashboard.",
+    },
+  }}
+/>
+
+## Hot reload and HMR
+
+Two independent reload loops run side by side, and neither steps on the other:
+
+- **Frontend HMR is Vite's, unchanged.** Editing a component hot-swaps it in the browser exactly as
+  in any Vite app.
+- **Backend hot reload is stackbase's.** Saving a file under `convex/` reloads your schema and
+  functions and regenerates `convex/_generated/`, without dropping live subscriptions. A client
+  watching a query stays connected and re-runs against the new code on the next invalidation. A
+  broken save logs `✗ reload failed` and keeps the previous working functions running.
+
+In proxy mode, the child's own file watcher does this, exactly as described under
+[local development](/docs/deploy/local-dev#hot-reload). In embed mode, the plugin subscribes to
+Vite's own file watcher instead: changes under `convexDir` (except `_generated/`) are debounced for
+50ms and then re-pushed in-process.
+
+Regenerated `_generated/` files are ordinary source files as far as Vite is concerned, so a codegen
+change that your frontend imports (a new function on `api`, say) flows into the browser through
+Vite's normal HMR.
+
+## Limits
+
+- **The plugin is dev only.** It shapes `vite`'s dev server and nothing else. `vite build` produces
+  your frontend as usual, and you deploy the backend separately
+  ([self-hosting](/docs/deploy/self-hosting), [deploy and build](/docs/deploy/deploy-and-build)).
+- **Embed mode caps request bodies at 5 MiB** on the engine paths. A larger
+  [file storage](/docs/core-concepts/file-storage) upload through `/api/storage/upload` won't fit;
+  use proxy mode, or an S3-backed presigned upload, for big files.
+- **Embed mode needs Vite's own HTTP server.** Under `server.middlewareMode` (how some SSR
+  frameworks host Vite) there is no server to attach to, so the `/api/sync` WebSocket never wires up
+  and engine cleanup doesn't run. The plugin warns loudly; use proxy mode there.
+- **Proxy mode is two processes.** That's by design (zero divergence from the real `stackbase dev`),
+  but it means backend state lives in the child. If you need to poke the engine from Vite's process,
+  that's what embed mode is for.
+
+## Related
+
+- [Local development](/docs/deploy/local-dev): everything the backend does under the plugin, flags,
+  hot reload, and the dashboard.
+- [Quickstart](/docs/get-started/quickstart): install stackbase and see the whole loop end to end.

@@ -33,6 +33,11 @@ with `bun build`, so Bun is required here even though the backend engine itself 
 You need **Bun**, for `bun build` (bundling the web UI) and to run `stackbase dev` itself. No
 prior stackbase project needed. This tutorial creates one from scratch.
 
+First time through? Skim past the sharding commentary (`.shardKey`/`shardBy` notes in steps 2
+and 4). It changes nothing about how this app behaves on one node, and the app works identically
+if you ignore it. Come back to it with [Scaling](/docs/deploy/scaling) when you care about
+multi-node.
+
 </Callout>
 
 <Steps>
@@ -339,7 +344,9 @@ const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 ```
 
-<Callout type="info">
+<Accordions type="single">
+
+<Accordion title="Why anyApi as Api, instead of importing api?">
 
 `_generated/api.d.ts` is types only (it declares the `Api` type, not a runtime value), and
 `_generated/server.ts`'s runtime `api` re-exports server-only code alongside it: fine to import
@@ -348,7 +355,9 @@ plain runtime proxy that turns `api.messages.send` into a `{ __path: "messages:s
 reference. Casting it `as Api` gives you the exact same object, fully typed, with nothing
 server-side dragged along. This is the pattern every stackbase client entry point uses.
 
-</Callout>
+</Accordion>
+
+</Accordions>
 
 `webSocketTransport` opens the reactive connection to `/api/sync`, the same path `stackbase dev`
 serves the sync WebSocket on.
@@ -613,8 +622,8 @@ bunx stackbase dev --web web
 `stackbase dev` generates `convex/_generated/`, boots the reactive engine on local SQLite, serves
 HTTP + the sync WebSocket + the dashboard. Because of `--web web`, it also serves your bundled UI
 from the same origin and port, so there's no separate dev server or proxy to configure. It prints
-the dashboard URL (and an admin key, if you didn't set `STACKBASE_ADMIN_KEY`) on startup. Open the
-printed URL in your browser to see the app itself.
+the dashboard URL and the admin key on startup. Open the printed URL in your browser to see the
+app itself.
 
 </Step>
 

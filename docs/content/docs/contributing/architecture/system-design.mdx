@@ -31,30 +31,17 @@ Read that list again and notice the tension. "One lightweight binary" and "horiz
 
 Stackbase's answer is not to pick a lane. It makes both **the same system at two different operating points**, connected by a handful of stable internal interfaces. Growing from one to the other is a deployment and configuration change, never a rewrite of your functions.
 
-```mermaid
-flowchart LR
-  IP["In-process execution"]
-  SEAM["Narrow storage seam"]
-  TIER["Tiered split"]
-  PUSH["Push + differential updates"]
+Each goal maps to a concrete mechanism:
 
-  DX["Great developer experience"]
-  LIGHT["Lightweight"]
-  FAST["Fastest realtime"]
-  DEPLOY["Deploy anywhere"]
-  SCALE["Scalable"]
+| Goal | The mechanism that delivers it |
+|---|---|
+| Great developer experience | In-process execution: your functions run next to the engine, so the dev loop and the types stay tight |
+| Lightweight | In-process execution plus the tiered split: Tier 0 is one process, one file of SQLite |
+| Fastest realtime | Push plus differential updates: subscribed clients get changes the moment a commit lands, and only the rows that changed |
+| Deploy anywhere | The narrow storage seam: the engine never knows which database or host it's on |
+| Scalable | The storage seam plus the tiered split: swap the adapter, then split the components, without touching app code |
 
-  IP --> DX
-  IP --> LIGHT
-  IP --> FAST
-  PUSH --> FAST
-  SEAM --> DEPLOY
-  SEAM --> SCALE
-  TIER --> SCALE
-  TIER --> LIGHT
-```
-
-Each goal above maps to one concrete mechanism. The rest of this page explains those five mechanisms.
+The rest of this page explains those mechanisms.
 
 ## The core primitive: reactive transactions over an ordered log
 

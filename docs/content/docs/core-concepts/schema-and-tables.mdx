@@ -81,6 +81,8 @@ A validator does two jobs. It checks a value at runtime, which is what makes wri
 possible. And it carries the TypeScript type that flows into `Doc<"table">`, function
 `args`/`returns`, and the client's generated types, via `Infer<typeof validator>`.
 
+The ones you'll reach for daily:
+
 <TypeTable
   type={{
     "v.string()": {
@@ -91,67 +93,34 @@ possible. And it carries the TypeScript type that flows into `Doc<"table">`, fun
       description: "64-bit float. Alias: v.float64().",
       type: "number",
     },
-    "v.float64()": {
-      description: "Alias of v.number().",
-      type: "number",
-    },
-    "v.int64()": {
-      description: "64-bit integer. Alias: v.bigint().",
-      type: "bigint",
-    },
-    "v.bigint()": {
-      description: "Alias of v.int64().",
-      type: "bigint",
-    },
     "v.boolean()": {
       description: "A boolean.",
       type: "boolean",
-    },
-    "v.null()": {
-      description: "The literal null.",
-      type: "null",
-    },
-    "v.bytes()": {
-      description: "Raw binary data.",
-      type: "ArrayBuffer",
-    },
-    "v.any()": {
-      description: "Skips validation entirely for that field. An escape hatch, not a default.",
-      type: "any",
     },
     "v.id(table)": {
       description:
         "A typed reference to another table's document, or the same table for self-references.",
       type: 'Id<"table">',
     },
-    "v.literal(value)": {
-      description: "Exact match on one specific string, number, bigint, or boolean value.",
-      type: "the literal's own type",
-    },
-    "v.array(element)": {
-      description: "A homogeneous array. Every element is checked against element.",
-      type: "Array<Infer<element>>",
+    "v.optional(inner)": {
+      description: "Marks a field as allowed to be absent. See optional fields below.",
+      type: "Infer<inner> | undefined",
     },
     "v.object({ ...fields })": {
       description: "A nested object. See object semantics below.",
       type: "{ ...fields }",
     },
-    "v.record(keys, values)": {
-      description:
-        "An object with an arbitrary, unbounded key set. keys validates each key, values each value.",
-      type: "Record<string, Infer<values>>",
-    },
-    "v.union(...members)": {
-      description:
-        "Valid if it matches any member. Members are tried in order and the first match wins.",
-      type: "union of the members' types",
-    },
-    "v.optional(inner)": {
-      description: "Marks a field as allowed to be absent. See optional fields below.",
-      type: "Infer<inner> | undefined",
+    "v.array(element)": {
+      description: "A homogeneous array. Every element is checked against element.",
+      type: "Array<Infer<element>>",
     },
   }}
 />
+
+The rest of the catalog (`v.int64()`/`v.bigint()`, `v.null()`, `v.bytes()`, `v.literal(value)`,
+`v.union(...members)`, `v.record(keys, values)`, `v.any()`) lives in the
+[configuration reference](/docs/reference/configuration), the canonical quick-lookup copy.
+`v.literal`, `v.union`, and `v.record` also get worked examples below.
 
 A table's own document shape (the object you pass to `defineTable`) is itself implicitly
 `v.object(fields)` under the hood. `defineTable` builds that validator for you.
@@ -224,7 +193,7 @@ no fixed field list to violate.
 ## Document validation at write time
 
 Validation isn't just a type-level convenience. The engine actually runs each table's validator
-against every value passed to `ctx.db.insert`/`ctx.db.replace` (and the equivalent patch path),
+against every value passed to `ctx.db.insert`/`ctx.db.replace`,
 inside the mutation's transaction, before the write lands. A value that fails is rejected with a
 `DocumentValidationError`, and the mutation throws. Nothing partial commits.
 
@@ -289,6 +258,15 @@ Every table, including one with no `.index(...)` calls at all, also gets a built
 index (creation order). That's why `ctx.db.query("table", "by_creation").collect()` always works.
 It's also the index the dashboard's data browser uses to list rows.
 
+### Unique indexes
+
+`.index(name, fields, { unique: true })` declares the index unique. Today this is enforced as a
+real unique constraint (a `CREATE UNIQUE INDEX`, with a duplicate insert rejected) only on the
+Cloudflare D1 adapter that backs [`.global()` tables](#global-tables-cloudflare). On the default
+SQLite and Postgres adapters the flag is recorded in your schema but not enforced as a write-time
+constraint, so don't rely on it there: enforce uniqueness in your mutation (read first, then
+insert) instead.
+
 Indexes matter for more than query planning. They're what make reactivity precise. A
 subscription's read set is expressed in terms of the index range it actually touched, so a write
 only refreshes the subscriptions whose recorded range it falls inside. A query narrowed to one
@@ -332,6 +310,16 @@ A `.shardKey`'d table doesn't support client-supplied `_id`s (see
 up front, so let the server mint ids for sharded tables.
 
 </Callout>
+
+## Global tables (Cloudflare): `.global()`
+
+`defineTable(...).global()` marks a table as **global data** on the Cloudflare deployment target:
+its rows live in a single D1 database shared across every shard, instead of being owned by one
+shard, which is what makes cross-shard reads and globally unique indexes possible there. It's
+mutually exclusive with `.shardKey()` (global data is, by definition, not sharded), and it's
+Cloudflare-specific: on a deployment with no D1 binding, any read or write of a `.global()` table
+fails fast with a clear error rather than silently landing in the local store. See
+[Cloudflare](/docs/deploy/cloudflare) for the full global-tables story.
 
 ## System tables
 
@@ -425,14 +413,21 @@ Your schema changes as your app does. stackbase's live deploy (`stackbase deploy
 own schema now rejects. A deploy diffs your new schema against the one currently running, table by
 table and field by field.
 
-**Accepted (additive):**
+<Tabs items={['Accepted', 'Rejected']}>
+
+<Tab value="Accepted">
+
+Additive changes deploy live, with no migration step:
 
 - A brand-new table.
 - A brand-new field on an existing table, as long as it's optional (`v.optional(...)`). A
   required field would reject every row that predates it.
 
-**Rejected (destructive, the deploy is refused, and the running server stays on its current
-schema):**
+</Tab>
+
+<Tab value="Rejected">
+
+Destructive changes refuse the deploy, and the running server stays on its current schema:
 
 - Removing or renaming a table. From the diff's point of view, a rename *is* a remove-plus-add:
   the old name disappears.
@@ -446,6 +441,10 @@ schema):**
   a deploy. It never corrupts data.
 - Turning a previously-optional field required. Existing rows that omit it would immediately
   become invalid.
+
+</Tab>
+
+</Tabs>
 
 <Callout type="info" title="No migration step">
 
@@ -479,7 +478,7 @@ because the storage layer never had app-shaped columns to begin with.
 
 - [Queries](/docs/core-concepts/queries): reading through an index, and why the read set it
   records is the unit of reactivity.
-- [Mutations](/docs/core-concepts/mutations): the only place `ctx.db.insert`/`replace`/`patch`
+- [Mutations](/docs/core-concepts/mutations): the only place `ctx.db.insert`/`replace`/`delete`
   run, and where document validation is enforced.
 - [Deploy and build](/docs/deploy/deploy-and-build): how the additive-schema gate applies to a
   live `stackbase deploy`.

@@ -102,6 +102,44 @@ function code ever invokes a trigger directly. The whole surface is this declara
 `triggers:resume` mutation for un-pausing one (see [Pausing and resuming](#failure-handling-pausing-and-resuming)
 below).
 
+## The delivery contract
+
+Read this before writing a handler.
+
+<Callout type="warn" title="Delivery is bounded at-least-once, in-order per document">
+
+Never coalesced. A crash between a handler succeeding and its cursor advance landing redelivers the
+last batch's changes, possibly inside a larger batch if new commits landed in the meantime (the batch
+boundary is not stable across redelivery), but every change's `changeId` is stable. A document written
+twice before the cursor reaches it produces both revisions in the log, not one coalesced update. There
+is no ordering guarantee across different triggers, and one delivery is in flight per trigger at a
+time: a slow handler backs up only its own trigger's backlog, never another trigger's. **Handlers must
+be idempotent, or dedup on `changeId`.**
+
+</Callout>
+
+In practice, your handler will occasionally see a change it already processed, after a crash, or (in a
+multi-node deployment) a default-shard failover. Treat `changeId` as that change's permanent, stable
+identity. Either make writing it twice harmless (an upsert keyed off something derived from the
+document, so it sets a counter to a value rather than incrementing it), or explicitly check-and-skip a
+seen `changeId`, as the audit-log handler below does.
+
+### `changeId`: the stable, redelivery-proof identity
+
+`changeId` is `"<table>:<id>:<ts>"`, the change's exact log coordinate. It never changes, regardless of
+which batch a redelivery happens to place it in, which is exactly what makes dedup possible. Your
+handler can't rely on stable batch boundaries, but it can always rely on this one field.
+
+<Callout type="info" title="Edge case: delete then re-insert">
+
+Re-inserting a document id that was previously deleted is not classified as a fresh `"insert"`. Its log
+entry's `prev_ts` still points at the tombstone the delete left behind, so `op` reads `"update"`, but
+`oldDoc` reads back `null` (the tombstone), not the value the document held before the delete. If your
+handler diffs `oldDoc`/`newDoc`, treat a `null` `oldDoc` on an `"update"` the same as a fresh document,
+not as "nothing changed."
+
+</Callout>
+
 ## Handlers and the change batch
 
 `handler` is an ordinary registered `mutation` or `action`, the same `mutation`/`action` builder from
@@ -120,9 +158,9 @@ first violation found throws immediately with an instructive message:
 3. **Wrong kind.** The path resolves and is internal, but is a `query`, not a `mutation` or `action`.
 
 ```
-@stackbase/triggers: trigger "messages"'s handler "notifications:onMessage" must be an internal
-function: a module or function name segment prefixed with "_" (e.g. "notifications:_onMessage").
-Trigger handlers are driven only by the trigger loop and must not be directly client-callable.
+@stackbase/triggers: trigger "messages" references handler "notifications:_onMessage", which is
+not a registered function. Check the path matches an exported mutation or action
+(e.g. "notifications:_onMessage").
 ```
 
 The handler receives exactly one argument:
@@ -157,14 +195,13 @@ it's OCC-replayed on conflict, and any writes it makes are immediately visible a
 to any live subscription that overlaps them (the chat example's counter and audit-log pattern):
 
 ```ts title="convex/audit.ts"
-import { v } from "@stackbase/values";
 import { mutation } from "./_generated/server";
 import type { LogChange } from "@stackbase/component";
 
-export const _onChange = mutation({
-  handler: async (ctx, { changes }: { changes: LogChange[] }) => {
+export const _onChange = mutation<{ changes: LogChange[] }, null>({
+  handler: async (ctx, { changes }) => {
     for (const change of changes) {
-      // Idempotency: dedup on changeId (see "The delivery contract" below). A redelivered
+      // Idempotency: dedup on changeId (see "The delivery contract" above). A redelivered
       // change is a no-op, not a duplicate audit row.
       const dup = await ctx.db.query("auditLog", "by_changeId").eq("changeId", change.changeId).take(1).collect();
       if (dup.length > 0) continue;
@@ -175,6 +212,7 @@ export const _onChange = mutation({
         op: change.op,
       });
     }
+    return null;
   },
 });
 ```
@@ -216,44 +254,6 @@ third-party API call, that has no place inside a transaction.
 
 </Tabs>
 
-## The delivery contract
-
-Read this before writing a handler.
-
-<Callout type="warn" title="Delivery is bounded at-least-once, in-order per document">
-
-Never coalesced. A crash between a handler succeeding and its cursor advance landing redelivers the
-last batch's changes, possibly inside a larger batch if new commits landed in the meantime (the batch
-boundary is not stable across redelivery), but every change's `changeId` is stable. A document written
-twice before the cursor reaches it produces both revisions in the log, not one coalesced update. There
-is no ordering guarantee across different triggers, and one delivery is in flight per trigger at a
-time: a slow handler backs up only its own trigger's backlog, never another trigger's. **Handlers must
-be idempotent, or dedup on `changeId`.**
-
-</Callout>
-
-In practice, your handler will occasionally see a change it already processed, after a crash, or (in a
-multi-node deployment) a default-shard failover. Treat `changeId` as that change's permanent, stable
-identity. Either make writing it twice harmless (an upsert keyed off something derived from the
-document, so it sets a counter to a value rather than incrementing it), or explicitly check-and-skip a
-seen `changeId`, as the audit-log handler above does.
-
-### `changeId`: the stable, redelivery-proof identity
-
-`changeId` is `"<table>:<id>:<ts>"`, the change's exact log coordinate. It never changes, regardless of
-which batch a redelivery happens to place it in, which is exactly what makes dedup possible. Your
-handler can't rely on stable batch boundaries, but it can always rely on this one field.
-
-<Callout type="info" title="Edge case: delete then re-insert">
-
-Re-inserting a document id that was previously deleted is not classified as a fresh `"insert"`. Its log
-entry's `prev_ts` still points at the tombstone the delete left behind, so `op` reads `"update"`, but
-`oldDoc` reads back `null` (the tombstone), not the value the document held before the delete. If your
-handler diffs `oldDoc`/`newDoc`, treat a `null` `oldDoc` on an `"update"` the same as a fresh document,
-not as "nothing changed."
-
-</Callout>
-
 ## How the driver decides what to deliver: the durable cursor loop
 
 Under the hood, `@stackbase/triggers` runs one independent event loop per configured trigger. Each
@@ -264,16 +264,16 @@ commit fan-out.
 Each trigger has two wake sources, with no fixed-interval polling driving normal delivery:
 
 - **Reactive.** The engine's commit fan-out (`DriverContext.onCommit`) wakes a trigger whenever a
-  commit's touched tables include its own watched table, and wakes every trigger whenever the triggers
-  component's own `cursors` table is touched externally (an operator calling `triggers:resume`, which
-  any paused trigger could be waiting on).
+  commit's touched tables include its own watched table, and only then. The subscription deliberately
+  ignores the triggers component's own `cursors` table entirely: an external `triggers:resume` call is
+  noticed by the periodic backstop beat instead, within about 30 seconds (see
+  [Failure handling](#failure-handling-pausing-and-resuming) below).
 - **Timer.** A failed delivery arms a single retry timer for that one trigger, at an exponential
   backoff delay (`@stackbase/scheduler`'s `computeBackoff`).
 
 A trigger's own routine cursor-bookkeeping writes (`_advanceCursor`/`_recordFailure`/`_pause`) do not
 themselves re-wake the loop. If they did, a trigger would perpetually rediscover its own housekeeping
-as new work and spin forever. Only genuine external activity, a real write to the watched table, or an
-external `triggers:resume` call, wakes it.
+as new work and spin forever. Only a real write to the watched table wakes it reactively.
 
 On every wake, the driver drains as much as it can. It peeks the log's current stable bound once at the
 start of the attempt, then loops `readLog({ afterTs: cursorTs, tables: [name], limit: batchSize })`,
@@ -358,8 +358,9 @@ normalizing a value on write, or chaining a state machine forward. It also means
 unconditionally writes to its watched table on every delivery will recurse: each of its own writes
 becomes a new change it delivers to itself.
 
-As a safety net, not a substitute for writing a well-behaved handler, each trigger tracks its own
-deliveries in a rolling window: default 1000 deliveries per 10-second window
+As a safety net, not a substitute for writing a well-behaved handler, each trigger counts its own
+deliveries in a fixed tumbling window (the count resets when a window's 10 seconds are up, rather
+than sliding continuously): default 1000 deliveries per 10-second window
 (`DEFAULT_MAX_DELIVERIES_PER_WINDOW` / `BREAKER_WINDOW_MS`), configurable per-trigger via
 `maxDeliveriesPerWindow`. Tripping it pauses the trigger with `pausedReason: "circuit-breaker"`
 instead of spinning the node, recognizably distinct from a `"max-failures"` pause, because the handler
@@ -387,16 +388,19 @@ commits fine; only the runaway trigger itself is paused.
 
 ## Batching: `batchSize` and the byte budget
 
-Each handler invocation receives at most `batchSize` changes (default 64, `DEFAULT_BATCH_SIZE`). A
-batch is also cut early, mid-batch, never mid-commit, once its serialized size crosses a roughly 1MB
-byte budget (`BYTE_BUDGET`), so one giant commit touching many documents at once can't blow up a single
-delivery into an unbounded payload. The cut is measured with `JSON.stringify(...).length` (UTF-16 code
-units, a ballpark, not an exact byte count) and never splits a single commit timestamp's group of
-changes across two batches. A commit that touches multiple documents in the same watched table at once
-is either delivered whole or not yet, never half-delivered with the cursor advanced past the excluded
-half (which would silently and permanently skip them). If the very first commit-ts group alone already
-exceeds the budget, one huge document, or many documents committed together, it's delivered whole and
-unbounded rather than stalling the trigger forever waiting for something smaller.
+Each handler invocation receives at most `batchSize` changes (default 64, `DEFAULT_BATCH_SIZE`).
+Three more rules shape a batch:
+
+- **A byte budget cuts a batch early.** Once a batch's serialized size crosses roughly 1MB
+  (`BYTE_BUDGET`), it's cut mid-batch, so one giant commit touching many documents at once can't
+  blow up a single delivery into an unbounded payload. The cut is measured with
+  `JSON.stringify(...).length` (UTF-16 code units, a ballpark, not an exact byte count).
+- **A batch never splits a commit.** A commit that touches multiple documents in the same watched
+  table at once is either delivered whole or not yet, never half-delivered with the cursor advanced
+  past the excluded half (which would silently and permanently skip them).
+- **A too-big commit still delivers.** If the very first commit-ts group alone already exceeds the
+  budget (one huge document, or many documents committed together), it's delivered whole and
+  unbounded rather than stalling the trigger forever waiting for something smaller.
 
 ## The cost of `fromStart`
 

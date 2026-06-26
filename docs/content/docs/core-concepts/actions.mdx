@@ -171,13 +171,15 @@ flowchart LR
   Action -->|"ctx.runQuery / runMutation"| TX["Transaction (query or mutation)"]
 ```
 
-### From the client
+<Tabs items={['Client', 'HTTP', 'Another function', 'Scheduler']}>
+
+<Tab value="Client">
 
 Over the same WebSocket sync connection as queries and mutations, with a plain non-reactive call:
 
 ```tsx title="web/ReminderButton.tsx"
 import { useAction } from "@stackbase/client/react";
-import { api } from "../convex/_generated/api";
+import { api } from "../convex/_generated/server";
 
 function ReminderButton({ taskId }: { taskId: string }) {
   const sendReminder = useAction(api.tasks.sendReminder);
@@ -197,13 +199,15 @@ the client sends an `Action` message and waits for an `ActionResponse`. A failed
 one under backpressure, so a slow client still eventually learns its action's outcome instead of the
 connection silently losing the response.
 
-### Over plain HTTP
+</Tab>
+
+<Tab value="HTTP">
 
 `POST /api/run` with the action's path runs it directly, no WebSocket required. It's handy for a
 server-to-server call or a script:
 
 ```bash
-curl -X POST http://localhost:3210/api/run \
+curl -X POST http://localhost:3000/api/run \
   -H 'content-type: application/json' \
   -d '{"path": "tasks:sendReminder", "args": {"taskId": "..."}}'
 ```
@@ -216,13 +220,17 @@ queries, mutations, and actions, and you don't declare the kind in the request. 
 `Authorization: Bearer <token>` header to pass an identity through, exactly like the WebSocket path
 does.
 
-### From another function, via ctx.runAction
+</Tab>
+
+<Tab value="Another function">
 
 Any action, or recursively, an action it calls, can call another action with `ctx.runAction(ref,
 args)` (see the previous section). This is also the only way to invoke an internal (`_`-prefixed)
 action from outside the scheduler.
 
-### From the scheduler
+</Tab>
+
+<Tab value="Scheduler">
 
 `ctx.scheduler.runAfter`/`runAt`, and a `cronJobs()` recurring schedule, run a target function later,
 exactly as if a client had called it, with no caller waiting on the result. The target can be a
@@ -230,28 +238,25 @@ mutation or an action: the scheduler resolves which and dispatches accordingly. 
 [Scheduling](/docs/components/scheduling) for the full surface: delays, cron expressions, retry
 policy, and cascading cancellation.
 
-The dispatch guarantee differs by kind, and the difference matters for actions specifically:
+The dispatch guarantee differs by what failed, and the difference matters for actions specifically:
 
-- **A scheduled mutation** is safely retried on an infra kill, because a mutation is transactional.
-  Replaying it is either a no-op (nothing committed) or produces the same result deterministically.
+| what happened | scheduled mutation | scheduled action |
+|---|---|---|
+| handler threw an error | retried (jittered exponential backoff, then dead-lettered) | **not retried by default**: dead-lettered on the first failure, unless the job explicitly opted into retries |
+| process crashed mid-run | safely retried: a transaction either committed or it didn't | **not retried**: the job is dead-lettered (at-most-once) |
 
-<Callout type="warn" title="A scheduled action is at-most-once across a crash">
+Both action rows follow from the same fact: an action's side effects, like an email sent or a
+charge made, aren't transactional, so re-running one that already did external work could double
+the side effect. Retries for an action are an explicit opt-in (the scheduler's low-level
+`retry: { maxFailures }` option, which is also how a workflow step's `maxAttempts` works), and
+opting in is your statement that the action is idempotent. If
+you need "this multi-step process eventually finishes even if a node dies partway through," that's
+what the [Workflows](/docs/components/workflows) durable step journal is for, not a bare scheduled
+action.
 
-If the process dies while the action is executing, the scheduler does not blind-retry it on
-recovery. An action's side effects, like an email sent or a charge made, aren't transactional, so
-re-running it from scratch could double the side effect. A crash mid-flight instead dead-letters the
-job.
+</Tab>
 
-</Callout>
-
-- **A scheduled action that throws a caught error** (as opposed to crashing the process) is retried,
-  with jittered exponential backoff, up to a configurable failure count, then dead-lettered to a
-  `"failed"` state if every attempt fails. This is ordinary error-path retry, distinct from the
-  crash-recovery guarantee above.
-
-If you need stronger guarantees than at-most-once around a crash, for example "this multi-step
-process eventually finishes even if a node dies partway through", that's what
-[Workflows](/docs/components/workflows) durable step journal is for, not a bare scheduled action.
+</Tabs>
 
 ## Errors propagate to the caller
 
@@ -288,13 +293,14 @@ an action-mode variant that delegates every read and write to that component's o
 body calling `ctx.scheduler.runAfter(...)` is portable between a mutation and an action without
 changing a line.
 
-`ctx.storage` is the clearest example of why this split exists. `getUrl`/`getMetadata`/`delete` are
-metadata-only, and appear on both variants with identical signatures. `store`/`get` do actual byte
-I/O against the blob backend, and are action-only: fetching or pushing bytes over the network is
-exactly the kind of non-determinism a mutation may never perform, so they simply don't exist on the
-mutation-mode facade's type. This is the same "no non-determinism in a transaction" rule as `fetch`,
-expressed as a capability that's structurally present in one context and absent in the other, rather
-than as a runtime check:
+`ctx.storage` is the clearest example of why this split exists. The action-mode facade is exactly
+four methods: `store`/`get`/`getUrl`/`getMetadata`. `getUrl` and `getMetadata` are metadata-only
+and appear on both variants with identical signatures (`delete` is a write, so it exists only on
+the mutation-mode facade). `store`/`get` do actual byte I/O against the blob backend, and are
+action-only: fetching or pushing bytes over the network is exactly the kind of non-determinism a
+mutation may never perform, so they simply don't exist on the mutation-mode facade's type. This is
+the same "no non-determinism in a transaction" rule as `fetch`, expressed as a capability that's
+structurally present in one context and absent in the other, rather than as a runtime check:
 
 ```ts title="convex/images.ts"
 export const resize = action({

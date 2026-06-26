@@ -40,6 +40,21 @@ mechanism is simple:
    result and re-enqueues the advance, which reruns the handler from the top again, one step
    further this time.
 
+```mermaid
+sequenceDiagram
+    participant D as Driver (advance)
+    participant H as Handler (replay)
+    participant J as Steps journal
+    participant S as Scheduler
+    D->>H: re-run from the top
+    H->>J: step call at position N?
+    J-->>H: cached result (resolves instantly)
+    H->>J: new step: journal it
+    H->>S: dispatch the step's job
+    S-->>J: onComplete records the outcome
+    J-->>D: commit wakes the driver, advance again
+```
+
 <Callout type="warn" title="A workflow handler must be deterministic">
 
 Because of step 3, a workflow handler has to call the same sequence of steps, with the same
@@ -110,7 +125,8 @@ export const placeOrder = mutation({
 ```
 
 - **`ctx.workflow.start(ref, args)`** → `Promise<runId>`. Inserts a new `workflows` row
-  (`state: "running"`, `generationNumber: 0`) in the **calling mutation's own transaction**, and
+  (`state: "running"`, `generationNumber: 0`, plus a `recoveryAttempts` counter initialized to `0`,
+  a crash-recovery accounting field on the row) in the **calling mutation's own transaction**, and
   enqueues the first `workflow:_advance` poll through the scheduler. The same `contextWrite`-backed
   pattern `ctx.scheduler.runAfter` uses: if the calling mutation rolls back, the workflow never
   started at all.
@@ -119,8 +135,10 @@ export const placeOrder = mutation({
 - **`ctx.workflow.sendEvent(runId, name, payload?)`** → `Promise<void>`. Resolves a parked
   `step.waitForEvent(name)`. See [`waitForEvent`](#waitforevent-the-durable-signal) below.
 
-`ref` in all three is a `FnRef`: a bare function-path string (`"orders:_reserveStock"`) or a
-codegen'd `api`/`internal` reference, exactly like `ctx.scheduler`'s own `fnRef` argument.
+`ref` in `start` is a `FnRef`: a bare function-path string (`"workflows:fulfillOrder"`) or a
+codegen'd `api`/`internal` reference, exactly like `ctx.scheduler`'s own `fnRef` argument. `cancel`
+and `sendEvent` don't take a function reference at all: their first argument is the `runId` string
+that `start` returned.
 
 ### From an action too
 
@@ -152,6 +170,37 @@ workflow.define({
 });
 ```
 
+The six methods at a glance (each covered in detail below):
+
+<TypeTable
+  type={{
+    'runMutation(ref, args?, opts?)': {
+      type: 'Promise<T>',
+      description: "Dispatches a mutation as a durable step. opts: { maxAttempts?, compensate? }. args defaults to {}.",
+    },
+    'runQuery(ref, args?)': {
+      type: 'Promise<T>',
+      description: "Dispatches a query as a durable step. args defaults to {}.",
+    },
+    'runAction(ref, args?, opts?)': {
+      type: 'Promise<T>',
+      description: "Dispatches an action as a durable step, with the scheduler's at-most-once contract. opts: { maxAttempts?, compensate? }. args defaults to {}.",
+    },
+    'sleep(ms)': {
+      type: 'Promise<void>',
+      description: "Durable relative timer. The due time is computed from the poll's deterministic clock, never Date.now().",
+    },
+    'sleepUntil(ts)': {
+      type: 'Promise<void>',
+      description: "Durable absolute timer (epoch ms).",
+    },
+    'waitForEvent(name, opts?)': {
+      type: 'Promise<T>',
+      description: "Parks durably, with no scheduler job at all, until ctx.workflow.sendEvent(runId, name, payload) resolves it. opts.timeoutMs is not implemented yet.",
+    },
+  }}
+/>
+
 ### `step.runMutation` / `step.runQuery` / `step.runAction`
 
 ```ts
@@ -173,10 +222,11 @@ const order = await step.runQuery("orders:_get", { orderId });
   jittered-backoff retry rather than inventing a second one.
 - **`opts.compensate`** (mutation and action steps only) declares an "undo" handler for the saga
   unwind. See [Saga: per-step compensation](#saga-per-step-compensation) below.
-- **`runAction` is at-most-once**: it dispatches a `kind: "action"` scheduler job, and actions
-  carry the scheduler's own at-most-once contract. A crash mid-flight dead-letters rather than
-  blind-retrying, since an action's side effects aren't transactional. A step built on `runAction`
-  inherits that guarantee unchanged.
+- **`runAction` is at-most-once by default**: it dispatches a `kind: "action"` scheduler job, and
+  actions carry the scheduler's own at-most-once contract. Without `maxAttempts`, a single clean
+  failure dead-letters the step; a crash mid-flight always dead-letters, since an action's side
+  effects aren't transactional. Declaring `maxAttempts` is your opt-in that the action is safe to
+  re-run, and its clean failures then retry with backoff (a crash still dead-letters).
 - **`runMutation`/`runQuery` steps are exactly-once** in the sense that matters for a durable
   journal: once a step's row is `"success"`, replay never re-dispatches it.
 
@@ -388,10 +438,12 @@ applied to a pending forward step's job.
 ```mermaid
 stateDiagram-v2
     [*] --> running
-    running --> compensating: step fails / cancel-with-compensation
-    compensating --> failed
+    running --> compensating: step fails / cancel, compensations owed
+    running --> failed: step fails, nothing to undo
     running --> canceled: cancel, nothing to undo / {compensate:false}
     running --> completed: handler returns
+    compensating --> failed: unwind done or halted (failure path)
+    compensating --> canceled: unwind done (cancel path)
     failed --> [*]
     canceled --> [*]
     completed --> [*]

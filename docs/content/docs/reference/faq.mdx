@@ -71,16 +71,6 @@ TLS at the edge.
 
 </Accordion>
 
-<Accordion title="A Bun.SQL Postgres driver">
-
-The shipped `@stackbase/docstore-postgres` implementation (`NodePgClient`) is built on the
-[`pg`](https://node-postgres.com/) driver, which runs on both Node and Bun. The interface
-(`PgClient`: `query`/`transaction`/`acquireWriterLock`/`close`) is deliberately shaped so a
-`Bun.SQL`-backed client could drop in with zero changes to `PostgresDocStore`. It's a reserved,
-seam-swappable fast-follow, but it doesn't exist yet.
-
-</Accordion>
-
 <Accordion title="Per-user/per-role file-read authorization">
 
 Reading a private file is a bearer-token model today: whoever holds a valid `getUrl` link can read
@@ -102,12 +92,18 @@ silently reinterpreting history.
 
 </Accordion>
 
-<Accordion title="Some Tier-3 tail items">
+<Accordion title="Spreading object-storage shards across multiple nodes">
 
 The object-storage substrate (no database at all: an object store as the write-only durable log,
 local SQLite as queryable state) has its core shipped and E2E-proven on both filesystem and real
-MinIO. But multi-shard-node support, a dedicated replica-serve mode, a standalone GC driver with its
-own fencing, and a reshard tool remain unbuilt tail items on that arc.
+MinIO, and its tail items have shipped since: a multi-shard writer (`stackbase serve
+--object-store <url> --shards N`, one node owning all N lanes), read replicas (`--replica`, with
+`--writer-url` to forward writes to the writer), a background GC driver (sweep cadence via
+`STACKBASE_OBJECTSTORE_GC_MS`), and an offline reshard tool (`stackbase objectstore reshard`).
+
+The remaining gap is spreading shard ownership across multiple Tier-3 nodes. A multi-shard writer
+owns every lane itself. You can add replicas for reads, but you can't split those N shards across
+several writer nodes the way the Tier-2 Postgres fleet does.
 
 </Accordion>
 
@@ -232,7 +228,7 @@ against a matched app:
 | reactive propagation p99 | 13.7 ms | 27.3 ms |
 
 Same order of magnitude, and in this same-substrate test, on par with or ahead of the Rust
-reference it's cloning. See [How fast is it?](#how-fast-is-it-measured-numbers) below for the full
+reference it's cloning. See [Performance](/docs/get-started/performance) for the full
 scorecard and its caveats. stackbase is a clean-room build studied against Convex's open, published
 architecture documentation, not a fork or a decompilation of Convex's code.
 
@@ -296,119 +292,21 @@ it. If your app needs search today, reach for an external service or a custom ad
 
 ## How fast is it? (measured numbers)
 
-Every number below is hand-transcribed from a runnable benchmark harness under `benchmarks/`. See
-[Reproducing these numbers](#reproducing-these-numbers) for how to reproduce any of them. The
-running theme is honest measurement: same conditions on both sides of a comparison, caveats
-stated, and "no" or "here's a problem" reported when that's what a benchmark actually said.
+Every number stackbase quotes is hand-transcribed from a runnable benchmark harness under
+`benchmarks/`, measured under the same conditions on both sides of any comparison. The headline
+results:
 
-### Reactivity (the signature metric)
-
-Same-substrate (both Docker containers, matched app) against `get-convex/convex-backend`:
-
-| metric | stackbase | Convex |
-|---|---:|---:|
-| reactive propagation p50 (50 subs) | **8.6 ms** | 13.4 ms |
-| reactive propagation p99 | 13.7 ms | 27.3 ms |
-
-The interval-indexed subscription matcher (which decides *which* live subscriptions a write's range
-overlaps, without scanning every one) cut the pathological "one write, one matching subscriber out
-of 10,000" cell from **6.72 ms p50 to 0.24 ms p50** (a 96.4% drop). That's the fix that keeps write
-cost independent of how many other subscriptions exist on a node.
-
-### Write throughput
-
-| axis | result |
+| axis | headline result |
 |---|---|
-| single-node group commit (Postgres) | **+39% at 8 clients, +58% at 64 clients**, neutral at 1 client (a real fsync amortization win, on by default for Postgres) |
-| single-node sharding (Postgres, in-process) | **~2.6 to 2.85× at 8 shards**, sub-linear with a knee around 4 shards (shared WAL) |
-| multi-node fleet (shared Postgres) | **~1.75× at 3 nodes**, real but sub-linear. The shared Postgres, not the engine, is the ceiling |
+| reactive propagation vs Convex (same-substrate, 50 subscribers) | **8.6 ms p50** vs 13.4 ms |
+| Postgres group commit (on by default there) | **+39% to +58%** write throughput under concurrency |
+| reconnect bandwidth with resume fingerprints | **99.3% smaller** for unchanged subscriptions |
+| concurrent subscribed connections, one sync node | **10,000** clean at 7.69 KB/connection |
+| Cloudflare DO-native vs Containers write latency | **133 ms** vs ~1,500 ms |
 
-### Offline outbox
-
-The durable offline mutation outbox adds effectively no online-path cost:
-
-| axis | result |
-|---|---|
-| online round-trip latency, adapter on vs off | **~0** (0.121ms vs 0.119ms p50) |
-| concurrent throughput, adapter on | **~13,000 ops/s** |
-| 500-entry reload drain, time-to-empty | **674.6 ms**, longest main-thread block **3.3 ms** |
-
-### Reconnect / resume
-
-Subscription-resume fingerprints (a client echoes its last-known result hash on reconnect; an
-unchanged query answers with a tiny marker instead of resending the full value):
-
-| scenario (50 subscriptions, all unchanged) | bytes | savings |
-|---|---:|---:|
-| fingerprints OFF | 310,882 | baseline |
-| fingerprints ON | 2,052 | **99.3% smaller** |
-
-This is a bandwidth win, not a compute win. Every subscription still fully re-executes and
-re-hashes on resubscribe. Saving the re-run itself (retained read-sets across a disconnect) is the
-documented v2 seam, not yet built.
-
-### Connections at scale
-
-One sync node holds 10,000 concurrent subscribed connections cleanly (all connected, zero failed
-sockets) at 7.69 KB/connection and 0.4% idle CPU. Under hot fan-out (one hot query, all 10,000
-subscribers), push latency grows roughly linearly with subscriber count: about 19 µs of added
-write-to-observed latency per additional subscriber, saturating most of one core by N=10,000. This
-is the honest capacity edge of the current single-threaded per-subscriber send path, not a defect.
-See the connections benchmark for the full shape.
-
-### Fleet cross-node behavior
-
-| metric | result |
-|---|---|
-| cross-node push latency (writer commits, a different node's subscriber receives it) | **~15 to 16 ms p50**, flat across fleet width K=1/2/4 |
-| RSS/connection tax for running in fleet mode at all | none found, same curve as single-node |
-| idle CPU tax for fleet mode | **~2 to 3 percentage points**, flat regardless of fleet width |
-| failover resume (fingerprint survives landing on a different physical node) | **100%** `QueryUnchanged` at every tested width |
-
-### Docker capacity (the shipped self-host image, cgroup-budgeted)
-
-| node budget | max clean concurrent subscribers | hot-push p50 | CPU used |
-|---|---:|---:|---:|
-| 1 vCPU / 512 MB | 2,000 | 102 ms | 11.9% of budget |
-| 2 vCPU / 1 GB | 2,000 | 104 ms | 5.8% of budget |
-| 4 vCPU / 2 GB | 2,000 | 105 ms | 3.0% of budget |
-
-A 1-vCPU/512MB node (the smallest tier tested, on the exact shipped `Dockerfile`) cleanly holds
-2,000 concurrent subscribers. It survives a full kill-all reconnect storm at 100%
-`QueryUnchanged` resume, using under 12% of its CPU budget.
-
-### Cloudflare Durable-Object-native host
-
-| path | measured write latency |
-|---|---:|
-| DO-native (co-located DO-SQLite) | **133 ms** |
-| Containers (R2 CAS round trip) | **~1,500 ms** |
-
-The DO-native host is **~11× faster on writes** than the Containers path, measured against real
-Cloudflare and real R2. See [Can I run it on Cloudflare?](#can-i-run-it-on-cloudflare) below for
-what each path actually is.
-
-### The honest caveats, stated once
-
-Every number above carries machine and substrate caveats in its source report. Docker Desktop on
-macOS taxes absolute latency (both sides of a comparison pay it equally, so ratios are the signal,
-not absolutes). Loopback has no WAN jitter. Several cells are single-machine co-located rather than
-genuinely distributed hardware. None of the shapes (single-writer flatness, sub-linear sharding,
-the O(N)-fixed interval matcher, the bandwidth-only nature of resume) are expected to change on
-different hardware. The absolute milliseconds will.
-
-### Reproducing these numbers
-
-```bash
-bun run bench:reactive --store both      # overhead ladder + reactive fan-out
-bun run bench:writes --store both        # single-node write/commit throughput
-bun run bench:sharded                    # single-node sharding scale-out
-bun run bench:connections                # concurrent-connection capacity
-bun run bench:dockerfleet                # cgroup-budgeted Docker capacity
-```
-
-See `benchmarks/README.md` in the source repo for the full harness list, including the opt-in
-env-gated multi-node/fleet benches that need Postgres or Docker.
+For the full scorecard (write throughput, sharding and fleet scale-out, the offline outbox, Docker
+capacity tiers), the honest caveats behind each number, and the commands to reproduce every one,
+see [Performance](/docs/get-started/performance).
 
 ## What runtime does it run on?
 
@@ -419,9 +317,11 @@ cares which one you're running, as long as the seam is satisfied.
 
 ## Can I run it on Cloudflare?
 
-Yes, via `@stackbase/runtime-cloudflare`, in one of two genuinely different architectures. Neither
-is wired into `stackbase deploy`'s automatic push flow. Both are a `wrangler deploy` of a small
-entrypoint that imports a stackbase host package.
+Yes, via `@stackbase/runtime-cloudflare`, in one of two genuinely different architectures. The
+DO-native path is a first-class deploy target: `stackbase deploy --target cloudflare` reconciles
+your `wrangler.jsonc` bindings (the Durable Object class, its SQLite migration, `nodejs_compat`,
+optional R2) and shells out to `wrangler deploy` for you. The Containers path is a hand-wired
+`wrangler deploy` of the portable `stackbase serve` image.
 
 <Tabs items={['DO-native (recommended)', 'Containers (experimental)']}>
 

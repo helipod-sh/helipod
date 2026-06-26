@@ -32,6 +32,8 @@ flowchart TB
   Core --> CF["Cloudflare DO host<br/>loader: bundled module map<br/>timer: DO alarm<br/>socket: WebSocketPair (hibernatable)<br/>storage: DO SQLite"]
 ```
 
+("Hibernatable" is Cloudflare's term for a WebSocket that stays open while the Durable Object holding it is unloaded from memory; the DO is revived when the next message arrives. More on that in the Durable Object section below.)
+
 <Callout type="warn" title="What's not built yet">
 
 The executor itself runs in-process today, not inside a real V8 isolate sandbox. The syscall boundary between a function and the engine is already shaped so a true isolate host is a seam swap later, not a rewrite, but it isn't built yet.
@@ -72,7 +74,7 @@ flowchart LR
 A few things ride along with this loopback wiring:
 
 - **Write fan-out to in-process subscribers.** When a mutation commits, the runtime's `notifyWrites` walks every live subscription in the same process, re-runs the ones whose read set overlaps the write, and pushes updates straight back through the loopback connection. No polling, no queue.
-- **`refreshSchema()` hot reload.** When you edit `schema.ts` in dev, the runtime re-reads it and reapplies index metadata **without** dropping any open WebSocket session. Your browser tab keeps its live subscriptions; they just re-run against the new schema. This is what makes the `stackbase dev` edit-save-see-it loop fast.
+- **Hot reload via `setModules(...)` / `setTableNumbers(...)`.** When you edit your functions or `schema.ts` in dev, the CLI re-resolves them and calls these two `EmbeddedRuntime` methods (`packages/runtime-embedded/src/runtime.ts`) to swap the function registry and the table-number map in place, **without** dropping any open WebSocket session. Your browser tab keeps its live subscriptions; they just re-run against the new code. This is what makes the `stackbase dev` edit-save-see-it loop fast, and it's the same pair of calls a live `stackbase deploy` uses.
 
 Every other tier below is really just: keep this same sync handler and executor, but swap in a *different* transport and a *different* storage binding.
 

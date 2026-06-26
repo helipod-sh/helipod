@@ -1,0 +1,181 @@
+---
+title: Glossary
+description: Plain-language definitions of the terms used across the stackbase docs.
+---
+
+{/* diataxis: reference */}
+
+Short definitions of the recurring terms in these docs, in alphabetical order. Each entry links to
+the page that covers the concept properly.
+
+### Action
+
+A function that runs outside the database transaction, so it can call `fetch`, read the clock, and
+use randomness. Actions have no direct database handle; they read and write through
+`ctx.runQuery` and `ctx.runMutation`. See [Actions](/docs/core-concepts/actions).
+
+### Component
+
+A packaged backend feature (scheduler, workflows, auth, triggers, notifications) that you compose
+into a project in `stackbase.config.ts`. Each component brings its own tables, functions, and
+background drivers. See [Components](/docs/components/overview).
+
+### DLR (Differential Log-Tail Reactivity)
+
+stackbase's strategy for keeping subscriptions cheap: instead of always re-running a subscribed
+query from scratch and re-sending the whole result, the engine diffs the tail of the
+[MVCC log](#mvcc-log) and pushes only what changed. See
+[Reactivity internals](/docs/contributing/architecture/reactivity).
+
+### Document
+
+One record in a table, like a row in SQL. A document is a plain JSON-style object plus two system
+fields: `_id` and `_creationTime`. See [Schema and tables](/docs/core-concepts/schema-and-tables).
+
+### Epoch
+
+A generation number a writer takes each time it acquires the [lease](#lease). Any commit stamped
+with an older epoch is rejected, which is how a node that lost the writer role is stopped from
+corrupting state. See [Scaling](/docs/deploy/scaling).
+
+### Fan-out
+
+Used in two senses. **Commit fan-out** is the engine notifying every subscription whose
+[read set](#read-set--write-set) a committed write touches (see
+[Reactivity](/docs/core-concepts/reactivity)). **Step fan-out** is a workflow running several steps
+in parallel with `Promise.all` and waiting for all of them (see
+[Workflows](/docs/components/workflows)).
+
+### Fence / fencing
+
+Blocking a stale writer from committing after it has lost the writer role, usually by checking its
+[epoch](#epoch) against the current one at commit time. Fencing is what makes failover safe. See
+[Scaling](/docs/deploy/scaling).
+
+### Frontier
+
+The timestamp up to which a client session (or a node) has observed committed writes. stackbase
+guarantees your session's frontier covers your own commits, so you never read your own write as
+stale. See [Reactivity](/docs/core-concepts/reactivity#the-frontier-guarantees-your-own-commit-is-never-stale).
+
+### Group commit
+
+Batching several concurrent commits into one physical database write, so they share a single fsync.
+It raises write throughput without changing any correctness guarantee. See
+[Postgres](/docs/deploy/postgres).
+
+### Idempotent
+
+Safe to apply more than once with the same end result. Anywhere delivery is at-least-once (a
+[trigger](/docs/components/triggers) redelivering a batch, an [outbox](#outbox-the-receipted-outbox)
+resending a mutation), the handler being idempotent is what keeps duplicates harmless.
+
+### Index
+
+An ordered lookup structure you declare on a table in `schema.ts`, which queries use to read a
+range of documents efficiently instead of scanning everything. Index ranges are also the
+granularity at which reads are recorded for reactivity. See
+[Schema and tables](/docs/core-concepts/schema-and-tables).
+
+### Lease
+
+A time-limited claim on a role, recorded in the database and renewed by heartbeat. In a fleet, the
+writer role is a lease: if the holder dies and stops renewing, another node takes it over. See
+[Scaling](/docs/deploy/scaling).
+
+### MVCC log
+
+The append-only format stackbase stores data in: a write never overwrites a document in place, it
+appends a new version with a timestamp. That history is what makes consistent snapshots, diffing,
+and [triggers](/docs/components/triggers) possible. See
+[Storage internals](/docs/contributing/architecture/storage).
+
+### Mutation
+
+A function that writes to the database. Mutations are the only writers, and each one runs as a
+single serializable transaction: all of its writes land together or not at all. See
+[Mutations](/docs/core-concepts/mutations).
+
+### OCC (optimistic concurrency control)
+
+Running a transaction without taking locks, then checking at commit whether a concurrent commit
+changed anything it read. If so, the transaction retries; if not, it commits. "Optimistic" because
+conflicts are assumed rare. See [Transactions](/docs/contributing/architecture/transactions).
+
+### Optimistic update
+
+A client-side technique for instant UI: when you call a mutation, a local guess at its effect is
+applied to your queries immediately, then replaced by the server's real result when the commit
+lands. See [Optimistic updates](/docs/client/optimistic-updates).
+
+### Outbox (the Receipted Outbox)
+
+A durable client-side queue of mutations that survives going offline and reloading the page. On
+reconnect it drains in order, and server-side receipts make sure a resent mutation is never
+executed twice. See [Offline sync](/docs/client/offline-sync).
+
+### Query
+
+A read-only, deterministic function. Because it cannot write or call non-deterministic APIs, the
+engine can record exactly what it read and re-run it safely whenever that data changes. See
+[Queries](/docs/core-concepts/queries).
+
+### Reactive query / subscription
+
+A query a client subscribes to over the WebSocket. The server pushes a fresh result whenever a
+committed write overlaps what the query read; the client never polls. This is the heart of
+stackbase. See [Reactivity](/docs/core-concepts/reactivity).
+
+### Read set / write set
+
+The read set is the set of index ranges a query touched while running; the write set is what a
+mutation changed. A subscription re-runs only when a commit's write set intersects its read set.
+See [Reactivity](/docs/core-concepts/reactivity).
+
+### Seam
+
+A deliberately narrow interface where one implementation can be swapped for another: the storage
+adapter, the blob store, an email provider. Seams are how the engine stays ignorant of which
+database or cloud it runs on. See [System design](/docs/contributing/architecture/system-design).
+
+### Shard / shard key
+
+A shard is a slice of your data with its own [single writer](#single-writer), so write capacity
+grows by adding shards rather than by weakening consistency. The shard key is the schema field that
+decides which shard a document lives on. See [Scaling](/docs/deploy/scaling).
+
+### Single-writer
+
+The invariant that exactly one process commits writes at a time (per [shard](#shard--shard-key)).
+It is what lets stackbase give serializable transactions without distributed coordination on every
+commit. See [Transactions](/docs/contributing/architecture/transactions).
+
+### Syscall boundary
+
+The interface between your function code and the engine. Every `ctx.db` call crosses it as plain
+serializable data, which keeps functions deterministic and ready to run inside a sandboxed isolate.
+See [Execution internals](/docs/contributing/architecture/execution).
+
+### Tier
+
+A deployment shape; the same app code runs at every tier.
+
+- **Tier 0**: one process, embedded SQLite. The default, and what `stackbase dev` runs.
+- **Tier 1**: one process, external Postgres.
+- **Tier 2**: a distributed fleet with sharded writers and a shared Postgres store.
+- **Tier 3**: the object-storage substrate: nodes coordinate through object storage, no shared
+  database at all.
+
+See [Scaling](/docs/deploy/scaling).
+
+### Transactor
+
+The part of the engine that runs mutations: a [single-writer](#single-writer) loop that executes a
+mutation, checks it for [OCC](#occ-optimistic-concurrency-control) conflicts, and commits it. See
+[Transactions](/docs/contributing/architecture/transactions).
+
+### UDF (user-defined function)
+
+Any function you write in `convex/`: a query, mutation, action, or `httpAction`. The docs mostly
+say "function"; internals pages say UDF. See
+[Execution internals](/docs/contributing/architecture/execution).

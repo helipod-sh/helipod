@@ -53,6 +53,37 @@ coordination overhead. This is the right shape for the overwhelming majority of 
 are what you reach for once you've measured a real write-throughput ceiling, need redundancy, or
 want to run with no managed database at all. Each is covered in full below.
 
+## When to reach for which tier
+
+- **Start at Tier 0/1.** Most apps never need more than one writer. Reach for a fleet or sharding
+  because you've measured a real write-throughput ceiling or need failover, not preemptively.
+- **Reach for the fleet** when you need redundancy or more read capacity, and you're already on (or
+  willing to move to) Postgres.
+- **Reach for sharding** when a specific table's write volume is the actual bottleneck. It's an
+  opt-in, per-table decision, not an all-or-nothing switch for the whole app.
+- **Reach for multi-writer distribution** once sharding alone (parallel writes on one node) isn't
+  enough and you want write throughput to also grow with node count.
+- **Reach for the object-storage substrate** when you want multi-node write scale-out with no
+  managed database in the deployment at all. The trade is a newer, less battle-tested substrate in
+  exchange for one less piece of infrastructure to run.
+
+<Callout type="info" title="Five terms this page leans on">
+
+- **Shard**: an independent commit-serialization lane. Writes within a shard are fully
+  serializable; different shards commit in parallel.
+- **Lease**: the record (a Postgres row, or an object-store manifest) a writer must keep renewing
+  to stay a shard's writer.
+- **Fence**: what guarantees an evicted or wedged writer's in-flight commit aborts instead of
+  landing after its lease is taken away.
+- **Frontier**: a shard's high-water committed timestamp. The fleet-wide visibility line is the
+  minimum frontier across every shard.
+- **Epoch**: a counter bumped each time a shard's ownership changes, so a stale owner's attempts
+  are recognizably stale.
+
+The [glossary](/docs/reference/glossary) has the full list.
+
+</Callout>
+
 ## Tier 2: the fleet (`@stackbase/fleet`)
 
 `stackbase serve --fleet` runs a small, symmetric fleet of `stackbase serve` processes that share
@@ -110,15 +141,11 @@ stackbase serve --dir convex
   static dependency on it), so `--fleet` without the package installed fails fast with an install
   instruction instead of a cryptic module-not-found error.
 
-Misconfiguration fails fast with a specific message in every case:
-
-| Misconfiguration | Result |
-|---|---|
-| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (or a SQLite URL) | `fleet mode requires --database-url (Postgres): set --database-url postgres://… or STACKBASE_DATABASE_URL.` |
-| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `fleet mode requires --advertise-url (or STACKBASE_ADVERTISE_URL): the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` |
-| `--fleet` without `@stackbase/fleet` installed | `fleet mode requires @stackbase/fleet: install it (bun add @stackbase/fleet).` |
-| `--fleet` combined with `--object-store` | `--object-store cannot be combined with --fleet (Tier 2): pick one write-scaling story.` |
-| No `--fleet` at all | Unchanged, today's single-node behavior. |
+Misconfiguration fails fast with a specific message in every case: a missing Postgres URL, a
+missing advertise URL, `@stackbase/fleet` not installed, or `--fleet` combined with
+`--object-store` each name exactly what to fix and exit 1 before anything binds. No `--fleet` at
+all is unchanged single-node behavior. The exact messages, and every fleet flag and environment
+variable, are in [the CLI reference](/docs/reference/cli#stackbase-serve).
 
 `serve`'s machine-readable startup line gains two additive fields in fleet mode:
 `{"fleet":true,"role":"writer"}` (or `"sync"`), printed once at boot. Watch logs or the dashboard,
@@ -407,9 +434,10 @@ is just shard count 1) so they share one Postgres round trip instead of each pay
 
 Measured 1.6x at 64 concurrent clients on a single shard.
 
-Default is off. A sharded fleet already spreads commits across per-shard connections and gets no
-extra benefit (or extra risk: the idle-frontier closer treats a shard with an in-flight batch as busy
-and skips it) from also batching within a shard.
+The default is topology-dependent: off on a fleet node when unset, while a single-node (non-fleet)
+Postgres deployment defaults it on (SQLite defaults off). A sharded fleet already spreads commits
+across per-shard connections and gets no extra benefit (or extra risk: the idle-frontier closer
+treats a shard with an in-flight batch as busy and skips it) from also batching within a shard.
 
 </Callout>
 
@@ -547,6 +575,9 @@ STACKBASE_ADMIN_KEY=secret stackbase serve --dir convex \
   cadence at the given value (`backstopMs = (d) => Math.max(d, n)`) so a cold start isn't paid more
   often than necessary. Unset, both are a no-op: drivers use their own default 30s/60s cadence.
 
+The full `--object-store` URL grammar (schemes, credential resolution, worked examples) lives in
+[the CLI reference](/docs/reference/cli#stackbase-serve).
+
 ### What's actually shipped
 
 - **Object-first commit.** A commit allocates its timestamp from the shard's manifest, durably
@@ -621,20 +652,6 @@ on your own infrastructure, at every tier. The key affects whether you can scale
 Core stackbase has no hard dependency on either `ee/` package: `serve --fleet` and
 `serve --object-store` both dynamically `import()` their package, so a deployment that never opts
 into scale-out never even resolves it.
-
-## When to reach for which tier
-
-- **Start at Tier 0/1.** Most apps never need more than one writer. Reach for a fleet or sharding
-  because you've measured a real write-throughput ceiling or need failover, not preemptively.
-- **Reach for the fleet** when you need redundancy or more read capacity, and you're already on (or
-  willing to move to) Postgres.
-- **Reach for sharding** when a specific table's write volume is the actual bottleneck. It's an
-  opt-in, per-table decision, not an all-or-nothing switch for the whole app.
-- **Reach for multi-writer distribution** once sharding alone (parallel writes on one node) isn't
-  enough and you want write throughput to also grow with node count.
-- **Reach for the object-storage substrate** when you want multi-node write scale-out with no
-  managed database in the deployment at all. The trade is a newer, less battle-tested substrate in
-  exchange for one less piece of infrastructure to run.
 
 ## Related
 

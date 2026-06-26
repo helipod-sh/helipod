@@ -238,7 +238,7 @@ If you're adding something new, here's how to decide where it lives.
 |---|---|
 | A new core engine subsystem (storage, transactions, query engine, sync) | A new package under `packages/` |
 | A new opt-in feature (like scheduling, workflows, triggers) | A new **component** under `components/`, built on the component seam. See [Building components](/docs/contributing/extending/custom-component) |
-| A new database backend | A new adapter package (implementing the same `DatabaseAdapter` interface as `docstore-sqlite`/`docstore-postgres`) |
+| A new database backend | A new adapter package implementing the `DocStore` interface (the shared cross-backend contract from `packages/docstore`). Under that seam, adapters differ: `docstore-sqlite` sits on a small synchronous `DatabaseAdapter`, while `docstore-postgres` sits on an async `PgClient`. See [Writing a storage adapter](/docs/contributing/extending/storage-adapter) |
 | A new object-storage backend | A new adapter package (implementing the `BlobStore` seam) |
 
 The guiding rule is the same one that keeps this codebase navigable at ~30 packages: **keep

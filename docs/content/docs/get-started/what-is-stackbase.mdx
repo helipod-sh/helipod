@@ -35,8 +35,23 @@ stackbase yourself, on your own infrastructure, with no managed cloud in the mid
 
 ## You write your backend as functions
 
-Your functions live in a `convex/` folder. Here's a query that lists messages and a mutation that
-adds one:
+Your functions live in a `convex/` folder:
+
+<Files>
+
+<Folder name="convex" defaultOpen>
+
+<File name="schema.ts" />
+
+<File name="messages.ts" />
+
+<Folder name="_generated" />
+
+</Folder>
+
+</Files>
+
+Here's a query that lists messages and a mutation that adds one:
 
 ```ts title="convex/messages.ts"
 import { v } from "@stackbase/values";
@@ -99,13 +114,31 @@ It stores data in SQLite by default, with no setup. When you want a managed data
 
 If you know these tools, here's the short version:
 
-- **Convex.** Same reactive model and the same style of functions, but you self-host it and your data
-  stays yours. stackbase also adds a few things Convex hadn't, like durable workflows and a Postgres
-  option. It's a clean-room build studied from Convex's public docs, not a fork.
-- **Firebase and Supabase.** Both give you realtime, but through security rules or a stack of separate
-  services around a database. stackbase gets its live updates from your own functions, in one process.
-- **SpacetimeDB.** Its functions are written in Rust or C#. stackbase's are plain TypeScript, and it
-  runs on ordinary infrastructure.
+<Tabs items={['Convex', 'Firebase/Supabase', 'SpacetimeDB']}>
+
+<Tab value="Convex">
+
+Same reactive model and the same style of functions, but you self-host it and your data
+stays yours. stackbase also adds a few things Convex hadn't, like durable workflows and a Postgres
+option. It's a clean-room build studied from Convex's public docs, not a fork.
+
+</Tab>
+
+<Tab value="Firebase/Supabase">
+
+Both give you realtime, but through security rules or a stack of separate
+services around a database. stackbase gets its live updates from your own functions, in one process.
+
+</Tab>
+
+<Tab value="SpacetimeDB">
+
+Its functions are written in Rust or C#. stackbase's are plain TypeScript, and it
+runs on ordinary infrastructure.
+
+</Tab>
+
+</Tabs>
 
 For numbers, [Performance](/docs/get-started/performance) has a measured comparison against Convex,
 with the caveats spelled out.

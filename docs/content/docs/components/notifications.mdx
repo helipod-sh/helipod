@@ -19,6 +19,18 @@ one preference gate, one retry/backoff/dead-letter machine, and one topic fan-ou
 There's no separate "push system" or "SMS system" to learn: the differences between channels are a
 handful of branches inside otherwise shared code.
 
+This is a long page. Jump to what you need:
+
+- [Enabling it](#enabling-it) and [Sending](#sending): the core path, `SendArgs`, at-most-once keys
+- [Channels and providers](#channels-and-providers): Resend, Twilio, writing your own, and
+  [multi-provider fallback](#multi-provider-fallback)
+- [Push](#push): device tokens, Expo/FCM/APNs, push non-goals
+- [The reactive in-app inbox](#the-reactive-in-app-inbox): `useNotifications` and `<Inbox>`
+- [Preferences and critical categories](#preferences-and-critical-categories) and [Topics](#topics)
+- [Delivery reliability](#delivery-reliability): retries, crash reclaim, delivery webhooks
+- [Email digest](#email-digest), [Auth unification](#auth-unification),
+  [the driver](#how-delivery-actually-runs-the-driver), [schema reference](#schema-reference)
+
 ## The model: Channel × Provider
 
 A **channel** is a medium: `"email" | "sms" | "in_app" | "push"`. A **provider** is a swappable
@@ -79,7 +91,7 @@ export default defineConfig({
 
 Once composed, every mutation/query context gets a `ctx.notifications` facade (typed via the
 component's `contextType`). Every action context gets a parallel `ctx.notifications` with a
-slightly larger surface (`sendNow`, `sendToTopic`). See
+different, send-focused surface (`send`, `sendNow`, `sendToTopic`, and nothing else). See
 [Mutation vs. action surface](#mutation-vs-action-surface) below.
 
 ## Sending
@@ -199,10 +211,15 @@ honors `EmailMessage.idempotencyKey`), the key passes through to it too, as defe
 
 The mutation-context facade (`NotificationsContext`) has: `send`, `setPreference`, `subscribe`,
 `unsubscribe`, `registerPushToken`, `unregisterPushToken`, `identity()`. The action-context facade
-(`NotificationsActionContext`) adds two more that need to do work outside a transaction: `sendNow`
-and `sendToTopic`. `ctx.notifications.identity()` returns the raw ambient caller token (the
-fallback identity `callerId` uses when `@stackbase/auth` isn't composed). Most app code never
-needs it directly.
+(`NotificationsActionContext`) is exactly three methods: `send`, `sendNow`, and `sendToTopic`, the
+sends that need (or are allowed) to do work outside a transaction.
+
+Everything else (`setPreference`, `subscribe`, `unsubscribe`, `registerPushToken`,
+`unregisterPushToken`, `identity()`) exists only on the mutation facade. Calling one of them from
+an action is a runtime TypeError, not a silent no-op. Do that work in a mutation the action invokes
+via `ctx.runMutation` instead. `ctx.notifications.identity()` (mutation facade) returns the raw
+ambient caller token (the fallback identity `callerId` uses when `@stackbase/auth` isn't composed).
+Most app code never needs it directly.
 
 #### `sendNow`: synchronous delivery from an action
 
@@ -234,6 +251,9 @@ return value for each channel actually delivered inline.
 Covered in full under [Topics](#topics) below.
 
 ## Channels and providers
+
+Email, SMS, and in-app are covered here. Push has enough of its own shape, multi-provider fan-out
+and a device-token registry, that it gets [its own section](#push) below.
 
 <Tabs items={['Email', 'SMS', 'In-app']}>
 
@@ -289,9 +309,6 @@ beyond `title`/`body` land on the inbox row's `data`.
 </Tab>
 
 </Tabs>
-
-Covered in full under [Push](#push) below. It has enough of its own shape, multi-provider fan-out
-and a device-token registry, to earn its own section.
 
 ### Writing your own provider
 
@@ -420,11 +437,19 @@ export default defineConfig({
 At least one of `expo`/`fcm`/`apns` must be set. `defineNotifications` **throws at construction**
 if `channels.push` is present with an empty `providers` map.
 
+<Accordions type="single">
+
+<Accordion title="Provider auth and adapter details (Expo / FCM / APNs)">
+
 | Provider | How it authenticates | Notes |
 |---|---|---|
 | `expoPush({ accessToken?, baseUrl? })` | Optional bearer token | Simplest adapter: one HTTP endpoint, works anonymously. Auto-chunks a large token batch into ≤100-message requests (Expo's documented cap), invisible to the caller. A per-token `DeviceNotRegistered` ticket maps to a prunable invalid token. |
 | `fcmPush({ projectId, serviceAccount: { client_email, private_key }, baseUrl? })` | Service-account OAuth2 | Exchanges a signed JWT for a cached Bearer access token (refreshed ~5 min before its ~1hr expiry; one adapter instance, one cache). One HTTP request per token internally (FCM v1 has no batch-send endpoint), hidden inside the adapter's own loop. `UNREGISTERED`/`NOT_FOUND` maps to a prunable invalid token. |
 | `apnsPush({ teamId, keyId, privateKey, bundleId, production?, baseUrl? })` | Self-signed ES256 JWT (`kid`=Key ID, `iss`=Team ID) | Uses `node:http2` directly: Apple's provider API is HTTP/2-only, and `fetch` doesn't negotiate ALPN h2 to arbitrary hosts. The JWT is re-signed locally (not re-fetched over the network) roughly every 50 minutes, comfortably under Apple's ~1hr guidance. A `410` status or `Unregistered`/`BadDeviceToken` reason maps to a prunable invalid token. |
+
+</Accordion>
+
+</Accordions>
 
 ### Registering device tokens
 
@@ -783,11 +808,14 @@ defineNotifications({
   channels: { /* … */ },
   retry: {
     maxAttempts: 4,          // total delivery attempts (first send + retries) before dead-lettering
-    initialBackoffMs: 250,   // first retry's base delay
+    initialBackoffMs: 250,   // backoff constant: the FIRST retry waits 250 * 2 ** 2 = 1000ms, jittered
     base: 2,                 // exponential multiplier
   },
 });
 ```
+
+The delay for the Nth retry is `initialBackoffMs * base ** (N + 1)`, jittered to 50-100%. With the
+defaults, the first retry waits 500ms to 1,000ms (not ~250ms), the second 1s to 2s, and so on.
 
 Whether a failure is retried depends on how the provider's `send` throws:
 
@@ -827,10 +855,12 @@ its signature, then reactively updates the message row with a normalized `delive
 provider reports what happened after the send: bounces, opens, clicks, complaints.
 
 **Endpoint.** `POST /api/notifications/webhooks/:channel` (`:channel` is `email` or `sms`, matching
-`WEBHOOK_PREFIX`, e.g. `https://your-host/api/notifications/webhooks/email` for Resend). This route
-is registered only if the configured channel's primary provider declares a `webhook` (so a project
-using only `consoleEmail()` never exposes it). Configure it in the provider's own dashboard
-(Resend: Webhooks; Twilio: the number's Messaging status callback URL).
+`WEBHOOK_PREFIX`, e.g. `https://your-host/api/notifications/webhooks/email` for Resend). What's
+actually registered is one prefix route (`/api/notifications/webhooks/`), and only if at least one
+configured channel's primary provider declares a `webhook`, so a project using only
+`consoleEmail()`/`consoleSms()` never exposes it. Whether a specific `:channel` accepts events is
+then checked per request against that channel's own configured provider. Configure the URL in the
+provider's dashboard (Resend: Webhooks; Twilio: the number's Messaging status callback URL).
 
 **Signing.** Set `webhookSecret` on the email channel (Resend's `whsec_…` Svix secret). Twilio's
 webhook is verified with the SMS provider's own `authToken`. No separate secret needed:
@@ -995,6 +1025,10 @@ single-writer OCC is the authoritative once-only guard, and the provider-facing 
 All tables live under the `notifications/` namespace when composed and are entirely additive. A
 project without `defineNotifications` has none of them.
 
+<Accordions type="single">
+
+<Accordion title="Table-by-table reference">
+
 | Table | Purpose | Key indexes |
 |---|---|---|
 | `messages` | One row per channel per logical send: `status` (`queued`/`sending`/`sent`/`failed`), rendered `payload` (transient, cleared once terminal), `attempts`/`nextAttemptAt`/`claimedAt` (retry bookkeeping), `deliveryStatus`/`deliveryDetail`/`complainedAt` (webhook axis), `providerName` (fallback observability), `tokens` (push device-token snapshot). | `byStatus`, `byIdempotencyKey`, `byProviderMessageId` |
@@ -1004,6 +1038,10 @@ project without `defineNotifications` has none of them.
 | `topicSubscriptions` | `(topic, userId)` subscriber rows. | `byTopic`, `byUserTopic` |
 | `digestBuffer` | Buffered digest items awaiting flush: `recipientKey`, `category`, rendered content, `flushedAt?`. | `byUnflushed`, `byRecipientCategory` |
 | `pushTokens` | One row per registered device token, upserted by token: `userId`, `token`, `provider`, `platform?`. | `byUser`, `byToken` |
+
+</Accordion>
+
+</Accordions>
 
 ## What's not built
 

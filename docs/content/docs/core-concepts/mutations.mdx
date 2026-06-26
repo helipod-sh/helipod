@@ -57,7 +57,7 @@ Calling `send` with a missing `body`, an extra `foo` field, or a `conversationId
 string all reject with the same shape of error. The caller never reaches `ctx.db.insert` at all:
 
 ```
-ArgumentValidationError: arguments to "messages:send" do not match validator: body: expected string, got undefined
+ArgumentValidationError: arguments to "messages:send" do not match validator: body: missing required field
 ```
 
 Use `v.optional(...)` for arguments that may be omitted. `httpAction` is the one exception: it
@@ -155,10 +155,11 @@ This is also what gives the engine a single, well-defined moment to hook reactiv
 commit. There's no ambiguity about "when did this write happen," because a mutation either fully
 happened at its commit or didn't happen at all.
 
-### The 3-phase commit pipeline
+### The commit pipeline
 
-Under the hood, committing a mutation's staged writes is a 3-phase pipeline run under the shard's
-single-writer mutex:
+Under the hood, committing a mutation's staged writes runs under the shard's single-writer mutex
+in two steps: validate, then the store atomically allocates the timestamp and lands the writes in
+one step.
 
 1. **Validate**: has any commit since this transaction's snapshot written something this
    transaction read? The engine checks the transaction's *validated* read set (everything read via
@@ -166,29 +167,29 @@ single-writer mutex:
    intersect, the commit is aborted with an `OccConflictError` (code `OCC_CONFLICT`, HTTP 409,
    retryable). This is optimistic concurrency control (OCC): the engine doesn't lock rows up
    front, it detects a genuine conflict at commit time.
-2. **Apply**: every staged insert/replace/delete is appended to the document log, chaining each
-   row's `prev_ts` to its latest *committed* revision (the single-writer lock makes this race-free).
-3. **Allocate**: the commit timestamp is allocated inside the store's own atomicity domain and
-   stamped onto every row atomically, so there is no window where a timestamp is allocated but not
-   yet landed.
+2. **Apply and allocate, atomically**: the store allocates the commit timestamp inside its own
+   atomicity domain and appends every staged insert/replace/delete to the document log at that
+   timestamp, in one atomic step, chaining each row's `prev_ts` to its latest *committed* revision
+   (the single-writer lock makes this race-free). There is no window where a timestamp is
+   allocated but its writes aren't yet landed.
 
 ```mermaid
 flowchart LR
-  V["Validate"] --> A["Apply"]
-  A --> AL["Allocate"]
-  AL -->|"success"| F["Fan out to subscriptions"]
+  V["Validate"] --> A["Apply + allocate (atomic)"]
+  A -->|"success"| F["Fan out to subscriptions"]
 ```
 
-Only after all three phases succeed does the engine compute the write set and fan it out to
-subscriptions (see [How it works](/docs/get-started/how-it-works) and
-[Reactivity](/docs/core-concepts/reactivity)).
+Only after both steps succeed does the engine compute the write set and fan it out to
+subscriptions. [How it works](/docs/get-started/how-it-works) is the canonical deep explanation of
+this pipeline; see also [Reactivity](/docs/core-concepts/reactivity) for the fan-out side.
 
 ### OCC conflicts replay your handler, deterministically
 
-When phase 1 detects a conflict, the engine doesn't fail the mutation. It **replays the handler**:
-runs it again from scratch, against a fresh snapshot, up to 8 attempts by default. This is
-invisible to the caller in the common case; they see one mutation call that eventually committed
-(or, past the retry budget, an `OccConflictError` that propagates).
+When validation detects a conflict, the engine doesn't fail the mutation. It **replays the
+handler**: runs it again from scratch, against a fresh snapshot, up to 8 retries after the initial
+attempt by default (so up to 9 executions in all). This is invisible to the caller in the common
+case; they see one mutation call that eventually committed (or, past the retry budget, an
+`OccConflictError` that propagates).
 
 Replay only works because mutations are **deterministic**, covered next. If replaying the same
 handler against the same (now newer) data could produce a *different* sequence of writes than the
@@ -226,9 +227,10 @@ Every document gets two system fields the engine assigns, not you:
 - **`_creationTime`**: the transaction's snapshot timestamp at the moment of insert, carried
   forward unchanged by any later `replace` of the same document.
 
-You never set these directly in the `value` you pass to `insert`/`replace`. Pass them anyway and
-they're silently stripped (an ordinary insert) or rejected as a system field. The one exception is
-a client-supplied `_id`, covered below.
+You never set these directly in the `value` you pass to `insert`/`replace`. On a `replace`, both
+system fields are ignored in favor of the document's real ones. On an `insert`, a `_creationTime`
+is rejected, and a `_id` is never ignored: it's always treated as a client-supplied id and
+validated as such, covered below.
 
 <Callout type="warn" title="Same-transaction inserts share one _creationTime">
 
@@ -286,18 +288,14 @@ export const send = mutation({
 });
 ```
 
-`shardBy` can be a field name (a string naming one of the mutation's `args`, resolved directly
-from the call's arguments, as above) or a function `(args) => value` for a computed shard key.
-Either way, the resolved value is hashed to a shard **before** the transaction opens, and codegen
-cross-checks a string `shardBy` against the table's actual `.shardKey()` at build time, so a
-mismatch is caught before it ever reaches the engine's runtime guards.
+The three-line summary: `shardBy` is a field name from `args` (or a function `(args) => value`),
+resolved and hashed to a shard **before** the transaction opens. Codegen cross-checks a string
+`shardBy` against the table's `.shardKey()` at build time, and the engine enforces shard ownership
+at runtime on every tier, single-node included. If your table has no `.shardKey()`, none of this
+applies and every mutation runs exactly as unsharded as before this feature existed.
 
-The engine enforces shard ownership at every tier (a single-node deployment included, since it
-runs the same virtual-shard machinery), with instructive rejections if you get it wrong. See
-**Shard ownership rules** under Going deeper below for the exact list.
-
-If your table has no `.shardKey()` at all, none of this applies. Every mutation and read is
-exactly as unsharded as before this feature existed.
+The exact ownership rules and their rejection messages are under **Shard ownership rules** in
+Going deeper below.
 
 ## Client-supplied ids
 
@@ -324,15 +322,12 @@ await client.mutation(api.conversations.create, { _id: conversationId, name }); 
 await client.mutation(api.messages.send, { conversationId, body });               // references it, also offline
 ```
 
-This is the primary pattern for an **offline create-then-reference chain**: mint the id before
-either mutation is even sent, hand it to both, and both can enqueue into the durable
-[offline outbox](/docs/client/offline-sync) without either waiting on the other to actually commit.
-On drain, the create runs first (the outbox is FIFO), lands under the minted id, and by the time
-the second mutation runs, the reference resolves against a real row.
-
-`mintId`'s type parameter accepts any of your schema's table names, but the emitted map only
-contains your **app's own tables**. Component and system tables are excluded by construction, so
-`mintId("_storage")` compiles but throws at runtime ("unknown table ... regenerate `_generated/`").
+The three-line summary: this is the pattern for an **offline create-then-reference chain**. Mint
+the id before either mutation is sent, hand it to both, and both can enqueue into the durable
+[offline outbox](/docs/client/offline-sync); on drain the create runs first (the outbox is FIFO),
+so the reference resolves against a real row. `mintId` only knows your **app's own tables**:
+component and system tables are excluded by construction, so `mintId("_storage")` compiles but
+throws at runtime.
 
 The exact validation order the engine runs at insert, the v1 restriction to unsharded tables on
 the default ring, and the purity rule for pairing a client-supplied id with an optimistic update
@@ -369,7 +364,7 @@ On the client, `useMutation` returns a callback bound to a typed function refere
 
 ```tsx
 import { useMutation } from "@stackbase/client/react";
-import { api } from "../convex/_generated/api";
+import { api } from "../convex/_generated/server";
 
 function Composer({ author }: { author: string }) {
   const send = useMutation(api.messages.send);

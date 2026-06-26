@@ -7,7 +7,7 @@ description: "The single-writer OCC transactor and 3-phase commit."
 
 Picture a small shop with one register. Any number of customers can wander the aisles and fill their carts at the same time, but only one person checks out at a time. That's the whole trick behind how Stackbase keeps every mutation safe without making every read stand in line.
 
-Every mutation you write runs inside a transaction: a `ctx.db.insert(...)`, a `ctx.db.patch(...)`, all of it. This page explains how that transaction stays safe (no two mutations can silently step on each other) and cheap (no locks while reading, no waiting) at the same time. It also explains how the same bookkeeping that makes this safe gets reused to power live queries.
+Every mutation you write runs inside a transaction: a `ctx.db.insert(...)`, a `ctx.db.replace(...)`, all of it. This page explains how that transaction stays safe (no two mutations can silently step on each other) and cheap (no locks while reading, no waiting) at the same time. It also explains how the same bookkeeping that makes this safe gets reused to power live queries.
 
 If you haven't read `/docs/core-concepts/mutations` yet, start there for the developer-facing view. This page is the "how it works under the hood" companion, useful once you're reading engine source, writing a component, or just curious.
 
@@ -41,7 +41,7 @@ Every transaction goes through the same four steps. Keep this shape in mind: it'
 
 ```mermaid
 sequenceDiagram
-    participant Caller as Function runner
+    participant Caller as ShardWriter retry loop
     participant Txn as Transaction
     participant Store as Document store
 
@@ -51,11 +51,10 @@ sequenceDiagram
     Caller->>Txn: commit
     Txn->>Txn: Phase 1 - validate read set
     alt conflict detected
-        Txn-->>Caller: ConflictError
+        Txn-->>Caller: OccConflictError
         Caller->>Txn: replay mutation on a fresh snapshot
     else no conflict
-        Txn->>Txn: Phase 2 - assign one commit ts
-        Txn->>Store: Phase 3 - apply writes atomically
+        Txn->>Store: Phases 2+3 - apply writes and<br/>allocate the commit ts, atomically
         Txn-->>Caller: commitTs and written ranges
     end
 ```
@@ -80,12 +79,12 @@ That shared representation isn't just a shortcut. It's the core of the whole sys
 
 ```mermaid
 flowchart TB
-    RS["Read set<br/>(key ranges + versions)"]
+    RS["Read set<br/>(key ranges)"]
     RS --> OCC["OCC validation<br/>at commit time"]
     RS --> SUB["Subscription invalidation<br/>while the query stays live"]
 ```
 
-- **At commit time**, the read set (with the version each read saw) is what Phase 1 validation checks against: did anything in here change since my snapshot?
+- **At commit time**, the read set (together with the snapshot timestamp it was read at) is what Phase 1 validation checks against: did anything in here change since my snapshot?
 - **While a query is subscribed**, that same read set is handed to the sync tier. When a later commit's write set arrives, the sync tier intersects it against every live subscription's read set. Any overlap means this query might now return something different, so it re-runs and pushes the update. See `/docs/contributing/architecture/reactivity` for that half of the story.
 
 One recorded read set, two consumers. Get this representation right and both correctness (OCC) and reactivity fall out of it almost for free.
@@ -94,53 +93,47 @@ One recorded read set, two consumers. Get this representation right and both cor
 
 Commit is where the interesting work happens. It's intentionally short, so the single-writer lock is held for as little time as possible.
 
-**Phase 1: Validate.** For every entry in the read set, ask: has a newer, conflicting write landed since my snapshot?
+**Phase 1: Validate.** Has any commit since this transaction's snapshot written something it read? The read set (as key ranges) is intersected against the write sets of recent commits.
 
-- If the answer is yes for anything read, the whole transaction is rejected with a `ConflictError`. Nothing is applied.
+- If anything intersects, the whole transaction is rejected with an `OccConflictError`. Nothing is applied.
 - The transaction's own staged writes are excluded from this check. Reading back something you just wrote in the same transaction is expected, not a conflict.
 
-**Phase 2: Assign a commit timestamp.** If validation passes, the transaction gets exactly one new timestamp from the shard's monotonic clock. Every document and index entry this transaction writes gets stamped with that single timestamp, so they all appear to happen at one instant, together.
+**Phases 2 and 3: Apply and allocate, atomically, inside the store.** If validation passes, every staged document and index update is handed to the document store's `commitWrite` with a placeholder timestamp, and the store allocates the real commit timestamp *inside its own atomicity domain*, stamps every row with it, and lands them all in one atomic operation. Allocating the timestamp any earlier, outside the store, would open a window where a timestamp had been promised but nothing was written yet; doing both in one step means that window simply doesn't exist. (See [Storage & the MVCC log](/docs/contributing/architecture/storage) for the store's side of this.)
 
-**Phase 3: Apply.** All staged documents and index updates are written to the document store in one atomic operation, at the assigned commit timestamp.
-
-Only after Phase 3 succeeds does the transaction return its result: the commit timestamp, plus the write set (the "written ranges") that becomes the input to reactive invalidation.
+Only after that atomic step succeeds does the transaction publish the returned timestamp as the shard's new last-committed clock and return its result: the commit timestamp, plus the write set (the "written ranges") that becomes the input to reactive invalidation.
 
 A transaction that staged no writes at all (a pure read) short-circuits before Phase 1. There's nothing to validate and nothing to apply, so it never takes the lock and never burns a timestamp.
 
 ## How a conflict is actually detected
 
-Validation has to handle a few different shapes of read, each checked slightly differently:
+The mechanism is one check, applied uniformly: **a range-set intersection against recent commits**. Each `ShardWriter` keeps an in-memory ring of recent commits, each remembered as `(ts, write ranges)`. Validation walks that ring and asks, for every commit newer than this transaction's snapshot: do its write ranges intersect my validated read ranges? One intersection anywhere is a conflict (`packages/transactor/src/shard-writer.ts`).
 
 ```mermaid
 flowchart TD
-    R["Read-set entry"] --> P{"What kind of read?"}
-    P -->|"point read"| PT["Still the same document version?<br/>(follow the prev_ts chain)"]
-    P -->|"range / table scan"| RS["Did any document in the range change,<br/>or did a new one appear (phantom)?"]
-    P -->|"read of absence"| AB["Does that document exist now,<br/>when it didn't at snapshot time?"]
-    PT --> D{"Conflict?"}
-    RS --> D
-    AB --> D
-    D -->|"yes"| X["Reject: ConflictError"]
-    D -->|"no"| OK["Validation passes"]
+    R["Transaction's read ranges"] --> I{"Intersect the write ranges of any<br/>ring commit with ts > snapshot?"}
+    I -->|"yes"| X["Reject: OccConflictError"]
+    I -->|"no"| OK["Validation passes"]
 ```
 
-- **Point read of one document.** Every document revision carries a back-pointer, `prev_ts`, to the revision it replaced: a little linked list of history. Validation checks whether a newer revision has landed since the snapshot. If it has, the document changed under you, and that's a conflict.
-- **Range scan or table scan.** The mutation recorded which document IDs it saw when it ran the scan. Validation re-checks: did any of those documents change? Did a document that wasn't there before now fall inside the scanned range (a "phantom" row)? Either one is a conflict. A table scan that missed a brand-new matching row would silently produce a wrong answer, so phantoms have to be caught too.
-- **Read of absence.** If your mutation checked "does this document exist?" and got no, and a matching document has since been created, that's also a conflict. You made a decision based on it being absent, and that's no longer true.
+Because reads of every shape are recorded as key ranges (the previous section), this one check covers all the cases you'd otherwise need special logic for:
+
+- **Point read of one document.** A point range. A newer commit that wrote that document intersects it.
+- **Range scan or table scan.** The scanned interval. A newer commit that changed any row in it intersects, and so does a brand-new "phantom" row inserted into it, since an insert's write range lands inside the scanned interval just like an update's does. A scan that missed a new matching row would silently produce a wrong answer, so phantoms have to be caught, and the range representation catches them for free.
+- **Read of absence.** Checking "does this document exist?" and finding nothing still records the range that was probed. A commit that has since created a matching document writes into that range, and conflicts.
 
 In every case, the transaction's own writes are excluded. You never conflict with yourself.
 
-As a shortcut, each shard also tracks the highest commit timestamp that touched each table (its "write watermark"). If nothing was written to a table since your snapshot, validation skips re-checking any read against that table entirely. Most reads in most mutations validate in constant time, and only tables that actually changed pay the cost of a closer look.
+Note what validation does *not* do: it never walks a document's `prev_ts` history chain, and it never re-reads the store at all. The ring is in memory, and pure range arithmetic decides the answer. (Under group commit, the same intersection is also checked against any staged-but-unlanded batches, so a write that hasn't reached the ring yet still can't be missed. The ring is pruned only past the oldest snapshot any active transaction still holds.)
 
 ## Deterministic replay: how a conflict gets resolved
 
-<Callout type="info" title="The transaction itself never retries">
+<Callout type="info" title="The failed attempt is discarded, not patched">
 
-When Phase 1 throws a `ConflictError`, the transactor's job stops there. It rolls back and hands the error back to its caller, the function runner, which is the one that actually retries.
+When Phase 1 throws an `OccConflictError`, nothing from that attempt survives. The retry loop lives right inside `ShardWriter.runInTransaction` (`packages/transactor/src/shard-writer.ts`): it catches the conflict and loops, up to a default ceiling of 8 attempts. There's no outer "function runner" doing the retrying.
 
 </Callout>
 
-The function runner discards everything from the failed attempt, takes a brand new snapshot, and runs your entire mutation function again from the top: same arguments, fresh reads, fresh writes.
+On each retry, the writer discards everything from the failed attempt, takes a brand new snapshot, and runs your entire mutation function again from the top: same arguments, fresh reads, fresh writes.
 
 This is safe, and not as wasteful as it sounds, for one reason: mutations are required to be deterministic functions of the database and their arguments. No `Math.random()`, no `Date.now()`, no network calls. Given the same inputs and the same database state, a mutation always produces the same writes. Replaying it on a fresh snapshot after a conflict isn't a guess or a workaround. It's simply re-deriving the correct answer against up-to-date data.
 
@@ -151,9 +144,10 @@ This replay is bounded (a default retry ceiling), so a mutation that keeps colli
 Within a single mutation, this needs to work:
 
 ```ts
-await ctx.db.patch(userId, { credits: 10 });
 const user = await ctx.db.get(userId);
-// user.credits is 10, even though nothing has been committed yet
+await ctx.db.replace(userId, { ...user, credits: 10 });
+const updated = await ctx.db.get(userId);
+// updated.credits is 10, even though nothing has been committed yet
 ```
 
 The write to `userId` is only staged at this point. It hasn't reached the document store yet. But the very next read has to see it anyway, or the mutation's own logic would be reading stale data mid-execution. Stackbase handles this by checking the transaction's own staged writes before falling through to the document store: a `get()` call first asks "did this transaction already write this document?" and only asks the store if the answer is no.
@@ -168,11 +162,21 @@ The important thing to take away here: reactivity isn't a notification system bo
 
 ## Limits: protecting the one writer you have
 
-Because every mutation on a shard funnels through a single lock and a single retry loop, a single runaway mutation could, in principle, monopolize it: scanning millions of rows, staging an unbounded number of writes, or retrying forever. Stackbase bounds this with a per-transaction resource budget (a `HeadroomTracker`, in `packages/transactor/src/headroom.ts`): a cap on documents read, and a separate, tighter cap on documents written.
+Because every mutation on a shard funnels through a single lock and a single retry loop, a single runaway mutation could, in principle, monopolize it: scanning millions of rows, staging an unbounded number of writes, or retrying forever. Stackbase bounds this with a per-transaction resource budget, called headroom.
 
-Writes are capped more tightly than reads for a specific reason. Every written document also has to be checked against every live subscription's read set when it commits. A read only costs this transaction. A write costs the whole reactive fan-out downstream of it. Exceeding either limit aborts the mutation immediately with a resource error. This is deliberately not treated as a conflict and is never retried, since retrying a mutation that's simply too big would just fail the same way again.
+<Accordions type="single">
 
-These limits do two jobs at once. They keep one mutation from starving the single-writer shard for everyone else, and they put a ceiling under the OCC retry loop above: a transaction whose read set keeps growing without bound would otherwise be increasingly likely to conflict with something, retry, grow further, and never converge.
+<Accordion title="How the HeadroomTracker works">
+
+Each transaction carries a `HeadroomTracker` (`packages/transactor/src/headroom.ts`) with two caps: a maximum number of documents read and a maximum number of documents written. Both default to the same value, 4,096 (`DEFAULT_HEADROOM`), and callers can override either per run.
+
+Exceeding a limit aborts the mutation immediately with a `HeadroomExceededError`. This is deliberately not treated as a conflict and is never retried, since retrying a mutation that's simply too big would just fail the same way again.
+
+The limits do two jobs at once. They keep one mutation from starving the single-writer shard for everyone else, and they put a ceiling under the OCC retry loop above: a transaction whose read set keeps growing without bound would otherwise be increasingly likely to conflict with something, retry, grow further, and never converge.
+
+</Accordion>
+
+</Accordions>
 
 ## What this page didn't cover
 

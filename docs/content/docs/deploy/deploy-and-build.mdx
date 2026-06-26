@@ -14,10 +14,17 @@ There are two ways to do that, plus a third path if you'd rather skip containers
   live, with no restart.
 - `stackbase build` compiles your whole app into one self-contained executable, for when you'd rather
   ship a binary than a Docker image.
-- The Cloudflare target, a different `stackbase deploy` mode entirely. It provisions infrastructure, it
-  doesn't hot-swap.
+- The provisioning targets (`cloudflare`, `docker`, `railway`, `fly`, `aws`), a different
+  `stackbase deploy` mode entirely. They provision infrastructure, they don't hot-swap.
 
-This page covers all three.
+This page covers all three. If you already know what you're looking for, jump straight there:
+
+- [`stackbase deploy`: live hot-swap](#stackbase-deploy-live-hot-swap-onto-a-running-server)
+- [The six deploy targets](#the-six-deploy-targets)
+- [Deploying from CI (GitHub Actions)](#deploying-from-ci-github-actions)
+- [`stackbase build`: one self-contained binary](#stackbase-build-one-self-contained-binary)
+- [Choosing between `deploy`, `build`, and Docker](#choosing-between-deploy-build-and-docker-self-hosting),
+  the comparison table, if you're not sure which of the three fits
 
 ## `stackbase deploy`: live hot-swap onto a running server
 
@@ -68,23 +75,38 @@ STACKBASE_ADMIN_KEY=your-strong-secret stackbase deploy --url https://myapp.exam
 
 | Flag | Env fallback | Default | Description |
 |---|---|---|---|
-| `--url <url>` | `STACKBASE_DEPLOY_URL` | (required) | The target deployment's base URL |
+| `--url <url>` | `STACKBASE_DEPLOY_URL` | (required, unless set in the config's `deploy` block) | The target deployment's base URL |
 | `--dir <convexDir>` | none | `convex` | The local `convex/` directory to push |
+| `--check` | none | off | Fail if committed `convex/_generated/` has drifted from a fresh codegen run |
+| `--dry-run` | none | off | Validate (preflight + package) without pushing |
 
 `STACKBASE_ADMIN_KEY` is read from the environment (there's no `--admin-key` flag), and it's required.
-`stackbase deploy` refuses to run without it.
+`stackbase deploy` refuses to run without it. The general `--target`/`--env` flags also apply here
+(this command form is the default `--target serve --env production`); see
+[the CLI reference](/docs/reference/cli#stackbase-deploy).
 
-On success:
+<Callout type="warn" title="Run codegen yourself before a serve-target deploy">
 
-```
-✓ deployed rev 4b3187d88b93 (7 functions)
+The `serve` target pushes your tree exactly as it sits on disk. It does not regenerate
+`convex/_generated/`. If your schema or functions changed, run `stackbase codegen` (and commit the
+result) before deploying. `--check` verifies exactly this and fails fast on drift.
+
+</Callout>
+
+On success, verbatim:
+
+```text
+✓ deployed via serve (production) — rev 4b3187d88b93 (7 functions, 2 changed)
+  https://myapp.example
 ```
 
 `rev` is a content hash of the pushed file tree (the first 12 hex characters of its SHA-256), not a
-sequence number. Deploying the exact same tree twice produces the same `rev`. The new functions are
-callable immediately, with no restart, and existing WebSocket subscriptions keep working. They
-reactively pick up writes made through the newly deployed code, exactly as if the change had been made
-via `stackbase dev`'s hot reload.
+sequence number. Deploying the exact same tree twice produces the same `rev`. The `2 changed` part
+appears on a delta push (see
+[what a deploy actually does](#going-deeper-what-a-deploy-actually-does) below); a full push prints
+just `(<n> functions)`. The new functions are callable immediately, with no restart, and existing
+WebSocket subscriptions keep working. They reactively pick up writes made through the newly deployed
+code, exactly as if the change had been made via `stackbase dev`'s hot reload.
 
 </Step>
 
@@ -94,11 +116,11 @@ via `stackbase dev`'s hot reload.
 
 | Condition | HTTP status | CLI behavior |
 |---|---|---|
-| `--allow-deploy` not set on the target | 404 | `✗ deploy not enabled on target (start serve with --allow-deploy)`, exit 1 |
+| `--allow-deploy` not set on the target | 404 | `✗ deploy failed: deploy not enabled on target (start serve with --allow-deploy)`, exit 1 |
 | Wrong or missing admin key | 401 | `✗ deploy failed: unauthorized`, exit 1 (checked before any file is written) |
 | Malformed payload (bad JSON, unsafe path) | 400 | `✗ deploy failed: <reason>`, exit 1 |
 | Destructive schema change | 409 | `✗ deploy failed: <reason>`, exit 1 (old version stays fully live) |
-| Success | 200 | `✓ deployed rev <hash> (<n> functions)`, exit 0 |
+| Success | 200 | the two-line `✓ deployed via serve …` output shown above, exit 0 |
 
 ### Additive-only schema: destructive changes are rejected, not migrated
 
@@ -156,9 +178,10 @@ STACKBASE_ADMIN_KEY=prod-secret stackbase serve --dir convex --allow-deploy &
 # 2. Make a change locally: add a new query, add an optional field to schema.ts
 #    (edit convex/notes.ts, convex/schema.ts)
 
-# 3. Push it live
+# 3. Push it live (run `stackbase codegen` first if schema/functions changed)
 STACKBASE_ADMIN_KEY=prod-secret stackbase deploy --url http://localhost:3000
-# ✓ deployed rev 4b3187d88b93 (8 functions)
+# ✓ deployed via serve (production) — rev 4b3187d88b93 (8 functions, 2 changed)
+#   http://localhost:3000
 
 # 4. The new function is callable immediately, no restart:
 curl -X POST http://localhost:3000/api/run \
@@ -177,19 +200,22 @@ step 4 pushed to it reactively. The deploy in between didn't drop or reset the s
 
 `stackbase deploy` runs three steps locally, then hands off to one remote step:
 
-1. **Refreshes local codegen.** It runs the same `loadConvexDir → push → writeGenerated` pipeline
-   `stackbase dev`/`stackbase codegen` use, rewriting `convex/_generated/` in place. This runs before
-   packaging, so the client types your app ships with match the code you're about to push. You don't
-   need a separate `stackbase codegen` step.
-2. **Transpiles every `.ts` file under `convex/`** via esbuild's `transform` (not `bundle`). This strips
+1. **Transpiles every `.ts` file under `convex/`** via esbuild's `transform` (not `bundle`). This strips
    TypeScript types but leaves import specifiers completely untouched. A bare import like
    `import { v } from "@stackbase/values"` passes through as-is, and it resolves against the target
    server's own `node_modules`, not anything on your machine. Relative imports resolve within the
    pushed file tree itself. This is why a deploy target needs the same `@stackbase/*` packages
    installed as your app does (the Docker image already provides this, see
-   [Self-hosting](/docs/deploy/self-hosting)).
-3. **Posts the resulting file tree** to `/_admin/deploy` as `{files: [{path, code}]}`, with
-   `Authorization: Bearer $STACKBASE_ADMIN_KEY`.
+   [Self-hosting](/docs/deploy/self-hosting)). It does **not** refresh `convex/_generated/`; that's
+   `stackbase codegen`'s job, run it yourself before deploying.
+2. **Probes `GET /_admin/deploy/modules`** for the server's current per-module content hashes
+   (lowercase-hex SHA-256 per pushed path). An older server, or one with deploy disabled, doesn't
+   answer; the CLI just falls back to a full-tree push.
+3. **Posts a delta** to `/_admin/deploy`, with `Authorization: Bearer $STACKBASE_ADMIN_KEY`: modules
+   whose hash differs go as `changed` (`{path, code}`), matching ones as `unchanged` (`{path,
+   sha256}`), so an unchanged module never crosses the wire twice. Without a probe base it posts the
+   full `{files: [{path, code}]}` tree instead, and if the server reports the delta's base is stale
+   (another deploy landed in between), the CLI retries once with the full tree.
 4. **The server validates and applies it** (see the next section). This is the only step that runs
    remotely.
 
@@ -222,17 +248,75 @@ running state, before the first field is swapped.
 
 </Accordions>
 
-## Other `stackbase deploy` targets: Cloudflare
+## The six deploy targets
 
 `stackbase deploy --url <url>` (documented above) is shorthand for one specific target:
-`--target serve` with no deploy target configured in `stackbase.config.ts`. `stackbase deploy` also
-supports a general `--target <name> --env <name>` form (with `--dry-run` and `--check` flags) that
-provisions infrastructure instead of hot-swapping an already-running process. For example,
-`--target cloudflare` provisions a Durable-Object-native Cloudflare host via `wrangler deploy`.
+`--target serve`, the default. The general form is `--target <name> --env <name>` (plus `--dry-run`
+and `--check`), and the other five targets provision infrastructure instead of hot-swapping an
+already-running process. Target settings and credentials can live in the `deploy` block of
+`stackbase.config.ts` (see [Configuration](/docs/reference/configuration#the-deploy-block)).
 
-See [Cloudflare](/docs/deploy/cloudflare) for that target in full. It's a materially different deploy
-model (infrastructure provisioning, not live hot-swap), and it doesn't share the additive-schema gate
-described above.
+| Target | What a push does | Runs codegen? | Notes |
+|---|---|---|---|
+| `serve` (default) | Pushes `convex/` to a running `serve --allow-deploy`, live hot-swap | No, run `stackbase codegen` yourself | This page, above |
+| `cloudflare` | Reconciles `wrangler.jsonc` bindings, then `wrangler deploy` | Yes | [Cloudflare](/docs/deploy/cloudflare); needs `wrangler` installed, `CLOUDFLARE_API_TOKEN` in CI |
+| `docker` | `docker compose up -d --build` in your project | Yes | Needs Docker installed with the daemon running |
+| `railway` | `railway up` (Railway builds the image itself) | Yes | Needs the `railway` CLI; `RAILWAY_TOKEN` in CI; optional `service`/`environment` settings |
+| `fly` | `fly deploy` (Fly builds the image itself) | Yes | Needs `flyctl`; `FLY_API_TOKEN` in CI; optional `app`/`region` settings |
+| `aws` | `aws apprunner start-deployment` against an existing App Runner service | Yes | Needs the `aws` CLI and a `serviceArn` setting; `AWS_ACCESS_KEY_ID` or `AWS_PROFILE` in CI |
+
+Provider CLIs are never bundled into stackbase; each target shells out to the one you already have
+installed, and fails `preflight` with a clear install hint if it's missing. Only the `serve` target
+uses the additive-schema gate described above. The provisioning targets ship a whole new
+build/image, so there's nothing to gate: the platform's own rollout replaces the process.
+
+## Deploying from CI (GitHub Actions)
+
+CI is just another caller of the same command: the workflow below runs the identical
+`stackbase deploy` a human runs locally, with credentials coming from repository secrets.
+
+```yaml title=".github/workflows/deploy.yml"
+name: deploy
+on:
+  pull_request:
+  push: { branches: [main] }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run test
+      # PRs: verify committed codegen is current; exits before any target preflight, so
+      # it needs no secrets. Add --dry-run to also validate target preflight/packaging
+      # (the serve target's preflight then wants STACKBASE_DEPLOY_URL + STACKBASE_ADMIN_KEY).
+      - if: github.event_name == 'pull_request'
+        run: bunx stackbase deploy --check
+      # main: the real deploy (serve target).
+      - if: github.ref == 'refs/heads/main'
+        run: bunx stackbase deploy
+        env:
+          STACKBASE_DEPLOY_URL: ${{ secrets.STACKBASE_DEPLOY_URL }}
+          STACKBASE_ADMIN_KEY: ${{ secrets.STACKBASE_ADMIN_KEY }}
+```
+
+Three properties make this workflow safe to copy:
+
+- **It never hangs.** `stackbase deploy` derives its interactive mode from `stdin.isTTY` and the
+  `CI` environment variable (GitHub Actions sets `CI=true` on every runner), so a missing credential
+  fails fast with an actionable message and a non-zero exit instead of prompting.
+- **`--check` gates codegen drift.** It exits 1 if `convex/_generated/` doesn't match a fresh
+  codegen run, which matters doubly for the `serve` target since a serve deploy never regenerates
+  it. `--dry-run` additionally runs the target's `preflight` and `package` steps without pushing.
+- **Exit codes are real.** A rejected schema change, a failed `--check`, or a provider CLI error all
+  exit 1 and fail the job like any other CI step.
+
+For a provisioning target, swap the deploy line and secrets: `bunx stackbase deploy --target
+cloudflare` with `CLOUDFLARE_API_TOKEN` (plus a `npm i -D wrangler` install step), `--target
+railway` with `RAILWAY_TOKEN`, `--target fly` with `FLY_API_TOKEN`, and so on per the table above.
+Tokens always come from CI secrets; the provider CLIs' interactive `login` flows have no place in a
+headless runner.
 
 ## `stackbase build`: one self-contained binary
 

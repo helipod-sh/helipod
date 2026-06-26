@@ -5,7 +5,8 @@ description: stackbase deploy --target cloudflare provisions a Durable-Object-na
 
 {/* diataxis: how-to */}
 
-stackbase has two Cloudflare deployment paths. Most projects want the first one.
+stackbase has two Cloudflare deployment paths. Most projects want the first one; the Containers
+path is experimental and gives up scheduled work (details [below](#the-alternative-path-cloudflare-containers-experimental)).
 
 | | Durable-Object-native (this page's main path) | Containers (alternative) |
 |---|---|---|
@@ -17,7 +18,9 @@ stackbase has two Cloudflare deployment paths. Most projects want the first one.
 ## The recommended path: Durable-Object-native
 
 `stackbase deploy --target cloudflare` provisions `@stackbase/runtime-cloudflare`'s Durable Object
-host via `wrangler deploy`. One Durable Object is the OCC writer, the DO-SQLite store, every
+host via `wrangler deploy`. A [Durable Object](https://developers.cloudflare.com/durable-objects/)
+is Cloudflare's stateful primitive: a single-instance, globally addressable object with its own
+storage and single-threaded execution. One Durable Object is the OCC writer, the DO-SQLite store, every
 hibernatable WebSocket, and the wake alarm that fires scheduled functions/crons/triggers even
 though the DO idles between requests. It's a **single global DO** in v1, not a sharded fleet. See
 [Scaling](/docs/deploy/scaling) for the paid-tier multi-shard follow-on.
@@ -94,9 +97,10 @@ stackbase deploy --target cloudflare --env production
 Configure environments in `stackbase.config.ts`:
 
 ```ts title="stackbase.config.ts"
-import { defineConfig, env } from "@stackbase/component";
+import { defineConfig } from "@stackbase/component";
 
 export default defineConfig({
+  components: [], // your composed components, if any
   deploy: {
     targets: {
       cloudflare: {
@@ -173,6 +177,70 @@ after a fresh deploy honors the hint.
 | Scheduled functions, crons, [triggers](/docs/components/triggers) | Work. The DO's own alarm wakes due timers through idle/hibernation. |
 | File storage | Supported via the R2 binding above. |
 | Scale | Single global DO in v1, not a sharded fleet. See [Scaling](/docs/deploy/scaling) for the paid-tier multi-shard router. |
+
+## Global tables (D1)
+
+`.global()` on a table definition puts that table in [Cloudflare
+D1](https://developers.cloudflare.com/d1/) (a shared relational database) instead of a Durable
+Object's local store, so it's the same data no matter which shard or DO a mutation or query runs
+on. It exists for data that must be globally unique or globally consistent: a `users` table keyed
+by email, an `orgs` table keyed by slug. It's the natural companion to the paid-tier multi-shard
+router (each shard-DO has its own local store, exactly wrong for account lookups), and it works on
+the single-DO host too whenever a D1 binding is wired.
+
+`.global()` is mutually exclusive with `.shardKey()`: a table is either sharded or global, never
+both (declaring both throws at schema build time).
+
+```ts title="convex/schema.ts"
+import { defineSchema, defineTable, v } from "@stackbase/values";
+
+export default defineSchema({
+  accounts: defineTable({
+    email: v.string(),
+    name: v.string(),
+  })
+    // { unique: true } on a .global() table is a REAL global-unique constraint
+    // (a D1 CREATE UNIQUE INDEX), enforced across every shard.
+    .index("by_email", ["email"], { unique: true })
+    .global(),
+});
+```
+
+Reads and writes route to D1 automatically; the function body looks like any other table's.
+`ctx.db.get(id)` and equality index queries (`.eq(field, value)`, optionally `.take(n)`) are
+supported. A mutation that inserts a global row and reads it back in the same handler sees its own
+write (a per-mutation overlay provides read-your-own-writes before the write ever hits D1), and a
+row written through one shard-DO is readable through another immediately after commit. A violated
+unique constraint rejects the mutation with an error naming the table and field.
+
+Subscriptions to a `.global()` table are live, via the same `useQuery` as any other table, but the
+mechanism is a poller, not commit-time push: a DO with at least one live global subscription checks
+a D1 version counter about every 2 seconds and pushes only on change (a DO with none polls
+nothing). Expect a global change to surface within roughly that interval; use an
+[optimistic update](/docs/client/optimistic-updates) if the writing client's own UI needs to
+reflect it instantly.
+
+Honest boundaries, all fail-fast rather than silent:
+
+- **No co-writes.** One mutation writes global tables or sharded/root tables, never both (a D1
+  write can't enlist in a shard's local transaction, so allowing both would admit a partial
+  commit). Split into two mutations.
+- **Equality-only queries.** Range comparisons, `.order()`, filters, and `.paginate()` on a
+  `.global()` table are rejected with a clear error.
+- **`{ unique: true }` means D1.** The same option on a non-global table's index is rejected at
+  schema-load time, since a per-shard store can't enforce it globally.
+- **Row policies aren't supported here yet.** An authz read or write policy on a `.global()` table
+  is rejected (`read policies are not yet supported on .global() tables`), never silently skipped.
+- **Cloudflare only.** Without a D1 binding, any read or write against a `.global()` table fails
+  fast naming the table. You can still declare `.global()` in a schema you also run locally; you
+  just can't exercise those tables outside Cloudflare.
+
+Wiring: the `d1_databases` binding is currently manual (unlike the DO/R2 bindings the deploy target
+reconciles). Create the database once with `wrangler d1 create <name>`, add
+`{ "binding": "DB", "database_name": "...", "database_id": "..." }` to `wrangler.jsonc`, and pass
+it through your DO subclass's `appConfig` as `d1: bindingD1Client(env.DB)` (from
+`@stackbase/docstore-d1`). The D1 tables and indexes for every `.global()` table are created
+automatically on first boot with the binding present; there's no migration step.
 
 ## CI: GitHub Actions
 
@@ -261,3 +329,5 @@ STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.co
 - [Scaling](/docs/deploy/scaling): the paid-tier multi-shard Cloudflare router and the Postgres
   fleet, for when a single node (DO or otherwise) isn't enough.
 - [Self-hosting with Docker](/docs/deploy/self-hosting): the non-Cloudflare baseline.
+- [Vite plugin](/docs/deploy/vite-plugin): local development for a Vite app that talks to this
+  deployment.

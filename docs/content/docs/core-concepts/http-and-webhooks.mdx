@@ -122,9 +122,13 @@ http.route({ pathPrefix: "/webhooks/stripe/", method: "POST", handler: stripeHoo
 http.route({ pathPrefix: "/webhooks/", method: "POST", handler: genericHook });
 ```
 
-A `POST /webhooks/stripe/invoice` matches `stripeHook` (longer prefix beats shorter), not
-`genericHook`. A `GET /webhooks/stripe/health` matches `healthCheck`, the exact match, even though it
-also satisfies no `pathPrefix` route (different method anyway).
+With those three routes registered:
+
+| request | winning route | why |
+|---|---|---|
+| `GET /webhooks/stripe/health` | `healthCheck` | exact `path` beats any prefix |
+| `POST /webhooks/stripe/invoice` | `stripeHook` | longest matching prefix wins |
+| `POST /webhooks/messages` | `genericHook` | only `/webhooks/` matches |
 
 There's no support for named path parameters (`/webhooks/:id`). A route only ever knows the exact
 path or a prefix it starts with, so a handler that needs the rest of the path reads it itself, from
@@ -257,6 +261,8 @@ are the always-on, built-in-rather-than-composed example of the same mechanism. 
 
 ## What's not here
 
+<Callout type="info" title="Non-goals">
+
 A few things a general-purpose HTTP framework offers are deliberately not part of `httpAction` and
 `http.ts`, and aren't planned:
 
@@ -272,8 +278,10 @@ A few things a general-purpose HTTP framework offers are deliberately not part o
   function each handler calls.
 
 If you need any of these, build it inside the handler body. The primitives (`Request`, `Response`,
-`ctx.runQuery`/`runMutation`/`runAction`) are the same ones a hand-rolled Node or Bun HTTP server would
-give you.
+`ctx.runQuery`/`runMutation`/`runAction`) are the same ones a hand-rolled Node or Bun HTTP server
+would give you.
+
+</Callout>
 
 ## Related
 

@@ -14,6 +14,20 @@ It gives you three tools: role-based access control (RBAC) with inheritance and 
 relationship-based access control (ReBAC) for sharing-style permissions, and declarative row
 policies that filter what a query returns and gate what a mutation writes.
 
+| You want to say | Reach for | Looks like |
+|---|---|---|
+| "Editors can update documents" | RBAC: [roles](#roles-and-permissions), optionally [scoped](#scoped-role-assignments) | `roles: { editor: { documents: ["read", "update"] } }` |
+| "Bob shared this doc with Alice" | ReBAC: [relation tuples](#rebac-relationship-tuples) | `addRelation(alice, "viewer", doc)` |
+| "Queries only ever return rows the caller may see" | [Row policies](#row-policies) | `policies: { documents: { read, write } }` |
+
+```mermaid
+flowchart LR
+  App["Your function"] -->|"explicit check: ctx.authz.can()"| RBAC["Roles\n(effective_permissions)"]
+  App -->|"every ctx.db read/write"| Policies["Row policies\n(kernel seam)"]
+  Policies -->|"a rule may consult"| RBAC
+  Policies -->|"a rule may consult"| ReBAC["Relation tuples"]
+```
+
 All three are enforced by the engine itself, at the same `ctx.db` seam that already enforces
 component table namespacing. A permission check is just a data read, so it participates in the
 reactive read-set like any other query. Revoke a role or unshare a document, and every live
@@ -45,8 +59,11 @@ export default defineConfig({ components: [auth, authz] });
 ```
 
 `config` takes three optional keys: `roles` (see below), `policies` (row policies, see below), and
-`permissions`, a documentation-only vocabulary hint (`{ resource: string[] }`). Nothing reads
-`permissions` at runtime today. The enforced source of truth is what a role's entries actually grant.
+`permissions`, a documentation-only vocabulary hint (`{ resource: string[] }`). Nothing *enforces*
+`permissions` at runtime; the enforced source of truth is what a role's entries actually grant. It
+does feed the boot-reconcile's config hash, though, so editing it triggers a full
+effective-permissions rebuild on the next boot (see
+[Materialized effective permissions](#materialized-effective-permissions)).
 
 Composing `authz` wires a typed `ctx.authz` facade into every query, mutation, and action, and
 installs your declared row policies at the kernel's read/write seam.
@@ -103,8 +120,11 @@ target scope (or globally) before either call succeeds. Role management can't be
 privilege, and a scope-level admin can only grant within their own scope:
 
 ```ts
+// Identity is per-connection, set once with setAuth, not per-call.
+mallorysClient.setAuth(mallorysToken);
+
 // Mallory holds no role at all: this throws "Forbidden: authz:manage"
-await client.mutation(anyApi.authz.assignRole, { userId: mallory, role: "admin" }, { identity: mallory.token });
+await mallorysClient.mutation(anyApi.authz.assignRole, { userId: malloryId, role: "admin" });
 ```
 
 Both calls are idempotent: assigning a role the user already holds (in that scope) is a no-op on
@@ -136,7 +156,17 @@ admin is created normally, by an already-bootstrapped admin calling `assignRole`
 ## Materialized effective permissions
 
 Rather than re-walking role inheritance on every check, authz **materializes** permissions at
-*write* time (when a role is assigned or revoked) into an `effective_permissions` table:
+*write* time (when a role is assigned or revoked) into an `effective_permissions` table. A check
+(`can`) is then at most four indexed point-reads (the candidate keys `res:act`, `res:*`, `*:act`,
+`*:*`), never a graph walk.
+
+The internals are tucked away below; you don't need them to use the component.
+
+<Accordions type="single">
+
+<Accordion title="Candidate keys, revoke reconciliation, and the pattern cap">
+
+The table shape:
 
 ```ts
 // components/authz/src/schema.ts (shape)
@@ -149,9 +179,8 @@ A role's patterns are expanded once, on assignment (`expandRolePatterns`), and s
 wildcards kept verbatim. An `admin` role with `documents: ["*"]` materializes the single row
 `documents:*`, not one row per concrete action.
 
-A check (`can`) is then a lookup against at most four **candidate keys** for the permission being
-asked about: `res:act`, `res:*`, `*:act`, `*:*`. Each is a single indexed point-read via
-`byLookup`, not a graph walk:
+Each check looks up at most four **candidate keys** for the permission being asked about, each a
+single indexed point-read via `byLookup`:
 
 ```ts
 candidateKeys("documents:read"); // => ["documents:read", "documents:*", "*:read", "*:*"]
@@ -167,7 +196,9 @@ still grants it.
 A single role is capped at expanding to **1000 permission patterns**. A role whose inheritance
 chain would exceed that throws at assignment time rather than silently truncating.
 
-### Boot reconcile
+</Accordion>
+
+<Accordion title="Boot reconcile: role edits take effect without a migration">
 
 A `meta` table stores a stable, order-independent hash of the current `roles`/`permissions`
 config. At boot, `defineAuthz`'s `boot` hook compares the stored hash to the current one:
@@ -183,6 +214,10 @@ config. At boot, `defineAuthz`'s `boot` hook compares the stored hash to the cur
 
 There is also a manually-callable `rebuild` mutation (gated by `authz:manage`) that forces the
 same full reconciliation on demand.
+
+</Accordion>
+
+</Accordions>
 
 ## Checking permissions: `ctx.authz`
 
@@ -245,10 +280,10 @@ A caller with a global `admin` role therefore passes every scoped check without 
 per-scope assignment. The fallback is one-directional: a check with **no** scope only ever looks
 at the global scope. It does not enumerate or aggregate a caller's scoped grants.
 
-This same asymmetry matters for `scopesWith`: it returns the scope ids where a **scoped** grant
-exists, filtered to the given `type`. If you omit `type`, it also surfaces the global scope's own
-(empty-string) scope id in the result set, so a read policy that means "every org I can read
-documents in" should always pass a `type` and separately short-circuit on a global grant:
+This same asymmetry matters for `scopesWith`. It returns the scope ids where a **scoped** grant
+exists, filtered to the given `type`. Omit `type`, and the global scope's own empty-string scope
+id shows up in the result set too. So a read policy that means "every org I can read documents in"
+should always pass a `type`, and short-circuit separately on a global grant:
 
 ```ts
 read: async ({ auth }) =>
@@ -326,8 +361,10 @@ membership, the shape you want inside a read policy or an admin listing.
 
 A component (or your own app, via `defineAuthz({ policies })`) declares `read`/`write` rules per
 table. A `read` policy compiles to a filter merged into **every** read of that table
-(`ctx.db.get`, `.query(...).collect()`, paginated scans, and relation lookups a policy resolves
-through), and a `write` policy gates whether an insert, replace, or delete is allowed:
+(`ctx.db.get`, `.query(...).collect()`, paginated scans), and a `write` policy gates whether an
+insert, replace, or delete is allowed. (One deliberate exception: a relation lookup a policy
+resolves *through* does not re-apply the related table's own read policy; see
+[Relation clauses](#relation-clauses-inside-a-policy) below.)
 
 ```ts
 const authz = defineAuthz({
@@ -356,6 +393,12 @@ if anonymous), `identity` (the raw claims), and the same
 express "only rows this user owns" exactly as easily as "only if this permission is held." `db`
 is a read-only reader over the same transaction, for resolving arbitrary related-row lookups
 inside a policy body.
+
+Two practical notes. Policies can't cover `.global()` tables yet: a read of a global table that a
+read policy would gate throws (`read policies are not yet supported on .global() tables`) rather
+than silently going unenforced. And the policy types (`TablePolicy`, `WhereInput`, `FieldOps`,
+`PolicyPredicate`) are re-exported from `@stackbase/authz`, so a policy file never needs to import
+`@stackbase/executor` directly.
 
 ### `WhereInput`: the predicate shape
 
@@ -397,13 +440,14 @@ documents: defineTable({ title: v.string() }).relation("sharedWith", { table: "d
 document_shares: defineTable({ documentId: v.id("documents"), userId: v.string() }),
 ```
 
-`some`/`none` collect the parent ids whose related rows *do*/*don't* match the leaf; `every`
-collects parents where **all** related rows match, vacuously true for a parent with zero related
-rows, so "at least one, and all match" needs
+`some`/`none` collect the parent ids whose related rows *do*/*don't* match the leaf. `every`
+collects parents where **all** related rows match. Watch the vacuous truth: `every` is satisfied
+by a parent with *zero* related rows, so "at least one, and all match" needs
 `{ AND: [{ sharedWith: { some: {} } }, { sharedWith: { every: leaf } }] }`.
-`is`/`isNot` work the same way over a `v.id` field with no extra schema declaration needed. Leaves
-can themselves contain relation clauses, chaining through multiple tables, for example a document
-shared with a *team* the caller belongs to:
+
+`is`/`isNot` work the same way over a `v.id` field, with no extra schema declaration needed.
+Leaves can themselves contain relation clauses, chaining through multiple tables, for example a
+document shared with a *team* the caller belongs to:
 
 ```ts
 read: ({ auth }) => ({

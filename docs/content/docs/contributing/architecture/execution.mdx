@@ -84,19 +84,16 @@ The syscall boundary described below is deliberately built so that a future V8-i
 
 This is the core isolation idea, and it's simpler than it sounds. The function's handler never holds a live reference to the database, the transaction, or the query engine. Every time it calls something like `ctx.db.get(id)` or `ctx.db.insert(table, value)`, that call is serialized into a plain string message and sent across a narrow channel to a **kernel**: a per-invocation, trusted object that runs in the engine and has the actual access.
 
-```
-guest handler                         kernel (trusted host)
-─────────────────                     ──────────────────────
-ctx.db.insert(table, value)
-  │  JSON.stringify(...)
-  ▼
-channel.call("db.insert", argJson) ──▶ SyscallRouter.dispatch(...)
-                                          │  resolves the table, validates the
-                                          │  document against its schema,
-                                          │  writes into the transaction,
-                                          │  records the read/write it made
-                                          ▼
-                                       returns a JSON string back
+```mermaid
+sequenceDiagram
+    participant G as Guest handler
+    participant C as Syscall channel
+    participant K as Kernel (trusted host)
+
+    G->>C: ctx.db.insert(table, value)<br/>serialized to a JSON string
+    C->>K: channel.call("db.insert", argJson)
+    K->>K: resolve the table, validate the document<br/>against its schema, write into the transaction,<br/>record the read/write it made
+    K-->>G: a JSON string comes back
 ```
 
 The two sides of this (`packages/executor/src/guest.ts` for the guest, `packages/executor/src/kernel.ts` for the host) only ever exchange plain strings: `channel.call(op, argJson): Promise<string>`. Nothing but JSON crosses the line. That's a deliberate design choice. Because the boundary is "a string goes in, a string comes back," it doesn't matter whether the guest is plain JS in the same process (as it is today) or, eventually, code running inside a fully separate V8 isolate. The contract is identical either way.

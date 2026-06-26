@@ -44,15 +44,16 @@ new StackbaseClient(transport, {
   poisonPolicy: "skip",             // "skip" (default) or "pause", see Offline sync
   outboxMaxQueueSize: 1000,         // cap on unsettled durable entries (default 1000)
   optimisticUpdates: { "messages:send": (store, args) => { ... } }, // registry for hydrated entries
-  gateTimeoutMs: 5000,              // internal reconcile-gate timeout (rarely overridden)
+  gateTimeoutMs: 10_000,            // internal reconcile-gate timeout (default 10s, rarely overridden)
 });
 ```
 
 Everything outbox-related (`outbox`, `poisonPolicy`, `outboxMaxQueueSize`, `outboxLocks`,
 `outboxDeployment`, `outboxDrainIntervalMs`, `outboxChunkSize`, `outboxBroadcast`,
-`onClientReset`, `onMutationFailed`, `optimisticUpdates`) is documented in full in
-[Offline sync](/docs/client/offline-sync). A client constructed with no `outbox` behaves exactly as
-if none of this existed.
+`outboxBackoffMs` (a custom retry-delay function for the drain), `onOutboxPause` (fires when a
+`"pause"` poison policy halts the drain), `onClientReset`, `onMutationFailed`, `optimisticUpdates`)
+is documented in full in [Offline sync](/docs/client/offline-sync). A client constructed with no
+`outbox` behaves exactly as if none of this existed.
 
 ## Transports
 
@@ -121,10 +122,15 @@ opts out with `{ reconnect: false }`.
 
 ### Backoff schedule
 
-Each reconnect attempt waits `reconnectDelayMs(attempt, initialBackoffMs, maxBackoffMs)`. The schedule
-uses equal jitter: half the exponential delay, plus up to another half at random. This never produces
-a zero wait, which avoids a thundering-herd reconnect storm the instant a server comes back, and it's
-capped at `maxBackoffMs`:
+Each reconnect attempt waits an exponentially-growing, jittered delay, capped at `maxBackoffMs`.
+
+<Accordions type="single">
+
+<Accordion title="The exact backoff math">
+
+Each attempt waits `reconnectDelayMs(attempt, initialBackoffMs, maxBackoffMs)`. The schedule uses
+equal jitter: half the exponential delay, plus up to another half at random. This never produces a
+zero wait, which avoids a thundering-herd reconnect storm the instant a server comes back:
 
 ```ts
 import { reconnectDelayMs } from "@stackbase/client";
@@ -135,6 +141,10 @@ const delay = reconnectDelayMs(attempt, 300, 30_000);
 
 `reconnectDelayMs` is exported directly so the schedule itself is testable without simulating a
 socket.
+
+</Accordion>
+
+</Accordions>
 
 ### What happens on reopen
 
@@ -183,12 +193,19 @@ try {
 
 ### The pre-first-open case
 
-If the very first connection attempt fails before ever opening (constructed while offline, or a
-network blip on load), the transport queues frames until a socket does open. When one finally does,
-it runs the same reopen sequence (`SetAuth` replay, resubscribe, flush) as a mid-session reconnect,
-even though technically no socket had "reopened" yet. From the app's point of view there is exactly
-one code path for "the client now has a live connection and needs to rebuild state from what it
-remembers": first connect after a failed attempt, and every subsequent reconnect.
+While the very first connection attempt is still pending, the transport buffers frames and flushes
+them the moment the socket opens. That covers normal connection latency. If that first attempt
+*fails* before ever opening (constructed while offline, or a network blip on load), the buffered
+frames are dropped, not held: the transport announces the close, and recovery moves up a level.
+When a socket finally does open, the client runs the same reopen sequence (`SetAuth` replay,
+resubscribe, flush unsent mutations) as a mid-session reconnect, rebuilding everything from its own
+state rather than from replayed raw frames.
+
+The same holds for any later down period: once a socket has opened at least once (with reconnect
+on), a frame sent while disconnected is deliberately dropped rather than buffered, because the
+reopen sequence re-derives everything it could have represented. From the app's point of view there
+is exactly one code path for "the client now has a live connection and needs to rebuild state from
+what it remembers": first connect after a failed attempt, and every subsequent reconnect.
 
 ## Wrap your app in the provider
 
@@ -442,6 +459,10 @@ Every public entry point that accepts a function reference (`client.query`/`muta
 `action`, `useQuery`/`useMutation`/`useAction`) also accepts a raw string path or the untyped `anyApi`
 value directly. A generated typed `api` isn't required, just recommended.
 
+In the same spirit, `@stackbase/client` also exports an untyped `mintDocumentId`, the core mint
+underneath codegen's typed `mintId` helper for client-supplied ids. Reach for it only in hosts
+without codegen output; see [Offline sync](/docs/client/offline-sync) for the typed path.
+
 ### `FunctionReference`, `FunctionArgs`, `FunctionReturnType`
 
 Codegen's generated reference type carries phantom `__args`/`__returns` fields derived from a
@@ -544,7 +565,8 @@ Each entry's `status` is one of `unsent`/`inflight`/`parked`/`completed`/`failed
 harmless no-ops otherwise: `retry()` re-enqueues under a fresh `(clientId, seq)` rather than reviving
 the old record, since a seq is never reused once minted. The hook re-reads on every local outbox
 change and on a cross-tab `BroadcastChannel` nudge, so a second browser tab's queued mutations show up
-here too. The underlying client methods, `client.pendingMutations()` and `client.pendingSummary()`
+here too. Non-React hosts get the same signal from `client.onOutboxChange(listener)`, which fires on
+every local outbox change and every cross-tab nudge, and returns an unsubscribe. The underlying client methods, `client.pendingMutations()` and `client.pendingSummary()`
 (count plus oldest-age, for a "changes may be lost soon" banner), are documented alongside the full
 durable-outbox model in [Offline sync](/docs/client/offline-sync).
 

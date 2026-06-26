@@ -19,7 +19,7 @@ stackbase <command> [options]
 |---|---|
 | [`dev`](#stackbase-dev) | Run the engine locally with hot reload, codegen, and the dashboard |
 | [`serve`](#stackbase-serve) | Run the production server, single-node, fleet (Tier 2), or object-storage (Tier 3) |
-| [`deploy`](#stackbase-deploy) | Push `convex/` to a running `serve --allow-deploy` and hot-swap it live |
+| [`deploy`](#stackbase-deploy) | Deploy the app to a target: `serve` (live hot-swap), `cloudflare`, `docker`, `railway`, `fly`, or `aws` |
 | [`build`](#stackbase-build) | Compile the app to a self-contained executable |
 | [`migrate`](#stackbase-migrate) | Migrate a Convex project into stackbase (imports + divergence report) |
 | [`migrate export`](#stackbase-migrate-export--stackbase-migrate-import) | Dump a deployment's data to a file |
@@ -54,14 +54,14 @@ stackbase dev
 | `--ip <addr>` | `127.0.0.1` | Bind address |
 | `--data <path>` | `.stackbase/data.db` | SQLite file path (ignored if `--database-url` is set) |
 | `--database-url <url>` | `STACKBASE_DATABASE_URL` env, else unset (SQLite) | Postgres connection string, see [Postgres](/docs/deploy/postgres) |
-| `--storage-bucket <name>` | unset (filesystem) | Select the S3-compatible file-storage backend, see [File storage](/docs/core-concepts/file-storage) |
-| `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, …) |
+| `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` env, else unset (filesystem) | Select the S3-compatible file-storage backend, see [File storage](/docs/core-concepts/file-storage) |
+| `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` env, else unset | S3-compatible endpoint (MinIO, R2, …) |
 | `--web <dir>` | unset | Serve a static web UI directory at the site root, alongside the API |
 
-`--database-url` is the only `dev` flag with an environment fallback (`STACKBASE_DATABASE_URL`).
-`--storage-bucket`/`--storage-endpoint` on `dev` do **not** fall back to
-`STACKBASE_STORAGE_BUCKET`/`STACKBASE_STORAGE_ENDPOINT` the way `serve`'s do. Pass them explicitly
-if you want S3 storage under `dev`.
+The database and storage settings fall back to the same environment variables under `dev` as under
+`serve`: `STACKBASE_DATABASE_URL`, `STACKBASE_STORAGE_BUCKET`, and `STACKBASE_STORAGE_ENDPOINT`
+(plus the rest of the `STACKBASE_STORAGE_*` family) all work, with the flag winning when both are
+set. Both commands resolve storage through the same boot path.
 
 ### Admin key handling
 
@@ -76,7 +76,7 @@ it instead.
 
 ```
 stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
-admin key → sk_dev_...
+admin key → u3K9xQ1vZ8pL5mW2rT7cY4bN6dF0hJsG
 web UI → http://127.0.0.1:3000/        (only if --web was passed)
 ```
 
@@ -169,7 +169,7 @@ is the exhaustive flag reference.
 | `--advertise-url <url>` | `STACKBASE_ADVERTISE_URL` | none (required with `--fleet`) | The URL other fleet nodes reach *this* node at (recorded on the write lease; sync nodes forward writes/proxy `httpAction`s here when this node is the writer) |
 | `--shards <n>` | `STACKBASE_FLEET_SHARDS` (also read fleet-side, decided once at first boot) | `8` | Shard count. Persisted at first boot and **immutable** after: a later boot with a disagreeing env value fails fast, naming both counts |
 | none | `STACKBASE_FLEET_LEASE_TTL_MS` | `15000` | The write-lease TTL in ms: the single knob the whole failover clock scales from (heartbeat/acquire cadences derive from it). No CLI flag, ops/test tuning only |
-| none | `STACKBASE_GROUP_COMMIT` | store-conditional: **on** for Postgres, **off** for SQLite, when unset | Batch concurrent commits into one fsync. An explicit value (`1`/`true`/`yes`, case-insensitive) always overrides the store-conditional default, in either direction |
+| none | `STACKBASE_GROUP_COMMIT` | **off** when unset in fleet mode | Batch concurrent commits into one fsync. An explicit `1`/`true`/`yes` (case-insensitive) forces it on; any other explicit value forces it off. Note the default is topology-dependent: a fleet node defaults off, while single-node (non-fleet) is store-conditional, on for Postgres and off for SQLite |
 
 `STACKBASE_FLEET_MULTI_WRITER` (spreading shard *ownership* across nodes so write throughput scales
 with node count) is a `@stackbase/fleet`-side setting, not a `packages/cli` flag. See
@@ -257,10 +257,13 @@ container's grace period), close the store, then `process.exit(0)`, printing
 
 ## `stackbase deploy`
 
-Pushes the local `convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it live,
-no restart. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism (what
-`applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order); this is
-the flag/behavior reference.
+Deploys the app through a pluggable target adapter. The default target, `serve`, pushes the local
+`convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it live, no restart. The
+other targets (`cloudflare`, `docker`, `railway`, `fly`, `aws`) provision or shell out to their
+platform's own CLI. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism
+(what `applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order)
+and [Cloudflare](/docs/deploy/cloudflare) for that target's setup; this is the flag/behavior
+reference.
 
 ```bash
 STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.example.com
@@ -268,41 +271,76 @@ STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.exampl
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--url <url>` | `STACKBASE_DEPLOY_URL` | none (required) | Target `serve` deployment's base URL |
+| `--target <name>` | none | `deploy.defaultTarget` in `stackbase.config.ts`, else `serve` | One of `serve`, `cloudflare`, `docker`, `railway`, `fly`, `aws` |
+| `--env <name>` | none | `production` | Selects a per-environment settings block from `deploy.targets.<name>.environments` |
+| `--url <url>` | `STACKBASE_DEPLOY_URL` | none (required for `serve` unless set in config) | Target `serve` deployment's base URL |
 | `--dir <path>` | none | `convex` | The app directory to push |
+| `--dry-run` | none | off | Run `preflight` and `package`, skip the actual push |
+| `--check` | none | off | Fail (exit 1) if committed `convex/_generated/` has drifted from a fresh codegen run. Never pushes; combine with `--dry-run` to also run preflight and packaging |
 
-`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the request). Unlike `migrate
-export`/`migrate import`, `deploy` has **no** `--admin-key` flag: it's env-only. The target must
-have been started with `--allow-deploy` (or `STACKBASE_ALLOW_DEPLOY=1`).
+An unknown `--target` value fails with `no deploy adapter for provider "<name>" (v1 supports:
+serve, cloudflare, docker, railway, fly, aws)`. Target credentials and settings can live in the
+`deploy` block of `stackbase.config.ts` (see
+[Configuration](/docs/reference/configuration#the-deploy-block)) instead of flags.
 
-What it does, in order: (1) refreshes local `_generated/` via the same
-`loadConvexDir → push → writeGenerated` pipeline `codegen` uses; (2) transpiles every `.ts` file
-under `--dir` with esbuild's `transform` (types stripped, import specifiers untouched: bare
-`@stackbase/*` imports resolve against the *target's* `node_modules`, relative imports resolve
-within the pushed tree); (3) `POST`s `{files: [{path, code}]}` to `/_admin/deploy` with
-`Authorization: Bearer <adminKey>`.
+### The `serve` target
+
+`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the request; the config's
+`deploy.targets.serve.adminKey` setting can supply it instead). Unlike `migrate export`/`migrate
+import`, `deploy` has **no** `--admin-key` flag. The target must have been started with
+`--allow-deploy` (or `STACKBASE_ALLOW_DEPLOY=1`).
+
+What it does, in order: (1) transpiles every `.ts` file under `--dir` with esbuild's `transform`
+(types stripped, import specifiers untouched: bare `@stackbase/*` imports resolve against the
+*target's* `node_modules`, relative imports resolve within the pushed tree); (2) probes
+`GET /_admin/deploy/modules` for the server's current per-module hashes; (3) if the probe answers,
+`POST`s a delta payload (`{changed, unchanged}`) to `/_admin/deploy` with `Authorization: Bearer
+<adminKey>`, falling back to a full `{files}` push when the probe fails or the server reports a
+stale base.
+
+<Callout type="warn" title="The serve target does not run codegen">
+
+Unlike every other target, which regenerates `_generated/` as part of the deploy, the `serve`
+target pushes your tree as-is. Run `stackbase codegen` yourself (and commit the result) before
+deploying if your schema or functions changed. `--check` verifies exactly this.
+
+</Callout>
 
 Schema changes must be **additive only**: new tables, new *optional* fields. A destructive change
 (dropped/renamed table, changed table number, removed field, changed field type, a field turned
 required, a new required field) is rejected and the running deployment stays completely untouched;
 nothing is swapped until both load and schema-diff succeed.
 
-| Response | CLI output | Exit code |
-|---|---|---|
-| Success | `✓ deployed rev <hash> (<n> functions)` | 0 |
-| Target 404s `/_admin/deploy` (deploy not enabled) | `✗ deploy not enabled on target (start serve with --allow-deploy)` | 1 |
-| Schema rejected / other server error | `✗ deploy failed: <reason>` | 1 |
-| Target unreachable | `✗ could not reach <url>: <error>` | 1 |
-| Missing `--url`/`STACKBASE_DEPLOY_URL` | `✗ missing target URL: pass --url <url> or set STACKBASE_DEPLOY_URL` | 1 |
-| Missing `STACKBASE_ADMIN_KEY` | `✗ STACKBASE_ADMIN_KEY is required to deploy` | 1 |
+On success (exit 0), verbatim:
+
+```text
+✓ deployed via serve (production) — rev 4f2a91c8 (12 functions, 3 changed)
+  https://my-deployment.example.com
+```
+
+The parenthetical is `(<n> functions)` on a full push, `(<n> functions, <m> changed)` on a delta
+push, and `(<n> functions, full retry)` when a delta was retried as a full push. Failures (exit 1),
+verbatim:
+
+```text
+✗ deploy failed: deploy not enabled on target (start serve with --allow-deploy)
+✗ serve target needs a url — pass --url or set deploy.targets.serve settings / STACKBASE_DEPLOY_URL
+✗ STACKBASE_ADMIN_KEY is required to deploy to a serve target
+✗ deploy failed: could not reach <url>: <error>
+✗ deploy failed: <server-reported reason, e.g. a rejected schema change>
+```
 
 The component set (e.g. `@stackbase/scheduler`, `@stackbase/workflow`) is fixed at `serve` boot.
 `deploy` can push new functions and additive schema against that fixed set, but adding/removing a
 component from `stackbase.config.ts` requires a restart.
 
-`stackbase deploy` targets a Postgres/SQLite/object-storage `serve` deployment. Cloudflare's
-Durable-Object-native host has its own separate deployment path (`wrangler`-based provisioning, not
-a hot-swap onto a running server). See [Cloudflare](/docs/deploy/cloudflare).
+### The other targets
+
+`cloudflare` reconciles `wrangler.jsonc` bindings and shells out to `wrangler deploy`
+([Cloudflare](/docs/deploy/cloudflare)); `docker`, `railway`, `fly`, and `aws` likewise shell out
+to their platform CLIs, which must be installed. Every non-`serve` target runs codegen
+(`ctx.codegen()`) before packaging, so a fresh `_generated/` is part of what ships. Provider CLIs
+are never bundled; a missing one fails `preflight` with a clear message.
 
 ## `stackbase build`
 
@@ -492,15 +530,15 @@ was given (e.g. a trailing `--dir` with nothing after it) is rejected explicitly
 Prints usage and exits 0. Also the fallback for no command at all, and (with exit 1 instead) for an
 unrecognized command:
 
-```
-stackbase: Convex-compatible reactive backend
+```text
+stackbase — Convex-compatible reactive backend
 
 Usage: stackbase <command> [options]
 
 Commands:
   dev        Run the engine with hot reload + dashboard
   serve      Run the production server (requires STACKBASE_ADMIN_KEY)
-  deploy     Push convex/ to a running `serve --allow-deploy` and hot-swap it live
+  deploy     Deploy the app: --target <serve|cloudflare|docker|railway|fly|aws> --env <name> [--dry-run] [--check]
   build      Compile the app to a self-contained executable (bun build --compile)
   migrate    Migrate a Convex project into Stackbase (imports + report)
   migrate export --url <src> --out dump.json   Export app data to a portable dump
@@ -509,6 +547,9 @@ Commands:
   fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count
   objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count
   help       Show this help
+
+Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>
+Deploy:  --target <name>  --env <name>  --dry-run  --check   (default target: serve; default env: production)
 ```
 
 ## Environment variables (full reference)
@@ -522,7 +563,8 @@ Flags always win over their environment-variable equivalent when a command accep
 | `STACKBASE_ADMIN_KEY` | `serve`, `dev`, `deploy`, `migrate export/import`, compiled `build` binaries | Bearer token for the dashboard and admin/deploy/export/import endpoints. **Required** for `serve`/`build` binaries (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
 | `PORT` | `serve`, compiled `build` binaries | HTTP/WebSocket port (default `3000`). `dev` uses `--port` only, no env fallback |
 | `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve`, `deploy` (via refreshed codegen only), compiled `build` binaries, `fleet reshard` | Postgres connection string. Unset selects SQLite. See [Postgres](/docs/deploy/postgres) |
+| `STACKBASE_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | Postgres connection string. Unset selects SQLite. Not read by `deploy` (a deploy pushes code, it never touches the database). See [Postgres](/docs/deploy/postgres) |
+| `STACKBASE_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads), falling back to buffered reads. Default: streaming on. See [Postgres](/docs/deploy/postgres) |
 | `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
 | `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
 | `STACKBASE_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
@@ -556,7 +598,7 @@ hosts, expand whichever applies to you.
 | `STACKBASE_ADVERTISE_URL` | This node's URL, as reachable by other fleet nodes (equivalent to `--advertise-url`) |
 | `STACKBASE_FLEET_SHARDS` | Shard count, persisted at first boot, immutable after (equivalent to `--shards`; also consulted by `fleet reshard`'s companion, and by an `--object-store` boot when no `--shards` flag is given) |
 | `STACKBASE_FLEET_LEASE_TTL_MS` | Write-lease TTL in ms (default `15000`), no CLI flag |
-| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group-commit on, any other explicit value forces it off; unset → on for Postgres, off for SQLite |
+| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group-commit on, any other explicit value forces it off. Unset: off on a fleet node; on single-node it's store-conditional (on for Postgres, off for SQLite) |
 
 </Accordion>
 

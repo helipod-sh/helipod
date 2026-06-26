@@ -34,8 +34,8 @@ function appendOptimistic(
   store.setQuery(api.messages.list, { conversationId: args.conversationId }, [
     ...list,
     {
-      _id: store.placeholderId("messages"), // deterministic across replays, NOT crypto.randomUUID()
-      _creationTime: store.now(),           // fixed at entry creation, NOT Date.now()
+      _id: store.placeholderId("messages"), // deterministic across replays (see Purity rules below)
+      _creationTime: store.now(),           // fixed at entry creation, stable across replays
       conversationId: args.conversationId,
       author: args.author,
       body: args.body,
@@ -110,8 +110,7 @@ interface OptimisticLocalStore {
   }}
 />
 
-`placeholderId`/`now` are covered in full detail further down this page, in the purity rules section.
-Always use them instead of `crypto.randomUUID()`/`Date.now()`.
+`placeholderId`/`now` are covered in full detail in [Purity rules](#purity-rules) below.
 
 The demo app's vote-count patch uses `getAllQueries` to bump every open `options.list` regardless of
 which poll it's scoped to:
@@ -194,7 +193,7 @@ function createPollOptimistic(store: OptimisticLocalStore, args: { question: str
 
 A first-class pending-row metadata channel on the store itself is a named follow-on, not built.
 
-## Purity rules: `placeholderId()` and `now()`, never `crypto.randomUUID()`/`Date.now()`
+## Purity rules
 
 An updater can run more than once for the same mutation. Every server push that arrives while your
 mutation is still pending rebuilds the whole composed view, replaying every surviving layer's
@@ -209,11 +208,12 @@ updater from scratch over the fresh base. Your updater has to be a pure, determi
 - **`now()`** returns the timestamp fixed when the mutation was created. It's stable across every
   replay, and stands in for `_creationTime` on a row you're inserting.
 
-<Callout type="warn" title="Don't call crypto.randomUUID() or Date.now() inside an updater">
+<Callout type="error" title="Never call crypto.randomUUID() or Date.now() inside an updater">
 
-Either one mints a fresh value on every replay. React, keying off it, sees a brand-new row instead
-of the same optimistic row re-rendering: remounts, list-key churn, and lost input focus, on every
-unrelated server push while your mutation is pending.
+Use `store.placeholderId(table)` and `store.now()` instead, always. Either impure call mints a
+fresh value on every replay. React, keying off it, sees a brand-new row instead of the same
+optimistic row re-rendering: remounts, list-key churn, and lost input focus, on every unrelated
+server push while your mutation is pending.
 
 This is a documented anti-pattern precisely because it's what Convex's own docs example does. The
 store's shape is designed so the deterministic path is also the easy path, not so the impure path is

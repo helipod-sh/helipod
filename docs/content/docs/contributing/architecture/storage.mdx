@@ -200,12 +200,13 @@ built on: "give me everything that happened between these two timestamps."
 <Accordion title="OCC support">
 
 `previous_revisions(queries)` answers "what was this document's revision immediately before some
-timestamp?" for a batch of documents at once. This is raw material the transactor's
-optimistic-concurrency-control (OCC) validation consumes when checking whether something a
-transaction read has since changed. See
-[Transactions & consistency](/docs/contributing/architecture/transactions) for how that
-validation actually works. The `DocStore` itself doesn't validate anything; it just answers the
-question honestly.
+timestamp?" for a batch of documents at once. Worth being precise about who calls it: **the
+transactor doesn't.** Its OCC validation intersects a transaction's read ranges against an
+in-memory ring of recent commits (`packages/transactor/src/shard-writer.ts`) and never re-reads
+the store; see [Transactions & consistency](/docs/contributing/architecture/transactions). Today
+`previous_revisions` is consumed by the scaled-out `ee/` storage substrates, which pass it
+through when composing stores. The `DocStore` itself doesn't validate anything; it just answers
+the question honestly.
 
 </Accordion>
 
@@ -375,8 +376,8 @@ built one layer up:
 - [Transactions & consistency](/docs/contributing/architecture/transactions): how a mutation
   becomes one serializable transaction on top of `commitWrite`, including OCC validation and
   conflict retry.
-- [The query engine](/docs/contributing/architecture/query-engine): how `.filter()`/index
-  selection turns into calls to `index_scan`.
+- [The query engine](/docs/contributing/architecture/query-engine): how index selection and
+  `.where()` post-filters turn into calls to `index_scan`.
 - [Reactivity](/docs/contributing/architecture/reactivity): how a write's range gets compared
   against a subscribed query's read set to decide whether to re-run it.
 - [Writing a storage adapter](/docs/contributing/extending/storage-adapter): a practical guide if

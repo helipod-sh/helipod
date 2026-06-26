@@ -135,11 +135,14 @@ reactive way to read a single document once you already have its id.
 ## Determinism: why queries can't touch the outside world
 
 A query must be **deterministic**: given the same underlying data, running it twice must produce
-the same result. Concretely, a query's handler can't call `fetch`, `Date.now()`, `Math.random()`,
-`crypto.randomUUID()`, or `setTimeout`. All of these are blocked at the runtime boundary. If your
-handler genuinely needs the current time or a random value, `ctx.now()` and `ctx.random()` are the
-deterministic substitutes: both are fixed for the life of the call (and any replay of it), so
-re-running the same query against the same data always produces the same answer.
+the same result. Concretely, a query's handler must not call `fetch`, `Date.now()`,
+`Math.random()`, `crypto.randomUUID()`, or `setTimeout`. `ctx` never grants any of these
+capabilities, but functions run in-process today, so the globals are still physically reachable.
+There's no runtime guard that catches a call; it just silently breaks the reactivity guarantees
+below, so treat the rule as hard. (A planned V8-isolate executor will block the globals at the
+engine level.) If your handler genuinely needs the current time or a random value, `ctx.now()` and
+`ctx.random()` are the deterministic substitutes: both are fixed for the life of the call (and any
+replay of it), so re-running the same query against the same data always produces the same answer.
 
 This isn't a restriction for its own sake. It's the property that makes the whole reactive model
 trustworthy. The engine's entire subscription mechanism rests on being able to re-run a query's
@@ -171,10 +174,12 @@ Two consequences follow directly from how the query builder works:
   for a top-N query, but it means `.take()` and "get notified about anything appended later" don't
   mix. If you need that, don't limit, or re-query.
 
-A query with no bounded index range at all (an unfiltered whole-table `by_creation` scan, or a
-`.where(...)` the index can't turn into a range) still gets a read set, but it degrades to
-table-level: any write to that table invalidates it. Narrowing with `.eq`/`.gt`/`.gte`/`.lt`/`.lte`
-is what keeps a query off that coarse fallback. See
+Even an unbounded scan records a range. An unfiltered whole-table `by_creation` scan records the
+full index interval, so any write to the table lands inside it. That's precise in mechanism but
+maximally wide in effect. A separate table-level fallback exists for the rare query run that
+records no ranges at all: a subscription with zero recorded ranges is matched by table instead.
+Either way, narrowing with `.eq`/`.gt`/`.gte`/`.lt`/`.lte` is what keeps a subscription's range,
+and therefore its wake-ups, small. See
 [Reactivity](/docs/core-concepts/reactivity#table-level-fallback) for the mechanics of how that
 matching actually happens at commit time.
 
@@ -195,14 +200,26 @@ export const page = query({
 
 The result is a `PaginationResult`:
 
-```ts
-interface PaginationResult {
-  page: DocumentValue[];   // this page's documents
-  nextCursor: string | null; // opaque; pass back in to get the next page. null on the last page
-  hasMore: boolean;        // false on (and only on) the last page
-  scanCapped: boolean;     // true iff maxScan stopped the scan before pageSize was filled
-}
-```
+<TypeTable
+  type={{
+    page: {
+      type: 'DocumentValue[]',
+      description: "This page's documents.",
+    },
+    nextCursor: {
+      type: 'string | null',
+      description: 'Opaque cursor; pass it back in to get the next page. null on the last page.',
+    },
+    hasMore: {
+      type: 'boolean',
+      description: 'false on (and only on) the last page.',
+    },
+    scanCapped: {
+      type: 'boolean',
+      description: 'true only when maxScan stopped the scan before pageSize was filled.',
+    },
+  }}
+/>
 
 <Callout type="info" title="Coming from Convex?">
 
@@ -250,10 +267,13 @@ off. Any UI paginating over a heavily-filtered range should consider the same si
 
 ## Reactivity classification
 
-Not every query gets the same kind of reactive update. The engine classifies each query run by how
-"clean" a passthrough it is, and that classification decides whether a later write can be
-**diffed** into the existing result (cheap) or forces a **full re-run** (safe, but pays the cost of
-re-executing the whole handler and re-sending the whole result).
+The plain-language version first: some query shapes get cheap incremental updates, and anything
+fancier gets a safe full re-run. Both are equally correct; only the cost differs.
+
+More precisely, the engine classifies each query run by how "clean" a passthrough it is, and that
+classification decides whether a later write can be **diffed** into the existing result (cheap) or
+forces a **full re-run** (safe, but pays the cost of re-executing the whole handler and re-sending
+the whole result).
 
 ```mermaid
 flowchart TB
@@ -291,13 +311,10 @@ flowchart TB
   where matching stopped and where scanning stopped that a diff can't safely reason about, so it's
   re-run in full instead.
 
-None of this changes what a query returns. It's purely about how efficiently a later write's
-effect on that subscription gets computed and sent. A query classified as a full re-run is exactly
-as correct as one classified as diffable, just not free.
-
-Writing queries that stay in the diffable shapes above (a single index-range `.collect()` or
-`.paginate()`, returned as-is) is how you keep your subscriptions cheap under load, the same way
-narrowing the index range in the first place is how you keep them precise.
+None of this changes what a query returns; it's purely about how efficiently a later write's
+effect on the subscription gets computed and sent. Staying in the diffable shapes (a single
+index-range `.collect()` or `.paginate()`, returned as-is) keeps your subscriptions cheap under
+load, the same way narrowing the index range in the first place keeps them precise.
 
 ## Using a query from a client
 
@@ -305,7 +322,7 @@ On the client, you subscribe with the `useQuery` hook and the generated, typed `
 
 ```tsx
 import { useQuery } from "@stackbase/client/react";
-import { api } from "../convex/_generated/api";
+import { api } from "../convex/_generated/server";
 
 function Messages({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });
@@ -316,3 +333,12 @@ function Messages({ conversationId }: { conversationId: string }) {
 
 The component re-renders on its own whenever the query's result changes. That's the payoff of
 everything above. The full client surface is in [Client SDK](/docs/client/client-sdk).
+
+<Callout type="info" title="Bundling for the browser?">
+
+The runtime `api` value lives in `_generated/server` (`_generated/api.d.ts` is types-only). In a
+browser bundle you usually don't want the server-side code that file re-exports, so cast the
+client's `anyApi` proxy instead: `const api = anyApi as Api`. The
+[tutorial](/docs/get-started/tutorial#build-the-web-ui) shows the pattern and explains why.
+
+</Callout>

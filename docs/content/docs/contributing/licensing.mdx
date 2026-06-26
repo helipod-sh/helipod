@@ -97,7 +97,7 @@ flowchart LR
     Free -.->|"license boundary"| Paid
 ```
 
-The `ee/` directory in the repository (short for "enterprise edition," the same convention GitLab popularized) is where this future paid code will live. It already exists today as a placeholder: `ee/packages/fleet`, the distributed multi-node coordination package for Tier 2 scale-out, is reserved there, but the paid gate itself isn't built or active yet. Nothing in `ee/` currently requires a license key to use.
+The `ee/` directory in the repository (short for "enterprise edition," the same convention GitLab popularized) is where paid-tier code lives. It's not a placeholder: `ee/packages/` already holds three shipped packages, **fleet** (the distributed multi-node Tier 2 coordination layer), **objectstore-substrate** (the object-storage-backed storage/compute-separation substrate), and **runtime-cloudflare-shard** (the sharded Cloudflare Durable Object host). The paid *gate* itself isn't built or active yet, though: nothing in `ee/` currently requires a license key to use.
 
 Code under `ee/` is **not** covered by FSL. It's under a separate commercial license from the start. This matters because FSL's two-year Apache conversion only applies to the FSL-licensed core. If the paid tier were also under FSL, it would automatically become free after two years too, which would defeat the entire point. Keeping `ee/` on its own, non-converting license from day one avoids that leak.
 
@@ -120,5 +120,5 @@ The gate mechanics are designed but deliberately not built yet. The rough shape,
 ## Related pages
 
 - [Contributing guide](/docs/contributing/contributing-guide): the workflow for proposing and landing a change, including the CLA/DCO.
-- [Architecture](/docs/contributing/architecture): how the engine that this license protects is put together.
+- [Architecture: system design](/docs/contributing/architecture/system-design): how the engine that this license protects is put together.
 - [Self-hosting](/docs/deploy/self-hosting): the free-forever deploy-anywhere story in practice.

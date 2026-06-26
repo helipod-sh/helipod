@@ -85,6 +85,8 @@ them. The rest of this page walks each one in the order you'll likely reach for 
 
 ## Seam 1: `schema` (your own namespaced tables)
 
+**When you need this:** whenever your component stores anything at all, which is nearly always.
+
 ```ts
 interface ComponentDefinition {
   schema: SchemaDefinition;
@@ -105,6 +107,8 @@ feature) is a compose-time error, never a silent overwrite.
 
 ## Seam 2: `modules` (your component's own functions)
 
+**When you need this:** always. Every component ships at least one function, whether it's called by app code, your own driver, or your facade.
+
 ```ts
 interface ComponentDefinition {
   modules: Record<string, RegisteredFunction>;
@@ -124,6 +128,8 @@ meant to be called from application code; they exist purely so the driver (seam 
 something to run.
 
 ## Seam 3: `context` / `buildAction` (the facade users actually touch)
+
+**When you need this:** when app code should call your component ergonomically, as `ctx.widget.doThing(...)`, instead of invoking your module paths by hand.
 
 This is the seam that puts `ctx.scheduler`, `ctx.auth`, or (for your component) `ctx.widget` into
 every query, mutation, and action in the project.
@@ -213,6 +219,8 @@ in.
 
 ## Seam 4: `driver` (the recurring background loop)
 
+**When you need this:** when your component has work no single request triggers, like a due job, a retry, or a sweep.
+
 Most of the interesting components need to do work that isn't triggered by any single request:
 running a job whose time has come, retrying a failed delivery, sweeping for something stuck. That's
 what `driver` is for:
@@ -300,6 +308,8 @@ every seam to build something useful.
 
 ## Seam 5: `boot` (one-time startup work)
 
+**When you need this:** when config declared in code needs reconciling into your tables once per process start, before any request is served.
+
 ```ts
 boot?: (ctx: BootContext) => Promise<void>;
 ```
@@ -312,6 +322,8 @@ into its `crons` table (`reconcileCrons`) so the driver has something concrete t
 rather than re-parsing the config file on every tick.
 
 ## Seam 6: `httpRoutes` (reserved endpoints)
+
+**When you need this:** when the outside world has to call your component directly, like an OAuth callback or a delivery provider's webhook.
 
 ```ts
 interface ComponentHttpRoute {
