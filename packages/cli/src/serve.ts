@@ -1,7 +1,8 @@
 /**
  * `stackbase serve` — the production server. Unlike `dev`: requires a persistent admin key,
- * binds 0.0.0.0, never writes codegen (the mounted convex/ must already contain _generated/),
- * and shuts down gracefully on SIGTERM/SIGINT. Shares the boot core with dev via bootProject().
+ * binds 0.0.0.0, never writes codegen (the mounted functions directory must already contain
+ * _generated/), and shuts down gracefully on SIGTERM/SIGINT. Shares the boot core with dev via
+ * bootProject().
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -19,7 +20,7 @@ import {
 } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import { httpWakeHost } from "./wake-host";
-import { resolveFunctionsDir, functionsDirNotFoundMessage } from "./functions-dir";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
 import type { DocStore } from "@stackbase/docstore";
@@ -536,10 +537,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   // and fail loudly — with the migrate hint — if it doesn't exist at all, before falling through to
   // the narrower "_generated/ missing" check below (which assumes the directory itself is real).
   const { functionsDir } = await resolveFunctionsDir(opts.functionsDir || undefined, process.cwd());
-  if (!existsSync(functionsDir)) {
-    process.stderr.write(functionsDirNotFoundMessage(functionsDir));
-    return 1;
-  }
+  if (!ensureFunctionsDirExists(functionsDir)) return 1;
   opts.functionsDir = functionsDir;
   if (!existsSync(join(opts.functionsDir, "_generated", "server.ts"))) {
     process.stderr.write(

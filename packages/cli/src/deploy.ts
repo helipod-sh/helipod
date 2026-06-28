@@ -1,5 +1,5 @@
 /**
- * `stackbase deploy` — package the local convex/ app and push it to a target via the
+ * `stackbase deploy` — package the local functions directory and push it to a target via the
  * `@stackbase/deploy` seam. Targets: `serve` (slice-6b live hot-swap, back-compat default),
  * `cloudflare` (Workers via wrangler), `docker` (build + push an image). This module: resolve
  * flags → build a DeployContext (packageApp/codegen closures over the existing CLI machinery,
@@ -15,7 +15,7 @@ import { resolveDeploy, loadTarget, NodeSpawner, type Spawner, type DeployContex
 import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
-import { resolveFunctionsDir } from "./functions-dir";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 
 /** @deprecated slice-6b's own flag parser, superseded by parseDeployFlags/resolveDeploy. Kept for its existing test coverage. */
 export interface DeployOptions {
@@ -126,9 +126,12 @@ export async function deployCommand(args: string[], deps: DeployDeps = {}): Prom
   const flags = parseDeployFlags(args);
   const cwd = deps.cwd ?? process.cwd();
   // `resolveFunctionsDir` handles the precedence (--dir > `functionsDir` in stackbase.config.ts >
-  // DEFAULT_FUNCTIONS_DIR) and always returns an absolute path, so no separate `resolve()` is needed
-  // here the way the old bare `flags.convexDir` default required.
+  // DEFAULT_FUNCTIONS_DIR) and always returns an absolute path, so no separate `resolve()` of
+  // `flags.dirFlag` is needed here the way a bare flag default would have required.
   const { functionsDir } = await resolveFunctionsDir(flags.dirFlag, cwd);
+  // Fail loudly — with the migrate hint — before anything below (the `--check` drift scan or the
+  // main package/push flow) can hit `loadFunctionsDir` and throw a raw ENOENT.
+  if (!ensureFunctionsDirExists(functionsDir)) return 1;
   const config = await loadConfig(cwd);
 
   if (flags.check) {

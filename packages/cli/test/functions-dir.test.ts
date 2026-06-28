@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveFunctionsDir, functionsDirNotFoundMessage, DEFAULT_FUNCTIONS_DIR } from "../src/functions-dir";
+import { resolveFunctionsDir, functionsDirNotFoundMessage, ensureFunctionsDirExists, DEFAULT_FUNCTIONS_DIR } from "../src/functions-dir";
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "sb-fnsdir-"));
@@ -58,5 +58,43 @@ describe("functionsDirNotFoundMessage", () => {
     expect(msg).toContain("/tmp/app/stackbase");
     expect(msg).toContain("stackbase migrate");
     expect(msg).toContain("--dir");
+  });
+});
+
+describe("ensureFunctionsDirExists", () => {
+  it("returns true and writes nothing when the directory exists", () => {
+    const root = scratch();
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: string): boolean => { chunks.push(String(chunk)); return true; };
+    let ok: boolean;
+    try {
+      ok = ensureFunctionsDirExists(root);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = original;
+    }
+    expect(ok).toBe(true);
+    expect(chunks.join("")).toBe("");
+  });
+
+  it("returns false and writes the friendly message when the directory is missing", () => {
+    const missing = join(scratch(), "nope");
+    const chunks: string[] = [];
+    const original = process.stderr.write.bind(process.stderr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: string): boolean => { chunks.push(String(chunk)); return true; };
+    let ok: boolean;
+    try {
+      ok = ensureFunctionsDirExists(missing);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = original;
+    }
+    expect(ok).toBe(false);
+    const all = chunks.join("");
+    expect(all).toContain(missing);
+    expect(all).toContain("stackbase migrate");
   });
 });

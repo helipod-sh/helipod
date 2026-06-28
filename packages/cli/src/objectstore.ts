@@ -14,7 +14,7 @@ import { loadObjectStoreSubstrateModule, makeInMemorySqliteStore } from "./boot"
 import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
-import { resolveFunctionsDir } from "./functions-dir";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 
 export async function objectstoreCommand(args: string[]): Promise<number> {
   const sub = args[0];
@@ -66,6 +66,9 @@ async function reshardCommand(args: string[]): Promise<number> {
     // The reshard's ONLY schema dependency: the per-table shard key. Load the app's functions dir the
     // same way `bootProject` does, and read `.shardKey` off the composed catalog.
     const { functionsDir } = await resolveFunctionsDir(dirFlag, process.cwd());
+    // Fail loudly — with the migrate hint, not a raw ENOENT surfaced through the catch-all below —
+    // before `loadFunctionsDir` can throw.
+    if (!ensureFunctionsDirExists(functionsDir)) return 1;
     const loaded = await loadFunctionsDir(functionsDir);
     const config = await loadConfig(dirname(functionsDir));
     const { project } = push(loaded, config.components);

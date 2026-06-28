@@ -12,7 +12,7 @@ import { loadFunctionsDir, listConvexModuleFiles, moduleKeyForFile } from "./loa
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { generateEntrySource } from "./build-entry";
-import { resolveFunctionsDir } from "./functions-dir";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 
 export interface BuildOptions { functionsDir: string; outfile: string; target: string | null; dashboard: boolean; verbose: boolean }
 
@@ -63,6 +63,8 @@ export async function buildCommand(args: string[]): Promise<number> {
   const opts = await resolveBuildOptions(args);
   // `resolveFunctionsDir` already returns an absolute path, so no extra `resolve()` is needed here.
   const functionsDirAbs = opts.functionsDir;
+  // Fail loudly — with the migrate hint — before `loadFunctionsDir` below can throw a raw ENOENT.
+  if (!ensureFunctionsDirExists(functionsDirAbs)) return 1;
   // 1. Load + refresh codegen so `import "./_generated/server"` resolves when bun bundles the modules.
   const loaded = await loadFunctionsDir(functionsDirAbs);
   const config = await loadConfig(dirname(functionsDirAbs));

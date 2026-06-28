@@ -8,7 +8,7 @@ import { writeGenerated } from "@stackbase/codegen";
 import { generateAdminKey } from "@stackbase/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadFunctionsDir } from "./load-modules";
-import { resolveFunctionsDir, functionsDirNotFoundMessage } from "./functions-dir";
+import { resolveFunctionsDir, functionsDirNotFoundMessage, ensureFunctionsDirExists } from "./functions-dir";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { bootProject, loadDashboard, withStorageModules } from "./boot";
@@ -117,10 +117,7 @@ export async function codegenCommand(args: string[]): Promise<number> {
   // fallback (which never reads the config file) — otherwise `codegen` and `dev` could disagree
   // about where the functions live on a project that sets the config key.
   const { functionsDir } = await resolveFunctionsDir(flags.functionsDir, process.cwd());
-  if (!existsSync(functionsDir)) {
-    process.stderr.write(functionsDirNotFoundMessage(functionsDir));
-    return 1;
-  }
+  if (!ensureFunctionsDirExists(functionsDir)) return 1;
   const opts = resolveDevOptions({ ...flags, functionsDir });
   const loaded = await loadFunctionsDir(opts.functionsDir);
   const config = await loadConfig(dirname(opts.functionsDir));

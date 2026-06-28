@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { loadConfig } from "./load-config";
 
@@ -49,4 +50,18 @@ export function functionsDirNotFoundMessage(functionsDir: string): string {
     `Otherwise create ${join(functionsDir, "schema.ts")}, or point at an existing folder:\n` +
     `  stackbase dev --dir <path>\n`
   );
+}
+
+/**
+ * Checks that the resolved functions directory exists. When it doesn't, writes the friendly
+ * `functionsDirNotFoundMessage` to stderr and returns false — callers should return exit code 1
+ * in that case, rather than letting a missing directory escape as a raw fs error further down the
+ * command. Every command that resolves a functions directory (serve, deploy, build, objectstore,
+ * codegen, dev) should route its existence check through this one helper, not hand-roll the
+ * `existsSync` + message-write pair at each call site.
+ */
+export function ensureFunctionsDirExists(functionsDir: string): boolean {
+  if (existsSync(functionsDir)) return true;
+  process.stderr.write(functionsDirNotFoundMessage(functionsDir));
+  return false;
 }
