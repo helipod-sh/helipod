@@ -1,4 +1,4 @@
-# Stackbase self-host — the generic engine image + your app's convex/ bind-mounted.
+# Stackbase self-host — the generic engine image + your app's stackbase/ bind-mounted.
 services:
   stackbase:
     build:
@@ -11,9 +11,9 @@ services:
       STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}
       STACKBASE_DATA_DIR: /data
     volumes:
-      - ./convex:/app/convex:ro
+      - ./stackbase:/app/stackbase:ro
       - stackbase-data:/data
-    command: ["serve", "--dir", "/app/convex", "--data", "/data/db.sqlite"]
+    command: ["serve", "--dir", "/app/stackbase", "--data", "/data/db.sqlite"]
     restart: unless-stopped
 
 volumes:

@@ -76,7 +76,7 @@ export async function applyDeploy(
   if (!rec.ok) return { ok: false, kind: "stale-base", error: rec.error };
   const files = rec.files;
   const rev = createHash("sha256").update(JSON.stringify(files)).digest("hex").slice(0, 12);
-  const dir = join(deps.deployRoot, rev, "convex");
+  const dir = join(deps.deployRoot, rev, "functions");
 
   let project;
   try {

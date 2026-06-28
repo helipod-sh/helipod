@@ -32,7 +32,7 @@ describe("docker config", () => {
     expect(dockerfile).toMatch(/chown bun:bun[^\n]*\/app/);
   });
   it("compose mounts the app dir and a data volume and requires the admin key", () => {
-    expect(compose).toMatch(/\/app\/convex/);
+    expect(compose).toMatch(/\/app\/stackbase/);
     expect(compose).toMatch(/STACKBASE_ADMIN_KEY/);
     expect(compose).toMatch(/serve/);
   });
