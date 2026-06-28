@@ -14,7 +14,7 @@ function makeProject(wrangler?: string): string {
 
 function ctx(dir: string, spawn: FakeSpawner, over: Partial<DeployContext> = {}): DeployContext {
   return {
-    cwd: dir, convexDir: join(dir, "convex"), env: "production",
+    cwd: dir, functionsDir: join(dir, "stackbase"), env: "production",
     target: { targetName: "cloudflare", provider: "cloudflare", env: "production", settings: {} },
     interactive: true, spawn, log: () => {},
     packageApp: async () => ({ files: [] }), codegen: async () => {},

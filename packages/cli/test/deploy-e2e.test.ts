@@ -39,10 +39,10 @@ function fixtureConvexDir(name: string): string {
 /** Refresh a fixture's committed `_generated/` in place — the same load->push->write codegen
  * step `deployCommand` itself performs before packaging, so this keeps the committed output
  * honest (deterministic; running it again produces byte-identical files, i.e. no git diff). */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadConvexDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, join(convexDir, "_generated"));
+  writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -135,7 +135,7 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       /* 1. Boot v1 with --allow-deploy; subscribe to notes:list -> [].         */
       /* ---------------------------------------------------------------------- */
       round1 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbdeploy-e2e-db-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,
@@ -213,7 +213,7 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       /*    the "not enabled" message.                                          */
       /* ---------------------------------------------------------------------- */
       round2 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbdeploy-e2e-db2-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,

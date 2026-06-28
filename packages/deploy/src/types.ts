@@ -12,15 +12,15 @@ export interface ResolvedTarget {
 }
 
 export interface DeployContext {
-  cwd: string;                           // project root (dir containing convex/)
-  convexDir: string;                     // path to the convex/ dir
+  cwd: string;                           // project root (dir containing the functions dir)
+  functionsDir: string;                  // path to the functions dir (default "stackbase/")
   env: string;                           // = ResolvedTarget.env
   target: ResolvedTarget;
   interactive: boolean;                  // stdin.isTTY && !process.env.CI — false gates all prompts
   spawn: Spawner;
   log: (msg: string) => void;
-  packageApp: () => Promise<FileTree>;   // transpile convex/ (provided by the CLI)
-  codegen: () => Promise<void>;          // refresh convex/_generated (provided by the CLI)
+  packageApp: () => Promise<FileTree>;   // transpile the functions dir (provided by the CLI)
+  codegen: () => Promise<void>;          // refresh <functionsDir>/_generated (provided by the CLI)
 }
 
 export interface DeployResult { ok: boolean; url?: string; detail?: string; error?: string; }

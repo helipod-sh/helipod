@@ -1,23 +1,25 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveDeployOptions, packageApp } from "../src/deploy";
+import { DEFAULT_FUNCTIONS_DIR } from "../src/functions-dir";
 
 describe("resolveDeployOptions", () => {
-  it("resolves --url + STACKBASE_ADMIN_KEY", () => {
-    const r = resolveDeployOptions(["--url", "http://x:1"], { STACKBASE_ADMIN_KEY: "k" } as NodeJS.ProcessEnv);
-    expect(r).toEqual({ url: "http://x:1", convexDir: "convex", adminKey: "k" });
+  it("resolves --url + STACKBASE_ADMIN_KEY", async () => {
+    const r = await resolveDeployOptions(["--url", "http://x:1"], { STACKBASE_ADMIN_KEY: "k" } as NodeJS.ProcessEnv);
+    // No `--dir` and no `stackbase.config.ts` at cwd → DEFAULT_FUNCTIONS_DIR, resolved absolute.
+    expect(r).toEqual({ url: "http://x:1", functionsDir: resolve(process.cwd(), DEFAULT_FUNCTIONS_DIR), adminKey: "k" });
   });
-  it("falls back to STACKBASE_DEPLOY_URL", () => {
-    const r = resolveDeployOptions([], { STACKBASE_ADMIN_KEY: "k", STACKBASE_DEPLOY_URL: "http://y:2" } as NodeJS.ProcessEnv);
+  it("falls back to STACKBASE_DEPLOY_URL", async () => {
+    const r = await resolveDeployOptions([], { STACKBASE_ADMIN_KEY: "k", STACKBASE_DEPLOY_URL: "http://y:2" } as NodeJS.ProcessEnv);
     expect(r).toMatchObject({ url: "http://y:2" });
   });
-  it("errors on missing url", () => {
-    expect(resolveDeployOptions([], { STACKBASE_ADMIN_KEY: "k" } as NodeJS.ProcessEnv)).toHaveProperty("error");
+  it("errors on missing url", async () => {
+    expect(await resolveDeployOptions([], { STACKBASE_ADMIN_KEY: "k" } as NodeJS.ProcessEnv)).toHaveProperty("error");
   });
-  it("errors on missing/blank admin key", () => {
-    expect(resolveDeployOptions(["--url", "http://x:1"], { STACKBASE_ADMIN_KEY: "  " } as NodeJS.ProcessEnv)).toHaveProperty("error");
+  it("errors on missing/blank admin key", async () => {
+    expect(await resolveDeployOptions(["--url", "http://x:1"], { STACKBASE_ADMIN_KEY: "  " } as NodeJS.ProcessEnv)).toHaveProperty("error");
   });
 });
 

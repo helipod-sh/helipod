@@ -135,7 +135,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
   /* 1. Boot node A over the object store. */
   const nodeA = await startServe({
-    convexDir: CONVEX_DIR,
+    functionsDir: CONVEX_DIR,
     dataPath: freshDataDir(`${label}-a`),
     ip: "127.0.0.1",
     port: 0,
@@ -203,7 +203,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
    * review flagged as missing (a full-TTL write outage on every graceful rolling deploy). */
   const takeoverStart = Date.now();
   const nodeB = await startServe({
-    convexDir: CONVEX_DIR,
+    functionsDir: CONVEX_DIR,
     dataPath: freshDataDir(`${label}-b`),
     ip: "127.0.0.1",
     port: 0,

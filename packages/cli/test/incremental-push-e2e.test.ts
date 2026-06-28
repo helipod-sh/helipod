@@ -46,10 +46,10 @@ function fixtureConvexDir(name: string): string {
 
 /** Refresh a fixture's committed `_generated/` in place — same codegen step `deployCommand`
  * itself performs before packaging (deterministic; re-running produces byte-identical output). */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadConvexDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, join(convexDir, "_generated"));
+  writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -160,7 +160,7 @@ describe("stackbase deploy — incremental (delta) push end-to-end through the r
       /*    /_admin/deploy) — so the tracked module set starts genuinely empty. */
       /* ---------------------------------------------------------------------- */
       round1 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbincr-e2e-db-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,

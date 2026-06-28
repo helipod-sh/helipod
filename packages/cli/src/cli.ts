@@ -111,7 +111,17 @@ export async function devCommand(args: string[]): Promise<number> {
 }
 
 export async function codegenCommand(args: string[]): Promise<number> {
-  const opts = resolveDevOptions(parseFlags(args));
+  const flags = parseFlags(args);
+  // Same two-step resolve as `devCommand`: consult `functionsDir` in stackbase.config.ts when
+  // `--dir` isn't given, instead of `resolveDevOptions`'s own bare `?? DEFAULT_FUNCTIONS_DIR`
+  // fallback (which never reads the config file) — otherwise `codegen` and `dev` could disagree
+  // about where the functions live on a project that sets the config key.
+  const { functionsDir } = await resolveFunctionsDir(flags.functionsDir, process.cwd());
+  if (!existsSync(functionsDir)) {
+    process.stderr.write(functionsDirNotFoundMessage(functionsDir));
+    return 1;
+  }
+  const opts = resolveDevOptions({ ...flags, functionsDir });
   const loaded = await loadFunctionsDir(opts.functionsDir);
   const config = await loadConfig(dirname(opts.functionsDir));
   const { generated } = push(loaded, config.components);
@@ -135,9 +145,9 @@ function printHelp(): void {
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  migrate export --url <src> --out dump.json   Export app data to a portable dump",
       "  migrate import --url <dst> --in  dump.json   Import a dump into a deployment",
-      "  codegen    Regenerate convex/_generated types",
+      "  codegen    Regenerate <functionsDir>/_generated types",
       "  fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count",
-      "  objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count",
+      "  objectstore reshard --shards M --object-store <url> --dir <functionsDir>   Change a STOPPED object-storage deployment's shard count",
       "  help       Show this help",
       "",
       "Options: --port <n>  --ip <addr>  --dir <functionsDir>  --data <dbPath>  --database-url <url>",

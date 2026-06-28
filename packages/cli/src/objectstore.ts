@@ -1,7 +1,7 @@
 /**
  * `stackbase objectstore <subcommand>` — object-storage maintenance tools.
  *
- * `objectstore reshard --object-store <url> --dir <convex> --shards M` changes a STOPPED
+ * `objectstore reshard --object-store <url> --dir <functionsDir> --shards M` changes a STOPPED
  * object-storage deployment's shard count N→M: it loads the schema (for each table's shard key),
  * dynamic-imports + gates `@stackbase/objectstore-substrate`, and runs `reshardObjectStore` — which
  * physically re-partitions every doc's current state to `shardIdForKeyValue(doc[shardKey], M)`'s lane
@@ -11,16 +11,17 @@
 import { dirname } from "node:path";
 import { resolveObjectStore } from "./objectstore-select";
 import { loadObjectStoreSubstrateModule, makeInMemorySqliteStore } from "./boot";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
+import { resolveFunctionsDir } from "./functions-dir";
 
 export async function objectstoreCommand(args: string[]): Promise<number> {
   const sub = args[0];
   if (sub !== "reshard") {
     process.stderr.write(
       `✗ unknown \`objectstore\` subcommand '${sub ?? ""}' — usage: ` +
-        `stackbase objectstore reshard --object-store <url> --dir <convex> --shards M\n`,
+        `stackbase objectstore reshard --object-store <url> --dir <functionsDir> --shards M\n`,
     );
     return 1;
   }
@@ -29,7 +30,7 @@ export async function objectstoreCommand(args: string[]): Promise<number> {
 
 async function reshardCommand(args: string[]): Promise<number> {
   let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
-  let dir = "convex";
+  let dirFlag: string | undefined;
   let shards: number | undefined;
   const VALUE_FLAGS = new Set(["--object-store", "--dir", "--shards"]);
   for (let i = 0; i < args.length; i++) {
@@ -44,7 +45,7 @@ async function reshardCommand(args: string[]): Promise<number> {
     }
     i++;
     if (a === "--object-store") objectStoreUrl = val;
-    else if (a === "--dir") dir = val;
+    else if (a === "--dir") dirFlag = val;
     else shards = Number(val);
   }
   if (!objectStoreUrl) {
@@ -62,10 +63,11 @@ async function reshardCommand(args: string[]): Promise<number> {
       return 1;
     }
 
-    // The reshard's ONLY schema dependency: the per-table shard key. Load the app's convex dir the same
-    // way `bootProject` does, and read `.shardKey` off the composed catalog.
-    const loaded = await loadConvexDir(dir);
-    const config = await loadConfig(dirname(dir));
+    // The reshard's ONLY schema dependency: the per-table shard key. Load the app's functions dir the
+    // same way `bootProject` does, and read `.shardKey` off the composed catalog.
+    const { functionsDir } = await resolveFunctionsDir(dirFlag, process.cwd());
+    const loaded = await loadFunctionsDir(functionsDir);
+    const config = await loadConfig(dirname(functionsDir));
     const { project } = push(loaded, config.components);
     const shardKeyFor = (tableNumber: number): string | null =>
       project.catalog.getTableByNumber(tableNumber)?.shardKey ?? null;

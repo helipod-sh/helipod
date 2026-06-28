@@ -19,6 +19,7 @@ import {
 } from "./boot";
 import { applyDeploy } from "./deploy-apply";
 import { httpWakeHost } from "./wake-host";
+import { resolveFunctionsDir, functionsDirNotFoundMessage } from "./functions-dir";
 import type { DeploySchema } from "./schema-diff";
 import type { SchemaJsonLike } from "@stackbase/admin";
 import type { DocStore } from "@stackbase/docstore";
@@ -111,7 +112,7 @@ export interface FleetModule {
 }
 
 export interface ServeOptions {
-  convexDir: string;
+  functionsDir: string;
   dataPath: string;
   ip: string;
   port: number;
@@ -280,7 +281,12 @@ async function resolveFleetNumShards(databaseUrl: string, envValue: number | und
 }
 
 export function resolveServeOptions(args: string[]): ServeOptions {
-  let convexDir = "convex";
+  // The raw `--dir` flag value, captured but NOT defaulted here — "" means "not given", handled
+  // identically to `undefined` by `resolveFunctionsDir` (called later, in `serveCommand`, which also
+  // consults `functionsDir` in stackbase.config.ts). Resolving eagerly here would bake a literal
+  // default in before the config file is ever consulted, silently winning over it — see T3 controller
+  // note on the `codegenCommand` gap this whole task exists to close.
+  let functionsDir = "";
   let dataPath = process.env.STACKBASE_DATA_DIR ? join(process.env.STACKBASE_DATA_DIR, "db.sqlite") : "./data/db.sqlite";
   let ip = "0.0.0.0";
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
@@ -311,7 +317,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
   const objectStoreGcMs = parseLeaseTtlMs(process.env.STACKBASE_OBJECTSTORE_GC_MS);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
+    if (a === "--dir" && args[i + 1]) functionsDir = args[++i] as string;
     else if (a === "--data" && args[i + 1]) dataPath = args[++i] as string;
     else if (a === "--ip" && args[i + 1]) ip = args[++i] as string;
     else if (a === "--port" && args[i + 1]) port = Number(args[++i]);
@@ -336,7 +342,7 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     objectStoreShards = parseNumShards(process.env.STACKBASE_FLEET_SHARDS);
   }
   return {
-    convexDir,
+    functionsDir,
     dataPath,
     ip,
     port,
@@ -416,7 +422,7 @@ export async function startServe(
 
   const { runtime, adminApi, project, store, components, storageRoutes, componentRoutes, objectStoreRelease, replicaWriterUrl } =
     await bootProject({
-      functionsDir: opts.convexDir,
+      functionsDir: opts.functionsDir,
       dataPath: opts.dataPath,
       adminKey: opts.adminKey,
       databaseUrl: opts.databaseUrl,
@@ -519,13 +525,25 @@ export async function startServe(
 export async function serveCommand(args: string[]): Promise<number> {
   const opts = resolveServeOptions(args);
   const adminKey = process.env.STACKBASE_ADMIN_KEY?.trim();
+  // Admin key first: an operator missing BOTH the key and the functions directory should see the
+  // key error, not have it masked by a directory error — this is the more fundamental misconfiguration
+  // and was already serve's first fail-fast check before this task.
   if (!adminKey) {
     process.stderr.write("✗ STACKBASE_ADMIN_KEY is required for `serve` — set it to a strong secret.\n");
     return 1;
   }
-  if (!existsSync(join(opts.convexDir, "_generated", "server.ts"))) {
+  // Resolve the functions directory (flag > stackbase.config.ts `functionsDir` > DEFAULT_FUNCTIONS_DIR)
+  // and fail loudly — with the migrate hint — if it doesn't exist at all, before falling through to
+  // the narrower "_generated/ missing" check below (which assumes the directory itself is real).
+  const { functionsDir } = await resolveFunctionsDir(opts.functionsDir || undefined, process.cwd());
+  if (!existsSync(functionsDir)) {
+    process.stderr.write(functionsDirNotFoundMessage(functionsDir));
+    return 1;
+  }
+  opts.functionsDir = functionsDir;
+  if (!existsSync(join(opts.functionsDir, "_generated", "server.ts"))) {
     process.stderr.write(
-      `✗ ${opts.convexDir}/_generated not found — run \`stackbase codegen --dir ${opts.convexDir}\` and commit _generated/ before deploying.\n`,
+      `✗ ${opts.functionsDir}/_generated not found — run \`stackbase codegen --dir ${opts.functionsDir}\` and commit _generated/ before deploying.\n`,
     );
     return 1;
   }
@@ -661,7 +679,7 @@ export async function serveCommand(args: string[]): Promise<number> {
       level: "info",
       msg: "stackbase serve",
       url: server.url,
-      dir: opts.convexDir,
+      dir: opts.functionsDir,
       data: opts.dataPath,
       dashboard: opts.dashboard,
       allowDeploy: opts.allowDeploy,

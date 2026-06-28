@@ -159,14 +159,14 @@ async function subscribeToList(wsUrl: string): Promise<{ ws: WebSocket; messages
 
 describe("stackbase serve — end-to-end through the real production server", () => {
   it("webhook -> ctx.runMutation -> reactive fan-out; data survives a full server restart", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureConvexDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbserve-e2e-db-")), "db.sqlite");
 
     /* ---------------------------------------------------------------------- */
     /* Round 1: boot, subscribe, POST the webhook, observe the reactive push. */
     /* ---------------------------------------------------------------------- */
     const round1 = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -207,7 +207,7 @@ describe("stackbase serve — end-to-end through the real production server", ()
     /* the restart must still be there — this is the load-bearing assertion. */
     /* ---------------------------------------------------------------------- */
     const round2 = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,

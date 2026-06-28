@@ -98,10 +98,10 @@ function fixtureConvexDir(): string {
 
 /** Refresh the fixture's committed `_generated/` in place (same load->push->write step `deploy`/
  * `codegen` perform) so the checked-in output stays honest — deterministic, no git diff on a rerun. */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadConvexDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, resolve(convexDir, "_generated"));
+  writeGenerated(generated.files, resolve(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */

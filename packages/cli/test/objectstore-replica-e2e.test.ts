@@ -147,7 +147,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
   /* 1. Boot the WRITER over the object store. */
   const writer = await startServe({
-    convexDir: CONVEX_DIR,
+    functionsDir: CONVEX_DIR,
     dataPath: freshDataDir(`${label}-writer`),
     ip: "127.0.0.1",
     port: 0,
@@ -171,7 +171,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
     /* 1 (cont.). Boot the REPLICA over the SAME bucket — a distinct local data dir + port. */
     const replica = await startServe({
-      convexDir: CONVEX_DIR,
+      functionsDir: CONVEX_DIR,
       dataPath: freshDataDir(`${label}-replica`),
       ip: "127.0.0.1",
       port: 0,

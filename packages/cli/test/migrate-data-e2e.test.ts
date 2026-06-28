@@ -25,10 +25,10 @@ function fixtureConvexDir(name: string): string {
   return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "convex");
 }
 
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadConvexDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, join(convexDir, "_generated"));
+  writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
 
 function tmpDb(tag: string): string {
@@ -57,7 +57,7 @@ describe("stackbase migrate export/import — end-to-end through the real serve 
     try {
       // 1. Source deployment: boot, seed real data across two tables.
       source = await startServe({
-        convexDir: dir,
+        functionsDir: dir,
         dataPath: tmpDb("src"),
         ip: "127.0.0.1",
         port: 0,
@@ -87,7 +87,7 @@ describe("stackbase migrate export/import — end-to-end through the real serve 
 
       // 3. FRESH target deployment (empty store), same schema.
       target = await startServe({
-        convexDir: dir,
+        functionsDir: dir,
         dataPath: tmpDb("dst"),
         ip: "127.0.0.1",
         port: 0,

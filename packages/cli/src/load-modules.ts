@@ -128,10 +128,11 @@ export async function loadFunctionsDir(dir: string): Promise<LoadedProject> {
 }
 
 /**
- * Compatibility alias, temporary. `loadConvexDir` is the pre-rename name; this task (T2, the
- * functions-dir-rename project) only wires `dev`/`codegen`/`bootProject` onto `loadFunctionsDir` —
- * `deploy.ts`/`build.ts`/`objectstore.ts`/`migrate.ts` and their tests still import the old name
- * (T3/T6 convert them). Keeping both names live means this rename doesn't break those call sites out
- * of turn. Remove once every consumer has migrated to `loadFunctionsDir`.
+ * Compatibility alias, temporary. `loadConvexDir` is the pre-rename name. T2 wired `dev`/`codegen`/
+ * `bootProject` onto `loadFunctionsDir`; T3 has since converted `deploy.ts`/`build.ts`/
+ * `objectstore.ts` too. Only `packages/cli/src/migrate/` (explicitly excluded from this rename — it
+ * performs the convex/ → stackbase/ conversion itself, T6's job) and some test files still import
+ * the old name. Keeping both names live means this rename doesn't break those call sites out of
+ * turn. Remove once every consumer has migrated to `loadFunctionsDir`.
  */
 export const loadConvexDir = loadFunctionsDir;

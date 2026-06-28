@@ -8,24 +8,26 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@stackbase/codegen";
-import { loadConvexDir, listConvexModuleFiles, moduleKeyForFile } from "./load-modules";
+import { loadFunctionsDir, listConvexModuleFiles, moduleKeyForFile } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { generateEntrySource } from "./build-entry";
+import { resolveFunctionsDir } from "./functions-dir";
 
-export interface BuildOptions { convexDir: string; outfile: string; target: string | null; dashboard: boolean; verbose: boolean }
+export interface BuildOptions { functionsDir: string; outfile: string; target: string | null; dashboard: boolean; verbose: boolean }
 
-export function resolveBuildOptions(args: string[]): BuildOptions {
-  let convexDir = "convex", outfile = "./stackbase-server", target: string | null = null, dashboard = true, verbose = false;
+export async function resolveBuildOptions(args: string[]): Promise<BuildOptions> {
+  let dirFlag: string | undefined, outfile = "./stackbase-server", target: string | null = null, dashboard = true, verbose = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--dir" && args[i + 1]) convexDir = args[++i] as string;
+    if (a === "--dir" && args[i + 1]) dirFlag = args[++i] as string;
     else if (a === "--outfile" && args[i + 1]) outfile = args[++i] as string;
     else if (a === "--target" && args[i + 1]) target = args[++i] as string;
     else if (a === "--no-dashboard") dashboard = false;
     else if (a === "--verbose") verbose = true;
   }
-  return { convexDir, outfile, target, dashboard, verbose };
+  const { functionsDir } = await resolveFunctionsDir(dirFlag, process.cwd());
+  return { functionsDir, outfile, target, dashboard, verbose };
 }
 
 const TARGETS: Record<string, string> = {
@@ -58,17 +60,18 @@ function dashboardFiles(): Array<{ urlPath: string; absPath: string }> | null {
 }
 
 export async function buildCommand(args: string[]): Promise<number> {
-  const opts = resolveBuildOptions(args);
-  const convexAbs = resolve(opts.convexDir);
+  const opts = await resolveBuildOptions(args);
+  // `resolveFunctionsDir` already returns an absolute path, so no extra `resolve()` is needed here.
+  const functionsDirAbs = opts.functionsDir;
   // 1. Load + refresh codegen so `import "./_generated/server"` resolves when bun bundles the modules.
-  const loaded = await loadConvexDir(convexAbs);
-  const config = await loadConfig(dirname(convexAbs));
+  const loaded = await loadFunctionsDir(functionsDirAbs);
+  const config = await loadConfig(dirname(functionsDirAbs));
   const { generated } = push(loaded, config.components);
-  writeGenerated(generated.files, join(convexAbs, "_generated"));
+  writeGenerated(generated.files, join(functionsDirAbs, "_generated"));
   // 2. Codegen the entrypoint.
-  const moduleImports = listConvexModuleFiles(convexAbs).map((f) => ({ key: moduleKeyForFile(f), absPath: join(convexAbs, f) }));
-  const schemaAbsPath = join(convexAbs, existsSync(join(convexAbs, "schema.ts")) ? "schema.ts" : "schema.js");
-  const cfgTs = join(dirname(convexAbs), "stackbase.config.ts"), cfgJs = join(dirname(convexAbs), "stackbase.config.js");
+  const moduleImports = listConvexModuleFiles(functionsDirAbs).map((f) => ({ key: moduleKeyForFile(f), absPath: join(functionsDirAbs, f) }));
+  const schemaAbsPath = join(functionsDirAbs, existsSync(join(functionsDirAbs, "schema.ts")) ? "schema.ts" : "schema.js");
+  const cfgTs = join(dirname(functionsDirAbs), "stackbase.config.ts"), cfgJs = join(dirname(functionsDirAbs), "stackbase.config.js");
   const configAbsPath = existsSync(cfgTs) ? cfgTs : existsSync(cfgJs) ? cfgJs : null;
   const entrySrc = generateEntrySource({ moduleImports, schemaAbsPath, configAbsPath, dashboardFiles: opts.dashboard ? dashboardFiles() : null });
   const buildDir = resolve(".stackbase-build");

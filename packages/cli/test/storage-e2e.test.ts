@@ -135,11 +135,11 @@ function abs(baseUrl: string, maybeRelative: string): string {
 
 describe("file storage — FS hermetic E2E (real serve, proxied upload path)", () => {
   it("upload (binary) → ready + reactive fan-out → getUrl GET (200 + Range 206) → delete", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureConvexDir();
     const dataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-fs-db-")), "db.sqlite");
 
     const { server, store } = await startServe({
-      convexDir,
+      functionsDir,
       dataPath,
       ip: "127.0.0.1",
       port: 0,
@@ -306,7 +306,7 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
     "presigned PUT → confirm → getUrl 302 → reactive save; orphan reap; delete blob reclaim",
     async () => {
       const { endpoint } = await startMinio();
-      const convexDir = makeFixtureConvexDir();
+      const functionsDir = makeFixtureConvexDir();
       const dataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-s3-db-")), "db.sqlite");
 
       // The test-side view of the same bucket (the shipped adapter) — used to assert bucket-object
@@ -338,7 +338,7 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
         // `_finalize`'s resurrection guard / `ctx.storage.delete`'s doc comment) — only the sweep
         // cadence, not this TTL, governs how promptly the post-delete reclaim below is observed.
         const started = await startServe({
-          convexDir,
+          functionsDir,
           dataPath,
           ip: "127.0.0.1",
           port: 0,
@@ -417,7 +417,7 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
          * generous one. */
         const orphanDataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-s3-orphan-db-")), "db.sqlite");
         const { server: orphanServer, store: orphanStore } = await startServe({
-          convexDir,
+          functionsDir,
           dataPath: orphanDataPath,
           ip: "127.0.0.1",
           port: 0,

@@ -72,7 +72,7 @@ describe("startServe", () => {
     const fixtureDir = makeFixtureConvexDir(true);
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbserve-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir: fixtureDir,
+      functionsDir: fixtureDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -109,7 +109,7 @@ describe("startServe --web", () => {
     const webDir = makeWebDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir: fixtureDir,
+      functionsDir: fixtureDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -141,7 +141,7 @@ describe("startServe --web", () => {
     const fixtureDir = makeFixtureConvexDir(true);
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir: fixtureDir,
+      functionsDir: fixtureDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,

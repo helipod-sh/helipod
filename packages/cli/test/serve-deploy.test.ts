@@ -70,10 +70,10 @@ describe("resolveServeOptions — --allow-deploy / STACKBASE_ALLOW_DEPLOY", () =
 
 describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   it("WITHOUT --allow-deploy: falls through to the admin router's generic 404 — endpoint not registered", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureConvexDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -98,10 +98,10 @@ describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   });
 
   it("WITH --allow-deploy: the endpoint is reachable and returns a deploy-shaped response", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureConvexDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -128,10 +128,10 @@ describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   });
 
   it("WITH --allow-deploy but a bad admin key: unauthorized, not a generic 404", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureConvexDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
