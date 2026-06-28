@@ -108,7 +108,7 @@ async function bundleAndImport(file: string, key: string, cacheDir: string): Pro
   return (await import(pathToFileURL(outFile).href + CACHE_BUST())) as Record<string, unknown>;
 }
 
-export async function loadConvexDir(dir: string): Promise<LoadedProject> {
+export async function loadFunctionsDir(dir: string): Promise<LoadedProject> {
   const absDir = resolve(dir);
   const entries = listConvexModuleFiles(absDir);
   const cacheDir = resolveCacheDir(absDir);
@@ -126,3 +126,12 @@ export async function loadConvexDir(dir: string): Promise<LoadedProject> {
 
   return { schema: schemaModule.default, modules };
 }
+
+/**
+ * Compatibility alias, temporary. `loadConvexDir` is the pre-rename name; this task (T2, the
+ * functions-dir-rename project) only wires `dev`/`codegen`/`bootProject` onto `loadFunctionsDir` —
+ * `deploy.ts`/`build.ts`/`objectstore.ts`/`migrate.ts` and their tests still import the old name
+ * (T3/T6 convert them). Keeping both names live means this rename doesn't break those call sites out
+ * of turn. Remove once every consumer has migrated to `loadFunctionsDir`.
+ */
+export const loadConvexDir = loadFunctionsDir;

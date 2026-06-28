@@ -416,7 +416,7 @@ export async function startServe(
 
   const { runtime, adminApi, project, store, components, storageRoutes, componentRoutes, objectStoreRelease, replicaWriterUrl } =
     await bootProject({
-      convexDir: opts.convexDir,
+      functionsDir: opts.convexDir,
       dataPath: opts.dataPath,
       adminKey: opts.adminKey,
       databaseUrl: opts.databaseUrl,

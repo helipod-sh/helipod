@@ -1,12 +1,14 @@
 /**
  * Resolve `stackbase dev` options from CLI flags + defaults.
  */
+import { DEFAULT_FUNCTIONS_DIR } from "./functions-dir";
+
 export type RuntimeKind = "bun" | "node" | "auto";
 
 export interface DevOptions {
   port?: number;
   ip?: string;
-  convexDir?: string;
+  functionsDir?: string;
   dataPath?: string;
   runtime?: RuntimeKind;
   /** Optional static web UI directory to serve alongside the API/WebSocket. */
@@ -21,7 +23,7 @@ export interface DevOptions {
 export interface ResolvedDevOptions {
   port: number;
   ip: string;
-  convexDir: string;
+  functionsDir: string;
   dataPath: string;
   runtime: RuntimeKind;
   webDir: string | undefined;
@@ -34,7 +36,7 @@ export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions 
   return {
     port: options.port ?? 3000,
     ip: options.ip ?? "127.0.0.1",
-    convexDir: options.convexDir ?? "convex",
+    functionsDir: options.functionsDir ?? DEFAULT_FUNCTIONS_DIR,
     dataPath: options.dataPath ?? ".stackbase/data.db",
     runtime: options.runtime ?? "auto",
     webDir: options.webDir,

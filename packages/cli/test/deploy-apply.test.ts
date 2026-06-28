@@ -121,7 +121,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "db.sqlite"),
       adminKey: "k",
     });
@@ -217,7 +217,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "traversal-db.sqlite"),
       adminKey: "k",
     });
@@ -259,7 +259,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "badcode-db.sqlite"),
       adminKey: "k",
     });
@@ -297,7 +297,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "add-table-db.sqlite"),
       adminKey: "k",
     });

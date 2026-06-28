@@ -100,7 +100,7 @@ export function embedPlugin(options: StackbaseVitePluginOptions): Plugin {
       const { bootProject, writeGenerated, handleHttpRequest, push, loadConvexDir, loadConfig, withStorageModules } = cli;
 
       const boot = await bootProject({
-        convexDir,
+        functionsDir: convexDir,
         dataPath,
         ...(options.databaseUrl !== undefined ? { databaseUrl: options.databaseUrl } : {}),
         adminKey,

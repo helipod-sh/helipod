@@ -60,8 +60,8 @@ describe("push (load → codegen)", () => {
 
 describe("resolveDevOptions", () => {
   it("applies defaults and overrides", () => {
-    expect(resolveDevOptions()).toMatchObject({ port: 3000, ip: "127.0.0.1", convexDir: "convex" });
-    expect(resolveDevOptions({ port: 9000, convexDir: "backend" })).toMatchObject({ port: 9000, convexDir: "backend" });
+    expect(resolveDevOptions()).toMatchObject({ port: 3000, ip: "127.0.0.1", functionsDir: "stackbase" });
+    expect(resolveDevOptions({ port: 9000, functionsDir: "backend" })).toMatchObject({ port: 9000, functionsDir: "backend" });
   });
 });
 
@@ -153,5 +153,15 @@ describe("hot reload (setModules)", () => {
     // Swapping to an empty map makes the old function unresolvable (proves the swap is live).
     runtime.setModules({});
     await expect(runtime.run("messages:send", { conversationId: "c1", body: "x" })).rejects.toThrow(/unknown function/);
+  });
+});
+
+describe("dev options: functions directory", () => {
+  it("resolves to stackbase by default", () => {
+    expect(resolveDevOptions({}).functionsDir).toBe("stackbase");
+  });
+
+  it("honors an explicit value", () => {
+    expect(resolveDevOptions({ functionsDir: "convex" }).functionsDir).toBe("convex");
   });
 });
