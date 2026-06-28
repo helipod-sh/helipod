@@ -83,12 +83,11 @@ export function embedPlugin(options: StackbaseVitePluginOptions): Plugin {
     async configureServer(server) {
       const log = server.config.logger;
       const root = server.config.root;
-      const convexDir = resolve(root, options.convexDir ?? "convex");
-      const generatedDir = join(convexDir, "_generated");
-      const dataPath = options.dataPath ? resolve(root, options.dataPath) : join(root, ".stackbase", "dev.db");
-      const adminKey = options.adminKey ?? randomBytes(24).toString("hex");
 
-      // Reach the CLI's shared boot core ONLY here, via a dynamic import — proxy mode never pulls it.
+      // Reach the CLI's shared boot core ONLY here, via a dynamic import — proxy mode never pulls it
+      // (also where DEFAULT_FUNCTIONS_DIR comes from: a static top-level import of `@stackbase/cli`
+      // would defeat the point, forcing it to resolve even for proxy-mode-only consumers who never
+      // installed it — it's an optional peer, see package.json).
       let cli: typeof import("@stackbase/cli");
       try {
         cli = await import("@stackbase/cli");
@@ -97,17 +96,31 @@ export function embedPlugin(options: StackbaseVitePluginOptions): Plugin {
           `@stackbase/vite embed mode requires @stackbase/cli to be installed — ${e instanceof Error ? e.message : String(e)}`,
         );
       }
-      const { bootProject, writeGenerated, handleHttpRequest, push, loadConvexDir, loadConfig, withStorageModules } = cli;
+      const {
+        bootProject,
+        writeGenerated,
+        handleHttpRequest,
+        push,
+        loadFunctionsDir,
+        loadConfig,
+        withStorageModules,
+        DEFAULT_FUNCTIONS_DIR,
+      } = cli;
+
+      const functionsDir = resolve(root, options.functionsDir ?? DEFAULT_FUNCTIONS_DIR);
+      const generatedDir = join(functionsDir, "_generated");
+      const dataPath = options.dataPath ? resolve(root, options.dataPath) : join(root, ".stackbase", "dev.db");
+      const adminKey = options.adminKey ?? randomBytes(24).toString("hex");
 
       const boot = await bootProject({
-        functionsDir: convexDir,
+        functionsDir,
         dataPath,
         ...(options.databaseUrl !== undefined ? { databaseUrl: options.databaseUrl } : {}),
         adminKey,
       });
       const { runtime, adminApi, project, generated, store, storageRoutes, componentRoutes } = boot;
       writeGenerated(generated.files, generatedDir);
-      const config = await loadConfig(dirname(convexDir));
+      const config = await loadConfig(dirname(functionsDir));
 
       // Mutable across hot-reloads: only the user `http.ts` routes swap (the component set — and thus
       // storage/component routes — is fixed at boot, exactly as `stackbase dev`/`serve` behave).
@@ -212,17 +225,17 @@ export function embedPlugin(options: StackbaseVitePluginOptions): Plugin {
       }
       server.httpServer?.on("upgrade", onUpgrade);
 
-      // ── Hot-reload convex/ — an INDEPENDENT loop from Vite HMR ─────────────────────────────────
+      // ── Hot-reload the functions dir — an INDEPENDENT loop from Vite HMR ─────────────────────────
       let reloadTimer: ReturnType<typeof setTimeout> | undefined;
       const scheduleReload = (file: string) => {
-        if (!file.startsWith(convexDir + sep)) return;
+        if (!file.startsWith(functionsDir + sep)) return;
         if (file.includes(sep + "_generated" + sep)) return;
         if (reloadTimer) clearTimeout(reloadTimer);
         reloadTimer = setTimeout(() => { void reload(); }, 50);
       };
       const reload = async () => {
         try {
-          const next = push(await loadConvexDir(convexDir), config.components);
+          const next = push(await loadFunctionsDir(functionsDir), config.components);
           writeGenerated(next.generated.files, generatedDir);
           runtime.setModules(withStorageModules(next.project.moduleMap));
           currentRoutes = next.project.routes;

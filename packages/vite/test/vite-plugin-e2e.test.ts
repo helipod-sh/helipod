@@ -33,7 +33,7 @@ describe("@stackbase/vite — single-origin dev (real Vite + real stackbase dev)
       // Explicit IPv4 host: Vite's default `localhost` binding can resolve to the IPv6 loopback
       // (`::1`) only, which would refuse the IPv4 `127.0.0.1` connections below.
       server: { port: vitePort, strictPort: true, host: "127.0.0.1" },
-      plugins: [stackbase({ convexDir: "convex", command: `${cliRunner} ${cliBin}` })],
+      plugins: [stackbase({ functionsDir: "stackbase", command: `${cliRunner} ${cliBin}` })],
     });
     await vite.listen();
     const address = vite.httpServer!.address();

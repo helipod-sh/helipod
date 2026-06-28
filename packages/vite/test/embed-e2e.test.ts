@@ -33,7 +33,7 @@ describe("@stackbase/vite — embed mode (engine IN Vite's process, no child, no
       logLevel: "warn",
       // Explicit IPv4 host (Vite's default `localhost` can bind IPv6-only, refusing the 127.0.0.1 below).
       server: { port: vitePort, strictPort: true, host: "127.0.0.1" },
-      plugins: [stackbase({ mode: "embed", convexDir: "convex", dataPath: join(dataDir, "dev.db") })],
+      plugins: [stackbase({ mode: "embed", functionsDir: "stackbase", dataPath: join(dataDir, "dev.db") })],
     });
     await vite.listen();
     const address = vite.httpServer!.address();
