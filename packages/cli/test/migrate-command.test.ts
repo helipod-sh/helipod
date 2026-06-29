@@ -51,16 +51,19 @@ describe("migrateCommand", () => {
     expect(existsSync(join(root, "stackbase.config.ts"))).toBe(true);
   });
 
-  it("--dry-run renames the directory but writes no content edits", async () => {
-    // The directory move happens between `detect` and `analyze` regardless of --dry-run (analyze
-    // must run against the final location — see migrate.ts). --dry-run still guarantees no FILE
-    // CONTENT is rewritten and no codegen runs.
+  it("--dry-run leaves the working tree untouched and writes no content edits", async () => {
+    // --dry-run must not move the directory (it previously did, which meant a bare re-run without
+    // --dry-run would fail with "stackbase already exists" — see migrate.ts). It still writes
+    // MIGRATION-REPORT.md as a preview, and guarantees no FILE CONTENT is rewritten and no codegen
+    // runs.
     const code = await migrateCommand(["--dir", join(root, "convex"), "--dry-run", "--force"]);
     expect(code).toBe(0);
-    expect(existsSync(join(root, "convex"))).toBe(false);
-    expect(readFileSync(join(root, "stackbase", "schema.ts"), "utf8")).toContain("convex/values"); // unchanged
+    expect(existsSync(join(root, "convex"))).toBe(true);
+    expect(existsSync(join(root, "stackbase"))).toBe(false);
+    expect(readFileSync(join(root, "convex", "schema.ts"), "utf8")).toContain("convex/values"); // unchanged
     expect(existsSync(join(root, "MIGRATION-REPORT.md"))).toBe(true);
-    expect(existsSync(join(root, "stackbase", "_generated"))).toBe(false);
+    const report = readFileSync(join(root, "MIGRATION-REPORT.md"), "utf8");
+    expect(report).toMatch(/would be renamed/i);
   });
 
   it("deletes a pre-existing Convex _generated/ before regenerating, so stale .js files don't survive", async () => {

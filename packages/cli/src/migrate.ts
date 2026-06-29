@@ -4,7 +4,7 @@
  * only `--from convex`; other origin backends register into `SOURCES` the same way.
  */
 import { writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeGenerated, generateServer } from "@stackbase/codegen";
 import { loadConvexDir } from "./load-modules";
@@ -13,7 +13,7 @@ import { push } from "./push-pipeline";
 import { resolveSource, type MigrationSource, type ReportEntry } from "./migrate/source";
 import { convexSource } from "./migrate/convex-source";
 import { migrateExportCommand, migrateImportCommand } from "./migrate/data";
-import { DEFAULT_FUNCTIONS_DIR } from "./functions-dir";
+import { resolveFunctionsDir } from "./functions-dir";
 
 const SOURCES: Record<string, MigrationSource> = { convex: convexSource };
 
@@ -97,11 +97,15 @@ export async function migrateCommand(args: string[]): Promise<number> {
   // for convex/schema.ts on the untouched tree) and BEFORE analyze, so every path in the plan
   // already refers to the new location. A project that declares its own `functionsDir` wins, so
   // migrate can never produce a layout the CLI would then fail to find.
-  const cfg = await loadConfig(projectRoot);
-  const targetName = cfg.functionsDir ?? DEFAULT_FUNCTIONS_DIR;
-  const targetDir = isAbsolute(targetName) ? targetName : join(projectRoot, targetName);
+  //
+  // `resolveFunctionsDir(undefined, projectRoot)` replicates its own no-flag branch: `projectRoot`
+  // is already an absolute dir (computed above from `--dir`, defaulting to cwd/convex), so passing
+  // it as `cwd` makes `resolve(cwd)` idempotent, and it loads `stackbase.config.ts` from that same
+  // root — the exact `cfg.functionsDir ?? DEFAULT_FUNCTIONS_DIR` resolution this used to hand-roll.
+  const { functionsDir: targetDir } = await resolveFunctionsDir(undefined, projectRoot);
   let migratedDir = functionsDir;
   let renamed = false;
+  let pendingRename = false;
   if (resolve(functionsDir) !== resolve(targetDir)) {
     if (existsSync(targetDir)) {
       process.stderr.write(
@@ -109,28 +113,45 @@ export async function migrateCommand(args: string[]): Promise<number> {
       );
       return 1;
     }
-    // `dirty` (computed above) already tells us whether projectRoot is a git repo at all — reuse
-    // that signal instead of shelling out to git again. Inside a repo, prefer `git mv` so the
-    // rename shows up as a rename in history rather than a delete+add; fall back to a plain
-    // filesystem rename if git mv fails for any reason (e.g. the dir isn't tracked yet).
-    let didGitMv = false;
-    if (dirty !== null) {
-      const r = spawnSync("git", ["mv", functionsDir, targetDir], { cwd: projectRoot });
-      didGitMv = r.status === 0;
+    if (opts.dryRun) {
+      // A dry run must not touch the working tree. Leave `migratedDir` as the untouched
+      // `functionsDir` so `analyze()` below reads real files at a real, existing path — its file
+      // counts stay accurate — and just remember that a rename would happen, for the preview.
+      pendingRename = true;
+    } else {
+      try {
+        // `dirty` (computed above) already tells us whether projectRoot is a git repo at all —
+        // reuse that signal instead of shelling out to git again. Inside a repo, prefer `git mv`
+        // so the rename shows up as a rename in history rather than a delete+add; fall back to a
+        // plain filesystem rename if git mv fails for any reason (e.g. the dir isn't tracked yet).
+        let didGitMv = false;
+        if (dirty !== null) {
+          const r = spawnSync("git", ["mv", functionsDir, targetDir], { cwd: projectRoot });
+          didGitMv = r.status === 0;
+        }
+        if (!didGitMv) renameSync(functionsDir, targetDir);
+      } catch (e) {
+        process.stderr.write(
+          `refusing to migrate: could not rename ${functionsDir} to ${targetDir}: ` +
+            `${e instanceof Error ? e.message : String(e)}\n`,
+        );
+        return 1;
+      }
+      migratedDir = targetDir;
+      renamed = true;
+      process.stdout.write(`renamed ${functionsDir} → ${targetDir}\n`);
     }
-    if (!didGitMv) renameSync(functionsDir, targetDir);
-    migratedDir = targetDir;
-    renamed = true;
-    process.stdout.write(`renamed ${functionsDir} → ${targetDir}\n`);
   }
 
   const plan = await source.analyze(projectRoot, migratedDir);
-  if (renamed) {
+  if (renamed || pendingRename) {
     plan.report.unshift({
       severity: "auto-fixed",
       file: `${basename(functionsDir)}/`,
-      what: `renamed to ${basename(targetDir)}/`,
-      fix: `Your backend functions now live in ${basename(targetDir)}/. Imports inside that folder are relative and did not change.`,
+      what: pendingRename ? `would be renamed to ${basename(targetDir)}/` : `renamed to ${basename(targetDir)}/`,
+      fix: pendingRename
+        ? `Your backend functions will move to ${basename(targetDir)}/ when you run this migration without --dry-run. Imports inside that folder are relative and will not change.`
+        : `Your backend functions now live in ${basename(targetDir)}/. Imports inside that folder are relative and did not change.`,
     });
   }
 
@@ -138,8 +159,9 @@ export async function migrateCommand(args: string[]): Promise<number> {
   writeFileSync(join(projectRoot, "MIGRATION-REPORT.md"), renderReport(plan.report));
 
   if (opts.dryRun) {
+    const renameNote = pendingRename ? ` ${basename(functionsDir)}/ would be renamed to ${basename(targetDir)}/.` : "";
     process.stdout.write(
-      `[dry-run] ${plan.edits.length} files would change, ${plan.scaffold.length} scaffolded. See MIGRATION-REPORT.md\n`,
+      `[dry-run] ${plan.edits.length} files would change, ${plan.scaffold.length} scaffolded.${renameNote} See MIGRATION-REPORT.md\n`,
     );
     return 0;
   }

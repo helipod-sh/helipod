@@ -57,6 +57,47 @@ describe("stackbase migrate renames the functions directory", () => {
     expect(existsSync(join(root, "convex", "schema.ts"))).toBe(true);
   });
 
+  it("--dry-run leaves convex/ untouched and does not create stackbase/", async () => {
+    const root = convexApp();
+    const prevCwd = process.cwd();
+    try {
+      process.chdir(root);
+      const code = await migrateCommand(["--dir", join(root, "convex"), "--dry-run", "--force"]);
+      expect(code).toBe(0);
+    } finally {
+      process.chdir(prevCwd);
+    }
+    expect(existsSync(join(root, "convex"))).toBe(true);
+    expect(existsSync(join(root, "convex", "schema.ts"))).toBe(true);
+    expect(existsSync(join(root, "convex", "notes.ts"))).toBe(true);
+    expect(existsSync(join(root, "stackbase"))).toBe(false);
+  });
+
+  it("preview-then-commit: --dry-run followed by a real run completes the rename", async () => {
+    // This is the exact workflow the dry-run-mutates-the-tree bug broke: a user previews with
+    // --dry-run, likes what they see, then re-runs the identical command without the flag. If the
+    // dry run had already renamed convex/ -> stackbase/, this second call would fail with
+    // "stackbase already exists" (functionsDir still resolves to convex, which the dry run left
+    // behind as a stale/incomplete copy).
+    const root = convexApp();
+    const prevCwd = process.cwd();
+    try {
+      process.chdir(root);
+      const dryCode = await migrateCommand(["--dir", join(root, "convex"), "--dry-run", "--force"]);
+      expect(dryCode).toBe(0);
+      expect(existsSync(join(root, "convex"))).toBe(true);
+      expect(existsSync(join(root, "stackbase"))).toBe(false);
+
+      const realCode = await migrateCommand(["--dir", join(root, "convex"), "--force"]);
+      expect(realCode).toBe(0);
+    } finally {
+      process.chdir(prevCwd);
+    }
+    expect(existsSync(join(root, "stackbase", "schema.ts"))).toBe(true);
+    expect(existsSync(join(root, "stackbase", "notes.ts"))).toBe(true);
+    expect(existsSync(join(root, "convex"))).toBe(false);
+  });
+
   it("renames to the project's configured functionsDir instead of the default", async () => {
     const root = convexApp();
     writeFileSync(
