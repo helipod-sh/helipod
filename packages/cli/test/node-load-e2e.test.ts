@@ -8,7 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const cliBin = join(here, "..", "dist", "bin.js");
 const fixtureSrc = join(here, "fixtures", "conventional-app", "convex");
 // The CLI package dir (packages/cli), NOT the monorepo root. `resolveCacheDir` in
-// load-modules.ts walks UP from the convex dir to the nearest ancestor that literally
+// load-modules.ts walks UP from the functions dir to the nearest ancestor that literally
 // contains a `node_modules` folder, then bundles+caches there so the bundle's external
 // `@stackbase/*` imports resolve via Node's own ancestor walk. In a real end-user project
 // (single package.json, single node_modules with @stackbase/* installed from the registry)
@@ -24,7 +24,7 @@ const fixtureSrc = join(here, "fixtures", "conventional-app", "convex");
 // packages/cli/test/fixtures, inheriting packages/cli/node_modules).
 const cliPackageDir = join(here, ".."); // packages/cli/test → packages/cli
 
-/** Copy the fixture to a throwaway convex dir under packages/cli (so the bundled .mjs's
+/** Copy the fixture to a throwaway functions dir under packages/cli (so the bundled .mjs's
  *  external @stackbase/* imports resolve from packages/cli's own node_modules — see the
  *  comment on cliPackageDir above), run codegen via `runner`, and return { ok, out }.
  *  `_generated` is kept in place — notes.ts imports ./_generated/server, so removing it up
@@ -33,10 +33,10 @@ const cliPackageDir = join(here, ".."); // packages/cli/test → packages/cli
  *  code alone — the old broken path exits 0 too. Cleans up the throwaway dir in `finally`. */
 function codegenWith(runner: string): { ok: boolean; out: string } {
   const tmp = mkdtempSync(join(cliPackageDir, ".tmp-node-load-"));
-  const convex = join(tmp, "convex");
-  cpSync(fixtureSrc, convex, { recursive: true }); // keep _generated — notes.ts imports it
+  const functionsDir = join(tmp, "stackbase");
+  cpSync(fixtureSrc, functionsDir, { recursive: true }); // keep _generated — notes.ts imports it
   try {
-    const out = execFileSync(runner, [cliBin, "codegen", "--dir", convex], { encoding: "utf8", stdio: "pipe" });
+    const out = execFileSync(runner, [cliBin, "codegen", "--dir", functionsDir], { encoding: "utf8", stdio: "pipe" });
     return { ok: /generated/.test(out) && !/ERR_MODULE_NOT_FOUND/.test(out), out };
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string };

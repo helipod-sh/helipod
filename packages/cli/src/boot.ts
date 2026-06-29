@@ -318,7 +318,7 @@ async function buildObjectStoreWriterNode(opts: {
   if (opts.shards !== undefined && opts.shards !== numShards) {
     throw new Error(
       `stackbase: --shards ${opts.shards} disagrees with the bucket's persisted shard count ${numShards} — ` +
-        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <convex> --shards ${opts.shards}\`) ` +
+        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <dir> --shards ${opts.shards}\`) ` +
         `to change it, or drop --shards.`,
     );
   }

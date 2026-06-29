@@ -860,7 +860,7 @@ const HAS_EMBEDDED_PG = embeddedPgAvailable();
 const maybeDescribe = HAS_EMBEDDED_PG ? describe : describe.skip;
 
 const CLI_BIN = resolve(new URL(".", import.meta.url).pathname, "..", "dist", "bin.js");
-const FLEET_FIXTURE_CONVEX = resolve(
+const FLEET_FIXTURE_FUNCTIONS_DIR = resolve(
   new URL(".", import.meta.url).pathname,
   "..", "..", "..", "ee", "packages", "fleet", "test", "fixtures", "app", "convex",
 );
@@ -907,7 +907,7 @@ function spawnFleetServe(databaseUrl: string, port: number, dataDir: string): Se
   return spawn(
     "bun",
     [
-      CLI_BIN, "serve", "--dir", FLEET_FIXTURE_CONVEX, "--data", join(dataDir, "db.sqlite"),
+      CLI_BIN, "serve", "--dir", FLEET_FIXTURE_FUNCTIONS_DIR, "--data", join(dataDir, "db.sqlite"),
       "--port", String(port), "--ip", "127.0.0.1", "--no-dashboard", "--database-url", databaseUrl,
       "--fleet", "--advertise-url", `http://127.0.0.1:${port}`,
     ],
