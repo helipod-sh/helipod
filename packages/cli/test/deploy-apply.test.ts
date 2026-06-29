@@ -1,6 +1,6 @@
 /**
  * `applyDeploy` — the server-side funnel for `stackbase deploy`: write the pushed tree, reuse
- * loadConvexDir -> push, gate on an additive-schema diff, then atomically swap modules/routes/
+ * loadFunctionsDir -> push, gate on an additive-schema diff, then atomically swap modules/routes/
  * schema. All validation happens before the first swap, so a rejected deploy leaves the running
  * version fully live — proven here by re-exercising the previously-live function after each
  * rejected apply.
@@ -19,7 +19,7 @@ import { defineComponent } from "@stackbase/component";
 import { bootProject } from "../src/boot";
 import { packageApp } from "../src/deploy";
 import { applyDeploy, type DeployDeps } from "../src/deploy-apply";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import type { DeploySchema } from "../src/schema-diff";
 
@@ -41,7 +41,7 @@ function write(dir: string, file: string, content: string): void {
  * itself, which is what this test exercises).
  */
 async function schemaOf(dir: string): Promise<{ schemaJson: DeploySchema["schemaJson"]; tableNumbers: Record<string, number> }> {
-  const loaded = await loadConvexDir(dir);
+  const loaded = await loadFunctionsDir(dir);
   const { project } = push(loaded, []);
   return { schemaJson: project.schemaJson as DeploySchema["schemaJson"], tableNumbers: project.tableNumbers };
 }

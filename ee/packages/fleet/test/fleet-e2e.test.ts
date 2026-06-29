@@ -73,7 +73,7 @@ async function stopPostgresContainer(): Promise<void> {
 /* Fixture app (schema + notes:add/list/get/update) — codegen committed        */
 /* -------------------------------------------------------------------------- */
 
-function fixtureConvexDir(): string {
+function fixtureFunctionsDir(): string {
   return resolve(new URL(".", import.meta.url).pathname, "fixtures", "app", "convex");
 }
 
@@ -202,7 +202,7 @@ function spawnFleetServe(
     "bun",
     [
       CLI_BIN, "serve",
-      "--dir", fixtureConvexDir(),
+      "--dir", fixtureFunctionsDir(),
       "--data", join(dataDir, "db.sqlite"),
       "--port", String(port),
       "--ip", "127.0.0.1",

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { resolve } from "node:path";
 import { resolveBuildOptions, bunTargetFor } from "../src/build";
-import { listConvexModuleFiles, moduleKeyForFile } from "../src/load-modules";
+import { listFunctionModuleFiles, moduleKeyForFile } from "../src/load-modules";
 import { DEFAULT_FUNCTIONS_DIR } from "../src/functions-dir";
 
 describe("resolveBuildOptions", () => {
@@ -31,7 +31,7 @@ describe("bunTargetFor", () => {
 
 describe("shared module-file helpers", () => {
   it("lists function modules (excludes schema/_generated/.d.ts) and derives keys", () => {
-    const files = listConvexModuleFiles("test/fixtures/deploy-v2/convex");
+    const files = listFunctionModuleFiles("test/fixtures/deploy-v2/convex");
     expect(files).toContain("notes.ts");
     expect(files).not.toContain("schema.ts");
     expect(moduleKeyForFile("notes.ts")).toBe("notes");

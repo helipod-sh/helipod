@@ -7,7 +7,7 @@ import { writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:f
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeGenerated, generateServer } from "@stackbase/codegen";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { resolveSource, type MigrationSource, type ReportEntry } from "./migrate/source";
@@ -186,7 +186,7 @@ export async function migrateCommand(args: string[]): Promise<number> {
 
     // A project migrated straight from Convex source has NEVER had `_generated/` written — its
     // hand-authored function files (e.g. `notes.ts`) already `import ... from "./_generated/
-    // server"`, so `loadConvexDir`'s dynamic import of them needs that file to exist on disk
+    // server"`, so `loadFunctionsDir`'s dynamic import of them needs that file to exist on disk
     // *before* the real codegen below ever runs. `generateServer`'s output doesn't depend on the
     // schema (only on composed components), so pre-writing it here is safe — the accurate,
     // final version (from the fully-loaded project) overwrites this stub a few lines down.
@@ -199,7 +199,7 @@ export async function migrateCommand(args: string[]): Promise<number> {
       writeFileSync(join(generatedDir, "server.ts"), stub.content);
     }
 
-    const loaded = await loadConvexDir(migratedDir);
+    const loaded = await loadFunctionsDir(migratedDir);
     const { generated } = push(loaded, config.components);
     writeGenerated(generated.files, generatedDir);
   } catch (e) {

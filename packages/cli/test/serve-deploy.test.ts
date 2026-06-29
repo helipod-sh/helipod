@@ -18,7 +18,7 @@ function cliNodeModules(): string {
 }
 
 /** A minimal real convex/ dir — enough for bootProject (which never reads _generated/). */
-function makeFixtureConvexDir(): string {
+function makeFixtureFunctionsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbservedeploy-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
@@ -70,7 +70,7 @@ describe("resolveServeOptions — --allow-deploy / STACKBASE_ALLOW_DEPLOY", () =
 
 describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   it("WITHOUT --allow-deploy: falls through to the admin router's generic 404 — endpoint not registered", async () => {
-    const functionsDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureFunctionsDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
       functionsDir,
@@ -98,7 +98,7 @@ describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   });
 
   it("WITH --allow-deploy: the endpoint is reachable and returns a deploy-shaped response", async () => {
-    const functionsDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureFunctionsDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
       functionsDir,
@@ -128,7 +128,7 @@ describe("startServe — POST /_admin/deploy gated by allowDeploy", () => {
   });
 
   it("WITH --allow-deploy but a bad admin key: unauthorized, not a generic 404", async () => {
-    const functionsDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureFunctionsDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbservedeploy-db-")), "db.sqlite");
     const { server, store } = await startServe({
       functionsDir,

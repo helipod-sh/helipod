@@ -2,7 +2,7 @@ import { query, mutation } from "./_generated/server";
 
 // The conventional Convex/Stackbase authoring shape — value imports from ./_generated/server
 // (extensionless). This is what real apps + every example use, and what fails under Node's ESM
-// resolver with bare import(). loadConvexDir only IMPORTS this module (to read its exports); the
+// resolver with bare import(). loadFunctionsDir only IMPORTS this module (to read its exports); the
 // handlers are never executed here.
 export const list = query({
   handler: async (ctx) =>

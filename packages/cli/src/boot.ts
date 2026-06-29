@@ -1158,7 +1158,7 @@ function makeStorageCheckRead(
 
 /**
  * `bootProject`'s options: everything `bootLoaded` takes, MINUS the two things `bootProject` exists
- * to produce itself, PLUS the `convexDir` it produces them from. Derived deliberately — never
+ * to produce itself, PLUS the `functionsDir` it produces them from. Derived deliberately — never
  * re-declared.
  *
  * WHY (a trap this has already cost a full debug cycle — do not re-introduce it): `bootProject` used to

@@ -17,16 +17,16 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startServe } from "../src/serve";
 import { migrateExportCommand, migrateImportCommand } from "../src/migrate/data";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import { writeGenerated } from "@stackbase/codegen";
 
-function fixtureConvexDir(name: string): string {
+function fixtureFunctionsDir(name: string): string {
   return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "convex");
 }
 
 async function regenerate(functionsDir: string): Promise<void> {
-  const loaded = await loadConvexDir(functionsDir);
+  const loaded = await loadFunctionsDir(functionsDir);
   const { generated } = push(loaded, []);
   writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
@@ -48,7 +48,7 @@ async function run(url: string, path: string, args: unknown = {}): Promise<unkno
 
 describe("stackbase migrate export/import — end-to-end through the real serve server", () => {
   it("SQLite → dump → fresh SQLite reproduces identical rows/ids/_creationTime; guard rejects a clash", async () => {
-    const dir = fixtureConvexDir("migrate-data");
+    const dir = fixtureFunctionsDir("migrate-data");
     await regenerate(dir);
     const dumpFile = join(mkdtempSync(join(tmpdir(), "sbmig-dump-")), "dump.json");
 

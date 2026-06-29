@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { resolveBinaryOptions, startBinaryServer } from "../src/binary-main";
 import { rmSync } from "node:fs";
 
@@ -16,7 +16,7 @@ describe("resolveBinaryOptions", () => {
 
 describe("startBinaryServer", () => {
   it("serves a committing mutation from a pre-loaded project (no convex dir at runtime)", async () => {
-    const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex"); // notes:list + notes:add
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex"); // notes:list + notes:add
     const { server, store } = await startBinaryServer(loaded, [], { port: 0, ip: "127.0.0.1", dataDir: "./.tmp-binmain", adminKey: "k" });
     const add = await fetch(`${server.url}/api/run`, {
       method: "POST", headers: { "content-type": "application/json" },

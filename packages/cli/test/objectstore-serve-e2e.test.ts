@@ -38,7 +38,7 @@ import { startServe } from "../src/serve";
 /* index) — same convention `objectstore-boot.test.ts` uses for this slice.  */
 /* -------------------------------------------------------------------------- */
 
-const CONVEX_DIR = "test/fixtures/deploy-v2/convex";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/convex";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors serve-e2e.test.ts / storage-e2e.test.ts)        */
@@ -135,7 +135,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
   /* 1. Boot node A over the object store. */
   const nodeA = await startServe({
-    functionsDir: CONVEX_DIR,
+    functionsDir: FUNCTIONS_DIR,
     dataPath: freshDataDir(`${label}-a`),
     ip: "127.0.0.1",
     port: 0,
@@ -203,7 +203,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
    * review flagged as missing (a full-TTL write outage on every graceful rolling deploy). */
   const takeoverStart = Date.now();
   const nodeB = await startServe({
-    functionsDir: CONVEX_DIR,
+    functionsDir: FUNCTIONS_DIR,
     dataPath: freshDataDir(`${label}-b`),
     ip: "127.0.0.1",
     port: 0,

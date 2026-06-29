@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 import { resolveServeOptions, serveCommand } from "../src/serve";
 
@@ -16,7 +16,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — Tier 3 Slice 8 object-store replica node", () => {
   it("materializes the writer's committed state from the bucket, stays live, and rejects a mutation with a clear message", async () => {
-    const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
     const bucket = `file://${ROOT}/bucket`;
 
     // ── WRITER: commits data BEFORE the replica ever opens ────────────────────────────────────

@@ -15,8 +15,11 @@ import { embedPlugin } from "./embed";
 // NOT imported: `@stackbase/cli` is an optional peer dependency (see package.json) so that
 // proxy-mode-only consumers — who spawn `stackbase dev` as a child process and never touch the
 // package's own JS — aren't forced to have it installed. embed.ts reaches the real constant
-// through its own dynamic import instead, for the same reason.
-const DEFAULT_FUNCTIONS_DIR = "stackbase";
+// through its own dynamic import instead, for the same reason. Exported (not just module-local) so
+// a test can assert this literal hasn't drifted from `@stackbase/cli`'s own constant — see
+// `test/plugin.test.ts`'s "DEFAULT_FUNCTIONS_DIR guard" — without a static top-level import of
+// `@stackbase/cli` here in the shipped proxy path itself.
+export const DEFAULT_FUNCTIONS_DIR = "stackbase";
 
 export interface StackbaseVitePluginOptions {
   /**

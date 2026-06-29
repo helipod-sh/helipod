@@ -13,7 +13,7 @@ import {
   NUM_SHARDS_GLOBAL_KEY,
   bootLoaded,
 } from "../src/boot";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 
 describe("parseNumShards", () => {
   it("parses a positive integer string", () => {
@@ -115,7 +115,7 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
 
   it("persists the resolved count at first boot and reuses it on a later boot with no env override", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/convex");
 
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     expect(await first.store.getGlobal(NUM_SHARDS_GLOBAL_KEY)).toBe(String(DEFAULT_NUM_SHARDS));
@@ -129,7 +129,7 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
 
   it("a later boot with a disagreeing STACKBASE_FLEET_SHARDS fails fast, naming both values", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/convex");
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     first.store.close();
 
@@ -139,7 +139,7 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
 
   it("a later boot with an AGREEING STACKBASE_FLEET_SHARDS boots normally", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/convex");
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     first.store.close();
 

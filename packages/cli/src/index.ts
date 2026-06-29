@@ -20,7 +20,7 @@ export { startDevServer, ProcessRuntimeHost } from "./server";
 export type { WatchLoop, WatchLoopOptions, WatchTriggerReason } from "./watch";
 export { createWatchLoop } from "./watch";
 
-export { loadFunctionsDir, loadConvexDir } from "./load-modules";
+export { loadFunctionsDir } from "./load-modules";
 export type { StackbaseConfig } from "@stackbase/component";
 export { loadConfig } from "./load-config";
 export type { ResolvedFunctionsDir } from "./functions-dir";

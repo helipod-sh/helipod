@@ -1,5 +1,5 @@
 /**
- * Load a `convex/` directory: esbuild-BUNDLE each module (schema + function files) then import the
+ * Load a functions directory: esbuild-BUNDLE each module (schema + function files) then import the
  * bundle. Bundling resolves relative imports (incl. the conventional extensionless `./_generated/*`
  * value imports every app uses) at bundle time, identically on Bun / Node / any ESM runtime — so
  * loading no longer depends on the runtime's own resolver (plain Node's ESM rejects extensionless
@@ -18,13 +18,13 @@ import type { LoadedProject } from "./project";
 
 const CACHE_BUST = () => `?t=${Date.now()}`;
 
-/** The module key `stackbase` uses to address a convex/ function file — strips the extension. */
+/** The module key `stackbase` uses to address a functions-directory function file — strips the extension. */
 export function moduleKeyForFile(file: string): string {
   return file.replace(/\.(ts|js)$/, "");
 }
 
-/** List a convex/ dir's function module files (excludes schema.{ts,js}, `_`-prefixed, and .d.ts). */
-export function listConvexModuleFiles(absDir: string): string[] {
+/** List a functions directory's function module files (excludes schema.{ts,js}, `_`-prefixed, and .d.ts). */
+export function listFunctionModuleFiles(absDir: string): string[] {
   const isModule = (f: string) =>
     (f.endsWith(".ts") || f.endsWith(".js")) &&
     !f.endsWith(".d.ts") &&
@@ -35,7 +35,7 @@ export function listConvexModuleFiles(absDir: string): string[] {
 }
 
 /** The nearest ancestor of `startDir` (walking up) that contains a `node_modules` dir. A real app's
- *  `convex/` sits under its project root, whose `node_modules` has `@stackbase/*`; that is what we
+ *  functions directory sits under its project root, whose `node_modules` has `@stackbase/*`; that is what we
  *  find. Returns `undefined` if there is no `node_modules` ancestor at all (e.g. a throwaway temp-dir
  *  project) — the caller then falls back to the CLI's own root. */
 function nearestNodeModulesRoot(startDir: string): string | undefined {
@@ -57,7 +57,7 @@ function resolveCacheDir(startDir: string): string {
     nearestNodeModulesRoot(startDir) ??
     // Fallback: the dir containing the CLI's own node_modules (found by walking up from this module).
     (nearestNodeModulesRoot(dirname(fileURLToPath(import.meta.url))) ?? resolve(startDir));
-  // Namespace per convex-dir so two projects that resolve to the SAME node_modules ancestor never
+  // Namespace per functions-dir so two projects that resolve to the SAME node_modules ancestor never
   // collide on `<key>.mjs` (a shared path would let a parallel load of a different dir overwrite this
   // one's bundle between write and read — a silent wrong-module load).
   const ns = createHash("sha256").update(resolve(startDir)).digest("hex").slice(0, 16);
@@ -110,7 +110,7 @@ async function bundleAndImport(file: string, key: string, cacheDir: string): Pro
 
 export async function loadFunctionsDir(dir: string): Promise<LoadedProject> {
   const absDir = resolve(dir);
-  const entries = listConvexModuleFiles(absDir);
+  const entries = listFunctionModuleFiles(absDir);
   const cacheDir = resolveCacheDir(absDir);
 
   const schemaFile = existsSync(join(absDir, "schema.ts")) ? "schema.ts" : "schema.js";
@@ -126,13 +126,3 @@ export async function loadFunctionsDir(dir: string): Promise<LoadedProject> {
 
   return { schema: schemaModule.default, modules };
 }
-
-/**
- * Compatibility alias, temporary. `loadConvexDir` is the pre-rename name. T2 wired `dev`/`codegen`/
- * `bootProject` onto `loadFunctionsDir`; T3 has since converted `deploy.ts`/`build.ts`/
- * `objectstore.ts` too. Only `packages/cli/src/migrate/` (explicitly excluded from this rename — it
- * performs the convex/ → stackbase/ conversion itself, T6's job) and some test files still import
- * the old name. Keeping both names live means this rename doesn't break those call sites out of
- * turn. Remove once every consumer has migrated to `loadFunctionsDir`.
- */
-export const loadConvexDir = loadFunctionsDir;

@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@stackbase/codegen";
-import { loadFunctionsDir, listConvexModuleFiles, moduleKeyForFile } from "./load-modules";
+import { loadFunctionsDir, listFunctionModuleFiles, moduleKeyForFile } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { generateEntrySource } from "./build-entry";
@@ -71,7 +71,7 @@ export async function buildCommand(args: string[]): Promise<number> {
   const { generated } = push(loaded, config.components);
   writeGenerated(generated.files, join(functionsDirAbs, "_generated"));
   // 2. Codegen the entrypoint.
-  const moduleImports = listConvexModuleFiles(functionsDirAbs).map((f) => ({ key: moduleKeyForFile(f), absPath: join(functionsDirAbs, f) }));
+  const moduleImports = listFunctionModuleFiles(functionsDirAbs).map((f) => ({ key: moduleKeyForFile(f), absPath: join(functionsDirAbs, f) }));
   const schemaAbsPath = join(functionsDirAbs, existsSync(join(functionsDirAbs, "schema.ts")) ? "schema.ts" : "schema.js");
   const cfgTs = join(dirname(functionsDirAbs), "stackbase.config.ts"), cfgJs = join(dirname(functionsDirAbs), "stackbase.config.js");
   const configAbsPath = existsSync(cfgTs) ? cfgTs : existsSync(cfgJs) ? cfgJs : null;

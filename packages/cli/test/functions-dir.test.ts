@@ -98,3 +98,12 @@ describe("ensureFunctionsDirExists", () => {
     expect(all).toContain("stackbase migrate");
   });
 });
+
+describe("regression guard", () => {
+  it("the default functions directory is stackbase, not convex", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sb-guard-"));
+    const r = await resolveFunctionsDir(undefined, root);
+    expect(r.functionsDir.endsWith("convex")).toBe(false);
+    expect(r.functionsDir).toBe(join(root, "stackbase"));
+  });
+});

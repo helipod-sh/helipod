@@ -19,7 +19,7 @@ function cliNodeModules(): string {
  * like a real project) and optionally a `_generated/server.ts` stub — enough for `bootProject`
  * (which never reads `_generated/`) and for the `serveCommand` fail-fast existence check.
  */
-function makeFixtureConvexDir(withGenerated: boolean): string {
+function makeFixtureFunctionsDir(withGenerated: boolean): string {
   const dir = mkdtempSync(join(tmpdir(), "sbserve-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
@@ -54,14 +54,14 @@ describe("serveCommand fail-fast", () => {
 
   it("returns 1 with a clear message when STACKBASE_ADMIN_KEY is unset", async () => {
     delete process.env.STACKBASE_ADMIN_KEY;
-    const dir = makeFixtureConvexDir(true);
+    const dir = makeFixtureFunctionsDir(true);
     const code = await serveCommand(["--dir", dir]);
     expect(code).toBe(1);
   });
 
   it("returns 1 when --dir lacks _generated/", async () => {
     process.env.STACKBASE_ADMIN_KEY = "test-key";
-    const dir = makeFixtureConvexDir(false);
+    const dir = makeFixtureFunctionsDir(false);
     const code = await serveCommand(["--dir", dir]);
     expect(code).toBe(1);
   });
@@ -69,7 +69,7 @@ describe("serveCommand fail-fast", () => {
 
 describe("startServe", () => {
   it("boots and serves /api/health", async () => {
-    const fixtureDir = makeFixtureConvexDir(true);
+    const fixtureDir = makeFixtureFunctionsDir(true);
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbserve-db-")), "db.sqlite");
     const { server, store } = await startServe({
       functionsDir: fixtureDir,
@@ -105,7 +105,7 @@ function makeWebDir(): string {
 
 describe("startServe --web", () => {
   it("serves index.html at / and static assets, on the same origin as /api/sync", async () => {
-    const fixtureDir = makeFixtureConvexDir(true);
+    const fixtureDir = makeFixtureFunctionsDir(true);
     const webDir = makeWebDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
     const { server, store } = await startServe({
@@ -138,7 +138,7 @@ describe("startServe --web", () => {
   });
 
   it("without --web, an app path 404s (the control — proves the test above isn't vacuous)", async () => {
-    const fixtureDir = makeFixtureConvexDir(true);
+    const fixtureDir = makeFixtureFunctionsDir(true);
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbweb-db-")), "db.sqlite");
     const { server, store } = await startServe({
       functionsDir: fixtureDir,

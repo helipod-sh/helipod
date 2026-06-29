@@ -1,7 +1,7 @@
 /**
  * Pure generator for the `stackbase build` entrypoint. `bun build --compile` only bundles STATIC
  * imports, so we emit static imports of the app's modules/schema/config (+ embedded dashboard files)
- * and reconstruct the `{schema, modules}` shape `loadConvexDir` returns at runtime. `JSON.stringify`
+ * and reconstruct the `{schema, modules}` shape `loadFunctionsDir` returns at runtime. `JSON.stringify`
  * on every path/key guards against quotes/backslashes breaking the generated source.
  */
 export interface EntryInputs {

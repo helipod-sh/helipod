@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
 const DATA_DIR = "./.tmp-shard-dev-boot";
@@ -48,7 +48,7 @@ describe("dev-tier shard routing (Shards B2a, T5)", () => {
     const [channelA, channelB] = distinctShardPair();
     expect(shardIdForKeyValue(channelA, NUM_SHARDS)).not.toBe(shardIdForKeyValue(channelB, NUM_SHARDS));
 
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/convex");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     try {
       // Real per-shard routing: both channels' sends succeed (neither errors as an "undeclared

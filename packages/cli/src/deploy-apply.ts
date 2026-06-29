@@ -1,6 +1,6 @@
 /**
  * Server-side apply for `stackbase deploy`: write the pushed tree under a writable dir a sibling
- * chain from the engine's node_modules (so `@stackbase/*` resolves), reuse loadConvexDir → push,
+ * chain from the engine's node_modules (so `@stackbase/*` resolves), reuse loadFunctionsDir → push,
  * gate on an additive-schema diff, then ATOMICALLY swap modules/routes/schema. All validation
  * happens before the first swap, so a rejected deploy leaves the running version fully live.
  */
@@ -11,7 +11,7 @@ import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import type { AdminApi } from "@stackbase/admin";
 import type { ComponentDefinition } from "@stackbase/component";
 import { sha256Hex } from "@stackbase/deploy";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
 import { push } from "./push-pipeline";
 import { withStorageModules } from "./boot";
 import { diffSchema, type DeploySchema } from "./schema-diff";
@@ -93,7 +93,7 @@ export async function applyDeploy(
       mkdirSync(dirname(abs), { recursive: true });
       writeFileSync(abs, f.code);
     }
-    const loaded = await loadConvexDir(dir);
+    const loaded = await loadFunctionsDir(dir);
     project = push(loaded, deps.components, deps.current().tableNumbers).project;
   } catch (e) {
     return { ok: false, kind: "load-error", error: e instanceof Error ? e.message : String(e) };

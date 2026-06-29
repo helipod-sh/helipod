@@ -2,13 +2,13 @@
  * `stackbase` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
-import { existsSync, watch as fsWatch } from "node:fs";
+import { watch as fsWatch } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@stackbase/codegen";
 import { generateAdminKey } from "@stackbase/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadFunctionsDir } from "./load-modules";
-import { resolveFunctionsDir, functionsDirNotFoundMessage, ensureFunctionsDirExists } from "./functions-dir";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { bootProject, loadDashboard, withStorageModules } from "./boot";
@@ -40,8 +40,7 @@ function parseFlags(args: string[]): DevOptions {
 export async function devCommand(args: string[]): Promise<number> {
   const flags = parseFlags(args);
   const { functionsDir, projectRoot } = await resolveFunctionsDir(flags.functionsDir, process.cwd());
-  if (!existsSync(functionsDir)) {
-    process.stderr.write(functionsDirNotFoundMessage(functionsDir));
+  if (!ensureFunctionsDirExists(functionsDir)) {
     return 1;
   }
   const opts = resolveDevOptions({ ...flags, functionsDir });

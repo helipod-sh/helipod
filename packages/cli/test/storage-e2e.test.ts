@@ -36,12 +36,12 @@ import { S3BlobStore } from "@stackbase/blobstore-s3";
 
 /** The committed fixture convex dir (schema.ts + files.ts + _generated). Copied into a temp dir per
  * run so a fresh `node_modules/@stackbase` symlink can resolve the bare `@stackbase/*` imports the
- * dynamic `loadConvexDir` import needs (mirrors `serve-e2e.test.ts`). */
+ * dynamic `loadFunctionsDir` import needs (mirrors `serve-e2e.test.ts`). */
 function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../node_modules");
 }
 
-function makeFixtureConvexDir(): string {
+function makeFixtureFunctionsDir(): string {
   const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "convex");
   const root = mkdtempSync(join(tmpdir(), "sb-storage-e2e-"));
   const dir = join(root, "convex");
@@ -135,7 +135,7 @@ function abs(baseUrl: string, maybeRelative: string): string {
 
 describe("file storage — FS hermetic E2E (real serve, proxied upload path)", () => {
   it("upload (binary) → ready + reactive fan-out → getUrl GET (200 + Range 206) → delete", async () => {
-    const functionsDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureFunctionsDir();
     const dataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-fs-db-")), "db.sqlite");
 
     const { server, store } = await startServe({
@@ -306,7 +306,7 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
     "presigned PUT → confirm → getUrl 302 → reactive save; orphan reap; delete blob reclaim",
     async () => {
       const { endpoint } = await startMinio();
-      const functionsDir = makeFixtureConvexDir();
+      const functionsDir = makeFixtureFunctionsDir();
       const dataPath = join(mkdtempSync(join(tmpdir(), "sb-storage-s3-db-")), "db.sqlite");
 
       // The test-side view of the same bucket (the shipped adapter) — used to assert bucket-object
