@@ -3,8 +3,8 @@
  * imports, scaffold config, write a divergence report, and regenerate `_generated/`. v1 supports
  * only `--from convex`; other origin backends register into `SOURCES` the same way.
  */
-import { writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeGenerated, generateServer } from "@stackbase/codegen";
 import { loadConvexDir } from "./load-modules";
@@ -13,21 +13,22 @@ import { push } from "./push-pipeline";
 import { resolveSource, type MigrationSource, type ReportEntry } from "./migrate/source";
 import { convexSource } from "./migrate/convex-source";
 import { migrateExportCommand, migrateImportCommand } from "./migrate/data";
+import { DEFAULT_FUNCTIONS_DIR } from "./functions-dir";
 
 const SOURCES: Record<string, MigrationSource> = { convex: convexSource };
 
 interface MigrateOptions {
   from: string;
-  appDir: string;
+  functionsDir: string;
   dryRun: boolean;
   force: boolean;
 }
 function parse(args: string[]): MigrateOptions {
-  const out: MigrateOptions = { from: "convex", appDir: "convex", dryRun: false, force: false };
+  const out: MigrateOptions = { from: "convex", functionsDir: "convex", dryRun: false, force: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--from" && args[i + 1]) out.from = args[++i]!;
-    else if (a === "--dir" && args[i + 1]) out.appDir = args[++i]!;
+    else if (a === "--dir" && args[i + 1]) out.functionsDir = args[++i]!;
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--force") out.force = true;
   }
@@ -66,8 +67,8 @@ export async function migrateCommand(args: string[]): Promise<number> {
   if (args[0] === "import") return migrateImportCommand(args.slice(1));
 
   const opts = parse(args);
-  const appDir = resolve(opts.appDir);
-  const projectRoot = dirname(appDir);
+  const functionsDir = resolve(opts.functionsDir);
+  const projectRoot = dirname(functionsDir);
 
   const dirty = gitDirty(projectRoot);
   if (dirty === true && !opts.force) {
@@ -92,7 +93,46 @@ export async function migrateCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  const plan = await source.analyze(projectRoot, appDir);
+  // Rename the functions directory to Stackbase's own convention. Runs AFTER detect (which looks
+  // for convex/schema.ts on the untouched tree) and BEFORE analyze, so every path in the plan
+  // already refers to the new location. A project that declares its own `functionsDir` wins, so
+  // migrate can never produce a layout the CLI would then fail to find.
+  const cfg = await loadConfig(projectRoot);
+  const targetName = cfg.functionsDir ?? DEFAULT_FUNCTIONS_DIR;
+  const targetDir = isAbsolute(targetName) ? targetName : join(projectRoot, targetName);
+  let migratedDir = functionsDir;
+  let renamed = false;
+  if (resolve(functionsDir) !== resolve(targetDir)) {
+    if (existsSync(targetDir)) {
+      process.stderr.write(
+        `refusing to migrate: ${targetDir} already exists (remove or rename it, then re-run)\n`,
+      );
+      return 1;
+    }
+    // `dirty` (computed above) already tells us whether projectRoot is a git repo at all — reuse
+    // that signal instead of shelling out to git again. Inside a repo, prefer `git mv` so the
+    // rename shows up as a rename in history rather than a delete+add; fall back to a plain
+    // filesystem rename if git mv fails for any reason (e.g. the dir isn't tracked yet).
+    let didGitMv = false;
+    if (dirty !== null) {
+      const r = spawnSync("git", ["mv", functionsDir, targetDir], { cwd: projectRoot });
+      didGitMv = r.status === 0;
+    }
+    if (!didGitMv) renameSync(functionsDir, targetDir);
+    migratedDir = targetDir;
+    renamed = true;
+    process.stdout.write(`renamed ${functionsDir} → ${targetDir}\n`);
+  }
+
+  const plan = await source.analyze(projectRoot, migratedDir);
+  if (renamed) {
+    plan.report.unshift({
+      severity: "auto-fixed",
+      file: `${basename(functionsDir)}/`,
+      what: `renamed to ${basename(targetDir)}/`,
+      fix: `Your backend functions now live in ${basename(targetDir)}/. Imports inside that folder are relative and did not change.`,
+    });
+  }
 
   // Always write the report first (so a later regen failure still leaves it).
   writeFileSync(join(projectRoot, "MIGRATION-REPORT.md"), renderReport(plan.report));
@@ -109,7 +149,7 @@ export async function migrateCommand(args: string[]): Promise<number> {
 
   // Regenerate _generated/ via the standard pipeline.
   try {
-    const generatedDir = join(appDir, "_generated");
+    const generatedDir = join(migratedDir, "_generated");
 
     // Delete the app's existing `_generated/` before regenerating (spec §88). A real Convex app
     // ships `_generated/{server.js, server.d.ts, api.js, api.d.ts, dataModel.d.ts}` — the pre-write
@@ -137,7 +177,7 @@ export async function migrateCommand(args: string[]): Promise<number> {
       writeFileSync(join(generatedDir, "server.ts"), stub.content);
     }
 
-    const loaded = await loadConvexDir(appDir);
+    const loaded = await loadConvexDir(migratedDir);
     const { generated } = push(loaded, config.components);
     writeGenerated(generated.files, generatedDir);
   } catch (e) {

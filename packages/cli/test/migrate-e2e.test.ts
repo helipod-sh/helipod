@@ -45,7 +45,7 @@ describe("migrate E2E", () => {
   it("migrated fixture loads and a migrated mutation runs on the engine", async () => {
     expect(await migrateCommand(["--dir", join(root, "convex"), "--force"])).toBe(0);
 
-    const loaded = await loadConvexDir(join(root, "convex"));
+    const loaded = await loadConvexDir(join(root, "stackbase"));
     const project = loadProject(loaded);
     const runtime = await createEmbeddedRuntime({
       store: new SqliteDocStore(new NodeSqliteAdapter()),
