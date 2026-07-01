@@ -101,7 +101,7 @@ the **calling mutation's own transaction**: an enqueue rolls back if the mutatio
 fans out reactively to any live subscription (like the in-app inbox) the instant the mutation
 commits:
 
-```ts title="convex/users.ts"
+```ts title="stackbase/users.ts"
 import { mutation } from "./_generated/server";
 
 export const welcome = mutation({
@@ -223,7 +223,7 @@ Most app code never needs it directly.
 
 #### `sendNow`: synchronous delivery from an action
 
-```ts title="convex/blast.ts"
+```ts title="stackbase/blast.ts"
 import { action } from "./_generated/server";
 
 export const blast = action({

@@ -35,11 +35,11 @@ stackbase yourself, on your own infrastructure, with no managed cloud in the mid
 
 ## You write your backend as functions
 
-Your functions live in a `convex/` folder:
+Your functions live in a `stackbase/` folder:
 
 <Files>
 
-<Folder name="convex" defaultOpen>
+<Folder name="stackbase" defaultOpen>
 
 <File name="schema.ts" />
 
@@ -53,7 +53,7 @@ Your functions live in a `convex/` folder:
 
 Here's a query that lists messages and a mutation that adds one:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 

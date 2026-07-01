@@ -194,7 +194,7 @@ A mutation handler runs inside its own transaction, exactly like any other mutat
 it's OCC-replayed on conflict, and any writes it makes are immediately visible and fan out reactively
 to any live subscription that overlaps them (the chat example's counter and audit-log pattern):
 
-```ts title="convex/audit.ts"
+```ts title="stackbase/audit.ts"
 import { mutation } from "./_generated/server";
 import type { LogChange } from "@stackbase/component";
 
@@ -232,7 +232,7 @@ An action handler works the same way, but runs outside the transaction: no `ctx.
 `fetch`/`Date`/clock, exactly like any other [action](/docs/core-concepts/actions). This is the shape
 for notification fan-out or syncing to an external system:
 
-```ts title="convex/notifications.ts"
+```ts title="stackbase/notifications.ts"
 import { action } from "./_generated/server";
 import type { LogChange } from "@stackbase/component";
 
@@ -367,7 +367,7 @@ instead of spinning the node, recognizably distinct from a `"max-failures"` paus
 may have been succeeding on every single call. It was just running far too often. Fix the recursive
 write pattern, then `triggers:resume`.
 
-```ts title="convex/loops.ts"
+```ts title="stackbase/loops.ts"
 // The recursion footgun, deliberately: this handler writes its OWN watched table on every
 // delivery, one row per call. With a low maxDeliveriesPerWindow the breaker trips well before
 // this melts the node.
@@ -440,7 +440,7 @@ export default defineConfig({
 });
 ```
 
-```ts title="convex/orders.ts"
+```ts title="stackbase/orders.ts"
 import { mutation } from "./_generated/server";
 import type { LogChange } from "@stackbase/component";
 

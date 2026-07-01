@@ -13,10 +13,11 @@ rewriting imports, not rewriting your logic.
 `_generated/`. For everything it can't do for you, it gives you a concrete, file-and-line list.
 
 Canonical imports in stackbase are `@stackbase/*`, never `convex/*` (see
-[What is stackbase?](/docs/get-started/what-is-stackbase)). The `convex/` app-directory name is
-kept only as a low-friction default. Migrating moves your app onto the native import surface; it
-does not make stackbase execute `convex/*` imports unchanged. There's no compatibility shim to fall
-back on. The codemod is the whole migration.
+[What is stackbase?](/docs/get-started/what-is-stackbase)). `stackbase migrate` also renames your
+app's function directory from `convex/` to stackbase's own default, `stackbase/`, as part of the
+same run. Migrating moves your app onto the native import surface; it does not make stackbase
+execute `convex/*` imports unchanged. There's no compatibility shim to fall back on. The codemod is
+the whole migration.
 
 This page covers two independent things under one command: `stackbase migrate` rewrites a Convex
 project's **code**, and `stackbase migrate export`/`import` moves an app's **data** between
@@ -35,8 +36,9 @@ Nothing about your function bodies needs to change:
 
 - `query`/`mutation`/`action` still come from `./_generated/server`. Your function bodies don't
   move.
-- `convex/schema.ts` keeps its shape. `defineSchema`, `defineTable`, and indexes work the same way;
-  only the import specifier moves.
+- `schema.ts` keeps its shape (it just relocates from `convex/` to `stackbase/` along with the rest
+  of the directory, see [the rename step](#what-it-actually-does-in-order) below).
+  `defineSchema`, `defineTable`, and indexes work the same way; only the import specifier moves.
 - `useQuery`/`useMutation` keep the same signatures, imported from `@stackbase/client/react`
   instead of `convex/react`.
 
@@ -108,10 +110,24 @@ migrated 3 files. 2 item(s) need manual attention, see MIGRATION-REPORT.md
 
 <Step>
 
-### Walk `convex/`
+### Rename the functions directory
+
+Runs right after detection, on the untouched tree, and before anything else. If the source
+directory (`--dir`, default `convex`) differs from where stackbase itself would put it
+(`stackbase/` by default, or your project's own `functionsDir` in `stackbase.config.ts`), the whole
+directory is renamed there first: `git mv` inside a git repo, falling back to a plain filesystem
+rename if that fails. If the target directory already exists, the migration refuses to proceed
+rather than overwrite it. Every step from here on operates on the renamed directory. On `--dry-run`,
+the rename is only reported as pending; the directory itself is left untouched.
+
+</Step>
+
+<Step>
+
+### Walk the functions directory
 
 It recurses into every subdirectory except `_generated` and `node_modules`, collecting every
-`.ts`/`.tsx` file.
+`.ts`/`.tsx` file (under the renamed directory, if a rename just happened).
 
 </Step>
 
@@ -164,7 +180,7 @@ It deletes the app's existing `_generated/` directory outright. A real Convex ap
 were left in place, a JS-first module resolver would pick the stale `server.js` (which still
 imports the now-uninstalled `"convex/server"`) over the regenerated `.ts`. It then loads the
 rewritten project and regenerates fresh typed `Doc`/`Id`/`api` and server helpers, through the same
-`loadConvexDir → push → writeGenerated` pipeline `stackbase codegen` uses.
+`loadFunctionsDir → push → writeGenerated` pipeline `stackbase codegen` uses.
 
 If codegen fails, usually because an action-needed item wasn't fixed yet (for example, a
 `.withIndex` left in place makes the load itself throw), the command exits `1`. Everything up to
@@ -211,7 +227,7 @@ import { v } from "convex/values";
 export default defineSchema({ notes: defineTable({ body: v.string() }) });
 ```
 
-```ts title="convex/schema.ts (after migrate)"
+```ts title="stackbase/schema.ts (after migrate)"
 import { defineSchema, defineTable } from "@stackbase/values";
 import { v } from "@stackbase/values";
 
@@ -264,24 +280,25 @@ section is omitted entirely if it has no entries:
 ```md title="MIGRATION-REPORT.md"
 # Stackbase migration report
 
-4 auto-fixed, 3 action-needed, 1 unsupported.
+5 auto-fixed, 3 action-needed, 1 unsupported.
 
-## Auto-fixed (4)
+## Auto-fixed (5)
 
-- `convex/schema.ts:1`: import "convex/server" (schema). **Fix:** rewritten to "@stackbase/values"
-- `convex/schema.ts:2`: import "convex/values". **Fix:** rewritten to "@stackbase/values"
-- `convex/messages.ts:1`: import "convex/react". **Fix:** rewritten to "@stackbase/client/react"
-- `convex/http.ts:1`: import "convex/server" (http). **Fix:** rewritten to "./_generated/server"
+- `convex/`: renamed to stackbase/. **Fix:** Your backend functions now live in stackbase/. Imports inside that folder are relative and did not change.
+- `stackbase/schema.ts:1`: import "convex/server" (schema). **Fix:** rewritten to "@stackbase/values"
+- `stackbase/schema.ts:2`: import "convex/values". **Fix:** rewritten to "@stackbase/values"
+- `stackbase/messages.ts:1`: import "convex/react". **Fix:** rewritten to "@stackbase/client/react"
+- `stackbase/http.ts:1`: import "convex/server" (http). **Fix:** rewritten to "./_generated/server"
 
 ## Action needed (3)
 
-- `convex/messages.ts:14`: .withIndex(...) query. **Fix:** Stackbase has no .withIndex, use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()
-- `convex/messages.ts:22`: ctx.db.patch(...). **Fix:** Stackbase has no patch, read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })
-- `convex/crons.ts:1`: Convex crons (cronJobs). **Fix:** Compose defineScheduler() in stackbase.config.ts and use cronJobs() from "@stackbase/scheduler"
+- `stackbase/messages.ts:14`: .withIndex(...) query. **Fix:** Stackbase has no .withIndex, use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()
+- `stackbase/messages.ts:22`: ctx.db.patch(...). **Fix:** Stackbase has no patch, read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })
+- `stackbase/crons.ts:1`: Convex crons (cronJobs). **Fix:** Compose defineScheduler() in stackbase.config.ts and use cronJobs() from "@stackbase/scheduler"
 
 ## Unsupported (1)
 
-- `convex/search.ts:9`: vector/search index. **Fix:** search/vector is not yet supported in Stackbase (see roadmap)
+- `stackbase/search.ts:9`: vector/search index. **Fix:** search/vector is not yet supported in Stackbase (see roadmap)
 ```
 
 Every finding, including the auto-fixed ones, is listed for visibility, not just the ones that need
@@ -329,7 +346,7 @@ files, and the scaffolded config file isn't part of that pass.
 directly), and the registry it builds does nothing until it's passed to
 `defineScheduler({ crons })`:
 
-```ts title="convex/crons.ts"
+```ts title="stackbase/crons.ts"
 import { cronJobs } from "./_generated/server";
 
 const crons = cronJobs();
@@ -341,7 +358,7 @@ export default crons;
 ```ts title="stackbase.config.ts"
 import { defineConfig } from "@stackbase/component";
 import { defineScheduler } from "@stackbase/scheduler";
-import crons from "./convex/crons";
+import crons from "./stackbase/crons";
 
 export default defineConfig({ components: [defineScheduler({ crons })] });
 ```
@@ -525,8 +542,9 @@ immediately, not a silent runtime divergence.
 
 ### Port your tests, if you have them
 
-`stackbase migrate` rewrites only your app's own `convex/` source. It does not touch
-`convex-test` call sites. Switch those to [`@stackbase/test`](/docs/reference/testing) yourself.
+`stackbase migrate` rewrites only your app's own function-directory source (renamed from `convex/`
+to `stackbase/` as part of the same run). It does not touch `convex-test` call sites. Switch those
+to [`@stackbase/test`](/docs/reference/testing) yourself.
 The fixture shape (`createTestStackbase`) is different enough that it isn't auto-rewritten.
 
 </Step>
@@ -599,10 +617,10 @@ catch every one of them at the call site rather than let them surface later as a
   [`@stackbase/notifications`](/docs/components/notifications), via `stackbase.config.ts`.
 
 `@stackbase/*` is the canonical surface, permanently. This isn't a temporary migration artifact.
-The `convex/` directory name is kept only because it's a familiar, low-friction default for a
-project's function directory. It is not, and was never meant to be, a promise that `convex/*`
-imports keep working. There's no alias path back to `convex/*` imports to maintain: once migrated,
-you're simply writing a native stackbase app.
+stackbase's own default function directory is `stackbase/`, not `convex/`; `convex/` was never the
+target, only where a Convex app starts from, and `stackbase migrate` renames it as part of the same
+run. There's no alias path back to `convex/*` imports to maintain: once migrated, you're simply
+writing a native stackbase app.
 
 ## Related
 

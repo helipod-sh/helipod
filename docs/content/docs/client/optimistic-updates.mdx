@@ -134,7 +134,7 @@ function bumpVotes(store: OptimisticLocalStore, id: Id<"options">, delta: number
 type. That type comes from an explicit `returns` validator on the query, the same way `args` already
 works:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 export const list = query({
   args: { conversationId: v.id("conversations") },
   returns: v.array(v.object({

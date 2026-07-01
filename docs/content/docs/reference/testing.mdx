@@ -35,7 +35,7 @@ npm install -D @stackbase/test
 
 ### Write and run a test
 
-```ts title="convex/messages.test.ts"
+```ts title="stackbase/messages.test.ts"
 import { afterEach, expect, test } from "vitest";
 import { createTestStackbase, type TestStackbase } from "@stackbase/test";
 import * as messages from "./messages";
@@ -140,12 +140,12 @@ const t = await createTestStackbase({
 // Or let your bundler enumerate the directory: the non-eager form (a map of lazy
 // loaders) works as-is; each entry is awaited before use.
 const t = await createTestStackbase({
-  modules: import.meta.glob("./convex/**/*.ts"),
+  modules: import.meta.glob("./stackbase/**/*.ts"),
 });
 ```
 
-Keys from `import.meta.glob` come back with leading path segments, like `./convex/messages.ts`. The
-harness normalizes them: it strips `./`/`../` prefixes, a leading `convex/` root, and the file
+Keys from `import.meta.glob` come back with leading path segments, like `./stackbase/messages.ts`. The
+harness normalizes them: it strips `./`/`../` prefixes, a leading `stackbase/` root, and the file
 extension, landing on the same `module:export` path your codegen'd `api`/bare-string refs already use.
 A glob-sourced module registers under the exact path an explicit `{ "messages.ts": messages }` entry
 would.

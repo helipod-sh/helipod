@@ -134,7 +134,7 @@ measurably the faster single-node store, since there's no network round trip and
 fsync-per-commit cost: it's in-memory and CPU-bound.
 
 ```bash
-stackbase serve --dir convex
+stackbase serve --dir stackbase
 ```
 
 </Tab>
@@ -148,7 +148,7 @@ headed toward the multi-node fleet (see [How fast is it?](#how-fast-is-it-measur
 below).
 
 ```bash
-stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+stackbase serve --dir stackbase --database-url postgres://user:pass@host:5432/db
 ```
 
 </Tab>
@@ -405,7 +405,7 @@ including `wrangler.jsonc`, the region-pinning hint, and R2-backed file storage.
 
 No. Two things make that concrete, not just a slogan:
 
-- **The same app code runs everywhere.** Your `schema.ts` and `convex/` functions run unchanged on
+- **The same app code runs everywhere.** Your `schema.ts` and `stackbase/` functions run unchanged on
   `stackbase dev`, `stackbase serve` (SQLite or Postgres), a compiled single binary, a multi-node
   fleet, or either Cloudflare path. Moving up the tiered architecture changes deployment
   configuration and adapters, never the functions you wrote.

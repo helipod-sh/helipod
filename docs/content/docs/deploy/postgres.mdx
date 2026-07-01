@@ -22,11 +22,11 @@ unset and you get SQLite exactly as before.
 <Tabs items={['Flag', 'Environment variable']}>
 
 ```bash tab="Flag"
-stackbase serve --dir convex --database-url postgres://user:pass@host:5432/db
+stackbase serve --dir stackbase --database-url postgres://user:pass@host:5432/db
 ```
 
 ```bash tab="Environment variable"
-STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir convex
+STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir stackbase
 ```
 
 </Tabs>
@@ -50,11 +50,11 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./convex:/app/convex:ro
+      - ./stackbase:/app/stackbase:ro
     environment:
       STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY}
       STACKBASE_DATABASE_URL: postgres://stackbase:stackbase@postgres:5432/stackbase
-    command: serve --dir /app/convex
+    command: serve --dir /app/stackbase
     depends_on:
       - postgres
 
@@ -101,7 +101,7 @@ that one pinned connection. A second `serve` or `dev` process pointed at the sam
 fast instead of silently corrupting state:
 
 ```bash
-$ stackbase serve --dir convex --database-url postgres://...   # already running elsewhere
+$ stackbase serve --dir stackbase --database-url postgres://...   # already running elsewhere
 Error: another Stackbase engine is already connected to this database (advisory lock held)
 ```
 
@@ -227,10 +227,10 @@ other value, including `0`/`false`, forces it off):
 
 ```bash
 # force it off even against Postgres
-STACKBASE_GROUP_COMMIT=0 stackbase serve --database-url postgres://... --dir convex
+STACKBASE_GROUP_COMMIT=0 stackbase serve --database-url postgres://... --dir stackbase
 
 # force it on even against SQLite (rarely useful, see the measured cost below)
-STACKBASE_GROUP_COMMIT=1 stackbase serve --dir convex
+STACKBASE_GROUP_COMMIT=1 stackbase serve --dir stackbase
 ```
 
 The store-conditional default exists because the win is store-dependent, not universal. Measured on

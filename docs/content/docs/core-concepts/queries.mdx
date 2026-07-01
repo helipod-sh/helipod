@@ -17,7 +17,7 @@ re-run.
 `query({ args, returns, handler })` takes a validated argument object and a handler. The handler
 receives a `QueryCtx` whose only capability is `ctx.db`, a **read-only** database handle:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { query } from "./_generated/server";
 
@@ -187,7 +187,7 @@ matching actually happens at commit time.
 
 `.paginate({ cursor, pageSize, maxScan? })` returns one page instead of the whole matching set:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 export const page = query({
   args: { conversationId: v.id("conversations"), cursor: v.union(v.string(), v.null()), pageSize: v.number() },
   handler: (ctx, args) =>
@@ -322,7 +322,7 @@ On the client, you subscribe with the `useQuery` hook and the generated, typed `
 
 ```tsx
 import { useQuery } from "@stackbase/client/react";
-import { api } from "../convex/_generated/server";
+import { api } from "../stackbase/_generated/server";
 
 function Messages({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });

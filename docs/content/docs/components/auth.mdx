@@ -72,7 +72,7 @@ and attaches `ctx.auth` as a context provider to every query, mutation, and acti
 `SetAuth`, or an HTTP request's bearer token, to a user id. It returns `null` if there's no
 session, or if it expired:
 
-```ts title="convex/documents.ts"
+```ts title="stackbase/documents.ts"
 import { query } from "./_generated/server";
 
 export const myDocuments = query({

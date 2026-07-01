@@ -137,21 +137,21 @@ bun run dev
 That `dev` script is really:
 
 ```bash
-bun ../../packages/cli/dist/bin.js dev --dir convex --web web --port 3210
+bun ../../packages/cli/dist/bin.js dev --dir stackbase --web web --port 3210
 ```
 
 Here's what happens when it starts:
 
 1. It boots the **embedded runtime**, an in-process engine (storage, transaction manager, query
    engine, WebSocket sync server), all in one Bun process. No separate database to start.
-2. It watches the `convex/` folder (`--dir convex`) for function and schema changes.
+2. It watches the `stackbase/` folder (`--dir stackbase`) for function and schema changes.
 3. On every save, it re-bundles your functions, re-runs codegen (regenerating the typed
    `_generated/api` your app code imports), and pushes the new code into the running engine,
    without dropping open WebSocket subscriptions. A page with a live query just updates.
 4. It serves the sync WebSocket, the HTTP API, and the dashboard, all on one port
    (`--port 3210`), and serves the example's static frontend (`--web web`).
 
-If you only changed a function in `convex/` you don't need to do anything else. The watch loop
+If you only changed a function in `stackbase/` you don't need to do anything else. The watch loop
 picks it up. If you changed a package under `packages/` that the example depends on, remember
 gotcha #1: rebuild that package first, or the example keeps running the old code.
 

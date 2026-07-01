@@ -100,7 +100,7 @@ node is a **sync node**.
 
 ```bash
 STACKBASE_ADMIN_KEY=secret stackbase serve \
-  --dir convex \
+  --dir stackbase \
   --database-url postgres://user:pass@host:5432/db \
   --fleet \
   --advertise-url http://10.0.0.5:3000
@@ -118,7 +118,7 @@ export STACKBASE_ADMIN_KEY=secret
 export STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db
 export STACKBASE_FLEET=1
 export STACKBASE_ADVERTISE_URL=http://10.0.0.5:3000
-stackbase serve --dir convex
+stackbase serve --dir stackbase
 ```
 
 </Tab>
@@ -307,7 +307,7 @@ Sharding is what lets writes themselves parallelize: annotate a table with `.sha
 mutation that writes it with `shardBy`, and that table's writes route across multiple independent
 shards instead of funneling through one bottleneck.
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -321,7 +321,7 @@ export default defineSchema({
 });
 ```
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   shardBy: "conversationId",
@@ -543,7 +543,7 @@ backend with no database at all.
 ### Starting an object-storage node
 
 ```bash
-STACKBASE_ADMIN_KEY=secret stackbase serve --dir convex \
+STACKBASE_ADMIN_KEY=secret stackbase serve --dir stackbase \
   --object-store s3://accessKey:secretKey@localhost:9000/my-bucket?region=us-east-1
 ```
 
@@ -609,7 +609,7 @@ The full `--object-store` URL grammar (schemes, credential resolution, worked ex
 ### Changing shard count: `stackbase objectstore reshard`
 
 ```bash
-stackbase objectstore reshard --object-store s3://... --dir convex --shards 4
+stackbase objectstore reshard --object-store s3://... --dir stackbase --shards 4
 ```
 
 Unlike the Postgres fleet's reshard, an object-storage shard has its own physical, append-only log.

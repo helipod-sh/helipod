@@ -7,7 +7,7 @@ description: "How queries, mutations, actions, and httpActions run behind a narr
 
 ## The one-sentence version
 
-A **UDF** ("user-defined function") is the query, mutation, action, or `httpAction` you write in TypeScript, the code that lives in your `convex/` (or `stackbase/`) folder. The executor is the pipeline that takes a request naming one of those functions and turns it into a running handler that reaches the database only through a narrow, controlled doorway, then hands back a result plus a record of exactly what it read and wrote.
+A **UDF** ("user-defined function") is the query, mutation, action, or `httpAction` you write in TypeScript, the code that lives in your `stackbase/` (or `stackbase/`) folder. The executor is the pipeline that takes a request naming one of those functions and turns it into a running handler that reaches the database only through a narrow, controlled doorway, then hands back a result plus a record of exactly what it read and wrote.
 
 Everything on this page traces that pipeline. If you're new to the codebase, the package to have open while you read is `packages/executor` (`src/executor.ts`, `src/kernel.ts`, `src/guest.ts`, `src/profile.ts`).
 

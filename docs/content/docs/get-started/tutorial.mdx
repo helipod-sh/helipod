@@ -63,9 +63,9 @@ bun add @stackbase/cli @stackbase/values @stackbase/client react react-dom
 
 ### Define the schema
 
-Your backend lives in `convex/` (the default function directory). Create `convex/schema.ts`:
+Your backend lives in `stackbase/` (the default function directory). Create `stackbase/schema.ts`:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -108,9 +108,9 @@ Two annotations on `messages` matter for everything that follows:
 
 ### Conversations: create and list
 
-Create `convex/conversations.ts`:
+Create `stackbase/conversations.ts`:
 
-```ts title="convex/conversations.ts"
+```ts title="stackbase/conversations.ts"
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 
@@ -140,10 +140,10 @@ optimistic update) know their exact result type. See
 
 ### Messages: insert, replace, delete
 
-Create `convex/messages.ts`. This is the file that does the real work: three mutations covering
+Create `stackbase/messages.ts`. This is the file that does the real work: three mutations covering
 every way a mutation writes, plus two queries:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 
@@ -271,9 +271,9 @@ A few things worth calling out:
 
 [Actions](/docs/core-concepts/actions) are the only place `fetch` is allowed. Queries and
 mutations must stay deterministic, so anything that talks to the outside world runs outside the
-transaction, in an action. Create `convex/webhook.ts`:
+transaction, in an action. Create `stackbase/webhook.ts`:
 
-```ts title="convex/webhook.ts"
+```ts title="stackbase/webhook.ts"
 import { v } from "@stackbase/values";
 import { action } from "./_generated/server";
 
@@ -305,7 +305,7 @@ mutation's does. See [Actions](/docs/core-concepts/actions) for the full picture
 
 ### Build the web UI
 
-Create a `web/` directory alongside `convex/`:
+Create a `web/` directory alongside `stackbase/`:
 
 ```html title="web/index.html"
 <!doctype html>
@@ -335,8 +335,8 @@ import { StackbaseProvider, useQuery, useMutation, useAction, useStackbaseClient
 // Type-only imports, erased at bundle time, so this never pulls the server-side
 // `@stackbase/executor` re-exports in `_generated/server.ts` into the browser bundle. `anyApi`
 // (below) is the real runtime value; `Api` just shapes it, at the import site, for free.
-import type { Api } from "../convex/_generated/api";
-import type { Doc, Id } from "../convex/_generated/dataModel";
+import type { Api } from "../stackbase/_generated/api";
+import type { Doc, Id } from "../stackbase/_generated/dataModel";
 
 const api = anyApi as Api;
 
@@ -619,7 +619,7 @@ bun build web/main.tsx --outfile web/main.js --watch
 bunx stackbase dev --web web
 ```
 
-`stackbase dev` generates `convex/_generated/`, boots the reactive engine on local SQLite, serves
+`stackbase dev` generates `stackbase/_generated/`, boots the reactive engine on local SQLite, serves
 HTTP + the sync WebSocket + the dashboard. Because of `--web web`, it also serves your bundled UI
 from the same origin and port, so there's no separate dev server or proxy to configure. It prints
 the dashboard URL and the admin key on startup. Open the printed URL in your browser to see the
@@ -655,7 +655,7 @@ live query's read-set and pushing the result to every open subscription that mat
 
 ### Hot reload while you work
 
-`stackbase dev` watches `convex/` and reloads automatically: edit a query, mutation, or schema
+`stackbase dev` watches `stackbase/` and reloads automatically: edit a query, mutation, or schema
 field and the running server picks it up without a restart. Try adding a field to `messages` or
 tweaking `list`'s handler and watch the dashboard/your app reflect it on the next read. The web UI
 is not part of that watch loop. After editing `web/main.tsx`, re-run `bun build` (or keep

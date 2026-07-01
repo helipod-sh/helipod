@@ -240,7 +240,7 @@ the current result: `undefined` until the first result arrives.
 
 ```tsx title="examples/chat/web/main.tsx"
 import { useQuery } from "@stackbase/client/react";
-import { api } from "../convex/_generated/api";
+import { api } from "../stackbase/_generated/api";
 
 function Chat({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });
@@ -439,7 +439,7 @@ full API.
 
 ## Typed codegen api
 
-`stackbase codegen` generates a typed `api` object from your `convex/` functions. That's what makes
+`stackbase codegen` generates a typed `api` object from your `stackbase/` functions. That's what makes
 `api.messages.list` a real, autocompleting, type-checked reference instead of a magic string.
 
 ### `anyApi` and `getFunctionPath`
