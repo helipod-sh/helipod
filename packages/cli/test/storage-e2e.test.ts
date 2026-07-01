@@ -11,7 +11,7 @@
  *     reap → `delete` blob reclaim. Gated on Docker like `postgres-e2e.test.ts`.
  *
  * Both boot the real `startServe` (the production entry `serve-e2e.test.ts` uses) against an
- * on-disk fixture `convex/` dir with a `files` table holding `image: v.id("_storage")`, and both
+ * on-disk fixture `stackbase/` dir with a `files` table holding `image: v.id("_storage")`, and both
  * assert the reactive path: a `files:list` subscription opened BEFORE `files:save` sees the new
  * row (an `Id<"_storage">` in a user doc fanning out like any other write).
  *
@@ -34,9 +34,9 @@ import { S3BlobStore } from "@stackbase/blobstore-s3";
 /* Shared: the storage-app fixture, WS helpers, byte assertions                */
 /* -------------------------------------------------------------------------- */
 
-/** The committed fixture convex dir (schema.ts + files.ts + _generated). Copied into a temp dir per
- * run so a fresh `node_modules/@stackbase` symlink can resolve the bare `@stackbase/*` imports the
- * dynamic `loadFunctionsDir` import needs (mirrors `serve-e2e.test.ts`). */
+/** The committed fixture functions dir (schema.ts + files.ts + _generated). Copied into a temp dir
+ * per run so a fresh `node_modules/@stackbase` symlink can resolve the bare `@stackbase/*` imports
+ * the dynamic `loadFunctionsDir` import needs (mirrors `serve-e2e.test.ts`). */
 function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../node_modules");
 }
@@ -44,7 +44,7 @@ function cliNodeModules(): string {
 function makeFixtureFunctionsDir(): string {
   const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "stackbase");
   const root = mkdtempSync(join(tmpdir(), "sb-storage-e2e-"));
-  const dir = join(root, "convex");
+  const dir = join(root, "stackbase");
   cpSync(src, dir, { recursive: true });
   const nm = join(dir, "node_modules");
   mkdirSync(nm);

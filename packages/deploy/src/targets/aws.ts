@@ -38,7 +38,8 @@ export const awsTarget: DeployTarget = {
   async package(ctx) {
     // App Runner deploys the image already configured on the service (an ECR repo pushed to by a
     // separate CI step — see the file's doc comment) — there is nothing to bundle here beyond
-    // refreshing codegen so the baked convex/_generated matches the functions being deployed.
+    // refreshing codegen so the baked functions directory's `_generated` matches the functions
+    // being deployed.
     await ctx.codegen();
   },
   async push(ctx): Promise<DeployResult> {

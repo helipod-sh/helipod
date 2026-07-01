@@ -32,6 +32,16 @@ export interface CreateTestOptions {
    * start empty; the harness owns its lifecycle from here.
    */
   store?: DocStore;
+  /**
+   * The leading path segment `import.meta.glob`-sourced `modules` keys are prefixed with (e.g.
+   * `import.meta.glob("./stackbase/**\/*.ts")` yields keys like `./stackbase/messages.ts`) —
+   * stripped so a glob-sourced module registers under the same `messages:send`-style path an
+   * explicit `{ "messages.ts": messages }` map would. Defaults to the same value as
+   * `DEFAULT_FUNCTIONS_DIR` in `@stackbase/cli`. Only needed if `modules` came from a glob AND the
+   * project's `stackbase.config.ts` sets a non-default `functionsDir` — an explicit `{ "messages.ts":
+   * ... }` map (no path prefix to strip) is unaffected either way.
+   */
+  functionsRoot?: string;
 }
 
 /** A single `http.ts` route, with its handler resolved from a `RegisteredFunction` value to the
@@ -93,7 +103,7 @@ export interface BuiltRuntime {
 }
 
 export async function buildRuntime(opts: CreateTestOptions): Promise<BuiltRuntime> {
-  const flat = await flattenModules(opts.modules);
+  const flat = await flattenModules(opts.modules, opts.functionsRoot);
   // Resolve the schema: explicit option wins; else the schema.ts module; else empty.
   const schemaDef: SchemaDefinition =
     // `opts.schema &&` already excludes `false` (falsy) as well as `undefined`, so an explicit

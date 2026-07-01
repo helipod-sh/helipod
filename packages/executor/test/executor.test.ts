@@ -28,7 +28,7 @@ const byConversation: IndexSpec = {
   indexId: encodeStorageIndexId(MESSAGES, "by_conversation"),
 };
 
-// --- functions (what a user would write in convex/) ---
+// --- functions (what a user would write in their functions directory) ---
 const sendMessage = mutation<{ conversationId: string; body: string }, string>({
   handler: (ctx, { conversationId, body }) => ctx.db.insert("messages", { conversationId, body }),
 });

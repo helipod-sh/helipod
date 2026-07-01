@@ -5,7 +5,7 @@
  * version fully live — proven here by re-exercising the previously-live function after each
  * rejected apply.
  *
- * Mirrors the fixture pattern of ../test/serve-e2e.test.ts (a real on-disk convex/ dir booted via
+ * Mirrors the fixture pattern of ../test/serve-e2e.test.ts (a real on-disk functions dir booted via
  * bootProject) and ../test/cli.test.ts's "hot reload (setModules)" (asserting a swap is live by
  * calling `runtime.run` before/after). `packageApp` (deploy.ts, Task 2) produces the `files` from
  * a real v2 fixture dir so this exercises the real transpile -> apply path, not a hand-built
@@ -34,7 +34,7 @@ function write(dir: string, file: string, content: string): void {
 }
 
 /**
- * Independently derive `{schemaJson, tableNumbers}` from a source convex/ dir — used to feed
+ * Independently derive `{schemaJson, tableNumbers}` from a source functions dir — used to feed
  * `DeployDeps.current` without going through `AdminApi.getSchema()`, whose declared return type
  * (`SchemaJsonLike`, a narrower shape for the data browser) doesn't carry `documentType` and so
  * isn't assignable to `DeploySchema["schemaJson"]` (a separate wiring concern from applyDeploy

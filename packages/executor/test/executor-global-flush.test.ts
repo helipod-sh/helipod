@@ -66,7 +66,7 @@ const globalSchema = defineSchema({
 const COUNTERS_TABLE_NUMBER = 50001;
 const NOTES_TABLE_NUMBER = 50002;
 
-// --- functions (what a user would write in convex/) ---
+// --- functions (what a user would write in their functions directory) ---
 const insertCounter = mutation<{ key: string; value: number }, string>({
   handler: (ctx, { key, value }) => ctx.db.insert("counters", { key, value }),
 });
