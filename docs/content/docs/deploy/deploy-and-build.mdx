@@ -466,14 +466,14 @@ stackbase build --dir stackbase --target linux-x64 --outfile ./dist/server-linux
 
 <Accordion title="How the build works internally">
 
-1. **Refreshes codegen**: `loadConvexDir → push → writeGenerated`, same as `deploy`, so the app's own
+1. **Refreshes codegen**: `loadFunctionsDir → push → writeGenerated`, same as `deploy`, so the app's own
    `import "./_generated/server"` resolves once bundled.
 2. **Generates a static-import entrypoint.** `bun build --compile` only bundles code reached via static
    `import` statements. There's no filesystem to dynamically scan inside a compiled binary, so
    `stackbase build` writes a throwaway `entry.ts` that statically imports every `stackbase/` module by
    absolute path, the schema, `stackbase.config.ts` (if present), and, if the dashboard is included,
    every dashboard asset via `import x with { type: "file" }`. It then reconstructs the exact
-   `{schema, modules}` shape `loadConvexDir` returns at runtime and hands it to `runBinaryServer` (the
+   `{schema, modules}` shape `loadFunctionsDir` returns at runtime and hands it to `runBinaryServer` (the
    same boot core `stackbase serve` uses, just fed statically imported modules instead of a dynamic
    directory scan).
 3. **Shells out to `bun build --compile --minify`** (via `node:child_process.spawnSync`, so this works
