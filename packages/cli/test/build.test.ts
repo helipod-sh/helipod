@@ -31,7 +31,7 @@ describe("bunTargetFor", () => {
 
 describe("shared module-file helpers", () => {
   it("lists function modules (excludes schema/_generated/.d.ts) and derives keys", () => {
-    const files = listFunctionModuleFiles("test/fixtures/deploy-v2/convex");
+    const files = listFunctionModuleFiles("test/fixtures/deploy-v2/stackbase");
     expect(files).toContain("notes.ts");
     expect(files).not.toContain("schema.ts");
     expect(moduleKeyForFile("notes.ts")).toBe("notes");

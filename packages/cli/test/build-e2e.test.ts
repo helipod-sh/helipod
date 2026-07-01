@@ -35,7 +35,7 @@ function readReadyLine(stdout: NodeJS.ReadableStream): Promise<{ url: string }> 
 
 describe("stackbase build (real compiled binary)", () => {
   it("compiles a fixture app (with a component) and the binary serves a committing mutation", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/convex", "--outfile", OUT, "--no-dashboard"]);
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", OUT, "--no-dashboard"]);
     expect(rc).toBe(0);
     expect(existsSync(OUT)).toBe(true);
 
@@ -57,13 +57,13 @@ describe("stackbase build (real compiled binary)", () => {
   }, 120_000);
 
   it("cross-compiles to linux-x64 (produces a non-empty file, not executed here)", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/convex", "--outfile", `${OUT}-linux`, "--target", "linux-x64", "--no-dashboard"]);
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", `${OUT}-linux`, "--target", "linux-x64", "--no-dashboard"]);
     expect(rc).toBe(0);
     expect(statSync(`${OUT}-linux`).size).toBeGreaterThan(1_000_000);
   }, 120_000);
 
   it("embeds the dashboard by default (served) and omits it with --no-dashboard", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/convex", "--outfile", `${OUT}-dash`]); // dashboard ON
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", `${OUT}-dash`]); // dashboard ON
     expect(rc).toBe(0);
     const proc = spawn(`${OUT}-dash`, ["--port", "3601", "--hostname", "127.0.0.1", "--data-dir", `${DATA}-dash`], {
       env: { ...process.env, STACKBASE_ADMIN_KEY: "e2e" },

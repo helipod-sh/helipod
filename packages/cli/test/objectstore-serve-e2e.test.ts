@@ -38,7 +38,7 @@ import { startServe } from "../src/serve";
 /* index) — same convention `objectstore-boot.test.ts` uses for this slice.  */
 /* -------------------------------------------------------------------------- */
 
-const FUNCTIONS_DIR = "test/fixtures/deploy-v2/convex";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/stackbase";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors serve-e2e.test.ts / storage-e2e.test.ts)        */

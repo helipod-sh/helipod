@@ -41,7 +41,7 @@ import { writeGenerated } from "@stackbase/codegen";
 /* -------------------------------------------------------------------------- */
 
 function fixtureFunctionsDir(name: string): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "convex");
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "stackbase");
 }
 
 /** Refresh a fixture's committed `_generated/` in place — same codegen step `deployCommand`

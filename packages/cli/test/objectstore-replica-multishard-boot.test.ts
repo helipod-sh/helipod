@@ -13,7 +13,7 @@ import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
 const ROOT = "./.tmp-objectstore-replica-ms-boot";
-const FIXTURE = "test/fixtures/shard-dev/convex";
+const FIXTURE = "test/fixtures/shard-dev/stackbase";
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — multi-shard object-store replica", () => {

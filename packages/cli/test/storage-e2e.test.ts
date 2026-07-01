@@ -42,7 +42,7 @@ function cliNodeModules(): string {
 }
 
 function makeFixtureFunctionsDir(): string {
-  const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "convex");
+  const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "stackbase");
   const root = mkdtempSync(join(tmpdir(), "sb-storage-e2e-"));
   const dir = join(root, "convex");
   cpSync(src, dir, { recursive: true });

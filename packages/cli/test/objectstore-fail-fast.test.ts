@@ -66,7 +66,7 @@ describe("isObjectStoreBootFailFast (F2 — distinguishes KNOWN object-store boo
     // short to ever win — produces the genuine production Error object (not a fabricated string).
     const root = mkdtempSync(join(tmpdir(), "sb-objstore-failfast-"));
     try {
-      const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+      const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
       const nodeA = await bootLoaded({
         loaded,
         components: [],
@@ -106,7 +106,7 @@ describe("isObjectStoreBootFailFast (F2 — distinguishes KNOWN object-store boo
   });
 
   it("classifies resolveObjectStore's parse/validation throws (bad scheme, missing bucket, missing creds)", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const root = mkdtempSync(join(tmpdir(), "sb-objstore-failfast-badurl-"));
     try {
       let caught: unknown;

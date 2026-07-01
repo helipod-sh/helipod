@@ -15,7 +15,7 @@ import { bootLoaded } from "../src/boot";
 import { objectstoreCommand } from "../src/objectstore";
 
 const ROOT = "./.tmp-objectstore-reshard-cmd";
-const FIXTURE = "test/fixtures/shard-dev/convex";
+const FIXTURE = "test/fixtures/shard-dev/stackbase";
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 /** Capture everything the command writes to stdout/stderr while it runs. */

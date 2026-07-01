@@ -30,7 +30,7 @@ import { startServe } from "../src/serve";
 import { resolveObjectStore } from "../src/objectstore-select";
 import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
 
-const FUNCTIONS_DIR = "test/fixtures/shard-dev/convex";
+const FUNCTIONS_DIR = "test/fixtures/shard-dev/stackbase";
 
 /* ── WS + HTTP helpers (mirror objectstore-replica-e2e.test.ts) ───────────────────────────────── */
 

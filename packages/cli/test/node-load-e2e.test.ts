@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cliBin = join(here, "..", "dist", "bin.js");
-const fixtureSrc = join(here, "fixtures", "conventional-app", "convex");
+const fixtureSrc = join(here, "fixtures", "conventional-app", "stackbase");
 // The CLI package dir (packages/cli), NOT the monorepo root. `resolveCacheDir` in
 // load-modules.ts walks UP from the functions dir to the nearest ancestor that literally
 // contains a `node_modules` folder, then bundles+caches there so the bundle's external

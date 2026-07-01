@@ -15,7 +15,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   it("boots over a file:// bucket, acquires the lease, and commits + reads back a mutation", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const { runtime, store, objectStoreRelease } = await bootLoaded({
       loaded,
       components: [],
@@ -38,7 +38,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("multi-shard (--shards 3): boots+acquires all 3 lanes, the runtime commits+reads over the ShardedObjectStoreDocStore composite, and the bucket has every lane's manifest", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const bucketDir = `${ROOT}/ms-bucket`;
     const { runtime, store, objectStoreRelease } = await bootLoaded({
       loaded,
@@ -71,7 +71,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("a fresh boot against the SAME bucket (different local dir) ADOPTS the existing deploymentId and takes over immediately after relinquish (Task 6.5)", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const bucket = `file://${ROOT}/bucket-adopt`;
 
     const nodeA = await bootLoaded({
@@ -130,7 +130,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   // real (short) sweep cadence + a real sleep — `createEmbeddedRuntime`'s DriverContext.setTimer
   // is backed by real `setTimeout`, same pattern `storage-e2e.test.ts` uses for the storage reaper.
   it("the gc-driver reclaims superseded segments/snapshots automatically while the node stays live and queryable", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const bucketDir = `${ROOT}/bucket-gc`;
     const boot = await bootLoaded({
       loaded,
@@ -188,7 +188,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("throws a clear error when combined with fleet wiring", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     await expect(
       bootLoaded({
         loaded,

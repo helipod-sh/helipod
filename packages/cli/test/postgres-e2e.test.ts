@@ -93,7 +93,7 @@ function stopPostgresContainer(): void {
 /* -------------------------------------------------------------------------- */
 
 function fixtureFunctionsDir(): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "convex");
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "stackbase");
 }
 
 /** Refresh the fixture's committed `_generated/` in place (same load->push->write step `deploy`/

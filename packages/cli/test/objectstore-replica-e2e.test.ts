@@ -40,7 +40,7 @@ import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
 /* Slice 6/7/8's other object-store CLI tests.                                */
 /* -------------------------------------------------------------------------- */
 
-const FUNCTIONS_DIR = "test/fixtures/deploy-v2/convex";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/stackbase";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors objectstore-serve-e2e.test.ts / serve-e2e.test.ts) */

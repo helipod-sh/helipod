@@ -72,7 +72,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     const wakeHost: WakeHost = { armWake: (atMs) => void arms.push(atMs) };
 
     const { store } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       wakeHost,
@@ -97,7 +97,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     };
 
     const { store } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       backstopMs,
@@ -122,7 +122,7 @@ describe("bootProject forwards its options through to the runtime", () => {
   it("forwards a plain pass-through option it has no special handling for", async () => {
     const dir = mkdtempSync(join(tmpdir(), "boot-fwd-"));
     const { store, runtime } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       storageReaperSweepMs: 999_999,

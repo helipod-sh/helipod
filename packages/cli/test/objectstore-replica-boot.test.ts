@@ -16,7 +16,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — Tier 3 Slice 8 object-store replica node", () => {
   it("materializes the writer's committed state from the bucket, stays live, and rejects a mutation with a clear message", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const bucket = `file://${ROOT}/bucket`;
 
     // ── WRITER: commits data BEFORE the replica ever opens ────────────────────────────────────
@@ -100,7 +100,7 @@ describe("bootLoaded — Tier 3 Slice 8 object-store replica node", () => {
       return true;
     };
     try {
-      const code = await serveCommand(["--replica", "--dir", "test/fixtures/deploy-v2/convex"]);
+      const code = await serveCommand(["--replica", "--dir", "test/fixtures/deploy-v2/stackbase"]);
       expect(code).toBe(1);
       expect(captured).toMatch(/--replica requires --object-store/);
     } finally {
