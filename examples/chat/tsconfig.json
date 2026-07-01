@@ -5,5 +5,5 @@
     "types": ["node"],
     "jsx": "react-jsx"
   },
-  "include": ["convex", "stackbase.config.ts", "test", "scripts", "web"]
+  "include": ["stackbase", "stackbase.config.ts", "test", "scripts", "web"]
 }

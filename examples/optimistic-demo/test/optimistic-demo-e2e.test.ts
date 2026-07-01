@@ -16,9 +16,9 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { StackbaseClient, webSocketTransport, type ClientTransport, type OptimisticStoreView } from "@stackbase/client";
 import { loadProject, startDevServer, type DevServer } from "@stackbase/cli";
-import schema from "../convex/schema";
-import * as polls from "../convex/polls";
-import * as options from "../convex/options";
+import schema from "../stackbase/schema";
+import * as polls from "../stackbase/polls";
+import * as options from "../stackbase/options";
 import { delayTransport } from "../web/delay-transport";
 
 type OptionRow = { _id: string; label: string; votes: number };

@@ -4,8 +4,8 @@ import { StackbaseClient, anyApi, type OptimisticLocalStore } from "@stackbase/c
 import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
 import { delayTransport } from "./delay-transport";
 // Type-only imports — erased at bundle time, so server-side re-exports never reach the browser.
-import type { Api } from "../convex/_generated/api";
-import type { Doc, Id } from "../convex/_generated/dataModel";
+import type { Api } from "../stackbase/_generated/api";
+import type { Doc, Id } from "../stackbase/_generated/dataModel";
 
 const api = anyApi as Api;
 

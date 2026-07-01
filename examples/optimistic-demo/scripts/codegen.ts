@@ -1,17 +1,17 @@
 /**
- * Regenerate convex/_generated from the schema + functions. Run with `bun run scripts/codegen.ts`.
+ * Regenerate stackbase/_generated from the schema + functions. Run with `bun run scripts/codegen.ts`.
  * The dev CLI does this automatically; this script also backs the "generated is up to date" test.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { push } from "@stackbase/cli";
-import schema from "../convex/schema";
-import * as polls from "../convex/polls";
-import * as options from "../convex/options";
+import schema from "../stackbase/schema";
+import * as polls from "../stackbase/polls";
+import * as options from "../stackbase/options";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const generatedDir = join(here, "../convex/_generated");
+const generatedDir = join(here, "../stackbase/_generated");
 
 const { generated } = push({ schema, modules: { polls, options } });
 mkdirSync(generatedDir, { recursive: true });
