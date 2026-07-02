@@ -52,7 +52,7 @@ const auth = defineAuth({
 });
 
 // A minimal illustrative workflow — the reference pattern real projects extend: a single
-// `step.runQuery` against this project's own `whoami:get` (`convex/whoami.ts`), referenced by its
+// `step.runQuery` against this project's own `whoami:get` (`stackbase/whoami.ts`), referenced by its
 // bare string path exactly like `ctx.scheduler.runAfter`'s targets are (codegen's typed
 // `internal`/`api` refs work here too). Registered under the key `"workflows:sample"` — the
 // `ctx.workflow.start("workflows:sample", {})` target a real app would call from a mutation/action.

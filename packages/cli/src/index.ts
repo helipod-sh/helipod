@@ -20,9 +20,11 @@ export { startDevServer, ProcessRuntimeHost } from "./server";
 export type { WatchLoop, WatchLoopOptions, WatchTriggerReason } from "./watch";
 export { createWatchLoop } from "./watch";
 
-export { loadConvexDir } from "./load-modules";
+export { loadFunctionsDir } from "./load-modules";
 export type { StackbaseConfig } from "@stackbase/component";
 export { loadConfig } from "./load-config";
+export type { ResolvedFunctionsDir } from "./functions-dir";
+export { resolveFunctionsDir, functionsDirNotFoundMessage, DEFAULT_FUNCTIONS_DIR } from "./functions-dir";
 export { runCli, devCommand, codegenCommand } from "./cli";
 
 // The shared boot core + codegen writer, re-exported so an out-of-CLI host (e.g. `@stackbase/vite`'s

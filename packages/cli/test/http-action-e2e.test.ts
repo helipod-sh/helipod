@@ -203,7 +203,7 @@ describe("public HTTP router — end-to-end through the real dev server", () => 
       // Mirrors what a real `http.ts` does at module-evaluation time: build the router, then
       // register a route. `route()` guards reserved paths itself (Task 2) so a malformed
       // `http.ts` can never shadow `/api/*`/`/_*` — the throw happens before `loadProject`
-      // (and thus `loadConvexDir`'s dynamic import of `http.ts`) can complete.
+      // (and thus `loadFunctionsDir`'s dynamic import of `http.ts`) can complete.
       const reservedRouter = httpRouter();
       reservedRouter.route({ method: "GET", path: "/api/x", handler: boom });
       loadProject({

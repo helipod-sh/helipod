@@ -11,7 +11,7 @@ and every step below is real.
 
 <Callout title="Before you start">
   You need **Bun** or **Node.js 22.5+** and a package manager. Your backend lives in a folder called
-  `convex/`. That's just the default name (everything you import is `@stackbase/*`), and you can
+  `stackbase/`. That's just the default name (everything you import is `@stackbase/*`), and you can
   change it later with `--dir`.
 </Callout>
 
@@ -52,9 +52,9 @@ the `stackbase` command you'll run.
 
 ### Define a schema
 
-Create `convex/schema.ts`. It lists your tables and the shape of each row:
+Create `stackbase/schema.ts`. It lists your tables and the shape of each row:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -75,9 +75,9 @@ list of field types (`v.number()`, `v.id(...)`, `v.optional(...)`, and so on) is
 
 ### Write a query and a mutation
 
-Create `convex/messages.ts`:
+Create `stackbase/messages.ts`:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 
@@ -110,7 +110,7 @@ no index of your own.
 npx stackbase dev
 ```
 
-`stackbase dev` generates the typed `convex/_generated/` helpers, starts the engine on a local SQLite
+`stackbase dev` generates the typed `stackbase/_generated/` helpers, starts the engine on a local SQLite
 file, serves a dashboard, and reloads whenever you edit a file. It prints its URL and a dev admin key:
 
 ```
@@ -155,7 +155,7 @@ With the server running, point a client at the `ws://127.0.0.1:3000/api/sync` en
 ```tsx title="App.tsx"
 import { StackbaseClient, webSocketTransport } from "@stackbase/client";
 import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
-import { api } from "./convex/_generated/server";
+import { api } from "./stackbase/_generated/server";
 
 const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
 
@@ -184,7 +184,7 @@ arrives, then re-renders on its own every time the result changes. That's the wh
 
 ```ts title="client.ts"
 import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { api } from "./convex/_generated/server";
+import { api } from "./stackbase/_generated/server";
 
 const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
 
@@ -214,7 +214,7 @@ See [Client SDK](/docs/client/client-sdk) for the full hook surface, and
 |---|---|---|
 | `--port` | `3000` | HTTP and WebSocket port |
 | `--ip` | `127.0.0.1` | Bind address |
-| `--dir` | `convex` | Function directory |
+| `--dir` | `stackbase` | Function directory |
 | `--data` | `.stackbase/data.db` | SQLite file path |
 | `--web` | (none) | Serve a built web UI alongside the API |
 | `--database-url` | (SQLite) | Use Postgres instead |
@@ -225,9 +225,9 @@ Run `stackbase help` for every command and flag.
 
 </Accordion>
 
-<Accordion title="What's in convex/_generated/">
+<Accordion title="What's in stackbase/_generated/">
 
-After the first run, `convex/_generated/` holds typed helpers derived from your schema and functions:
+After the first run, `stackbase/_generated/` holds typed helpers derived from your schema and functions:
 
 - `Doc<"messages">` and `Id<"messages">`: the type of a row, and a typed id to reference one.
 - `api`: a typed object mirroring your functions (`api.messages.list`, `api.messages.send`). Pass

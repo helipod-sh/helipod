@@ -32,7 +32,7 @@ import { join, resolve } from "node:path";
 import WebSocket from "ws";
 import { startServe } from "../src/serve";
 import { deployCommand } from "../src/deploy";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import { writeGenerated } from "@stackbase/codegen";
 
@@ -40,16 +40,16 @@ import { writeGenerated } from "@stackbase/codegen";
 /* Fixtures                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function fixtureConvexDir(name: string): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "convex");
+function fixtureFunctionsDir(name: string): string {
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "stackbase");
 }
 
 /** Refresh a fixture's committed `_generated/` in place — same codegen step `deployCommand`
  * itself performs before packaging (deterministic; re-running produces byte-identical output). */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadFunctionsDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, join(convexDir, "_generated"));
+  writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -145,8 +145,8 @@ async function captureDeployPosts<T>(fn: () => Promise<T>): Promise<{ result: T;
 
 describe("stackbase deploy — incremental (delta) push end-to-end through the real serve server", () => {
   it("v1 full push populates /modules; v2 one-file delta is live + reactive; unrelated module untouched", async () => {
-    const v1Dir = fixtureConvexDir("incremental-v1");
-    const v2Dir = fixtureConvexDir("incremental-v2");
+    const v1Dir = fixtureFunctionsDir("incremental-v1");
+    const v2Dir = fixtureFunctionsDir("incremental-v2");
     await regenerate(v1Dir);
     await regenerate(v2Dir);
 
@@ -160,7 +160,7 @@ describe("stackbase deploy — incremental (delta) push end-to-end through the r
       /*    /_admin/deploy) — so the tracked module set starts genuinely empty. */
       /* ---------------------------------------------------------------------- */
       round1 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbincr-e2e-db-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,

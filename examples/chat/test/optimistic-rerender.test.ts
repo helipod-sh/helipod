@@ -3,9 +3,9 @@ import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { StackbaseClient, loopbackTransport, anyApi, type OptimisticLocalStore } from "@stackbase/client";
 import { loadProject, type LoadedProject } from "@stackbase/cli";
-import schema from "../convex/schema";
-import * as messages from "../convex/messages";
-import * as audit from "../convex/audit";
+import schema from "../stackbase/schema";
+import * as messages from "../stackbase/messages";
+import * as audit from "../stackbase/audit";
 
 /**
  * The (i)5 measurement (verdict §(i).5 / spec plan constraint): `LayeredQueryStore.recompose`

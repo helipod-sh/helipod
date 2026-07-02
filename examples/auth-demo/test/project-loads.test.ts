@@ -35,7 +35,7 @@ describe("auth-demo project loads", () => {
     const appSchema = defineSchema({});
 
     // Reproduce what loadConvexDir + loadProject does for this project:
-    // one module file "whoami" exporting a query named "get" (mirrors convex/whoami.ts).
+    // one module file "whoami" exporting a query named "get" (mirrors stackbase/whoami.ts).
     const whoamiGet = query(
       async (ctx) =>
         (ctx as unknown as { auth: { getUserId(): Promise<string | null> } }).auth.getUserId(),

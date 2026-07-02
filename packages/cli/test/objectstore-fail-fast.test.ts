@@ -15,7 +15,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded, isObjectStoreBootFailFast, OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE } from "../src/boot";
 import { serveCommand, raceWithTimeout, OBJECTSTORE_RELINQUISH_TIMEOUT_MS, FLEET_ERR_NO_PACKAGE } from "../src/serve";
 
@@ -66,7 +66,7 @@ describe("isObjectStoreBootFailFast (F2 — distinguishes KNOWN object-store boo
     // short to ever win — produces the genuine production Error object (not a fabricated string).
     const root = mkdtempSync(join(tmpdir(), "sb-objstore-failfast-"));
     try {
-      const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
+      const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
       const nodeA = await bootLoaded({
         loaded,
         components: [],
@@ -106,7 +106,7 @@ describe("isObjectStoreBootFailFast (F2 — distinguishes KNOWN object-store boo
   });
 
   it("classifies resolveObjectStore's parse/validation throws (bad scheme, missing bucket, missing creds)", async () => {
-    const loaded = await loadConvexDir("test/fixtures/deploy-v2/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
     const root = mkdtempSync(join(tmpdir(), "sb-objstore-failfast-badurl-"));
     try {
       let caught: unknown;
@@ -149,7 +149,7 @@ function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../node_modules");
 }
 
-function makeFixtureConvexDir(): string {
+function makeFixtureFunctionsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sb-objstore-failfast-serve-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
@@ -182,7 +182,7 @@ describe("serveCommand — object-store fail-fast UX (F2)", () => {
 
   it("a bad --object-store URL prints a clean ✗ message and returns 1 — not a raw stack trace", async () => {
     process.env.STACKBASE_ADMIN_KEY = "test-key";
-    const dir = makeFixtureConvexDir();
+    const dir = makeFixtureFunctionsDir();
     let stderr = "";
     const origWrite = process.stderr.write.bind(process.stderr);
     process.stderr.write = ((chunk: string) => {
@@ -223,7 +223,7 @@ describe("serveCommand — object-store fail-fast UX (F2)", () => {
     try {
       const code = await serveCommand([
         "--dir",
-        makeFixtureConvexDir(),
+        makeFixtureFunctionsDir(),
         "--data",
         join(mkdtempSync(join(tmpdir(), "sb-shards-validation-db-")), "db.sqlite"),
         "--port",

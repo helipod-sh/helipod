@@ -24,7 +24,7 @@ import { join, resolve } from "node:path";
 import WebSocket from "ws";
 import { startServe } from "../src/serve";
 import { deployCommand } from "../src/deploy";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import { writeGenerated } from "@stackbase/codegen";
 
@@ -32,17 +32,17 @@ import { writeGenerated } from "@stackbase/codegen";
 /* Fixtures                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function fixtureConvexDir(name: string): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "convex");
+function fixtureFunctionsDir(name: string): string {
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "stackbase");
 }
 
 /** Refresh a fixture's committed `_generated/` in place — the same load->push->write codegen
  * step `deployCommand` itself performs before packaging, so this keeps the committed output
  * honest (deterministic; running it again produces byte-identical files, i.e. no git diff). */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadFunctionsDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, join(convexDir, "_generated"));
+  writeGenerated(generated.files, join(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -118,9 +118,9 @@ async function subscribeToNotesList(wsUrl: string): Promise<{ ws: WebSocket; mes
 
 describe("stackbase deploy — end-to-end through the real serve server", () => {
   it("v1 -> v2 live hot-swap with reactive fan-out; destructive rejected; opt-in gate; wrong key 401", async () => {
-    const v1Dir = fixtureConvexDir("deploy-v1");
-    const v2Dir = fixtureConvexDir("deploy-v2");
-    const badDir = fixtureConvexDir("deploy-bad");
+    const v1Dir = fixtureFunctionsDir("deploy-v1");
+    const v2Dir = fixtureFunctionsDir("deploy-v2");
+    const badDir = fixtureFunctionsDir("deploy-bad");
     await regenerate(v1Dir);
     await regenerate(v2Dir);
     await regenerate(badDir);
@@ -135,7 +135,7 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       /* 1. Boot v1 with --allow-deploy; subscribe to notes:list -> [].         */
       /* ---------------------------------------------------------------------- */
       round1 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbdeploy-e2e-db-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,
@@ -213,7 +213,7 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       /*    the "not enabled" message.                                          */
       /* ---------------------------------------------------------------------- */
       round2 = await startServe({
-        convexDir: v1Dir,
+        functionsDir: v1Dir,
         dataPath: join(mkdtempSync(join(tmpdir(), "sbdeploy-e2e-db2-")), "db.sqlite"),
         ip: "127.0.0.1",
         port: 0,

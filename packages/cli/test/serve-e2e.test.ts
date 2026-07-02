@@ -1,7 +1,7 @@
 /**
  * End-to-end test: `stackbase serve` (the production server) through the REAL `startServe` entry
  * point — mirrors `http-action-e2e.test.ts`'s "test through the shipped entrypoint" pattern, but
- * loads a real on-disk `convex/` dir (via `bootProject` -> `loadConvexDir`, the same path
+ * loads a real on-disk `convex/` dir (via `bootProject` -> `loadFunctionsDir`, the same path
  * `serveCommand` uses) instead of an in-memory `loadProject` call, and adds the load-bearing
  * assertion `dev` never needs to make: data survives a full server restart on the same SQLite file.
  *
@@ -36,7 +36,7 @@ function cliNodeModules(): string {
  * `pings:add`), and a `_generated/server.ts` stub (bootProject never reads it, but a real project
  * always has it committed).
  */
-function makeFixtureConvexDir(): string {
+function makeFixtureFunctionsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbserve-e2e-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
@@ -159,14 +159,14 @@ async function subscribeToList(wsUrl: string): Promise<{ ws: WebSocket; messages
 
 describe("stackbase serve — end-to-end through the real production server", () => {
   it("webhook -> ctx.runMutation -> reactive fan-out; data survives a full server restart", async () => {
-    const convexDir = makeFixtureConvexDir();
+    const functionsDir = makeFixtureFunctionsDir();
     const tmpDbPath = join(mkdtempSync(join(tmpdir(), "sbserve-e2e-db-")), "db.sqlite");
 
     /* ---------------------------------------------------------------------- */
     /* Round 1: boot, subscribe, POST the webhook, observe the reactive push. */
     /* ---------------------------------------------------------------------- */
     const round1 = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,
@@ -207,7 +207,7 @@ describe("stackbase serve — end-to-end through the real production server", ()
     /* the restart must still be there — this is the load-bearing assertion. */
     /* ---------------------------------------------------------------------- */
     const round2 = await startServe({
-      convexDir,
+      functionsDir,
       dataPath: tmpDbPath,
       ip: "127.0.0.1",
       port: 0,

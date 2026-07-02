@@ -76,7 +76,7 @@ export const convexSource: MigrationSource = {
           `import { defineConfig } from "@stackbase/component";\n` +
           `import { defineScheduler } from "@stackbase/scheduler";\n\n` +
           `// Convex crons map to Stackbase's scheduler component. Move your cron definitions into\n` +
-          `// a convex/crons.ts using cronJobs() from "@stackbase/scheduler".\n` +
+          `// a stackbase/crons.ts using cronJobs() from "@stackbase/scheduler".\n` +
           `export default defineConfig({ components: [defineScheduler()] });\n`,
       });
     }

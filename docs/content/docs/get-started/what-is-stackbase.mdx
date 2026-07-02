@@ -30,16 +30,16 @@ flowchart LR
   Query -->|"push update"| App
 ```
 
-The developer experience is close to [Convex](https://convex.dev), with one big difference: you run
-stackbase yourself, on your own infrastructure, with no managed cloud in the middle.
+The developer experience is built entirely around that reactive model, with one defining trait: you
+run stackbase yourself, on your own infrastructure, with no managed cloud in the middle.
 
 ## You write your backend as functions
 
-Your functions live in a `convex/` folder:
+Your functions live in a `stackbase/` folder:
 
 <Files>
 
-<Folder name="convex" defaultOpen>
+<Folder name="stackbase" defaultOpen>
 
 <File name="schema.ts" />
 
@@ -53,7 +53,7 @@ Your functions live in a `convex/` folder:
 
 Here's a query that lists messages and a mutation that adds one:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { query, mutation } from "./_generated/server";
 
@@ -114,15 +114,7 @@ It stores data in SQLite by default, with no setup. When you want a managed data
 
 If you know these tools, here's the short version:
 
-<Tabs items={['Convex', 'Firebase/Supabase', 'SpacetimeDB']}>
-
-<Tab value="Convex">
-
-Same reactive model and the same style of functions, but you self-host it and your data
-stays yours. stackbase also adds a few things Convex hadn't, like durable workflows and a Postgres
-option. It's a clean-room build studied from Convex's public docs, not a fork.
-
-</Tab>
+<Tabs items={['Firebase/Supabase', 'SpacetimeDB']}>
 
 <Tab value="Firebase/Supabase">
 
@@ -140,8 +132,8 @@ runs on ordinary infrastructure.
 
 </Tabs>
 
-For numbers, [Performance](/docs/get-started/performance) has a measured comparison against Convex,
-with the caveats spelled out.
+For numbers, [Performance](/docs/get-started/performance) has measured benchmarks, with the caveats
+spelled out.
 
 ## A few honest limits
 

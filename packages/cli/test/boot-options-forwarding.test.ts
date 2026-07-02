@@ -26,7 +26,7 @@ import type { WakeHost } from "@stackbase/component";
 
 /**
  * The ONLY keys `bootProject` may legitimately not accept: the two it produces itself from
- * `convexDir` (`loadConvexDir` -> `loaded`, `loadConfig` -> `components`). Any other unreachable key
+ * `functionsDir` (`loadFunctionsDir` -> `loaded`, `loadConfig` -> `components`). Any other unreachable key
  * is the bug this file exists to prevent, so it must be spelled out here — never silently omitted.
  */
 type ProducedByBootProject = "loaded" | "components";
@@ -45,14 +45,14 @@ const unreachableBootOptions: Unreachable[] = [];
 
 /** `bootProject`'s own additions over the derived set — asserted so a typo'd rename is loud too. */
 type AddedByBootProject = Exclude<keyof BootProjectOptions, keyof BootLoadedOptions>;
-const addedByBootProject: AddedByBootProject[] = ["convexDir"];
+const addedByBootProject: AddedByBootProject[] = ["functionsDir"];
 
 describe("bootProject options are derived from bootLoaded (no silent drops)", () => {
   it("declares no unreachable bootLoaded options", () => {
     // The real assertion is the type of `unreachableBootOptions` above (checked by tsc). This keeps
     // the symbols used and states the invariant in the suite output.
     expect(unreachableBootOptions).toEqual([]);
-    expect(addedByBootProject).toEqual(["convexDir"]);
+    expect(addedByBootProject).toEqual(["functionsDir"]);
   });
 });
 
@@ -72,7 +72,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     const wakeHost: WakeHost = { armWake: (atMs) => void arms.push(atMs) };
 
     const { store } = await bootProject({
-      convexDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       wakeHost,
@@ -97,7 +97,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     };
 
     const { store } = await bootProject({
-      convexDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       backstopMs,
@@ -122,7 +122,7 @@ describe("bootProject forwards its options through to the runtime", () => {
   it("forwards a plain pass-through option it has no special handling for", async () => {
     const dir = mkdtempSync(join(tmpdir(), "boot-fwd-"));
     const { store, runtime } = await bootProject({
-      convexDir: "test/fixtures/deploy-v1/convex",
+      functionsDir: "test/fixtures/deploy-v1/stackbase",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       storageReaperSweepMs: 999_999,

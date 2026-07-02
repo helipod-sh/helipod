@@ -9,16 +9,16 @@ import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
 import { FsObjectStore } from "@stackbase/objectstore-fs";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
 const ROOT = "./.tmp-objectstore-replica-ms-boot";
-const FIXTURE = "test/fixtures/shard-dev/convex";
+const FIXTURE = "test/fixtures/shard-dev/stackbase";
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — multi-shard object-store replica", () => {
   it("a 3-shard replica materializes + reads every lane, publishes a per-lane watermark, rejects writes", async () => {
-    const loaded = await loadConvexDir(FIXTURE);
+    const loaded = await loadFunctionsDir(FIXTURE);
     const bucketDir = `${ROOT}/bucket`;
     const bucket = `file://${bucketDir}`;
     const channels = ["b3", "b4", "b1"];
@@ -79,7 +79,7 @@ describe("bootLoaded — multi-shard object-store replica", () => {
   });
 
   it("rejects --writer-url (write-forwarding) on a multi-shard bucket — fails fast, not a latent RYOW bug", async () => {
-    const loaded = await loadConvexDir(FIXTURE);
+    const loaded = await loadFunctionsDir(FIXTURE);
     const bucket = `file://${ROOT}/fwd-bucket`;
 
     // Establish a 3-shard bucket (globals.numShards = 3), then relinquish so the replica can materialize.

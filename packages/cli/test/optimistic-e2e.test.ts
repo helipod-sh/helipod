@@ -55,7 +55,7 @@ import {
 } from "@stackbase/client";
 import type { ClientMessage, ServerMessage } from "@stackbase/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
 /* -------------------------------------------------------------------------- */
@@ -675,7 +675,7 @@ function appendAllUpdate(tempId: string, channelId: string, body: string): (stor
 describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test", () => {
   it("across many iterations, the client's own write is NEVER dropped from its composed view before the server base includes it (drop-never-precedes-inclusion)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-"));
-    const loaded = await loadConvexDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "convex"));
+    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "stackbase"));
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
@@ -740,7 +740,7 @@ describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test"
   // mutation converges PROMPTLY with nothing else happening on the server.
   it("with NO foreign traffic, A's own cross-shard write converges promptly (the stale-forever regression is gone)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-solo-"));
-    const loaded = await loadConvexDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "convex"));
+    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "stackbase"));
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;

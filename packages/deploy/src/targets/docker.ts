@@ -13,7 +13,7 @@ export const dockerTarget: DeployTarget = {
   },
   async package(ctx) {
     // The image builds from the repo's Dockerfile/compose at push time (`--build`); refresh codegen
-    // so the baked convex/_generated matches the functions being deployed.
+    // so the baked functions directory's `_generated` matches the functions being deployed.
     await ctx.codegen();
   },
   async push(ctx): Promise<DeployResult> {

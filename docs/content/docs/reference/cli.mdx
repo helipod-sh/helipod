@@ -24,7 +24,7 @@ stackbase <command> [options]
 | [`migrate`](#stackbase-migrate) | Migrate a Convex project into stackbase (imports + divergence report) |
 | [`migrate export`](#stackbase-migrate-export--stackbase-migrate-import) | Dump a deployment's data to a file |
 | [`migrate import`](#stackbase-migrate-export--stackbase-migrate-import) | Load a data dump into a (fresh) deployment |
-| [`codegen`](#stackbase-codegen) | Regenerate `convex/_generated/` types only, no server |
+| [`codegen`](#stackbase-codegen) | Regenerate `stackbase/_generated/` types only, no server |
 | [`fleet reshard`](#stackbase-fleet-reshard) | Change a **stopped** Postgres fleet's shard count |
 | [`objectstore reshard`](#stackbase-objectstore-reshard) | Change a **stopped** object-storage deployment's shard count |
 | [`help`](#stackbase-help----help--h) / `--help` / `-h` | Print usage |
@@ -39,7 +39,7 @@ absent, falling back to its default, unless a command says otherwise.
 
 ## `stackbase dev`
 
-Loads `convex/`, generates `_generated/`, boots the embedded engine over local SQLite (or Postgres,
+Loads `stackbase/`, generates `_generated/`, boots the embedded engine over local SQLite (or Postgres,
 if configured), serves HTTP + WebSocket + the dashboard, and watches the directory for changes to
 hot-reload functions and schema. This is the command you run while building an app.
 
@@ -49,7 +49,7 @@ stackbase dev
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `convex` | The app directory to load |
+| `--dir <path>` | `stackbase` | The app directory to load |
 | `--port <n>` | `3000` | HTTP/WebSocket port |
 | `--ip <addr>` | `127.0.0.1` | Bind address |
 | `--data <path>` | `.stackbase/data.db` | SQLite file path (ignored if `--database-url` is set) |
@@ -86,15 +86,15 @@ If the dashboard package isn't built, `dev` still starts and prints a note to ru
 ### Hot reload
 
 `dev` watches `--dir` recursively (`fs.watch`, ignoring changes under `_generated`) and on any
-change: reloads `convex/`, re-runs codegen, replaces the runtime's function modules
+change: reloads `stackbase/`, re-runs codegen, replaces the runtime's function modules
 (`runtime.setModules`, which also re-applies the always-on `_storage:*` built-ins), and updates
 `httpAction` routes. All of this happens without restarting the process or dropping WebSocket
 connections. It prints `↻ pushed (N functions)` on success, or `✗ reload failed: <message>` on a
 load/type error (the previous, still-working version keeps serving in that case).
 
-The function loader is **top-level only**: it does not recurse into subdirectories of `convex/`.
-Keep query/mutation/action modules directly under `convex/*.ts` (e.g. `convex/items.ts`), not nested
-under a subfolder (e.g. `convex/lib/items.ts`); nested modules are silently not loaded. This applies
+The function loader is **top-level only**: it does not recurse into subdirectories of `stackbase/`.
+Keep query/mutation/action modules directly under `stackbase/*.ts` (e.g. `stackbase/items.ts`), not
+nested under a subfolder (e.g. `stackbase/lib/items.ts`); nested modules are silently not loaded. This applies
 to `dev`, `serve`, and `deploy` alike.
 
 `dev` runs until killed (`Ctrl-C`); there's no `--once`/exit mode.
@@ -131,7 +131,7 @@ STACKBASE_ADMIN_KEY=<secret> stackbase serve
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--dir <path>` | none | `convex` | The app directory (must already contain `_generated/`) |
+| `--dir <path>` | none | `stackbase` | The app directory (must already contain `_generated/`) |
 | `--data <path>` | `STACKBASE_DATA_DIR` | `./data/db.sqlite` | SQLite file path (`STACKBASE_DATA_DIR` sets the *containing directory*; the filename `db.sqlite` is fixed) |
 | `--ip <addr>` | none | `0.0.0.0` | Bind address |
 | `--port <n>` | `PORT` | `3000` | HTTP/WebSocket port |
@@ -241,7 +241,7 @@ On success, `serve` prints one JSON line to stdout (fields beyond `level`/`msg`/
 in the relevant mode):
 
 ```json
-{"level":"info","msg":"stackbase serve","url":"http://0.0.0.0:3000","dir":"convex","data":"./data/db.sqlite","dashboard":true,"allowDeploy":false}
+{"level":"info","msg":"stackbase serve","url":"http://0.0.0.0:3000","dir":"stackbase","data":"./data/db.sqlite","dashboard":true,"allowDeploy":false}
 ```
 
 A fleet node adds `"fleet":true,"role":"writer"|"sync"`; an object-storage node adds
@@ -258,7 +258,7 @@ container's grace period), close the store, then `process.exit(0)`, printing
 ## `stackbase deploy`
 
 Deploys the app through a pluggable target adapter. The default target, `serve`, pushes the local
-`convex/` tree to an already-running `serve --allow-deploy` and hot-swaps it live, no restart. The
+`stackbase/` tree to an already-running `serve --allow-deploy` and hot-swaps it live, no restart. The
 other targets (`cloudflare`, `docker`, `railway`, `fly`, `aws`) provision or shell out to their
 platform's own CLI. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism
 (what `applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order)
@@ -274,9 +274,9 @@ STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.exampl
 | `--target <name>` | none | `deploy.defaultTarget` in `stackbase.config.ts`, else `serve` | One of `serve`, `cloudflare`, `docker`, `railway`, `fly`, `aws` |
 | `--env <name>` | none | `production` | Selects a per-environment settings block from `deploy.targets.<name>.environments` |
 | `--url <url>` | `STACKBASE_DEPLOY_URL` | none (required for `serve` unless set in config) | Target `serve` deployment's base URL |
-| `--dir <path>` | none | `convex` | The app directory to push |
+| `--dir <path>` | none | `stackbase` | The app directory to push |
 | `--dry-run` | none | off | Run `preflight` and `package`, skip the actual push |
-| `--check` | none | off | Fail (exit 1) if committed `convex/_generated/` has drifted from a fresh codegen run. Never pushes; combine with `--dry-run` to also run preflight and packaging |
+| `--check` | none | off | Fail (exit 1) if committed `stackbase/_generated/` has drifted from a fresh codegen run. Never pushes; combine with `--dry-run` to also run preflight and packaging |
 
 An unknown `--target` value fails with `no deploy adapter for provider "<name>" (v1 supports:
 serve, cloudflare, docker, railway, fly, aws)`. Target credentials and settings can live in the
@@ -354,7 +354,7 @@ stackbase build --target linux-x64
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `convex` | The app directory to compile |
+| `--dir <path>` | `stackbase` | The app directory to compile |
 | `--outfile <path>` | `./stackbase-server` | Output executable path (`.exe` is appended automatically when `--target windows-x64` is used and the given path doesn't already end in `.exe`) |
 | `--target <name>` | host platform | Cross-compile target, see the table below |
 | `--no-dashboard` | dashboard included | Exclude the dashboard from the binary |
@@ -434,7 +434,7 @@ codegen failed: <error>`. The report is still written, since it's written before
 Move an app's **data** (not code) between two running deployments (e.g. a portable SQLite/Postgres
 deployment and a Cloudflare DO-native one). Both are plain HTTP clients against a running
 deployment's bearer-gated admin endpoints (`GET /_admin/export`, `POST /_admin/import`); they don't
-touch `convex/` at all.
+touch `stackbase/` at all.
 
 ```bash
 stackbase migrate export --url <source-url> --out dump.json
@@ -456,17 +456,17 @@ produce their own `✗ missing …` message and exit 1 before any network call i
 
 ## `stackbase codegen`
 
-Regenerates `convex/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
+Regenerates `stackbase/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
 engine or serving anything. Useful in CI to verify generated types are committed and current, or
 before `stackbase serve` (which never generates codegen itself).
 
 ```bash
-stackbase codegen --dir convex
+stackbase codegen --dir stackbase
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `convex` | The app directory to load and generate types for |
+| `--dir <path>` | `stackbase` | The app directory to load and generate types for |
 
 Prints `generated <dir>/_generated` on success.
 
@@ -504,13 +504,13 @@ document's current state to its new shard lane based on the table's `.shardKey()
 non-atomic tool: back up the bucket first, and make sure no writer/replica is running against it.
 
 ```bash
-stackbase objectstore reshard --object-store <url> --dir convex --shards 4
+stackbase objectstore reshard --object-store <url> --dir stackbase --shards 4
 ```
 
 | Flag | Env equivalent | Meaning |
 |---|---|---|
 | `--object-store <url>` | `STACKBASE_OBJECT_STORE` | Required, the bucket URL (same grammar as `serve --object-store`, above) |
-| `--dir <path>` | none | Default `convex`. Loaded only to read each table's `.shardKey()` off the schema, this is the reshard's only schema dependency |
+| `--dir <path>` | none | Default `stackbase`. Loaded only to read each table's `.shardKey()` off the schema, this is the reshard's only schema dependency |
 | `--shards <n>` | none | Required, target shard count, a positive integer |
 
 On success:
@@ -531,7 +531,7 @@ Prints usage and exits 0. Also the fallback for no command at all, and (with exi
 unrecognized command:
 
 ```text
-stackbase — Convex-compatible reactive backend
+stackbase - the reactive backend you self-host
 
 Usage: stackbase <command> [options]
 
@@ -543,12 +543,12 @@ Commands:
   migrate    Migrate a Convex project into Stackbase (imports + report)
   migrate export --url <src> --out dump.json   Export app data to a portable dump
   migrate import --url <dst> --in  dump.json   Import a dump into a deployment
-  codegen    Regenerate convex/_generated types
+  codegen    Regenerate <functionsDir>/_generated types
   fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count
-  objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count
+  objectstore reshard --shards M --object-store <url> --dir <functionsDir>   Change a STOPPED object-storage deployment's shard count
   help       Show this help
 
-Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>
+Options: --port <n>  --ip <addr>  --dir <functionsDir>  --data <dbPath>  --database-url <url>
 Deploy:  --target <name>  --env <name>  --dry-run  --check   (default target: serve; default env: production)
 ```
 

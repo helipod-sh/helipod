@@ -25,10 +25,10 @@ flowchart LR
 
 ## Defining a schema
 
-Your `convex/schema.ts` file default-exports a `defineSchema` call. It maps table names to
+Your `stackbase/schema.ts` file default-exports a `defineSchema` call. It maps table names to
 `defineTable` definitions:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -239,7 +239,7 @@ the one in your `schema.ts`. It's the same concrete class, rehydrated. This is a
 An index lets a query find documents efficiently instead of scanning the whole table. Declare one
 with `.index(name, [fields])`, chained off `defineTable`:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 messages: defineTable({
   conversationId: v.id("conversations"),
   author: v.string(),
@@ -282,7 +282,7 @@ time.
 lets a table's writes fan out across multiple independent single-writer shards instead of
 funneling through one, at Tier 2 scale:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 messages: defineTable({
   conversationId: v.id("conversations"),
   author: v.string(),
@@ -331,7 +331,7 @@ System tables are **first-class**. `Id<"_storage">` and `v.id("_storage")` type-
 schema exactly like a reference to any table you defined yourself. Codegen merges the system
 tables into your `DataModel` ahead of your own tables, so the types are always available.
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 export default defineSchema({
   photos: defineTable({
     caption: v.string(),
@@ -371,7 +371,7 @@ row before its creating mutation has even run: create a conversation offline, th
 queue a message into it, without waiting for the create to round-trip. For that, the client can
 mint a real id up front and pass it explicitly:
 
-```ts title="convex/conversations.ts"
+```ts title="stackbase/conversations.ts"
 export const create = mutation({
   args: { _id: v.optional(v.id("conversations")), title: v.string() },
   handler: (ctx, { _id, title }) => ctx.db.insert("conversations", { _id, title }),
@@ -398,7 +398,7 @@ In practice you won't hand-decode ids yourself. `stackbase codegen` emits a type
 `_generated/ids.ts` for exactly this:
 
 ```ts
-import { mintId } from "../convex/_generated/ids";
+import { mintId } from "../stackbase/_generated/ids";
 
 const conversationId = mintId("conversations"); // a real Id<"conversations">, minted client-side now
 ```

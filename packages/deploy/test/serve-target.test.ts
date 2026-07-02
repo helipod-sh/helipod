@@ -6,7 +6,7 @@ import type { DeployContext } from "../src/types";
 
 function ctxWith(settings: Record<string, unknown>): DeployContext {
   return {
-    cwd: "/tmp", convexDir: "/tmp/convex", env: "production",
+    cwd: "/tmp", functionsDir: "/tmp/stackbase", env: "production",
     target: { targetName: "serve", provider: "serve", env: "production", settings },
     interactive: false,
     spawn: { run: async () => ({ code: 0, stdout: "", stderr: "" }) },

@@ -34,15 +34,15 @@ describe("flattenModules", () => {
     expect(out.moduleMap["http:default"]).toBeUndefined();
   });
 
-  it("normalizes import.meta.glob-style keys (./convex/ prefix) to the same function-path root as explicit keys", async () => {
+  it("normalizes import.meta.glob-style keys (./stackbase/ prefix, the DEFAULT_FUNCTIONS_ROOT) to the same function-path root as explicit keys", async () => {
     const send = mutation(async () => "ok");
     const ping = httpAction(async () => new Response("ok"));
     const schema = { __isSchema: true };
     const router = { __isRouter: true, routes: [] };
     const out = await flattenModules({
-      "./convex/messages.ts": { send },
-      "./convex/schema.ts": { default: schema },
-      "./convex/http.ts": { default: router, ping },
+      "./stackbase/messages.ts": { send },
+      "./stackbase/schema.ts": { default: schema },
+      "./stackbase/http.ts": { default: router, ping },
     });
     expect(out.moduleMap["messages:send"]).toBe(send);
     expect(out.schemaModule).toBe(schema);
@@ -50,9 +50,23 @@ describe("flattenModules", () => {
     expect(out.moduleMap["http:ping"]).toBe(ping);
   });
 
-  it("normalizes a glob key with no convex/ dir (./messages.ts) too", async () => {
+  it("normalizes a glob key with no functions-root dir (./messages.ts) too", async () => {
     const send = mutation(async () => "ok");
     const out = await flattenModules({ "./messages.ts": { send } });
     expect(out.moduleMap["messages:send"]).toBe(send);
+  });
+
+  it("strips a caller-supplied non-default functionsRoot instead of the DEFAULT_FUNCTIONS_ROOT", async () => {
+    const send = mutation(async () => "ok");
+    const out = await flattenModules({ "./backend/messages.ts": { send } }, "backend");
+    expect(out.moduleMap["messages:send"]).toBe(send);
+  });
+
+  it("does NOT implicitly strip a legacy convex/ prefix when functionsRoot defaults to stackbase", async () => {
+    const send = mutation(async () => "ok");
+    const out = await flattenModules({ "./convex/messages.ts": { send } });
+    // No implicit convex/ tolerance: the segment survives as part of the module path.
+    expect(out.moduleMap["convex/messages:send"]).toBe(send);
+    expect(out.moduleMap["messages:send"]).toBeUndefined();
   });
 });

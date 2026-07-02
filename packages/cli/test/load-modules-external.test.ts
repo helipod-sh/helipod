@@ -15,7 +15,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 
 function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../node_modules");
@@ -60,14 +60,14 @@ function makeFixture(): string {
   return dir;
 }
 
-describe("loadConvexDir — STACKBASE_BUNDLE_EXTERNAL escape hatch", () => {
+describe("loadFunctionsDir — STACKBASE_BUNDLE_EXTERNAL escape hatch", () => {
   afterEach(() => {
     delete process.env.STACKBASE_BUNDLE_EXTERNAL;
   });
 
   it("without the escape hatch, each module inlines its own private copy (independent state)", async () => {
     const dir = makeFixture();
-    const loaded = await loadConvexDir(dir);
+    const loaded = await loadFunctionsDir(dir);
     const bumpA = loaded.modules.a!.bumpA as () => number;
     const bumpB = loaded.modules.b!.bumpB as () => number;
     expect(bumpA()).toBe(1);
@@ -79,7 +79,7 @@ describe("loadConvexDir — STACKBASE_BUNDLE_EXTERNAL escape hatch", () => {
   it("with STACKBASE_BUNDLE_EXTERNAL, both modules share the one real module instance", async () => {
     process.env.STACKBASE_BUNDLE_EXTERNAL = "singleton-lib";
     const dir = makeFixture();
-    const loaded = await loadConvexDir(dir);
+    const loaded = await loadFunctionsDir(dir);
     const bumpA = loaded.modules.a!.bumpA as () => number;
     const bumpB = loaded.modules.b!.bumpB as () => number;
     expect(bumpA()).toBe(1);

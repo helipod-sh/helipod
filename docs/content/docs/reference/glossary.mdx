@@ -150,6 +150,12 @@ The invariant that exactly one process commits writes at a time (per [shard](#sh
 It is what lets stackbase give serializable transactions without distributed coordination on every
 commit. See [Transactions](/docs/contributing/architecture/transactions).
 
+### `.stackbase/`
+
+Local working data, most importantly the SQLite database file when you run `stackbase dev`. It is
+created automatically and belongs in `.gitignore`. Not to be confused with `stackbase/`, which holds
+the backend functions you write and commit.
+
 ### Syscall boundary
 
 The interface between your function code and the engine. Every `ctx.db` call crosses it as plain
@@ -176,6 +182,6 @@ mutation, checks it for [OCC](#occ-optimistic-concurrency-control) conflicts, an
 
 ### UDF (user-defined function)
 
-Any function you write in `convex/`: a query, mutation, action, or `httpAction`. The docs mostly
+Any function you write in `stackbase/`: a query, mutation, action, or `httpAction`. The docs mostly
 say "function"; internals pages say UDF. See
 [Execution internals](/docs/contributing/architecture/execution).

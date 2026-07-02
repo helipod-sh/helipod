@@ -38,7 +38,7 @@ import { receiptsReaper } from "@stackbase/receipts";
 import { makeBlobStore, isS3Config, resolveStorageConfig, type StorageConfig } from "./blobstore-select";
 import { resolveObjectStore } from "./objectstore-select";
 import { ReplicaWriteForwarder } from "./replica-forward";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { detectRuntime } from "./dev-options";
@@ -318,7 +318,7 @@ async function buildObjectStoreWriterNode(opts: {
   if (opts.shards !== undefined && opts.shards !== numShards) {
     throw new Error(
       `stackbase: --shards ${opts.shards} disagrees with the bucket's persisted shard count ${numShards} — ` +
-        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <convex> --shards ${opts.shards}\`) ` +
+        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <dir> --shards ${opts.shards}\`) ` +
         `to change it, or drop --shards.`,
     );
   }
@@ -1158,7 +1158,7 @@ function makeStorageCheckRead(
 
 /**
  * `bootProject`'s options: everything `bootLoaded` takes, MINUS the two things `bootProject` exists
- * to produce itself, PLUS the `convexDir` it produces them from. Derived deliberately — never
+ * to produce itself, PLUS the `functionsDir` it produces them from. Derived deliberately — never
  * re-declared.
  *
  * WHY (a trap this has already cost a full debug cycle — do not re-introduce it): `bootProject` used to
@@ -1176,19 +1176,19 @@ function makeStorageCheckRead(
  * Deriving from `BootLoadedOptions` + forwarding with a spread makes the drop structurally
  * impossible rather than merely caught: a new `bootLoaded` option is part of this type, and is
  * forwarded, the moment it is declared. The `Omit` is the ONLY exclusion list, and it is deliberate:
- * `loaded`/`components` are `bootProject`'s own outputs (`loadConvexDir`/`loadConfig`), so accepting
- * them from a caller would be meaningless. Anything else belongs here automatically.
+ * `loaded`/`components` are `bootProject`'s own outputs (`loadFunctionsDir`/`loadConfig`), so
+ * accepting them from a caller would be meaningless. Anything else belongs here automatically.
  */
-export type BootProjectOptions = Omit<BootLoadedOptions, "loaded" | "components"> & { convexDir: string };
+export type BootProjectOptions = Omit<BootLoadedOptions, "loaded" | "components"> & { functionsDir: string };
 
 export async function bootProject(opts: BootProjectOptions): Promise<BootResult> {
   // Destructure off ONLY what `bootProject` itself consumes/produces; `forwarded` is by construction
   // every remaining `BootLoadedOptions` key, so no option can be left behind. Keep this a spread —
   // re-introducing a hand-enumerated forward re-opens the silent-drop trap documented above (and
   // `boot-options-forwarding.test.ts` is what fails if you do).
-  const { convexDir, ...forwarded } = opts;
-  const loaded = await loadConvexDir(convexDir);
-  const config = await loadConfig(dirname(convexDir));
+  const { functionsDir, ...forwarded } = opts;
+  const loaded = await loadFunctionsDir(functionsDir);
+  const config = await loadConfig(dirname(functionsDir));
   return bootLoaded({ ...forwarded, loaded, components: config.components });
 }
 

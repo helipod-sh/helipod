@@ -17,7 +17,7 @@ import { join, resolve } from "node:path";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { migrateCommand } from "../src/migrate";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { loadProject } from "../src/project";
 
 /** Resolve the CLI package's own node_modules (already linked by the workspace install). */
@@ -45,7 +45,7 @@ describe("migrate E2E", () => {
   it("migrated fixture loads and a migrated mutation runs on the engine", async () => {
     expect(await migrateCommand(["--dir", join(root, "convex"), "--force"])).toBe(0);
 
-    const loaded = await loadConvexDir(join(root, "convex"));
+    const loaded = await loadFunctionsDir(join(root, "stackbase"));
     const project = loadProject(loaded);
     const runtime = await createEmbeddedRuntime({
       store: new SqliteDocStore(new NodeSqliteAdapter()),

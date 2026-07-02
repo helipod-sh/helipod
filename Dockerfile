@@ -34,7 +34,7 @@ COPY --from=builder --chown=bun:bun /app .
 # Link workspace @stackbase/* packages into the ROOT node_modules so a BIND-MOUNTED app can
 # resolve them. turbo-prune + bun keep workspace links nested per-package
 # (/app/packages/cli/node_modules/@stackbase/*), never at /app/node_modules — but a mounted
-# /app/convex is not under any package, so its bare `import "@stackbase/values"` (every schema.ts)
+# /app/stackbase is not under any package, so its bare `import "@stackbase/values"` (every schema.ts)
 # and the `_generated/server` re-exports walk up to /app/node_modules and fail without these links.
 RUN <<'EOF'
 bun -e '
@@ -64,6 +64,6 @@ USER bun
 # Embedded SQLite database lives on a single mounted volume.
 VOLUME ["/data"]
 EXPOSE 3000
-# Production entrypoint: serve the app mounted at /app/convex, SQLite on the /data volume.
+# Production entrypoint: serve the app mounted at /app/stackbase, SQLite on the /data volume.
 ENTRYPOINT ["bun", "packages/cli/dist/bin.js"]
-CMD ["serve", "--dir", "/app/convex", "--data", "/data/db.sqlite"]
+CMD ["serve", "--dir", "/app/stackbase", "--data", "/data/db.sqlite"]

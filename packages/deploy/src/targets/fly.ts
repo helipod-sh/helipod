@@ -17,8 +17,8 @@ export const flyTarget: DeployTarget = {
   async package(ctx) {
     // Fly builds the deployed image itself (from the repo's Dockerfile, per fly.toml's `build`
     // config, or a buildpack fallback) when `fly deploy` uploads the project — there is nothing to
-    // bundle here beyond refreshing codegen so the baked convex/_generated matches the functions
-    // being deployed.
+    // bundle here beyond refreshing codegen so the baked functions directory's `_generated`
+    // matches the functions being deployed.
     await ctx.codegen();
   },
   async push(ctx): Promise<DeployResult> {

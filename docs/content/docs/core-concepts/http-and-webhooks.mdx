@@ -39,7 +39,7 @@ a regular action:
   query, mutation, or action through the three methods above.
 </Callout>
 
-```ts title="convex/http.ts"
+```ts title="stackbase/http.ts"
 import { httpAction, httpRouter } from "./_generated/server";
 
 export const receiveWebhook = httpAction(async (ctx, request) => {
@@ -68,10 +68,10 @@ HTTP in, mutation for the write, reactive fan-out for free.
 
 ### Register it in http.ts
 
-A conventional `convex/http.ts` default-exports an `httpRouter()` populated with `route()` calls. This
+A conventional `stackbase/http.ts` default-exports an `httpRouter()` populated with `route()` calls. This
 is how the engine discovers your endpoints at load time:
 
-```ts title="convex/http.ts"
+```ts title="stackbase/http.ts"
 import { httpRouter } from "./_generated/server";
 import { receiveWebhook } from "./webhooks";
 
@@ -116,7 +116,7 @@ When a request could match more than one registered route, resolution is determi
 3. Among `pathPrefix` routes, the longest matching prefix wins. `pathPrefix: "/webhooks/stripe/"`
    beats `pathPrefix: "/webhooks/"` for a request to `/webhooks/stripe/invoice`.
 
-```ts title="convex/http.ts"
+```ts title="stackbase/http.ts"
 http.route({ path: "/webhooks/stripe/health", method: "GET", handler: healthCheck });
 http.route({ pathPrefix: "/webhooks/stripe/", method: "POST", handler: stripeHook });
 http.route({ pathPrefix: "/webhooks/", method: "POST", handler: genericHook });

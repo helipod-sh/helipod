@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
 import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
 import { loadProject, push, type LoadedProject } from "@stackbase/cli";
-import schema from "../convex/schema";
-import * as polls from "../convex/polls";
-import * as options from "../convex/options";
+import schema from "../stackbase/schema";
+import * as polls from "../stackbase/polls";
+import * as options from "../stackbase/options";
 
 const loaded: LoadedProject = { schema, modules: { polls, options } };
 
@@ -73,9 +73,9 @@ describe("pulse — voting", () => {
 });
 
 describe("codegen — the committed _generated matches the schema", () => {
-  it("convex/_generated is up to date (no drift)", () => {
+  it("stackbase/_generated is up to date (no drift)", () => {
     const { generated } = push(loaded);
-    const dir = join(dirname(fileURLToPath(import.meta.url)), "../convex/_generated");
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "../stackbase/_generated");
     for (const file of generated.files) {
       expect(readFileSync(join(dir, file.path), "utf8"), `${file.path} is stale — run \`bun run scripts/codegen.ts\``).toBe(
         file.content,

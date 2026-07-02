@@ -1,5 +1,5 @@
 /**
- * `stackbase deploy` — package the local convex/ app and push it to a target via the
+ * `stackbase deploy` — package the local functions directory and push it to a target via the
  * `@stackbase/deploy` seam. Targets: `serve` (slice-6b live hot-swap, back-compat default),
  * `cloudflare` (Workers via wrangler), `docker` (build + push an image). This module: resolve
  * flags → build a DeployContext (packageApp/codegen closures over the existing CLI machinery,
@@ -7,34 +7,36 @@
  * --dry-run). `--check` gates on codegen drift (does the committed _generated/ match a fresh run).
  */
 import { readdirSync, statSync, readFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { transform } from "esbuild";
 import { writeGenerated } from "@stackbase/codegen";
 import { resolveDeploy, loadTarget, NodeSpawner, type Spawner, type DeployContext, DeployError } from "@stackbase/deploy";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 
 /** @deprecated slice-6b's own flag parser, superseded by parseDeployFlags/resolveDeploy. Kept for its existing test coverage. */
 export interface DeployOptions {
   url: string;
-  convexDir: string;
+  functionsDir: string;
   adminKey: string;
 }
 
 /** @deprecated see DeployOptions. */
-export function resolveDeployOptions(args: string[], env: NodeJS.ProcessEnv): DeployOptions | { error: string } {
+export async function resolveDeployOptions(args: string[], env: NodeJS.ProcessEnv): Promise<DeployOptions | { error: string }> {
   let url = env.STACKBASE_DEPLOY_URL?.trim() ?? "";
-  let convexDir = "convex";
+  let dirFlag: string | undefined;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--url" && args[i + 1]) url = args[++i]!;
-    else if (args[i] === "--dir" && args[i + 1]) convexDir = args[++i]!;
+    else if (args[i] === "--dir" && args[i + 1]) dirFlag = args[++i]!;
   }
   const adminKey = env.STACKBASE_ADMIN_KEY?.trim() ?? "";
   if (!url) return { error: "missing target URL — pass --url <url> or set STACKBASE_DEPLOY_URL" };
   if (!adminKey) return { error: "STACKBASE_ADMIN_KEY is required to deploy" };
-  return { url, convexDir, adminKey };
+  const { functionsDir } = await resolveFunctionsDir(dirFlag, process.cwd());
+  return { url, functionsDir, adminKey };
 }
 
 function walkTs(root: string, dir: string, out: string[]): void {
@@ -45,16 +47,16 @@ function walkTs(root: string, dir: string, out: string[]): void {
   }
 }
 
-export async function packageApp(convexDir: string): Promise<Array<{ path: string; code: string }>> {
+export async function packageApp(functionsDir: string): Promise<Array<{ path: string; code: string }>> {
   const absFiles: string[] = [];
-  walkTs(convexDir, convexDir, absFiles);
+  walkTs(functionsDir, functionsDir, absFiles);
   const out: Array<{ path: string; code: string }> = [];
   for (const abs of absFiles) {
     const source = readFileSync(abs, "utf8");
     // `transform` strips TS types and leaves import specifiers untouched — bare `@stackbase/*`
     // resolve from the remote's node_modules; relative imports resolve within the pushed tree.
     const { code } = await transform(source, { loader: "ts", format: "esm", target: "esnext" });
-    const rel = relative(convexDir, abs).split(sep).join("/").replace(/\.ts$/, ".js");
+    const rel = relative(functionsDir, abs).split(sep).join("/").replace(/\.ts$/, ".js");
     out.push({ path: rel, code });
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
@@ -66,31 +68,31 @@ export interface DeployDeps {
   interactive?: boolean;
 }
 
-function parseDeployFlags(args: string[]): { target?: string; env?: string; url?: string; convexDir: string; dryRun: boolean; check: boolean } {
+function parseDeployFlags(args: string[]): { target?: string; env?: string; url?: string; dirFlag?: string; dryRun: boolean; check: boolean } {
   let target: string | undefined;
   let env: string | undefined;
   let url: string | undefined = process.env.STACKBASE_DEPLOY_URL?.trim() || undefined;
-  let convexDir = "convex";
+  let dirFlag: string | undefined;
   let dryRun = false;
   let check = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--target" && args[i + 1]) target = args[++i];
     else if (args[i] === "--env" && args[i + 1]) env = args[++i];
     else if (args[i] === "--url" && args[i + 1]) url = args[++i];
-    else if (args[i] === "--dir" && args[i + 1]) convexDir = args[++i]!;
+    else if (args[i] === "--dir" && args[i + 1]) dirFlag = args[++i];
     else if (args[i] === "--dry-run") dryRun = true;
     else if (args[i] === "--check") check = true;
   }
-  return { target, env, url, convexDir, dryRun, check };
+  return { target, env, url, dirFlag, dryRun, check };
 }
 
-/** True if running codegen would change the committed convex/_generated (drift). */
-async function checkDrift(convexDir: string, components: Awaited<ReturnType<typeof loadConfig>>["components"]): Promise<boolean> {
+/** True if running codegen would change the committed `_generated/` (drift). */
+async function checkDrift(functionsDir: string, components: Awaited<ReturnType<typeof loadConfig>>["components"]): Promise<boolean> {
   const tmp = mkdtempSync(join(tmpdir(), "sb-codegen-"));
   try {
-    const { generated } = push(await loadConvexDir(convexDir), components);
+    const { generated } = push(await loadFunctionsDir(functionsDir), components);
     writeGenerated(generated.files, tmp);
-    const genDir = join(convexDir, "_generated");
+    const genDir = join(functionsDir, "_generated");
     return !dirsEqual(tmp, genDir);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -123,19 +125,22 @@ function dirsEqual(a: string, b: string): boolean {
 export async function deployCommand(args: string[], deps: DeployDeps = {}): Promise<number> {
   const flags = parseDeployFlags(args);
   const cwd = deps.cwd ?? process.cwd();
-  // `resolve` (not `join`): flags.convexDir may already be absolute (e.g. a caller passing a
-  // fixture path via --dir, or any future non-cwd-relative invocation) — join() would naively
-  // concatenate cwd + an absolute path into a bogus nested path instead of respecting it.
-  const convexDir = resolve(cwd, flags.convexDir);
+  // `resolveFunctionsDir` handles the precedence (--dir > `functionsDir` in stackbase.config.ts >
+  // DEFAULT_FUNCTIONS_DIR) and always returns an absolute path, so no separate `resolve()` of
+  // `flags.dirFlag` is needed here the way a bare flag default would have required.
+  const { functionsDir } = await resolveFunctionsDir(flags.dirFlag, cwd);
+  // Fail loudly — with the migrate hint — before anything below (the `--check` drift scan or the
+  // main package/push flow) can hit `loadFunctionsDir` and throw a raw ENOENT.
+  if (!ensureFunctionsDirExists(functionsDir)) return 1;
   const config = await loadConfig(cwd);
 
   if (flags.check) {
-    const drift = await checkDrift(convexDir, config.components);
+    const drift = await checkDrift(functionsDir, config.components);
     if (drift) {
-      process.stderr.write("✗ convex/_generated is out of date — run `stackbase codegen` and commit the result\n");
+      process.stderr.write(`✗ ${functionsDir}/_generated is out of date — run \`stackbase codegen\` and commit the result\n`);
       return 1;
     }
-    process.stdout.write("✓ convex/_generated is up to date\n");
+    process.stdout.write(`✓ ${functionsDir}/_generated is up to date\n`);
     // `--check` never pushes: it's a verification gate. Return after the drift verdict unless the
     // caller ALSO passed --dry-run (the dry-run flow below runs but always skips push), so --check
     // can never reach `push`.
@@ -159,16 +164,16 @@ export async function deployCommand(args: string[], deps: DeployDeps = {}): Prom
   const interactive = deps.interactive ?? (Boolean(process.stdin.isTTY) && !process.env.CI);
   const ctx: DeployContext = {
     cwd,
-    convexDir,
+    functionsDir,
     env: resolved.env,
     target: resolved,
     interactive,
     spawn: deps.spawn ?? new NodeSpawner(),
     log: (m) => process.stdout.write(`  ${m}\n`),
-    packageApp: async () => ({ files: await packageApp(convexDir) }),
+    packageApp: async () => ({ files: await packageApp(functionsDir) }),
     codegen: async () => {
-      const { generated } = push(await loadConvexDir(convexDir), config.components);
-      writeGenerated(generated.files, join(convexDir, "_generated"));
+      const { generated } = push(await loadFunctionsDir(functionsDir), config.components);
+      writeGenerated(generated.files, join(functionsDir, "_generated"));
     },
   };
 

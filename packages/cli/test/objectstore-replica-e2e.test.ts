@@ -40,7 +40,7 @@ import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
 /* Slice 6/7/8's other object-store CLI tests.                                */
 /* -------------------------------------------------------------------------- */
 
-const CONVEX_DIR = "test/fixtures/deploy-v2/convex";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/stackbase";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors objectstore-serve-e2e.test.ts / serve-e2e.test.ts) */
@@ -147,7 +147,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
   /* 1. Boot the WRITER over the object store. */
   const writer = await startServe({
-    convexDir: CONVEX_DIR,
+    functionsDir: FUNCTIONS_DIR,
     dataPath: freshDataDir(`${label}-writer`),
     ip: "127.0.0.1",
     port: 0,
@@ -171,7 +171,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
     /* 1 (cont.). Boot the REPLICA over the SAME bucket — a distinct local data dir + port. */
     const replica = await startServe({
-      convexDir: CONVEX_DIR,
+      functionsDir: FUNCTIONS_DIR,
       dataPath: freshDataDir(`${label}-replica`),
       ip: "127.0.0.1",
       port: 0,

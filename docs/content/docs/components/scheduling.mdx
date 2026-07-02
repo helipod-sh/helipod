@@ -239,9 +239,9 @@ job whose `onComplete` advances the workflow's own journal.
 
 ## Recurring jobs: `cronJobs()`
 
-An app's `crons.ts` declares recurring work with a Convex-parity surface:
+An app's `crons.ts` declares recurring work:
 
-```ts title="convex/crons.ts"
+```ts title="stackbase/crons.ts"
 import { cronJobs } from "./_generated/server";
 
 const crons = cronJobs();
@@ -259,7 +259,7 @@ export default crons;
 ```ts title="stackbase.config.ts"
 import { defineConfig } from "@stackbase/component";
 import { defineScheduler } from "@stackbase/scheduler";
-import crons from "./convex/crons";
+import crons from "./stackbase/crons";
 
 export default defineConfig({ components: [defineScheduler({ crons })] });
 ```

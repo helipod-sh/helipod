@@ -9,7 +9,7 @@
  * `createEmbeddedRuntime` (`bootProject` forwards every key explicitly and simply never forwarded
  * this one — see its comment).
  *
- * So this test hand-builds nothing the shipped server builds itself: a real on-disk `convex/` dir, a
+ * So this test hand-builds nothing the shipped server builds itself: a real on-disk `stackbase/` dir, a
  * real `stackbase.config.ts` composing `@stackbase/scheduler`, booted through the real `startServe`
  * (the same call `serveCommand` makes), driven over the real HTTP `/api/run`, with the wake host
  * reached over a real HTTP listener. The test supplies the listener and — in the round-trip test —
@@ -63,7 +63,7 @@ async function wakeListener(): Promise<{ url: string; arms: Array<number | null>
 }
 
 /* -------------------------------------------------------------------------- */
-/* Fixture project on disk (convex/ + stackbase.config.ts composing scheduler) */
+/* Fixture project on disk (stackbase/ + stackbase.config.ts composing scheduler) */
 /* -------------------------------------------------------------------------- */
 
 /** Resolve a package from the CLI's own node_modules (already linked by the workspace install). */
@@ -73,11 +73,11 @@ function cliNodeModules(): string {
 
 /**
  * A real project ROOT: `stackbase.config.ts` at the top (where `bootProject`'s
- * `loadConfig(dirname(convexDir))` looks for it) and a dynamically-importable `convex/` beneath —
- * i.e. the layout a real deployment has, so `bootProject` composes the scheduler for itself rather
- * than being handed a pre-composed project.
+ * `loadConfig(dirname(functionsDir))` looks for it) and a dynamically-importable `stackbase/`
+ * beneath — i.e. the layout a real deployment has, so `bootProject` composes the scheduler for
+ * itself rather than being handed a pre-composed project.
  */
-function makeFixtureProject(): { root: string; convexDir: string } {
+function makeFixtureProject(): { root: string; functionsDir: string } {
   const root = mkdtempSync(join(tmpdir(), "sbwake-e2e-"));
   const nm = join(root, "node_modules");
   mkdirSync(nm);
@@ -92,15 +92,15 @@ function makeFixtureProject(): { root: string; convexDir: string } {
     `,
   );
 
-  const convexDir = join(root, "convex");
-  mkdirSync(convexDir);
-  mkdirSync(join(convexDir, "_generated"));
+  const functionsDir = join(root, "stackbase");
+  mkdirSync(functionsDir);
+  mkdirSync(join(functionsDir, "_generated"));
   // `serveCommand` fail-fasts on a missing `_generated/server.ts`; `bootProject` never reads it, but
   // a real project always has it committed, so the fixture does too.
-  writeFileSync(join(convexDir, "_generated", "server.ts"), `export {};`);
+  writeFileSync(join(functionsDir, "_generated", "server.ts"), `export {};`);
 
   writeFileSync(
-    join(convexDir, "schema.ts"),
+    join(functionsDir, "schema.ts"),
     `
     import { v, defineSchema, defineTable } from "@stackbase/values";
     export default defineSchema({ results: defineTable({ tag: v.string() }) });
@@ -108,7 +108,7 @@ function makeFixtureProject(): { root: string; convexDir: string } {
   );
 
   writeFileSync(
-    join(convexDir, "jobs.ts"),
+    join(functionsDir, "jobs.ts"),
     `
     import { mutation } from "@stackbase/executor";
     export const schedule = mutation({
@@ -120,7 +120,7 @@ function makeFixtureProject(): { root: string; convexDir: string } {
     `,
   );
 
-  return { root, convexDir };
+  return { root, functionsDir };
 }
 
 async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
@@ -139,9 +139,9 @@ afterEach(async () => {
 
 /** Boot the fixture through the real `startServe` — the same call `serveCommand` makes. */
 async function serveFixture(opts: { wakeUrl?: string } = {}) {
-  const { root, convexDir } = makeFixtureProject();
+  const { root, functionsDir } = makeFixtureProject();
   const booted = await startServe({
-    convexDir,
+    functionsDir,
     dataPath: join(root, "data", "db.sqlite"),
     ip: "127.0.0.1",
     port: 0,

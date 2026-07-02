@@ -7,7 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@stackbase/codegen";
 import { generateAdminKey } from "@stackbase/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
-import { loadConvexDir } from "./load-modules";
+import { loadFunctionsDir } from "./load-modules";
+import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
 import { bootProject, loadDashboard, withStorageModules } from "./boot";
@@ -26,7 +27,7 @@ function parseFlags(args: string[]): DevOptions {
     const a = args[i];
     if (a === "--port" && args[i + 1]) out.port = Number(args[++i]);
     else if (a === "--ip" && args[i + 1]) out.ip = args[++i];
-    else if (a === "--dir" && args[i + 1]) out.convexDir = args[++i];
+    else if (a === "--dir" && args[i + 1]) out.functionsDir = args[++i];
     else if (a === "--data" && args[i + 1]) out.dataPath = args[++i];
     else if (a === "--web" && args[i + 1]) out.webDir = args[++i];
     else if (a === "--database-url" && args[i + 1]) out.databaseUrl = args[++i];
@@ -37,10 +38,15 @@ function parseFlags(args: string[]): DevOptions {
 }
 
 export async function devCommand(args: string[]): Promise<number> {
-  const opts = resolveDevOptions(parseFlags(args));
-  const generatedDir = join(opts.convexDir, "_generated");
+  const flags = parseFlags(args);
+  const { functionsDir, projectRoot } = await resolveFunctionsDir(flags.functionsDir, process.cwd());
+  if (!ensureFunctionsDirExists(functionsDir)) {
+    return 1;
+  }
+  const opts = resolveDevOptions({ ...flags, functionsDir });
+  const generatedDir = join(opts.functionsDir, "_generated");
 
-  const config = await loadConfig(dirname(opts.convexDir));
+  const config = await loadConfig(projectRoot);
 
   // Treat an empty/whitespace STACKBASE_ADMIN_KEY as unset (a blank key would 401 everything).
   const envKey = process.env.STACKBASE_ADMIN_KEY?.trim();
@@ -52,7 +58,7 @@ export async function devCommand(args: string[]): Promise<number> {
   const loopback = ["127.0.0.1", "::1", "localhost"].includes(opts.ip);
 
   const { runtime, adminApi, project, generated, store, logSink, storageRoutes } = await bootProject({
-    convexDir: opts.convexDir,
+    functionsDir: opts.functionsDir,
     dataPath: opts.dataPath,
     adminKey,
     databaseUrl: opts.databaseUrl,
@@ -77,7 +83,7 @@ export async function devCommand(args: string[]): Promise<number> {
 
   const watcher = createWatchLoop({
     subscribe: (onChange) => {
-      const w = fsWatch(resolve(opts.convexDir), { recursive: true }, (_e, file) => {
+      const w = fsWatch(resolve(opts.functionsDir), { recursive: true }, (_e, file) => {
         if (file && !String(file).includes("_generated")) onChange();
       });
       return () => w.close();
@@ -85,7 +91,7 @@ export async function devCommand(args: string[]): Promise<number> {
     onTrigger: async (reason) => {
       if (reason === "initial") return; // already pushed above
       try {
-        const next = push(await loadConvexDir(opts.convexDir), config.components);
+        const next = push(await loadFunctionsDir(opts.functionsDir), config.components);
         writeGenerated(next.generated.files, generatedDir);
         // Re-apply the always-on `_storage:*` built-ins: `setModules` replaces `modules` wholesale.
         runtime.setModules(withStorageModules(next.project.moduleMap));
@@ -104,19 +110,26 @@ export async function devCommand(args: string[]): Promise<number> {
 }
 
 export async function codegenCommand(args: string[]): Promise<number> {
-  const opts = resolveDevOptions(parseFlags(args));
-  const loaded = await loadConvexDir(opts.convexDir);
-  const config = await loadConfig(dirname(opts.convexDir));
+  const flags = parseFlags(args);
+  // Same two-step resolve as `devCommand`: consult `functionsDir` in stackbase.config.ts when
+  // `--dir` isn't given, instead of `resolveDevOptions`'s own bare `?? DEFAULT_FUNCTIONS_DIR`
+  // fallback (which never reads the config file) — otherwise `codegen` and `dev` could disagree
+  // about where the functions live on a project that sets the config key.
+  const { functionsDir } = await resolveFunctionsDir(flags.functionsDir, process.cwd());
+  if (!ensureFunctionsDirExists(functionsDir)) return 1;
+  const opts = resolveDevOptions({ ...flags, functionsDir });
+  const loaded = await loadFunctionsDir(opts.functionsDir);
+  const config = await loadConfig(dirname(opts.functionsDir));
   const { generated } = push(loaded, config.components);
-  writeGenerated(generated.files, join(opts.convexDir, "_generated"));
-  process.stdout.write(`generated ${opts.convexDir}/_generated\n`);
+  writeGenerated(generated.files, join(opts.functionsDir, "_generated"));
+  process.stdout.write(`generated ${opts.functionsDir}/_generated\n`);
   return 0;
 }
 
 function printHelp(): void {
   process.stdout.write(
     [
-      "stackbase — Convex-compatible reactive backend",
+      "stackbase - the reactive backend you self-host",
       "",
       "Usage: stackbase <command> [options]",
       "",
@@ -128,12 +141,12 @@ function printHelp(): void {
       "  migrate    Migrate a Convex project into Stackbase (imports + report)",
       "  migrate export --url <src> --out dump.json   Export app data to a portable dump",
       "  migrate import --url <dst> --in  dump.json   Import a dump into a deployment",
-      "  codegen    Regenerate convex/_generated types",
+      "  codegen    Regenerate <functionsDir>/_generated types",
       "  fleet reshard --shards M --database-url <url>   Change a STOPPED fleet's shard count",
-      "  objectstore reshard --shards M --object-store <url> --dir <convex>   Change a STOPPED object-storage deployment's shard count",
+      "  objectstore reshard --shards M --object-store <url> --dir <functionsDir>   Change a STOPPED object-storage deployment's shard count",
       "  help       Show this help",
       "",
-      "Options: --port <n>  --ip <addr>  --dir <convexDir>  --data <dbPath>  --database-url <url>",
+      "Options: --port <n>  --ip <addr>  --dir <functionsDir>  --data <dbPath>  --database-url <url>",
       "Deploy:  --target <name>  --env <name>  --dry-run  --check   (default target: serve; default env: production)",
       "",
     ].join("\n"),

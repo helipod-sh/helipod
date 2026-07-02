@@ -14,7 +14,7 @@ does.
 
 ## Start the dev server
 
-From your app's root (where `convex/` lives):
+From your app's root (where `stackbase/` lives):
 
 ```bash
 npx stackbase dev
@@ -23,14 +23,14 @@ npx stackbase dev
 Under the hood, one command does five things, in order:
 
 1. **Loads your project.** It resolves `stackbase.config.ts` (component composition), then reads
-   `convex/schema.ts` and every function file under `convex/`.
-2. **Generates `convex/_generated/`**: the typed `api`/`Doc`/`Id` helpers your functions and client
+   `stackbase/schema.ts` and every function file under `stackbase/`.
+2. **Generates `stackbase/_generated/`**: the typed `api`/`Doc`/`Id` helpers your functions and client
    import.
 3. **Boots the embedded engine** against a local SQLite database, or Postgres if you pass
    [`--database-url`](#flag-reference) (see below).
 4. **Serves everything on one port**: the sync WebSocket (`/api/sync`), the `/api/*` HTTP surface,
    your `httpAction` routes, the `/_admin/*` admin API, and the dashboard at `/_dashboard`.
-5. **Starts watching `convex/`** for changes and hot-reloads your functions on every save (see
+5. **Starts watching `stackbase/`** for changes and hot-reloads your functions on every save (see
    [Hot reload](#hot-reload) below).
 
 On startup it prints the server URL, the dashboard URL, and the admin key:
@@ -58,7 +58,7 @@ Here's every flag `stackbase dev` accepts:
 |---|---|---|
 | `--port <n>` | `3000` | HTTP/WebSocket port. |
 | `--ip <addr>` | `127.0.0.1` | Bind address. `127.0.0.1`, `::1`, and `localhost` all count as loopback (see [Admin key](#admin-key) below); anything else exposes the server on your network. |
-| `--dir <path>` | `convex` | Where your schema and functions live. |
+| `--dir <path>` | `stackbase` | Where your schema and functions live. |
 | `--data <path>` | `.stackbase/data.db` | SQLite database file path. Ignored when `--database-url` is set. |
 | `--web <dir>` | unset | Serve a static web UI (a built frontend, for example) alongside the API. `GET` requests that don't match `/api/*`, `/_admin/*`, or `/_dashboard` fall through to files in this directory. |
 | `--database-url <url>` | unset | A `postgres://` or `postgresql://` connection string. When set, stackbase uses Postgres instead of SQLite; see [Postgres](/docs/deploy/postgres). Also readable from `STACKBASE_DATABASE_URL`, though the flag wins. |
@@ -135,13 +135,13 @@ A persistent `STACKBASE_ADMIN_KEY` is never embedded in the HTML, loopback or no
 
 ## Hot reload
 
-`stackbase dev` watches `convex/` (recursively) via a filesystem watch, ignoring anything under
-`convex/_generated/` so codegen's own writes don't re-trigger themselves. On every change, after a
+`stackbase dev` watches `stackbase/` (recursively) via a filesystem watch, ignoring anything under
+`stackbase/_generated/` so codegen's own writes don't re-trigger themselves. On every change, after a
 short debounce, this is the loop:
 
 ```mermaid
 flowchart LR
-  Edit["You save a file in convex/"] --> Debounce["Watcher debounces"]
+  Edit["You save a file in stackbase/"] --> Debounce["Watcher debounces"]
   Debounce --> Reload["Reload schema + functions, regenerate _generated/"]
   Reload --> Push["setModules + setRoutes"]
   Push --> Live["Live subscriptions re-run on the next invalidation"]
@@ -152,10 +152,10 @@ In detail, it:
 1. Re-loads and re-pushes your project (schema, functions, and composed components), catching load
    errors. A bad `schema.ts` or a syntax error prints `✗ reload failed: <message>` and leaves the
    previous, working set of functions running rather than crashing the server.
-2. Re-writes `convex/_generated/` with the freshly generated types.
+2. Re-writes `stackbase/_generated/` with the freshly generated types.
 3. Calls `runtime.setModules(...)` with the new function map. This replaces the module map
    wholesale, so `stackbase dev` re-applies the always-on `_storage:*` built-in functions on every
-   reload. They aren't part of your `convex/` source, so they'd otherwise vanish on the first save.
+   reload. They aren't part of your `stackbase/` source, so they'd otherwise vanish on the first save.
 4. Calls `server.setRoutes(...)` with the freshly resolved `http.ts` routes, so `httpAction` changes
    take effect immediately too.
 
@@ -167,10 +167,10 @@ time something invalidates it.
 
 ```bash
 stackbase codegen
-stackbase codegen --dir convex   # if your functions aren't in ./convex
+stackbase codegen --dir stackbase   # if your functions aren't in ./stackbase
 ```
 
-This regenerates `convex/_generated/` and exits: no server, no watch loop. `stackbase dev` does this
+This regenerates `stackbase/_generated/` and exits: no server, no watch loop. `stackbase dev` does this
 automatically on every change. You need the explicit command before
 [`stackbase serve`](/docs/deploy/self-hosting), which never runs codegen itself (it fails fast at
 boot if `_generated/` is missing).

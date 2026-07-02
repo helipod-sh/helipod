@@ -18,7 +18,7 @@ export function resolveCli(cwd: string, override?: string): ResolvedCli {
   return { command: "npx", baseArgs: ["stackbase"] };
 }
 
-/** Assemble the `dev` argv: `[...baseArgs, "dev", "--port", <port>, "--dir", <convexDir>, ...extra]`. */
-export function buildDevArgs(baseArgs: string[], port: number, convexDir: string, extra: string[]): string[] {
-  return [...baseArgs, "dev", "--port", String(port), "--dir", convexDir, ...extra];
+/** Assemble the `dev` argv: `[...baseArgs, "dev", "--port", <port>, "--dir", <functionsDir>, ...extra]`. */
+export function buildDevArgs(baseArgs: string[], port: number, functionsDir: string, extra: string[]): string[] {
+  return [...baseArgs, "dev", "--port", String(port), "--dir", functionsDir, ...extra];
 }

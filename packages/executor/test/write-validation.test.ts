@@ -6,7 +6,7 @@ import { QueryRuntime } from "@stackbase/query-engine";
 import { InlineUdfExecutor, SimpleIndexCatalog, query, mutation } from "../src/index";
 import { v } from "@stackbase/values";
 
-// --- functions (what a user would write in convex/) ---
+// --- functions (what a user would write in their functions directory) ---
 const insDocs = mutation<{ n: unknown; extra?: boolean }, string>({
   handler: (ctx, a) => ctx.db.insert("docs", a as unknown as DocumentValue),
 });

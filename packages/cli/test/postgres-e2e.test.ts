@@ -27,7 +27,7 @@ import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import { writeGenerated } from "@stackbase/codegen";
 
@@ -92,16 +92,16 @@ function stopPostgresContainer(): void {
 /* Fixture: reuse deploy-e2e's `notes` app (notes:add + notes:list)            */
 /* -------------------------------------------------------------------------- */
 
-function fixtureConvexDir(): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "convex");
+function fixtureFunctionsDir(): string {
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "stackbase");
 }
 
 /** Refresh the fixture's committed `_generated/` in place (same load->push->write step `deploy`/
  * `codegen` perform) so the checked-in output stays honest — deterministic, no git diff on a rerun. */
-async function regenerate(convexDir: string): Promise<void> {
-  const loaded = await loadConvexDir(convexDir);
+async function regenerate(functionsDir: string): Promise<void> {
+  const loaded = await loadFunctionsDir(functionsDir);
   const { generated } = push(loaded, []);
-  writeGenerated(generated.files, resolve(convexDir, "_generated"));
+  writeGenerated(generated.files, resolve(functionsDir, "_generated"));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -150,7 +150,7 @@ function waitForReadyOrExit(proc: ServeProcess): Promise<ReadyOrExit> {
 function spawnServe(databaseUrl: string): ServeProcess {
   return spawn(
     "bun",
-    [CLI_BIN, "serve", "--dir", fixtureConvexDir(), "--port", "0", "--ip", "127.0.0.1", "--no-dashboard", "--database-url", databaseUrl],
+    [CLI_BIN, "serve", "--dir", fixtureFunctionsDir(), "--port", "0", "--ip", "127.0.0.1", "--no-dashboard", "--database-url", databaseUrl],
     { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY }, stdio: ["ignore", "pipe", "pipe"] },
   );
 }
@@ -235,7 +235,7 @@ maybeDescribe("stackbase serve — Postgres ship gate (real container, real bun 
   it(
     "commits + fans out + reads back over a real Postgres container; single-writer refuses; survives a restart",
     async () => {
-      await regenerate(fixtureConvexDir());
+      await regenerate(fixtureFunctionsDir());
       const { port } = await startPostgresContainer();
       const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
 

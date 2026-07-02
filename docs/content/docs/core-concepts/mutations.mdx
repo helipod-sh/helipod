@@ -15,7 +15,7 @@ a scheduled job, a webhook, a trigger.
 
 A mutation takes a context (`ctx`) and, optionally, arguments, and returns a value:
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 import { v } from "@stackbase/values";
 import { mutation } from "./_generated/server";
 
@@ -46,7 +46,7 @@ client's WebSocket mutation call, `POST /api/run`, an action's inner `ctx.runMut
 scheduler/cron driver calling a job's target, boot steps. None of them reach a handler with
 unvalidated arguments.
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), body: v.string() },
   handler: (ctx, args) => ctx.db.insert("messages", { conversationId: args.conversationId, body: args.body }),
@@ -116,7 +116,7 @@ update. To change one field, read the document first and write back every field,
 
 </Callout>
 
-```ts title="convex/items.ts"
+```ts title="stackbase/items.ts"
 export const toggle = mutation({
   args: { id: v.id("items"), done: v.boolean() },
   handler: async (ctx, { id, done }) => {
@@ -243,7 +243,7 @@ yourself if you need a deterministic order among documents created in the same t
 
 </Callout>
 
-```ts title="convex/steps.ts"
+```ts title="stackbase/steps.ts"
 export const createSteps = mutation({
   args: { workflowId: v.id("workflows"), labels: v.array(v.string()) },
   handler: async (ctx, { workflowId, labels }) => {
@@ -265,7 +265,7 @@ mutation runs unless it opts into sharding.
 
 A mutation that writes a sharded table must declare which shard it's routing to, with `shardBy`:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 export default defineSchema({
   conversations: defineTable({ title: v.string() }),
   messages: defineTable({
@@ -278,7 +278,7 @@ export default defineSchema({
 });
 ```
 
-```ts title="convex/messages.ts"
+```ts title="stackbase/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   returns: v.id("messages"),
@@ -303,7 +303,7 @@ By default, `ctx.db.insert` mints a random `_id`. A mutation can instead accept 
 **client-minted** id and pass it straight through as `_id` in the insert value. The engine
 validates and accepts it in place of minting its own:
 
-```ts title="convex/conversations.ts"
+```ts title="stackbase/conversations.ts"
 export const create = mutation({
   args: { _id: v.optional(v.string()), name: v.string() },
   handler: (ctx, args) => ctx.db.insert("conversations", args),
@@ -315,7 +315,7 @@ generated locally) via the typed `mintId` that `stackbase codegen` (and `stackba
 regeneration on every push) emits to `_generated/ids.ts`:
 
 ```ts
-import { mintId } from "../convex/_generated/ids";
+import { mintId } from "../stackbase/_generated/ids";
 
 const conversationId = mintId("conversations");                                   // a real Id<"conversations">, minted now
 await client.mutation(api.conversations.create, { _id: conversationId, name });   // can enqueue offline
@@ -339,7 +339,7 @@ When a project composes a component in `stackbase.config.ts`, its facade is atta
 under that component's name. For components that opt into writing, it's usable from inside a
 mutation's own transaction, so its writes commit and roll back with the rest of the handler:
 
-```ts title="convex/reminders.ts"
+```ts title="stackbase/reminders.ts"
 export const remind = mutation({
   args: { taskId: v.id("tasks"), delayMs: v.number() },
   handler: async (ctx, { taskId, delayMs }) => {
@@ -364,7 +364,7 @@ On the client, `useMutation` returns a callback bound to a typed function refere
 
 ```tsx
 import { useMutation } from "@stackbase/client/react";
-import { api } from "../convex/_generated/server";
+import { api } from "../stackbase/_generated/server";
 
 function Composer({ author }: { author: string }) {
   const send = useMutation(api.messages.send);

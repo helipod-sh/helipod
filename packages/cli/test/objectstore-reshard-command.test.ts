@@ -10,12 +10,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
 import { FsObjectStore } from "@stackbase/objectstore-fs";
 import { shardIdForKeyValue } from "@stackbase/id-codec";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 import { objectstoreCommand } from "../src/objectstore";
 
 const ROOT = "./.tmp-objectstore-reshard-cmd";
-const FIXTURE = "test/fixtures/shard-dev/convex";
+const FIXTURE = "test/fixtures/shard-dev/stackbase";
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 /** Capture everything the command writes to stdout/stderr while it runs. */
@@ -104,7 +104,7 @@ describe("objectstoreCommand — R2a arg parsing / gate (no bucket needed)", () 
 
 describe("objectstoreCommand reshard — R3 full E2E (boot → commit → reshard → fresh boot reads)", () => {
   it("reshards a stopped single-shard bucket 1→3 by the fixture's channelId shard key; a fresh node derives 3 lanes and reads everything", async () => {
-    const loaded = await loadConvexDir(FIXTURE);
+    const loaded = await loadFunctionsDir(FIXTURE);
     const bucketDir = `${ROOT}/bucket`;
     const bucketUrl = `file://${bucketDir}`;
 

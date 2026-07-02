@@ -67,7 +67,7 @@ StackbaseDurableObject { … }` plus `export default createWorkerHandler("STACKB
 `stackbase deploy` doesn't scaffold this file for you. It reconciles bindings into an existing
 `wrangler.jsonc`, additively, never dropping a field you hand-wrote.
 
-You also need a `convex/` directory with committed `_generated/`, the same requirement as
+You also need a `stackbase/` directory with committed `_generated/`, the same requirement as
 `stackbase serve`. `stackbase deploy` refreshes codegen before packaging.
 
 </Step>
@@ -91,7 +91,7 @@ stackbase deploy --target cloudflare --env production
 <Callout type="info">
   `--dry-run` runs preflight and packaging (validate wrangler, refresh codegen, reconcile
   `wrangler.jsonc`) and skips the actual `wrangler deploy`, useful for validating a PR. `--check`
-  fails if your committed `convex/_generated/` has drifted from a fresh codegen run.
+  fails if your committed `stackbase/_generated/` has drifted from a fresh codegen run.
 </Callout>
 
 Configure environments in `stackbase.config.ts`:
@@ -191,7 +191,7 @@ the single-DO host too whenever a D1 binding is wired.
 `.global()` is mutually exclusive with `.shardKey()`: a table is either sharded or global, never
 both (declaring both throws at schema build time).
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -295,7 +295,7 @@ don't support bind mounts:
 
 ```dockerfile
 FROM stackbase:latest
-COPY ./convex /app/convex
+COPY ./stackbase /app/stackbase
 ```
 
 Point `serve` at R2 with `--object-store` (`s3+https://<account-id>.r2.cloudflarestorage.com/<bucket>?region=auto&forcePathStyle=true`).

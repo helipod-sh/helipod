@@ -1,7 +1,7 @@
 /**
  * Packlist E2E — the README's demo flows, through the REAL machinery end-to-end: the real
  * `stackbase dev` server (startDevServer), a real StackbaseClient over a real WebSocket, the
- * demo's OWN `offlineToggleTransport` as the offline switch, the demo's own convex functions,
+ * demo's OWN `offlineToggleTransport` as the offline switch, the demo's own stackbase functions,
  * and a client-minted id from the committed `_generated/ids.ts`. This is the protocol-level
  * twin of driving the app in a browser (the React layer is the only thing not under test here;
  * `packages/cli/test/crosstab-e2e.test.ts` covers the cross-tab rendering mechanism).
@@ -29,10 +29,10 @@ import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-
 import { StackbaseClient, webSocketTransport, type ClientTransport, type PendingMutationEntry } from "@stackbase/client";
 import { fsOutbox } from "@stackbase/client/outbox-fs";
 import { loadProject, startDevServer, type DevServer } from "@stackbase/cli";
-import schema from "../convex/schema";
-import * as lists from "../convex/lists";
-import * as items from "../convex/items";
-import { mintId } from "../convex/_generated/ids";
+import schema from "../stackbase/schema";
+import * as lists from "../stackbase/lists";
+import * as items from "../stackbase/items";
+import { mintId } from "../stackbase/_generated/ids";
 import { offlineToggleTransport, type OfflineToggleTransport } from "../web/offline-transport";
 
 /* ------------------------------------ harness ------------------------------------ */

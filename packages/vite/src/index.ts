@@ -11,6 +11,16 @@ import { resolveCli, buildDevArgs } from "./resolve-cli";
 import { startBackend, probePort, installSignalCleanup, type SpawnFn, type Backend } from "./child";
 import { embedPlugin } from "./embed";
 
+// Mirrors `DEFAULT_FUNCTIONS_DIR` from `@stackbase/cli` (`packages/cli/src/functions-dir.ts`).
+// NOT imported: `@stackbase/cli` is an optional peer dependency (see package.json) so that
+// proxy-mode-only consumers — who spawn `stackbase dev` as a child process and never touch the
+// package's own JS — aren't forced to have it installed. embed.ts reaches the real constant
+// through its own dynamic import instead, for the same reason. Exported (not just module-local) so
+// a test can assert this literal hasn't drifted from `@stackbase/cli`'s own constant — see
+// `test/plugin.test.ts`'s "DEFAULT_FUNCTIONS_DIR guard" — without a static top-level import of
+// `@stackbase/cli` here in the shipped proxy path itself.
+export const DEFAULT_FUNCTIONS_DIR = "stackbase";
+
 export interface StackbaseVitePluginOptions {
   /**
    * How the backend is run alongside Vite:
@@ -21,8 +31,8 @@ export interface StackbaseVitePluginOptions {
    *     so proxy-mode users never pull it. See `docs/superpowers/specs/2026-05-15-vite-phase2-embed-design.md`.
    */
   mode?: "proxy" | "embed";
-  /** App functions dir → `--dir` (default "convex"). Shared by both modes. */
-  convexDir?: string;
+  /** App functions dir → `--dir` (default "stackbase"). Shared by both modes. */
+  functionsDir?: string;
 
   // ── proxy mode ──────────────────────────────────────────────────────────────────────────────
   /** Backend port to proxy to (default: an OS-assigned free port). */
@@ -79,7 +89,7 @@ function proxyPlugin(options: StackbaseVitePluginOptions): Plugin {
     async configureServer(server) {
       const root = server.config.root;
       const cli = resolveCli(root, options.command);
-      const args = buildDevArgs(cli.baseArgs, port, options.convexDir ?? "convex", options.args ?? []);
+      const args = buildDevArgs(cli.baseArgs, port, options.functionsDir ?? DEFAULT_FUNCTIONS_DIR, options.args ?? []);
       backend = await startBackend(
         { command: cli.command, args, cwd: root, port, onLog: (l) => server.config.logger.info(`[stackbase] ${l}`) },
         { spawn: nodeSpawn, probe: probePort },

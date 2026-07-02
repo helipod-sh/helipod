@@ -30,7 +30,7 @@ import { startServe } from "../src/serve";
 import { resolveObjectStore } from "../src/objectstore-select";
 import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
 
-const CONVEX_DIR = "test/fixtures/shard-dev/convex";
+const FUNCTIONS_DIR = "test/fixtures/shard-dev/stackbase";
 
 /* ── WS + HTTP helpers (mirror objectstore-replica-e2e.test.ts) ───────────────────────────────── */
 
@@ -133,7 +133,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
   expect(shardIdForKeyValue(REACT_CHANNEL, 3)).toBe("s1"); // the reactivity channel is a non-default lane
 
   const writer = await startServe({
-    convexDir: CONVEX_DIR,
+    functionsDir: FUNCTIONS_DIR,
     dataPath: freshDataDir(`${label}-writer`),
     ip: "127.0.0.1",
     port: 0,
@@ -153,7 +153,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
     for (const ch of CHANNELS) await run(writer.server.url, "messages:send", { channelId: ch, body: `seed-${ch}` });
 
     const replica = await startServe({
-      convexDir: CONVEX_DIR,
+      functionsDir: FUNCTIONS_DIR,
       dataPath: freshDataDir(`${label}-replica`),
       ip: "127.0.0.1",
       port: 0,

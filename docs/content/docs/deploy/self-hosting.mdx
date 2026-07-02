@@ -9,7 +9,7 @@ Think of `docker compose up` as the one command that starts your whole backend: 
 the HTTP API, any `httpAction` webhooks, and the dashboard, all in one container.
 
 This is the baseline way to self-host stackbase. A generic `stackbase:latest` image runs
-`stackbase serve`, your app's `convex/` folder is mounted in, and its SQLite database sits on a
+`stackbase serve`, your app's `stackbase/` folder is mounted in, and its SQLite database sits on a
 named volume so data survives restarts.
 
 This page covers `serve` itself (what it hardens versus `dev`, and every flag and environment
@@ -33,7 +33,7 @@ Nothing about how your functions run (schedulers, workflows, actions, `httpActio
 | Codegen | Runs on every change, writes `_generated/` | **Never runs**, fails fast if `_generated/` is missing |
 | Bind address | Loopback (`127.0.0.1`) | `0.0.0.0` by default |
 | Admin key | Ephemeral, auto-generated, embedded in the dashboard HTML | **Required** (`STACKBASE_ADMIN_KEY`), never embedded |
-| File watching | Watches `convex/` and hot-reloads | None, restart (or `stackbase deploy`) to pick up changes |
+| File watching | Watches `stackbase/` and hot-reloads | None, restart (or `stackbase deploy`) to pick up changes |
 | Shutdown | Ctrl-C exits immediately | `SIGTERM`/`SIGINT` trigger a graceful drain |
 
 ### Fail-fast checks, before anything binds
@@ -53,11 +53,11 @@ Nothing about how your functions run (schedulers, workflows, actions, `httpActio
    before deploying:
 
    ```bash
-   stackbase codegen --dir convex
+   stackbase codegen --dir stackbase
    ```
 
    ```text
-   ✗ convex/_generated not found: run `stackbase codegen --dir convex` and commit _generated/ before deploying.
+   ✗ stackbase/_generated not found: run `stackbase codegen --dir stackbase` and commit _generated/ before deploying.
    ```
 
 ### Binding and graceful shutdown
@@ -110,7 +110,7 @@ these.
 
 | Flag | Env var | Default | What it does |
 |---|---|---|---|
-| `--dir <path>` | | `convex` | The app directory to load (schema, functions, `stackbase.config.ts`, `_generated/`). |
+| `--dir <path>` | | `stackbase` | The app directory to load (schema, functions, `stackbase.config.ts`, `_generated/`). |
 | `--data <path>` | `STACKBASE_DATA_DIR` (sets `<dir>/db.sqlite`) | `./data/db.sqlite` | SQLite database file path. Ignored when `--database-url` selects Postgres. |
 | `--ip <address>` | | `0.0.0.0` | Bind address. |
 | `--port <n>` | `PORT` | `3000` | Bind port. |
@@ -128,11 +128,11 @@ the environment, not in a process argument list visible via `ps`.
 
 <Callout title="Before you start">
 
-You need a `convex/` directory with **committed `_generated/`**. `serve` fails fast without it, as
+You need a `stackbase/` directory with **committed `_generated/`**. `serve` fails fast without it, as
 covered above. Generate it before building the image:
 
 ```bash
-stackbase codegen --dir convex
+stackbase codegen --dir stackbase
 ```
 
 You also need Docker and Docker Compose.
@@ -181,9 +181,9 @@ services:
       STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}
       STACKBASE_DATA_DIR: /data
     volumes:
-      - ./convex:/app/convex:ro
+      - ./stackbase:/app/stackbase:ro
       - stackbase-data:/data
-    command: ["serve", "--dir", "/app/convex", "--data", "/data/db.sqlite"]
+    command: ["serve", "--dir", "/app/stackbase", "--data", "/data/db.sqlite"]
     restart: unless-stopped
 
 volumes:
@@ -191,13 +191,13 @@ volumes:
 ```
 
 This builds the `runner` stage of the repo `Dockerfile`, binds the container to `0.0.0.0:3000`,
-bind-mounts `./convex` **read-only** into `/app/convex`, and persists SQLite on the named
+bind-mounts `./stackbase` **read-only** into `/app/stackbase`, and persists SQLite on the named
 `stackbase-data` volume at `/data/db.sqlite`. The container's command is exactly
-`serve --dir /app/convex --data /data/db.sqlite`.
+`serve --dir /app/stackbase --data /data/db.sqlite`.
 
 ```mermaid
 flowchart LR
-  Convex["./convex (read-only)"] -->|"bind mount"| Container["stackbase:latest running serve"]
+  AppDir["./stackbase (read-only)"] -->|"bind mount"| Container["stackbase:latest running serve"]
   Container -->|"port 3000"| You["Your browser or client"]
   Container --> Data[("stackbase-data volume: db.sqlite")]
 ```
@@ -268,7 +268,7 @@ running a real container, not by any host-based test.
 `@stackbase/*` package links **nested per-package**, for example
 `/app/packages/cli/node_modules/@stackbase/executor`, never at `/app/node_modules`.
 
-That's fine for code living inside a workspace package. But your bind-mounted `/app/convex` is not
+That's fine for code living inside a workspace package. But your bind-mounted `/app/stackbase` is not
 under any package. Its bare `import "@stackbase/values"` (every `schema.ts`) and the
 `_generated/server` module's re-export of `@stackbase/executor` resolve by walking **up** to
 `/app/node_modules`, and find nothing there.
@@ -296,7 +296,7 @@ EOF
 ```
 
 This walks every `packages/*` and `components/*` package's `package.json` and symlinks its
-`@stackbase/*` name straight into `/app/node_modules/`, so a mounted (or baked-in) `convex/`
+`@stackbase/*` name straight into `/app/node_modules/`, so a mounted (or baked-in) `stackbase/`
 resolves its imports exactly the way it would in a normal workspace checkout.
 
 **2. `/data` is chowned to the non-root `bun` user before dropping privileges**
@@ -333,18 +333,18 @@ volume, and the dashboard served key-less.
 
 <Accordion title="Bake the app into an immutable image">
 
-The default compose file bind-mounts `convex/` at run time. That's convenient for local
+The default compose file bind-mounts `stackbase/` at run time. That's convenient for local
 self-hosting, but the image alone isn't a deployable artifact: it's empty without the mount.
 
 For an immutable image, one you can push to a registry and deploy elsewhere without carrying a
-separate `convex/` directory around, build a small wrapper `Dockerfile` on top of
+separate `stackbase/` directory around, build a small wrapper `Dockerfile` on top of
 `stackbase:latest` that copies your app in instead of mounting it:
 
 ```dockerfile title="Dockerfile"
 FROM stackbase:latest
-COPY ./convex /app/convex
+COPY ./stackbase /app/stackbase
 # ENTRYPOINT/CMD are inherited from stackbase:latest:
-#   serve --dir /app/convex --data /data/db.sqlite
+#   serve --dir /app/stackbase --data /data/db.sqlite
 ```
 
 ```bash
@@ -354,7 +354,7 @@ docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=... -v stackbase-data:/data myapp
 
 Because the root-`node_modules` symlink fixup above is part of the base `stackbase:latest` image
 (baked into the `runner` stage, not something the bind-mount does at run time), a `COPY`ed
-`convex/` resolves its `@stackbase/*` imports exactly the same way a mounted one does. No extra
+`stackbase/` resolves its `@stackbase/*` imports exactly the same way a mounted one does. No extra
 step is needed in the wrapper `Dockerfile`.
 
 </Accordion>
@@ -401,7 +401,7 @@ volume for the data directory, and point health checks at `GET /api/health`.
 builder = "nixpacks"
 
 [deploy]
-startCommand = "stackbase serve --dir ./convex --data /app/data/db.sqlite"
+startCommand = "stackbase serve --dir ./stackbase --data /app/data/db.sqlite"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 
@@ -435,7 +435,7 @@ path = "/api/health"
 ```
 
 Set the secret with `fly secrets set STACKBASE_ADMIN_KEY=...`, and start the process as
-`stackbase serve --dir ./convex --data /app/data/db.sqlite`. Fly terminates TLS at its edge.
+`stackbase serve --dir ./stackbase --data /app/data/db.sqlite`. Fly terminates TLS at its edge.
 
 </Tab>
 

@@ -1,11 +1,11 @@
 /**
  * `applyDeploy` — the server-side funnel for `stackbase deploy`: write the pushed tree, reuse
- * loadConvexDir -> push, gate on an additive-schema diff, then atomically swap modules/routes/
+ * loadFunctionsDir -> push, gate on an additive-schema diff, then atomically swap modules/routes/
  * schema. All validation happens before the first swap, so a rejected deploy leaves the running
  * version fully live — proven here by re-exercising the previously-live function after each
  * rejected apply.
  *
- * Mirrors the fixture pattern of ../test/serve-e2e.test.ts (a real on-disk convex/ dir booted via
+ * Mirrors the fixture pattern of ../test/serve-e2e.test.ts (a real on-disk functions dir booted via
  * bootProject) and ../test/cli.test.ts's "hot reload (setModules)" (asserting a swap is live by
  * calling `runtime.run` before/after). `packageApp` (deploy.ts, Task 2) produces the `files` from
  * a real v2 fixture dir so this exercises the real transpile -> apply path, not a hand-built
@@ -19,7 +19,7 @@ import { defineComponent } from "@stackbase/component";
 import { bootProject } from "../src/boot";
 import { packageApp } from "../src/deploy";
 import { applyDeploy, type DeployDeps } from "../src/deploy-apply";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import type { DeploySchema } from "../src/schema-diff";
 
@@ -34,14 +34,14 @@ function write(dir: string, file: string, content: string): void {
 }
 
 /**
- * Independently derive `{schemaJson, tableNumbers}` from a source convex/ dir — used to feed
+ * Independently derive `{schemaJson, tableNumbers}` from a source functions dir — used to feed
  * `DeployDeps.current` without going through `AdminApi.getSchema()`, whose declared return type
  * (`SchemaJsonLike`, a narrower shape for the data browser) doesn't carry `documentType` and so
  * isn't assignable to `DeploySchema["schemaJson"]` (a separate wiring concern from applyDeploy
  * itself, which is what this test exercises).
  */
 async function schemaOf(dir: string): Promise<{ schemaJson: DeploySchema["schemaJson"]; tableNumbers: Record<string, number> }> {
-  const loaded = await loadConvexDir(dir);
+  const loaded = await loadFunctionsDir(dir);
   const { project } = push(loaded, []);
   return { schemaJson: project.schemaJson as DeploySchema["schemaJson"], tableNumbers: project.tableNumbers };
 }
@@ -121,7 +121,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "db.sqlite"),
       adminKey: "k",
     });
@@ -217,7 +217,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "traversal-db.sqlite"),
       adminKey: "k",
     });
@@ -259,7 +259,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "badcode-db.sqlite"),
       adminKey: "k",
     });
@@ -297,7 +297,7 @@ describe("applyDeploy — write -> load -> diff -> atomic swap", () => {
     write(v1Dir, "items.ts", ITEMS_V1);
 
     const { runtime, adminApi, store } = await bootProject({
-      convexDir: v1Dir,
+      functionsDir: v1Dir,
       dataPath: join(base, "add-table-db.sqlite"),
       adminKey: "k",
     });

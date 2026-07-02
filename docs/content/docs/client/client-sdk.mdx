@@ -240,7 +240,7 @@ the current result: `undefined` until the first result arrives.
 
 ```tsx title="examples/chat/web/main.tsx"
 import { useQuery } from "@stackbase/client/react";
-import { api } from "../convex/_generated/api";
+import { api } from "../stackbase/_generated/api";
 
 function Chat({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });
@@ -439,7 +439,7 @@ full API.
 
 ## Typed codegen api
 
-`stackbase codegen` generates a typed `api` object from your `convex/` functions. That's what makes
+`stackbase codegen` generates a typed `api` object from your `stackbase/` functions. That's what makes
 `api.messages.list` a real, autocompleting, type-checked reference instead of a magic string.
 
 ### `anyApi` and `getFunctionPath`
@@ -622,16 +622,16 @@ These are fire-and-forget: no persistence, no read set, no replay on reconnect.
 `client.mutation(...)` (and therefore `useMutation`) resolves when the server's `MutationResponse`
 arrives: at commit, once the write is durable, carrying the commit's timestamp.
 
-<Callout type="warn" title="Migrating from Convex?">
+<Callout type="warn" title="Resolution and re-render can arrive in either order">
 
-This is a deliberate divergence from `convex-js`, whose mutation promise resolves earlier, at what
-Stackbase calls the optimistic reconciliation "gate": the moment the client's own reactive feed has
-observed the write, not merely been told it succeeded. If you relied on that earlier resolution
-timing (for example reading freshly-committed state synchronously right after `await mutation(...)`),
-note that here the promise's resolution and the query re-render triggered by the same write can
-arrive in either order relative to each other. See
+Because the promise resolves at commit (not at the moment your own reactive feed has observed the
+write), the promise's resolution and the query re-render triggered by the same write can arrive in
+either order relative to each other. If you read freshly-committed state synchronously right after
+`await mutation(...)`, keep that in mind. See
 [Optimistic updates](/docs/client/optimistic-updates#the-promise-resolves-at-commit-not-at-the-flicker-free-gate)
-for exactly how the two are sequenced and why.
+for exactly how the two are sequenced and why, and the
+[migration guide](/docs/reference/migrate-from-convex) if you are porting code that relied on
+earlier resolution timing.
 
 </Callout>
 

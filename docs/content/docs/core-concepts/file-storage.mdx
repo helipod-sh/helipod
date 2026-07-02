@@ -25,7 +25,7 @@ Unlike a component's internal tables, `_storage` lives in the app root, not some
 of the schema. That's what makes `Id<"_storage">` usable as a first-class field type in your own
 schema, exactly like `v.id("photos")`:
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { v, defineSchema, defineTable } from "@stackbase/values";
 
 export default defineSchema({
@@ -77,7 +77,7 @@ storage forever, and you never have to write code for the abandoned case.
 
 Inside a query or mutation, `ctx.storage` is a small facade with four methods:
 
-```ts title="convex/files.ts"
+```ts title="stackbase/files.ts"
 import { mutation, query } from "./_generated/server";
 import { v } from "@stackbase/values";
 
@@ -225,7 +225,7 @@ Reading or writing the actual file *contents* is real I/O, the same kind of non-
 `fetch`. So it belongs in an [action](/docs/core-concepts/actions), never a query or mutation. The
 action-mode `ctx.storage` facade adds two byte-level methods and keeps the two read-only ones:
 
-```ts title="convex/files.ts"
+```ts title="stackbase/files.ts"
 import { action } from "./_generated/server";
 import { v } from "@stackbase/values";
 

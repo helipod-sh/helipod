@@ -7,8 +7,8 @@ import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/reac
 // `Api` is codegen's typed surface (docs/enduser/optimistic-updates.md#return-type-typing): both
 // `list` and `send` below declare `returns`, so `OptimisticLocalStore.getQuery`/`setQuery` and
 // `useQuery`/`useMutation` all infer real arg/return types instead of falling back to `Value`.
-import type { Api } from "../convex/_generated/api";
-import type { Doc, Id } from "../convex/_generated/dataModel";
+import type { Api } from "../stackbase/_generated/api";
+import type { Doc, Id } from "../stackbase/_generated/dataModel";
 
 const api = anyApi as Api;
 
@@ -16,7 +16,7 @@ const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 
 // No real `conversations` row ever gets created in this example — "general" is used directly as
-// the shard key (see convex/messages.ts). Cast once so every call site is a real `Id<"conversations">`.
+// the shard key (see stackbase/messages.ts). Cast once so every call site is a real `Id<"conversations">`.
 const CONVERSATION_ID = "general" as Id<"conversations">;
 
 type Message = Doc<"messages">;

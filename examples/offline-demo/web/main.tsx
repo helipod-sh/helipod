@@ -13,9 +13,9 @@ import { offlineToggleTransport } from "./offline-transport";
 // Type-only imports — erased at bundle time, so the server-side `_generated/server.ts` re-exports
 // never reach the browser bundle. `ids.ts` is a VALUE import (mintId runs in the browser); it pulls
 // only `@stackbase/id-codec`, which is browser-safe.
-import type { Api } from "../convex/_generated/api";
-import type { Doc, Id } from "../convex/_generated/dataModel";
-import { mintId } from "../convex/_generated/ids";
+import type { Api } from "../stackbase/_generated/api";
+import type { Doc, Id } from "../stackbase/_generated/dataModel";
+import { mintId } from "../stackbase/_generated/ids";
 
 const api = anyApi as Api;
 

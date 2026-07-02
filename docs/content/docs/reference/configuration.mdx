@@ -95,7 +95,7 @@ JSON with `.toJSON()`. That JSON is what the engine stores as a table's live sch
   }}
 />
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { v } from "@stackbase/values";
 
 v.object({
@@ -122,7 +122,7 @@ JSON.
 
 ## Schema builder
 
-```ts title="convex/schema.ts"
+```ts title="stackbase/schema.ts"
 import { defineSchema, defineTable, v } from "@stackbase/values";
 
 export default defineSchema({
@@ -218,7 +218,7 @@ all. See each component's own reference page under [Components](/docs/components
 ## `stackbase.config.ts`
 
 `stackbase.config.ts` is an optional file that composes opt-in components into your project. It
-sits alongside `convex/`, as a sibling of that directory, not inside it.
+sits alongside `stackbase/`, as a sibling of that directory, not inside it.
 
 If the file is absent entirely, you get no components: byte-identical to an explicit
 `{ components: [] }`. `stackbase dev`, `serve`, `build`, and `deploy` all read the same file
@@ -232,8 +232,8 @@ import { defineAuth } from "@stackbase/auth";
 import { defineAuthz } from "@stackbase/authz";
 import { defineTriggers } from "@stackbase/triggers";
 import { defineNotifications, resendEmail } from "@stackbase/notifications";
-import crons from "./convex/crons";
-import { policies } from "./convex/policies";
+import crons from "./stackbase/crons";
+import { policies } from "./stackbase/policies";
 
 export default defineConfig({
   components: [
@@ -251,16 +251,21 @@ export default defineConfig({
 });
 ```
 
-`StackbaseConfig` is two fields, one required and one optional:
+`StackbaseConfig` is three fields, one required and two optional:
 
 ```ts
 export interface StackbaseConfig {
   components: ComponentDefinition[];
   deploy?: DeployConfig;
+  functionsDir?: string;
 }
 
 export function defineConfig(config: StackbaseConfig): StackbaseConfig; // identity, just gives the file a typed default export
 ```
+
+`functionsDir` overrides where your schema and functions live, relative to the project root
+(default `"stackbase"`). An explicit `--dir` flag on any command wins over this value, which in turn
+wins over the default. See [CLI](/docs/reference/cli) for the full `--dir` precedence.
 
 Each `components` entry is a component's own `define*()` call: `defineScheduler()`,
 `defineWorkflow()`, `defineAuth()`, `defineAuthz()`, `defineTriggers()`, `defineNotifications()`.
@@ -345,7 +350,7 @@ into the project via `defineScheduler({ crons })`, shown above. `cronJobs()` its
 registry come from `@stackbase/scheduler`, re-exported through codegen's `_generated/server`, so
 the file needs only one import:
 
-```ts title="convex/crons.ts"
+```ts title="stackbase/crons.ts"
 import { cronJobs } from "./_generated/server";
 import { internal } from "./_generated/api";
 
@@ -361,7 +366,7 @@ crons.monthly("invoice", { day: 1, hourUTC: 0, minuteUTC: 0 }, internal.billing.
 export default crons;
 ```
 
-Then, in `stackbase.config.ts`: `import crons from "./convex/crons"; defineScheduler({ crons })`.
+Then, in `stackbase.config.ts`: `import crons from "./stackbase/crons"; defineScheduler({ crons })`.
 
 <TypeTable
   type={{
@@ -416,7 +421,7 @@ or reconcile and drops its row. Already-enqueued work jobs it spawned are left a
 `http.ts` is a conventional file that default-exports an `httpRouter()` of routes, each one backed
 by an `httpAction`:
 
-```ts title="convex/http.ts"
+```ts title="stackbase/http.ts"
 import { httpRouter } from "./_generated/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";

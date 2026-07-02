@@ -17,7 +17,8 @@ export const railwayTarget: DeployTarget = {
   async package(ctx) {
     // Railway builds the deployed image itself (from the repo's Dockerfile if present, else Nixpacks
     // auto-detection) when `railway up` uploads the project — there is nothing to bundle here beyond
-    // refreshing codegen so the baked convex/_generated matches the functions being deployed.
+    // refreshing codegen so the baked functions directory's `_generated` matches the functions
+    // being deployed.
     await ctx.codegen();
   },
   async push(ctx): Promise<DeployResult> {

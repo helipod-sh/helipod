@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
 import { groupCommitEnabled, resolveGroupCommit, bootLoaded } from "../src/boot";
-import { loadConvexDir } from "../src/load-modules";
+import { loadFunctionsDir } from "../src/load-modules";
 
 describe("groupCommitEnabled", () => {
   it("true for 1 / true / yes, case-insensitive", () => {
@@ -70,7 +70,7 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
 
   it("absent + SQLite store: runtime.groupCommitStats() stays all-zero after a committing mutation (store-conditional default → OFF for SQLite)", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     expect(runtime.groupCommitStats()).toEqual({ lastBatchSize: 0, maxBatchSize: 0, flushCount: 0 });
@@ -79,7 +79,7 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
 
   it("STACKBASE_GROUP_COMMIT=1: a committing mutation flushes through the grouped path", async () => {
     process.env[ENV_KEY] = "1";
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     const stats = runtime.groupCommitStats();
@@ -90,7 +90,7 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
 
   it("STACKBASE_GROUP_COMMIT=0: byte-identical to absent — all-zero counters", async () => {
     process.env[ENV_KEY] = "0";
-    const loaded = await loadConvexDir("test/fixtures/shard-dev/convex");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     expect(runtime.groupCommitStats()).toEqual({ lastBatchSize: 0, maxBatchSize: 0, flushCount: 0 });

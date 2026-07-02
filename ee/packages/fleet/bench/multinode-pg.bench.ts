@@ -29,7 +29,7 @@ const NODE_COUNTS = [1, 2, 3];
 const WRITERS_PER_NODE = 8;
 const CLI_BIN = resolve(new URL(".", import.meta.url).pathname, "../../../../packages/cli/dist/bin.js");
 const ADMIN_KEY = "bench-multinode-key";
-function fixtureConvexDir() {
+function fixtureFunctionsDir() {
   return resolve(new URL(".", import.meta.url).pathname, "..", "test", "fixtures", "app", "convex");
 }
 
@@ -55,7 +55,7 @@ function spawnFleetServe(databaseUrl: string, port: number, numShards: number): 
   const proc = spawn(
     "bun",
     [
-      CLI_BIN, "serve", "--dir", fixtureConvexDir(), "--data", join(dataDir, "db.sqlite"),
+      CLI_BIN, "serve", "--dir", fixtureFunctionsDir(), "--data", join(dataDir, "db.sqlite"),
       "--port", String(port), "--ip", "127.0.0.1", "--no-dashboard",
       "--database-url", databaseUrl, "--fleet", "--advertise-url", `http://127.0.0.1:${port}`,
     ],
