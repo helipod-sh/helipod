@@ -215,9 +215,8 @@ fresh value on every replay. React, keying off it, sees a brand-new row instead 
 optimistic row re-rendering: remounts, list-key churn, and lost input focus, on every unrelated
 server push while your mutation is pending.
 
-This is a documented anti-pattern precisely because it's what Convex's own docs example does. The
-store's shape is designed so the deterministic path is also the easy path, not so the impure path is
-blocked by a lint rule. There isn't one.
+This is an easy mistake to make. The store's shape is designed so the deterministic path is also the
+easy path, not so the impure path is blocked by a lint rule. There isn't one.
 
 </Callout>
 
@@ -324,15 +323,17 @@ an authoritative push. In practice this rarely matters. The composed view alread
 synchronously the moment you called `send`, and anything you read after `await` reflects the commit
 regardless.
 
-<Callout type="info" title="A deliberate departure from Convex">
+<Callout type="info" title="What the resolved promise guarantees">
 
-Convex resolves the promise at that later gate instead. Gate-time resolution has sharp edges this
-protocol doesn't want to inherit: a transport drop can turn a mutation that did commit into a promise
-that rejects, and a lost gating frame with no follow-on traffic can leave a promise hanging forever.
+Resolving at commit rather than at the later supersede gate is deliberate. Gate-time resolution has
+sharp edges this protocol doesn't want: a transport drop can turn a mutation that did commit into a
+promise that rejects, and a lost gating frame with no follow-on traffic can leave a promise hanging
+forever.
 
-If you're migrating code that relies on await-then-local-cache-read semantics, know that the
-guarantee here is "committed," not "your optimistic guess has been definitively superseded." Those
-are almost always indistinguishable in practice, but not quite always. See the two residuals below.
+So the guarantee here is "committed," not "your optimistic guess has been definitively superseded."
+Those are almost always indistinguishable in practice, but not quite always. See the two residuals
+below. If you're porting code that relies on await-then-local-cache-read semantics, the
+[migration guide](/docs/reference/migrate-from-convex) covers the difference.
 
 </Callout>
 

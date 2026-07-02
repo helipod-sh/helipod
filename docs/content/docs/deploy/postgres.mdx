@@ -179,9 +179,9 @@ client_floors    (identity, client_id, pruned_through_seq, updated_at)  -- offli
 
 A table in your `schema.ts` is a `table_id` value. A field is a key inside the JSON blob in `value`.
 An index is a set of rows in `indexes`. Adding a table, adding a field, or changing an index needs no
-`ALTER TABLE`, no migration file, and no Postgres-side schema change at all. This is the same design
-Convex's own backend uses, and it's why the Postgres adapter is bounded in scope rather than an
-open-ended migrations project. There's nothing app-shaped to migrate.
+`ALTER TABLE`, no migration file, and no Postgres-side schema change at all. That's why the Postgres
+adapter is bounded in scope rather than an open-ended migrations project. There's nothing app-shaped
+to migrate.
 
 Reads over this log-shaped storage are set-based, not per-row round trips. `scan`/`count` use
 `SELECT DISTINCT ON (internal_id) ... ORDER BY internal_id, ts DESC` to resolve "the latest revision

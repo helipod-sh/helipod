@@ -129,7 +129,7 @@ export async function codegenCommand(args: string[]): Promise<number> {
 function printHelp(): void {
   process.stdout.write(
     [
-      "stackbase — Convex-compatible reactive backend",
+      "stackbase - the reactive backend you self-host",
       "",
       "Usage: stackbase <command> [options]",
       "",

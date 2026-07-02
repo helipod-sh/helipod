@@ -79,15 +79,13 @@ There's no `.first()`. To get one document, either `.take(1)` and read index 0, 
 id) use `ctx.db.get` instead. It's simpler, and it gets the cheaper by-id reactivity path (see
 [Reactivity classification](#reactivity-classification) below).
 
-<Callout type="info" title="Coming from Convex?">
+<Callout type="info" title="Choosing an index">
 
-There's no `.withIndex(name, (q) => q.eq(...))`, Convex's builder shape. Stackbase's index name is
-the second argument to `.query()` itself, and the range methods (`.eq`/`.gt`/`.gte`/`.lt`/`.lte`)
-chain directly off the builder:
+The index name is the second argument to `.query()` itself, and the range methods
+(`.eq`/`.gt`/`.gte`/`.lt`/`.lte`) chain directly off the builder:
 
 ```ts
-// Convex:    ctx.db.query("messages").withIndex("by_conversation", q => q.eq("conversationId", id))
-// stackbase: ctx.db.query("messages", "by_conversation").eq("conversationId", id)
+ctx.db.query("messages", "by_conversation").eq("conversationId", id)
 ```
 
 </Callout>
@@ -221,11 +219,10 @@ The result is a `PaginationResult`:
   }}
 />
 
-<Callout type="info" title="Coming from Convex?">
+<Callout type="info" title="Pagination fields">
 
-The field names differ. `hasMore` is `!isDone`, and `nextCursor` is Convex's `continueCursor`.
-There's no `numItems` option either. Pass `pageSize` directly, along with an explicit `cursor`
-(Convex bundles both into a `paginationOpts` object; stackbase takes them as plain fields).
+`.paginate()` takes `cursor` and `pageSize` as plain fields, not bundled into an options object.
+The result reports `hasMore` (`false` on the last page) and `nextCursor` for the following page.
 
 </Callout>
 

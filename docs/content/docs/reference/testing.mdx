@@ -16,8 +16,8 @@ test here is a claim about the shipped engine's real behavior, not about a stand
 
 This page is the complete reference for the harness. It covers every option `createTestStackbase`
 takes, every method on the object it returns, how to test reactivity and time-based (scheduler and
-cron) code, how to compose components, and the exact places behavior diverges from Convex's testing
-tools.
+cron) code, how to compose components, and the specific harness behaviors worth knowing before you
+write assertions.
 
 <Steps>
 
@@ -118,7 +118,7 @@ function createTestStackbase(opts: CreateTestOptions): Promise<TestStackbase>;
 
 ### `modules` (required)
 
-A flat map from a Convex-style module path (`"messages.ts"`) to that module's exports. Two shapes
+A flat map from a module path (`"messages.ts"`) to that module's exports. Two shapes
 work:
 
 ```ts
@@ -533,23 +533,20 @@ left disabled. Two representative things it pins down as correct, by regression 
   `int64`/`float64`/`bytes`/array/record types, and scheduler retries, `onComplete`, idempotency,
   crons, and failure isolation.
 
-The rule the suite holds itself to: assert real, observed Convex-parity behavior, and where behavior
-genuinely diverges, document the divergence explicitly (see the next section) rather than silently
-asserting the wrong thing to keep a test green.
+The rule the suite holds itself to: assert real, observed behavior, and where a behavior might
+surprise you, document it explicitly (see the next section) rather than silently asserting the wrong
+thing to keep a test green.
 
-## Differences from Convex's testing tools
+## Harness behaviors worth knowing
 
-If you're porting tests written against Convex's `convex-test`, here are the specific places behavior
-diverges. Each one was discovered by writing the conformance suite against real Convex-derived
-expectations and finding the actual shipped behavior differs.
+A handful of harness behaviors surface often enough in tests to call out directly. Each one was
+pinned down by the conformance suite against the actual shipped engine.
 
 <Accordions type="single">
 
 <Accordion title="1. Identity is a raw string token, not a JWT-claims object">
 
 ```ts
-// Convex: t.withIdentity({ subject: "user_1", name: "Ada" })
-// Stackbase:
 const asAda = t.withIdentity("some-token");
 ```
 
@@ -560,10 +557,9 @@ entirely up to your composed auth component.
 
 </Accordion>
 
-<Accordion title="2. Index reads use a chained query builder, not .withIndex(cb)">
+<Accordion title="2. Index reads use a chained query builder">
 
 ```ts
-// Stackbase:
 ctx.db
   .query("docs", "by_owner")
   .eq("owner", "a")
@@ -578,18 +574,16 @@ there's no separate index-selector callback.
 
 </Accordion>
 
-<Accordion title="3. Pagination returns a different result shape">
+<Accordion title="3. Pagination result shape">
 
 ```ts
-// Stackbase: .paginate({ cursor, pageSize, maxScan? }) returns:
+// .paginate({ cursor, pageSize, maxScan? }) returns:
 { page: Doc[], nextCursor: string | null, hasMore: boolean, scanCapped: boolean }
-
-// not Convex's { page, isDone, continueCursor }
 ```
 
-`hasMore` is `!isDone`; `nextCursor` is `continueCursor`. `scanCapped` (Convex has no equivalent) is
-`true` when the page's underlying scan hit `maxScan` before filling `pageSize`. That's a signal that
-more matching rows may exist beyond what this page found.
+`hasMore` is `false` only on the last page. `scanCapped` is `true` when the page's underlying scan
+hit `maxScan` before filling `pageSize`. That's a signal that more matching rows may exist beyond
+what this page found.
 
 </Accordion>
 
@@ -627,7 +621,7 @@ translate `convex-test` calls to `@stackbase/test`. See
 
 ## Other error shapes worth knowing
 
-A few error behaviors, beyond the schema-validation divergence above, that show up often enough in
+A few error behaviors, beyond the schema-validation behavior above, that show up often enough in
 tests to call out directly:
 
 - **A query attempting a write** throws `ForbiddenOperationError` (`code: "FORBIDDEN"`). But the

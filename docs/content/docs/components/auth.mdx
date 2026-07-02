@@ -842,9 +842,9 @@ auth.setSession(session);
 `aud`, `exp`/`nbf`, against the first matching configured issuer. Then it resolves, links, or
 mints a Stackbase session through the exact same core the OAuth callback uses.
 
-This is an exchange model, not per-request verification. That's a deliberate divergence from
-Convex's design, where the third-party JWT itself is the ambient identity, re-verified on every
-request. Stackbase verifies once and trades the token for a real DB-backed session, because:
+This is an exchange model, not per-request verification. Stackbase verifies the token once and
+trades it for a real DB-backed session, rather than treating the third-party JWT itself as the
+ambient identity re-verified on every request, because:
 
 - **Revocation stays reactive.** A DB-backed session can be listed (`listSessions`) and revoked
   (`revokeSession`) like any other. A bare third-party JWT can't be killed early: you'd have to

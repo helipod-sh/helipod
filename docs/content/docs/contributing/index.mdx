@@ -14,7 +14,7 @@ stackbase is an open-source, self-hostable, reactive backend. You write ordinary
 
 Every client subscribed to the data those functions touch gets pushed a fresh result over a WebSocket the instant it changes. You never write polling code, manual refetch calls, or cache-invalidation logic.
 
-It aims for Convex-grade developer experience with no vendor lock-in. Run it on your own laptop, your own server, or your own cloud account.
+It aims for a best-in-class developer experience with no vendor lock-in. Run it on your own laptop, your own server, or your own cloud account.
 
 ## The one idea everything else serves
 
@@ -52,7 +52,7 @@ stackbase is loosely inspired by [Convex](https://github.com/get-convex/convex-b
 Two practical consequences worth knowing before you dive into the deeper architecture pages:
 
 - Those internal notes are dense, expert-written, and occasionally describe *intent* rather than *what shipped*: a design that was proposed, then later built differently, deferred, or superseded.
-- "Convex-compatible" describes the *authoring style* (how you write a query or a schema), not a promise to be a drop-in replacement. stackbase's canonical imports are its own (`@stackbase/*`), and it has already grown capabilities Convex doesn't have: durable workflows with saga/compensation, a Postgres adapter, a single-binary build. Convex compatibility shows up as a migration on-ramp (`stackbase migrate`), not the product's identity.
+- The familiar *authoring style* (how you write a query or a schema) is not a promise to be a drop-in replacement for anything. stackbase's canonical imports are its own (`@stackbase/*`), and it has already grown capabilities its prior art doesn't have: durable workflows with saga/compensation, a Postgres adapter, a single-binary build. Compatibility with an existing project shows up as a migration on-ramp (`stackbase migrate`), not the product's identity.
 
 <Callout type="info">
   This Contributing section is the reconciled, ships-are-real view. Where the internal `docs/dev/` notes and the shipped code disagree, the shipped code wins.
