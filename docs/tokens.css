@@ -1,0 +1,74 @@
+/* Hallmark · tokens · theme: Coral (modern-minimal) · portable design tokens
+ * Scoped to .lp so the landing page never leaks into the fumadocs docs theme.
+ * Warm-grey paper, one coral signal, single-family Inter, soft pills. */
+.lp {
+  /* warm paper + warm ink */
+  --color-paper: oklch(98.2% 0.006 66);
+  --color-paper-2: oklch(96.4% 0.008 64);
+  --color-ink: oklch(23% 0.012 50);
+  --color-ink-2: oklch(38% 0.013 52);
+  --color-muted: oklch(55% 0.013 54);
+  --color-rule: oklch(90% 0.008 62);
+
+  /* the one crimson signal (< 5% of any viewport) */
+  --color-accent: oklch(52% 0.19 12);
+  --color-accent-hover: oklch(46% 0.19 12);
+  --color-accent-ink: oklch(99% 0.01 20);
+  --color-accent-wash: oklch(52% 0.19 12 / 0.1);
+
+  /* the one dark code tile */
+  --color-graphite: oklch(24% 0.014 48);
+  --color-graphite-rule: oklch(36% 0.016 48);
+  --color-code-fg: oklch(90% 0.012 66);
+  --color-code-muted: oklch(64% 0.014 54);
+  --tok-key: oklch(76% 0.11 20);
+  --tok-str: oklch(80% 0.09 96);
+  --tok-punct: oklch(62% 0.012 54);
+  --tok-comment: oklch(56% 0.012 52);
+
+  /* single-family Inter + a mono for code */
+  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", monospace;
+
+  --text-display: clamp(2.4rem, 4.5vw + 0.5rem, 3.9rem);
+  --text-display-s: clamp(1.75rem, 2.6vw + 0.5rem, 2.5rem);
+  --text-2xl: clamp(1.5rem, 2vw + 0.5rem, 2rem);
+  --text-stat: clamp(2.5rem, 4vw + 0.5rem, 3.5rem);
+  --text-lg: 1.125rem;
+  --text-base: 1rem;
+  --text-sm: 0.875rem;
+  --text-xs: 0.75rem;
+
+  /* 4pt spacing scale */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  /* soft radii */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --rule: 1px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: 200ms;
+}
+
+/* Dark mode (fumadocs toggles `.dark` on <html>). Colour tokens only. */
+.dark .lp {
+  --color-paper: oklch(18% 0.008 58);
+  --color-paper-2: oklch(22.5% 0.01 56);
+  --color-ink: oklch(95% 0.008 70);
+  --color-ink-2: oklch(80% 0.012 64);
+  --color-muted: oklch(62% 0.013 58);
+  --color-rule: oklch(32% 0.012 56);
+  --color-accent: oklch(56% 0.2 14);
+  --color-accent-hover: oklch(63% 0.2 14);
+  --color-accent-wash: oklch(56% 0.2 14 / 0.14);
+  --color-graphite: oklch(13% 0.012 55);
+  --color-graphite-rule: oklch(30% 0.014 55);
+}

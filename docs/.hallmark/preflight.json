@@ -1,0 +1,9 @@
+{
+  "date": "2026-07-03",
+  "font_stack": "Inter (next/font, root layout) + Space Grotesk + JetBrains Mono (home layout)",
+  "palette": "fumadocs-ui neutral preset + Tailwind v4; landing tokens scoped under .lp (Cobalt OKLCH)",
+  "motion": "motion-cut (no framer-motion/gsap); landing uses CSS reveal + IntersectionObserver only",
+  "framework": "Next.js 16 app router, Tailwind v4",
+  "preserved": ["fumadocs shell + real HomeLayout nav", "Inter body", "Tailwind v4"],
+  "introduced": ["scoped Cobalt token system", "Workbench macrostructure", "slop-test gates"]
+}
