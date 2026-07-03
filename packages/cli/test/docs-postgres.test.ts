@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 describe("self-hosting docs document Postgres", () => {
   const doc = readFileSync(
-    join(import.meta.dirname, "../../../docs/enduser/self-hosting.md"),
+    join(import.meta.dirname, "../../../docs/content/docs/deploy/postgres.mdx"),
     "utf8",
   );
 

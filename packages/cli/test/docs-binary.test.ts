@@ -5,9 +5,14 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("standalone-binary docs match reality", () => {
-  const doc = readFileSync("../../docs/enduser/deploy/standalone-binary.md", "utf8");
+  // The single-binary content lives in the deploy-and-build page of the fumadocs site.
+  const doc = readFileSync(
+    join(import.meta.dirname, "../../../docs/content/docs/deploy/deploy-and-build.mdx"),
+    "utf8",
+  );
 
   it("does not reference non-existent packages", () => {
     for (const phantom of [
