@@ -1,5 +1,5 @@
 /**
- * `@stackbase/id-codec` — document identity (the self-validating `DocumentId` codec),
+ * `@helipod/id-codec` — document identity (the self-validating `DocumentId` codec),
  * the binary primitives it's built from (Crockford base32, fletcher16, varint), storage
  * id helpers, the table registry, and the sharding seam (`ShardId`, `ShardKeyResolver`,
  * `ShardRouter`). Canonical home (design §3.1) for `ShardId`/`DEFAULT_SHARD` and identity.

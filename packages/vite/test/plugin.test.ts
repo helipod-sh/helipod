@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { stackbase, DEFAULT_FUNCTIONS_DIR } from "../src/index";
+import { helipod, DEFAULT_FUNCTIONS_DIR } from "../src/index";
 
-describe("stackbase() plugin — config hook", () => {
+describe("helipod() plugin — config hook", () => {
   it("injects the engine-owned proxy entries at the resolved port, with ws on /api", async () => {
-    const plugin = stackbase({ port: 4567 });
+    const plugin = helipod({ port: 4567 });
     // `config` may be a function; call it to get the partial config it contributes.
     const configHook =
       typeof plugin.config === "function"
@@ -21,20 +21,20 @@ describe("stackbase() plugin — config hook", () => {
   });
 
   it("has the plugin name and a configureServer hook", () => {
-    const plugin = stackbase();
-    expect(plugin.name).toBe("stackbase");
+    const plugin = helipod();
+    expect(plugin.name).toBe("helipod");
     expect(plugin.configureServer).toBeTypeOf("function");
   });
 });
 
 describe("DEFAULT_FUNCTIONS_DIR guard", () => {
-  it("the module-local literal (deliberately not imported, see src/index.ts) has not drifted from @stackbase/cli's own constant", async () => {
-    // A test file may import @stackbase/cli freely — only the shipped proxy path (src/index.ts)
+  it("the module-local literal (deliberately not imported, see src/index.ts) has not drifted from @helipod/cli's own constant", async () => {
+    // A test file may import @helipod/cli freely — only the shipped proxy path (src/index.ts)
     // must avoid a static top-level import of it, to preserve the optional-peer-dependency
     // contract for proxy-mode-only consumers. See packages/vite/src/index.ts's DEFAULT_FUNCTIONS_DIR
     // comment and embed.ts's dynamic import for the two ways this package reaches the real value.
-    const { DEFAULT_FUNCTIONS_DIR: cliDefault } = await import("@stackbase/cli");
+    const { DEFAULT_FUNCTIONS_DIR: cliDefault } = await import("@helipod/cli");
     expect(DEFAULT_FUNCTIONS_DIR).toBe(cliDefault);
-    expect(DEFAULT_FUNCTIONS_DIR).toBe("stackbase");
+    expect(DEFAULT_FUNCTIONS_DIR).toBe("helipod");
   });
 });

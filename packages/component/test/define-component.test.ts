@@ -1,7 +1,7 @@
 // packages/component/test/define-component.test.ts
 import { describe, it, expect } from "vitest";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation, httpAction } from "@stackbase/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { mutation, httpAction } from "@helipod/executor";
 import { defineComponent } from "../src/define-component";
 
 const schema = defineSchema({ sessions: defineTable({ token: v.string() }) });
@@ -29,7 +29,7 @@ describe("defineComponent", () => {
 
   it("rejects contextType without a context builder", () => {
     expect(() =>
-      defineComponent({ name: "x", schema: defineSchema({}), modules: {}, contextType: { import: "@stackbase/x", type: "XContext" } }),
+      defineComponent({ name: "x", schema: defineSchema({}), modules: {}, contextType: { import: "@helipod/x", type: "XContext" } }),
     ).toThrow(/contextType but no context/);
   });
 

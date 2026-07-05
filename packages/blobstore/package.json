@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/blobstore",
+  "name": "@helipod/blobstore",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",

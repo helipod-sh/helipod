@@ -1,9 +1,9 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import { describe, it, expect, beforeEach } from "vitest";
-import { NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, InternalDocumentId } from "@stackbase/docstore";
+import { NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, InternalDocumentId } from "@helipod/docstore";
 import { SwitchableDocStore } from "../src/switchable-store";
 
 const TABLE = 10001;

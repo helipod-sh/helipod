@@ -1,6 +1,6 @@
 /**
  * The IndexedDB-backed `OutboxStorage` (verdict §(d) decision 8, `docs/dev/research/offline-outbox/
- * verdict.md`). ONE database, `stackbase-outbox` — the whole seam (the shared mutation queue AND
+ * verdict.md`). ONE database, `helipod-outbox` — the whole seam (the shared mutation queue AND
  * per-clientId identity) lives together so an origin eviction takes BOTH atomically. That is
  * verdict §(g) hazard 1 ("whole-origin eviction... co-evict — one database") pinned structurally:
  * there is no separate identity store to fall out of sync with the queue, because there is only
@@ -26,7 +26,7 @@ import type { HydrateResult, OutboxEntry, OutboxEntryError, OutboxEntryStatus, O
  *  guesses a migration. */
 export const OUTBOX_VERSION = 1;
 
-export const OUTBOX_DB_NAME = "stackbase-outbox";
+export const OUTBOX_DB_NAME = "helipod-outbox";
 const DB_VERSION = 1;
 const ENTRIES_STORE = "entries";
 const META_STORE = "meta";

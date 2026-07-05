@@ -1,11 +1,11 @@
 ---
 title: How it works
-description: "The reactive model: how stackbase knows which queries to refresh when data changes."
+description: "The reactive model: how helipod knows which queries to refresh when data changes."
 ---
 
 {/* diataxis: explanation */}
 
-Reactivity in stackbase is not magic, and it is not polling. It comes from one idea: **the engine
+Reactivity in helipod is not magic, and it is not polling. It comes from one idea: **the engine
 records what each query reads, records what each mutation writes, and refreshes a query only when
 the two overlap.**
 
@@ -18,7 +18,7 @@ one idea right.
 When a query runs, the engine watches every read it makes and remembers it as a **read set**. Not
 "the `messages` table," but the exact keyspace (table and index) and **key range** the scan covered.
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const list = query({
   args: { conversationId: v.id("conversations") },
   handler: (ctx, args) =>
@@ -49,7 +49,7 @@ everyone else until the handler returns, and then it all lands together or none 
 commit, the engine computes the mutation's **write set**: exactly which rows (as key ranges) it
 inserted, replaced, or deleted.
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   handler: (ctx, args) => ctx.db.insert("messages", args),
@@ -116,7 +116,7 @@ A snapshot read at timestamp `T` is "the newest revision of this document with `
 what makes a mutation's snapshot isolation cheap: reading "as of `T`" is a property of the log, not a
 lock. The OCC validation phase above walks exactly this `prev_ts` chain to detect a conflicting write.
 
-This log-shaped model is why stackbase is **physically schemaless** on both of its storage adapters.
+This log-shaped model is why helipod is **physically schemaless** on both of its storage adapters.
 `schema.ts` describes what your app *expects* to find in a table. It is not a `CREATE TABLE` statement
 the engine executes. App tables and fields are data rows in this one log, not DDL objects in the
 underlying database, so there is no migration step as `schema.ts` evolves, whether you're running on
@@ -226,7 +226,7 @@ The matcher above answers *which* subscriptions to recompute. What a recomputed 
 actually receives is either a full re-run of its query handler, or, for the common narrow shapes a
 read set can take, an incremental **diff** instead of a full result.
 
-Stackbase's queries are arbitrary imperative TypeScript, not a declarative query language, so there is
+Helipod's queries are arbitrary imperative TypeScript, not a declarative query language, so there is
 no operator graph to update incrementally the way a fully compiled dataflow engine would. The query
 handler stays exactly what you wrote. What changes is what happens *around* it:
 
@@ -249,7 +249,7 @@ handler stays exactly what you wrote. What changes is what happens *around* it:
    resend.
 
 The net effect: unchanged data on reconnect and narrow, targeted writes cost proportionally little.
-Stackbase never compiles your query into anything other than the TypeScript function you wrote.
+Helipod never compiles your query into anything other than the TypeScript function you wrote.
 
 </Accordion>
 
@@ -305,4 +305,4 @@ threads. See [Scaling](/docs/deploy/scaling) for how sharding is configured in a
 That is the entire reactive core. [Schema & tables](/docs/core-concepts/schema-and-tables),
 [Queries](/docs/core-concepts/queries), [Mutations](/docs/core-concepts/mutations), and
 [Reactivity](/docs/core-concepts/reactivity) build the day-to-day API surface on top of it. But if you
-understand this loop, you understand stackbase.
+understand this loop, you understand helipod.

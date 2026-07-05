@@ -1,23 +1,23 @@
 ---
 title: Cloudflare
-description: stackbase deploy --target cloudflare provisions a Durable-Object-native host via wrangler.
+description: helipod deploy --target cloudflare provisions a Durable-Object-native host via wrangler.
 ---
 
 {/* diataxis: how-to */}
 
-stackbase has two Cloudflare deployment paths. Most projects want the first one; the Containers
+helipod has two Cloudflare deployment paths. Most projects want the first one; the Containers
 path is experimental and gives up scheduled work (details [below](#the-alternative-path-cloudflare-containers-experimental)).
 
 | | Durable-Object-native (this page's main path) | Containers (alternative) |
 |---|---|---|
-| Command | `stackbase deploy --target cloudflare` | hand-wired, no `stackbase deploy` integration |
+| Command | `helipod deploy --target cloudflare` | hand-wired, no `helipod deploy` integration |
 | Storage | DO-SQLite (per-object) | R2 (object-store substrate) |
 | Scheduled functions / crons / triggers | Fire: the DO's own alarm wakes them | Do not fire: container stops ~5s after idle |
 | Status | Supported target | Experimental |
 
 ## The recommended path: Durable-Object-native
 
-`stackbase deploy --target cloudflare` provisions `@stackbase/runtime-cloudflare`'s Durable Object
+`helipod deploy --target cloudflare` provisions `@helipod/runtime-cloudflare`'s Durable Object
 host via `wrangler deploy`. A [Durable Object](https://developers.cloudflare.com/durable-objects/)
 is Cloudflare's stateful primitive: a single-instance, globally addressable object with its own
 storage and single-threaded execution. One Durable Object is the OCC writer, the DO-SQLite store, every
@@ -53,22 +53,22 @@ Authenticate locally with `wrangler login`, or in CI set `CLOUDFLARE_API_TOKEN` 
   // node:crypto (fingerprint/resume hashing) needs nodejs_compat.
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
+    "bindings": [{ "name": "HELIPOD_DO", "class_name": "HelipodDO" }]
   },
   "migrations": [
     // DO-SQLite needs the SQLite-backed class migration tag.
-    { "tag": "v1", "new_sqlite_classes": ["StackbaseDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["HelipodDO"] }
   ]
 }
 ```
 
-Your worker source needs only a few lines: `export class StackbaseDO extends
-StackbaseDurableObject { … }` plus `export default createWorkerHandler("STACKBASE_DO")`.
-`stackbase deploy` doesn't scaffold this file for you. It reconciles bindings into an existing
+Your worker source needs only a few lines: `export class HelipodDO extends
+HelipodDurableObject { … }` plus `export default createWorkerHandler("HELIPOD_DO")`.
+`helipod deploy` doesn't scaffold this file for you. It reconciles bindings into an existing
 `wrangler.jsonc`, additively, never dropping a field you hand-wrote.
 
-You also need a `stackbase/` directory with committed `_generated/`, the same requirement as
-`stackbase serve`. `stackbase deploy` refreshes codegen before packaging.
+You also need a `helipod/` directory with committed `_generated/`, the same requirement as
+`helipod serve`. `helipod deploy` refreshes codegen before packaging.
 
 </Step>
 
@@ -77,10 +77,10 @@ You also need a `stackbase/` directory with committed `_generated/`, the same re
 ### Deploy
 
 ```bash
-stackbase deploy --target cloudflare --env production
+helipod deploy --target cloudflare --env production
 ```
 
-`stackbase deploy --target cloudflare`:
+`helipod deploy --target cloudflare`:
 
 - Checks and adds `durable_objects.bindings`, `migrations`, and `compatibility_flags` in
   `wrangler.jsonc` if missing (byte-for-byte unchanged, comments included, if nothing was missing).
@@ -91,13 +91,13 @@ stackbase deploy --target cloudflare --env production
 <Callout type="info">
   `--dry-run` runs preflight and packaging (validate wrangler, refresh codegen, reconcile
   `wrangler.jsonc`) and skips the actual `wrangler deploy`, useful for validating a PR. `--check`
-  fails if your committed `stackbase/_generated/` has drifted from a fresh codegen run.
+  fails if your committed `helipod/_generated/` has drifted from a fresh codegen run.
 </Callout>
 
-Configure environments in `stackbase.config.ts`:
+Configure environments in `helipod.config.ts`:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
 
 export default defineConfig({
   components: [], // your composed components, if any
@@ -122,10 +122,10 @@ export default defineConfig({
 ### Set the admin key as a secret
 
 ```bash
-wrangler secret put STACKBASE_ADMIN_KEY
+wrangler secret put HELIPOD_ADMIN_KEY
 ```
 
-`STACKBASE_ADMIN_KEY` is required. The DO fails fast on an empty admin key. `stackbase deploy`
+`HELIPOD_ADMIN_KEY` is required. The DO fails fast on an empty admin key. `helipod deploy`
 doesn't manage secrets: `wrangler secret put` is a one-time, out-of-band step, the same way
 `CLOUDFLARE_API_TOKEN` itself never belongs in `wrangler.jsonc`.
 
@@ -145,11 +145,11 @@ If your app uses [file storage](/docs/core-concepts/file-storage), turn on an R2
 cloudflare: {
   provider: "cloudflare",
   r2: true,
-  r2BucketName: "my-app-storage", // optional, defaults to "stackbase-storage"
+  r2BucketName: "my-app-storage", // optional, defaults to "helipod-storage"
 },
 ```
 
-`stackbase deploy --target cloudflare` reconciles an `r2_buckets` binding into `wrangler.jsonc`.
+`helipod deploy --target cloudflare` reconciles an `r2_buckets` binding into `wrangler.jsonc`.
 Create the bucket once, out-of-band:
 
 ```bash
@@ -161,7 +161,7 @@ wrangler r2 bucket create my-app-storage
 <Accordion title="Pinning the DO's region">
 
 A Durable Object is single-homed and never moves once created. By default it lands near whoever
-first reaches it. Set `STACKBASE_DO_LOCATION_HINT` (one of the 11 Cloudflare region codes, for
+first reaches it. Set `HELIPOD_DO_LOCATION_HINT` (one of the 11 Cloudflare region codes, for
 example `enam`) as a Worker environment variable to pin it explicitly. Only the *first* request
 after a fresh deploy honors the hint.
 
@@ -191,8 +191,8 @@ the single-DO host too whenever a D1 binding is wired.
 `.global()` is mutually exclusive with `.shardKey()`: a table is either sharded or global, never
 both (declaring both throws at schema build time).
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   accounts: defineTable({
@@ -239,7 +239,7 @@ Wiring: the `d1_databases` binding is currently manual (unlike the DO/R2 binding
 reconciles). Create the database once with `wrangler d1 create <name>`, add
 `{ "binding": "DB", "database_name": "...", "database_id": "..." }` to `wrangler.jsonc`, and pass
 it through your DO subclass's `appConfig` as `d1: bindingD1Client(env.DB)` (from
-`@stackbase/docstore-d1`). The D1 tables and indexes for every `.global()` table are created
+`@helipod/docstore-d1`). The D1 tables and indexes for every `.global()` table are created
 automatically on first boot with the binding present; there's no migration step.
 
 ## CI: GitHub Actions
@@ -258,13 +258,13 @@ jobs:
       - run: bun install
       - run: npm i -D wrangler
       - if: github.event_name == 'pull_request'
-        run: bunx stackbase deploy --check --dry-run --target cloudflare
+        run: bunx helipod deploy --check --dry-run --target cloudflare
       - if: github.ref == 'refs/heads/main'
-        run: bunx stackbase deploy --target cloudflare --env production
+        run: bunx helipod deploy --target cloudflare --env production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          STACKBASE_ADMIN_KEY: ${{ secrets.STACKBASE_ADMIN_KEY }}
+          HELIPOD_ADMIN_KEY: ${{ secrets.HELIPOD_ADMIN_KEY }}
 ```
 
 <Callout type="info">
@@ -274,9 +274,9 @@ jobs:
 
 ## The alternative path: Cloudflare Containers (experimental)
 
-If you specifically want the same portable `stackbase serve` image (SQLite/Postgres storage
+If you specifically want the same portable `helipod serve` image (SQLite/Postgres storage
 options) you'd run anywhere else, running inside a Cloudflare Container instead of a Durable
-Object, that's possible too. It's hand-wired though (no `stackbase deploy` integration), and it has
+Object, that's possible too. It's hand-wired though (no `helipod deploy` integration), and it has
 a correctness gap worth knowing before you pick it.
 
 <Callout type="warn" title="Scheduled work does not fire">
@@ -286,7 +286,7 @@ a correctness gap worth knowing before you pick it.
   path only for a request-driven app that doesn't depend on any of those.
 </Callout>
 
-It uses Workers (a stateless router), Containers (running the shipped `stackbase serve` image),
+It uses Workers (a stateless router), Containers (running the shipped `helipod serve` image),
 and R2 as the object-store substrate. R2 has to be the source of truth because container disk is
 ephemeral. You'll need a Workers Paid plan (about $5/mo, Containers and DOs have no free tier), an
 R2 bucket, and Docker able to build `linux/amd64` (cross-build explicitly on Apple Silicon:
@@ -294,8 +294,8 @@ R2 bucket, and Docker able to build `linux/amd64` (cross-build explicitly on App
 don't support bind mounts:
 
 ```dockerfile
-FROM stackbase:latest
-COPY ./stackbase /app/stackbase
+FROM helipod:latest
+COPY ./helipod /app/helipod
 ```
 
 Point `serve` at R2 with `--object-store` (`s3+https://<account-id>.r2.cloudflarestorage.com/<bucket>?region=auto&forcePathStyle=true`).
@@ -313,8 +313,8 @@ Data doesn't teleport between them. Export a portable dump from one deployment a
 another:
 
 ```bash
-STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://source.example.com --out dump.json
-STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.com --in dump.json
+HELIPOD_ADMIN_KEY=… helipod migrate export --url https://source.example.com --out dump.json
+HELIPOD_ADMIN_KEY=… helipod migrate import --url https://target.example.com --in dump.json
 ```
 
 <Callout type="warn">
@@ -324,8 +324,8 @@ STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.co
 
 ## Related
 
-- [Deploy and build](/docs/deploy/deploy-and-build): `stackbase deploy`'s `serve` target and
-  `stackbase build`, the other ways to ship a change.
+- [Deploy and build](/docs/deploy/deploy-and-build): `helipod deploy`'s `serve` target and
+  `helipod build`, the other ways to ship a change.
 - [Scaling](/docs/deploy/scaling): the paid-tier multi-shard Cloudflare router and the Postgres
   fleet, for when a single node (DO or otherwise) isn't enough.
 - [Self-hosting with Docker](/docs/deploy/self-hosting): the non-Cloudflare baseline.

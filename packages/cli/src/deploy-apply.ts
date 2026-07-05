@@ -1,16 +1,16 @@
 /**
- * Server-side apply for `stackbase deploy`: write the pushed tree under a writable dir a sibling
- * chain from the engine's node_modules (so `@stackbase/*` resolves), reuse loadFunctionsDir → push,
+ * Server-side apply for `helipod deploy`: write the pushed tree under a writable dir a sibling
+ * chain from the engine's node_modules (so `@helipod/*` resolves), reuse loadFunctionsDir → push,
  * gate on an additive-schema diff, then ATOMICALLY swap modules/routes/schema. All validation
  * happens before the first swap, so a rejected deploy leaves the running version fully live.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { AdminApi } from "@stackbase/admin";
-import type { ComponentDefinition } from "@stackbase/component";
-import { sha256Hex } from "@stackbase/deploy";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import type { AdminApi } from "@helipod/admin";
+import type { ComponentDefinition } from "@helipod/component";
+import { sha256Hex } from "@helipod/deploy";
 import { loadFunctionsDir } from "./load-modules";
 import { push } from "./push-pipeline";
 import { withStorageModules } from "./boot";

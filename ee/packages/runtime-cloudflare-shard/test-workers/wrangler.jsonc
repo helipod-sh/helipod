@@ -1,13 +1,13 @@
 {
   // The wrangler config the vitest-pool-workers project loads to spin up real shard-DOs inside
-  // workerd. ONE DO class (`FixtureStackbaseDO`) — the multi-shard front addresses N instances of it
+  // workerd. ONE DO class (`FixtureHelipodDO`) — the multi-shard front addresses N instances of it
   // by name, so a single binding + a single sqlite-classes migration covers every shard.
-  "name": "stackbase-do-shard-workers-tests",
+  "name": "helipod-do-shard-workers-tests",
   "main": "test-worker.ts",
   "compatibility_date": "2024-11-27",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDO" }]
+    "bindings": [{ "name": "HELIPOD_DO", "class_name": "FixtureHelipodDO" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FixtureHelipodDO"] }]
 }

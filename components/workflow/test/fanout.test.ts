@@ -9,8 +9,8 @@
 // `./src/modules.ts`), not just at the `runReplay` unit level: two steps dispatched in ONE poll,
 // the handler's `order.push("joined")` runs exactly once, after both ran.
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
-import { workflow } from "@stackbase/workflow"; // the authoring surface: workflow.define
+import { mutation } from "@helipod/executor";
+import { workflow } from "@helipod/workflow"; // the authoring surface: workflow.define
 import { makeRuntimeWithWorkflow, readTable } from "./helpers";
 
 describe("workflow fan-out/fan-in", () => {

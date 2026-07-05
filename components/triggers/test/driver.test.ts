@@ -1,10 +1,10 @@
 // components/triggers/test/driver.test.ts — the cursor loop: batch delivery, continuation, quiet
 // tables, byte-budget cutting, and per-trigger sequential isolation.
 import { describe, it, expect } from "vitest";
-import { mutation, action } from "@stackbase/executor";
+import { mutation, action } from "@helipod/executor";
 import { makeRuntimeWithTriggers, readCursors } from "./helpers";
 
-describe("@stackbase/triggers — driver loop", () => {
+describe("@helipod/triggers — driver loop", () => {
   it("a batch is delivered to the handler and the cursor advances to maxScannedTs", async () => {
     const delivered: unknown[][] = [];
     const { runtime, tick } = await makeRuntimeWithTriggers(
@@ -122,7 +122,7 @@ describe("@stackbase/triggers — driver loop", () => {
     // single-writer transactor (the whole architecture — see CLAUDE.md's reactivity model), so a
     // hanging MUTATION handler would block every other mutation in the runtime, not just its own
     // trigger — that's a property of the engine, not something a driver could route around.
-    // Actions run OUTSIDE the transaction (no `ctx.db`, no writer lock — see `@stackbase/executor`'s
+    // Actions run OUTSIDE the transaction (no `ctx.db`, no writer lock — see `@helipod/executor`'s
     // `ActionCtx` doc comment), so a slow action is the correct way to prove "sequential per
     // trigger, concurrent across triggers": the fast trigger's MUTATION handler must still be able
     // to acquire the writer lock and complete while the slow action is in flight.

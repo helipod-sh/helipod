@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/blobstore-r2",
+  "name": "@helipod/blobstore-r2",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,7 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/blobstore": "workspace:*"
+    "@helipod/blobstore": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",

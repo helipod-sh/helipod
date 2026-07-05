@@ -9,10 +9,10 @@
  *   (d) the grouped-commit path stamps per-unit origin correctly (each unit's own tag on its oplog).
  */
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { CommitUnit } from "@stackbase/docstore";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { newDocumentId, encodeStorageTableId, type ShardId } from "@stackbase/id-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { CommitUnit } from "@helipod/docstore";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { newDocumentId, encodeStorageTableId, type ShardId } from "@helipod/id-codec";
 import { SingleWriterTransactor, ShardedTransactor, type OplogDelta } from "../src/index";
 
 const TABLE = 30001;

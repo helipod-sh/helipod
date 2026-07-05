@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { isS3Config, makeBlobStore } from "../src/blobstore-select";
 import { assertStorageConfigCoherent } from "../src/boot";
-import { FsBlobStore } from "@stackbase/blobstore-fs";
-import { S3BlobStore } from "@stackbase/blobstore-s3";
+import { FsBlobStore } from "@helipod/blobstore-fs";
+import { S3BlobStore } from "@helipod/blobstore-s3";
 
 describe("makeBlobStore selection", () => {
   it("defaults to FS when no bucket configured", () => {
@@ -47,7 +47,7 @@ describe("assertStorageConfigCoherent", () => {
       { region: "us-east-1" },
       { publicBaseUrl: "https://cdn.example.com" },
     ]) {
-      expect(() => assertStorageConfigCoherent(bad)).toThrow(/STACKBASE_STORAGE_BUCKET/);
+      expect(() => assertStorageConfigCoherent(bad)).toThrow(/HELIPOD_STORAGE_BUCKET/);
     }
   });
 });

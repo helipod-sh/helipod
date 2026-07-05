@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 9.3 (B5 Part 1) — the headline E2E: a STOPPED fleet resharded N→M comes back up at M with
  * EVERY lane writable (each acquires + commits + advances its frontier) and all pre-reshard
@@ -14,10 +14,10 @@
  * produced a working M-shard fleet, not just row surgery on `shard_leases`.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import { newDocumentId, shardIdList, DEFAULT_SHARD, type ShardId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
+import { NodePgClient, PostgresDocStore } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import { newDocumentId, shardIdList, DEFAULT_SHARD, type ShardId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
 import { LeaseManager } from "../src/lease";
 import { installCommitGuard } from "../src/node";
 import { reshardFleet, NUM_SHARDS_GLOBAL_KEY } from "../src/reshard";

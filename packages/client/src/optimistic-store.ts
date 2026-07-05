@@ -24,7 +24,7 @@
  *    was found in this package at T1 — this is the convention going forward) so a production build
  *    pays no freeze cost.
  */
-import type { Value } from "@stackbase/values";
+import type { Value } from "@helipod/values";
 import type { AnyFunctionRef } from "./api";
 import type { AnyFunctionReference } from "./function-types";
 import type { OptimisticStoreView } from "./layered-store";

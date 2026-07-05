@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Fenced Frontier B1 (Task 4): fencing-first eviction of an expired lease + wedged-writer takeover
  * via the acquire loop. Exercised against a real `PostgresDocStore`/`LeaseManager` over PGlite (real
@@ -16,10 +16,10 @@
  * sequence (expired → evict → terminate-by-app-name → acquisition proceeds).
  */
 import { describe, it, expect, vi } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
 import { LeaseManager } from "../src/lease";
 import { installCommitGuard } from "../src/node";
 import { PgliteClient } from "./pglite-client";
@@ -39,7 +39,7 @@ async function makeStore(opts?: { applicationName?: string }): Promise<{
 }> {
   const client = new PgliteClient();
   const pgStore = new PostgresDocStore(client);
-  await pgStore.setupSchema(); // creates the stackbase_ts sequence evictExpired draws from
+  await pgStore.setupSchema(); // creates the helipod_ts sequence evictExpired draws from
   const lease = new LeaseManager(client, {
     advertiseUrl: "http://node-a:4000",
     applicationName: opts?.applicationName,
@@ -56,12 +56,12 @@ async function expireLease(client: PgClient): Promise<void> {
 
 describe("Fenced Frontier B1: fencing-first eviction (Task 4)", () => {
   it("evictExpired() on an expired row bumps epoch, clears urls, bumps frontier, returns the old app name", async () => {
-    const { client, lease } = await makeStore({ applicationName: "stackbase-fleet-4000" });
+    const { client, lease } = await makeStore({ applicationName: "helipod-fleet-4000" });
     await lease.tryAcquire(); // epoch 1, writer_url + writer_app_name set
     await expireLease(client);
 
     const result = await lease.evictExpired();
-    expect(result).toEqual({ fenced: true, oldAppName: "stackbase-fleet-4000" });
+    expect(result).toEqual({ fenced: true, oldAppName: "helipod-fleet-4000" });
 
     const row = await lease.read();
     expect(row?.epoch).toBe(2n); // fenced: epoch bumped
@@ -73,7 +73,7 @@ describe("Fenced Frontier B1: fencing-first eviction (Task 4)", () => {
   });
 
   it("evictExpired() on a LIVE (unexpired) row is a no-op → {fenced:false} and leaves the row untouched", async () => {
-    const { client, lease } = await makeStore({ applicationName: "stackbase-fleet-4000" });
+    const { client, lease } = await makeStore({ applicationName: "helipod-fleet-4000" });
     await lease.tryAcquire(); // fresh 15s TTL — live
 
     const before = await lease.read();
@@ -83,13 +83,13 @@ describe("Fenced Frontier B1: fencing-first eviction (Task 4)", () => {
     const after = await lease.read();
     expect(after?.epoch).toBe(before?.epoch); // untouched — no epoch bump
     expect(after?.writerUrl).toBe("http://node-a:4000");
-    expect(after?.writerAppName).toBe("stackbase-fleet-4000");
+    expect(after?.writerAppName).toBe("helipod-fleet-4000");
 
     await client.close();
   });
 
   it("eviction after commits preserves the frontier high-water — GREATEST(frontier_ts, nextval), never a reset", async () => {
-    const { client, pgStore, lease } = await makeStore({ applicationName: "stackbase-fleet-4000" });
+    const { client, pgStore, lease } = await makeStore({ applicationName: "helipod-fleet-4000" });
     await lease.tryAcquire(); // epoch 1
     installCommitGuard(pgStore, lease, () => {});
 
@@ -118,7 +118,7 @@ describe("Fenced Frontier B1: fencing-first eviction (Task 4)", () => {
     // The Task 3 test only proved frontier-survives-re-acquisition from a ZERO frontier (fresh row).
     // This drives the real chain: commit (frontier advances) → expire → EVICT → re-acquire, asserting
     // the durable-commit frontier is never reset by either the eviction or the subsequent acquisition.
-    const { client, pgStore, lease } = await makeStore({ applicationName: "stackbase-fleet-4000" });
+    const { client, pgStore, lease } = await makeStore({ applicationName: "helipod-fleet-4000" });
     await lease.tryAcquire(); // epoch 1
     installCommitGuard(pgStore, lease, () => {});
 
@@ -185,7 +185,7 @@ describe("Fenced Frontier B1: wedged-writer takeover in the acquire loop (Task 4
       await pgStore.setupSchema();
       const seedLease = new LeaseManager(inner, {
         advertiseUrl: "http://wedged:5000",
-        applicationName: "stackbase-fleet-5000",
+        applicationName: "helipod-fleet-5000",
       });
       await seedLease.setup();
       await seedLease.tryAcquire(); // epoch 1, held by the wedged writer
@@ -204,7 +204,7 @@ describe("Fenced Frontier B1: wedged-writer takeover in the acquire loop (Task 4
       // Tick 1: advisory try false → lease expired → evictExpired (epoch → 2) → terminate the wedged
       // holder's backend by its app_name. Acquisition does NOT happen this tick (advisory still false).
       await vi.advanceTimersByTimeAsync(10);
-      expect(client.terminatedAppNames).toEqual(["stackbase-fleet-5000"]);
+      expect(client.terminatedAppNames).toEqual(["helipod-fleet-5000"]);
       expect(onAcquired).not.toHaveBeenCalled();
       expect((await seedLease.read())?.epoch).toBe(2n); // fenced
 
@@ -231,7 +231,7 @@ describe("Fenced Frontier B1: wedged-writer takeover in the acquire loop (Task 4
       await pgStore.setupSchema();
       const holder = new LeaseManager(inner, {
         advertiseUrl: "http://holder:5000",
-        applicationName: "stackbase-fleet-5000",
+        applicationName: "helipod-fleet-5000",
       });
       await holder.setup();
       await holder.tryAcquire(); // fresh 15s TTL — LIVE

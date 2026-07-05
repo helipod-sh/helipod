@@ -1,6 +1,6 @@
 // components/scheduler/test/workflow-ready.test.ts
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
+import { mutation } from "@helipod/executor";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 /**

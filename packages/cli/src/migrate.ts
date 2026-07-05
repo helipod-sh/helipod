@@ -1,12 +1,12 @@
 /**
- * `stackbase migrate` — turn an existing Convex project into a Stackbase project: rewrite
+ * `helipod migrate` — turn an existing Convex project into a Helipod project: rewrite
  * imports, scaffold config, write a divergence report, and regenerate `_generated/`. v1 supports
  * only `--from convex`; other origin backends register into `SOURCES` the same way.
  */
 import { writeFileSync, existsSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { writeGenerated, generateServer } from "@stackbase/codegen";
+import { writeGenerated, generateServer } from "@helipod/codegen";
 import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
@@ -44,7 +44,7 @@ export function renderReport(entries: ReportEntry[]): string {
         items.map((e) => `- \`${e.file}${e.line ? `:${e.line}` : ""}\` — ${e.what}. **Fix:** ${e.fix}`).join("\n") +
         "\n";
   return (
-    `# Stackbase migration report\n\n` +
+    `# Helipod migration report\n\n` +
     `${by("auto-fixed").length} auto-fixed, ${by("action-needed").length} action-needed, ${by("unsupported").length} unsupported.\n` +
     section("Auto-fixed", by("auto-fixed")) +
     section("Action needed", by("action-needed")) +
@@ -62,7 +62,7 @@ function gitDirty(dir: string): boolean | null {
 export async function migrateCommand(args: string[]): Promise<number> {
   // Data-migration verbs (Slice 5) — `migrate export`/`migrate import` move an app's DATA between the
   // portable and DO-native topologies. Kept under `migrate` (a sibling of the bare-`migrate` Convex
-  // codemod, which is unchanged) so `stackbase migrate` stays one coherent command.
+  // codemod, which is unchanged) so `helipod migrate` stays one coherent command.
   if (args[0] === "export") return migrateExportCommand(args.slice(1));
   if (args[0] === "import") return migrateImportCommand(args.slice(1));
 
@@ -93,14 +93,14 @@ export async function migrateCommand(args: string[]): Promise<number> {
     return 1;
   }
 
-  // Rename the functions directory to Stackbase's own convention. Runs AFTER detect (which looks
+  // Rename the functions directory to Helipod's own convention. Runs AFTER detect (which looks
   // for convex/schema.ts on the untouched tree) and BEFORE analyze, so every path in the plan
   // already refers to the new location. A project that declares its own `functionsDir` wins, so
   // migrate can never produce a layout the CLI would then fail to find.
   //
   // `resolveFunctionsDir(undefined, projectRoot)` replicates its own no-flag branch: `projectRoot`
   // is already an absolute dir (computed above from `--dir`, defaulting to cwd/convex), so passing
-  // it as `cwd` makes `resolve(cwd)` idempotent, and it loads `stackbase.config.ts` from that same
+  // it as `cwd` makes `resolve(cwd)` idempotent, and it loads `helipod.config.ts` from that same
   // root — the exact `cfg.functionsDir ?? DEFAULT_FUNCTIONS_DIR` resolution this used to hand-roll.
   const { functionsDir: targetDir } = await resolveFunctionsDir(undefined, projectRoot);
   let migratedDir = functionsDir;
@@ -175,8 +175,8 @@ export async function migrateCommand(args: string[]): Promise<number> {
 
     // Delete the app's existing `_generated/` before regenerating (spec §88). A real Convex app
     // ships `_generated/{server.js, server.d.ts, api.js, api.d.ts, dataModel.d.ts}` — the pre-write
-    // guard below only checks for `server.ts` (Stackbase's own extension), so those stale Convex
-    // artifacts would otherwise survive untouched and can shadow the regenerated Stackbase files
+    // guard below only checks for `server.ts` (Helipod's own extension), so those stale Convex
+    // artifacts would otherwise survive untouched and can shadow the regenerated Helipod files
     // (a JS-first resolver picks the stale `server.js`, which imports the now-uninstalled
     // "convex/server"). `force: true` makes this a no-op when the dir is absent (the from-scratch
     // migration case), preserving existing behavior there.
@@ -204,7 +204,7 @@ export async function migrateCommand(args: string[]): Promise<number> {
     writeGenerated(generated.files, generatedDir);
   } catch (e) {
     process.stderr.write(
-      `imports migrated, but codegen failed: ${String(e)}\nSee MIGRATION-REPORT.md; fix the flagged items, then run \`stackbase codegen\`.\n`,
+      `imports migrated, but codegen failed: ${String(e)}\nSee MIGRATION-REPORT.md; fix the flagged items, then run \`helipod codegen\`.\n`,
     );
     return 1;
   }

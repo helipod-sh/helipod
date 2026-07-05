@@ -1,7 +1,7 @@
 // File-storage surface for the deploy rig's real-R2 E2E. `ctx.storage` is contributed at runtime by
 // the always-on storage provider (wired when `worker.ts` injects an `R2BlobStore`), so a local
 // structural type lets this fixture typecheck (mirrors `packages/cli/test/fixtures/storage-app`).
-import { query, mutation } from "@stackbase/executor";
+import { query, mutation } from "@helipod/executor";
 
 type UploadTarget = { kind: "proxied" | "presigned"; url: string; method: string; headers?: Record<string, string> };
 type StorageWriter = {

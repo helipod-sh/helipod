@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `WriteForwarder` — the non-owner side of the fleet write path. Implements the engine's
  * per-shard `WriteRouter` seam (B2b, D1): for any shard this node does NOT currently hold,
@@ -20,7 +20,7 @@
  * `NotShardOwnerError` instead of re-forwarding itself (which would let a forward chase a moving
  * target unboundedly). `forward()` treats that ONE error shape like a transport failure — refresh
  * the shard's cached URL and retry once — then surfaces whatever the second attempt does. Any OTHER
- * typed `StackbaseError` (an OCC conflict, a validation failure, …) means a LIVE owner answered
+ * typed `HelipodError` (an OCC conflict, a validation failure, …) means a LIVE owner answered
  * DEFINITIVELY and is re-thrown unchanged, exactly as before.
  *
  * Task 3 (read-your-own-writes): `/_fleet/run`'s response carries the write's `commitTs`
@@ -31,10 +31,10 @@
  * hasn't caught up yet. `promote()` also releases any pending wait: once this node becomes the
  * writer, replica catch-up is no longer the right thing to block on.
  */
-import type { WriteRouter, ClientReplay } from "@stackbase/runtime-embedded";
-import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import type { JSONValue } from "@stackbase/values";
-import { isStackbaseError, stackbaseErrorFromJSON, NOT_SHARD_OWNER_CODE, type StackbaseErrorJSON } from "@stackbase/errors";
+import type { WriteRouter, ClientReplay } from "@helipod/runtime-embedded";
+import { DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import type { JSONValue } from "@helipod/values";
+import { isHelipodError, helipodErrorFromJSON, NOT_SHARD_OWNER_CODE, type HelipodErrorJSON } from "@helipod/errors";
 import type { LeaseManager } from "./lease";
 import type { ReplicaTailer } from "./replica-tailer";
 
@@ -166,16 +166,16 @@ export class WriteForwarder implements WriteRouter {
     try {
       result = await this.post(first, body);
     } catch (firstErr) {
-      // A StackbaseError here means a LIVE node answered DEFINITIVELY. Two cases:
+      // A HelipodError here means a LIVE node answered DEFINITIVELY. Two cases:
       //  - `NOT_SHARD_OWNER_CODE` (the single-hop guard's answer): the cached URL is stale — this is
       //    exactly a transport-style failure from the forwarder's perspective, worth ONE retry
       //    against a freshly-read (hopefully current) owner.
       //  - any OTHER typed error (an OCC conflict, a validation failure, the shard guard, …): the
       //    mutation reached an owner and it DECIDED. Re-forwarding would only re-run it against the
       //    same target, so propagate the typed error UNCHANGED (its status/code/retryable survive).
-      // A non-StackbaseError (fetch rejected: the owner may have failed over or the connection
+      // A non-HelipodError (fetch rejected: the owner may have failed over or the connection
       // blipped) is the original TRANSPORT-failure retry case, unchanged from before.
-      const shouldRetry = !isStackbaseError(firstErr) || firstErr.code === NOT_SHARD_OWNER_CODE;
+      const shouldRetry = !isHelipodError(firstErr) || firstErr.code === NOT_SHARD_OWNER_CODE;
       if (!shouldRetry) throw firstErr;
       let second: string;
       try {
@@ -243,7 +243,7 @@ export class WriteForwarder implements WriteRouter {
     let parsed: {
       value?: JSONValue;
       error?: string;
-      errorJson?: StackbaseErrorJSON;
+      errorJson?: HelipodErrorJSON;
       commitTs?: string;
       shardId?: string;
       /** Effectively-once forwarding (Fleet B3, D3): true when the receiver replayed a
@@ -268,7 +268,7 @@ export class WriteForwarder implements WriteRouter {
       // the same 4xx/5xx the writer would have returned locally. Falls back to a plain Error (an old
       // writer without `errorJson`, or a non-JSON body) so a mixed-version fleet still surfaces the
       // message.
-      if (parsed.errorJson) throw stackbaseErrorFromJSON(parsed.errorJson);
+      if (parsed.errorJson) throw helipodErrorFromJSON(parsed.errorJson);
       throw new Error(parsed.error ?? `fleet: writer /_fleet/run returned HTTP ${res.status}`);
     }
     return { value: parsed.value ?? null, commitTs: parsed.commitTs, shardId: parsed.shardId, clientReplay: parsed.clientReplay };

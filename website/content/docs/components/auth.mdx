@@ -5,7 +5,7 @@ description: Sessions, email, OAuth, MFA, and passkeys.
 
 {/* diataxis: explanation */}
 
-`@stackbase/auth` is a first-party, self-hosted authentication component. Out of the box it gives
+`@helipod/auth` is a first-party, self-hosted authentication component. Out of the box it gives
 you email and password accounts, anonymous sign-in with in-place upgrade, and a hardened session
 model. Layer on top of that as much as you need: email verification, password reset, magic links,
 one-time codes, social OAuth, third-party JWT/OIDC, TOTP two-factor, and passkeys.
@@ -38,11 +38,11 @@ This is a long page. Jump to what you need:
 
 ## Enabling it
 
-Compose `auth` in `stackbase.config.ts` like any other component:
+Compose `auth` in `helipod.config.ts` like any other component:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { auth } from "@stackbase/auth";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { auth } from "@helipod/auth";
 
 export default defineConfig({ components: [auth] });
 ```
@@ -50,8 +50,8 @@ export default defineConfig({ components: [auth] });
 `auth` is `defineAuth()` called with defaults. To override any of the top-level session knobs
 (everything else stays behind its own block), call `defineAuth` yourself:
 
-```ts title="stackbase.config.ts"
-import { defineAuth } from "@stackbase/auth";
+```ts title="helipod.config.ts"
+import { defineAuth } from "@helipod/auth";
 
 export const auth = defineAuth({
   accessTtlMs: 60 * 60 * 1000,                 // access token lifetime (default 1h)
@@ -72,7 +72,7 @@ and attaches `ctx.auth` as a context provider to every query, mutation, and acti
 `SetAuth`, or an HTTP request's bearer token, to a user id. It returns `null` if there's no
 session, or if it expired:
 
-```ts title="stackbase/documents.ts"
+```ts title="helipod/documents.ts"
 import { query } from "./_generated/server";
 
 export const myDocuments = query({
@@ -107,9 +107,9 @@ turns the raw token pair they return into a managed session: persistence, applyi
 token to the connection, scheduling refresh, and coordinating across tabs.
 
 ```ts title="app.ts"
-import { StackbaseClient, webSocketTransport, createAuthClient, anyApi } from "@stackbase/client";
+import { HelipodClient, webSocketTransport, createAuthClient, anyApi } from "@helipod/client";
 
-const client = new StackbaseClient(webSocketTransport(url));
+const client = new HelipodClient(webSocketTransport(url));
 const auth = createAuthClient(client, { onSignedOut: () => location.reload() });
 
 const result = await client.mutation(anyApi.auth.signUp, {
@@ -126,7 +126,7 @@ auth.close();              // stop the refresh timer + close the broadcast chann
 What `createAuthClient(client, opts)` does under the hood:
 
 - **Persistence.** `localStorageSession()` is the default `SessionStorage`. It reads and writes a
-  `stackbase.session` JSON blob (the exported constant `SESSION_STORAGE_KEY`), and falls back
+  `helipod.session` JSON blob (the exported constant `SESSION_STORAGE_KEY`), and falls back
   transparently to an in-memory store (`memorySession()`) if `localStorage` throws or doesn't
   exist (private-mode Safari, SSR, a non-browser host). Pass your own `storage` (any
   `{ load(): SessionInfo | null; save(info): void; clear(): void }`) for Node/Electron/Tauri hosts.
@@ -146,7 +146,7 @@ What `createAuthClient(client, opts)` does under the hood:
   and its pair is strictly newer (a later `expiresAt` and a different `refreshToken`), this tab
   simply adopts that pair instead of refreshing again.
 - **Cross-tab broadcast.** After a winning refresh, the new pair is posted over a
-  `BroadcastChannel` (`stackbase:auth:pair`) so every other tab adopts it immediately rather than
+  `BroadcastChannel` (`helipod:auth:pair`) so every other tab adopts it immediately rather than
   each independently hitting `auth:refresh`.
 - **`REFRESH_STALE` handling.** If this tab's refresh loses an honest race (see [rotation and
   reuse detection](#rotation-and-reuse-detection) below), it waits ~250ms for the winner's
@@ -328,14 +328,14 @@ reset, magic-link sign-in, and one-time-code (OTP) sign-in. All four are built o
 mutation (`auth:_issueCode`, not client-callable) that generates a code, hashes it, and stores
 only the hash.
 
-```ts title="stackbase.config.ts"
-import { defineAuth, consoleEmail } from "@stackbase/auth";
+```ts title="helipod.config.ts"
+import { defineAuth, consoleEmail } from "@helipod/auth";
 
 export const auth = defineAuth({
   email: {
     provider: consoleEmail(),                // zero-config dev default
     from: "no-reply@example.com",
-    appName: "My App",                       // used in email subject lines (default "Stackbase app")
+    appName: "My App",                       // used in email subject lines (default "Helipod app")
     baseUrl: "https://app.example.com",       // required to build clickable reset/magic/verify links
   },
 });
@@ -358,7 +358,7 @@ export const auth = defineAuth({
     appName: {
       description: 'Interpolated into the default subject lines and bodies',
       type: 'string',
-      default: '"Stackbase app"',
+      default: '"Helipod app"',
     },
     baseUrl: {
       description: 'Base URL used to build clickable magic-link/verify links. Omit and only the raw code/token is sent',
@@ -415,7 +415,7 @@ export const auth = defineAuth({
       default: 'defaultTemplates',
     },
     notificationCategory: {
-      description: 'The category passed to a composed @stackbase/notifications (see Notifications integration below)',
+      description: 'The category passed to a composed @helipod/notifications (see Notifications integration below)',
       type: 'string',
       default: '"auth"',
     },
@@ -433,7 +433,7 @@ Two providers ship built-in:
 
 - **`consoleEmail()`** is the zero-config dev default. It delivers nothing: it prints the whole
   rendered message (subject, body, and, deliberately, for dev convenience, the raw code or link) to
-  the server's own console, meaning the terminal running `stackbase dev`/`serve`.
+  the server's own console, meaning the terminal running `helipod dev`/`serve`.
 - **`resendEmail({ apiKey, baseUrl? })`** makes one `fetch` call to the Resend API per send. Zero
   extra dependencies, and it throws on a non-2xx response.
 
@@ -455,7 +455,7 @@ dependency):
 
 ```ts title="smtp-email.ts"
 import nodemailer from "nodemailer";
-import type { EmailProvider } from "@stackbase/auth";
+import type { EmailProvider } from "@helipod/auth";
 
 export function smtpEmail(opts: { host: string; port: number; user: string; pass: string }): EmailProvider {
   const transport = nodemailer.createTransport({ host: opts.host, port: opts.port, auth: { user: opts.user, pass: opts.pass } });
@@ -476,7 +476,7 @@ export function smtpEmail(opts: { host: string; port: number; user: string; pass
 and returning `{ subject, text, html? }`:
 
 ```ts
-import { defineAuth, consoleEmail, defaultTemplates } from "@stackbase/auth";
+import { defineAuth, consoleEmail, defaultTemplates } from "@helipod/auth";
 
 export const auth = defineAuth({
   email: {
@@ -585,14 +585,14 @@ accumulating them.
 
 An `oauth` block turns on social sign-in through six built-in providers, plus any custom
 OIDC/OAuth2 provider. All of them resolve through the same account-linking core that email and
-password sign-in uses. Stackbase's own sessions always stay DB rows: an external identity is
+password sign-in uses. Helipod's own sessions always stay DB rows: an external identity is
 resolved to, or linked with, a local `userId`, and then a normal session is minted for it.
 
-```ts title="stackbase.config.ts"
+```ts title="helipod.config.ts"
 import {
   defineAuth, googleProvider, githubProvider,
   microsoftProvider, discordProvider, facebookProvider, appleProvider,
-} from "@stackbase/auth";
+} from "@helipod/auth";
 
 export const auth = defineAuth({
   oauth: {
@@ -630,7 +630,7 @@ Any custom provider, including one you build yourself, goes through the public
 `oauthProvider({ kind, ... })` seam the six built-ins are thin wrappers over:
 
 ```ts
-import { oauthProvider } from "@stackbase/auth";
+import { oauthProvider } from "@helipod/auth";
 
 const acmeProvider = oauthProvider({
   kind: "oidc",                          // or "oauth2" for an explicit-endpoint provider (no discovery/id_token)
@@ -735,7 +735,7 @@ page exchanges a one-time code for a session.
 sequenceDiagram
   participant Browser
   participant Provider as OAuth provider
-  participant Engine as Stackbase engine
+  participant Engine as Helipod engine
   Browser->>Provider: navigate to /start?redirectTo=...
   Provider->>Engine: redirect to /callback
   Engine->>Browser: 302 to redirectTo#code=handoff
@@ -819,7 +819,7 @@ flowchart TD
 For providers that hand your frontend a signed ID token directly (Clerk, Auth0, Supabase Auth, or
 any issuer that publishes a JWKS), configure `jwt.issuers` and call `signInWithIdToken`:
 
-```ts title="stackbase.config.ts"
+```ts title="helipod.config.ts"
 export const auth = defineAuth({
   jwt: {
     issuers: [
@@ -840,9 +840,9 @@ auth.setSession(session);
 
 `signInWithIdToken` verifies the token once: signature via a live JWKS fetch (`jose`), plus `iss`,
 `aud`, `exp`/`nbf`, against the first matching configured issuer. Then it resolves, links, or
-mints a Stackbase session through the exact same core the OAuth callback uses.
+mints a Helipod session through the exact same core the OAuth callback uses.
 
-This is an exchange model, not per-request verification. Stackbase verifies the token once and
+This is an exchange model, not per-request verification. Helipod verifies the token once and
 trades it for a real DB-backed session, rather than treating the third-party JWT itself as the
 ambient identity re-verified on every request, because:
 
@@ -866,13 +866,13 @@ first-factor sign-in path (password, magic-link, OTP, email verification, passwo
 third-party JWT, and passkeys) behind a second factor, without ever bypassing the session-minting
 chokepoint.
 
-```ts title="stackbase.config.ts"
-import { defineAuth } from "@stackbase/auth";
+```ts title="helipod.config.ts"
+import { defineAuth } from "@helipod/auth";
 
 export const auth = defineAuth({
   mfa: {
-    encryptionKey: process.env.STACKBASE_AUTH_MFA_KEY!, // a 32-byte key, base64 or hex
-    issuer: "My App",                                   // otpauth:// issuer label (default "Stackbase")
+    encryptionKey: process.env.HELIPOD_AUTH_MFA_KEY!, // a 32-byte key, base64 or hex
+    issuer: "My App",                                   // otpauth:// issuer label (default "Helipod")
   },
 });
 ```
@@ -886,7 +886,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 <Callout type="warn" title="mfa fails fast at boot without a usable key">
 
 `defineAuth` fails fast at boot if `mfa` is configured without a usable 32-byte key, the same
-posture as `STACKBASE_ADMIN_KEY` for the admin and storage surfaces.
+posture as `HELIPOD_ADMIN_KEY` for the admin and storage surfaces.
 
 </Callout>
 
@@ -910,7 +910,7 @@ expected code, unlike session tokens and email codes, which are only ever compar
     issuer: {
       description: 'otpauth:// issuer label shown in the authenticator app',
       type: 'string',
-      default: '"Stackbase"',
+      default: '"Helipod"',
     },
     recoveryCodeCount: {
       description: 'Recovery codes minted per (re)enrollment',
@@ -1062,7 +1062,7 @@ the next sign-in mints directly, with no `mfaRequired` step.
 There's no backdoor around losing both the authenticator app and the recovery codes. That's
 deliberate: an unconditional bypass would defeat the point of a second factor. Two recoveries are
 supported. One is a saved recovery code, the intended path (tell users to save them durably the
-moment they're shown). The other is an admin or support-side reset your own app builds. Stackbase
+moment they're shown). The other is an admin or support-side reset your own app builds. Helipod
 ships no automatic "reset MFA" flow; deleting the user's `mfaEnrollments`/`mfaRecoveryCodes` rows
 via the dashboard, behind your own out-of-band identity check, is the pattern. There is also no
 "remember this device for 30 days" skip: every gated sign-in challenges, every time, on every
@@ -1074,8 +1074,8 @@ device.
 defineAuth({
   mfa: {
     encryptionKeys: [
-      { id: "2", key: process.env.STACKBASE_AUTH_MFA_KEY_2! }, // NEW primary, encrypts going forward
-      { id: "1", key: process.env.STACKBASE_AUTH_MFA_KEY_1! }, // retired, still decrypts old secrets
+      { id: "2", key: process.env.HELIPOD_AUTH_MFA_KEY_2! }, // NEW primary, encrypts going forward
+      { id: "1", key: process.env.HELIPOD_AUTH_MFA_KEY_1! }, // retired, still decrypts old secrets
     ],
   },
 });
@@ -1093,7 +1093,7 @@ synced platform passkey) as a phishing-resistant, passwordless first factor. A p
 through the same session-minting chokepoint as a password, so it honors any enrolled MFA and
 participates in the same device-management surface as sessions.
 
-```ts title="stackbase.config.ts"
+```ts title="helipod.config.ts"
 export const auth = defineAuth({
   passkeys: {
     rpID: "example.com",              // your Relying Party ID (the registrable domain, no scheme/port)
@@ -1258,7 +1258,7 @@ A few guarantees hold across every flow above, by construction:
 
 ## Notifications integration
 
-When `@stackbase/notifications` is composed alongside `auth`, every A2 email send (OTP,
+When `@helipod/notifications` is composed alongside `auth`, every A2 email send (OTP,
 magic-link, verification, and password-reset) routes through `ctx.notifications.send(...)`
 instead of auth's own `EmailProvider.send`. It goes with `critical: true` (bypassing the
 recipient's notification preferences, since a security-critical send can't be silently suppressed
@@ -1275,13 +1275,13 @@ Without notifications composed, the exact same sends fall back to auth's own con
 
 ## localStorage vs. cookies
 
-Stackbase is WebSocket-first: identity flows over the `SetAuth` message, not request headers. So
+Helipod is WebSocket-first: identity flows over the `SetAuth` message, not request headers. So
 the client holds the access token in JS (`localStorage` by default) rather than an httpOnly
 cookie. The theft mitigation is the session model itself (a short access TTL, refresh rotation,
 and reuse detection), not cookie isolation.
 
 httpOnly-cookie mode plus CSRF is intentionally out of scope. If your threat model requires cookie
-isolation, front Stackbase with your own auth-terminating proxy.
+isolation, front Helipod with your own auth-terminating proxy.
 
 ## Where to go next
 

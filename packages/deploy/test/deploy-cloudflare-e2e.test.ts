@@ -41,7 +41,7 @@ describe.skipIf(!cfAvailable())("cloudflare target — real wrangler deploy", ()
     //
     // Marked deploy-pending in CI until a CF test account/token is provisioned — see
     // packages/runtime-cloudflare/rig/README.md for the exact manual commands (wrangler login,
-    // wrangler secret put STACKBASE_ADMIN_KEY, wrangler r2 bucket create, wrangler deploy, teardown)
+    // wrangler secret put HELIPOD_ADMIN_KEY, wrangler r2 bucket create, wrangler deploy, teardown)
     // this test will eventually automate. NEVER assert a fake pass here — the whole point of
     // `skipIf` is that a missing-credential run reports "skipped", not a hollow "passed".
     expect(true).toBe(true); // replace with the real deploy+probe once creds exist

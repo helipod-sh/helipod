@@ -1,13 +1,13 @@
-# @stackbase/runtime-cloudflare
+# @helipod/runtime-cloudflare
 
-The single-shard **Cloudflare Durable Object host** for Stackbase — Slice 3 of the DO-native program
+The single-shard **Cloudflare Durable Object host** for Helipod — Slice 3 of the DO-native program
 (`docs/superpowers/specs/2026-03-20-do-host-slice3-design.md`). A **leaf host package**: every
 Cloudflare shape lives here (as narrow structural interfaces) and in the deploy rig; nothing below it
 (`runtime-embedded`/`transactor`/`sync`) ever references a Cloudflare type.
 
 ## The one-DO design (decision 1)
 
-`StackbaseDurableObject` is a **unified** Durable Object: one object owns the OCC writer, the DO-SQLite
+`HelipodDurableObject` is a **unified** Durable Object: one object owns the OCC writer, the DO-SQLite
 store (`ctx.storage.sql`), the hibernatable WebSockets, the subscription index (the union of every
 live socket's attachment), and the wake alarm (`ctx.storage.setAlarm`). Because the writer and the
 subscription index are the **same object**, a mutation's reactive fan-out is an **in-process call in
@@ -17,19 +17,19 @@ Slice 6; `notifyWrites` stays a single named in-process method so that split is 
 rewrite.
 
 ```ts
-import { StackbaseDurableObject, createWorkerHandler } from "@stackbase/runtime-cloudflare";
+import { HelipodDurableObject, createWorkerHandler } from "@helipod/runtime-cloudflare";
 // (a real app uses the codegen'd worker.ts — see the rig)
-export class StackbaseDO extends StackbaseDurableObject {
-  appConfig(env) { return { loaded, components, adminKey: env.STACKBASE_ADMIN_KEY }; }
+export class HelipodDO extends HelipodDurableObject {
+  appConfig(env) { return { loaded, components, adminKey: env.HELIPOD_ADMIN_KEY }; }
 }
-export default createWorkerHandler("STACKBASE_DO");
+export default createWorkerHandler("HELIPOD_DO");
 ```
 
 ## Placement: pin your one DO's home region
 
 A Durable Object is **single-homed** — pinned to one data center at creation, and it **never moves**.
 By default it lands near whoever **first** `get()`s it. A US-centric app can instead pin its one DO
-explicitly with the **`STACKBASE_DO_LOCATION_HINT`** env var (e.g. `enam`): the Worker reads it per
+explicitly with the **`HELIPOD_DO_LOCATION_HINT`** env var (e.g. `enam`): the Worker reads it per
 request and passes it to `get(id, { locationHint })`. Only the **first** `get()` for the `"default"` id
 is honored (the DO is pinned thereafter), so a stable env value places it deterministically. **Unset ⇒
 no hint** — byte-identical to the pre-hint behavior (Cloudflare places the DO near the first requester).
@@ -39,7 +39,7 @@ apac-se oc afr me`) — jurisdictions (`eu`/`fedramp`) are a *separate* mechanis
 
 This is a single DO in a single region: it is **not** geographic scale-out. Placing *many* shard-DOs
 near *their own* audiences is the paid-tier
-[`@stackbase/runtime-cloudflare-shard`](../../ee/packages/runtime-cloudflare-shard) router (Slice 6, M1).
+[`@helipod/runtime-cloudflare-shard`](../../ee/packages/runtime-cloudflare-shard) router (Slice 6, M1).
 
 ## Load-bearing decisions
 
@@ -50,7 +50,7 @@ near *their own* audiences is the paid-tier
 - **Eager rehydrate-all-on-wake** (decision 3): every hibernated socket's session is reconstructed
   from its attachment before serving, so a fan-out's read-set intersection never misses a subscriber.
 - **App code is statically bundled** (decision 4): `generateWorkerEntrySource` emits static imports of
-  every module/schema/config (no dir-scan in a DO), the twin of `stackbase build`'s entrypoint codegen.
+  every module/schema/config (no dir-scan in a DO), the twin of `helipod build`'s entrypoint codegen.
 - **Fan-out stays INLINE, never `waitUntil`-deferred** (decision 5) — deferring would let a
   `MutationResponse` beat its own G4 origin-frontier advance.
 - **Process-shaped timers disarmed** (decision 6): the DO socket omits `ping` and the runtime boots

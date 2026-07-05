@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod, type TestHelipod } from "../../src";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type A = any;
@@ -20,14 +20,14 @@ const mod = {
 };
 
 describe("conformance — ids", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   afterEach(async () => {
     await t.close();
   });
 
   it("an inserted id round-trips: insert -> returned id string -> get returns the row", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     const id = await t.mutation<string>("mod:insertA", { label: "hello" });
     expect(typeof id).toBe("string");
     const doc = (await t.query("mod:get", { id })) as Record<string, unknown>;
@@ -35,12 +35,12 @@ describe("conformance — ids", () => {
   });
 
   it("ctx.db.get of a syntactically-malformed id string rejects (id-codec throws)", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     await expect(t.query("mod:get", { id: "garbage!!" })).rejects.toThrow();
   });
 
   it("cross-table id: v.id(table) is NOT runtime-enforced (D5) — get() decodes the id's OWN embedded table, ignoring the field's declared table", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
 
     // Mint an id for table "a".
     const idA = await t.mutation<string>("mod:insertA", { label: "from-a" });
@@ -70,17 +70,17 @@ describe("conformance — ids", () => {
   });
 
   it("ctx.db.replace of a syntactically-malformed id string rejects (id-codec throws)", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     await expect(t.mutation("mod:replace", { id: "garbage!!", value: { label: "x" } })).rejects.toThrow();
   });
 
   it("ctx.db.delete of a syntactically-malformed id string rejects (id-codec throws)", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     await expect(t.mutation("mod:del", { id: "garbage!!" })).rejects.toThrow();
   });
 
   it("replace ignores a caller-supplied _id/_creationTime in the payload: real id + original creation time are kept", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     const id = await t.mutation<string>("mod:insertA", { label: "original" });
     const before = (await t.query("mod:get", { id })) as Record<string, unknown>;
     const originalCreationTime = before["_creationTime"];
@@ -107,7 +107,7 @@ describe("conformance — ids", () => {
   });
 
   it("two inserts with byte-for-byte identical field values produce two distinct ids", async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
     const id1 = await t.mutation<string>("mod:insertA", { label: "twin" });
     const id2 = await t.mutation<string>("mod:insertA", { label: "twin" });
     expect(id1).not.toBe(id2);
@@ -131,7 +131,7 @@ describe("conformance — ids", () => {
       insertC: mutation(async (ctx: A, args: A) => ctx.db.insert("c", args)),
       get: query(async (ctx: A, args: { id: string }) => ctx.db.get(args.id)),
     };
-    t = await createTestStackbase({ modules: { "mod.ts": nestedMod, "schema.ts": { default: nestedSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": nestedMod, "schema.ts": { default: nestedSchema } } });
 
     const idA = await t.mutation<string>("mod:insertA", { label: "nested-target" });
     const idC = await t.mutation<string>("mod:insertC", {

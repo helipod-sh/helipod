@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `StablePrefixTs` (Fenced Frontier B1, D6) — a compile-time brand over `bigint` marking a
  * timestamp as a member of the FENCED FRONTIER: the stable prefix of the primary's MVCC log that

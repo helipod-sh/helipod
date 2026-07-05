@@ -8,7 +8,7 @@
  * `max(now + delay, lastScheduledFireAt)` — lowering the slider mid-flight can never let a
  * later mutation overtake an earlier one.
  */
-import { webSocketTransport, type ClientTransport } from "@stackbase/client";
+import { webSocketTransport, type ClientTransport } from "@helipod/client";
 
 type OutboundMessage = Parameters<ClientTransport["send"]>[0];
 

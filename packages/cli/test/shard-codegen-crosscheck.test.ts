@@ -1,11 +1,11 @@
 /**
  * Shards B2a, Task 5 — the codegen-time shardBy cross-check (D7), wired into `loadProject`/`push`
  * (packages/cli/src/project.ts): every mutation whose `shardBy` is a plain arg-name STRING is
- * validated against the schema at push time (dev boot + every hot reload + `stackbase codegen`).
+ * validated against the schema at push time (dev boot + every hot reload + `helipod codegen`).
  */
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
 import { push, type LoadedProject } from "../src/index";
 
 const schema = defineSchema({

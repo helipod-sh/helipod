@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId, newDocumentId, shardIdForKeyValue } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { Driver, DriverContext } from "@stackbase/component";
-import type { IndexSpec } from "@stackbase/query-engine";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { encodeStorageIndexId, newDocumentId, shardIdForKeyValue } from "@helipod/id-codec";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import type { Driver, DriverContext } from "@helipod/component";
+import type { IndexSpec } from "@helipod/query-engine";
 import { createEmbeddedRuntime, type WriteRouter } from "../src/index";
 
 const MESSAGES = 10001;

@@ -8,7 +8,7 @@ description: Build a small reactive chat app, end to end, with a real React UI.
 The [Quickstart](/docs/get-started/quickstart) got one query and one mutation running and showed
 you reactivity in the dashboard. This tutorial goes further. You'll build a small **chat app**:
 multiple conversations, a real React UI, pagination, an action that calls out to the network, and
-live updates across two browser tabs. It's the full shape a real stackbase app is built from.
+live updates across two browser tabs. It's the full shape a real helipod app is built from.
 
 Every step below is runnable. You'll need **Bun** for this one. The tutorial bundles its own UI
 with `bun build`, so Bun is required here even though the backend engine itself also runs on Node.
@@ -24,14 +24,14 @@ with `bun build`, so Bun is required here even though the backend engine itself 
 - Mutations that insert, replace, and delete (the three ways a mutation writes), each fanning out
   reactively to every open subscription that reads what it touched.
 - An **action** that reaches out to the network, callable from the client with `useAction`.
-- A React UI wired with `StackbaseProvider`, `useQuery`, `useMutation` (with an optimistic update
+- A React UI wired with `HelipodProvider`, `useQuery`, `useMutation` (with an optimistic update
   for instant sends), and `useAction`, plus one-shot manual pagination via the client directly.
 - Two browser tabs open side by side, proving the whole thing is reactive with zero refresh code.
 
 <Callout title="Before you start">
 
-You need **Bun**, for `bun build` (bundling the web UI) and to run `stackbase dev` itself. No
-prior stackbase project needed. This tutorial creates one from scratch.
+You need **Bun**, for `bun build` (bundling the web UI) and to run `helipod dev` itself. No
+prior helipod project needed. This tutorial creates one from scratch.
 
 First time through? Skim past the sharding commentary (`.shardKey`/`shardBy` notes in steps 2
 and 4). It changes nothing about how this app behaves on one node, and the app works identically
@@ -49,12 +49,12 @@ multi-node.
 ```bash
 mkdir chat-app && cd chat-app
 bun init -y
-bun add @stackbase/cli @stackbase/values @stackbase/client react react-dom
+bun add @helipod/cli @helipod/values @helipod/client react react-dom
 ```
 
-- `@stackbase/cli` is the `stackbase` command.
-- `@stackbase/values` gives you `defineSchema`, `defineTable`, and the `v` validators.
-- `@stackbase/client` is the browser client: the reactive connection, plus its `/react` subpath
+- `@helipod/cli` is the `helipod` command.
+- `@helipod/values` gives you `defineSchema`, `defineTable`, and the `v` validators.
+- `@helipod/client` is the browser client: the reactive connection, plus its `/react` subpath
   for hooks.
 
 </Step>
@@ -63,10 +63,10 @@ bun add @stackbase/cli @stackbase/values @stackbase/client react react-dom
 
 ### Define the schema
 
-Your backend lives in `stackbase/` (the default function directory). Create `stackbase/schema.ts`:
+Your backend lives in `helipod/` (the default function directory). Create `helipod/schema.ts`:
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   conversations: defineTable({
@@ -108,10 +108,10 @@ Two annotations on `messages` matter for everything that follows:
 
 ### Conversations: create and list
 
-Create `stackbase/conversations.ts`:
+Create `helipod/conversations.ts`:
 
-```ts title="stackbase/conversations.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/conversations.ts"
+import { v } from "@helipod/values";
 import { query, mutation } from "./_generated/server";
 
 export const create = mutation({
@@ -140,11 +140,11 @@ optimistic update) know their exact result type. See
 
 ### Messages: insert, replace, delete
 
-Create `stackbase/messages.ts`. This is the file that does the real work: three mutations covering
+Create `helipod/messages.ts`. This is the file that does the real work: three mutations covering
 every way a mutation writes, plus two queries:
 
-```ts title="stackbase/messages.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/messages.ts"
+import { v } from "@helipod/values";
 import { query, mutation } from "./_generated/server";
 
 const messageObject = v.object({
@@ -159,7 +159,7 @@ const messageObject = v.object({
 // Insert. `shardBy: "conversationId"` routes this write to the shard that owns this
 // conversation. That's required because `messages` declared `.shardKey("conversationId")` in
 // the schema, and because `conversationId` is a required arg of the same type as the shard key
-// field, codegen cross-checks the pairing at every `stackbase dev`/`stackbase codegen` run.
+// field, codegen cross-checks the pairing at every `helipod dev`/`helipod codegen` run.
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   returns: v.id("messages"),
@@ -271,10 +271,10 @@ A few things worth calling out:
 
 [Actions](/docs/core-concepts/actions) are the only place `fetch` is allowed. Queries and
 mutations must stay deterministic, so anything that talks to the outside world runs outside the
-transaction, in an action. Create `stackbase/webhook.ts`:
+transaction, in an action. Create `helipod/webhook.ts`:
 
-```ts title="stackbase/webhook.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/webhook.ts"
+import { v } from "@helipod/values";
 import { action } from "./_generated/server";
 
 export const pingWebhook = action({
@@ -305,7 +305,7 @@ mutation's does. See [Actions](/docs/core-concepts/actions) for the full picture
 
 ### Build the web UI
 
-Create a `web/` directory alongside `stackbase/`:
+Create a `web/` directory alongside `helipod/`:
 
 ```html title="web/index.html"
 <!doctype html>
@@ -330,18 +330,18 @@ one file, `web/main.tsx`.
 ```tsx title="web/main.tsx (part 1, setup)"
 import { StrictMode, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { StackbaseClient, webSocketTransport, anyApi, type OptimisticLocalStore } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation, useAction, useStackbaseClient } from "@stackbase/client/react";
+import { HelipodClient, webSocketTransport, anyApi, type OptimisticLocalStore } from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation, useAction, useHelipodClient } from "@helipod/client/react";
 // Type-only imports, erased at bundle time, so this never pulls the server-side
-// `@stackbase/executor` re-exports in `_generated/server.ts` into the browser bundle. `anyApi`
+// `@helipod/executor` re-exports in `_generated/server.ts` into the browser bundle. `anyApi`
 // (below) is the real runtime value; `Api` just shapes it, at the import site, for free.
-import type { Api } from "../stackbase/_generated/api";
-import type { Doc, Id } from "../stackbase/_generated/dataModel";
+import type { Api } from "../helipod/_generated/api";
+import type { Doc, Id } from "../helipod/_generated/dataModel";
 
 const api = anyApi as Api;
 
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
+const client = new HelipodClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 ```
 
 <Accordions type="single">
@@ -350,16 +350,16 @@ const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${locatio
 
 `_generated/api.d.ts` is types only (it declares the `Api` type, not a runtime value), and
 `_generated/server.ts`'s runtime `api` re-exports server-only code alongside it: fine to import
-from a Node process, wasteful to ship to a browser. `anyApi` (from `@stackbase/client`) is a
+from a Node process, wasteful to ship to a browser. `anyApi` (from `@helipod/client`) is a
 plain runtime proxy that turns `api.messages.send` into a `{ __path: "messages:send" }`
 reference. Casting it `as Api` gives you the exact same object, fully typed, with nothing
-server-side dragged along. This is the pattern every stackbase client entry point uses.
+server-side dragged along. This is the pattern every helipod client entry point uses.
 
 </Accordion>
 
 </Accordions>
 
-`webSocketTransport` opens the reactive connection to `/api/sync`, the same path `stackbase dev`
+`webSocketTransport` opens the reactive connection to `/api/sync`, the same path `helipod dev`
 serves the sync WebSocket on.
 
 #### Conversations sidebar
@@ -519,11 +519,11 @@ Four hooks, four jobs:
 #### One-shot pagination
 
 `listPaginated` isn't wired to `useQuery`. It's a page-at-a-time read, not something you keep a
-live subscription open on. Call it directly on the client through `useStackbaseClient()`:
+live subscription open on. Call it directly on the client through `useHelipodClient()`:
 
 ```tsx title="web/main.tsx (part 4, load older messages)"
 function LoadOlder({ conversationId }: { conversationId: Id<"conversations"> }) {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   const [older, setOlder] = useState<Message[]>([]);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [hasMore, setHasMore] = useState(true);
@@ -548,7 +548,7 @@ function LoadOlder({ conversationId }: { conversationId: Id<"conversations"> }) 
 }
 ```
 
-`useStackbaseClient()` returns the same `StackbaseClient` instance `<StackbaseProvider>` holds:
+`useHelipodClient()` returns the same `HelipodClient` instance `<HelipodProvider>` holds:
 the escape hatch for anything that isn't a live subscription. `client.query(ref, args)` is a
 one-shot read: it resolves once with the current result and then unsubscribes. Nothing here
 stays live, so a new message arriving elsewhere doesn't reshuffle a page you've already loaded.
@@ -580,16 +580,16 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <App />
-      </StackbaseProvider>
+      </HelipodProvider>
     </StrictMode>,
   );
 }
 ```
 
-`<StackbaseProvider client={client}>` is what makes `useQuery`/`useMutation`/`useAction`/
-`useStackbaseClient` work anywhere beneath it in the tree: exactly one client, shared by the
+`<HelipodProvider client={client}>` is what makes `useQuery`/`useMutation`/`useAction`/
+`useHelipodClient` work anywhere beneath it in the tree: exactly one client, shared by the
 whole app.
 
 </Step>
@@ -616,10 +616,10 @@ bun build web/main.tsx --outfile web/main.js --watch
 ### Run it
 
 ```bash
-bunx stackbase dev --web web
+bunx helipod dev --web web
 ```
 
-`stackbase dev` generates `stackbase/_generated/`, boots the reactive engine on local SQLite, serves
+`helipod dev` generates `helipod/_generated/`, boots the reactive engine on local SQLite, serves
 HTTP + the sync WebSocket + the dashboard. Because of `--web web`, it also serves your bundled UI
 from the same origin and port, so there's no separate dev server or proxy to configure. It prints
 the dashboard URL and the admin key on startup. Open the printed URL in your browser to see the
@@ -655,7 +655,7 @@ live query's read-set and pushing the result to every open subscription that mat
 
 ### Hot reload while you work
 
-`stackbase dev` watches `stackbase/` and reloads automatically: edit a query, mutation, or schema
+`helipod dev` watches `helipod/` and reloads automatically: edit a query, mutation, or schema
 field and the running server picks it up without a restart. Try adding a field to `messages` or
 tweaking `list`'s handler and watch the dashboard/your app reflect it on the next read. The web UI
 is not part of that watch loop. After editing `web/main.tsx`, re-run `bun build` (or keep
@@ -671,8 +671,8 @@ the static bundle in this setup.
 A two-table schema with an index and a shard key, five backend functions covering every write a
 mutation can make (insert, replace, delete) plus both ways to read (a full collect and a
 paginated walk), one action reaching out to the network, and a React UI wired to all of it with
-`StackbaseProvider`, `useQuery`, `useMutation` (with an optimistic update), `useAction`, and
-direct one-shot `client.query()` calls. That's the same shape every stackbase app is built from,
+`HelipodProvider`, `useQuery`, `useMutation` (with an optimistic update), `useAction`, and
+direct one-shot `client.query()` calls. That's the same shape every helipod app is built from,
 whether it's a chat app, a dashboard, or something much bigger.
 
 From here:
@@ -690,4 +690,4 @@ From here:
 - [Components](/docs/components/overview): opt-in pieces like scheduling, workflows, triggers,
   and auth that compose onto an app exactly like this one.
 - [Self-hosting](/docs/deploy/self-hosting) and [Deploy & build](/docs/deploy/deploy-and-build):
-  taking this from `stackbase dev` to a real deployment.
+  taking this from `helipod dev` to a real deployment.

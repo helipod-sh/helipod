@@ -1,20 +1,20 @@
-# Stackbase self-host — the generic engine image + your app's stackbase/ bind-mounted.
+# Helipod self-host — the generic engine image + your app's helipod/ bind-mounted.
 services:
-  stackbase:
+  helipod:
     build:
       context: .
       target: runner
-    image: stackbase:latest
+    image: helipod:latest
     ports:
       - "3000:3000"
     environment:
-      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}
-      STACKBASE_DATA_DIR: /data
+      HELIPOD_ADMIN_KEY: ${HELIPOD_ADMIN_KEY:?set HELIPOD_ADMIN_KEY in a .env file}
+      HELIPOD_DATA_DIR: /data
     volumes:
-      - ./stackbase:/app/stackbase:ro
-      - stackbase-data:/data
-    command: ["serve", "--dir", "/app/stackbase", "--data", "/data/db.sqlite"]
+      - ./helipod:/app/helipod:ro
+      - helipod-data:/data
+    command: ["serve", "--dir", "/app/helipod", "--data", "/data/db.sqlite"]
     restart: unless-stopped
 
 volumes:
-  stackbase-data:
+  helipod-data:

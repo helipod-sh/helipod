@@ -142,13 +142,13 @@ describe("LeaseManager", () => {
   it("tryAcquire() records writer_app_name from LeaseManagerOptions.applicationName", async () => {
     const mgr = new LeaseManager(client, {
       advertiseUrl: "http://node-a:4000",
-      applicationName: "stackbase-fleet-4000",
+      applicationName: "helipod-fleet-4000",
     });
     await mgr.setup();
     await mgr.tryAcquire();
 
     const rows = await client.query("SELECT writer_app_name FROM shard_leases WHERE shard_id = 'default'");
-    expect(rows[0]!.writer_app_name).toBe("stackbase-fleet-4000");
+    expect(rows[0]!.writer_app_name).toBe("helipod-fleet-4000");
   });
 
   it("heartbeat(epoch) extends expires_at and returns 1 row updated for the current epoch", async () => {

@@ -1,5 +1,5 @@
 /**
- * `createAuthClient` — a thin token-lifecycle manager over a `StackbaseClient` (auth slice A1).
+ * `createAuthClient` — a thin token-lifecycle manager over a `HelipodClient` (auth slice A1).
  * Sign-in flows stay ordinary app mutations; the app hands the mint result to `setSession`. From
  * there this manages: persistence (default `localStorage`, memory fallback), applying the access
  * token via `client.setAuth` + re-applying on reconnect (SetAuth replay handles the wire side),
@@ -22,13 +22,13 @@ export interface SessionInfo {
   expiresAt: number;
 }
 
-/** The minimal `StackbaseClient` surface `createAuthClient` needs (kept structural for testability).
- *  `mutation` deliberately returns `Promise<unknown>` (not a generic) so `StackbaseClient`'s
+/** The minimal `HelipodClient` surface `createAuthClient` needs (kept structural for testability).
+ *  `mutation` deliberately returns `Promise<unknown>` (not a generic) so `HelipodClient`'s
  *  overloaded `mutation(...): Promise<Value>` is structurally assignable; call sites cast. */
 export interface AuthManagedClient {
   setAuth(token: string | null): void;
   setSessionFingerprint(sessionId: string | null): void;
-  /** `opts.transient` is threaded straight to `StackbaseClient.mutation`'s own escape hatch — the
+  /** `opts.transient` is threaded straight to `HelipodClient.mutation`'s own escape hatch — the
    *  refresh call below always passes `{ transient: true }` so a refresh mutation never durably
    *  enqueues, even when the app configured an `outbox` (see the file doc's outbox-fingerprint
    *  paragraph and `client.ts#mutation`'s doc for why replaying a refresh is never safe). */
@@ -75,7 +75,7 @@ export interface AuthClient {
   close(): void;
 }
 
-const KEY = "stackbase.session";
+const KEY = "helipod.session";
 
 /** The default `localStorage` key `localStorageSession()` persists under — a `SessionInfo` JSON
  *  blob, `.sessionId` being the field a headless host needs for `headless-drain.ts`'s `getSessionId`
@@ -115,7 +115,7 @@ export function memorySession(): SessionStorage {
 function defaultLock(): RefreshLock {
   const locks = typeof navigator !== "undefined" ? (navigator as unknown as { locks?: { request: (name: string, cb: () => Promise<unknown>) => Promise<unknown> } }).locks : undefined;
   if (locks) {
-    return { run: <T>(fn: () => Promise<T>) => locks.request("stackbase:auth:refresh", fn as () => Promise<unknown>) as Promise<T> };
+    return { run: <T>(fn: () => Promise<T>) => locks.request("helipod:auth:refresh", fn as () => Promise<unknown>) as Promise<T> };
   }
   let tail: Promise<unknown> = Promise.resolve();
   return {
@@ -131,7 +131,7 @@ function defaultLock(): RefreshLock {
 function defaultBroadcast(): PairBroadcast {
   const BC = typeof BroadcastChannel !== "undefined" ? BroadcastChannel : undefined;
   if (!BC) return { post: () => {}, onMessage: () => {}, close: () => {} };
-  const ch = new BC("stackbase:auth:pair");
+  const ch = new BC("helipod:auth:pair");
   return {
     post: (info) => ch.postMessage(info),
     onMessage: (cb) => { ch.onmessage = (e: MessageEvent) => cb(e.data as SessionInfo); },

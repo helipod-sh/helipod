@@ -1,10 +1,10 @@
 /**
- * Shards B2a, Task 5 — NUM_SHARDS first-boot config: `STACKBASE_FLEET_SHARDS` env parsing,
+ * Shards B2a, Task 5 — NUM_SHARDS first-boot config: `HELIPOD_FLEET_SHARDS` env parsing,
  * persist-once via `writeGlobalIfAbsent`, and the boot-fails-fast-on-mismatch story.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import {
   parseNumShards,
   resolveNumShards,
@@ -104,7 +104,7 @@ describe("resolveNumShards", () => {
 describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
   const DATA_DIR = "./.tmp-numshards-boot";
   const DATA = `${DATA_DIR}/db.sqlite`;
-  const ENV_KEY = "STACKBASE_FLEET_SHARDS";
+  const ENV_KEY = "HELIPOD_FLEET_SHARDS";
   const savedEnv = process.env[ENV_KEY];
 
   afterEach(() => {
@@ -115,7 +115,7 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
 
   it("persists the resolved count at first boot and reuses it on a later boot with no env override", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
 
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     expect(await first.store.getGlobal(NUM_SHARDS_GLOBAL_KEY)).toBe(String(DEFAULT_NUM_SHARDS));
@@ -127,9 +127,9 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
     second.store.close();
   });
 
-  it("a later boot with a disagreeing STACKBASE_FLEET_SHARDS fails fast, naming both values", async () => {
+  it("a later boot with a disagreeing HELIPOD_FLEET_SHARDS fails fast, naming both values", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     first.store.close();
 
@@ -137,9 +137,9 @@ describe("bootLoaded — NUM_SHARDS persists across boots (non-fleet)", () => {
     await expect(bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" })).rejects.toThrow(/8/);
   });
 
-  it("a later boot with an AGREEING STACKBASE_FLEET_SHARDS boots normally", async () => {
+  it("a later boot with an AGREEING HELIPOD_FLEET_SHARDS boots normally", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const first = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     first.store.close();
 

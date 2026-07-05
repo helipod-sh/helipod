@@ -70,7 +70,7 @@
  * `sql.end()` hangs forever waiting for a reserved connection nobody will ever return otherwise
  * (verified empirically — see `test/bun-sql-smoke.ts`'s close-while-streaming case). `STREAM_POOL_MAX`
  * is sized well under `Bun.SQL`'s own default pool `max: 10`, leaving headroom for the pinned writer
- * reservation and any commit-pool shard reservations to always get a slot. A `STACKBASE_PG_STREAM=0`/
+ * reservation and any commit-pool shard reservations to always get a slot. A `HELIPOD_PG_STREAM=0`/
  * `"false"` env var (mirroring `NodePgClient`'s identical kill switch) disables `queryStream`
  * entirely — the field is left `undefined` in the constructor so `PostgresDocStore.index_scan`'s
  * truthiness check falls back to buffered `query`.
@@ -142,13 +142,13 @@ export const STREAM_POOL_MAX = 4;
 
 /**
  * Kill switch for the DECLARE/FETCH cursor streaming path, mirroring `NodePgClient`'s
- * `resolveStreamingEnabled` exactly (same env var, same semantics): `STACKBASE_PG_STREAM=0` (or
+ * `resolveStreamingEnabled` exactly (same env var, same semantics): `HELIPOD_PG_STREAM=0` (or
  * `"false"`) makes this client NOT advertise `queryStream`, so `PostgresDocStore.index_scan`'s
  * `if (this.db.queryStream)` gate falls through to the buffered `query` path. Default (unset, or
  * any other value) is streaming ON.
  */
 function resolveStreamingEnabled(): boolean {
-  const v = process.env.STACKBASE_PG_STREAM;
+  const v = process.env.HELIPOD_PG_STREAM;
   return v !== "0" && v !== "false";
 }
 
@@ -243,7 +243,7 @@ export class BunSqlClient implements PgClient {
   readonly releaseShardLock?: (slot: number) => Promise<void>;
 
   /** Present (bound in the constructor) only when the {@link resolveStreamingEnabled} kill switch is
-   *  ON (the default) — absent (`undefined`) when `STACKBASE_PG_STREAM=0`/`"false"` disables it, so
+   *  ON (the default) — absent (`undefined`) when `HELIPOD_PG_STREAM=0`/`"false"` disables it, so
    *  `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` truthiness check correctly falls
    *  through to buffered `query`, mirroring `NodePgClient`'s same field/gate exactly. */
   readonly queryStream?: (sql: string, params?: readonly PgValue[]) => AsyncIterable<PgRow>;
@@ -269,7 +269,7 @@ export class BunSqlClient implements PgClient {
       this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
       this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
     }
-    // Kill switch (STACKBASE_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
+    // Kill switch (HELIPOD_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
     // falsy — `index_scan`'s `if (this.db.queryStream)` gate then falls through to buffered `query`.
     if (resolveStreamingEnabled()) {
       this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
@@ -359,7 +359,7 @@ export class BunSqlClient implements PgClient {
       await this.pinnedUnsafe(pinned, `SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY]),
     );
     if (rows[0]?.ok !== true) {
-      throw new Error("another Stackbase engine is already connected to this database (advisory lock held)");
+      throw new Error("another Helipod engine is already connected to this database (advisory lock held)");
     }
   }
 
@@ -465,7 +465,7 @@ export class BunSqlClient implements PgClient {
    */
   private async *queryStreamImpl(sql: string, params?: readonly PgValue[]): AsyncIterable<PgRow> {
     const reserved = await this.acquireStreamConn();
-    const cursorName = `stackbase_stream_${this.nextStreamCursorId++}`;
+    const cursorName = `helipod_stream_${this.nextStreamCursorId++}`;
     let batch = STREAM_BATCH_INITIAL;
     let broken = false;
     try {

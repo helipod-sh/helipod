@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import { describe, it, expect } from "vitest";
-import type { LoadedProject } from "@stackbase/cli/project";
+import type { LoadedProject } from "@helipod/cli/project";
 import { resolveShard } from "../src/route";
 import { shardDoName, DEFAULT_SHARD_DO_NAME } from "../src/canonical";
 import { SHARD_KEY_REQUIRED, CROSS_SHARD_UNSUPPORTED, INVALID_REGION_HINT, FANOUT_REQUIRES_FIXED_SHARDS } from "../src/errors";
@@ -47,8 +47,8 @@ describe("resolveShard — default routing", () => {
 });
 
 describe("resolveShard — explicit envelope key (source #1)", () => {
-  it("routes by the X-Stackbase-Shard header", async () => {
-    const r = await resolveShard(get("/api/sync", { "x-stackbase-shard": "roomA" }));
+  it("routes by the X-Helipod-Shard header", async () => {
+    const r = await resolveShard(get("/api/sync", { "x-helipod-shard": "roomA" }));
     expect(r).toEqual({ kind: "shard", name: shardDoName("roomA") });
   });
 
@@ -64,7 +64,7 @@ describe("resolveShard — explicit envelope key (source #1)", () => {
   });
 
   it("header wins over query param", async () => {
-    const r = await resolveShard(get("/api/sync?shard=roomB", { "x-stackbase-shard": "roomA" }));
+    const r = await resolveShard(get("/api/sync?shard=roomB", { "x-helipod-shard": "roomA" }));
     expect((r as { name: string }).name).toBe(shardDoName("roomA"));
   });
 });
@@ -97,7 +97,7 @@ describe("resolveShard — derive from POST /api/run args (source #2)", () => {
 
   it("an explicit key overrides derivation (skips the body read)", async () => {
     const r = await resolveShard(
-      run({ path: "messages:send", args: { roomId: "roomA" } }, { "x-stackbase-shard": "roomB" }),
+      run({ path: "messages:send", args: { roomId: "roomA" } }, { "x-helipod-shard": "roomB" }),
       { loaded },
     );
     expect((r as { name: string }).name).toBe(shardDoName("roomB"));
@@ -110,8 +110,8 @@ describe("resolveShard — derive from POST /api/run args (source #2)", () => {
 });
 
 describe("resolveShard — cross-shard is refused, never fanned out (M1 non-goal)", () => {
-  it("rejects an X-Stackbase-Fanout header (mode 'key' has no enumerable shard set)", async () => {
-    const r = await resolveShard(get("/api/run", { "x-stackbase-fanout": "true" }));
+  it("rejects an X-Helipod-Fanout header (mode 'key' has no enumerable shard set)", async () => {
+    const r = await resolveShard(get("/api/run", { "x-helipod-fanout": "true" }));
     expect(r.kind).toBe("error");
     if (r.kind === "error") expect(r.body.error.code).toBe(FANOUT_REQUIRES_FIXED_SHARDS);
   });
@@ -142,8 +142,8 @@ describe("resolveShard — geographic placement hint (locationHint threading)", 
     expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "enam" });
   });
 
-  it("threads the X-Stackbase-Region header hint", async () => {
-    const r = await resolveShard(get("/api/sync?shard=roomA", { "x-stackbase-region": "weur" }));
+  it("threads the X-Helipod-Region header hint", async () => {
+    const r = await resolveShard(get("/api/sync?shard=roomA", { "x-helipod-region": "weur" }));
     expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "weur" });
   });
 
@@ -175,7 +175,7 @@ describe("resolveShard — geographic placement hint (locationHint threading)", 
 
   it("places the DERIVE-from-args path too (explicit region + a POST /api/run mutation)", async () => {
     const r = await resolveShard(
-      run({ path: "messages:send", args: { roomId: "roomA" } }, { "x-stackbase-region": "apac-se" }),
+      run({ path: "messages:send", args: { roomId: "roomA" } }, { "x-helipod-region": "apac-se" }),
       { loaded },
     );
     expect(r).toEqual({ kind: "shard", name: shardDoName("roomA"), locationHint: "apac-se" });

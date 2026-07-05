@@ -1,25 +1,25 @@
 ---
 title: Configuration
-description: The full v.* validator catalog, stackbase.config.ts, crons.ts, http.ts, and every environment variable the engine reads.
+description: The full v.* validator catalog, helipod.config.ts, crons.ts, http.ts, and every environment variable the engine reads.
 ---
 
 {/* diataxis: reference */}
 
-This page is the full reference for every configuration surface stackbase has: the `v.*` validator
-catalog, the schema builder, `stackbase.config.ts`, `crons.ts`, `http.ts`, and every `STACKBASE_*`
+This page is the full reference for every configuration surface helipod has: the `v.*` validator
+catalog, the schema builder, `helipod.config.ts`, `crons.ts`, `http.ts`, and every `HELIPOD_*`
 environment variable the CLI reads. For the why behind any of it, see
 [Schema & tables](/docs/core-concepts/schema-and-tables), [Queries](/docs/core-concepts/queries),
 and [Components overview](/docs/components/overview).
 
 ## Validators (`v`)
 
-These come from `@stackbase/values`. Every field in `defineTable`, every entry in a function's
-`args`/`returns`, and a composed component's own config in `stackbase.config.ts` all build on these
+These come from `@helipod/values`. Every field in `defineTable`, every entry in a function's
+`args`/`returns`, and a composed component's own config in `helipod.config.ts` all build on these
 validators.
 
 `Infer<typeof validator>` gives you the matching TypeScript type. Every validator also serializes to
 JSON with `.toJSON()`. That JSON is what the engine stores as a table's live schema, and what
-`stackbase deploy`'s schema diff compares.
+`helipod deploy`'s schema diff compares.
 
 <TypeTable
   type={{
@@ -95,8 +95,8 @@ JSON with `.toJSON()`. That JSON is what the engine stores as a table's live sch
   }}
 />
 
-```ts title="stackbase/schema.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { v } from "@helipod/values";
 
 v.object({
   status: v.union(v.literal("open"), v.literal("closed")),
@@ -122,8 +122,8 @@ JSON.
 
 ## Schema builder
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   conversations: defineTable({
@@ -215,25 +215,25 @@ Component-composed tables, like `scheduler`'s `jobs`/`crons` or `auth`'s `users`
 **namespaced** (`component/table`, not the app root). They aren't part of your own `schema.ts` at
 all. See each component's own reference page under [Components](/docs/components/overview).
 
-## `stackbase.config.ts`
+## `helipod.config.ts`
 
-`stackbase.config.ts` is an optional file that composes opt-in components into your project. It
-sits alongside `stackbase/`, as a sibling of that directory, not inside it.
+`helipod.config.ts` is an optional file that composes opt-in components into your project. It
+sits alongside `helipod/`, as a sibling of that directory, not inside it.
 
 If the file is absent entirely, you get no components: byte-identical to an explicit
-`{ components: [] }`. `stackbase dev`, `serve`, `build`, and `deploy` all read the same file
-(`stackbase.config.ts` or `.js`) from the project root.
+`{ components: [] }`. `helipod dev`, `serve`, `build`, and `deploy` all read the same file
+(`helipod.config.ts` or `.js`) from the project root.
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow } from "@stackbase/workflow";
-import { defineAuth } from "@stackbase/auth";
-import { defineAuthz } from "@stackbase/authz";
-import { defineTriggers } from "@stackbase/triggers";
-import { defineNotifications, resendEmail } from "@stackbase/notifications";
-import crons from "./stackbase/crons";
-import { policies } from "./stackbase/policies";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow } from "@helipod/workflow";
+import { defineAuth } from "@helipod/auth";
+import { defineAuthz } from "@helipod/authz";
+import { defineTriggers } from "@helipod/triggers";
+import { defineNotifications, resendEmail } from "@helipod/notifications";
+import crons from "./helipod/crons";
+import { policies } from "./helipod/policies";
 
 export default defineConfig({
   components: [
@@ -251,20 +251,20 @@ export default defineConfig({
 });
 ```
 
-`StackbaseConfig` is three fields, one required and two optional:
+`HelipodConfig` is three fields, one required and two optional:
 
 ```ts
-export interface StackbaseConfig {
+export interface HelipodConfig {
   components: ComponentDefinition[];
   deploy?: DeployConfig;
   functionsDir?: string;
 }
 
-export function defineConfig(config: StackbaseConfig): StackbaseConfig; // identity, just gives the file a typed default export
+export function defineConfig(config: HelipodConfig): HelipodConfig; // identity, just gives the file a typed default export
 ```
 
 `functionsDir` overrides where your schema and functions live, relative to the project root
-(default `"stackbase"`). An explicit `--dir` flag on any command wins over this value, which in turn
+(default `"helipod"`). An explicit `--dir` flag on any command wins over this value, which in turn
 wins over the default. See [CLI](/docs/reference/cli) for the full `--dir` precedence.
 
 Each `components` entry is a component's own `define*()` call: `defineScheduler()`,
@@ -273,8 +273,8 @@ Every one of them returns a plain `ComponentDefinition`.
 
 ### The `deploy` block
 
-`deploy` holds `stackbase deploy`'s target configuration, so a deploy needs no flags beyond
-`stackbase deploy` itself:
+`deploy` holds `helipod deploy`'s target configuration, so a deploy needs no flags beyond
+`helipod deploy` itself:
 
 ```ts
 export interface DeployConfig {
@@ -294,13 +294,13 @@ export interface TargetConfig {
 }
 ```
 
-The `env()` helper (also from `@stackbase/component`) reads an environment variable at config-load
+The `env()` helper (also from `@helipod/component`) reads an environment variable at config-load
 time, for wiring secrets into target settings without hardcoding them. It never throws: unset with
 no fallback resolves to `""`, and the target's own `preflight` is what fails fast on a genuinely
 missing credential, so the config still loads when no `.env` is present.
 
-```ts title="stackbase.config.ts"
-import { defineConfig, env } from "@stackbase/component";
+```ts title="helipod.config.ts"
+import { defineConfig, env } from "@helipod/component";
 
 export default defineConfig({
   components: [],
@@ -309,8 +309,8 @@ export default defineConfig({
     targets: {
       serve: {
         provider: "serve",
-        url: env("STACKBASE_DEPLOY_URL", "https://my-deployment.example.com"),
-        adminKey: env("STACKBASE_ADMIN_KEY"),
+        url: env("HELIPOD_DEPLOY_URL", "https://my-deployment.example.com"),
+        adminKey: env("HELIPOD_ADMIN_KEY"),
       },
       cloudflare: { provider: "cloudflare" },
     },
@@ -318,7 +318,7 @@ export default defineConfig({
 });
 ```
 
-See [`stackbase deploy`](/docs/reference/cli#stackbase-deploy) for the flags this block feeds and
+See [`helipod deploy`](/docs/reference/cli#helipod-deploy) for the flags this block feeds and
 [Deploy & build](/docs/deploy/deploy-and-build) for each target's own settings.
 
 See each component's own page under [Components](/docs/components/overview) for its `define*()`
@@ -334,23 +334,23 @@ options: `defineAuth(options?)`, `defineAuthz(config)`, `defineWorkflow(opts)`,
   component, composing `defineAuthz()` without `defineAuth()`, fails fast at compose time with
   `component "authz" requires "auth", which is not enabled`. A `requires` cycle is also rejected.
 - **The composed set is fixed at boot.** Which components are active, and their table numbers, is
-  decided once, at `stackbase dev`/`serve`/`build` startup. Adding or removing a component from
-  `stackbase.config.ts` needs a restart. It's not something `stackbase deploy`'s live hot-swap can
+  decided once, at `helipod dev`/`serve`/`build` startup. Adding or removing a component from
+  `helipod.config.ts` needs a restart. It's not something `helipod deploy`'s live hot-swap can
   do: deploy only hot-swaps *functions and additive schema* against the already-booted component
   set. See [Deploy and build](/docs/deploy/deploy-and-build).
-- **Each component's config is a plain value passed to its own `define*()`**, not a Stackbase-owned
+- **Each component's config is a plain value passed to its own `define*()`**, not a Helipod-owned
   field. Provider API keys, OAuth client credentials, and similar secrets are read from
-  `process.env` by your own `stackbase.config.ts`, not by the engine. See
+  `process.env` by your own `helipod.config.ts`, not by the engine. See
   [Component config from environment variables](#component-config-from-environment-variables) below.
 
 ## `crons.ts`
 
 `crons.ts` is a conventional file where an app declares recurring or scheduled work. It's composed
 into the project via `defineScheduler({ crons })`, shown above. `cronJobs()` itself and its
-registry come from `@stackbase/scheduler`, re-exported through codegen's `_generated/server`, so
+registry come from `@helipod/scheduler`, re-exported through codegen's `_generated/server`, so
 the file needs only one import:
 
-```ts title="stackbase/crons.ts"
+```ts title="helipod/crons.ts"
 import { cronJobs } from "./_generated/server";
 import { internal } from "./_generated/api";
 
@@ -366,7 +366,7 @@ crons.monthly("invoice", { day: 1, hourUTC: 0, minuteUTC: 0 }, internal.billing.
 export default crons;
 ```
 
-Then, in `stackbase.config.ts`: `import crons from "./stackbase/crons"; defineScheduler({ crons })`.
+Then, in `helipod.config.ts`: `import crons from "./helipod/crons"; defineScheduler({ crons })`.
 
 <TypeTable
   type={{
@@ -411,7 +411,7 @@ already UTC-named, so a timezone override would be ambiguous about which field i
 drops them. `"fireOnce"` runs the single most recent missed occurrence. `"fireAll"` replays every
 missed occurrence in order.
 
-Editing a cron's cadence, target function, or args in `stackbase.config.ts` and redeploying
+Editing a cron's cadence, target function, or args in `helipod.config.ts` and redeploying
 re-anchors its schedule from the moment of the change. Editing only `catchUp` doesn't disturb the
 running cadence. Removing an entry from `crons.ts` cancels its pending cadence job on the next boot
 or reconcile and drops its row. Already-enqueued work jobs it spawned are left alone.
@@ -421,7 +421,7 @@ or reconcile and drops its row. Already-enqueued work jobs it spawned are left a
 `http.ts` is a conventional file that default-exports an `httpRouter()` of routes, each one backed
 by an `httpAction`:
 
-```ts title="stackbase/http.ts"
+```ts title="helipod/http.ts"
 import { httpRouter } from "./_generated/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -478,7 +478,7 @@ middleware. These are non-goals, not deferred.
 
 ## Environment variables
 
-Every variable below is `STACKBASE_`-prefixed and read by the CLI (`stackbase dev`/`serve`/`deploy`).
+Every variable below is `HELIPOD_`-prefixed and read by the CLI (`helipod dev`/`serve`/`deploy`).
 Where a CLI flag exists for the same thing, the flag always wins over its environment-variable
 equivalent.
 
@@ -486,25 +486,25 @@ equivalent.
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `STACKBASE_ADMIN_KEY` | `serve`, `dev` (optional) | Bearer token for the dashboard and every admin/deploy endpoint. Required for `serve`: it fails fast (exit 1) if unset or blank. `dev` generates an ephemeral one per run if unset (printed to stdout on startup), or warns and does the same if the variable is set but blank. |
-| `PORT` | `serve` | HTTP/WebSocket port, default `3000`. Not `STACKBASE_`-prefixed: a bare `PORT` is the conventional PaaS variable. `dev` takes `--port` instead, with no env fallback. |
-| `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file, written to `<dir>/db.sqlite`. `dev` takes `--data <path>` instead (default `.stackbase/data.db`), with no env fallback. |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | A Postgres connection string. Unset → SQLite. `--database-url` wins over this. See [Postgres](/docs/deploy/postgres). |
-| `STACKBASE_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads); the adapter falls back to buffered reads with identical results. Any other value, including unset, leaves streaming on. See [Postgres](/docs/deploy/postgres). |
-| `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`). Any other value (including unset) leaves it on. |
-| `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy`, `stackbase deploy`'s hot-swap target (equivalent to `--allow-deploy`). Off by default. |
-| `STACKBASE_WEB_DIR` | `serve` | A static web UI directory to serve at the site root, alongside the sync WebSocket and API, so a same-origin client SPA needs no separate backend-URL config. Equivalent to `--web`. |
-| `STACKBASE_DEPLOY_URL` | `deploy` | Default target URL for `stackbase deploy` when `--url` is omitted. |
+| `HELIPOD_ADMIN_KEY` | `serve`, `dev` (optional) | Bearer token for the dashboard and every admin/deploy endpoint. Required for `serve`: it fails fast (exit 1) if unset or blank. `dev` generates an ephemeral one per run if unset (printed to stdout on startup), or warns and does the same if the variable is set but blank. |
+| `PORT` | `serve` | HTTP/WebSocket port, default `3000`. Not `HELIPOD_`-prefixed: a bare `PORT` is the conventional PaaS variable. `dev` takes `--port` instead, with no env fallback. |
+| `HELIPOD_DATA_DIR` | `serve` | Directory for the SQLite data file, written to `<dir>/db.sqlite`. `dev` takes `--data <path>` instead (default `.helipod/data.db`), with no env fallback. |
+| `HELIPOD_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | A Postgres connection string. Unset → SQLite. `--database-url` wins over this. See [Postgres](/docs/deploy/postgres). |
+| `HELIPOD_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads); the adapter falls back to buffered reads with identical results. Any other value, including unset, leaves streaming on. See [Postgres](/docs/deploy/postgres). |
+| `HELIPOD_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`). Any other value (including unset) leaves it on. |
+| `HELIPOD_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy`, `helipod deploy`'s hot-swap target (equivalent to `--allow-deploy`). Off by default. |
+| `HELIPOD_WEB_DIR` | `serve` | A static web UI directory to serve at the site root, alongside the sync WebSocket and API, so a same-origin client SPA needs no separate backend-URL config. Equivalent to `--web`. |
+| `HELIPOD_DEPLOY_URL` | `deploy` | Default target URL for `helipod deploy` when `--url` is omitted. |
 
 ### File storage
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_STORAGE_BUCKET` | Selects the S3-compatible backend. Any bucket name set here switches from the filesystem default to S3. Unset → files live on disk under `<data dir>/storage`, zero configuration. |
-| `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, Cloudflare R2, etc.). Only meaningful with `STACKBASE_STORAGE_BUCKET` set. `serve`/`dev` fail fast if endpoint/region/public-url are set without a bucket, rather than silently starting on the filesystem backend. |
-| `STACKBASE_STORAGE_REGION` | S3 region. |
-| `STACKBASE_STORAGE_PUBLIC_URL` | Public base URL used for `"public"`-visibility files' `getUrl()` (a CDN/bucket public endpoint) instead of the private capability-token URL. |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend. Deliberately not treated as "S3 intent" on their own: they're commonly present in an environment for unrelated reasons, so only `STACKBASE_STORAGE_BUCKET` selects the backend. |
+| `HELIPOD_STORAGE_BUCKET` | Selects the S3-compatible backend. Any bucket name set here switches from the filesystem default to S3. Unset → files live on disk under `<data dir>/storage`, zero configuration. |
+| `HELIPOD_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, Cloudflare R2, etc.). Only meaningful with `HELIPOD_STORAGE_BUCKET` set. `serve`/`dev` fail fast if endpoint/region/public-url are set without a bucket, rather than silently starting on the filesystem backend. |
+| `HELIPOD_STORAGE_REGION` | S3 region. |
+| `HELIPOD_STORAGE_PUBLIC_URL` | Public base URL used for `"public"`-visibility files' `getUrl()` (a CDN/bucket public endpoint) instead of the private capability-token URL. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend. Deliberately not treated as "S3 intent" on their own: they're commonly present in an environment for unrelated reasons, so only `HELIPOD_STORAGE_BUCKET` selects the backend. |
 
 `--storage-bucket`/`--storage-endpoint` flags (both `dev` and `serve`) win over their env
 equivalents. See [File storage](/docs/core-concepts/file-storage).
@@ -512,32 +512,32 @@ equivalents. See [File storage](/docs/core-concepts/file-storage).
 ### Fleet (Tier 2: Postgres multi-writer)
 
 Opt into a symmetric fleet of `serve` processes sharing one Postgres database via `--fleet` (or
-`STACKBASE_FLEET=1`/`true`). Requires the enterprise `@stackbase/fleet` package. See
+`HELIPOD_FLEET=1`/`true`). Requires the enterprise `@helipod/fleet` package. See
 [Scaling](/docs/deploy/scaling).
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_FLEET` | `1`/`true` enables fleet mode (equivalent to `--fleet`). Requires `STACKBASE_DATABASE_URL`/`--database-url` (Postgres) and an advertise URL. Boot fails fast with an actionable message if either is missing, or if `@stackbase/fleet` isn't installed. |
-| `STACKBASE_ADVERTISE_URL` | The URL other fleet nodes reach *this* node at (recorded on the write lease when this node is the writer; sync nodes forward writes/proxy httpActions here). Equivalent to `--advertise-url`. Required in fleet mode. |
-| `STACKBASE_FLEET_SHARDS` | Number of shards the fleet runs (default 8 in `@stackbase/fleet`). Persisted once at first boot and immutable after: a later mismatched value fails boot fast. Also read (without fleet) as the lane count for a single-node `--object-store --shards N` writer. |
-| `STACKBASE_FLEET_LEASE_TTL_MS` | The write lease's TTL in milliseconds, the one knob the whole failover clock (heartbeat and acquire cadence) scales from. Unset → fleet default (15000ms). Ops/test tuning knob, no CLI flag. |
-| `STACKBASE_FLEET_MULTI_WRITER` | `1`/`true`/`yes` opts into multi-writer scale-out (sharded writes across more than one writer node against the same Postgres database). Off by default. |
-| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group commit on (batching concurrent commits through a staged two-buffer committer, one fsync amortized across them); any other explicit value forces it off. Unset, the default is topology-dependent: **on** for single-node (non-fleet) Postgres, **off** for SQLite, and **off** on a fleet node. |
+| `HELIPOD_FLEET` | `1`/`true` enables fleet mode (equivalent to `--fleet`). Requires `HELIPOD_DATABASE_URL`/`--database-url` (Postgres) and an advertise URL. Boot fails fast with an actionable message if either is missing, or if `@helipod/fleet` isn't installed. |
+| `HELIPOD_ADVERTISE_URL` | The URL other fleet nodes reach *this* node at (recorded on the write lease when this node is the writer; sync nodes forward writes/proxy httpActions here). Equivalent to `--advertise-url`. Required in fleet mode. |
+| `HELIPOD_FLEET_SHARDS` | Number of shards the fleet runs (default 8 in `@helipod/fleet`). Persisted once at first boot and immutable after: a later mismatched value fails boot fast. Also read (without fleet) as the lane count for a single-node `--object-store --shards N` writer. |
+| `HELIPOD_FLEET_LEASE_TTL_MS` | The write lease's TTL in milliseconds, the one knob the whole failover clock (heartbeat and acquire cadence) scales from. Unset → fleet default (15000ms). Ops/test tuning knob, no CLI flag. |
+| `HELIPOD_FLEET_MULTI_WRITER` | `1`/`true`/`yes` opts into multi-writer scale-out (sharded writes across more than one writer node against the same Postgres database). Off by default. |
+| `HELIPOD_GROUP_COMMIT` | `1`/`true`/`yes` forces group commit on (batching concurrent commits through a staged two-buffer committer, one fsync amortized across them); any other explicit value forces it off. Unset, the default is topology-dependent: **on** for single-node (non-fleet) Postgres, **off** for SQLite, and **off** on a fleet node. |
 
 ### Object storage (Tier 3: bucket-backed, no database)
 
 Run the engine directly against an object-storage bucket (or local directory) as its substrate,
-instead of SQLite/Postgres, via `--object-store <url>` (or `STACKBASE_OBJECT_STORE`). Mutually
+instead of SQLite/Postgres, via `--object-store <url>` (or `HELIPOD_OBJECT_STORE`). Mutually
 exclusive with `--fleet`. See [Scaling](/docs/deploy/scaling).
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_OBJECT_STORE` | The bucket/dir URL (`s3://…`, `s3+http(s)://…`, `file://…`, or a bare path). Equivalent to `--object-store`. |
-| `STACKBASE_OBJECTSTORE_GC_MS` | The object-store writer's garbage-collection sweep cadence, ms. Unset → ~60s default. Env-only (no flag), mirroring `STACKBASE_FLEET_LEASE_TTL_MS`'s ops-tuning-knob shape. |
-| `STACKBASE_REPLICA` | `1`/`true`/`yes` boots this node as a **read-only replica** of the object store's shard (materialize and tail, no write lease, every mutation rejected) instead of a writer. Requires `--object-store`/`STACKBASE_OBJECT_STORE` also be set. Equivalent to `--replica`. |
-| `STACKBASE_WRITER_URL` | Only meaningful on a `--replica` boot: the writer node's URL. When set, every mutation/action on the replica forwards there instead of being rejected outright. Equivalent to `--writer-url`. |
+| `HELIPOD_OBJECT_STORE` | The bucket/dir URL (`s3://…`, `s3+http(s)://…`, `file://…`, or a bare path). Equivalent to `--object-store`. |
+| `HELIPOD_OBJECTSTORE_GC_MS` | The object-store writer's garbage-collection sweep cadence, ms. Unset → ~60s default. Env-only (no flag), mirroring `HELIPOD_FLEET_LEASE_TTL_MS`'s ops-tuning-knob shape. |
+| `HELIPOD_REPLICA` | `1`/`true`/`yes` boots this node as a **read-only replica** of the object store's shard (materialize and tail, no write lease, every mutation rejected) instead of a writer. Requires `--object-store`/`HELIPOD_OBJECT_STORE` also be set. Equivalent to `--replica`. |
+| `HELIPOD_WRITER_URL` | Only meaningful on a `--replica` boot: the writer node's URL. When set, every mutation/action on the replica forwards there instead of being rejected outright. Equivalent to `--writer-url`. |
 
-`--shards N` (no bare env flag beyond the shared `STACKBASE_FLEET_SHARDS` above) sizes the number
+`--shards N` (no bare env flag beyond the shared `HELIPOD_FLEET_SHARDS` above) sizes the number
 of object-storage lanes a writer owns when `N > 1`. It's invalid combined with `--replica`
 (single-shard by definition) or `--fleet` (its own shard resolution).
 
@@ -548,30 +548,30 @@ fire and every scheduler/trigger/reaper driver would go dead, notably Cloudflare
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_WAKE_URL` | An HTTP endpoint `serve` POSTs the next wake's absolute timestamp to (on Cloudflare, the container's Outbound-Worker hostname, which turns it into a Durable Object alarm). Equivalent to `--wake-url`. Unset (every non-serverless deployment) → no wake host, plain `setTimeout`, unchanged behavior. |
-| `STACKBASE_BACKSTOP_MIN_MS` | A floor applied to every driver's backstop poll cadence (`backstopMs = max(driverDefault, this)`). Unset → identity (each driver's own default, 30s/60s). Set where every wake costs a cold start, so a driver's own 30s backstop doesn't mean "boot a container every 30 seconds forever." Equivalent to `--backstop-min-ms`. |
+| `HELIPOD_WAKE_URL` | An HTTP endpoint `serve` POSTs the next wake's absolute timestamp to (on Cloudflare, the container's Outbound-Worker hostname, which turns it into a Durable Object alarm). Equivalent to `--wake-url`. Unset (every non-serverless deployment) → no wake host, plain `setTimeout`, unchanged behavior. |
+| `HELIPOD_BACKSTOP_MIN_MS` | A floor applied to every driver's backstop poll cadence (`backstopMs = max(driverDefault, this)`). Unset → identity (each driver's own default, 30s/60s). Set where every wake costs a cold start, so a driver's own 30s backstop doesn't mean "boot a container every 30 seconds forever." Equivalent to `--backstop-min-ms`. |
 
 ### Cloudflare DO-native host
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_DO_LOCATION_HINT` | Pins the single-shard Cloudflare Durable Object host's ONE Durable Object to a home region: one of the 11 `locationHint` codes (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `apac-ne`, `apac-se`, `oc`, `afr`, `me`). Unset → Cloudflare places the DO near the first requester (its normal default). Only the first `get()` for a given DO ever honors a hint. A DO is single-homed for life once created. |
+| `HELIPOD_DO_LOCATION_HINT` | Pins the single-shard Cloudflare Durable Object host's ONE Durable Object to a home region: one of the 11 `locationHint` codes (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `apac-ne`, `apac-se`, `oc`, `afr`, `me`). Unset → Cloudflare places the DO near the first requester (its normal default). Only the first `get()` for a given DO ever honors a hint. A DO is single-homed for life once created. |
 
-(The `durable_objects` binding name itself, `STACKBASE_DO` in `wrangler.jsonc` for example, is a
+(The `durable_objects` binding name itself, `HELIPOD_DO` in `wrangler.jsonc` for example, is a
 Wrangler binding identifier, not a `process.env` variable the engine reads. See
 [Cloudflare](/docs/deploy/cloudflare) for the full Workers deployment shape.)
 
 ## Component config from environment variables
 
-Stackbase itself owns no environment variables for component secrets. Provider API keys, OAuth
+Helipod itself owns no environment variables for component secrets. Provider API keys, OAuth
 client credentials, and similar values are plain fields on each component's `define*()` options,
-which your own `stackbase.config.ts` populates from `process.env` however you like:
+which your own `helipod.config.ts` populates from `process.env` however you like:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineAuth } from "@stackbase/auth";
-import { googleProvider, githubProvider } from "@stackbase/auth";
-import { defineNotifications, resendEmail, twilioSms } from "@stackbase/notifications";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineAuth } from "@helipod/auth";
+import { googleProvider, githubProvider } from "@helipod/auth";
+import { defineNotifications, resendEmail, twilioSms } from "@helipod/notifications";
 
 export default defineConfig({
   components: [
@@ -608,7 +608,7 @@ export default defineConfig({
 These variable names (`GOOGLE_CLIENT_ID`, `RESEND_API_KEY`, `TWILIO_ACCOUNT_SID`, and so on) are a
 convention you choose, not a contract the engine enforces or reads itself. Pick whatever names fit
 your deployment's secret-management story: Docker Compose `env_file`, a platform's secrets manager,
-or a plain `.env` loaded before `stackbase serve` starts. See [Auth](/docs/components/auth),
+or a plain `.env` loaded before `helipod serve` starts. See [Auth](/docs/components/auth),
 [Notifications](/docs/components/notifications), and
 [Authorization](/docs/components/authorization) for each component's full provider/config surface.
 
@@ -618,7 +618,7 @@ or a plain `.env` loaded before `stackbase serve` starts. See [Auth](/docs/compo
   validators and the schema builder serve, in prose.
 - [Queries](/docs/core-concepts/queries): how an index declared here actually shapes a read set.
 - [Components overview](/docs/components/overview): every component's own `define*()` reference.
-- [CLI](/docs/reference/cli): every command and flag that reads `stackbase.config.ts` and the
+- [CLI](/docs/reference/cli): every command and flag that reads `helipod.config.ts` and the
   environment variables above.
 - [Scaling](/docs/deploy/scaling) and [Cloudflare](/docs/deploy/cloudflare): the fleet,
   object-storage, and DO-native deployment stories the multi-node variables belong to.

@@ -5,7 +5,7 @@ describe("generateEntrySource", () => {
   const base = {
     moduleImports: [{ key: "messages", absPath: "/app/convex/messages.ts" }, { key: "users", absPath: "/app/convex/users.ts" }],
     schemaAbsPath: "/app/convex/schema.ts",
-    configAbsPath: "/app/stackbase.config.ts",
+    configAbsPath: "/app/helipod.config.ts",
     dashboardFiles: null,
   };
 
@@ -14,8 +14,8 @@ describe("generateEntrySource", () => {
     expect(src).toContain(`import * as m0 from "/app/convex/messages.ts"`);
     expect(src).toContain(`import * as m1 from "/app/convex/users.ts"`);
     expect(src).toContain(`import schema from "/app/convex/schema.ts"`);
-    expect(src).toContain(`import * as __config from "/app/stackbase.config.ts"`);
-    expect(src).toContain(`import { runBinaryServer } from "@stackbase/cli"`);
+    expect(src).toContain(`import * as __config from "/app/helipod.config.ts"`);
+    expect(src).toContain(`import { runBinaryServer } from "@helipod/cli"`);
     expect(src).toContain(`modules: { "messages": m0, "users": m1 }`);
     expect(src).toContain(`const components = (__config.default ?? __config).components ?? []`);
     expect(src).toContain(`runBinaryServer(loaded, components,`);

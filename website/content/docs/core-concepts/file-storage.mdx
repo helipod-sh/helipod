@@ -5,11 +5,11 @@ description: The _storage table, ctx.storage, and why uploads are a two-phase pr
 
 {/* diataxis: explanation */}
 
-Think of a file the way stackbase thinks of any other row: something you can reference, query, and
+Think of a file the way helipod thinks of any other row: something you can reference, query, and
 react to. The bytes themselves just happen to live somewhere else.
 
-File storage is always on. There's nothing to opt into in `stackbase.config.ts`. The moment you run
-`stackbase dev`, every project has a reserved `_storage` system table and a `ctx.storage` facade
+File storage is always on. There's nothing to opt into in `helipod.config.ts`. The moment you run
+`helipod dev`, every project has a reserved `_storage` system table and a `ctx.storage` facade
 available in every query, mutation, and action.
 
 The actual bytes live in a separate `BlobStore` backend: the local filesystem by default, an
@@ -25,8 +25,8 @@ Unlike a component's internal tables, `_storage` lives in the app root, not some
 of the schema. That's what makes `Id<"_storage">` usable as a first-class field type in your own
 schema, exactly like `v.id("photos")`:
 
-```ts title="stackbase/schema.ts"
-import { v, defineSchema, defineTable } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { v, defineSchema, defineTable } from "@helipod/values";
 
 export default defineSchema({
   photos: defineTable({
@@ -77,9 +77,9 @@ storage forever, and you never have to write code for the abandoned case.
 
 Inside a query or mutation, `ctx.storage` is a small facade with four methods:
 
-```ts title="stackbase/files.ts"
+```ts title="helipod/files.ts"
 import { mutation, query } from "./_generated/server";
-import { v } from "@stackbase/values";
+import { v } from "@helipod/values";
 
 export const createUpload = mutation({
   args: { contentType: v.optional(v.string()) },
@@ -225,9 +225,9 @@ Reading or writing the actual file *contents* is real I/O, the same kind of non-
 `fetch`. So it belongs in an [action](/docs/core-concepts/actions), never a query or mutation. The
 action-mode `ctx.storage` facade adds two byte-level methods and keeps the two read-only ones:
 
-```ts title="stackbase/files.ts"
+```ts title="helipod/files.ts"
 import { action } from "./_generated/server";
-import { v } from "@stackbase/values";
+import { v } from "@helipod/values";
 
 export const resizeAndStore = action({
   args: { id: v.id("_storage") },
@@ -277,7 +277,7 @@ Every file has a `visibility`, set at upload time (`generateUploadUrl({ visibili
 <Tab value="public">
 
 Served at a stable URL. Anyone holding it can fetch the bytes, no token required. On the S3 backend
-this resolves to a CDN or bucket public URL (when `STACKBASE_STORAGE_PUBLIC_URL` is configured). On
+this resolves to a CDN or bucket public URL (when `HELIPOD_STORAGE_PUBLIC_URL` is configured). On
 the filesystem backend, or without a public base URL configured, it resolves to the engine's own
 serve endpoint with no token appended, streaming the bytes with no access check. Use `"public"` for
 content meant to be world-readable: a marketing asset, a public avatar.
@@ -372,9 +372,9 @@ Bytes are stored through a small, pluggable `BlobStore` seam. The engine never i
 byte-backend driver directly, the same storage-seam story as `DocStore` for SQLite and Postgres.
 Three adapters ship:
 
-<Tabs items={['@stackbase/blobstore-fs', '@stackbase/blobstore-s3', '@stackbase/blobstore-r2']}>
+<Tabs items={['@helipod/blobstore-fs', '@helipod/blobstore-s3', '@helipod/blobstore-r2']}>
 
-<Tab value="@stackbase/blobstore-fs">
+<Tab value="@helipod/blobstore-fs">
 
 The zero-config default. Files land under `<data-dir>/storage`, next to your SQLite (or
 Postgres-adjacent) data. Nothing needs to be set to use it, and uploads use the `proxied` shape.
@@ -384,35 +384,35 @@ appended.
 
 </Tab>
 
-<Tab value="@stackbase/blobstore-s3">
+<Tab value="@helipod/blobstore-s3">
 
 Any S3-compatible bucket: AWS S3, MinIO, or Cloudflare R2 accessed via its S3-compatible API.
 Uploads use the `presigned` shape, a direct PUT to the bucket that bypasses the server. Reads
 either redirect to a short-lived presigned GET (private files) or to a configured public/CDN base
-URL (public files with `STACKBASE_STORAGE_PUBLIC_URL` set).
+URL (public files with `HELIPOD_STORAGE_PUBLIC_URL` set).
 
 </Tab>
 
-<Tab value="@stackbase/blobstore-r2">
+<Tab value="@helipod/blobstore-r2">
 
 A Workers-safe adapter for the Cloudflare Durable Object host. It uses an injected R2 bucket
 binding (`env.R2`) instead of the AWS SDK, so it carries no `node:fs`, `node:stream`, or
 `node:crypto` dependency and runs inside a Worker. Because an R2 *binding* has no presigned-PUT
 surface, uploads on this adapter always use the `proxied` shape, streamed through the Durable
 Object's own `fetch` handler. This adapter is wired up by the Cloudflare runtime host, not by
-`stackbase dev`/`serve`'s env and flag selection below.
+`helipod dev`/`serve`'s env and flag selection below.
 
 </Tab>
 
 </Tabs>
 
-For `stackbase dev`/`serve`, the byte backend is picked automatically at boot based on whether an
+For `helipod dev`/`serve`, the byte backend is picked automatically at boot based on whether an
 S3 bucket is configured. Unset means filesystem, set means S3:
 
 ```bash
-stackbase serve --storage-bucket my-app-uploads --storage-endpoint https://s3.us-east-1.amazonaws.com
+helipod serve --storage-bucket my-app-uploads --storage-endpoint https://s3.us-east-1.amazonaws.com
 # or, equivalently:
-STACKBASE_STORAGE_BUCKET=my-app-uploads stackbase serve
+HELIPOD_STORAGE_BUCKET=my-app-uploads helipod serve
 ```
 
 <Accordions type="single">
@@ -421,10 +421,10 @@ STACKBASE_STORAGE_BUCKET=my-app-uploads stackbase serve
 
 | Flag | Env var | Notes |
 |---|---|---|
-| `--storage-bucket` | `STACKBASE_STORAGE_BUCKET` | The single switch: set means the S3 backend, unset means the filesystem default. |
-| `--storage-endpoint` | `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, a non-default AWS region endpoint). Omit for plain AWS S3 with a standard region. |
-| (none) | `STACKBASE_STORAGE_REGION` | Bucket region. No CLI flag, env-only. |
-| (none) | `STACKBASE_STORAGE_PUBLIC_URL` | Base URL for `"public"` files (e.g. a CDN domain in front of the bucket). Omit to let `getUrl` fall back to signed bucket URLs for private files, and the bucket's own presigned GET for public ones without a CDN. No CLI flag, env-only. |
+| `--storage-bucket` | `HELIPOD_STORAGE_BUCKET` | The single switch: set means the S3 backend, unset means the filesystem default. |
+| `--storage-endpoint` | `HELIPOD_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, a non-default AWS region endpoint). Omit for plain AWS S3 with a standard region. |
+| (none) | `HELIPOD_STORAGE_REGION` | Bucket region. No CLI flag, env-only. |
+| (none) | `HELIPOD_STORAGE_PUBLIC_URL` | Base URL for `"public"` files (e.g. a CDN domain in front of the bucket). Omit to let `getUrl` fall back to signed bucket URLs for private files, and the bucket's own presigned GET for public ones without a CDN. No CLI flag, env-only. |
 | (none) | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials, used for MinIO/R2 too. |
 
 </Accordion>
@@ -432,10 +432,10 @@ STACKBASE_STORAGE_BUCKET=my-app-uploads stackbase serve
 </Accordions>
 
 Flags win over environment variables when both are set, the same convention as
-`--database-url`/`STACKBASE_DATABASE_URL` (see [Self-hosting](/docs/deploy/self-hosting)).
+`--database-url`/`HELIPOD_DATABASE_URL` (see [Self-hosting](/docs/deploy/self-hosting)).
 
-The bucket is the *only* switch between the two backends. If `STACKBASE_STORAGE_ENDPOINT`,
-`_REGION`, or `_PUBLIC_URL` are set but `STACKBASE_STORAGE_BUCKET` isn't, the server refuses to
+The bucket is the *only* switch between the two backends. If `HELIPOD_STORAGE_ENDPOINT`,
+`_REGION`, or `_PUBLIC_URL` are set but `HELIPOD_STORAGE_BUCKET` isn't, the server refuses to
 boot with an actionable error rather than silently falling back to the filesystem. Those settings
 only make sense for S3, so their presence without a bucket is an unambiguous misconfiguration.
 Silently writing uploads to local disk when you meant to point at durable object storage is a
@@ -445,7 +445,7 @@ reasons even on filesystem-backend deployments.
 
 <Callout type="info">
 
-On the filesystem backend, `stackbase dev`/`serve` also fails fast at boot if the storage
+On the filesystem backend, `helipod dev`/`serve` also fails fast at boot if the storage
 directory can't be created or written to. A read-only mount or wrong ownership surfaces
 immediately as a clear boot error, not as a mysterious failure on the first upload.
 

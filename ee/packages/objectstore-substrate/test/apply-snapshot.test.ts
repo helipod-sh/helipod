@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Direct unit coverage for `applySnapshotState` (Tier 3 Slice 5 re-review fix) — the shared
  * diff+tombstone snapshot-restore helper both `replica-tailer.ts`'s `#materializeRound` and
@@ -8,9 +8,9 @@
  * proves the helper itself in isolation, independent of either call site's own plumbing.
  */
 import { describe, expect, it } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
 import type { SnapshotPayload } from "../src/snapshot";
 import { applySnapshotState } from "../src/apply-snapshot";
 

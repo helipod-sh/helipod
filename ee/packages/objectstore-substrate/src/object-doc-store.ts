@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `ObjectStoreDocStore` (Tier 3 Slice 2, design record §4/§6a/§7) — a `DocStore` DECORATOR over a
  * local `SqliteDocStore` + one shard of an `ObjectStore`. Object storage is the linearization point
@@ -53,13 +53,13 @@
  * - **Fence/failure paths are exercised at the substrate level only on `objectstore-fs`** (keep-first
  *   `putImmutable`, same as every adapter now — `objectstore-s3` was fixed to keep-first too, Tier 3
  *   Slice 4 review, closing the overwrite hazard this note used to describe). The `objectstore-s3`
- *   package's OWN conformance suite (run against real MinIO under `STACKBASE_OBJECTSTORE_S3=1`) proves
+ *   package's OWN conformance suite (run against real MinIO under `HELIPOD_OBJECTSTORE_S3=1`) proves
  *   the keep-first invariant on S3 directly; a MinIO-gated fence/failure variant AT THIS SUBSTRATE LEVEL
  *   (as opposed to a bare adapter conformance check) is still a nice-to-have for the failover slice, not
  *   a correctness gap — the adapter-level guarantee is what the fence's safety actually rests on.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import { isCasConflict } from "@stackbase/objectstore";
+import type { ObjectStore } from "@helipod/objectstore";
+import { isCasConflict } from "@helipod/objectstore";
 import type {
   ClientVerdictRecord,
   ClientVerdictWrite,
@@ -77,9 +77,9 @@ import type {
   TimestampRange,
   InternalDocumentId,
   IndexWrite,
-} from "@stackbase/docstore";
-import type { JSONValue } from "@stackbase/values";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
+} from "@helipod/docstore";
+import type { JSONValue } from "@helipod/values";
+import type { SqliteDocStore } from "@helipod/docstore-sqlite";
 import { encodeSegment, decodeSegment, type SegmentPayload } from "./segment";
 import { readManifest, createManifest, casManifest, type Manifest } from "./manifest";
 import { writeSnapshot, readSnapshot, type SnapshotPayload } from "./snapshot";

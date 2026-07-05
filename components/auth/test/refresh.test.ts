@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { query } from "@stackbase/executor";
-import { createTestStackbase, type TestStackbase } from "@stackbase/test";
+import { query } from "@helipod/executor";
+import { createTestHelipod, type TestHelipod } from "@helipod/test";
 import { defineAuth, type MintResult } from "../src";
 
 const appModules = {
@@ -9,8 +9,8 @@ const appModules = {
 };
 
 // Harness with the harness-owned virtual clock (omit `now`) so `t.advanceTimers` moves auth time.
-async function harness(opts?: Parameters<typeof defineAuth>[0]): Promise<TestStackbase> {
-  return createTestStackbase({ modules: appModules, components: [defineAuth(opts)], schema: false });
+async function harness(opts?: Parameters<typeof defineAuth>[0]): Promise<TestHelipod> {
+  return createTestHelipod({ modules: appModules, components: [defineAuth(opts)], schema: false });
 }
 
 const GRACE = 30_000;

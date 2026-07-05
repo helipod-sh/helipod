@@ -1,5 +1,5 @@
 /**
- * N4 — auth unification E2E: with `@stackbase/notifications` composed alongside `@stackbase/auth`,
+ * N4 — auth unification E2E: with `@helipod/notifications` composed alongside `@helipod/auth`,
  * an auth email flow (`auth:requestOtp`) is delivered through the NOTIFICATIONS driver — not auth's
  * own `EmailProvider` — proving the `requestAction` routing (`components/auth/src/functions.ts`)
  * takes the `ctx.notifications` branch when it's present. Auth's own capture provider must stay
@@ -9,11 +9,11 @@
  * no need to pre-create a user for this test to prove delivery.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineAuth } from "@stackbase/auth";
-import { defineNotifications, type EmailMessage } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineAuth } from "@helipod/auth";
+import { defineNotifications, type EmailMessage } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 const servers: DevServer[] = [];

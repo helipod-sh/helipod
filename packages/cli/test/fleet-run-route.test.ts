@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog, mutation, action } from "@stackbase/executor";
-import { EmbeddedRuntime, type WriteRouter } from "@stackbase/runtime-embedded";
-import { systemModules } from "@stackbase/admin";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog, mutation, action } from "@helipod/executor";
+import { EmbeddedRuntime, type WriteRouter } from "@helipod/runtime-embedded";
+import { systemModules } from "@helipod/admin";
 import { handleHttpRequest, type FleetHandles } from "../src/http-handler";
 
 // Fleet's WriteForwarder (ee/packages/fleet/src/forwarder.ts, Task 3) needs `/_fleet/run`'s 200

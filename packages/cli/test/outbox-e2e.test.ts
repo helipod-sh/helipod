@@ -1,6 +1,6 @@
 /**
  * Receipted Outbox (Plan B) — THE FLAGSHIP E2E: offline → reload → reconnect → exactly-once, driving
- * the REAL `@stackbase/client` `StackbaseClient` over a REAL WebSocket to a REAL `stackbase dev`/
+ * the REAL `@helipod/client` `HelipodClient` over a REAL WebSocket to a REAL `helipod dev`/
  * `serve` server. This is the proof no competitor can run (verdict §(j) uniqueness / AC11.2): a
  * durable client outbox that survives a full reload and drains resend-safe, end to end, on two
  * substrates (single-binary/SQLite and Postgres + fleet + 8 shards).
@@ -13,8 +13,8 @@
  * ── The reload-fidelity boundary ────────────────────────────────────────────────────────────────
  * A real browser reload tears down the whole JS realm and reconstructs it, with IndexedDB surviving
  * on disk. We model that with `fake-indexeddb`: a single `IDBFactory` instance is shared across two
- * `StackbaseClient` instances (session 1 → "reload" → session 2). The factory IS the durable origin
- * storage that survives the reload; constructing a genuinely fresh `StackbaseClient` (fresh
+ * `HelipodClient` instances (session 1 → "reload" → session 2). The factory IS the durable origin
+ * storage that survives the reload; constructing a genuinely fresh `HelipodClient` (fresh
  * transport, fresh in-memory state, fresh clientId) over that same factory is the faithful reload
  * analog. The boundary this does NOT reproduce: the JS realm is the SAME process, so module-level
  * singletons/timers are not reset (a real reload resets them) — mitigated by never sharing client
@@ -43,14 +43,14 @@ import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
 import { IDBFactory } from "fake-indexeddb";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { NodePgClient } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { NodePgClient } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import {
-  StackbaseClient,
+  HelipodClient,
   webSocketTransport,
   indexedDBOutbox,
   memoryOutbox,
@@ -60,7 +60,7 @@ import {
   type PendingMutationEntry,
   type MutationFailedInfo,
   type ClientResetInfo,
-} from "@stackbase/client";
+} from "@helipod/client";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -311,12 +311,12 @@ describe("outbox client E2E (1a) — THE FLAGSHIP: offline → reload → reconn
     const wsUrl = wsUrlFor(proxy.port);
 
     let cid1: string;
-    let client1: StackbaseClient | undefined;
-    let client2: StackbaseClient | undefined;
+    let client1: HelipodClient | undefined;
+    let client2: HelipodClient | undefined;
     try {
       /* ---- Session 1: connect, prime a recognized timeline, arm, go offline, enqueue K ---- */
       const outbox1 = indexedDBOutbox({ indexedDB: idb });
-      client1 = new StackbaseClient(nodeWsTransport(wsUrl), {
+      client1 = new HelipodClient(nodeWsTransport(wsUrl), {
         outbox: outbox1,
         outboxLocks: null, // single-tab leader
         outboxDrainIntervalMs: 0,
@@ -355,7 +355,7 @@ describe("outbox client E2E (1a) — THE FLAGSHIP: offline → reload → reconn
 
       const outbox2Counting = countingOutbox(indexedDBOutbox({ indexedDB: idb }));
       const listFrames: unknown[][] = [];
-      client2 = new StackbaseClient(nodeWsTransport(wsUrl), {
+      client2 = new HelipodClient(nodeWsTransport(wsUrl), {
         outbox: outbox2Counting.storage,
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -444,10 +444,10 @@ describe("outbox client E2E (2) — kill-after-commit: the server dies post-comm
     const proxy = await makeProxy(s1.port);
     const wsUrl = wsUrlFor(proxy.port);
 
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let s2: Awaited<ReturnType<typeof startServer>> | undefined;
     try {
-      client = new StackbaseClient(nodeWsTransport(wsUrl), {
+      client = new HelipodClient(nodeWsTransport(wsUrl), {
         outbox: memoryOutbox(),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -530,7 +530,7 @@ async function seedOfflineBacklog(opts: {
   authToken?: string;
 }): Promise<{ clientId: string; fingerprint: string }> {
   const outbox = indexedDBOutbox({ indexedDB: opts.idb });
-  const client = new StackbaseClient(nodeWsTransport(opts.wsUrl), {
+  const client = new HelipodClient(nodeWsTransport(opts.wsUrl), {
     outbox,
     outboxLocks: opts.locks ?? null,
     outboxDrainIntervalMs: 0,
@@ -572,15 +572,15 @@ describe("outbox client E2E (3) — mid-drain leader kill: a second instance tak
     const proxy = await makeProxy(port);
     const wsUrl = wsUrlFor(proxy.port);
 
-    let leaderA: StackbaseClient | undefined;
-    let successorB: StackbaseClient | undefined;
+    let leaderA: HelipodClient | undefined;
+    let successorB: HelipodClient | undefined;
     try {
       const { clientId } = await seedOfflineBacklog({ idb, wsUrl, proxy, box: "led", K });
 
       // Two instances over ONE storage + ONE lock registry. A is constructed first → it wins the
       // lock (leader); B waits. Small chunks so the drain spans several flushes (a genuine mid-drain).
-      leaderA = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
-      successorB = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
+      leaderA = new HelipodClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
+      successorB = new HelipodClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
       // Latency (chunkSize 1) spaces the drain so the leader can be killed genuinely mid-drain.
       proxy.setLatencyMs(120);
       proxy.goOnline();
@@ -632,8 +632,8 @@ describe("outbox client E2E (4) — multi-tab: two clientIds share one storage; 
     const proxy = await makeProxy(port);
     const wsUrl = wsUrlFor(proxy.port);
 
-    let leader: StackbaseClient | undefined;
-    let idle: StackbaseClient | undefined;
+    let leader: HelipodClient | undefined;
+    let idle: HelipodClient | undefined;
     try {
       // Two prior tab-sessions, each minting its own clientId, both persisting into the SAME idb.
       const a = await seedOfflineBacklog({ idb, wsUrl, proxy, box: "tabA", K: KA });
@@ -642,8 +642,8 @@ describe("outbox client E2E (4) — multi-tab: two clientIds share one storage; 
 
       // One leader (a second idle instance shares the lock so only ONE drains) hydrates the WHOLE
       // shared queue — every clientId's entries — and drains each under its recorded id.
-      leader = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxDrainIntervalMs: 0 });
-      idle = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxDrainIntervalMs: 0 });
+      leader = new HelipodClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxDrainIntervalMs: 0 });
+      idle = new HelipodClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks(), outboxDrainIntervalMs: 0 });
       proxy.goOnline();
 
       // Both queues drain to completion under their OWN recorded clientIds.
@@ -692,7 +692,7 @@ describe("outbox client E2E (5) — STALE_CLIENT: a server-side prune disowns th
     const proxy = await makeProxy(port);
     const wsUrl = wsUrlFor(proxy.port);
 
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     try {
       const { clientId } = await seedOfflineBacklog({ idb, wsUrl, proxy, box: "stale", K });
 
@@ -701,7 +701,7 @@ describe("outbox client E2E (5) — STALE_CLIENT: a server-side prune disowns th
       await store.pruneClientMutations("", clientId, { ackedThrough: K + 5 });
 
       const failures: MutationFailedInfo[] = [];
-      client = new StackbaseClient(nodeWsTransport(wsUrl), {
+      client = new HelipodClient(nodeWsTransport(wsUrl), {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -748,7 +748,7 @@ describe("outbox client E2E (6) — authed-reload identity gate: entries queued 
     const origError = console.error;
     console.error = (...a: unknown[]) => { errs.push(a.map(String).join(" ")); };
 
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     try {
       // Seed while authed as ALICE — every offline entry is stamped with sha256("token-alice").
       const { clientId, fingerprint: aliceFp } = await seedOfflineBacklog({ idb, wsUrl, proxy, box: "authed", K, authToken: "token-alice" });
@@ -756,7 +756,7 @@ describe("outbox client E2E (6) — authed-reload identity gate: entries queued 
 
       const failures: MutationFailedInfo[] = [];
       const resets: ClientResetInfo[] = [];
-      client = new StackbaseClient(nodeWsTransport(wsUrl), {
+      client = new HelipodClient(nodeWsTransport(wsUrl), {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -827,10 +827,10 @@ describe("outbox client E2E (7) — old-server compat: a Plan-A-less server send
     const proxy = await makeProxy(port);
     const wsUrl = wsUrlFor(proxy.port);
 
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     try {
       const wrap = connectAckDroppingTransport(nodeWsTransport(wsUrl));
-      client = new StackbaseClient(wrap.transport, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+      client = new HelipodClient(wrap.transport, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
       await client.getOutboxIdentity();
 
       // A normal online mutation still commits (the wire protocol is otherwise identical).
@@ -911,7 +911,7 @@ function spawnFleetServe(databaseUrl: string, port: number, dataDir: string): Se
       "--port", String(port), "--ip", "127.0.0.1", "--no-dashboard", "--database-url", databaseUrl,
       "--fleet", "--advertise-url", `http://127.0.0.1:${port}`,
     ],
-    { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY, STACKBASE_FLEET_SHARDS: "8" }, stdio: ["ignore", "pipe", "pipe"] },
+    { env: { ...process.env, HELIPOD_ADMIN_KEY: ADMIN_KEY, HELIPOD_FLEET_SHARDS: "8" }, stdio: ["ignore", "pipe", "pipe"] },
   );
 }
 
@@ -935,7 +935,7 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
     let nodeA: ServeProc | undefined;
     let nodeB: ServeProc | undefined;
     let proxy: Awaited<ReturnType<typeof makeProxy>> | undefined;
-    let reload: StackbaseClient | undefined;
+    let reload: HelipodClient | undefined;
     const pg = new NodePgClient({ connectionString: databaseUrl });
     try {
       // A boots first → writer (owns all 8 shards). B → sync replica (a real 2-node fleet). The
@@ -958,7 +958,7 @@ maybeDescribe("outbox client E2E (1b) — THE FLAGSHIP on Postgres + fleet + 8 s
       // Reload: a fresh client over the same idb drains through the fleet transactor. Latency + a
       // single mid-drain socket kill force a genuine resend — the owner's receipts absorb the overlap
       // so nothing double-applies.
-      reload = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
+      reload = new HelipodClient(nodeWsTransport(wsUrl), { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxChunkSize: 1, outboxDrainIntervalMs: 0 });
       proxy.setLatencyMs(80);
       proxy.goOnline();
 
@@ -1026,7 +1026,7 @@ maybeDescribe("outbox client E2E (8) — a reload via the fleet SYNC node classi
     let nodeB: ServeProc | undefined;
     let proxyA: Awaited<ReturnType<typeof makeProxy>> | undefined;
     let proxyB: Awaited<ReturnType<typeof makeProxy>> | undefined;
-    let reload: StackbaseClient | undefined;
+    let reload: HelipodClient | undefined;
     const pg = new NodePgClient({ connectionString: databaseUrl });
     try {
       // A → writer (owns all 8 shards); B → sync replica. The reload client talks to the SYNC node B,
@@ -1056,7 +1056,7 @@ maybeDescribe("outbox client E2E (8) — a reload via the fleet SYNC node classi
       const wsB = `ws://127.0.0.1:${proxyB.port}/api/sync`;
       let resetInfo: ClientResetInfo | undefined;
       const failures: MutationFailedInfo[] = [];
-      reload = new StackbaseClient(nodeWsTransport(wsB), {
+      reload = new HelipodClient(nodeWsTransport(wsB), {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: null,
         outboxChunkSize: 1,
@@ -1127,11 +1127,11 @@ function lagSampler(): { stop: () => number } {
   };
 }
 
-// Opt-in (STACKBASE_BENCH=1) — the benchmark is a measurement, not a correctness gate, and its
+// Opt-in (HELIPOD_BENCH=1) — the benchmark is a measurement, not a correctness gate, and its
 // 500-entry drain + 400-concurrent burst add real load; keeping it off the default parallel gate
 // follows the repo's bench-opt-in precedent (fleet B4, 975f735). Run it standalone:
-//   STACKBASE_BENCH=1 bun run --filter @stackbase/cli test -t "four-axis benchmark"
-const maybeBench = process.env.STACKBASE_BENCH ? describe : describe.skip;
+//   HELIPOD_BENCH=1 bun run --filter @helipod/cli test -t "four-axis benchmark"
+const maybeBench = process.env.HELIPOD_BENCH ? describe : describe.skip;
 
 maybeBench("outbox client E2E — the four-axis benchmark (§(h))", () => {
   it("measures adapter overhead, throughput, 500-drain time-to-empty + main-thread block, and IDB txns/mutation", async () => {
@@ -1143,7 +1143,7 @@ maybeBench("outbox client E2E — the four-axis benchmark (§(h))", () => {
       const { server, port } = await startServer();
       try {
         const measure = async (withOutbox: boolean): Promise<number[]> => {
-          const client = new StackbaseClient(nodeWsTransport(wsUrlFor(port)), withOutbox ? { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 } : {});
+          const client = new HelipodClient(nodeWsTransport(wsUrlFor(port)), withOutbox ? { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 } : {});
           try {
             await sleep(150); // let the socket open
             // Warm up.
@@ -1178,7 +1178,7 @@ maybeBench("outbox client E2E — the four-axis benchmark (§(h))", () => {
       const M = 400;
       const { server, port } = await startServer();
       try {
-        const client = new StackbaseClient(nodeWsTransport(wsUrlFor(port)), { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
+        const client = new HelipodClient(nodeWsTransport(wsUrlFor(port)), { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
         try {
           await sleep(150);
           const t0 = performance.now();
@@ -1205,7 +1205,7 @@ maybeBench("outbox client E2E — the four-axis benchmark (§(h))", () => {
         await seedOfflineBacklog({ idb, wsUrl, proxy, box: "drain500", K });
 
         const counting = countingOutbox(indexedDBOutbox({ indexedDB: idb }));
-        const reload = new StackbaseClient(nodeWsTransport(wsUrl), { outbox: counting.storage, outboxLocks: null, outboxChunkSize: 50, outboxDrainIntervalMs: 0 });
+        const reload = new HelipodClient(nodeWsTransport(wsUrl), { outbox: counting.storage, outboxLocks: null, outboxChunkSize: 50, outboxDrainIntervalMs: 0 });
         try {
           const sampler = lagSampler();
           const t0 = performance.now();
@@ -1245,8 +1245,8 @@ maybeBench("outbox client E2E — the four-axis benchmark (§(h))", () => {
     const md = `# Receipted Outbox (Plan B) — the four-axis benchmark
 
 Generated by \`packages/cli/test/outbox-e2e.test.ts\` (the flagship E2E), driving the REAL
-\`@stackbase/client\` over a real WebSocket to a real \`stackbase dev\` server on this machine.
-Re-run: \`bun run --filter @stackbase/cli test -t "four-axis benchmark"\` (numbers are machine- and
+\`@helipod/client\` over a real WebSocket to a real \`helipod dev\` server on this machine.
+Re-run: \`bun run --filter @helipod/cli test -t "four-axis benchmark"\` (numbers are machine- and
 load-dependent; treat the SHAPE, not the absolute values, as the result).
 
 Environment: Node ${process.version}, ${process.platform}/${process.arch}. Durable storage under

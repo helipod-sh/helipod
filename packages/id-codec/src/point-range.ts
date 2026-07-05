@@ -3,15 +3,15 @@
  * `docKeyToPointRange`, byte-for-byte identical to the versions that originally shipped in
  * `ee/packages/fleet/src/ranges.ts` (Tier 3 Slice 1/2). Extracted here (Tier 3 Slice 8, Task 8.1) so
  * `ee/packages/objectstore-substrate`'s replica reactive-tailer wiring can reuse them without taking
- * a dependency on `@stackbase/fleet` (an EE package objectstore-substrate must not import — the
+ * a dependency on `@helipod/fleet` (an EE package objectstore-substrate must not import — the
  * object-store substrate and the Postgres fleet are siblings, not a hierarchy).
  *
- * Homed in `@stackbase/id-codec`, NOT `@stackbase/index-key-codec`, despite `SerializedKeyRange`
+ * Homed in `@helipod/id-codec`, NOT `@helipod/index-key-codec`, despite `SerializedKeyRange`
  * itself living in the latter: these functions bridge a STORAGE id (`decodeStorageIndexId`,
  * `encodeStorageTableId` — this package's own `storage-id.ts`) to the engine's KEYSPACE id
- * (`indexKeyspaceId`/`tableKeyspaceId` — `@stackbase/index-key-codec`'s `keyspace.ts`), so they
- * inherently need both id spaces. `@stackbase/id-codec` already depends on
- * `@stackbase/index-key-codec` (see `jump-hash.ts`'s `encodeIndexKey` import), so this direction adds
+ * (`indexKeyspaceId`/`tableKeyspaceId` — `@helipod/index-key-codec`'s `keyspace.ts`), so they
+ * inherently need both id spaces. `@helipod/id-codec` already depends on
+ * `@helipod/index-key-codec` (see `jump-hash.ts`'s `encodeIndexKey` import), so this direction adds
  * no new edge; the reverse — moving these into `index-key-codec` and having IT depend on
  * `id-codec`'s storage-id helpers — would create an import cycle (`id-codec -> index-key-codec ->
  * id-codec`). `id-codec` is therefore the only cycle-free canonical home for this bridge.
@@ -25,7 +25,7 @@ import {
   indexKeyspaceId,
   tableKeyspaceId,
   type SerializedKeyRange,
-} from "@stackbase/index-key-codec";
+} from "@helipod/index-key-codec";
 import { decodeStorageIndexId, encodeStorageTableId } from "./storage-id";
 
 /**

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * The combined multi-shard + `.global()`/D1 Worker/DO entry — a hand-written stand-in for what a
@@ -7,30 +7,30 @@
  * database (`env.DB`) into every shard-DO's `appConfig` via `bindingD1Client`, so `.global()` tables
  * route to D1 while sharded tables stay in each DO's own DO-SQLite.
  *
- *   - `export class StackbaseDO extends StackbaseDurableObject` — the (unmodified) shard-DO class; the
+ *   - `export class HelipodDO extends HelipodDurableObject` — the (unmodified) shard-DO class; the
  *     router addresses N instances of it by shard-key name, and each one shares the same D1 binding.
- *   - `export default createShardWorkerHandler("STACKBASE_DO", { mode: "key", loaded })` — the
+ *   - `export default createShardWorkerHandler("HELIPOD_DO", { mode: "key", loaded })` — the
  *     stateless multi-shard router.
  */
 import {
-  StackbaseDurableObject,
+  HelipodDurableObject,
   createShardWorkerHandler,
   type DurableObjectAppConfig,
-} from "@stackbase/runtime-cloudflare-shard";
-import { bindingD1Client, type D1Binding } from "@stackbase/docstore-d1";
-import type { LoadedProject } from "@stackbase/cli/project";
+} from "@helipod/runtime-cloudflare-shard";
+import { bindingD1Client, type D1Binding } from "@helipod/docstore-d1";
+import type { LoadedProject } from "@helipod/cli/project";
 import schema from "./convex/schema";
 import * as messages from "./convex/messages";
 import * as counters from "./convex/counters";
 
 const loaded: LoadedProject = { schema, modules: { messages, counters } };
 
-export class StackbaseDO extends StackbaseDurableObject {
+export class HelipodDO extends HelipodDurableObject {
   protected appConfig(env: Record<string, unknown>): DurableObjectAppConfig {
     const db = (env as { DB?: D1Binding }).DB;
     return {
       loaded,
-      adminKey: (env.STACKBASE_ADMIN_KEY as string | undefined) ?? "",
+      adminKey: (env.HELIPOD_ADMIN_KEY as string | undefined) ?? "",
       // The `.global()` tables' store: the shared D1 database bound as `env.DB`. Guarded so a deploy
       // without the binding degrades to sharded-only rather than throwing at boot. `.global()` D1
       // tables/indexes are auto-created on first DO boot with DB present — no migration step.
@@ -39,4 +39,4 @@ export class StackbaseDO extends StackbaseDurableObject {
   }
 }
 
-export default createShardWorkerHandler("STACKBASE_DO", { mode: "key", loaded });
+export default createShardWorkerHandler("HELIPOD_DO", { mode: "key", loaded });

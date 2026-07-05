@@ -40,10 +40,10 @@ export interface WorkerHandler {
 
 /**
  * Build the stateless Worker `fetch` handler. `bindingName` is the `durable_objects` binding declared
- * in `wrangler.jsonc` (e.g. `"STACKBASE_DO"`). Every request — HTTP and WS upgrade alike — forwards
+ * in `wrangler.jsonc` (e.g. `"HELIPOD_DO"`). Every request — HTTP and WS upgrade alike — forwards
  * to the single DO instance.
  *
- * Placement: the deployment can pin its ONE DO's home region with `STACKBASE_DO_LOCATION_HINT` (e.g.
+ * Placement: the deployment can pin its ONE DO's home region with `HELIPOD_DO_LOCATION_HINT` (e.g.
  * a US-centric app sets `enam`). The hint is read from `env` per request and passed to `get(id, …)` —
  * only the FIRST `get()` for the `"default"` id is honored (the DO is single-homed thereafter), so a
  * stable env value places the DO deterministically. Unset ⇒ no options bag, byte-identical to the
@@ -55,7 +55,7 @@ export function createWorkerHandler(bindingName: string): WorkerHandler {
     async fetch(request: Request, env: Record<string, unknown>): Promise<Response> {
       const ns = env[bindingName] as DurableObjectNamespaceLike | undefined;
       if (!ns || typeof ns.idFromName !== "function") {
-        return jsonError(500, `stackbase: Durable Object binding "${bindingName}" is not configured in wrangler.jsonc`);
+        return jsonError(500, `helipod: Durable Object binding "${bindingName}" is not configured in wrangler.jsonc`);
       }
       const rawHint = env[DEPLOYMENT_LOCATION_HINT_ENV];
       let locationHint: string | undefined;
@@ -63,7 +63,7 @@ export function createWorkerHandler(bindingName: string): WorkerHandler {
         if (!isValidLocationHint(rawHint)) {
           return jsonError(
             500,
-            `stackbase: ${DEPLOYMENT_LOCATION_HINT_ENV}="${rawHint}" is not a valid Durable Object location hint. ` +
+            `helipod: ${DEPLOYMENT_LOCATION_HINT_ENV}="${rawHint}" is not a valid Durable Object location hint. ` +
               `Valid hints: ${LOCATION_HINTS.join(", ")}.`,
           );
         }

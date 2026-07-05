@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { expandRolePatterns, candidateKeys, configHash } from "../src/effective-permissions";
 import type { AuthzConfig } from "../src/roles";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { auth } from "@stackbase/auth";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { auth } from "@helipod/auth";
 import { defineAuthz } from "../src/define-authz";
 
 const config: AuthzConfig = {

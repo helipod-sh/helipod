@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import type {
   CommitGuardUnit,
   ClientVerdictRecord,
@@ -16,8 +16,8 @@ import type {
   ShardId,
   TimestampRange,
   InternalDocumentId,
-} from "@stackbase/docstore";
-import type { JSONValue } from "@stackbase/values";
+} from "@helipod/docstore";
+import type { JSONValue } from "@helipod/values";
 
 /**
  * A `DocStore` that forwards every call to a swappable inner delegate, so a replica-to-primary

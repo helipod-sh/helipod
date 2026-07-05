@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
-  StackbaseClient,
+  HelipodClient,
   memoryOutbox,
   OUTBOX_VERSION,
   type MutationFailedInfo,
@@ -21,7 +21,7 @@ import {
   type OutboxEntry,
   type OutboxStorage,
 } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MockTransport {
   readonly sent: ClientMessage[] = [];
@@ -96,10 +96,10 @@ async function seedOutbox(
 async function driveHydratedCodedFailure(opts: {
   outbox: OutboxStorage;
   onMutationFailed?: (info: MutationFailedInfo) => void;
-}): Promise<{ t: MockTransport; client: StackbaseClient }> {
+}): Promise<{ t: MockTransport; client: HelipodClient }> {
   await seedOutbox(opts.outbox, "old-client", [{ seq: 0, order: 0, body: "boom" }]);
   const t = new MockTransport();
-  const client = new StackbaseClient(t, {
+  const client = new HelipodClient(t, {
     outbox: opts.outbox,
     outboxLocks: null,
     outboxDrainIntervalMs: 0,
@@ -125,7 +125,7 @@ async function driveHydratedCodedFailure(opts: {
 
 describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
   it("resolves [] / a zeroed summary without an outbox configured", async () => {
-    const client = new StackbaseClient(new MockTransport());
+    const client = new HelipodClient(new MockTransport());
     expect(await client.pendingMutations()).toEqual([]);
     expect(await client.pendingSummary()).toEqual({ count: 0, oldestEnqueuedAt: undefined, oldestAgeMs: undefined });
   });
@@ -136,7 +136,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
       { seq: 0, order: 0, body: "a" },
       { seq: 1, order: 1, body: "b" },
     ]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const entries = await client.pendingMutations();
     expect(entries).toHaveLength(2);
@@ -155,7 +155,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
       { seq: 0, order: 0 }, // enqueuedAt 1000 — the oldest
       { seq: 1, order: 1 }, // enqueuedAt 1001
     ]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const summary = await client.pendingSummary();
     expect(summary.count).toBe(2);
@@ -202,7 +202,7 @@ describe("client.pendingMutations() / pendingSummary() (T5 R9)", () => {
   it("retry()/dismiss() on a non-failed entry are harmless no-ops", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "c", [{ seq: 0, order: 0 }]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     await tick();
     const [unsent] = await client.pendingMutations();
     expect(unsent!.status).not.toBe("failed");
@@ -227,7 +227,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const onMutationFailed = vi.fn();
     const outbox = memoryOutbox();
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
+    const client = new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     client.setOutboxArmed(true);
 
     const p = client.mutation("messages:send", { body: "hi" });
@@ -263,7 +263,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old-client", [{ seq: 0, order: 0, status: "failed", error: { message: "left over", code: "APP_ERR" } }]);
     const onMutationFailed = vi.fn();
-    new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
+    new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     await tick();
 
     expect(onMutationFailed).toHaveBeenCalledTimes(1);
@@ -274,7 +274,7 @@ describe("onMutationFailed — hadAwaiter-style refire (T5 R9)", () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old-client", [{ seq: 0, order: 0, status: "failed", error: { message: "left over", code: "APP_ERR" } }]);
     const onMutationFailed = vi.fn();
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, onMutationFailed, outboxBroadcast: null });
     await tick();
     expect(onMutationFailed).toHaveBeenCalledTimes(1);
 
@@ -346,7 +346,7 @@ class FakeBroadcastChannel implements OutboxBroadcastLike {
 describe("client.onOutboxChange — same-instance + cross-tab BroadcastChannel nudge (T5 R9)", () => {
   it("fires locally on every outbox-mutating op (durable append)", async () => {
     const outbox = memoryOutbox();
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
     const spy = vi.fn();
     client.onOutboxChange(spy);
     void client.mutation("messages:send", { body: "hi" });
@@ -357,13 +357,13 @@ describe("client.onOutboxChange — same-instance + cross-tab BroadcastChannel n
   it("a change in tab A nudges tab B via a FAKED BroadcastChannel sharing the SAME durable store", async () => {
     const outbox = memoryOutbox(); // simulates the shared IndexedDB an app would really use
     const bus = new FakeBroadcastBus();
-    const clientA = new StackbaseClient(new MockTransport(), {
+    const clientA = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
       outboxBroadcast: new FakeBroadcastChannel(bus),
     });
-    const clientB = new StackbaseClient(new MockTransport(), {
+    const clientB = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -384,8 +384,8 @@ describe("client.onOutboxChange — same-instance + cross-tab BroadcastChannel n
   it("outboxBroadcast: null disables the cross-tab nudge (same-instance observability still works)", async () => {
     const outbox = memoryOutbox();
     const bus = new FakeBroadcastBus();
-    const clientA = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
-    const clientB = new StackbaseClient(new MockTransport(), {
+    const clientA = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const clientB = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,

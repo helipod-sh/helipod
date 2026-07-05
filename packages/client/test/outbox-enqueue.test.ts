@@ -1,13 +1,13 @@
 /**
- * Task 2 — durable enqueue + the ConnectAck-armed park swap, through the REAL `StackbaseClient`
+ * Task 2 — durable enqueue + the ConnectAck-armed park swap, through the REAL `HelipodClient`
  * (not just `closeDisposition` in isolation — see `delivery-policy.test.ts` for that). Uses a
  * lightweight `MockTransport` (the `reconnect.test.ts` pattern) and a controllable `OutboxStorage`
  * wrapper so append-durability timing can be driven precisely.
  */
 import { describe, it, expect } from "vitest";
-import { StackbaseClient } from "../src/client";
+import { HelipodClient } from "../src/client";
 import { memoryOutbox, OutboxOverflowError, type OutboxEntry, type OutboxStorage } from "../src/outbox-storage";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MockTransport {
   readonly sent: ClientMessage[] = [];
@@ -91,10 +91,10 @@ async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
-describe("StackbaseClient.mutation — no-outbox-config byte-identity", () => {
+describe("HelipodClient.mutation — no-outbox-config byte-identity", () => {
   it("sends exactly today's Mutation shape — no clientId/seq keys at all, not even undefined ones", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     void client.mutation("messages:send", { body: "hi" });
     const sent = t.mutations();
     expect(sent).toHaveLength(1);
@@ -104,18 +104,18 @@ describe("StackbaseClient.mutation — no-outbox-config byte-identity", () => {
 
   it("close() with no outbox still fails inflight exactly as before — armed defaults false regardless", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const p = client.mutation("messages:send", { body: "hi" });
     t.emitClose();
     await expect(p).rejects.toThrow(/connection closed/);
   });
 });
 
-describe("StackbaseClient.mutation — durable enqueue (Task 2)", () => {
+describe("HelipodClient.mutation — durable enqueue (Task 2)", () => {
   it("direct-send (queue empty, transport open) carries (clientId, seq) on the wire, matching the minted identity", async () => {
     const t = new MockTransport();
     const outbox = memoryOutbox();
-    const client = new StackbaseClient(t, { outbox });
+    const client = new HelipodClient(t, { outbox });
 
     // Called in the SAME tick as construction — `getOutboxIdentity()` has not resolved yet, but
     // `mutation()` must stay synchronous and still stamp the right clientId (T1's open concern).
@@ -134,7 +134,7 @@ describe("StackbaseClient.mutation — durable enqueue (Task 2)", () => {
 
   it("a second direct-send increments seq (never reuses one)", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     void client.mutation("messages:send", { body: "a" });
     void client.mutation("messages:send", { body: "b" });
     const [a, b] = t.mutations();
@@ -146,7 +146,7 @@ describe("StackbaseClient.mutation — durable enqueue (Task 2)", () => {
   it("write-behind: the append is fired but never awaited by the send — the Mutation frame is on the wire before append() even resolves", () => {
     const t = new MockTransport();
     const { storage, appendCalls } = controllableOutbox({ deferAppends: true });
-    const client = new StackbaseClient(t, { outbox: storage });
+    const client = new HelipodClient(t, { outbox: storage });
     void client.mutation("messages:send", { body: "hi" });
     // The send happened synchronously, in the SAME tick — proven by asserting it before any
     // microtask has had a chance to run at all.
@@ -157,7 +157,7 @@ describe("StackbaseClient.mutation — durable enqueue (Task 2)", () => {
 
   it("encodability triage: an unencodable args throws synchronously, BEFORE any seq is consumed", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     expect(() => client.mutation("messages:send", { cb: (() => {}) as unknown as string })).toThrow(TypeError);
     expect(t.mutations()).toHaveLength(0);
     expect(client.__pending).toHaveLength(0);
@@ -168,10 +168,10 @@ describe("StackbaseClient.mutation — durable enqueue (Task 2)", () => {
   });
 });
 
-describe("StackbaseClient — overflow (Task 2)", () => {
+describe("HelipodClient — overflow (Task 2)", () => {
   it("rejects the NEW enqueue with a coded OutboxOverflowError once the cap is hit, leaving the old entries intact", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox(), outboxMaxQueueSize: 2 });
+    const client = new HelipodClient(t, { outbox: memoryOutbox(), outboxMaxQueueSize: 2 });
     t.emitClose(); // offline — mutations pile up as `unsent`, never settling
 
     const first = client.mutation("messages:send", { body: "1" });
@@ -203,24 +203,24 @@ describe("StackbaseClient — overflow (Task 2)", () => {
 
   it("no cap applies without an outbox — 1000+ offline mutations all queue fine", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     t.emitClose();
     for (let i = 0; i < 5; i++) void client.mutation("messages:send", { body: String(i) });
     expect(client.__pending).toHaveLength(5);
   });
 });
 
-describe("StackbaseClient.setAuth — the identityFingerprint cache (Task 2)", () => {
+describe("HelipodClient.setAuth — the identityFingerprint cache (Task 2)", () => {
   it("defaults to \"anon\" before any setAuth call", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     void client.mutation("messages:send", { body: "hi" });
     expect(client.__pending[0]!.identityFingerprint).toBe("anon");
   });
 
   it("setAuth(null) stamps \"anon\" synchronously (no async wait needed)", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setAuth("tok-1");
     client.setAuth(null);
     void client.mutation("messages:send", { body: "hi" });
@@ -229,7 +229,7 @@ describe("StackbaseClient.setAuth — the identityFingerprint cache (Task 2)", (
 
   it("setAuth(token) computes the SHA-256 hex ASYNCHRONOUSLY — a same-tick mutation still sees the OLD cached value", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setAuth("tok-1");
     void client.mutation("messages:send", { body: "immediate" }); // fires before the digest resolves
     expect(client.__pending[0]!.identityFingerprint).toBe("anon");
@@ -245,7 +245,7 @@ describe("StackbaseClient.setAuth — the identityFingerprint cache (Task 2)", (
 
   it("a later setAuth wins over a slower-resolving earlier hash (no stale clobber)", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setAuth("tok-A");
     client.setAuth("tok-B");
     await waitFor(() => client.__outboxFingerprint !== "anon");
@@ -261,11 +261,11 @@ describe("StackbaseClient.setAuth — the identityFingerprint cache (Task 2)", (
   });
 });
 
-describe("StackbaseClient — the S4 park swap (Task 2)", () => {
+describe("HelipodClient — the S4 park swap (Task 2)", () => {
   it("park-requires-durability: an inflight entry whose append has NOT committed still rejects at close, even when armed", async () => {
     const t = new MockTransport();
     const { storage } = controllableOutbox({ deferAppends: true });
-    const client = new StackbaseClient(t, { outbox: storage });
+    const client = new HelipodClient(t, { outbox: storage });
     client.setOutboxArmed(true);
 
     const p = client.mutation("messages:send", { body: "hi" });
@@ -279,7 +279,7 @@ describe("StackbaseClient — the S4 park swap (Task 2)", () => {
   it("park-requires-durability: a COMMITTED append parks instead — the promise stays pending, the layer drops", async () => {
     const t = new MockTransport();
     const { storage, resolveNextAppend } = controllableOutbox({ deferAppends: true });
-    const client = new StackbaseClient(t, { outbox: storage });
+    const client = new HelipodClient(t, { outbox: storage });
     client.setOutboxArmed(true);
 
     let touchedList: unknown;
@@ -310,7 +310,7 @@ describe("StackbaseClient — the S4 park swap (Task 2)", () => {
   it("without arming (T3 never called setOutboxArmed), a durable inflight entry rejects exactly as before — feature-detected, off by default", async () => {
     const t = new MockTransport();
     const { storage, resolveNextAppend } = controllableOutbox({ deferAppends: true });
-    const client = new StackbaseClient(t, { outbox: storage });
+    const client = new HelipodClient(t, { outbox: storage });
     // No setOutboxArmed(true) call at all.
 
     const p = client.mutation("messages:send", { body: "hi" });
@@ -325,7 +325,7 @@ describe("StackbaseClient — the S4 park swap (Task 2)", () => {
   it("enqueue-behind-queue FIFO across the boundary: a parked entry left in the log makes a later live mutation queue behind it instead of direct-sending", async () => {
     const t = new MockTransport();
     const { storage, resolveNextAppend } = controllableOutbox({ deferAppends: true });
-    const client = new StackbaseClient(t, { outbox: storage });
+    const client = new HelipodClient(t, { outbox: storage });
     client.setOutboxArmed(true);
 
     const first = client.mutation("messages:send", { body: "A" });
@@ -349,11 +349,11 @@ describe("StackbaseClient — the S4 park swap (Task 2)", () => {
 /* the `transient` escape hatch (final-review fix wave — auth-refresh exemption) */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient.mutation — the `{ transient: true }` escape hatch", () => {
+describe("HelipodClient.mutation — the `{ transient: true }` escape hatch", () => {
   it("direct-sends with no (clientId, seq) and NEVER lands in the durable outbox, while a plain mutation on the same client still does", async () => {
     const t = new MockTransport();
     const outbox = memoryOutbox();
-    const client = new StackbaseClient(t, { outbox });
+    const client = new HelipodClient(t, { outbox });
 
     void client.mutation("auth:refresh", { refreshToken: "rt-1" }, { transient: true });
     await flushMicrotasks();
@@ -376,7 +376,7 @@ describe("StackbaseClient.mutation — the `{ transient: true }` escape hatch", 
 
   it("is a no-op for a client constructed with no outbox at all — byte-identical wire shape either way", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t); // no `outbox` option
+    const client = new HelipodClient(t); // no `outbox` option
     void client.mutation("messages:send", { body: "hi" }, { transient: true });
     const sent = t.mutations();
     expect(sent).toHaveLength(1);
@@ -385,7 +385,7 @@ describe("StackbaseClient.mutation — the `{ transient: true }` escape hatch", 
 
   it("offline (transport closed): a transient mutation still queues `unsent` with the promise pending — normal, non-durable semantics", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     t.emitClose();
     void client.mutation("auth:refresh", { refreshToken: "rt-1" }, { transient: true });
     expect(client.__pending).toHaveLength(1);

@@ -11,7 +11,7 @@ import {
   FunctionNotFoundError,
   IdAlreadyInUseError,
   InvalidClientIdError,
-} from "@stackbase/errors";
+} from "@helipod/errors";
 import {
   decodeDocumentId,
   encodeInternalDocumentId,
@@ -23,7 +23,7 @@ import {
   DEFAULT_SHARD,
   type InternalDocumentId,
   type ShardId,
-} from "@stackbase/id-codec";
+} from "@helipod/id-codec";
 import {
   indexKeyspaceId,
   keySuccessor,
@@ -33,7 +33,7 @@ import {
   type IndexableValue,
   type KeyRange,
   type SerializedKeyRange,
-} from "@stackbase/index-key-codec";
+} from "@helipod/index-key-codec";
 import {
   computeIndexUpdates,
   extractIndexKey,
@@ -42,11 +42,11 @@ import {
   type FilterExpr,
   type Query,
   type RangeExpression,
-} from "@stackbase/query-engine";
-import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
-import type { DocumentValue } from "@stackbase/docstore";
-import type { TransactionContext } from "@stackbase/transactor";
-import type { QueryRuntime } from "@stackbase/query-engine";
+} from "@helipod/query-engine";
+import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@helipod/values";
+import type { DocumentValue } from "@helipod/docstore";
+import type { TransactionContext } from "@helipod/transactor";
+import type { QueryRuntime } from "@helipod/query-engine";
 import type { IndexCatalog, TableMeta } from "./catalog";
 import type { UdfEnvironmentProfile } from "./profile";
 import type { SeededRandom } from "./seeded-random";
@@ -122,7 +122,7 @@ export interface CollectTrace {
  * via each package's `dist`). NOTE: in-process only. Across a real V8-isolate boundary the guest
  * array is serialized (dropping the Symbol), so the brand check would have to move guest-side and
  * travel as an explicit wire flag — out of scope for the current `InlineUdfExecutor`. */
-export const COLLECT_BRAND = Symbol.for("stackbase.executor.collectBrand");
+export const COLLECT_BRAND = Symbol.for("helipod.executor.collectBrand");
 
 /** Monotonic per-process source for {@link CollectTrace.token}. Never persisted, never used for
  *  reactivity — purely correlates a branded guest array to its trace entry within one run, so a
@@ -137,7 +137,7 @@ const nextCollectToken = (): string => `ct${++collectTokenSeq}`;
  * rationale (identity brand over content equality, `hadReadPolicy` decline, etc).
  *
  * `bounds` is the byte interval THIS PAGE "owns" in the index keyspace — order-correct for both
- * `asc` and `desc` (see `PaginatedResult.pageBounds`'s doc comment in `@stackbase/query-engine`
+ * `asc` and `desc` (see `PaginatedResult.pageBounds`'s doc comment in `@helipod/query-engine`
  * for the asc/desc partition argument). NOT the same as this page's OCC `readSet` range: a desc
  * page's `readSet` is trimmed to `[lastScanned, interval.end)` (the row the scan stopped ON) for
  * OCC-validation purposes, which is NOT the page's own key interval and is unsafe to reuse here —
@@ -328,7 +328,7 @@ function requireOwnTable(ctx: KernelContext, fullName: string): void {
 }
 
 // ── Shard ownership guards (D3) ──────────────────────────────────────────────────────────────
-// Always-on at every tier (Tier-0 SQLite, `stackbase dev`'s 8 virtual shards, fleet). The one
+// Always-on at every tier (Tier-0 SQLite, `helipod dev`'s 8 virtual shards, fleet). The one
 // invariant these enforce: EVERY document has exactly ONE owning ring for its whole life — a
 // sharded doc is owned by the shard of its (immutable) shard-key value; an unsharded doc is owned
 // by the `"default"` shard for read-modify-write purposes. An app with no `.shardKey` never

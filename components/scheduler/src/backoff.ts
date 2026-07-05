@@ -6,7 +6,7 @@
  * boundary — there are none in this codebase yet, but this keeps the function usable standalone).
  *
  * `_complete` passes `ctx.random` (the query/mutation guest ctx's seeded PRNG — see
- * `@stackbase/executor`'s `seeded-random.ts`), which is what actually gives the retry jitter its
+ * `@helipod/executor`'s `seeded-random.ts`), which is what actually gives the retry jitter its
  * determinism-for-replay property: a mutation and its OCC-conflict replay call `ctx.random()` in
  * the same sequence and get the same numbers, and tests get a computable, non-flaky result.
  */

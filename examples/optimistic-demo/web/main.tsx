@@ -1,11 +1,11 @@
 import { StrictMode, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { StackbaseClient, anyApi, type OptimisticLocalStore } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
+import { HelipodClient, anyApi, type OptimisticLocalStore } from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation } from "@helipod/client/react";
 import { delayTransport } from "./delay-transport";
 // Type-only imports — erased at bundle time, so server-side re-exports never reach the browser.
-import type { Api } from "../stackbase/_generated/api";
-import type { Doc, Id } from "../stackbase/_generated/dataModel";
+import type { Api } from "../helipod/_generated/api";
+import type { Doc, Id } from "../helipod/_generated/dataModel";
 
 const api = anyApi as Api;
 
@@ -15,7 +15,7 @@ export const transport = delayTransport(`${wsProtocol}://${location.host}/api/sy
 // NO outbox, NO optimisticUpdates registry: this demo is the pure ONLINE optimistic path —
 // examples/offline-demo owns durability. A failed mutation here rejects its promise and the
 // optimistic layer is dropped in the same reconcile pass (the exact-rollback demo).
-const client = new StackbaseClient(transport);
+const client = new HelipodClient(transport);
 
 /* ------------------------------------------------------------------------------------------------
  * Optimistic updaters — module-scoped and PURE (replay-safe): ids/time only from the store API,
@@ -256,9 +256,9 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <App />
-      </StackbaseProvider>
+      </HelipodProvider>
     </StrictMode>,
   );
 }

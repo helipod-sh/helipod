@@ -10,8 +10,8 @@
  * It does NOT own promise callbacks or the transport — the client resolves/rejects promises and
  * decides send-vs-unsent, calling into the reconciler for all layer bookkeeping.
  */
-import { jsonToConvex } from "@stackbase/values";
-import type { StateModification } from "@stackbase/sync";
+import { jsonToConvex } from "@helipod/values";
+import type { StateModification } from "@helipod/sync";
 import type { LayeredQueryStore, OptimisticStoreView } from "./layered-store";
 import { MutationLog, type PendingMutation } from "./mutation-log";
 import { closeDisposition } from "./delivery-policy";
@@ -137,7 +137,7 @@ export class Reconciler {
       const path = this.log.get(d.requestId)?.udfPath ?? d.requestId;
       this.log.delete(d.requestId);
       this.clearTimer(d.requestId);
-      console.warn(`[stackbase] optimistic update for "${path}" threw during replay; dropping its pending layer`, d.error);
+      console.warn(`[helipod] optimistic update for "${path}" threw during replay; dropping its pending layer`, d.error);
     }
   }
 
@@ -158,7 +158,7 @@ export class Reconciler {
         ownError = { error: d.error };
       } else {
         const path = this.log.get(d.requestId)?.udfPath ?? d.requestId;
-        console.warn(`[stackbase] optimistic update for "${path}" threw during replay; dropping its pending layer`, d.error);
+        console.warn(`[helipod] optimistic update for "${path}" threw during replay; dropping its pending layer`, d.error);
       }
     }
     if (ownError) throw ownError.error;
@@ -185,7 +185,7 @@ export class Reconciler {
         const sub = this.store.byId.get(mod.queryId);
         if (sub) {
           this.store.markAnswered(sub);
-          console.error(`[stackbase] query "${sub.path}" failed: ${mod.error}`);
+          console.error(`[helipod] query "${sub.path}" failed: ${mod.error}`);
           for (const l of sub.listeners) l.onError?.(mod.error);
         }
       } else if (mod.type === "QueryUnchanged") {
@@ -218,7 +218,7 @@ export class Reconciler {
           // (this subscription's first-ever reply) is unaffected — that can only be a real reset
           // (`mod.reset` defined) on the actual wire, so this branch never fires for it regardless.
           if (mod.reset === undefined && sub.renderMode === undefined && sub.answered) {
-            console.error(`[stackbase] query "${sub.path}" incremental diff arrived with no established render mode; resyncing`);
+            console.error(`[helipod] query "${sub.path}" incremental diff arrived with no established render mode; resyncing`);
             sub.lastHash = undefined;
             this.onDrift?.(mod.queryId);
           } else {
@@ -234,7 +234,7 @@ export class Reconciler {
             // cheap-to-reason-about invariant.
             sub.lastHash = mod.reset !== undefined ? mod.hash : undefined;
             if (drift) {
-              console.error(`[stackbase] query "${sub.path}" diff checksum mismatch; resyncing`);
+              console.error(`[helipod] query "${sub.path}" diff checksum mismatch; resyncing`);
               this.onDrift?.(mod.queryId);
             }
           }
@@ -266,7 +266,7 @@ export class Reconciler {
       return; // nothing rendered — no rebuild needed
     }
     if (ts === undefined || ts <= 0) {
-      console.warn(`[stackbase] mutation "${entry.udfPath}" acked with no usable commitTs (ts=${ts}); dropping its layer now`);
+      console.warn(`[helipod] mutation "${entry.udfPath}" acked with no usable commitTs (ts=${ts}); dropping its layer now`);
       this.log.delete(requestId);
       this.rebuild();
       return;
@@ -329,7 +329,7 @@ export class Reconciler {
       this.timers.delete(requestId);
       const entry = this.log.get(requestId);
       if (!entry || entry.status.type !== "completed") return;
-      console.warn(`[stackbase] mutation "${entry.udfPath}" layer not confirmed within ${this.gateTimeoutMs}ms; dropping it`);
+      console.warn(`[helipod] mutation "${entry.udfPath}" layer not confirmed within ${this.gateTimeoutMs}ms; dropping it`);
       this.log.delete(requestId);
       this.rebuild();
     }, this.gateTimeoutMs);

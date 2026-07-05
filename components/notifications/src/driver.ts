@@ -1,5 +1,5 @@
-import type { Driver, DriverContext } from "@stackbase/component";
-import type { JSONValue } from "@stackbase/values";
+import type { Driver, DriverContext } from "@helipod/component";
+import type { JSONValue } from "@helipod/values";
 import type { NotificationsConfig } from "./config";
 import { compact, deliverOutbound } from "./render";
 import type { QueuedMessage } from "./modules";

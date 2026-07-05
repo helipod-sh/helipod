@@ -1,8 +1,8 @@
 // components/triggers/test/reliability.test.ts — failure -> redelivery (dedup via changeId),
 // failureCount persistence across a simulated restart, pause at MAX_CONSECUTIVE_FAILURES, resume.
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { mutation } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { mutation } from "@helipod/executor";
 import { MAX_CONSECUTIVE_FAILURES } from "../src/index";
 import { makeRuntimeWithTriggers, readCursors } from "./helpers";
 
@@ -14,7 +14,7 @@ import { makeRuntimeWithTriggers, readCursors } from "./helpers";
 // test loop actually attempts instead of silently no-oping on a still-armed gate.
 const PAST_ANY_BACKOFF_MS = 200_000;
 
-describe("@stackbase/triggers — reliability", () => {
+describe("@helipod/triggers — reliability", () => {
   it("a failed delivery redelivers the SAME changeIds — even when the rescan window later grows", async () => {
     const seenChangeIds: string[][] = [];
     let failNext = true;

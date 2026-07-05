@@ -18,7 +18,7 @@ interface DoNs {
   idFromName(n: string): unknown;
   get(id: unknown): { fetch(req: Request): Promise<Response> };
 }
-const DO = () => (env as { STACKBASE_DO: DoNs }).STACKBASE_DO;
+const DO = () => (env as { HELIPOD_DO: DoNs }).HELIPOD_DO;
 const stub = (name: string) => DO().get(DO().idFromName(name));
 const ADMIN = "workerd-test-admin-key";
 
@@ -56,7 +56,7 @@ describe("data migration on REAL workerd (DO-SQLite export/import)", () => {
     expect(exportRes.status).toBe(200);
     const dumpText = await exportRes.text();
     const dump = JSON.parse(dumpText) as { format: string; documents: unknown[]; tableNumbers: Record<string, number> };
-    expect(dump.format).toBe("stackbase-migration-dump");
+    expect(dump.format).toBe("helipod-migration-dump");
     expect(dump.documents.length).toBeGreaterThanOrEqual(2);
     expect(dump.tableNumbers.messages).toBeGreaterThan(0);
 

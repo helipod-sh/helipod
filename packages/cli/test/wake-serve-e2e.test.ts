@@ -9,8 +9,8 @@
  * `createEmbeddedRuntime` (`bootProject` forwards every key explicitly and simply never forwarded
  * this one — see its comment).
  *
- * So this test hand-builds nothing the shipped server builds itself: a real on-disk `stackbase/` dir, a
- * real `stackbase.config.ts` composing `@stackbase/scheduler`, booted through the real `startServe`
+ * So this test hand-builds nothing the shipped server builds itself: a real on-disk `helipod/` dir, a
+ * real `helipod.config.ts` composing `@helipod/scheduler`, booted through the real `startServe`
  * (the same call `serveCommand` makes), driven over the real HTTP `/api/run`, with the wake host
  * reached over a real HTTP listener. The test supplies the listener and — in the round-trip test —
  * the alarm, because those are the HOST's jobs (a Durable Object's `schedule()`); it never supplies
@@ -63,7 +63,7 @@ async function wakeListener(): Promise<{ url: string; arms: Array<number | null>
 }
 
 /* -------------------------------------------------------------------------- */
-/* Fixture project on disk (stackbase/ + stackbase.config.ts composing scheduler) */
+/* Fixture project on disk (helipod/ + helipod.config.ts composing scheduler) */
 /* -------------------------------------------------------------------------- */
 
 /** Resolve a package from the CLI's own node_modules (already linked by the workspace install). */
@@ -72,8 +72,8 @@ function cliNodeModules(): string {
 }
 
 /**
- * A real project ROOT: `stackbase.config.ts` at the top (where `bootProject`'s
- * `loadConfig(dirname(functionsDir))` looks for it) and a dynamically-importable `stackbase/`
+ * A real project ROOT: `helipod.config.ts` at the top (where `bootProject`'s
+ * `loadConfig(dirname(functionsDir))` looks for it) and a dynamically-importable `helipod/`
  * beneath — i.e. the layout a real deployment has, so `bootProject` composes the scheduler for
  * itself rather than being handed a pre-composed project.
  */
@@ -81,18 +81,18 @@ function makeFixtureProject(): { root: string; functionsDir: string } {
   const root = mkdtempSync(join(tmpdir(), "sbwake-e2e-"));
   const nm = join(root, "node_modules");
   mkdirSync(nm);
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
 
   writeFileSync(
-    join(root, "stackbase.config.ts"),
+    join(root, "helipod.config.ts"),
     `
-    import { defineConfig } from "@stackbase/component";
-    import { defineScheduler } from "@stackbase/scheduler";
+    import { defineConfig } from "@helipod/component";
+    import { defineScheduler } from "@helipod/scheduler";
     export default defineConfig({ components: [defineScheduler()] });
     `,
   );
 
-  const functionsDir = join(root, "stackbase");
+  const functionsDir = join(root, "helipod");
   mkdirSync(functionsDir);
   mkdirSync(join(functionsDir, "_generated"));
   // `serveCommand` fail-fasts on a missing `_generated/server.ts`; `bootProject` never reads it, but
@@ -102,7 +102,7 @@ function makeFixtureProject(): { root: string; functionsDir: string } {
   writeFileSync(
     join(functionsDir, "schema.ts"),
     `
-    import { v, defineSchema, defineTable } from "@stackbase/values";
+    import { v, defineSchema, defineTable } from "@helipod/values";
     export default defineSchema({ results: defineTable({ tag: v.string() }) });
     `,
   );
@@ -110,7 +110,7 @@ function makeFixtureProject(): { root: string; functionsDir: string } {
   writeFileSync(
     join(functionsDir, "jobs.ts"),
     `
-    import { mutation } from "@stackbase/executor";
+    import { mutation } from "@helipod/executor";
     export const schedule = mutation({
       handler: (ctx, { tag, delayMs }) => ctx.scheduler.runAfter(delayMs, "jobs:work", { tag }),
     });

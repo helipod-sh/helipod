@@ -1,5 +1,5 @@
-import { evaluateFilter, type FilterExpr } from "@stackbase/query-engine";
-import type { Value } from "@stackbase/values";
+import { evaluateFilter, type FilterExpr } from "@helipod/query-engine";
+import type { Value } from "@helipod/values";
 import type { GuestDatabaseReader } from "./guest";
 import type { ComponentContext } from "./executor";
 

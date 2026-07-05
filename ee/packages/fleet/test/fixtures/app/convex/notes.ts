@@ -1,4 +1,4 @@
-import { query, mutation, action } from "@stackbase/executor";
+import { query, mutation, action } from "@helipod/executor";
 import type { Id } from "./_generated/dataModel";
 
 export const list = query({
@@ -19,7 +19,7 @@ export const add = mutation({
   handler: (ctx, { box, text }: { box: string; text: string }) => ctx.db.insert("notes", { box, text }),
 });
 
-// Stackbase has no ctx.db.patch (a documented Convex divergence) — read-merge-replace instead.
+// Helipod has no ctx.db.patch (a documented Convex divergence) — read-merge-replace instead.
 export const update = mutation({
   handler: async (ctx, { id, text }: { id: Id<"notes">; text: string }) => {
     const cur = await ctx.db.get(id);

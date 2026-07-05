@@ -7,7 +7,7 @@ export default defineConfig({
   clean: true,
   target: "es2022",
   // Keep `ws` external: embed mode reaches it via a runtime dynamic `import("ws")`, resolved against
-  // the project's own (Vite-transitive) install — never bundled in. `@stackbase/cli` is already
+  // the project's own (Vite-transitive) install — never bundled in. `@helipod/cli` is already
   // externalized as an optional peer dependency.
   external: ["ws"],
 });

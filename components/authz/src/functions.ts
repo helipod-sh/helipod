@@ -1,4 +1,4 @@
-import { mutation, type RegisteredFunction, type GuestDatabaseWriter } from "@stackbase/executor";
+import { mutation, type RegisteredFunction, type GuestDatabaseWriter } from "@helipod/executor";
 import type { AuthzContext } from "./context";
 import { roleGrants, type AuthzConfig } from "./roles";
 import { upsertPatterns, reconcileScope, reconcileEffectivePermissions, candidateKeys } from "./effective-permissions";

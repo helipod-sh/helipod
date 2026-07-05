@@ -3,14 +3,14 @@
  * reaches the transactor construction (both the single-shard and sharded branches), not just that
  * it type-checks: off stays byte-identical (all-zero counters), on flushes and — under genuinely
  * concurrent load — batches multiple mutations into one flush. `runtime.groupCommitStats()` is the
- * same aggregate the fleet health seam (`@stackbase/fleet`'s `node.ts`) reads for `/api/health`.
+ * same aggregate the fleet health seam (`@helipod/fleet`'s `node.ts`) reads for `/api/health`.
  */
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { CommitUnit } from "@stackbase/docstore";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { IndexSpec } from "@stackbase/query-engine";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { CommitUnit } from "@helipod/docstore";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@helipod/executor";
+import type { IndexSpec } from "@helipod/query-engine";
 import { createEmbeddedRuntime } from "../src/index";
 
 const NOTES = 10001;
@@ -36,7 +36,7 @@ class HookedSqliteStore extends SqliteDocStore {
   private callIndex = 0;
   readonly batchSizes: number[] = [];
 
-  override async commitWriteBatch(units: readonly CommitUnit[], shardId?: import("@stackbase/id-codec").ShardId): Promise<bigint[]> {
+  override async commitWriteBatch(units: readonly CommitUnit[], shardId?: import("@helipod/id-codec").ShardId): Promise<bigint[]> {
     const idx = this.callIndex++;
     if (this.beforeCommitBatch) await this.beforeCommitBatch(idx);
     this.batchSizes.push(units.length);

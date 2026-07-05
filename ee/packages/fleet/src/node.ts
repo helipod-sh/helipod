@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
- * Fleet node composition (Task 6). Two entry points `stackbase serve --fleet` calls around the
+ * Fleet node composition (Task 6). Two entry points `helipod serve --fleet` calls around the
  * shared `bootProject` boot core:
  *
  *  - `prepareFleetNode` — constructs the Postgres client + read-only store, sets up the lease
@@ -27,20 +27,20 @@
  */
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
-import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { DatabaseAdapter } from "@stackbase/docstore-sqlite";
-import type { DocStore } from "@stackbase/docstore";
-import type { JSONValue } from "@stackbase/values";
-import { CommitGuardRejection } from "@stackbase/errors";
-import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
+import { NodePgClient, PostgresDocStore } from "@helipod/docstore-postgres";
+import { SqliteDocStore, NodeSqliteAdapter, BunSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { DatabaseAdapter } from "@helipod/docstore-sqlite";
+import type { DocStore } from "@helipod/docstore";
+import type { JSONValue } from "@helipod/values";
+import { CommitGuardRejection } from "@helipod/errors";
+import { DEFAULT_SHARD, shardIdList, type ShardId } from "@helipod/id-codec";
 import {
   InMemoryWriteFanoutAdapter,
   clientReceiptsGuard,
   type EmbeddedRuntime,
   type EmbeddedWriteFanoutAdapter,
   type WriteRouter,
-} from "@stackbase/runtime-embedded";
+} from "@helipod/runtime-embedded";
 import { LeaseManager, type TryRunExclusiveOnShard, type IdempotencyReplay } from "./lease";
 import { LeaseMonitor } from "./lease-monitor";
 import { ShardLeaseBalancer } from "./balancer";
@@ -60,11 +60,11 @@ export { keyToPointRange, docKeyToPointRange } from "./ranges";
 /** The filename of a sync node's local embedded replica, under the serve data dir. */
 export const REPLICA_DB_FILENAME = "fleet-replica.db";
 
-/** Default lease TTL (ms) when `STACKBASE_FLEET_LEASE_TTL_MS` is unset — mirrors `lease.ts`'s own
+/** Default lease TTL (ms) when `HELIPOD_FLEET_LEASE_TTL_MS` is unset — mirrors `lease.ts`'s own
  *  default so the two never drift. */
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 
-/** Default number of shards a fleet node runs (B2a). T5 owns the persist-once/env/`STACKBASE_FLEET_
+/** Default number of shards a fleet node runs (B2a). T5 owns the persist-once/env/`HELIPOD_FLEET_
  *  SHARDS` story; this task threads it as a plain parameter (`prepareFleetNode`'s `numShards` dep),
  *  defaulting here. The one node holds ALL N shard leases, commits in parallel across them (per-shard
  *  commit-connection pool + per-shard `ShardedTransactor` mutexes), and F = min over the N frontiers. */
@@ -309,7 +309,7 @@ export function createAsyncChain(): (op: () => Promise<void>) => Promise<void> {
 
 /**
  * Derive the failover cadences from a single knob, the lease TTL. Every timing that must stay in a
- * fixed ratio to the TTL is computed here so one env var (`STACKBASE_FLEET_LEASE_TTL_MS`) scales the
+ * fixed ratio to the TTL is computed here so one env var (`HELIPOD_FLEET_LEASE_TTL_MS`) scales the
  * whole clock coherently — a live writer must renew (probe) several times per TTL, and a follower
  * must retry-acquire several times per TTL, or a shortened TTL would either expire a healthy writer's
  * lease or notice a wedged one too slowly. The ratios are chosen so the DEFAULT TTL (15000ms)
@@ -380,12 +380,12 @@ export function fleetApplicationName(advertiseUrl: string): string {
   } catch {
     // Unparseable advertise URL — keep the raw string as the discriminator.
   }
-  return `stackbase-fleet-${discriminator}`;
+  return `helipod-fleet-${discriminator}`;
 }
 
 /** Pick the SQLite adapter for the active runtime — Bun is primary (`bun:sqlite`), Node is
  *  supported (`node:sqlite`). Same runtime split `packages/cli`'s `makeStore` uses; hardcoding
- *  `NodeSqliteAdapter` would crash a Bun-hosted `stackbase serve --fleet` with "no such built-in
+ *  `NodeSqliteAdapter` would crash a Bun-hosted `helipod serve --fleet` with "no such built-in
  *  module: node:sqlite" the moment a sync node tries to open its replica. */
 function replicaAdapter(path: string): DatabaseAdapter {
   const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
@@ -393,7 +393,7 @@ function replicaAdapter(path: string): DatabaseAdapter {
 }
 
 /**
- * Whether this deployment runs in MULTI-WRITER mode (`STACKBASE_FLEET_MULTI_WRITER`), read in ONE
+ * Whether this deployment runs in MULTI-WRITER mode (`HELIPOD_FLEET_MULTI_WRITER`), read in ONE
  * place so `prepareFleetNode` (which decides the runtime store/queryStore wiring) and
  * `startFleetNode` (which decides the tailer/promotion wiring) can never disagree about a node's
  * shape. Multi-writer IS the hybrid regime (Fleet B3): every writer-ish node keeps a local replica
@@ -402,11 +402,11 @@ function replicaAdapter(path: string): DatabaseAdapter {
  * nodes are pure read-replica sync nodes — no hybrid machinery anywhere (byte-identical to B2b).
  */
 export function fleetMultiWriterEnabled(): boolean {
-  return /^(1|true|yes)$/i.test(process.env.STACKBASE_FLEET_MULTI_WRITER ?? "");
+  return /^(1|true|yes)$/i.test(process.env.HELIPOD_FLEET_MULTI_WRITER ?? "");
 }
 
 /**
- * Whether group commit (Fleet B4) is enabled (`STACKBASE_GROUP_COMMIT`), read the SAME way as
+ * Whether group commit (Fleet B4) is enabled (`HELIPOD_GROUP_COMMIT`), read the SAME way as
  * `fleetMultiWriterEnabled` above — one place, so every `runtimeOptions` construction site in
  * `prepareFleetNode` reads the identical value. Threaded straight into `createEmbeddedRuntime`
  * (`EmbeddedRuntimeOptions.groupCommit`), which routes every shard's commits through the two-buffer
@@ -415,7 +415,7 @@ export function fleetMultiWriterEnabled(): boolean {
  * single-commit path every shard already runs.
  */
 export function groupCommitEnabled(): boolean {
-  return /^(1|true|yes)$/i.test(process.env.STACKBASE_GROUP_COMMIT ?? "");
+  return /^(1|true|yes)$/i.test(process.env.HELIPOD_GROUP_COMMIT ?? "");
 }
 
 export interface FleetHandles {
@@ -433,7 +433,7 @@ export interface FleetHandles {
    * aggregate reading plus a derived `flushesPerSec` — a rolling delta between successive calls
    * (`(flushCount now - flushCount at the prior call) / elapsed seconds`), the simplest honest
    * throughput signal without a dedicated timer. The first call after boot (or after any gap) has no
-   * prior sample, so it reports 0 for that one call. Structurally all-zero when `STACKBASE_GROUP_
+   * prior sample, so it reports 0 for that one call. Structurally all-zero when `HELIPOD_GROUP_
    * COMMIT` is off (the underlying counters are never touched on the single-commit path) — never
    * null, unlike `frontierStats` (no "before the first beat" gating applies here).
    */
@@ -679,11 +679,11 @@ export async function prepareFleetNode(deps: {
   dataDir: string;
   /** Lease TTL in ms — the single knob the whole failover clock scales from (see `fleetProbeMs`/
    *  `fleetAcquireRetryMs`). Threaded from serve's fleet config, which reads
-   *  `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning; the wedged-writer E2E uses 4000). Default 15000
+   *  `HELIPOD_FLEET_LEASE_TTL_MS` (ops/test tuning; the wedged-writer E2E uses 4000). Default 15000
    *  reproduces the historical constants exactly. */
   leaseTtlMs?: number;
   /** Number of shards this fleet runs (B2a). This task threads it as a plain parameter (default 8);
-   *  T5 owns the persist-once/`STACKBASE_FLEET_SHARDS`/mismatch-fail-fast story. Drives the commit
+   *  T5 owns the persist-once/`HELIPOD_FLEET_SHARDS`/mismatch-fail-fast story. Drives the commit
    *  pool's connection set, the acquire-all loop, and the runtime's `ShardedTransactor`. */
   numShards?: number;
 }): Promise<FleetPrep> {
@@ -1350,7 +1350,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
   // The rendezvous shard balancer (B2b, D3) — runs on EVERY node. Its `requestPromotion` routes through
   // `doPromote` (wired by the sync branch); `isWriterish` gates acquire/release; the acquire/release
   // thunks are the two above. Beat cadence scales with the lease TTL (2000ms at the default 15000ms).
-  // Multi-writer scale-out is OPT-IN (`STACKBASE_FLEET_MULTI_WRITER`), off by default — see the
+  // Multi-writer scale-out is OPT-IN (`HELIPOD_FLEET_MULTI_WRITER`), off by default — see the
   // balancer's `multiWriter` doc. Off = single writer holds all shards + additional nodes are read
   // replicas (the shipped single-writer/sync-replica behavior, byte-identical to B2a); the balancer
   // still heartbeats presence (the bootstrap fix) and performs FAILOVER acquisition regardless. On =
@@ -1401,7 +1401,7 @@ export async function startFleetNode(deps: StartFleetNodeDeps): Promise<FleetHan
       // Trigger-wake gap fix: `notifyWrites` above only re-runs live QUERY subscriptions — it never
       // touches `commitSubs`, the driver `onCommit` fan-out (that only fires from THIS node's own
       // local `adapter.subscribe`, in `packages/runtime-embedded`). Without this, a driver here (e.g.
-      // `@stackbase/triggers`) never wakes on a co-writer's commit and instead sleeps up to its own
+      // `@helipod/triggers`) never wakes on a co-writer's commit and instead sleeps up to its own
       // wall-clock beat — delivery is still guaranteed (the durable cursor), this is latency-only.
       // `inv.writtenTables` is already ENCODED STORAGE-TABLE IDS (see `AppliedInvalidation`'s doc
       // comment in `replica-tailer.ts`), the same format `notifyExternalCommit` expects (it applies

@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/docstore-d1",
+  "name": "@helipod/docstore-d1",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
-  "dependencies": { "@stackbase/values": "workspace:*" },
+  "dependencies": { "@helipod/values": "workspace:*" },
   "devDependencies": {
     "better-sqlite3": "^11.8.0",
     "@types/better-sqlite3": "^7.6.12",

@@ -6,11 +6,11 @@
  * and fans a commit out to a live WebSocket subscription — plus the `satisfies RuntimeHost` check.
  */
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime, type RuntimeHost } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime, type RuntimeHost } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
 import { loadProject, ProcessRuntimeHost, type LoadedProject } from "../src/index";
 
 const schema = defineSchema({
@@ -74,8 +74,8 @@ describe("ProcessRuntimeHost (the RuntimeHost seam)", () => {
     const runtime = await makeRuntime();
     const server = await new ProcessRuntimeHost().serve(runtime, { port: 0, ip: "127.0.0.1" });
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
-    const clientA = new StackbaseClient(webSocketTransport(wsUrl));
-    const clientB = new StackbaseClient(webSocketTransport(wsUrl));
+    const clientA = new HelipodClient(webSocketTransport(wsUrl));
+    const clientB = new HelipodClient(webSocketTransport(wsUrl));
     try {
       const updates: Array<Array<{ body: string }>> = [];
       clientA.subscribe(api.messages.list, { conversationId: "c1" }, (val) => updates.push(val as Array<{ body: string }>));

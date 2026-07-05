@@ -9,7 +9,7 @@
  * threads through in production — only the `entry.update` closure itself is replaced with a probe.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import type { JSONValue, Value } from "@stackbase/values";
+import type { JSONValue, Value } from "@helipod/values";
 import { LayeredQueryStore, queryHash, type OptimisticStoreView } from "../src/layered-store";
 import { createOptimisticLocalStore, type OptimisticLocalStore, type RefArgs, type RefReturn } from "../src/optimistic-store";
 import type { PendingMutation } from "../src/mutation-log";
@@ -150,7 +150,7 @@ describe("createOptimisticLocalStore", () => {
 // `FunctionReference` — proving a generated typed `api` gives typed store reads, while the
 // client's own untyped `{ __path }` ref falls back to `Record<string, Value>`/`Value`. Verified by
 // `tsc --noEmit` (vitest's esbuild transform strips types, so the `@ts-expect-error` lines only
-// fail the build, not this runtime suite — `bun run --filter @stackbase/client typecheck`).
+// fail the build, not this runtime suite — `bun run --filter @helipod/client typecheck`).
 // ================================================================================================
 describe("OptimisticLocalStore — type-level (generated-ref union)", () => {
   it("compiles AND runs: a generated ref's __args/__returns type getQuery/setQuery/getAllQueries", () => {

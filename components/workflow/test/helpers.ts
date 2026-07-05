@@ -1,10 +1,10 @@
 // components/workflow/test/helpers.ts
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { defineScheduler, type SchedulerDriver } from "@stackbase/scheduler";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { defineScheduler, type SchedulerDriver } from "@helipod/scheduler";
 import { defineWorkflow, type WorkflowRegistry } from "../src/index";
 
 // Privileged raw-table scan — reads a fully-qualified table name (e.g. "workflow/workflows")
@@ -48,8 +48,8 @@ function systemModules(): Record<string, RegisteredFunction> {
 }
 
 /**
- * Composes an `EmbeddedRuntime` with BOTH `@stackbase/scheduler` (workflow's `requires:
- * ["scheduler"]`) and `@stackbase/workflow` enabled, plus the given app modules. Mirrors
+ * Composes an `EmbeddedRuntime` with BOTH `@helipod/scheduler` (workflow's `requires:
+ * ["scheduler"]`) and `@helipod/workflow` enabled, plus the given app modules. Mirrors
  * `components/scheduler/test/helpers.ts`'s `makeRuntimeWithScheduler` — same store/tableNumbers/
  * bootSteps/drivers wiring — with the workflow component added on top and its own registry
  * (`workflows: Record<workflowFnPath, WorkflowDefinition>`) passed to `defineWorkflow`.

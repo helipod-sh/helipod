@@ -33,18 +33,18 @@ describe("reconcileWrangler", () => {
       name: "my-app",
       main: "worker.ts",
       vars: { CUSTOM: "keep" }, // user field untouched
-      durable_objects: { bindings: [{ name: "STACKBASE_DO", class_name: "StackbaseDO" }] },
-      migrations: [{ tag: "v1", new_sqlite_classes: ["StackbaseDO"] }],
+      durable_objects: { bindings: [{ name: "HELIPOD_DO", class_name: "HelipodDO" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["HelipodDO"] }],
       compatibility_flags: ["nodejs_compat"],
     });
-    expect(r.added).toContain("durable_objects.STACKBASE_DO");
+    expect(r.added).toContain("durable_objects.HELIPOD_DO");
   });
 
   it("is a no-op when everything is already present (comments would be preserved by the caller)", () => {
     const complete = {
       name: "x", main: "w.ts",
-      durable_objects: { bindings: [{ name: "STACKBASE_DO", class_name: "StackbaseDO" }] },
-      migrations: [{ tag: "v1", new_sqlite_classes: ["StackbaseDO"] }],
+      durable_objects: { bindings: [{ name: "HELIPOD_DO", class_name: "HelipodDO" }] },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["HelipodDO"] }],
       compatibility_flags: ["nodejs_compat"],
     };
     const r = reconcileWrangler(complete, {});
@@ -70,7 +70,7 @@ describe("reconcileWrangler", () => {
     );
     const tags = (r.config.migrations as Array<{ tag: string }>).map((m) => m.tag);
     expect(new Set(tags).size).toBe(tags.length); // no duplicate tags
-    const sqliteMig = (r.config.migrations as Array<{ tag: string; new_sqlite_classes?: string[] }>).find((m) => m.new_sqlite_classes?.includes("StackbaseDO"));
+    const sqliteMig = (r.config.migrations as Array<{ tag: string; new_sqlite_classes?: string[] }>).find((m) => m.new_sqlite_classes?.includes("HelipodDO"));
     expect(sqliteMig).toBeDefined();
     expect(["v1", "v3"]).not.toContain(sqliteMig!.tag);
   });

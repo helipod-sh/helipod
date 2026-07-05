@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents, defineComponent } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, type QueryCtx } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents, defineComponent } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { query, type QueryCtx } from "@helipod/executor";
 import { authSchema } from "../src/schema";
 import { authContext } from "../src/context";
 import { makeAuthModules } from "../src/functions";
@@ -32,7 +32,7 @@ function defineAuthWithMfa(options: AuthOptions) {
     schema: authSchema,
     modules: { ...makeAuthModules(config), ...(config.mfa ? makeMfaModules(config) : {}) },
     context: authContext,
-    contextType: { import: "@stackbase/auth", type: "AuthContext" },
+    contextType: { import: "@helipod/auth", type: "AuthContext" },
   });
 }
 

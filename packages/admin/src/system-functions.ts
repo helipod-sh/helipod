@@ -1,5 +1,5 @@
-import { mutation, type RegisteredFunction } from "@stackbase/executor";
-import { DocumentNotFoundError } from "@stackbase/errors";
+import { mutation, type RegisteredFunction } from "@helipod/executor";
+import { DocumentNotFoundError } from "@helipod/errors";
 
 /** Built-in privileged mutations the admin API invokes by id. Registered under `_system:*`. */
 export function systemModules(): Record<string, RegisteredFunction> {

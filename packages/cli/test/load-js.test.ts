@@ -1,7 +1,7 @@
 /**
- * `loadFunctionsDir` must load `.js` modules as well as `.ts` — the tree `stackbase deploy` pushes
+ * `loadFunctionsDir` must load `.js` modules as well as `.ts` — the tree `helipod deploy` pushes
  * is transpiled JS, not TypeScript. Mirrors the fixture-dir pattern from `serve.test.ts` (a real
- * `schema.js` + one query module, symlinked into a `node_modules/@stackbase` so the dynamic
+ * `schema.js` + one query module, symlinked into a `node_modules/@helipod` so the dynamic
  * `import()` can resolve workspace packages), but writes plain JS instead of TS.
  */
 import { describe, it, expect } from "vitest";
@@ -19,18 +19,18 @@ function makeJsFixtureFunctionsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbloadjs-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
   writeFileSync(
     join(dir, "schema.js"),
     `
-    import { v, defineSchema, defineTable } from "@stackbase/values";
+    import { v, defineSchema, defineTable } from "@helipod/values";
     export default defineSchema({ items: defineTable({ body: v.string() }) });
     `,
   );
   writeFileSync(
     join(dir, "foo.js"),
     `
-    import { query } from "@stackbase/executor";
+    import { query } from "@helipod/executor";
     export const list = query({ handler: async () => [] });
     `,
   );
@@ -52,18 +52,18 @@ describe("loadFunctionsDir — .js support", () => {
     const dir = mkdtempSync(join(tmpdir(), "sbloadts-"));
     const nm = join(dir, "node_modules");
     mkdirSync(nm);
-    symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+    symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
     writeFileSync(
       join(dir, "schema.ts"),
       `
-      import { v, defineSchema, defineTable } from "@stackbase/values";
+      import { v, defineSchema, defineTable } from "@helipod/values";
       export default defineSchema({ items: defineTable({ body: v.string() }) });
       `,
     );
     writeFileSync(
       join(dir, "foo.ts"),
       `
-      import { query } from "@stackbase/executor";
+      import { query } from "@helipod/executor";
       export const list = query({ handler: async () => [] });
       `,
     );

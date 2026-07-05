@@ -1,15 +1,15 @@
 /**
- * `STACKBASE_BUNDLE_EXTERNAL` escape hatch: a caller can widen bundle-on-load's `external` set
- * beyond `@stackbase/*`, for a dep that must NOT be bundled/inlined (the deferred follow-on from
+ * `HELIPOD_BUNDLE_EXTERNAL` escape hatch: a caller can widen bundle-on-load's `external` set
+ * beyond `@helipod/*`, for a dep that must NOT be bundled/inlined (the deferred follow-on from
  * the deploy-target-seam slice — see load-modules.ts's `extraBundleExternals`).
  *
  * Proves the *reason* this matters, not just that the env var is read: two convex function
  * modules (`a.ts`, `b.ts`) both import a CJS package that holds module-level counter state.
  *   - Default (no escape hatch): each module's bundle INLINES its own private copy of the
  *     package, so the two modules' counters are independent — bumping one never affects the other.
- *   - With STACKBASE_BUNDLE_EXTERNAL="singleton-lib": the import is left external, so both
+ *   - With HELIPOD_BUNDLE_EXTERNAL="singleton-lib": the import is left external, so both
  *     bundled modules resolve it through Node's own module cache at runtime and share ONE
- *     instance — bumping one is visible to the other, same as `@stackbase/*` singleton identity.
+ *     instance — bumping one is visible to the other, same as `@helipod/*` singleton identity.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
@@ -25,7 +25,7 @@ function makeFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbloadext-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
 
   // A minimal CJS package with module-level state — the shape a real singleton dep would have.
   const pkgDir = join(nm, "singleton-lib");
@@ -39,7 +39,7 @@ function makeFixture(): string {
   writeFileSync(
     join(dir, "schema.ts"),
     `
-    import { v, defineSchema, defineTable } from "@stackbase/values";
+    import { v, defineSchema, defineTable } from "@helipod/values";
     export default defineSchema({ items: defineTable({ body: v.string() }) });
     `,
   );
@@ -60,9 +60,9 @@ function makeFixture(): string {
   return dir;
 }
 
-describe("loadFunctionsDir — STACKBASE_BUNDLE_EXTERNAL escape hatch", () => {
+describe("loadFunctionsDir — HELIPOD_BUNDLE_EXTERNAL escape hatch", () => {
   afterEach(() => {
-    delete process.env.STACKBASE_BUNDLE_EXTERNAL;
+    delete process.env.HELIPOD_BUNDLE_EXTERNAL;
   });
 
   it("without the escape hatch, each module inlines its own private copy (independent state)", async () => {
@@ -76,8 +76,8 @@ describe("loadFunctionsDir — STACKBASE_BUNDLE_EXTERNAL escape hatch", () => {
     expect(bumpB()).toBe(1);
   });
 
-  it("with STACKBASE_BUNDLE_EXTERNAL, both modules share the one real module instance", async () => {
-    process.env.STACKBASE_BUNDLE_EXTERNAL = "singleton-lib";
+  it("with HELIPOD_BUNDLE_EXTERNAL, both modules share the one real module instance", async () => {
+    process.env.HELIPOD_BUNDLE_EXTERNAL = "singleton-lib";
     const dir = makeFixture();
     const loaded = await loadFunctionsDir(dir);
     const bumpA = loaded.modules.a!.bumpA as () => number;

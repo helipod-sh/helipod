@@ -1,4 +1,4 @@
-import { defineComponent, type ComponentDefinition, type BootContext } from "@stackbase/component";
+import { defineComponent, type ComponentDefinition, type BootContext } from "@helipod/component";
 import { schedulerSchema } from "./schema";
 import { schedulerContext, schedulerActionContext } from "./facade";
 import { _peekDue, _claim, _complete, _reclaim, _cronTick, _enqueue, _cancel } from "./modules";
@@ -31,7 +31,7 @@ export type {
 export { cronJobs, computeNextRun, computePrevRun, enqueueCadenceJob } from "./crons";
 
 /**
- * `defineScheduler()` — the `@stackbase/scheduler` component: the `jobs`/`job_args`/`crons`
+ * `defineScheduler()` — the `@helipod/scheduler` component: the `jobs`/`job_args`/`crons`
  * schema, the `ctx.scheduler` facade (`runAfter`/`runAt`/`cancel`/`enqueue`), the
  * internal `_peekDue`/`_claim`/`_complete`/`_cronTick` modules, and the `schedulerDriver`
  * event-loop that actually RUNS due jobs — reactive on commits touching `scheduler/*` plus a
@@ -39,7 +39,7 @@ export { cronJobs, computeNextRun, computePrevRun, enqueueCadenceJob } from "./c
  *
  * `contextWrite: true` is load-bearing: it's what lets the facade write (via the calling
  * mutation's own transaction) instead of only reading — see `schedulerContext` in `./facade.ts`
- * and the `ContextProvider.write` opt-in on `@stackbase/executor`.
+ * and the `ContextProvider.write` opt-in on `@helipod/executor`.
  *
  * `opts.crons` — an app's `crons.ts` (`export default crons` from `cronJobs()` + `.interval()`/
  * `.cron()`/etc.) — is reconciled into the `crons` table once at boot (`reconcileCrons`, see its
@@ -51,7 +51,7 @@ export function defineScheduler(opts?: { crons?: CronJobs }): ComponentDefinitio
     schema: schedulerSchema,
     modules: { _peekDue, _claim, _complete, _reclaim, _cronTick, _enqueue, _cancel },
     context: (cctx) => schedulerContext(cctx),
-    contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" },
+    contextType: { import: "@helipod/scheduler", type: "SchedulerContext" },
     serverExports: ["cronJobs"],
     contextWrite: true,
     driver: schedulerDriver(),

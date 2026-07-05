@@ -1,19 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { stackbase } from "../src/index";
+import { helipod } from "../src/index";
 import { isEnginePath } from "../src/embed";
 
-describe("stackbase() mode switch", () => {
+describe("helipod() mode switch", () => {
   it("mode:'embed' returns the embed plugin — a configureServer hook and NO proxy config hook", () => {
-    const p = stackbase({ mode: "embed" });
-    expect(p.name).toBe("stackbase:embed");
+    const p = helipod({ mode: "embed" });
+    expect(p.name).toBe("helipod:embed");
     expect(p.configureServer).toBeTypeOf("function");
     // No `config` hook at all — embed serves the engine in-process, so there's no origin to proxy.
     expect(p.config).toBeUndefined();
   });
 
-  it("default and mode:'proxy' are the unchanged Phase-1 plugin (name 'stackbase', has a config hook)", () => {
-    for (const p of [stackbase(), stackbase({ mode: "proxy" })]) {
-      expect(p.name).toBe("stackbase");
+  it("default and mode:'proxy' are the unchanged Phase-1 plugin (name 'helipod', has a config hook)", () => {
+    for (const p of [helipod(), helipod({ mode: "proxy" })]) {
+      expect(p.name).toBe("helipod");
       expect(p.config).toBeTypeOf("function");
       expect(p.configureServer).toBeTypeOf("function");
     }

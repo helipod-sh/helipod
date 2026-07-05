@@ -1,5 +1,5 @@
 /**
- * `@stackbase/executor` — runs user functions through a fully-serializable syscall ABI (the
+ * `@helipod/executor` — runs user functions through a fully-serializable syscall ABI (the
  * host/guest split), with determinism profiles and an inline (Tier 0) executor. The kernel
  * maintains indexes on writes, so insert-then-query works end to end.
  */

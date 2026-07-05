@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * The object-storage writer's periodic reclamation driver (Tier 3 Slice 7, Task 7.2) — a recurring
- * `Driver` (the same seam `@stackbase/scheduler`/`@stackbase/triggers`/`storageReaper`/
+ * `Driver` (the same seam `@helipod/scheduler`/`@helipod/triggers`/`storageReaper`/
  * `receiptsReaper`/`leaseHeartbeatDriver` all run on) that calls `store.gc()` on a fixed cadence, so a
  * long-running writer's superseded segments/snapshots get reclaimed automatically instead of only on a
  * manual call.
@@ -20,7 +20,7 @@
  * shutdown, exactly `receiptsReaper`'s "one bad pass doesn't kill the reaper" policy with no exception
  * carved out.
  */
-import type { Driver, DriverContext } from "@stackbase/component";
+import type { Driver, DriverContext } from "@helipod/component";
 
 /** The minimal surface this driver needs from `ObjectStoreDocStore` — kept narrow (rather than
  *  importing the whole class as a type) so a test fake doesn't need to construct a real store, same

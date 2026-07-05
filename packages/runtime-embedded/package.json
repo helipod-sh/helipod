@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/runtime-embedded",
+  "name": "@helipod/runtime-embedded",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,20 +21,20 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/component": "workspace:*",
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/docstore-d1": "workspace:*",
-    "@stackbase/errors": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/sync": "workspace:*",
-    "@stackbase/transactor": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/component": "workspace:*",
+    "@helipod/docstore": "workspace:*",
+    "@helipod/docstore-d1": "workspace:*",
+    "@helipod/errors": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
+    "@helipod/sync": "workspace:*",
+    "@helipod/transactor": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore-sqlite": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
     "better-sqlite3": "^11.8.0",
     "tsup": "catalog:",

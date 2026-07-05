@@ -3,8 +3,8 @@
  * engine needs. In M5 this is built directly from `IndexSpec`s; later it's derived from the
  * generated schema. The kernel uses it for query planning and index maintenance.
  */
-import type { IndexSpec } from "@stackbase/query-engine";
-import { validatorFromJson, type AnyValidator, type ValidatorJSON } from "@stackbase/values";
+import type { IndexSpec } from "@helipod/query-engine";
+import { validatorFromJson, type AnyValidator, type ValidatorJSON } from "@helipod/values";
 
 export interface TableMeta {
   name: string;

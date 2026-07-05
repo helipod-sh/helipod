@@ -1,4 +1,4 @@
-import type { TableDefinitionJSON, ValidatorJSON } from "@stackbase/values";
+import type { TableDefinitionJSON, ValidatorJSON } from "@helipod/values";
 import { isJsonColumn } from "./ddl";
 
 function fields(table: TableDefinitionJSON): Array<[string, { fieldType: ValidatorJSON; optional: boolean }]> {

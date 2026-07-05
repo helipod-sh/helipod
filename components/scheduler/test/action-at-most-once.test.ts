@@ -9,7 +9,7 @@
 // `ComponentContext`), so a facade-scheduled action is tagged `kind:"action"` and `_reclaim`'s
 // already-correct action-branch (dead-letter, never retry) fires for real.
 import { describe, it, expect } from "vitest";
-import { action, mutation } from "@stackbase/executor";
+import { action, mutation } from "@helipod/executor";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 describe("scheduler — kindOf resolves the real function kind (at-most-once is truthful)", () => {

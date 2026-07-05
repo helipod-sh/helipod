@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents, type DriverContext } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation } from "@stackbase/executor";
-import { newDocumentId, encodeInternalDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocStore, DocumentLogEntry } from "@stackbase/docstore";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents, type DriverContext } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { mutation } from "@helipod/executor";
+import { newDocumentId, encodeInternalDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocStore, DocumentLogEntry } from "@helipod/docstore";
 
 /** A raw log revision at `ts` (a `null` body = tombstone), for driving the store directly. */
 function rev(id: InternalDocumentId, ts: bigint, prevTs: bigint | null, body: string | null): DocumentLogEntry {
@@ -191,7 +191,7 @@ describe("DriverContext.readLog", () => {
   it("limit:0 peeks the current bound at O(1) cost — no scan, no crash — on a non-empty log", async () => {
     // Regression: a naive reading of `scanned.length === limit` (0 === 0) would fall into the
     // `limitHit` branch and crash on `scanned[scanned.length - 1]` (empty array) — see the `limit:
-    // 0` special-case in `runtime.ts`'s `readLog`. `@stackbase/triggers` relies on this exact idiom
+    // 0` special-case in `runtime.ts`'s `readLog`. `@helipod/triggers` relies on this exact idiom
     // to seed a new trigger's cursor at the log's current tip without paying for a scan.
     const { ctx, store, tableNumbers } = await harness();
     const m = newDocumentId(tableNumbers.messages!);

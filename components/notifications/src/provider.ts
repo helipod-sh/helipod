@@ -1,5 +1,5 @@
 /**
- * The Channel × Provider seam for `@stackbase/notifications` (Global Constraints). A CHANNEL is a
+ * The Channel × Provider seam for `@helipod/notifications` (Global Constraints). A CHANNEL is a
  * medium ("email"/"sms"/"in_app"); a PROVIDER is a swappable adapter for one channel. The base
  * `NotificationProvider` never leaks a driver into the engine — same philosophy as `DatabaseAdapter`
  * /`BlobStore`. Shaped auth-compatible (the `send({to,from,subject,text,html?})` email contract

@@ -1,4 +1,4 @@
-import { defineComponent, type ComponentDefinition } from "@stackbase/component";
+import { defineComponent, type ComponentDefinition } from "@helipod/component";
 import { authzSchema } from "./schema";
 import type { AuthzConfig } from "./roles";
 import { authzContext } from "./context";
@@ -13,7 +13,7 @@ export function defineAuthz(config: AuthzConfig): ComponentDefinition {
     schema: authzSchema,
     modules: authzModules(config),
     context: (cctx) => authzContext(cctx, config),
-    contextType: { import: "@stackbase/authz", type: "AuthzContext" },
+    contextType: { import: "@helipod/authz", type: "AuthzContext" },
     policies: config.policies,
     policyContext: async (cctx) => ({ auth: await buildRuleAuth(cctx) }),
     boot: (ctx) => reconcileEffectivePermissions(ctx, config),

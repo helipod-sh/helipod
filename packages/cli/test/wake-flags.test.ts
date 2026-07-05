@@ -7,10 +7,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { resolveServeOptions } from "../src/serve";
 import { handleHttpRequest } from "../src/http-handler";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { AdminApi } from "@stackbase/admin";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import type { AdminApi } from "@helipod/admin";
 
-const ENV_KEYS = ["STACKBASE_WAKE_URL", "STACKBASE_BACKSTOP_MIN_MS"] as const;
+const ENV_KEYS = ["HELIPOD_WAKE_URL", "HELIPOD_BACKSTOP_MIN_MS"] as const;
 
 describe("resolveServeOptions — wake seam flags", () => {
   const saved: Record<string, string | undefined> = {};
@@ -35,16 +35,16 @@ describe("resolveServeOptions — wake seam flags", () => {
   });
 
   it("reads both from env", () => {
-    stash("STACKBASE_WAKE_URL", "http://wake.do/arm");
-    stash("STACKBASE_BACKSTOP_MIN_MS", "900000");
+    stash("HELIPOD_WAKE_URL", "http://wake.do/arm");
+    stash("HELIPOD_BACKSTOP_MIN_MS", "900000");
     const opts = resolveServeOptions([]);
     expect(opts.wakeUrl).toBe("http://wake.do/arm");
     expect(opts.backstopMinMs).toBe(900_000);
   });
 
   it("the flag wins over env (mirroring --object-store)", () => {
-    stash("STACKBASE_WAKE_URL", "http://env.example/arm");
-    stash("STACKBASE_BACKSTOP_MIN_MS", "1000");
+    stash("HELIPOD_WAKE_URL", "http://env.example/arm");
+    stash("HELIPOD_BACKSTOP_MIN_MS", "1000");
     const opts = resolveServeOptions(["--wake-url", "http://flag.example/arm", "--backstop-min-ms", "900000"]);
     expect(opts.wakeUrl).toBe("http://flag.example/arm");
     expect(opts.backstopMinMs).toBe(900_000);

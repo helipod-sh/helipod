@@ -1,8 +1,8 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `startReplicaReactiveTailer` (Tier 3 Slice 8, Task 8.1, design record §7/§8) — extracts the
  * reactive-tailer wiring the Slice-5 cross-node E2E (`test/cross-node-reactivity.e2e.test.ts`) built
- * inline into a reusable production helper: a caller (typically `stackbase serve --replica`'s boot
+ * inline into a reusable production helper: a caller (typically `helipod serve --replica`'s boot
  * path, Task 8.2) hands over a REPLICA-side runtime + its materialized `local` store + the bucket,
  * and this helper drives the runtime's reactive fan-out from the writer's committed segments, and
  * publishes the replica's consumer watermark (so the writer's `gcDriver`, Slice 7, never reclaims a
@@ -13,7 +13,7 @@
  *   1. `runtime.observeTimestamp(inv.newMaxTs)` — BEFORE fanning ranges into the sync handler, so the
  *      query oracle's re-run actually reads the newly-applied rows.
  *   2. Convert the round's raw `writtenKeys`/`writtenDocs` into point ranges via the canonical
- *      `keyToPointRange`/`docKeyToPointRange` (`@stackbase/id-codec`, Task 8.1's other half of this
+ *      `keyToPointRange`/`docKeyToPointRange` (`@helipod/id-codec`, Task 8.1's other half of this
  *      extraction).
  *   3. `await runtime.handler.notifyWrites(...)` — the live-subscription re-run/re-push path.
  *   4. `runtime.notifyExternalCommit(...)` — wakes any driver `onCommit` listener (e.g. a composed
@@ -32,20 +32,20 @@
  * and propagating errors, for tests that don't want to wait on a real timer.
  *
  * `ReplicaReactiveRuntime` is a deliberately NARROW structural type — only the three members this
- * sink actually calls — rather than an import of `@stackbase/runtime-embedded`'s `EmbeddedRuntime`.
+ * sink actually calls — rather than an import of `@helipod/runtime-embedded`'s `EmbeddedRuntime`.
  * `objectstore-substrate` must not take a dependency on `runtime-embedded` just for this helper's
  * type signature; the real `EmbeddedRuntime` already satisfies this shape structurally, so the CLI's
  * boot path (Task 8.2) can pass one straight through with no adapter.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
-import type { SerializedKeyRange } from "@stackbase/index-key-codec";
-import { keyToPointRange, docKeyToPointRange } from "@stackbase/id-codec";
+import type { ObjectStore } from "@helipod/objectstore";
+import type { SqliteDocStore } from "@helipod/docstore-sqlite";
+import type { SerializedKeyRange } from "@helipod/index-key-codec";
+import { keyToPointRange, docKeyToPointRange } from "@helipod/id-codec";
 import { ObjectStoreReplicaTailer, type AppliedInvalidation } from "./replica-tailer";
 import { publishConsumerWatermark } from "./consumers";
 
 /** The shape a runtime's reactive tier must expose for this sink to drive it — satisfied
- *  structurally by `@stackbase/runtime-embedded`'s `EmbeddedRuntime` (see module doc). */
+ *  structurally by `@helipod/runtime-embedded`'s `EmbeddedRuntime` (see module doc). */
 export interface ReplicaReactiveRuntime {
   /** Advances the runtime's own observed timestamp so a re-run oracle sees rows through `ts`. */
   observeTimestamp(ts: bigint): void;

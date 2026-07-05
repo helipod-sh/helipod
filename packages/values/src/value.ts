@@ -1,5 +1,5 @@
 /**
- * The Stackbase value model — Convex-compatible. A `Value` is what queries return,
+ * The Helipod value model — Convex-compatible. A `Value` is what queries return,
  * mutations write, and the index-key codec encodes. Two numeric types are distinct:
  * `number` is a float64, `bigint` is an int64 (they never compare equal).
  */
@@ -25,8 +25,8 @@ export type JSONValue =
 export type Cmp = -1 | 0 | 1;
 
 /**
- * The canonical Stackbase total order over values. **Must stay byte-for-byte consistent
- * with the index-key codec** (`@stackbase/index-key-codec`), so that
+ * The canonical Helipod total order over values. **Must stay byte-for-byte consistent
+ * with the index-key codec** (`@helipod/index-key-codec`), so that
  * `compareIndexKeys(encode(a), encode(b)) === compareValues(a, b)`.
  *
  * Order by type first, then within type:

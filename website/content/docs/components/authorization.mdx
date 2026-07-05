@@ -7,7 +7,7 @@ description: RBAC, ReBAC, and row policies.
 
 Say your `documents` table needs three kinds of access: some people can read everything, some can
 read only their team's documents, and some can read only what's been shared with them directly.
-`@stackbase/authz` is how you express all three without hand-rolling permission checks inside every
+`@helipod/authz` is how you express all three without hand-rolling permission checks inside every
 query and mutation.
 
 It gives you three tools: role-based access control (RBAC) with inheritance and scoped grants,
@@ -33,18 +33,18 @@ component table namespacing. A permission check is just a data read, so it parti
 reactive read-set like any other query. Revoke a role or unshare a document, and every live
 subscription that depended on it re-runs. No polling, nothing for you to invalidate.
 
-It composes on top of `@stackbase/auth` (`requires: ["auth"]`). Every check resolves the caller's
+It composes on top of `@helipod/auth` (`requires: ["auth"]`). Every check resolves the caller's
 identity through `ctx.auth.getUserId()`, so authz has no identity model of its own. See
 [Auth](/docs/components/auth) for that layer.
 
 ## Enabling it
 
-`defineAuthz(config)` is a Stackbase component. Compose it in `stackbase.config.ts` alongside auth:
+`defineAuthz(config)` is a Helipod component. Compose it in `helipod.config.ts` alongside auth:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineAuth } from "@stackbase/auth";
-import { defineAuthz } from "@stackbase/authz";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineAuth } from "@helipod/auth";
+import { defineAuthz } from "@helipod/authz";
 
 const auth = defineAuth({});
 const authz = defineAuthz({
@@ -397,8 +397,8 @@ inside a policy body.
 Two practical notes. Policies can't cover `.global()` tables yet: a read of a global table that a
 read policy would gate throws (`read policies are not yet supported on .global() tables`) rather
 than silently going unenforced. And the policy types (`TablePolicy`, `WhereInput`, `FieldOps`,
-`PolicyPredicate`) are re-exported from `@stackbase/authz`, so a policy file never needs to import
-`@stackbase/executor` directly.
+`PolicyPredicate`) are re-exported from `@helipod/authz`, so a policy file never needs to import
+`@helipod/executor` directly.
 
 ### `WhereInput`: the predicate shape
 
@@ -507,10 +507,10 @@ flowchart LR
 
 A small multi-tenant example combining scoped roles, a row policy, and sharing:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineAuth } from "@stackbase/auth";
-import { defineAuthz } from "@stackbase/authz";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineAuth } from "@helipod/auth";
+import { defineAuthz } from "@helipod/authz";
 
 const auth = defineAuth({});
 const authz = defineAuthz({

@@ -1,9 +1,9 @@
 {
   // The deploy rig for the single-shard Durable Object host (Slice 3). `wrangler deploy` (from this
-  // dir) builds `fixture/worker.ts` into a Worker whose `StackbaseDO` Durable Object owns the writer +
+  // dir) builds `fixture/worker.ts` into a Worker whose `HelipodDO` Durable Object owns the writer +
   // DO-SQLite + WebSockets + subscription index. See ./README.md for the exact human-run commands.
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "stackbase-do-fixture",
+  "name": "helipod-do-fixture",
   "main": "fixture/worker.ts",
   // Serve the Packlist SPA at the edge; /api/* has no matching asset so it falls to the Worker→DO.
   "assets": { "directory": "./public" },
@@ -12,23 +12,23 @@
   // `nodejs_compat` (§8.2). Without it the DO throws at import.
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "STACKBASE_DO", "class_name": "StackbaseDO" }]
+    "bindings": [{ "name": "HELIPOD_DO", "class_name": "HelipodDO" }]
   },
   // File storage: the R2 bucket the DO stores blobs in (`env.STORAGE_BUCKET` → `R2BlobStore`). Create
-  // it once with `wrangler r2 bucket create stackbase-do-fixture` before the first deploy (see
+  // it once with `wrangler r2 bucket create helipod-do-fixture` before the first deploy (see
   // ./README.md). Byte I/O runs in the DO's fetch handler, never in the transactor turn.
-  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "stackbase-do-fixture" }],
+  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "helipod-do-fixture" }],
   "migrations": [
     {
       // DO-SQLite needs the SQLite-backed class migration tag — `new_sqlite_classes`, NOT
       // `new_classes` (§6.1). Without it `ctx.storage.sql` is unavailable.
       "tag": "v1",
-      "new_sqlite_classes": ["StackbaseDO"]
+      "new_sqlite_classes": ["HelipodDO"]
     }
   ],
   "vars": {
-    // Placeholder — set the real value with `wrangler secret put STACKBASE_ADMIN_KEY` (do NOT commit a
+    // Placeholder — set the real value with `wrangler secret put HELIPOD_ADMIN_KEY` (do NOT commit a
     // real key). Required: the DO fail-fasts an empty admin key.
-    "STACKBASE_ADMIN_KEY": "dev-placeholder-set-a-real-secret"
+    "HELIPOD_ADMIN_KEY": "dev-placeholder-set-a-real-secret"
   }
 }

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Writer self-exit on lease loss (Task 4, C4) + promotion error policy (C5).
  *
@@ -11,7 +11,7 @@
  *       constructed ONLY on (successful) promotion — a sync node that never promotes never starts one.
  *
  * The fully-integrated `startFleetNode` wiring (real NodePgClient + advisory-lock election + a live
- * runtime/tailer) is proven only through the real `stackbase serve --fleet` E2E (Task 5); here we
+ * runtime/tailer) is proven only through the real `helipod serve --fleet` E2E (Task 5); here we
  * exercise the extracted, side-effect-free seams directly — the same spy pattern as
  * `node-lifecycle.test.ts`.
  */

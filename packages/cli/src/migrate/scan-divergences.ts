@@ -10,22 +10,22 @@ interface Rule {
 
 const RULES: Rule[] = [
   { test: /\.withIndex\s*\(/, severity: "action-needed", what: ".withIndex(...) query",
-    fix: `Stackbase has no .withIndex — use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()` },
+    fix: `Helipod has no .withIndex — use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()` },
   { test: /ctx\.db\.patch\s*\(/, severity: "action-needed", what: "ctx.db.patch(...)",
-    fix: `Stackbase has no patch — read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })` },
+    fix: `Helipod has no patch — read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })` },
   { test: /\.paginate\s*\(/, severity: "action-needed", what: ".paginate(...)",
-    fix: `Stackbase paginate({ cursor, pageSize, maxScan? }) returns { page, nextCursor, hasMore, scanCapped }` },
+    fix: `Helipod paginate({ cursor, pageSize, maxScan? }) returns { page, nextCursor, hasMore, scanCapped }` },
   { test: /ctx\.auth\b|getUserIdentity\s*\(/, severity: "action-needed", what: "ctx.auth / getUserIdentity()",
-    fix: `Identity is a string token via a context provider (e.g. @stackbase/auth's ctx.auth), not a JWT-claims object` },
+    fix: `Identity is a string token via a context provider (e.g. @helipod/auth's ctx.auth), not a JWT-claims object` },
   { test: /@convex-dev\/auth|["']convex\/auth["']/, severity: "unsupported", what: "Convex Auth",
-    fix: `Auth is not auto-translated — use @stackbase/auth or external JWT` },
+    fix: `Auth is not auto-translated — use @helipod/auth or external JWT` },
   { test: /\bapp\.use\s*\(/, severity: "unsupported", what: "Convex Component (app.use)",
-    fix: `Convex Components don't map 1:1 — recompose via stackbase.config.ts` },
+    fix: `Convex Components don't map 1:1 — recompose via helipod.config.ts` },
   { test: /\.vectorIndex\s*\(|\.searchIndex\s*\(/, severity: "unsupported", what: "vector/search index",
-    fix: `search/vector is not yet supported in Stackbase (see roadmap)` },
+    fix: `search/vector is not yet supported in Helipod (see roadmap)` },
 ];
 
-/** Line-based scan for Convex runtime-API divergences Stackbase does NOT auto-transform. */
+/** Line-based scan for Convex runtime-API divergences Helipod does NOT auto-transform. */
 export function scanDivergences(source: string, file: string): ReportEntry[] {
   const entries: ReportEntry[] = [];
   const lines = source.split("\n");
@@ -35,11 +35,11 @@ export function scanDivergences(source: string, file: string): ReportEntry[] {
   if (base === "crons.ts" || /\bcronJobs\s*\(/.test(source)) {
     const idx = lines.findIndex((l) => /\bcronJobs\s*\(/.test(l));
     entries.push({ severity: "action-needed", file, line: idx >= 0 ? idx + 1 : 1, what: "Convex crons (cronJobs)",
-      fix: `Compose defineScheduler() in stackbase.config.ts and use cronJobs() from "@stackbase/scheduler"` });
+      fix: `Compose defineScheduler() in helipod.config.ts and use cronJobs() from "@helipod/scheduler"` });
   }
   if (base === "convex.config.ts") {
     entries.push({ severity: "unsupported", file, line: 1, what: "Convex app config (convex.config.ts)",
-      fix: `Recompose components via stackbase.config.ts` });
+      fix: `Recompose components via helipod.config.ts` });
   }
 
   for (let i = 0; i < lines.length; i++) {

@@ -39,7 +39,7 @@ a regular action:
   query, mutation, or action through the three methods above.
 </Callout>
 
-```ts title="stackbase/http.ts"
+```ts title="helipod/http.ts"
 import { httpAction, httpRouter } from "./_generated/server";
 
 export const receiveWebhook = httpAction(async (ctx, request) => {
@@ -59,7 +59,7 @@ framework.
 
 Because the handler has no `ctx.db`, its actual write goes through `ctx.runMutation`. That mutation is
 what produces a write set and fans out to any subscription reading the `messages` table (see
-[Reactivity](/docs/core-concepts/reactivity)). This is the shape every webhook in stackbase takes:
+[Reactivity](/docs/core-concepts/reactivity)). This is the shape every webhook in helipod takes:
 HTTP in, mutation for the write, reactive fan-out for free.
 
 </Step>
@@ -68,10 +68,10 @@ HTTP in, mutation for the write, reactive fan-out for free.
 
 ### Register it in http.ts
 
-A conventional `stackbase/http.ts` default-exports an `httpRouter()` populated with `route()` calls. This
+A conventional `helipod/http.ts` default-exports an `httpRouter()` populated with `route()` calls. This
 is how the engine discovers your endpoints at load time:
 
-```ts title="stackbase/http.ts"
+```ts title="helipod/http.ts"
 import { httpRouter } from "./_generated/server";
 import { receiveWebhook } from "./webhooks";
 
@@ -116,7 +116,7 @@ When a request could match more than one registered route, resolution is determi
 3. Among `pathPrefix` routes, the longest matching prefix wins. `pathPrefix: "/webhooks/stripe/"`
    beats `pathPrefix: "/webhooks/"` for a request to `/webhooks/stripe/invoice`.
 
-```ts title="stackbase/http.ts"
+```ts title="helipod/http.ts"
 http.route({ path: "/webhooks/stripe/health", method: "GET", handler: healthCheck });
 http.route({ pathPrefix: "/webhooks/stripe/", method: "POST", handler: stripeHook });
 http.route({ pathPrefix: "/webhooks/", method: "POST", handler: genericHook });
@@ -187,7 +187,7 @@ whether it's called from the client SDK, another function, the scheduler, or, as
 
 <Callout type="warn" title="No built-in verification">
   If the request carries an `Authorization: Bearer <token>` header, that raw token is passed straight
-  through to the handler's context as its identity. stackbase does not decode, validate, or look up
+  through to the handler's context as its identity. helipod does not decode, validate, or look up
   the token for you. It's handed to your handler exactly as the caller sent it.
 </Callout>
 
@@ -199,7 +199,7 @@ or remove anything here.
 
 ## Hot reload
 
-`stackbase dev`'s watch loop re-resolves `http.ts` on every save, exactly like it reloads your
+`helipod dev`'s watch loop re-resolves `http.ts` on every save, exactly like it reloads your
 queries, mutations, and actions. The dev server exposes a `setRoutes(routes)` method that the reload
 path calls with the freshly-resolved route table, and the very next request sees the new routes.
 Nothing in the running WebSocket sync connections, active subscriptions, or in-flight mutations is
@@ -216,7 +216,7 @@ server restart. Same DX as editing a query or mutation.
 
 You never write this yourself unless you're authoring a component, but it's worth knowing it exists.
 
-An opt-in composed component (declared via `stackbase.config.ts`) can register its own reserved
+An opt-in composed component (declared via `helipod.config.ts`) can register its own reserved
 routes, for example an OAuth provider's callback endpoint, or a notification provider's delivery
 webhook, through a `httpRoutes` entry on its component definition:
 

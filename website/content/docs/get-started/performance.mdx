@@ -1,11 +1,11 @@
 ---
 title: Performance
-description: How fast stackbase is, measured under matched conditions with every caveat stated plainly.
+description: How fast helipod is, measured under matched conditions with every caveat stated plainly.
 ---
 
 {/* diataxis: explanation */}
 
-stackbase's performance is measured, not asserted. Every number on this page comes from a reproducible benchmark you can run yourself (`bun run bench:*`), reported with the conditions it was measured under.
+helipod's performance is measured, not asserted. Every number on this page comes from a reproducible benchmark you can run yourself (`bun run bench:*`), reported with the conditions it was measured under.
 
 The short version: a clean-room TypeScript engine that lands in the same league as the Rust reference implementation it's modeled on (Convex), with fast reactive push and honest, well-understood ceilings on one node and across many.
 
@@ -15,7 +15,7 @@ Benchmarks are easy to get wrong, usually by accident, by comparing two things u
 
 <Callout type="warn" title="Ballparks, not guarantees">
 
-An early stackbase-vs-Convex run fell into exactly that trap and showed a 60x win. The win evaporated the moment both systems were put in identical containers. So, on this page: comparisons are same-substrate (both systems in identical containers) or they're not reported. Numbers come from a single machine; Docker Desktop on macOS taxes absolute latency, loopback has no WAN jitter, and several cells are co-located rather than genuinely distributed. The *shapes* (single-writer flatness, sub-linear scale-out, log-scaling fan-out) hold on other hardware. The absolute milliseconds will differ, so run the benchmarks on your own substrate before relying on any figure.
+An early helipod-vs-Convex run fell into exactly that trap and showed a 60x win. The win evaporated the moment both systems were put in identical containers. So, on this page: comparisons are same-substrate (both systems in identical containers) or they're not reported. Numbers come from a single machine; Docker Desktop on macOS taxes absolute latency, loopback has no WAN jitter, and several cells are co-located rather than genuinely distributed. The *shapes* (single-writer flatness, sub-linear scale-out, log-scaling fan-out) hold on other hardware. The absolute milliseconds will differ, so run the benchmarks on your own substrate before relying on any figure.
 
 </Callout>
 
@@ -31,7 +31,7 @@ The core product is push: when a mutation commits, every client subscribed to af
 
 In a fair, same-container comparison against Convex (50 subscribers, matched app):
 
-| metric | stackbase | Convex |
+| metric | helipod | Convex |
 |---|---|---|
 | propagation p50 | **8.6 ms** | 13.4 ms |
 | propagation p99 | **13.7 ms** | 27.3 ms |
@@ -48,15 +48,15 @@ Every write is one serializable transaction through a single writer, one at a ti
 
 Measured against Convex (mutations per second, both containerized):
 
-| simultaneous writers | stackbase | Convex |
+| simultaneous writers | helipod | Convex |
 |---|---|---|
 | 1 | **2,321** | 353 |
 | 16 | 1,553 | 365 |
 | 32 | 1,849 | 279 |
 
-Throughput stays roughly flat as writers pile up. That's the single-writer signature, and it's true for both systems. The difference: Convex enforces a hard cap of 16 concurrent writers, and throughput drops past it, while stackbase has no such wall and degrades gently instead.
+Throughput stays roughly flat as writers pile up. That's the single-writer signature, and it's true for both systems. The difference: Convex enforces a hard cap of 16 concurrent writers, and throughput drops past it, while helipod has no such wall and degrades gently instead.
 
-**The overhead is lean.** stackbase adds history, reactivity, and safety around every write. Measured as three rungs of the same write on one machine:
+**The overhead is lean.** helipod adds history, reactivity, and safety around every write. Measured as three rungs of the same write on one machine:
 
 | what | writes/sec |
 |---|---|
@@ -64,11 +64,11 @@ Throughput stays roughly flat as writers pile up. That's the single-writer signa
 | store commit (append-only history, no engine logic) | 561 |
 | full mutation (your function + validation + indexes + history) | 464 |
 
-The gap from raw to store commit (about 3.5x) is the cost of never overwriting. stackbase appends every version to an MVCC log, which is what makes time-travel and reactivity possible, and that cost is unavoidable by design. The gap from store commit to a full mutation is only +21%, and that's all the engine's own logic: running your function, validating, maintaining indexes. A wasteful engine would show a huge gap there.
+The gap from raw to store commit (about 3.5x) is the cost of never overwriting. helipod appends every version to an MVCC log, which is what makes time-travel and reactivity possible, and that cost is unavoidable by design. The gap from store commit to a full mutation is only +21%, and that's all the engine's own logic: running your function, validating, maintaining indexes. A wasteful engine would show a huge gap there.
 
 **Group commit** batches concurrent commits into shared fsyncs on Postgres, where the fsync dominates each commit's cost: **+39% throughput at 8 clients, +58% at 64**, neutral at 1 client. It's on by default on Postgres and off by default on SQLite, where there's no fsync to amortize and it's a net loss.
 
-**Streaming reads on Postgres** (added in 1.7.0): paginated and limited reads (`.paginate()`, `.take(n)`) stream from a server-side cursor that stops fetching the moment the query engine has enough, instead of materializing the whole index range. Measured at 100k rows on the paginated shape: **−92% p50 wall-clock** and roughly 1000x fewer rows fetched. On by default, with a `STACKBASE_PG_STREAM=0` kill switch.
+**Streaming reads on Postgres** (added in 1.7.0): paginated and limited reads (`.paginate()`, `.take(n)`) stream from a server-side cursor that stops fetching the moment the query engine has enough, instead of materializing the whole index range. Measured at 100k rows on the paginated shape: **−92% p50 wall-clock** and roughly 1000x fewer rows fetched. On by default, with a `HELIPOD_PG_STREAM=0` kill switch.
 
 </Tab>
 

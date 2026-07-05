@@ -7,7 +7,7 @@ description: "How queries, mutations, actions, and httpActions run behind a narr
 
 ## The one-sentence version
 
-A **UDF** ("user-defined function") is the query, mutation, action, or `httpAction` you write in TypeScript, the code that lives in your `stackbase/` folder. The executor is the pipeline that takes a request naming one of those functions and turns it into a running handler that reaches the database only through a narrow, controlled doorway, then hands back a result plus a record of exactly what it read and wrote.
+A **UDF** ("user-defined function") is the query, mutation, action, or `httpAction` you write in TypeScript, the code that lives in your `helipod/` folder. The executor is the pipeline that takes a request naming one of those functions and turns it into a running handler that reaches the database only through a narrow, controlled doorway, then hands back a result plus a record of exactly what it read and wrote.
 
 Everything on this page traces that pipeline. If you're new to the codebase, the package to have open while you read is `packages/executor` (`src/executor.ts`, `src/kernel.ts`, `src/guest.ts`, `src/profile.ts`).
 
@@ -126,7 +126,7 @@ That's why scheduling doesn't need its own syscall. Enqueuing or canceling a job
 
 ## Validation: catching mistakes before they run
 
-Two different validation checks happen around every call, both using the same validator system (`@stackbase/values`, the same `v.string()`/`v.object()`/etc. helpers app code uses in `schema.ts`):
+Two different validation checks happen around every call, both using the same validator system (`@helipod/values`, the same `v.string()`/`v.object()`/etc. helpers app code uses in `schema.ts`):
 
 1. **Arguments, on the way in.** A function declared with an `args` validator (`query({ args: { ... }, handler })`) has that validator checked against the actual call arguments *before* the handler ever runs. A mismatch throws an `ArgumentValidationError` whose message names the offending field and why it failed. `httpAction`s skip this step: their input is a raw `Request`, not structured args.
 2. **Documents, on write.** `ctx.db.insert` and `ctx.db.replace` validate the value being written against the target table's schema (if the table declares one in `schema.ts`). A mismatch throws a `DocumentValidationError`, again naming the field.
@@ -137,7 +137,7 @@ A function can also declare a `returns` validator. Today that's used purely for 
 
 The object a handler receives as its first argument (conventionally called `ctx`) isn't one fixed shape. The executor assembles a different one depending on the function type, right before calling the handler:
 
-- **Query.** `ctx.db` is a read-only `GuestDatabaseReader` (`get`, `query(...).collect()`/`.paginate()`), plus `ctx.random()`, `ctx.now()`, and a read-only facade for each composed component (`ctx.auth`, `ctx.scheduler`, and so on, whatever the deployment has composed via `stackbase.config.ts`).
+- **Query.** `ctx.db` is a read-only `GuestDatabaseReader` (`get`, `query(...).collect()`/`.paginate()`), plus `ctx.random()`, `ctx.now()`, and a read-only facade for each composed component (`ctx.auth`, `ctx.scheduler`, and so on, whatever the deployment has composed via `helipod.config.ts`).
 - **Mutation.** Same as a query, but `ctx.db` is a `GuestDatabaseWriter` (adds `insert`, `replace`, `delete`), and any composed component that opted in to writing gets a writable facade too. For example, the scheduler needs to write a job row as part of the calling mutation's own transaction, so its writes roll back together with everything else if the mutation fails.
 - **Action / httpAction.** There is **no `ctx.db`**, structurally absent, not just empty, because actions run outside any transaction and have no read/write set to track. Instead `ctx` carries `ctx.runQuery`, `ctx.runMutation`, and `ctx.runAction`, each of which starts a brand-new, independent top-level invocation of this whole pipeline (its own transaction, for a query or mutation).
 
@@ -147,11 +147,11 @@ The object a handler receives as its first argument (conventionally called `ctx`
 
 Each of these `ctx.<component>` facades is built by the component's own `ContextProvider` (`build` for query/mutation, `buildAction` for actions). See [Building a custom component](/docs/contributing/extending/custom-component) for how a component author writes one. The facade doesn't get a resolved caller identity, just the same ambient bearer token the invocation carried in as `options.identity` (a plain string, or `null`), threaded through as `cctx.identity`/`identity` on whatever `ComponentContext`/`ActionApi` the provider receives.
 
-Resolving it into an actual user is entirely the component's job, done with ordinary reads. `@stackbase/auth`'s `ctx.auth.getUserId()` (`components/auth/src/context.ts`) looks up the session row for that token via a normal `db.get`-backed query inside the calling transaction. So an expired or revoked session is just a row that's missing or stale, and the lookup enters the read set like any other read (a session revocation reactively invalidates every query that called `getUserId()`, the same as any other write intersecting a read range). There's no separate "identity" syscall op and no dedicated read-tracking for it. Identity resolution is ordinary `db.*` traffic that happens to be looking at a sessions table.
+Resolving it into an actual user is entirely the component's job, done with ordinary reads. `@helipod/auth`'s `ctx.auth.getUserId()` (`components/auth/src/context.ts`) looks up the session row for that token via a normal `db.get`-backed query inside the calling transaction. So an expired or revoked session is just a row that's missing or stale, and the lookup enters the read set like any other read (a session revocation reactively invalidates every query that called `getUserId()`, the same as any other write intersecting a read range). There's no separate "identity" syscall op and no dedicated read-tracking for it. Identity resolution is ordinary `db.*` traffic that happens to be looking at a sessions table.
 
 ## The executor as a swappable seam
 
-Everything above (the profiles, the syscall channel, the validators, the way `ctx` is built) is designed around one contract: give the executor a function, its arguments, and some options, and get back a result plus its footprint. `InlineUdfExecutor` is the only implementation that ships today. It runs the handler as plain JavaScript in the same process as the rest of the engine: the fastest option, and entirely appropriate for a trusted single-tenant deployment, which is what Stackbase is today.
+Everything above (the profiles, the syscall channel, the validators, the way `ctx` is built) is designed around one contract: give the executor a function, its arguments, and some options, and get back a result plus its footprint. `InlineUdfExecutor` is the only implementation that ships today. It runs the handler as plain JavaScript in the same process as the rest of the engine: the fastest option, and entirely appropriate for a trusted single-tenant deployment, which is what Helipod is today.
 
 Here's why that matters if you're contributing. Because the boundary the handler talks through is always just strings in, strings out (as described above), nothing about how `ctx.db` is used from inside a handler needs to change if that handler later runs somewhere more isolated, like a real V8 isolate with no ambient access to the host's globals.
 

@@ -545,7 +545,7 @@ export async function exchangeAndExtractIdentity(args: {
   }
   // github (oauth2): fetch /user + /user/emails with the access token.
   const accessToken = result.access_token;
-  const ghHeaders = { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json", "user-agent": "stackbase" };
+  const ghHeaders = { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json", "user-agent": "helipod" };
   const user = (await (await fetch(args.provider.userinfoEndpoint!, { headers: ghHeaders })).json()) as Record<string, unknown>;
   let email = typeof user.email === "string" ? (user.email as string) : undefined;
   let emailVerified = false;

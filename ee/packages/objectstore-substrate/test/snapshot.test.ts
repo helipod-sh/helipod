@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { generateInternalId } from "@stackbase/id-codec";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
-import { MemoryObjectStore } from "@stackbase/objectstore/test-support/memory-objectstore";
+import { generateInternalId } from "@helipod/id-codec";
+import type { DocumentLogEntry, IndexWrite } from "@helipod/docstore";
+import { MemoryObjectStore } from "@helipod/objectstore/test-support/memory-objectstore";
 import { decodeSnapshot, encodeSnapshot, readSnapshot, snapshotKey, writeSnapshot, type SnapshotPayload } from "../src/snapshot";
 
 function docId(tableNumber: number) {

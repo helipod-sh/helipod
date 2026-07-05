@@ -1,5 +1,5 @@
 /**
- * The workflow authoring surface's registry types — mirrors `@stackbase/scheduler`'s job registry
+ * The workflow authoring surface's registry types — mirrors `@helipod/scheduler`'s job registry
  * shape, but for durable multi-step workflow handlers rather than one-shot scheduled functions.
  *
  * `WorkflowHandlerCtx` is the `step` object a workflow handler receives (`step.runMutation(...)`,

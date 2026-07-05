@@ -1,6 +1,6 @@
-# Stackbase Authorization: Which Model Should We Build Natively?
+# Helipod Authorization: Which Model Should We Build Natively?
 
-Stackbase builds authorization natively — no external service, no middleware sidecar, no second process. The question is not which service to integrate or which ops topology to deploy; it is which **authorization model's logic and features** belong in `packages/authz`. Concretely: should the model's primitive be a role assigned to a user (RBAC), a boolean predicate evaluated over a row (ABAC / row-rules), or a relationship tuple traversed through a typed graph (ReBAC / Zanzibar)? Service integration and deployment topology were explicitly out of scope for this research. The answer turns entirely on which model's **check algorithm** fits Stackbase's reactive engine — where every query records a read-set, every write is measured against it, and the O(1) invalidation guarantee is the heart of the product.
+Helipod builds authorization natively — no external service, no middleware sidecar, no second process. The question is not which service to integrate or which ops topology to deploy; it is which **authorization model's logic and features** belong in `packages/authz`. Concretely: should the model's primitive be a role assigned to a user (RBAC), a boolean predicate evaluated over a row (ABAC / row-rules), or a relationship tuple traversed through a typed graph (ReBAC / Zanzibar)? Service integration and deployment topology were explicitly out of scope for this research. The answer turns entirely on which model's **check algorithm** fits Helipod's reactive engine — where every query records a read-set, every write is measured against it, and the O(1) invalidation guarantee is the heart of the product.
 
 ---
 
@@ -13,7 +13,7 @@ Stackbase builds authorization natively — no external service, no middleware s
 
 ## The Authorization Models: A Primer
 
-Four contenders map to three paradigms. **RBAC** (Role-Based Access Control) assigns users to named roles; a permission check asks "does this user hold a role that grants this action?" Convex-authz is the RBAC representative here, enriched with ABAC and ReBAC layers. **ABAC** (Attribute-Based Access Control / row-predicate) evaluates a boolean function over the row being accessed and the caller's identity: `(viewer, row) => boolean`. Supabase's Row-Level Security is the canonical example. **ReBAC** (Relationship-Based Access Control, after the Google Zanzibar paper) stores authorization facts as typed relationship tuples `(subject, relation, object)` and answers permission checks by traversing the resulting graph. OpenFGA and SpiceDB are both Zanzibar descendants — OpenFGA is the lighter variant; SpiceDB adds a richer permission algebra and first-class caveats (ABAC conditions grafted onto tuples). All four are evaluated specifically against Stackbase's reactive engine constraint: the check must be a **precise, bounded data read** that enters the read-set and drives subscription invalidation correctly.
+Four contenders map to three paradigms. **RBAC** (Role-Based Access Control) assigns users to named roles; a permission check asks "does this user hold a role that grants this action?" Convex-authz is the RBAC representative here, enriched with ABAC and ReBAC layers. **ABAC** (Attribute-Based Access Control / row-predicate) evaluates a boolean function over the row being accessed and the caller's identity: `(viewer, row) => boolean`. Supabase's Row-Level Security is the canonical example. **ReBAC** (Relationship-Based Access Control, after the Google Zanzibar paper) stores authorization facts as typed relationship tuples `(subject, relation, object)` and answers permission checks by traversing the resulting graph. OpenFGA and SpiceDB are both Zanzibar descendants — OpenFGA is the lighter variant; SpiceDB adds a richer permission algebra and first-class caveats (ABAC conditions grafted onto tuples). All four are evaluated specifically against Helipod's reactive engine constraint: the check must be a **precise, bounded data read** that enters the read-set and drives subscription invalidation correctly.
 
 ---
 
@@ -48,7 +48,7 @@ The three paradigms share the same index structure, the same audit log, the same
 
 #### Expressiveness Walkthrough
 
-**Ownership** — ABAC policy covers this with zero schema changes: `ctx.resource?.ownerId === ctx.subject.userId`. The policy reads `ownerId`; Stackbase records that field in the read-set; ownership transfer automatically invalidates the subscription.
+**Ownership** — ABAC policy covers this with zero schema changes: `ctx.resource?.ownerId === ctx.subject.userId`. The policy reads `ownerId`; Helipod records that field in the read-set; ownership transfer automatically invalidates the subscription.
 
 **Scoped roles** — `assignRole(ctx, userId, "admin", { type: "org", id: orgId })`. The scope is part of the index key, so an org admin cannot leak into another org through a permission bug — isolation is structural.
 
@@ -64,9 +64,9 @@ The three paradigms share the same index structure, the same audit log, the same
 
 **Public/wildcard** — `grantPermission(ctx, "anonymous", "documents:read", undefined)` or a policy that always returns true; wildcard patterns (`documents:*`) grant families without enumerating actions.
 
-#### How Stackbase Builds It
+#### How Helipod Builds It
 
-`packages/authz` implements this model's logic natively. `definePermissions` and `defineRoles` are pure TypeScript — no runtime, no I/O. The `Authz` client wraps Stackbase's `DatabaseAdapter` interface, not any external service. The critical implementation decision mirrors the `effectivePermissions` pattern on Stackbase's MVCC log: role/relation writes expand into an `authz_effective_permissions` table keyed by `[tenantId, userId, permission, scopeKey]`; a check reads exactly one row from that index.
+`packages/authz` implements this model's logic natively. `definePermissions` and `defineRoles` are pure TypeScript — no runtime, no I/O. The `Authz` client wraps Helipod's `DatabaseAdapter` interface, not any external service. The critical implementation decision mirrors the `effectivePermissions` pattern on Helipod's MVCC log: role/relation writes expand into an `authz_effective_permissions` table keyed by `[tenantId, userId, permission, scopeKey]`; a check reads exactly one row from that index.
 
 ```typescript
 // packages/authz/src/index.ts
@@ -81,9 +81,9 @@ export const roles = defineRoles(permissions, {
   viewer: { documents: ["read"], comments: ["read"] },
 });
 
-export const authz = new StackbaseAuthz({ permissions, roles });
+export const authz = new HelipodAuthz({ permissions, roles });
 
-// Inside a Stackbase query — the check is a single indexed read:
+// Inside a Helipod query — the check is a single indexed read:
 export const getDocument = query({
   args: { docId: v.id("documents") },
   handler: async (ctx, { docId }) => {
@@ -175,9 +175,9 @@ The separation between **schema** (the model — declared once per deployment) a
 
 **Public/wildcard**: Write `doc:public-readme#viewer@user:*`. One tuple.
 
-#### How Stackbase Would Build It
+#### How Helipod Would Build It
 
-Store relationship tuples in Stackbase's MVCC store (same store as all other data); interpret the authorization model schema at server startup. Tuples are rows — the existing transaction, reactive read-set, and codegen machinery applies with zero new infrastructure.
+Store relationship tuples in Helipod's MVCC store (same store as all other data); interpret the authorization model schema at server startup. Tuples are rows — the existing transaction, reactive read-set, and codegen machinery applies with zero new infrastructure.
 
 ```typescript
 // TypeScript builder API replaces the FGA DSL
@@ -222,7 +222,7 @@ export const getDocument = query(async (ctx, { docId }) => {
 - **Arrow traversal grows the read-set with hierarchy depth** — a 10-level folder tree means up to 10 tuple reads per check, all entering the read-set; a single high-level tuple change (org membership) fans out into mass re-evaluation of every subscription that traversed it — the read-set fan-out problem
 - **CEL evaluation adds a runtime expression interpreter** — a non-trivial embedded dependency
 - **Conceptual shift** — "authorization as a graph" requires learning a new mental model; the DSL is a second source of truth alongside the TypeScript schema
-- **`ListObjects` (reverse queries) fights Stackbase's reactive design** — "all docs user:anne can view" requires a full index scan or graph enumeration; expensive, non-reactive, unsuitable for the per-request reactive path
+- **`ListObjects` (reverse queries) fights Helipod's reactive design** — "all docs user:anne can view" requires a full index scan or graph enumeration; expensive, non-reactive, unsuitable for the per-request reactive path
 
 #### Sharpest Rebuttal Point
 
@@ -269,7 +269,7 @@ The central insight is that authorization lives at the **data layer**, not the c
 
 **Public wildcard**: `canRead: (_viewer, row) => row.is_public`. Viewer unused; unauthenticated access works naturally.
 
-#### How Stackbase Would Build It
+#### How Helipod Would Build It
 
 A typed `policy()` call alongside the table schema definition, producing a `TablePolicy<T>` that the engine hooks into the query/mutation execution path:
 
@@ -410,9 +410,9 @@ Algebraic negation as a first-class operator — not a `NOT EXISTS` workaround.
 
 **Multi-tenancy**: Every resource type carries an `organization` relation; no path exists in the graph connecting tenant A's data to tenant B's user without an explicit cross-org tuple.
 
-#### How Stackbase Would Build It
+#### How Helipod Would Build It
 
-Relationship tuples are stored in Stackbase's MVCC store (same tables as app data). The schema's permission algebra is compiled to a traversal plan at server startup. A check is a graph walk over indexed tuple rows; every read enters the Stackbase read-set.
+Relationship tuples are stored in Helipod's MVCC store (same tables as app data). The schema's permission algebra is compiled to a traversal plan at server startup. A check is a graph walk over indexed tuple rows; every read enters the Helipod read-set.
 
 ```typescript
 export const authzSchema = defineAuthzSchema({
@@ -464,7 +464,7 @@ Schema compiler generates typed permission names — `"veiw"` (typo) is a TypeSc
 
 #### Sharpest Rebuttal Point
 
-The schema compilation step and CEL dependency directly violate Stackbase's locked "TypeScript end-to-end" principle. The permission algebra must be compiled in a foreign DSL; caveat conditions are CEL, not TypeScript — two foreign type systems that sit outside the TypeScript compiler and break the "rename a table and the compiler tells you exactly what broke" story. Additionally, the check algorithm is still a runtime graph traversal whose read-set is determined by traversal depth, not the query's declared data dependencies. A high-level tuple change fans out into mass re-evaluation proportional to the number of resources under that node — the same fatal reactive fit problem as OpenFGA.
+The schema compilation step and CEL dependency directly violate Helipod's locked "TypeScript end-to-end" principle. The permission algebra must be compiled in a foreign DSL; caveat conditions are CEL, not TypeScript — two foreign type systems that sit outside the TypeScript compiler and break the "rename a table and the compiler tells you exactly what broke" story. Additionally, the check algorithm is still a runtime graph traversal whose read-set is determined by traversal depth, not the query's declared data dependencies. A high-level tuple change fans out into mass re-evaluation proportional to the number of resources under that node — the same fatal reactive fit problem as OpenFGA.
 
 ---
 
@@ -480,11 +480,11 @@ Predicates are maximally local: the authorization rule for a document lives next
 
 ### Graph-Traversal Checks vs. O(1) Reactive Reads
 
-This is the decisive head-to-head for Stackbase. Graph-traversal checks (OpenFGA, SpiceDB) produce read-set entries proportional to hierarchy depth; a high-level tuple change fans out into mass subscription re-evaluation. Pre-computed `effectivePermissions` (convex-authz) collapses the check to a single indexed read — exactly one read-set entry — at the cost of write-time expansion. The reactive engine's correctness guarantee demands bounded, precise read-sets. Write amplification is bounded and manageable; read-set fan-out is unbounded and directly undermines the reactive guarantee. The O(1) read-path wins.
+This is the decisive head-to-head for Helipod. Graph-traversal checks (OpenFGA, SpiceDB) produce read-set entries proportional to hierarchy depth; a high-level tuple change fans out into mass subscription re-evaluation. Pre-computed `effectivePermissions` (convex-authz) collapses the check to a single indexed read — exactly one read-set entry — at the cost of write-time expansion. The reactive engine's correctness guarantee demands bounded, precise read-sets. Write amplification is bounded and manageable; read-set fan-out is unbounded and directly undermines the reactive guarantee. The O(1) read-path wins.
 
 ### One Unified Model vs. A Layered Ladder
 
-Should Stackbase ship one model (the most expressive one) or a layered ladder (start simple, graduate to complex)? The ReBAC advocates prefer one unified model — "incremental adoption" within the same graph schema. The predicate model advocates prefer a flat, TS-native starting point. The synthesis: the layered ladder is correct, but the layers should share a unified declaration surface. Apps start with ownership predicates and scoped RBAC; they add the ReBAC graph layer as an opt-in for hierarchy and group delegation without migrating existing checks. The engine exposes both layers under one `packages/authz` API.
+Should Helipod ship one model (the most expressive one) or a layered ladder (start simple, graduate to complex)? The ReBAC advocates prefer one unified model — "incremental adoption" within the same graph schema. The predicate model advocates prefer a flat, TS-native starting point. The synthesis: the layered ladder is correct, but the layers should share a unified declaration surface. Apps start with ownership predicates and scoped RBAC; they add the ReBAC graph layer as an opt-in for hierarchy and group delegation without migrating existing checks. The engine exposes both layers under one `packages/authz` API.
 
 ---
 
@@ -522,7 +522,7 @@ Should Stackbase ship one model (the most expressive one) or a layered ladder (s
 
 ### The Concrete Model to Build
 
-**Logic:** Authorization is typed application data stored in Stackbase's MVCC store. Every permission check is a typed, indexed data read. The reactive loop is not special-cased for authorization — it is free because authorization IS data.
+**Logic:** Authorization is typed application data stored in Helipod's MVCC store. Every permission check is a typed, indexed data read. The reactive loop is not special-cased for authorization — it is free because authorization IS data.
 
 **Features** (`packages/authz`):
 
@@ -571,7 +571,7 @@ Should Stackbase ship one model (the most expressive one) or a layered ladder (s
 
 ## Prior Art: Lunora — a Shipped Reactive-Backend RLS
 
-After the roundtable we examined **[Lunora](https://lunora.sh/docs/concepts/rls)**, a *production* reactive backend in Stackbase's exact category (Convex-like server functions + real-time subscriptions + local-first sync). It is the closest existing prior art to what we are designing, and it independently arrived at almost exactly the model the roundtable recommended — which is strong validation — while also **refining two decisions we got slightly wrong.**
+After the roundtable we examined **[Lunora](https://lunora.sh/docs/concepts/rls)**, a *production* reactive backend in Helipod's exact category (Convex-like server functions + real-time subscriptions + local-first sync). It is the closest existing prior art to what we are designing, and it independently arrived at almost exactly the model the roundtable recommended — which is strong validation — while also **refining two decisions we got slightly wrong.**
 
 ### Lunora's model (verbatim shape)
 
@@ -618,7 +618,7 @@ Lunora is **opt-in per procedure** (`.use(rls(...))`) + an advisor; our roundtab
 
 ## Why This Model Dominates — and Where Every Con Went
 
-The honest test of "best of the best" is not a feature list — it is whether **every con raised anywhere in this document has a concrete engineering answer that removes it**, leaving the model dominant on the axes that matter (speed, DX, ease, error-resistance). Below, each con is mapped to the mechanism that eliminates it. This is the synthesis of all five models *plus* the engine-level enforcement only Stackbase can do — and it is why none of the borrowed models, on its own, reaches here.
+The honest test of "best of the best" is not a feature list — it is whether **every con raised anywhere in this document has a concrete engineering answer that removes it**, leaving the model dominant on the axes that matter (speed, DX, ease, error-resistance). Below, each con is mapped to the mechanism that eliminates it. This is the synthesis of all five models *plus* the engine-level enforcement only Helipod can do — and it is why none of the borrowed models, on its own, reaches here.
 
 ### Every con, and the mechanism that removes it
 

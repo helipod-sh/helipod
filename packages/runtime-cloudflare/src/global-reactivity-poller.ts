@@ -27,7 +27,7 @@
  * optimistic-update gating and local reconnect-resume for any session with both a local and a global
  * subscription. The fix: `commitTs` on a global invalidation is now WRITE-ONLY NOISE (`0`,
  * unconditionally) — `SyncProtocolHandler` never reads it for a `global: true` invalidation (see
- * `WriteInvalidation.global`'s doc in `@stackbase/sync`), so the `now` clock this poller used to need
+ * `WriteInvalidation.global`'s doc in `@helipod/sync`), so the `now` clock this poller used to need
  * exists nowhere anymore and has been removed from {@link GlobalReactivityDeps} entirely.
  */
 
@@ -74,7 +74,7 @@ export class GlobalReactivityPoller {
         this.lastSeen.set(t, v);
         // M2c Critical fix: `commitTs: 0` is a harmless placeholder — a `global: true` invalidation
         // never has its `commitTs` read by `SyncProtocolHandler` (see this file's header doc + the
-        // `WriteInvalidation.global` doc in `@stackbase/sync`), so there is no clock to source here.
+        // `WriteInvalidation.global` doc in `@helipod/sync`), so there is no clock to source here.
         await this.deps.notifyWrites({ tables: [t], ranges: [], commitTs: 0, global: true });
       }
     }

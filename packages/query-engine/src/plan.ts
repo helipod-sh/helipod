@@ -3,7 +3,7 @@
  * Leading equality constraints form a key prefix; at most one inequality on the next field
  * narrows the bounds. Anything an index can't express is left to the post-filters.
  */
-import { encodeIndexKey, indexKeyRangeStart, indexKeyRangeEnd, type IndexableValue } from "@stackbase/index-key-codec";
+import { encodeIndexKey, indexKeyRangeStart, indexKeyRangeEnd, type IndexableValue } from "@helipod/index-key-codec";
 
 export type ScanOrder = "asc" | "desc";
 export type QueryOperator = "eq" | "gt" | "gte" | "lt" | "lte";

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
-import { workflow } from "@stackbase/workflow"; // the authoring surface: workflow.define
+import { mutation } from "@helipod/executor";
+import { workflow } from "@helipod/workflow"; // the authoring surface: workflow.define
 import { makeRuntimeWithWorkflow } from "./helpers";
 
 describe("workflow replay loop", () => {

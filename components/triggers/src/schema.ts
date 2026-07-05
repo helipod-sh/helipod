@@ -1,13 +1,13 @@
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 /**
- * The `@stackbase/triggers` component schema (namespaced `triggers/*` when composed) — design
+ * The `@helipod/triggers` component schema (namespaced `triggers/*` when composed) — design
  * spec D2. One `cursors` row per configured trigger, keyed by the WATCHED TABLE NAME (`name`) —
  * see `../docs`/the design spec for why a table rename orphans the cursor rather than migrating
  * it.
  *
  * - `cursorTs`: the log coordinate this trigger has fully delivered through — see
- *   `DriverContext.readLog`'s doc comment (`@stackbase/component`) for why this is ALWAYS
+ *   `DriverContext.readLog`'s doc comment (`@helipod/component`) for why this is ALWAYS
  *   `maxScannedTs`, never a delivered change's own `ts`.
  * - `state`: `"running"` (the driver dispatches this trigger on every relevant wake) or
  *   `"paused"` (max-consecutive-failures or the circuit breaker tripped; the driver skips it

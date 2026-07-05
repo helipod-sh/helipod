@@ -6,10 +6,10 @@ import { DEFAULT_FUNCTIONS_DIR } from "../src/functions-dir";
 
 describe("resolveBuildOptions", () => {
   it("defaults and flags", async () => {
-    // No `--dir` and no `stackbase.config.ts` at cwd → DEFAULT_FUNCTIONS_DIR, resolved absolute.
+    // No `--dir` and no `helipod.config.ts` at cwd → DEFAULT_FUNCTIONS_DIR, resolved absolute.
     expect(await resolveBuildOptions([])).toEqual({
       functionsDir: resolve(process.cwd(), DEFAULT_FUNCTIONS_DIR),
-      outfile: "./stackbase-server",
+      outfile: "./helipod-server",
       target: null,
       dashboard: true,
       verbose: false,
@@ -31,7 +31,7 @@ describe("bunTargetFor", () => {
 
 describe("shared module-file helpers", () => {
   it("lists function modules (excludes schema/_generated/.d.ts) and derives keys", () => {
-    const files = listFunctionModuleFiles("test/fixtures/deploy-v2/stackbase");
+    const files = listFunctionModuleFiles("test/fixtures/deploy-v2/helipod");
     expect(files).toContain("notes.ts");
     expect(files).not.toContain("schema.ts");
     expect(moduleKeyForFile("notes.ts")).toBe("notes");

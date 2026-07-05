@@ -64,7 +64,7 @@ describe("NodePgClient.listen — C8a listen leak", () => {
     expect(state.instances).toHaveLength(1);
     const mainClient = state.instances[0]!;
 
-    await expect(client.listen("stackbase_commits", () => {})).rejects.toThrow("simulated LISTEN failure");
+    await expect(client.listen("helipod_commits", () => {})).rejects.toThrow("simulated LISTEN failure");
 
     expect(state.instances).toHaveLength(2); // the dedicated LISTEN connection was created
     const listenerClient = state.instances[1]!;

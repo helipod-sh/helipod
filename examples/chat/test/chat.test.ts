@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi } from "@stackbase/client";
-import { loadProject, push, type LoadedProject } from "@stackbase/cli";
-import schema from "../stackbase/schema";
-import * as messages from "../stackbase/messages";
-import * as audit from "../stackbase/audit";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, loopbackTransport, anyApi } from "@helipod/client";
+import { loadProject, push, type LoadedProject } from "@helipod/cli";
+import schema from "../helipod/schema";
+import * as messages from "../helipod/messages";
+import * as audit from "../helipod/audit";
 
 const loaded: LoadedProject = { schema, modules: { messages, audit } };
 const api = anyApi as {
@@ -24,7 +24,7 @@ async function waitFor(cond: () => boolean, timeoutMs = 1500): Promise<void> {
 }
 
 let runtime: EmbeddedRuntime;
-const client = (s: string) => new StackbaseClient(loopbackTransport(runtime.connect(s)));
+const client = (s: string) => new HelipodClient(loopbackTransport(runtime.connect(s)));
 
 beforeEach(async () => {
   const project = loadProject(loaded);
@@ -109,9 +109,9 @@ describe("chat — ephemeral typing bypasses the engine", () => {
 });
 
 describe("codegen — the committed _generated matches the schema", () => {
-  it("stackbase/_generated is up to date (no drift)", () => {
+  it("helipod/_generated is up to date (no drift)", () => {
     const { generated } = push(loaded);
-    const dir = join(dirname(fileURLToPath(import.meta.url)), "../stackbase/_generated");
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "../helipod/_generated");
     for (const file of generated.files) {
       expect(readFileSync(join(dir, file.path), "utf8"), `${file.path} is stale — run \`bun run scripts/codegen.ts\``).toBe(
         file.content,

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * The point-range conversion is the trickiest pure logic in the tailer→sync bridge: a follower
  * derives written `(indexId, key)` pairs straight from the Postgres `indexes` table — where
@@ -23,13 +23,13 @@ import {
   encodeIndexKey,
   indexKeyspaceId,
   tableKeyspaceId,
-} from "@stackbase/index-key-codec";
+} from "@helipod/index-key-codec";
 import {
   encodeStorageIndexId,
   encodeStorageTableId,
   keyToPointRange as canonicalKeyToPointRange,
   docKeyToPointRange as canonicalDocKeyToPointRange,
-} from "@stackbase/id-codec";
+} from "@helipod/id-codec";
 import { keyToPointRange, docKeyToPointRange } from "../src/node";
 
 describe("keyToPointRange", () => {
@@ -186,13 +186,13 @@ describe("docKeyToPointRange", () => {
 
 /**
  * Task 8.1b (Tier 3 Slice 8) — `keyToPointRange`/`docKeyToPointRange` were extracted verbatim out of
- * this package into `@stackbase/id-codec` (see that package's `point-range.ts`), with `ee/packages/
+ * this package into `@helipod/id-codec` (see that package's `point-range.ts`), with `ee/packages/
  * fleet/src/ranges.ts` reduced to a thin re-export. This is the golden-value proof the extraction
  * didn't change a byte: fleet's own re-exported functions (imported here, as everywhere else in this
- * file, via `../src/node`) and the canonical `@stackbase/id-codec` functions produce IDENTICAL
+ * file, via `../src/node`) and the canonical `@helipod/id-codec` functions produce IDENTICAL
  * `SerializedKeyRange` output for the same inputs.
  */
-describe("extraction parity: fleet's re-export vs the canonical @stackbase/id-codec functions", () => {
+describe("extraction parity: fleet's re-export vs the canonical @helipod/id-codec functions", () => {
   it("keyToPointRange: identical output for the same (indexId, key)", () => {
     const storageIndexId = encodeStorageIndexId(10001, "by_creation");
     const key = encodeIndexKey(["hello", 42]);

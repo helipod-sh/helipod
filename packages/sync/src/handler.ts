@@ -7,11 +7,11 @@
  * `SyncUdfExecutor`, so the same handler runs in-process (Tier 0) or as a fleet node (Tier 2).
  */
 import { createHash } from "node:crypto";
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { isRetryableError, isStackbaseError } from "@stackbase/errors";
-import type { SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { WrittenDoc } from "@stackbase/transactor";
-import type { DiffableRange, DiffablePage } from "@stackbase/executor";
+import { convexToJson, type JSONValue, type Value } from "@helipod/values";
+import { isRetryableError, isHelipodError } from "@helipod/errors";
+import type { SerializedKeyRange } from "@helipod/index-key-codec";
+import type { WrittenDoc } from "@helipod/transactor";
+import type { DiffableRange, DiffablePage } from "@helipod/executor";
 import {
   encodeServerMessage,
   parseClientMessage,
@@ -24,7 +24,7 @@ import {
   type ClientMutationVerdict,
   type MutationBatchEntry,
 } from "./protocol";
-import { tableOfKeyspaceId } from "@stackbase/index-key-codec";
+import { tableOfKeyspaceId } from "@helipod/index-key-codec";
 import { SubscriptionManager, type Subscription } from "./subscription-manager";
 import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable } from "./classify";
 import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges } from "./commit-differ";
@@ -203,12 +203,12 @@ function errMessage(e: unknown): string {
 /**
  * The well-known symbol the executor stamps a committed-ts onto an error thrown AFTER its transaction
  * committed (a `commitThenThrow`). Read via `Symbol.for` (the global registry) rather than importing
- * the executor so `@stackbase/sync` keeps its executor coupling TYPE-ONLY — no runtime dependency
+ * the executor so `@helipod/sync` keeps its executor coupling TYPE-ONLY — no runtime dependency
  * edge, matching how it already treats `DiffableRange`/`transactor`/`index-key-codec`. MUST stay
- * byte-identical to `@stackbase/executor`'s `COMMITTED_TS_ERROR_KEY` (guarded by a cross-package
+ * byte-identical to `@helipod/executor`'s `COMMITTED_TS_ERROR_KEY` (guarded by a cross-package
  * assertion in this handler's tests). See `SyncProtocolHandler.originResponseGates`.
  */
-const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+const COMMITTED_TS_ERROR_KEY = Symbol.for("helipod.executor.committedTs");
 
 /** The committed-ts the executor stamped on a post-commit error, or `undefined` for a pre-commit
  *  throw (no commit → no origin-response gate was ever registered). */
@@ -307,7 +307,7 @@ export class SyncProtocolHandler {
    * re-exec (an identity flip can make a query newly read a global table), and from
    * `sendSessionTransition`'s live-re-run (a data/identity-dependent query can shift onto a global
    * table across a RERUN refresh). See `DriverContext.onGlobalSubscribe`'s doc comment
-   * (`@stackbase/component`) for why this exists — closing the busy-DO-late-subscribe gap in the
+   * (`@helipod/component`) for why this exists — closing the busy-DO-late-subscribe gap in the
    * M2c global-reactivity poller.
    */
   private readonly globalSubscribeListeners: Array<() => void> = [];
@@ -748,7 +748,7 @@ export class SyncProtocolHandler {
    *
    * Returns `"continue" | "stop"` — meaningful only to `handleMutationBatch`'s drain loop (a
    * standalone `Mutation` ignores it). A thrown error is classified via the executor's retryable
-   * discipline (`isRetryableError`, `@stackbase/errors` — the same classification
+   * discipline (`isRetryableError`, `@helipod/errors` — the same classification
    * `handleDedupError`'s dedup path already applies when deciding whether to record a verdict):
    *  - TERMINAL (not retryable — a deterministic app error, a coded verdict failure/replay) means the
    *    executor already recorded whatever verdict applies; the batch drain CONTINUES past it (a
@@ -835,7 +835,7 @@ export class SyncProtocolHandler {
       //
       // But only a TERMINAL error gets a code: the wire invariant is "coded ⇒ terminal, server-
       // recorded verdict" (mirrors `handleDedupError`'s own `!isRetryableError(e)` gate — only a
-      // non-retryable failure ever gets a recorded verdict). A retryable `StackbaseError` (OCC
+      // non-retryable failure ever gets a recorded verdict). A retryable `HelipodError` (OCC
       // conflict, timeout, rate limit, service-unavailable) still HAS a `.code`, but threading it
       // through here would make the drain settle a transient failure as terminal — durable mutation
       // lost, or on a `MutationBatch` "stop", the coded path skips `revertActive` and wedges the
@@ -845,7 +845,7 @@ export class SyncProtocolHandler {
         requestId: unit.requestId,
         success: false,
         error: errMessage(e),
-        code: isStackbaseError(e) && !isRetryableError(e) ? e.code : undefined,
+        code: isHelipodError(e) && !isRetryableError(e) ? e.code : undefined,
       });
       // Ordering note: `releaseOriginResponseGate` above runs BEFORE this `send`, and that ordering is
       // intentional and harmless — the release only SCHEDULES a microtask (it un-parks a gated
@@ -1120,7 +1120,7 @@ export class SyncProtocolHandler {
           // keyspace (`index:<tableNumber>:<indexName>`) while `wd.keyspace` is always a PRIMARY
           // keyspace (`table:<tableNumber>`), but both embed the identical `encodeStorageTableId`
           // table-number string (verified against `indexKeyspaceId`/`tableKeyspaceId`'s shared
-          // encoding in `@stackbase/index-key-codec`), so comparing the parsed table id is the
+          // encoding in `@helipod/index-key-codec`), so comparing the parsed table id is the
           // provably correct match — not a coincidental string prefix trick.
           const subTable = tableOfKeyspaceId(sub.range.keyspace);
           const wds = invalidation.writtenDocs.filter((w) => tableOfKeyspaceId(w.keyspace) === subTable);

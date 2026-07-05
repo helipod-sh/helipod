@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/component",
+  "name": "@helipod/component",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,17 +8,17 @@
   "types": "./dist/index.d.ts",
   "scripts": { "build": "tsup", "typecheck": "tsc --noEmit", "test": "vitest run" },
   "dependencies": {
-    "@stackbase/errors": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/errors": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/transactor": "workspace:*",
+    "@helipod/docstore": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
+    "@helipod/transactor": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

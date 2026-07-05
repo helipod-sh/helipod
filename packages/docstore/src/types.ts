@@ -7,9 +7,9 @@
  * `{ ts, id, value|null, prev_ts }`; the newest revision with `ts <= readTimestamp` is what
  * a snapshot read sees. A `null` value is a tombstone (the document is deleted as of `ts`).
  */
-import type { InternalDocumentId, ShardId } from "@stackbase/id-codec";
-import { documentIdKey } from "@stackbase/id-codec";
-import type { JSONValue, Value } from "@stackbase/values";
+import type { InternalDocumentId, ShardId } from "@helipod/id-codec";
+import { documentIdKey } from "@helipod/id-codec";
+import type { JSONValue, Value } from "@helipod/values";
 
 export type { InternalDocumentId, ShardId };
 
@@ -136,7 +136,7 @@ export interface DocStore {
    *
    * This closes the allocated-but-unlanded window that a caller-side oracle opens (allocate in
    * memory → then write): here allocation and landing are one atomic step. Postgres:
-   * `nextval('stackbase_ts')` inside the commit transaction, so the ts is visible atomically with
+   * `nextval('helipod_ts')` inside the commit transaction, so the ts is visible atomically with
    * its rows. SQLite: `MAX(ts) + 1` inside its transaction (race-free under the single writer).
    * The `write()` path is deliberately left untouched — the replica-apply path depends on its
    * caller-supplied timestamps.
@@ -179,8 +179,8 @@ export interface DocStore {
    * `commitWriteBatch` already documents for its own errors.
    *
    * The querier type `q` a guard receives is store-specific — an async `PgQuerier`
-   * (`@stackbase/docstore-postgres`) or a synchronous `SqliteGuardQuerier`
-   * (`@stackbase/docstore-sqlite`) — so this one interface member is deliberately typed loosely
+   * (`@helipod/docstore-postgres`) or a synchronous `SqliteGuardQuerier`
+   * (`@helipod/docstore-sqlite`) — so this one interface member is deliberately typed loosely
    * here rather than forcing a generic parameter through every `DocStore` consumer; each store
    * package exports its own precisely-typed `PgCommitGuard`/`SqliteCommitGuard` alias for callers
    * to write guards against. SQLite guards MUST be synchronous — SQLite's commit runs inside one

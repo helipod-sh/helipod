@@ -5,13 +5,13 @@
  * test.ts` behavior is untouched (proven there, not re-proven here).
  */
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime, type IndexSpec } from "@stackbase/query-engine";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { InlineUdfExecutor, SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { createClientState, applyServerMessage, type SyncClientState } from "@stackbase/sync";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime, type IndexSpec } from "@helipod/query-engine";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { InlineUdfExecutor, SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { createClientState, applyServerMessage, type SyncClientState } from "@helipod/sync";
 import { EmbeddedRuntime, createEmbeddedRuntime } from "../src/index";
 
 const MESSAGES = 10001;
@@ -39,7 +39,7 @@ function freshCatalog(): SimpleIndexCatalog {
   return new SimpleIndexCatalog().addIndex(byConversation);
 }
 
-function client(conn: { onMessage(l: (m: import("@stackbase/sync").ServerMessage) => void): () => void }): SyncClientState {
+function client(conn: { onMessage(l: (m: import("@helipod/sync").ServerMessage) => void): () => void }): SyncClientState {
   const state = createClientState();
   conn.onMessage((m) => applyServerMessage(state, m));
   return state;

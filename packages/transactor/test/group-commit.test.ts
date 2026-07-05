@@ -11,16 +11,16 @@
  * is store-agnostic and this proves it, the throughput win itself is a Postgres/E2E concern — T5).
  */
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { CommitUnit } from "@stackbase/docstore";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { CommitUnit } from "@helipod/docstore";
 import {
   newDocumentId,
   documentIdKey,
   DEFAULT_SHARD,
   type ShardId,
   type InternalDocumentId,
-} from "@stackbase/id-codec";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
+} from "@helipod/id-codec";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
 import {
   ShardedTransactor,
   SingleWriterTransactor,

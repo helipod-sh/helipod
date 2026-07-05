@@ -1,4 +1,4 @@
-import { mutation, action, httpAction, commitThenThrow, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, action, httpAction, commitThenThrow, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@helipod/executor";
 import type { AuthConfig } from "./config";
 import type { OAuthProvider } from "./oauth";
 import { authorizationServerFor, buildAuthorizeUrl, isAllowedRedirect, callbackUri, resolveProvider, exchangeAndExtractIdentity } from "./oauth";
@@ -85,7 +85,7 @@ export function makeExternalModules(config: AuthConfig): Record<string, Register
 /** Verify a third-party (Clerk/Auth0/any OIDC issuer) id_token via jose live JWKS fetch (signature +
  *  `iss` allowlist + `aud` + `exp`/`nbf`), then delegate to the SAME Part-3 core the OAuth callback
  *  uses (`_resolveExternalIdentity`) with `outcome:"mint"` — this is the exchange model: a short-lived
- *  third-party token is verified once and traded directly for a Stackbase session (no browser
+ *  third-party token is verified once and traded directly for a Helipod session (no browser
  *  redirect/handoff needed, since the client called this action directly and gets the mint result
  *  back). JIT-provision (a first-sight `oidc:<issuer>` identity becomes a fresh local user) and
  *  account-linking (a verified-email match) compose automatically since it is the same core Task 4/5

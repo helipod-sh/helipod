@@ -3,7 +3,7 @@
  *
  * Tasks 1-4 built action execution, scheduled actions, and the client WS `Action` message —
  * each proven by unit/integration tests against handlers/executors directly. This test proves
- * the WHOLE path works through the shipped `stackbase dev` server (real `startDevServer` +
+ * the WHOLE path works through the shipped `helipod dev` server (real `startDevServer` +
  * `loadProject`, real WebSocket, real HTTP), the way "test through the shipped entrypoint" has
  * caught wiring gaps twice before in this project (admin browse, scheduler driver wiring):
  *
@@ -18,10 +18,10 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation, action } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation, action } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
 import { loadProject, startDevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */

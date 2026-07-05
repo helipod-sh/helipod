@@ -1,11 +1,11 @@
-Stackbase Commercial License (Enterprise)
+Helipod Commercial License (Enterprise)
 
-Copyright (c) 2026 Stackbase.
+Copyright (c) 2026 Helipod.
 
 This directory (ee/) and everything under it is NOT covered by the license of the
 rest of this repository. It is source-available for reference and, at present, free
 to use in production (no license key is required yet — see
 docs/dev/business-model-and-licensing.md, "The two phases"). It may not be copied,
 modified, or distributed as part of a product or service that competes with
-Stackbase. A commercial license activating paid entitlements will govern future
+Helipod. A commercial license activating paid entitlements will govern future
 releases of this directory; code in ee/ never converts to an open-source license.

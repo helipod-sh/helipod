@@ -1,5 +1,5 @@
 /**
- * `stackbase objectstore reshard` (object-storage reshard, Task R2/R3): arg parsing/gate (R2a, no
+ * `helipod objectstore reshard` (object-storage reshard, Task R2/R3): arg parsing/gate (R2a, no
  * bucket needed) + the full E2E through the real CLI command and the real boot core (R3): boot a
  * single-shard object-store writer at a channel-sharded fixture, commit messages, stop, reshard the
  * STOPPED bucket 1→3 via the CLI, then fresh-boot WITHOUT `--shards` and prove (a) the node derives
@@ -8,14 +8,14 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 import { objectstoreCommand } from "../src/objectstore";
 
 const ROOT = "./.tmp-objectstore-reshard-cmd";
-const FIXTURE = "test/fixtures/shard-dev/stackbase";
+const FIXTURE = "test/fixtures/shard-dev/helipod";
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 /** Capture everything the command writes to stdout/stderr while it runs. */
@@ -36,10 +36,10 @@ async function captureRun(fn: () => Promise<number>): Promise<{ code: number; ou
 }
 
 describe("objectstoreCommand — R2a arg parsing / gate (no bucket needed)", () => {
-  const savedEnv = process.env.STACKBASE_OBJECT_STORE;
+  const savedEnv = process.env.HELIPOD_OBJECT_STORE;
   afterEach(() => {
-    if (savedEnv === undefined) delete process.env.STACKBASE_OBJECT_STORE;
-    else process.env.STACKBASE_OBJECT_STORE = savedEnv;
+    if (savedEnv === undefined) delete process.env.HELIPOD_OBJECT_STORE;
+    else process.env.HELIPOD_OBJECT_STORE = savedEnv;
   });
 
   it("unknown subcommand → usage error + exit 1", async () => {
@@ -54,7 +54,7 @@ describe("objectstoreCommand — R2a arg parsing / gate (no bucket needed)", () 
   });
 
   it("reshard without --object-store (and no env fallback) → exit 1", async () => {
-    delete process.env.STACKBASE_OBJECT_STORE;
+    delete process.env.HELIPOD_OBJECT_STORE;
     const { code, err } = await captureRun(() => objectstoreCommand(["reshard", "--shards", "3", "--dir", FIXTURE]));
     expect(code).toBe(1);
     expect(err).toMatch(/--object-store/);

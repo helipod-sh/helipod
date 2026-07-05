@@ -59,13 +59,13 @@ const READ_POOL_MAX = 4;
 /**
  * Kill switch for the pg-cursor + bounded-read-pool streaming path (Task 9). This production path
  * has never run against a real Postgres in CI (only PGlite/embedded substrates) — set
- * `STACKBASE_PG_STREAM=0` (or `"false"`) to make `NodePgClient` NOT advertise `queryStream`, so
+ * `HELIPOD_PG_STREAM=0` (or `"false"`) to make `NodePgClient` NOT advertise `queryStream`, so
  * `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` gate falls through to the proven
  * buffered `query` path, with no redeploy needed to recover from an unforeseen streaming-path
  * incident. Default (unset, or any other value) is streaming ON.
  */
 function resolveStreamingEnabled(): boolean {
-  const v = process.env.STACKBASE_PG_STREAM;
+  const v = process.env.HELIPOD_PG_STREAM;
   return v !== "0" && v !== "false";
 }
 
@@ -175,7 +175,7 @@ export class NodePgClient implements PgClient {
   readonly releaseShardLock?: (slot: number) => Promise<void>;
 
   /** Present (bound in the constructor) only when the {@link resolveStreamingEnabled} kill switch is
-   *  ON (the default) — absent (`undefined`) when `STACKBASE_PG_STREAM=0`/`"false"` disables it, so
+   *  ON (the default) — absent (`undefined`) when `HELIPOD_PG_STREAM=0`/`"false"` disables it, so
    *  `PostgresDocStore.index_scan`'s `if (this.db.queryStream)` truthiness check correctly falls
    *  through to buffered `query`. A field (not a method), so it can be conditionally assigned/omitted
    *  per instance rather than always being present on the prototype. */
@@ -204,7 +204,7 @@ export class NodePgClient implements PgClient {
       this.tryAcquireShardLock = (slot) => this.tryAcquireShardLockImpl(slot);
       this.releaseShardLock = (slot) => this.releaseShardLockImpl(slot);
     }
-    // Kill switch (STACKBASE_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
+    // Kill switch (HELIPOD_PG_STREAM=0/"false"): leave `queryStream` unassigned so it stays
     // falsy — `index_scan`'s `if (this.db.queryStream)` gate then falls through to buffered `query`.
     if (resolveStreamingEnabled()) {
       this.queryStream = (sql, params) => this.queryStreamImpl(sql, params);
@@ -218,7 +218,7 @@ export class NodePgClient implements PgClient {
     return new Client({
       connectionString: this.connectionString,
       // Tag this connection's backend in pg_stat_activity when a name is supplied (fleet nodes pass a
-      // per-node `stackbase-fleet-<port>` so an operator — or the fleet self-exit E2E — can identify
+      // per-node `helipod-fleet-<port>` so an operator — or the fleet self-exit E2E — can identify
       // and target one node's backends). Passed as an explicit config field, not appended to the
       // connection string: pg merges the parsed connection string OVER explicit fields, so this only
       // survives because our connection strings never set `application_name` themselves.
@@ -477,7 +477,7 @@ export class NodePgClient implements PgClient {
     // session-level, non-blocking: fail fast if another engine holds it.
     const rows = await this.query(`SELECT pg_try_advisory_lock($1) AS ok`, [ADVISORY_LOCK_KEY]);
     if (rows[0]?.ok !== true) {
-      throw new Error("another Stackbase engine is already connected to this database (advisory lock held)");
+      throw new Error("another Helipod engine is already connected to this database (advisory lock held)");
     }
   }
 

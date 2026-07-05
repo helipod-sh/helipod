@@ -1,5 +1,5 @@
 /**
- * The shared boot core for `stackbase dev` and `stackbase serve`: load the project, compose
+ * The shared boot core for `helipod dev` and `helipod serve`: load the project, compose
  * app + components, open the SQLite store, build the embedded runtime + admin API. Neither writes
  * codegen nor starts a server — the callers own those (dev writes _generated + watches; serve
  * hardens + serves).
@@ -8,24 +8,24 @@ import { mkdirSync, readFileSync, accessSync, constants as fsConstants } from "n
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { NodePgClient, BunSqlClient, PostgresDocStore, type PgClient } from "@stackbase/docstore-postgres";
-import type { DocStore } from "@stackbase/docstore";
+import { NodeSqliteAdapter, BunSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { NodePgClient, BunSqlClient, PostgresDocStore, type PgClient } from "@helipod/docstore-postgres";
+import type { DocStore } from "@helipod/docstore";
 import {
   createEmbeddedRuntime,
   type EmbeddedRuntime,
   type WriteRouter,
   type EmbeddedWriteFanoutAdapter,
-} from "@stackbase/runtime-embedded";
-import { InMemoryLogSink } from "@stackbase/executor";
-import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@stackbase/admin";
-import type { GeneratedBundle } from "@stackbase/codegen";
-import type { ComponentDefinition, Driver, WakeHost } from "@stackbase/component";
-import type { RegisteredFunction } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
-import type { BlobStore } from "@stackbase/blobstore";
-import type { ObjectStore } from "@stackbase/objectstore";
-import { shardIdList, DEFAULT_SHARD } from "@stackbase/id-codec";
+} from "@helipod/runtime-embedded";
+import { InMemoryLogSink } from "@helipod/executor";
+import { AdminApi, browseTableModule, systemModules, verifyAdminKey } from "@helipod/admin";
+import type { GeneratedBundle } from "@helipod/codegen";
+import type { ComponentDefinition, Driver, WakeHost } from "@helipod/component";
+import type { RegisteredFunction } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
+import type { BlobStore } from "@helipod/blobstore";
+import type { ObjectStore } from "@helipod/objectstore";
+import { shardIdList, DEFAULT_SHARD } from "@helipod/id-codec";
 import {
   storageContextProvider,
   storageReaper,
@@ -33,8 +33,8 @@ import {
   storageRoutes,
   type StorageRoute,
   type StorageRouteDeps,
-} from "@stackbase/storage";
-import { receiptsReaper } from "@stackbase/receipts";
+} from "@helipod/storage";
+import { receiptsReaper } from "@helipod/receipts";
 import { makeBlobStore, isS3Config, resolveStorageConfig, type StorageConfig } from "./blobstore-select";
 import { resolveObjectStore } from "./objectstore-select";
 import { ReplicaWriteForwarder } from "./replica-forward";
@@ -50,7 +50,7 @@ export function isPostgresUrl(s: string | undefined): boolean {
 }
 
 /**
- * Build the `PgClient` for a postgres `--database-url`/`STACKBASE_DATABASE_URL`. Under the Bun
+ * Build the `PgClient` for a postgres `--database-url`/`HELIPOD_DATABASE_URL`. Under the Bun
  * runtime (the single-binary/`serve` production runtime) uses `BunSqlClient` — native `Bun.SQL`,
  * ~10-17% faster than the `pg` driver; under Node (or any non-Bun host) falls back to `NodePgClient`.
  * Both implement the same `PgClient` seam, so `PostgresDocStore` and everything downstream is
@@ -71,12 +71,12 @@ export function makeStore(opts: { dataPath: string; databaseUrl?: string }): Doc
 }
 
 // ── Tier 3 Slice 6 (Task 6.3): the object-storage writer node ──────────────────────────────────
-// `stackbase serve --object-store <url>` boots a single-shard (shard "0") writer node whose store is
-// the Tier 3 object-storage substrate (`@stackbase/objectstore-substrate`) instead of the usual
+// `helipod serve --object-store <url>` boots a single-shard (shard "0") writer node whose store is
+// the Tier 3 object-storage substrate (`@helipod/objectstore-substrate`) instead of the usual
 // SQLite/Postgres store. Mirrors the fleet-store-bypass shape: `bootLoaded`'s `store = opts.fleet?.
 // store ?? objectStoreOverride ?? makeStore(...)`. The substrate is an ENTERPRISE (`ee/`) package —
 // core `packages/cli` keeps ZERO static/type dependency on it (same discipline `serve.ts`'s
-// `FleetModule` applies to `@stackbase/fleet`): the shapes below are hand-declared structural
+// `FleetModule` applies to `@helipod/fleet`): the shapes below are hand-declared structural
 // mirrors, loaded only via a dynamic, non-literal `import()` so `tsc`/bundlers never resolve it
 // either. A deployment that never sets `--object-store` pays nothing — the import is never reached.
 
@@ -99,7 +99,7 @@ export interface ObjectStoreWriterStore extends DocStore {
   gc(): Promise<{ deletedSegments: number; deletedSnapshots: number }>;
 }
 
-/** Structural mirror of `@stackbase/objectstore-substrate`'s public surface this module needs. */
+/** Structural mirror of `@helipod/objectstore-substrate`'s public surface this module needs. */
 export interface ObjectStoreSubstrateModule {
   ObjectStoreDocStore: {
     open(opts: { objectStore: ObjectStore; shard: string; local: SqliteDocStore }): Promise<ObjectStoreWriterStore>;
@@ -149,14 +149,14 @@ export interface ObjectStoreSubstrateModule {
 }
 
 export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
-  "stackbase: --object-store requires @stackbase/objectstore-substrate — install it (bun add @stackbase/objectstore-substrate).";
+  "helipod: --object-store requires @helipod/objectstore-substrate — install it (bun add @helipod/objectstore-substrate).";
 
 /**
  * True when `e` is one of this module's object-store fail-fast BOOT errors — the ee-package-missing
  * gate (`OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE`), `acquireWithRetry`'s "held by '<writer>' until …"
  * timeout, and every `resolveObjectStore` parse/validation throw (bad scheme, missing bucket,
- * missing credentials, unparseable URL) — all of which share the `"stackbase: --object-store"` /
- * `"stackbase: invalid --object-store"` message prefix. `serveCommand` uses this to print a clean
+ * missing credentials, unparseable URL) — all of which share the `"helipod: --object-store"` /
+ * `"helipod: invalid --object-store"` message prefix. `serveCommand` uses this to print a clean
  * `✗ <message>` instead of a raw stack trace for these KNOWN, actionable misconfigurations.
  *
  * Deliberately narrow: it does NOT match `assertCasSupported()`'s runtime bucket-connectivity
@@ -165,14 +165,14 @@ export const OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE =
  * cause.
  */
 export function isObjectStoreBootFailFast(e: unknown): e is Error {
-  return e instanceof Error && /^stackbase: (--object-store|invalid --object-store)\b/.test(e.message);
+  return e instanceof Error && /^helipod: (--object-store|invalid --object-store)\b/.test(e.message);
 }
 
-/** Dynamic-import gate for the ee substrate package (mirrors `serve.ts`'s `@stackbase/fleet` gate:
+/** Dynamic-import gate for the ee substrate package (mirrors `serve.ts`'s `@helipod/fleet` gate:
  *  an indirect (non-literal) specifier so `tsc` never statically resolves the enterprise package). */
 export async function loadObjectStoreSubstrateModule(): Promise<ObjectStoreSubstrateModule> {
   try {
-    const specifier: string = "@stackbase/objectstore-substrate";
+    const specifier: string = "@helipod/objectstore-substrate";
     return (await import(specifier)) as unknown as ObjectStoreSubstrateModule;
   } catch {
     throw new Error(OBJECTSTORE_SUBSTRATE_ERR_NO_PACKAGE);
@@ -200,7 +200,7 @@ export async function acquireWithRetry(
     last = { heldBy: result.heldBy, expiresAt: result.expiresAt };
     if (now() >= deadline) {
       throw new Error(
-        `stackbase: --object-store shard "0" held by '${last.heldBy}' until ${new Date(last.expiresAt).toISOString()} — ` +
+        `helipod: --object-store shard "0" held by '${last.heldBy}' until ${new Date(last.expiresAt).toISOString()} — ` +
           `timed out after ${opts.timeoutMs}ms waiting for the lease to free up. If '${last.heldBy}' crashed, its lease ` +
           `will expire on its own and a retry will take over; otherwise stop that writer before starting this one.`,
       );
@@ -230,8 +230,8 @@ export function makeInMemorySqliteStore(): SqliteDocStore {
   return new SqliteDocStore(adapter);
 }
 
-/** Mirrors `@stackbase/runtime-embedded`'s own private `DEPLOYMENT_ID_GLOBAL_KEY` (and
- *  `@stackbase/fleet`'s exported `FLEET_DEPLOYMENT_ID_KEY`) — the same well-known magic string, not
+/** Mirrors `@helipod/runtime-embedded`'s own private `DEPLOYMENT_ID_GLOBAL_KEY` (and
+ *  `@helipod/fleet`'s exported `FLEET_DEPLOYMENT_ID_KEY`) — the same well-known magic string, not
  *  otherwise exported for cross-package reuse (fleet re-declares its own copy too). `createEmbeddedRuntime`
  *  reads-or-mints this global on `options.store` right after boot; pre-seeding it here (carried note
  *  I1) makes a fresh local materialization ADOPT the bucket's `FleetGlobals.deploymentId` instead of
@@ -240,7 +240,7 @@ export function makeInMemorySqliteStore(): SqliteDocStore {
  *  a value (a same-node restart) — never overwrite an existing stamp. */
 const RUNTIME_DEPLOYMENT_ID_GLOBAL_KEY = "fleet:deploymentId";
 
-/** Default lease TTL (ms) — mirrors `@stackbase/fleet`'s own default (`STACKBASE_FLEET_LEASE_TTL_MS`
+/** Default lease TTL (ms) — mirrors `@helipod/fleet`'s own default (`HELIPOD_FLEET_LEASE_TTL_MS`
  *  unset case). Overridable via `bootLoaded`'s `objectStoreLeaseTtlMs` (tests only; not a CLI flag). */
 export const DEFAULT_OBJECTSTORE_LEASE_TTL_MS = 15000;
 /** Default heartbeat cadence (ms) — comfortably under the lease TTL (see `leaseHeartbeatDriver`'s own
@@ -249,7 +249,7 @@ export const DEFAULT_OBJECTSTORE_HEARTBEAT_MS = 5000;
 /** Default gc-driver sweep cadence (ms) — Tier 3 Slice 7, Task 7.3. gc() is best-effort/idempotent/
  *  self-fencing (Task 7.1), so there's no correctness ratio to enforce against the lease TTL the way
  *  the heartbeat has — this is purely a reclamation-latency-vs-sweep-cost tradeoff, mirroring
- *  `storageReaper`'s own 60s default. Overridable via `STACKBASE_OBJECTSTORE_GC_MS` (env, production
+ *  `storageReaper`'s own 60s default. Overridable via `HELIPOD_OBJECTSTORE_GC_MS` (env, production
  *  tuning) or `bootLoaded`'s `objectStoreGcMs` option (tests). */
 export const DEFAULT_OBJECTSTORE_GC_MS = 60000;
 
@@ -259,7 +259,7 @@ export const DEFAULT_OBJECTSTORE_GC_MS = 60000;
  * drivers to register (the lease-heartbeat), and a `release` handle for graceful shutdown — which
  * calls `store.relinquish()` (Task 6.5), NOT the in-process-only `store.release()`, so a challenger
  * can take over the shard immediately instead of waiting out the full lease TTL. Throws (fail-fast)
- * on: a CAS-unsupported object store, `@stackbase/objectstore-substrate` not installed, or a
+ * on: a CAS-unsupported object store, `@helipod/objectstore-substrate` not installed, or a
  * bounded-retry acquire timeout (another live writer holds the shard).
  */
 async function buildObjectStoreWriterNode(opts: {
@@ -285,7 +285,7 @@ async function buildObjectStoreWriterNode(opts: {
 }): Promise<{ store: DocStore; drivers: Driver[]; release: () => Promise<void>; numShards: number }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
-    throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
+    throw new Error(`helipod: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
   }
   await resolved.objectStore.assertCasSupported();
 
@@ -317,8 +317,8 @@ async function buildObjectStoreWriterNode(opts: {
   const numShards = globals.numShards;
   if (opts.shards !== undefined && opts.shards !== numShards) {
     throw new Error(
-      `stackbase: --shards ${opts.shards} disagrees with the bucket's persisted shard count ${numShards} — ` +
-        `reshard the bucket (\`stackbase objectstore reshard --object-store <url> --dir <dir> --shards ${opts.shards}\`) ` +
+      `helipod: --shards ${opts.shards} disagrees with the bucket's persisted shard count ${numShards} — ` +
+        `reshard the bucket (\`helipod objectstore reshard --object-store <url> --dir <dir> --shards ${opts.shards}\`) ` +
         `to change it, or drop --shards.`,
     );
   }
@@ -378,7 +378,7 @@ async function buildObjectStoreWriterNode(opts: {
 }
 
 // ── Tier 3 Slice 8 (Task 8.2): the object-storage REPLICA node ─────────────────────────────────
-// `stackbase serve --object-store <url> --replica` boots a read-scaled REPLICA instead of a writer:
+// `helipod serve --object-store <url> --replica` boots a read-scaled REPLICA instead of a writer:
 // it MATERIALIZES the shard from the bucket (`ObjectStoreDocStore.open`, same as the writer) but
 // NEVER `acquire()`s the write lease, and runs no heartbeat/gc drivers — only the Task 8.1 reactive-
 // tailer wiring helper (`startReplicaReactiveTailer`), started AFTER the runtime is built (its sink
@@ -391,7 +391,7 @@ async function buildObjectStoreWriterNode(opts: {
  *  meaningful to an app developer who doesn't know the substrate's lease vocabulary). See
  *  `wrapReplicaWriteRejection`'s doc. */
 export const REPLICA_WRITE_REJECTED_MESSAGE =
-  "stackbase: this node is a read replica (--replica) — it holds no write lease and cannot commit " +
+  "helipod: this node is a read replica (--replica) — it holds no write lease and cannot commit " +
   "mutations. Send writes to the primary/writer node.";
 
 const LEASE_OWNER_REJECTION_RE = /not the lease owner/;
@@ -481,7 +481,7 @@ async function buildObjectStoreReplicaNode(opts: {
 }> {
   const resolved = resolveObjectStore(opts.objectStoreUrl);
   if (resolved === null) {
-    throw new Error(`stackbase: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
+    throw new Error(`helipod: --object-store "${opts.objectStoreUrl}" did not resolve to a store (empty/unset value?).`);
   }
   await resolved.objectStore.assertCasSupported();
 
@@ -549,21 +549,21 @@ async function buildObjectStoreReplicaNode(opts: {
 }
 
 // ── Shards B2a (T5): NUM_SHARDS first-boot config ──────────────────────────────────────────────
-// Decided ONCE, at first boot, and immutable after: `STACKBASE_FLEET_SHARDS` (or the fleet
+// Decided ONCE, at first boot, and immutable after: `HELIPOD_FLEET_SHARDS` (or the fleet
 // default of 8) is persisted via `writeGlobalIfAbsent` the first time the store is writable; every
 // later boot reads the persisted value back and fails fast if an explicitly-set env value now
 // disagrees with it (resharding online isn't supported — that's B5's offline tool).
 
-/** Default shard count when neither `STACKBASE_FLEET_SHARDS` nor a persisted value is present.
- *  Mirrors `@stackbase/fleet`'s own `DEFAULT_NUM_SHARDS` (kept as an independent literal here —
- *  core `packages/cli` has zero static dependency on the enterprise `@stackbase/fleet` package). */
+/** Default shard count when neither `HELIPOD_FLEET_SHARDS` nor a persisted value is present.
+ *  Mirrors `@helipod/fleet`'s own `DEFAULT_NUM_SHARDS` (kept as an independent literal here —
+ *  core `packages/cli` has zero static dependency on the enterprise `@helipod/fleet` package). */
 export const DEFAULT_NUM_SHARDS = 8;
 
 /** The `persistence_globals` key the resolved shard count is stamped under (same store contract —
  *  SQLite/Postgres, fleet/non-fleet — `getGlobal`/`writeGlobalIfAbsent` all implement it). */
 export const NUM_SHARDS_GLOBAL_KEY = "fleet:numShards";
 
-/** Parse `STACKBASE_FLEET_SHARDS` — a positive integer, else undefined (falls through to the
+/** Parse `HELIPOD_FLEET_SHARDS` — a positive integer, else undefined (falls through to the
  *  persisted value, or the default on a fresh deployment). Mirrors `serve.ts`'s
  *  `parseLeaseTtlMs` shape for the other fleet-adjacent env knob. */
 export function parseNumShards(raw: string | undefined): number | undefined {
@@ -573,10 +573,10 @@ export function parseNumShards(raw: string | undefined): number | undefined {
 }
 
 /**
- * Parse `STACKBASE_GROUP_COMMIT` (Fleet B4) — a boolean env flag, same `1`/`true`/`yes`
- * (case-insensitive) shape `@stackbase/fleet`'s `fleetMultiWriterEnabled` uses for
- * `STACKBASE_FLEET_MULTI_WRITER`. This is just the token PARSER (truthy = `1`/`true`/`yes`); the
- * single-node DEFAULT when the var is unset is store-conditional — see `resolveGroupCommit`. Unlike `STACKBASE_FLEET_
+ * Parse `HELIPOD_GROUP_COMMIT` (Fleet B4) — a boolean env flag, same `1`/`true`/`yes`
+ * (case-insensitive) shape `@helipod/fleet`'s `fleetMultiWriterEnabled` uses for
+ * `HELIPOD_FLEET_MULTI_WRITER`. This is just the token PARSER (truthy = `1`/`true`/`yes`); the
+ * single-node DEFAULT when the var is unset is store-conditional — see `resolveGroupCommit`. Unlike `HELIPOD_FLEET_
  * SHARDS`, group commit needs no persist-once story: it's a per-boot transactor construction choice,
  * not a durable invariant the log depends on, so a plain env read (no `resolveNumShards`-style
  * mismatch-fail-fast) is the right shape.
@@ -586,7 +586,7 @@ export function groupCommitEnabled(raw: string | undefined): boolean {
 }
 
 /**
- * Resolve the single-node (non-fleet) group-commit default. An explicit `STACKBASE_GROUP_COMMIT`
+ * Resolve the single-node (non-fleet) group-commit default. An explicit `HELIPOD_GROUP_COMMIT`
  * always wins (either direction). When it is unset, the default is STORE-CONDITIONAL: ON for
  * Postgres, OFF for SQLite. Rationale (benchmark, `docs/dev/research/writes-benchmark.md`): group
  * commit batches concurrent commits into one fsync — a strict win on fsync-bound Postgres (+39% at
@@ -595,7 +595,7 @@ export function groupCommitEnabled(raw: string | undefined): boolean {
  * SQLite (nothing to amortize, pure pipeline overhead). Fleet B4 gated auto-enable on a single
  * GLOBAL 2× threshold and missed (1.63×), shipping dark-off; the per-store data shows the win is
  * store-dependent, so a store-conditional default is the correct refinement (scoped to the
- * single-node path — the fleet path still threads its own `STACKBASE_GROUP_COMMIT` read).
+ * single-node path — the fleet path still threads its own `HELIPOD_GROUP_COMMIT` read).
  */
 export function resolveGroupCommit(opts: { envRaw: string | undefined; databaseUrl: string | undefined }): boolean {
   const raw = opts.envRaw;
@@ -603,14 +603,14 @@ export function resolveGroupCommit(opts: { envRaw: string | undefined; databaseU
   return isPostgresUrl(opts.databaseUrl); // default: ON for Postgres, OFF for SQLite
 }
 
-/** Build the fail-fast message for a `STACKBASE_FLEET_SHARDS` value that disagrees with what's
+/** Build the fail-fast message for a `HELIPOD_FLEET_SHARDS` value that disagrees with what's
  *  already persisted — named verbatim so tests can assert on it without re-deriving the string. */
 export function numShardsMismatchError(envValue: number, persisted: number): Error {
   return new Error(
-    `stackbase: STACKBASE_FLEET_SHARDS=${envValue} conflicts with the shard count already persisted ` +
+    `helipod: HELIPOD_FLEET_SHARDS=${envValue} conflicts with the shard count already persisted ` +
       `for this deployment (${persisted}, set at first boot). The shard count is immutable after ` +
       `first boot — changing it live isn't supported; resharding is a planned offline tool (B5). ` +
-      `Unset STACKBASE_FLEET_SHARDS, or set it to ${persisted} to match the existing deployment.`,
+      `Unset HELIPOD_FLEET_SHARDS, or set it to ${persisted} to match the existing deployment.`,
   );
 }
 
@@ -657,7 +657,7 @@ export interface BootResult {
   generated: GeneratedBundle;
   store: DocStore;
   logSink: InMemoryLogSink;
-  /** The boot-time component set (from stackbase.config.ts) — `applyDeploy` re-composes against it. */
+  /** The boot-time component set (from helipod.config.ts) — `applyDeploy` re-composes against it. */
   components: ComponentDefinition[];
   /** The always-on file-storage byte backend (FS or S3), shared by the provider/reaper/routes. */
   blobStore: BlobStore;
@@ -667,7 +667,7 @@ export interface BootResult {
    */
   storageRoutes: StorageRoute[];
   /**
-   * Reserved engine routes contributed by composed components (e.g. `@stackbase/auth`'s
+   * Reserved engine routes contributed by composed components (e.g. `@helipod/auth`'s
    * `/api/auth/oauth/*`), each bound to `runtime.runHttpAction` and shaped as an engine-owned
    * `StorageRoute` `{method,pathPrefix,handler}` so `server.ts` dispatches them exactly like the
    * always-on storage routes. Fixed at boot (the component set is fixed at boot — only functions/
@@ -701,7 +701,7 @@ export interface BootResult {
  * Merge the always-on `_storage:*` privileged built-ins into a function map. The `_storage` modules
  * must live in the runtime's `modules` map (not just `systemModules`) because the action-mode
  * `ctx.storage.store` reaches them through the trusted `invoke`, and the reaper driver through
- * `runFunction` — both resolve `modules`. Since `setModules` (dev reload / `stackbase deploy`)
+ * `runFunction` — both resolve `modules`. Since `setModules` (dev reload / `helipod deploy`)
  * REPLACES `modules` wholesale, every such swap must re-apply this so storage survives a hot-swap.
  */
 export function withStorageModules(map: Record<string, RegisteredFunction>): Record<string, RegisteredFunction> {
@@ -709,9 +709,9 @@ export function withStorageModules(map: Record<string, RegisteredFunction>): Rec
 }
 
 /**
- * Fail fast when S3-shaped settings (`STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL`, or their
+ * Fail fast when S3-shaped settings (`HELIPOD_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL`, or their
  * `--storage-endpoint`/etc. flag equivalents) are present but no bucket was configured. Those
- * settings only make sense for the S3 backend, which is selected SOLELY by `STACKBASE_STORAGE_BUCKET`
+ * settings only make sense for the S3 backend, which is selected SOLELY by `HELIPOD_STORAGE_BUCKET`
  * (`isS3Config`) — so their presence without a bucket is an unambiguous misconfiguration by an
  * operator who intended S3 but forgot the bucket. Silently falling back to local FS in that case is
  * a data-durability footgun: uploads land on ephemeral local disk (gone on the next container
@@ -725,8 +725,8 @@ export function assertStorageConfigCoherent(storage: StorageConfig | undefined):
   const s3Shaped = storage?.endpoint !== undefined || storage?.region !== undefined || storage?.publicBaseUrl !== undefined;
   if (!s3Shaped) return;
   throw new Error(
-    "stackbase: S3 storage settings (STACKBASE_STORAGE_ENDPOINT/REGION/PUBLIC_URL or --storage-endpoint/etc.) " +
-      "are set, but no bucket was provided — the S3 backend is selected only by STACKBASE_STORAGE_BUCKET " +
+    "helipod: S3 storage settings (HELIPOD_STORAGE_ENDPOINT/REGION/PUBLIC_URL or --storage-endpoint/etc.) " +
+      "are set, but no bucket was provided — the S3 backend is selected only by HELIPOD_STORAGE_BUCKET " +
       "(or --storage-bucket). Set the bucket to use S3, or unset the other storage settings to use local FS. " +
       "Refusing to boot rather than silently store uploads on local disk.",
   );
@@ -743,8 +743,8 @@ function ensureStorageDirWritable(dir: string): void {
     accessSync(dir, fsConstants.W_OK);
   } catch (e) {
     throw new Error(
-      `stackbase: file-storage directory "${dir}" is not creatable/writable — ${e instanceof Error ? e.message : String(e)}. ` +
-        `Point --data at a writable location, or configure S3 storage (set STACKBASE_STORAGE_BUCKET).`,
+      `helipod: file-storage directory "${dir}" is not creatable/writable — ${e instanceof Error ? e.message : String(e)}. ` +
+        `Point --data at a writable location, or configure S3 storage (set HELIPOD_STORAGE_BUCKET).`,
     );
   }
 }
@@ -776,7 +776,7 @@ export interface BootLoadedOptions {
    */
   storageReaperSweepMs?: number;
   /**
-   * Tier 2 fleet wiring (from `@stackbase/fleet`'s `prepareFleetNode`). When set, `store` is the
+   * Tier 2 fleet wiring (from `@helipod/fleet`'s `prepareFleetNode`). When set, `store` is the
    * pre-constructed (read-only-until-promoted) Postgres store — used INSTEAD of `makeStore` — and
    * the runtime is built as a fleet node: writes route through `writeRouter` when this node isn't
    * the writer, drivers are deferred until promotion (`deferDrivers`), and a promoted writer's
@@ -798,8 +798,8 @@ export interface BootLoadedOptions {
     receiptsStore?: DocStore;
     /** Fleet B3 hybrid RYOW: awaited in the runtime fan-out drain before a local commit's re-runs. */
     beforeNotify?: (commitTs: bigint) => Promise<void>;
-    /** Fleet B4: group commit — resolved by `@stackbase/fleet`'s `node.ts` from its OWN
-     *  `STACKBASE_GROUP_COMMIT` read (mirrors how `numShards` is resolved fleet-side, before
+    /** Fleet B4: group commit — resolved by `@helipod/fleet`'s `node.ts` from its OWN
+     *  `HELIPOD_GROUP_COMMIT` read (mirrors how `numShards` is resolved fleet-side, before
      *  `bootLoaded` runs) and threaded straight into `createEmbeddedRuntime`. Unset → `false`. */
     groupCommit?: boolean;
     /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` (`min(shard_leases.frontier_ts)`
@@ -832,11 +832,11 @@ export interface BootLoadedOptions {
   /** Test-only: force a deterministic writer id instead of a fresh `randomUUID()` per boot. */
   objectStoreWriterId?: string;
   /** Tier 3 Slice 7, Task 7.3: the gc-driver's sweep cadence (ms). Unset → `DEFAULT_OBJECTSTORE_GC_MS`
-   *  (~60s). `serve.ts` threads `STACKBASE_OBJECTSTORE_GC_MS` in here; tests can also set it directly
+   *  (~60s). `serve.ts` threads `HELIPOD_OBJECTSTORE_GC_MS` in here; tests can also set it directly
    *  to force an observable reclamation on a short timescale. Ignored when `objectStoreUrl` is unset. */
   objectStoreGcMs?: number;
   /** Tier 3 multi-shard single-node serve: the number of object-storage lanes a `--object-store`
-   *  WRITER node owns (`serve.ts` threads `--shards`/`STACKBASE_FLEET_SHARDS` in here). Unset / `1`
+   *  WRITER node owns (`serve.ts` threads `--shards`/`HELIPOD_FLEET_SHARDS` in here). Unset / `1`
    *  → the shipped single-shard path (shard "0"), byte-identical. `> 1` → this node opens+acquires
    *  all `shardIdList(N)` lanes and composes a `ShardedObjectStoreDocStore`; the runtime's
    *  `numShards` is sized to N so the `ShardedTransactor` routes writes to the owning lane. Ignored
@@ -857,7 +857,7 @@ export interface BootLoadedOptions {
    *  (1000ms). Ignored unless `replica` is set. */
   objectStoreReplicaPollMs?: number;
   /**
-   * Tier 3 Slice 8 follow-on: the writer node's URL, from `--writer-url`/`STACKBASE_WRITER_URL`.
+   * Tier 3 Slice 8 follow-on: the writer node's URL, from `--writer-url`/`HELIPOD_WRITER_URL`.
    * When set on a `replica` boot, every mutation/action is FORWARDED here (`ReplicaWriteForwarder`,
    * wired in as `createEmbeddedRuntime`'s `writeRouter`) instead of being rejected locally.
    * Ignored unless `replica` is also set. Unset (the default) → today's unchanged reject-with-
@@ -867,7 +867,7 @@ export interface BootLoadedOptions {
   /**
    * The wake seam: the host's single alarm, for a host that STOPS THE PROCESS between requests (so
    * `setTimeout` never fires and every driver silently goes dead). `serve.ts` builds this from
-   * `--wake-url`/`STACKBASE_WAKE_URL` (`httpWakeHost`); the runtime then multiplexes every driver
+   * `--wake-url`/`HELIPOD_WAKE_URL` (`httpWakeHost`); the runtime then multiplexes every driver
    * timer down to one arm. Threaded straight into `createEmbeddedRuntime`. Unset (every existing
    * deployment) → plain `setTimeout`, byte-for-byte unchanged.
    */
@@ -875,7 +875,7 @@ export interface BootLoadedOptions {
   /**
    * The wake seam's other half: answers `DriverContext.backstopMs`, the floor/stretch applied to a
    * driver's BACKSTOP poll cadence only (never a next-work wake). `serve.ts` builds this from
-   * `--backstop-min-ms`/`STACKBASE_BACKSTOP_MIN_MS`. Threaded straight into `createEmbeddedRuntime`.
+   * `--backstop-min-ms`/`HELIPOD_BACKSTOP_MIN_MS`. Threaded straight into `createEmbeddedRuntime`.
    * Unset → identity (the drivers' own 30s/60s), byte-for-byte unchanged.
    */
   backstopMs?: (defaultMs: number) => number;
@@ -886,14 +886,14 @@ export async function bootLoaded(opts: BootLoadedOptions): Promise<BootResult> {
   const logSink = new InMemoryLogSink();
 
   if (opts.objectStoreUrl !== undefined && opts.fleet) {
-    throw new Error("stackbase: --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.");
+    throw new Error("helipod: --object-store cannot be combined with --fleet (Tier 2) — pick one write-scaling story.");
   }
   if (opts.replica && opts.objectStoreUrl === undefined) {
     // Defense in depth: `serve.ts` already validates this synchronously at the CLI-flag level,
     // before ever calling `bootProject`/`bootLoaded` — this only guards a direct `bootLoaded` caller
     // (e.g. a test) that sets `replica` without `objectStoreUrl`.
     throw new Error(
-      "stackbase: --replica requires --object-store — a replica materializes from an object-storage bucket; pass --object-store <url>.",
+      "helipod: --replica requires --object-store — a replica materializes from an object-storage bucket; pass --object-store <url>.",
     );
   }
   // Tier 3 Slice 6/8: ee-gate → resolve → adopt globals → materialize → (writer only) acquire the
@@ -944,7 +944,7 @@ export async function bootLoaded(opts: BootLoadedOptions): Promise<BootResult> {
   // reject-mode multi-shard are both unaffected.
   if (objectStoreReplicaNode && opts.writerUrl !== undefined && objectStoreReplicaNode.numShards > 1) {
     throw new Error(
-      `stackbase: --writer-url (replica write-forwarding) is not yet supported on a multi-shard bucket ` +
+      `helipod: --writer-url (replica write-forwarding) is not yet supported on a multi-shard bucket ` +
         `(this bucket has ${objectStoreReplicaNode.numShards} shards) — run the replica in reject mode (drop --writer-url) ` +
         `and send writes directly to the writer, or use a single-shard deployment.`,
     );
@@ -980,17 +980,17 @@ export async function bootLoaded(opts: BootLoadedOptions): Promise<BootResult> {
     numShards = objectStoreWriterNode?.numShards ?? objectStoreReplicaNode?.numShards ?? 1;
   } else {
     await store.setupSchema();
-    numShards = await resolveNumShards(store, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
+    numShards = await resolveNumShards(store, parseNumShards(process.env.HELIPOD_FLEET_SHARDS));
   }
 
   // Fleet B4 (T4): resolve GROUP_COMMIT the same shape as `numShards` above — a fleet caller has
-  // already resolved its own `STACKBASE_GROUP_COMMIT` read (mirrors `fleetMultiWriterEnabled`'s
-  // pattern in `@stackbase/fleet`'s `node.ts`) and threads it in as `opts.fleet.groupCommit`; the
+  // already resolved its own `HELIPOD_GROUP_COMMIT` read (mirrors `fleetMultiWriterEnabled`'s
+  // pattern in `@helipod/fleet`'s `node.ts`) and threads it in as `opts.fleet.groupCommit`; the
   // non-fleet path (dev, `serve` without `--fleet`, the single binary) reads the env var directly.
   // No persist-once story needed (see `groupCommitEnabled`'s doc comment) — a plain per-boot read.
   const groupCommit = opts.fleet
     ? (opts.fleet.groupCommit ?? false)
-    : resolveGroupCommit({ envRaw: process.env.STACKBASE_GROUP_COMMIT, databaseUrl: opts.databaseUrl });
+    : resolveGroupCommit({ envRaw: process.env.HELIPOD_GROUP_COMMIT, databaseUrl: opts.databaseUrl });
 
   // File storage is always on. Blobs sit beside the SQLite file (`<dataDir>/storage`); the signing
   // key is the deployment admin key (already fail-fasted-if-unset by `serve`). The `_storage` table
@@ -1064,7 +1064,7 @@ export async function bootLoaded(opts: BootLoadedOptions): Promise<BootResult> {
     // above (fleet: threaded in already-resolved; non-fleet: resolved+persisted just now).
     numShards,
     // Fleet B4 (T4): route every shard's commits through the group-commit committer loop — resolved
-    // above (fleet: threaded in already-resolved; non-fleet: read from STACKBASE_GROUP_COMMIT).
+    // above (fleet: threaded in already-resolved; non-fleet: read from HELIPOD_GROUP_COMMIT).
     groupCommit,
     // The wake seam (`serve --wake-url` / `--backstop-min-ms`): a host that stops the process between
     // requests fires driver timers via `runtime.fireDueTimers()` instead of `setTimeout`, and can
@@ -1199,7 +1199,7 @@ export async function bootProject(opts: BootProjectOptions): Promise<BootResult>
  */
 export function loadDashboard(adminKey: string | undefined): { distDir: string; html: string } | undefined {
   try {
-    const indexPath = createRequire(import.meta.url).resolve("@stackbase/dashboard/dist");
+    const indexPath = createRequire(import.meta.url).resolve("@helipod/dashboard/dist");
     const distDir = dirname(indexPath);
     const raw = readFileSync(indexPath, "utf8");
     if (adminKey === undefined) return { distDir, html: raw }; // no key embedded → SPA prompts

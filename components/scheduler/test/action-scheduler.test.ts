@@ -1,6 +1,6 @@
 // components/scheduler/test/action-scheduler.test.ts
 import { describe, it, expect } from "vitest";
-import { mutation, action } from "@stackbase/executor";
+import { mutation, action } from "@helipod/executor";
 import { makeRuntimeWithScheduler } from "./helpers";
 
 describe("ctx.scheduler in actions (buildAction → runMutation delegation)", () => {

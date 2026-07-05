@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
-import { defineScheduler, cronJobs } from "@stackbase/scheduler";
-import { mutation, query, action } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod, type TestHelipod } from "../../src";
+import { defineScheduler, cronJobs } from "@helipod/scheduler";
+import { mutation, query, action } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type A = any;
@@ -28,10 +28,10 @@ const mod = {
 };
 
 describe("conformance — scheduler", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: { "mod.ts": mod, "schema.ts": { default: schema } },
       components: [defineScheduler()],
     });
@@ -97,9 +97,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       currentTs: query(async (ctx: A) => ctx.now()),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": runAtMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -145,9 +145,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       all: query(async (ctx: A) => ctx.db.query("runs", "by_creation").collect()),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": actionMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -180,7 +180,7 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       // own reactive/timer wake (no manual ticking needed — see `driver.ts`'s `start()`) drain the
       // job on real (near-zero-delay) time, observed via polling like `reactivity.test.ts`'s
       // `waitFor` rather than `advanceTimers` (unavailable — real clock isn't harness-owned).
-      const t2 = await createTestStackbase({
+      const t2 = await createTestHelipod({
         modules: { "mod.ts": actionMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
         now: () => Date.now(),
@@ -222,10 +222,10 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       schedule: mutation(async (ctx: A) => ctx.scheduler.enqueue("mod:flaky", {}, { retry: { maxFailures: 2 } })),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
       flakyRuns = 0;
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": retryMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -271,9 +271,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       callbacks: query(async (ctx: A) => ctx.db.query("callbacks", "by_creation").collect()),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": callbackMod, "schema.ts": { default: callbackSchema } },
         components: [defineScheduler()],
       });
@@ -315,9 +315,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       }),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": cancelMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -371,9 +371,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       count: query(async (ctx: A) => (await ctx.db.query("runs", "by_creation").collect()).length),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": idemMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -409,9 +409,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       schedule: mutation(async (ctx: A) => ctx.scheduler.runAfter(0, "mod:insertRun", { at: "reactive-tick" })),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": reactiveMod, "schema.ts": { default: schema } },
         components: [defineScheduler()],
       });
@@ -459,7 +459,7 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       };
       crons.interval("beat-cron", { seconds: 10 }, "mod:beat", {});
 
-      const t = await createTestStackbase({
+      const t = await createTestHelipod({
         modules: { "mod.ts": cronMod, "schema.ts": { default: cronSchema } },
         components: [defineScheduler({ crons })],
       });
@@ -492,7 +492,7 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       };
       crons.interval("beat-cron-skip", { seconds: 10 }, "mod:beat", {}); // default catchUp: "skip"
 
-      const t = await createTestStackbase({
+      const t = await createTestHelipod({
         modules: { "mod.ts": cronMod, "schema.ts": { default: cronSchema } },
         components: [defineScheduler({ crons })],
       });
@@ -534,9 +534,9 @@ describe("conformance — scheduler: runAt, actions, retries, onComplete/context
       goodCount: query(async (ctx: A) => (await ctx.db.query("good", "by_creation").collect()).length),
     };
 
-    let t: TestStackbase;
+    let t: TestHelipod;
     beforeEach(async () => {
-      t = await createTestStackbase({
+      t = await createTestHelipod({
         modules: { "mod.ts": isolationMod, "schema.ts": { default: isolationSchema } },
         components: [defineScheduler()],
       });

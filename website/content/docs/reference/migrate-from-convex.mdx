@@ -1,31 +1,31 @@
 ---
 title: Migrate from Convex
-description: Use stackbase migrate to port a Convex project's imports, then work through its report.
+description: Use helipod migrate to port a Convex project's imports, then work through its report.
 ---
 
 {/* diataxis: how-to */}
 
-A Convex app already looks like a stackbase app. Same query and mutation handlers, the same
+A Convex app already looks like a helipod app. Same query and mutation handlers, the same
 `defineSchema`/`defineTable` schema, the same client hooks. Porting one is mostly a matter of
 rewriting imports, not rewriting your logic.
 
-`stackbase migrate` automates the mechanical part: import specifiers, `package.json`,
+`helipod migrate` automates the mechanical part: import specifiers, `package.json`,
 `_generated/`. For everything it can't do for you, it gives you a concrete, file-and-line list.
 
-Canonical imports in stackbase are `@stackbase/*`, never `convex/*` (see
-[What is stackbase?](/docs/get-started/what-is-stackbase)). `stackbase migrate` also renames your
-app's function directory from `convex/` to stackbase's own default, `stackbase/`, as part of the
-same run. Migrating moves your app onto the native import surface; it does not make stackbase
+Canonical imports in helipod are `@helipod/*`, never `convex/*` (see
+[What is helipod?](/docs/get-started/what-is-helipod)). `helipod migrate` also renames your
+app's function directory from `convex/` to helipod's own default, `helipod/`, as part of the
+same run. Migrating moves your app onto the native import surface; it does not make helipod
 execute `convex/*` imports unchanged. There's no compatibility shim to fall back on. The codemod is
 the whole migration.
 
-This page covers two independent things under one command: `stackbase migrate` rewrites a Convex
-project's **code**, and `stackbase migrate export`/`import` moves an app's **data** between
+This page covers two independent things under one command: `helipod migrate` rewrites a Convex
+project's **code**, and `helipod migrate export`/`import` moves an app's **data** between
 storage topologies. Most projects only need the first.
 
 ```mermaid
 flowchart LR
-  A["Convex project"] -->|"stackbase migrate"| B["Migrated code + MIGRATION-REPORT.md"]
+  A["Convex project"] -->|"helipod migrate"| B["Migrated code + MIGRATION-REPORT.md"]
   C["Running deployment"] -->|"migrate export"| D["dump.json"]
   D -->|"migrate import"| E["New deployment"]
 ```
@@ -36,10 +36,10 @@ Nothing about your function bodies needs to change:
 
 - `query`/`mutation`/`action` still come from `./_generated/server`. Your function bodies don't
   move.
-- `schema.ts` keeps its shape (it just relocates from `convex/` to `stackbase/` along with the rest
+- `schema.ts` keeps its shape (it just relocates from `convex/` to `helipod/` along with the rest
   of the directory, see [the rename step](#what-it-actually-does-in-order) below).
   `defineSchema`, `defineTable`, and indexes work the same way; only the import specifier moves.
-- `useQuery`/`useMutation` keep the same signatures, imported from `@stackbase/client/react`
+- `useQuery`/`useMutation` keep the same signatures, imported from `@helipod/client/react`
   instead of `convex/react`.
 
 ## Migrating a project's code
@@ -54,7 +54,7 @@ The command detects a Convex project by either signal being present at the proje
 It then refuses to touch a dirty git working tree:
 
 ```bash
-$ stackbase migrate
+$ helipod migrate
 refusing to migrate: /path/to/app has uncommitted changes (commit/stash first, or pass --force)
 ```
 
@@ -73,12 +73,12 @@ warning: /path/to/app is not a git repo, changes will be made in place with no e
 </Callout>
 
 The dirty check runs against the **parent** of `--dir` (the project root, one level above your
-Convex app directory), the same directory `package.json` and `stackbase.config.ts` live in.
+Convex app directory), the same directory `package.json` and `helipod.config.ts` live in.
 
 ### Running it
 
 ```bash title="terminal"
-stackbase migrate --from convex --dir convex
+helipod migrate --from convex --dir convex
 ```
 
 | Flag | Default | Meaning |
@@ -93,14 +93,14 @@ every file edit, every scaffold, and `_generated/` regeneration entirely. Your `
 left byte-for-byte as it was.
 
 ```bash
-$ stackbase migrate --dry-run --force
+$ helipod migrate --dry-run --force
 [dry-run] 3 files would change, 1 scaffolded. See MIGRATION-REPORT.md
 ```
 
 A real run reports what it actually did, and how many items still need you:
 
 ```bash
-$ stackbase migrate --force
+$ helipod migrate --force
 migrated 3 files. 2 item(s) need manual attention, see MIGRATION-REPORT.md
 ```
 
@@ -113,8 +113,8 @@ migrated 3 files. 2 item(s) need manual attention, see MIGRATION-REPORT.md
 ### Rename the functions directory
 
 Runs right after detection, on the untouched tree, and before anything else. If the source
-directory (`--dir`, default `convex`) differs from where stackbase itself would put it
-(`stackbase/` by default, or your project's own `functionsDir` in `stackbase.config.ts`), the whole
+directory (`--dir`, default `convex`) differs from where helipod itself would put it
+(`helipod/` by default, or your project's own `functionsDir` in `helipod.config.ts`), the whole
 directory is renamed there first: `git mv` inside a git repo, falling back to a plain filesystem
 rename if that fails. If the target directory already exists, the migration refuses to proceed
 rather than overwrite it. Every step from here on operates on the renamed directory. On `--dry-run`,
@@ -146,7 +146,7 @@ auto-fix (see [The divergence scan](#the-divergence-scan) below).
 ### Edit `package.json`
 
 It drops the `convex` dependency and any `@convex-dev/*` dependency, then adds, at version
-`"latest"`, whichever of `@stackbase/values`/`@stackbase/client` the rewrite actually introduced
+`"latest"`, whichever of `@helipod/values`/`@helipod/client` the rewrite actually introduced
 into your source. Only those two packages are auto-added. See the
 [scheduler gotcha](#the-scheduler-scaffold-doesnt-wire-your-crons-for-you) below for what isn't.
 
@@ -154,10 +154,10 @@ into your source. Only those two packages are auto-added. See the
 
 <Step>
 
-### Scaffold `stackbase.config.ts`, only if you use crons
+### Scaffold `helipod.config.ts`, only if you use crons
 
 This step runs *only* if it detected a `crons.ts` file or a `cronJobs(...)` call anywhere in your
-source, and only if `stackbase.config.ts` doesn't already exist. An existing config file is never
+source, and only if `helipod.config.ts` doesn't already exist. An existing config file is never
 overwritten.
 
 </Step>
@@ -180,7 +180,7 @@ It deletes the app's existing `_generated/` directory outright. A real Convex ap
 were left in place, a JS-first module resolver would pick the stale `server.js` (which still
 imports the now-uninstalled `"convex/server"`) over the regenerated `.ts`. It then loads the
 rewritten project and regenerates fresh typed `Doc`/`Id`/`api` and server helpers, through the same
-`loadFunctionsDir → push → writeGenerated` pipeline `stackbase codegen` uses.
+`loadFunctionsDir → push → writeGenerated` pipeline `helipod codegen` uses.
 
 If codegen fails, usually because an action-needed item wasn't fixed yet (for example, a
 `.withIndex` left in place makes the load itself throw), the command exits `1`. Everything up to
@@ -189,7 +189,7 @@ written:
 
 ```
 imports migrated, but codegen failed: <error>
-See MIGRATION-REPORT.md; fix the flagged items, then run `stackbase codegen`.
+See MIGRATION-REPORT.md; fix the flagged items, then run `helipod codegen`.
 ```
 
 </Step>
@@ -207,16 +207,16 @@ Three specifiers are unambiguous and always rewritten wherever they appear, quot
 
 | From | To |
 |---|---|
-| `"convex/values"` | `"@stackbase/values"` |
-| `"convex/react"` | `"@stackbase/client/react"` |
-| `"convex/browser"` | `"@stackbase/client"` |
+| `"convex/values"` | `"@helipod/values"` |
+| `"convex/react"` | `"@helipod/client/react"` |
+| `"convex/browser"` | `"@helipod/client"` |
 
 `"convex/server"` is different. Convex overloads that one module for schema builders, HTTP
-routing, and crons, which map to three different places in stackbase:
+routing, and crons, which map to three different places in helipod:
 
 | `convex/server` import | Rewrite |
 |---|---|
-| Only `defineSchema`/`defineTable` | `"@stackbase/values"` |
+| Only `defineSchema`/`defineTable` | `"@helipod/values"` |
 | Only `httpRouter`/`httpAction` | `"./_generated/server"` |
 | Anything else (including a mix, or `cronJobs`) | Left unchanged, flagged `action-needed` with the specific fix |
 
@@ -227,15 +227,15 @@ import { v } from "convex/values";
 export default defineSchema({ notes: defineTable({ body: v.string() }) });
 ```
 
-```ts title="stackbase/schema.ts (after migrate)"
-import { defineSchema, defineTable } from "@stackbase/values";
-import { v } from "@stackbase/values";
+```ts title="helipod/schema.ts (after migrate)"
+import { defineSchema, defineTable } from "@helipod/values";
+import { v } from "@helipod/values";
 
 export default defineSchema({ notes: defineTable({ body: v.string() }) });
 ```
 
 `./_generated/server` imports (`query`, `mutation`, `action`, `httpAction`) are never touched. A
-Convex app already imports those from the same relative path stackbase uses.
+Convex app already imports those from the same relative path helipod uses.
 
 A mixed `convex/server` import, say `import { defineSchema, cronJobs } from "convex/server"`, is
 never guessed at. It's left exactly as written and reported `action-needed` with a fix naming each
@@ -246,26 +246,26 @@ silently slips through as `unsupported`-by-omission.
 ### The divergence scan
 
 Independent of the import rewrite, every walked file is also scanned line by line for Convex
-runtime patterns that stackbase's engine doesn't accept, even after the import moves. Every finding
+runtime patterns that helipod's engine doesn't accept, even after the import moves. Every finding
 names the exact file and line.
 
-**Action-needed.** A real stackbase equivalent exists, but you adapt the call site by hand:
+**Action-needed.** A real helipod equivalent exists, but you adapt the call site by hand:
 
 | Convex pattern | Fix |
 |---|---|
 | `.withIndex(...)` | No `.withIndex`, use `ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"\|"desc").collect()` |
 | `ctx.db.patch(...)` | No `patch`, read the doc, spread-merge, `ctx.db.replace(id, { ...doc, ...changes })` |
 | `.paginate(...)` | `paginate({ cursor, pageSize, maxScan? })` returns `{ page, nextCursor, hasMore, scanCapped }` |
-| `ctx.auth` / `getUserIdentity()` | Identity is a string token via a context provider (e.g. `@stackbase/auth`'s `ctx.auth`), not a JWT-claims object |
-| `crons.ts` file, or any `cronJobs(...)` call | Compose `defineScheduler()` in `stackbase.config.ts`; use `cronJobs()` |
+| `ctx.auth` / `getUserIdentity()` | Identity is a string token via a context provider (e.g. `@helipod/auth`'s `ctx.auth`), not a JWT-claims object |
+| `crons.ts` file, or any `cronJobs(...)` call | Compose `defineScheduler()` in `helipod.config.ts`; use `cronJobs()` |
 
 **Unsupported.** No automatic path; you decide how, or whether, to proceed:
 
 | Convex pattern | Why |
 |---|---|
-| `@convex-dev/auth`, or an import from `"convex/auth"` | Not auto-translated, use [`@stackbase/auth`](/docs/components/auth) or an external JWT/OIDC provider |
-| `app.use(...)` (Convex Components), or a `convex.config.ts` file | Convex Components don't map 1:1. Recompose the equivalent stackbase component(s) via `stackbase.config.ts` |
-| `.vectorIndex(...)` / `.searchIndex(...)` | Full-text and vector search are not shipped in stackbase |
+| `@convex-dev/auth`, or an import from `"convex/auth"` | Not auto-translated, use [`@helipod/auth`](/docs/components/auth) or an external JWT/OIDC provider |
+| `app.use(...)` (Convex Components), or a `convex.config.ts` file | Convex Components don't map 1:1. Recompose the equivalent helipod component(s) via `helipod.config.ts` |
+| `.vectorIndex(...)` / `.searchIndex(...)` | Full-text and vector search are not shipped in helipod |
 
 `.withIndex`/`ctx.db.patch`/`.paginate`/`ctx.auth` are matched anywhere they appear as a substring
 on a line, so, for example, a comment mentioning `.paginate(` is flagged too. The scanner is
@@ -278,27 +278,27 @@ call.
 section is omitted entirely if it has no entries:
 
 ```md title="MIGRATION-REPORT.md"
-# Stackbase migration report
+# Helipod migration report
 
 5 auto-fixed, 3 action-needed, 1 unsupported.
 
 ## Auto-fixed (5)
 
-- `convex/`: renamed to stackbase/. **Fix:** Your backend functions now live in stackbase/. Imports inside that folder are relative and did not change.
-- `stackbase/schema.ts:1`: import "convex/server" (schema). **Fix:** rewritten to "@stackbase/values"
-- `stackbase/schema.ts:2`: import "convex/values". **Fix:** rewritten to "@stackbase/values"
-- `stackbase/messages.ts:1`: import "convex/react". **Fix:** rewritten to "@stackbase/client/react"
-- `stackbase/http.ts:1`: import "convex/server" (http). **Fix:** rewritten to "./_generated/server"
+- `convex/`: renamed to helipod/. **Fix:** Your backend functions now live in helipod/. Imports inside that folder are relative and did not change.
+- `helipod/schema.ts:1`: import "convex/server" (schema). **Fix:** rewritten to "@helipod/values"
+- `helipod/schema.ts:2`: import "convex/values". **Fix:** rewritten to "@helipod/values"
+- `helipod/messages.ts:1`: import "convex/react". **Fix:** rewritten to "@helipod/client/react"
+- `helipod/http.ts:1`: import "convex/server" (http). **Fix:** rewritten to "./_generated/server"
 
 ## Action needed (3)
 
-- `stackbase/messages.ts:14`: .withIndex(...) query. **Fix:** Stackbase has no .withIndex, use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()
-- `stackbase/messages.ts:22`: ctx.db.patch(...). **Fix:** Stackbase has no patch, read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })
-- `stackbase/crons.ts:1`: Convex crons (cronJobs). **Fix:** Compose defineScheduler() in stackbase.config.ts and use cronJobs() from "@stackbase/scheduler"
+- `helipod/messages.ts:14`: .withIndex(...) query. **Fix:** Helipod has no .withIndex, use ctx.db.query(table, "index").eq(f, v).gte(f, v).order("asc"|"desc").collect()
+- `helipod/messages.ts:22`: ctx.db.patch(...). **Fix:** Helipod has no patch, read the doc, spread-merge, ctx.db.replace(id, { ...doc, ...changes })
+- `helipod/crons.ts:1`: Convex crons (cronJobs). **Fix:** Compose defineScheduler() in helipod.config.ts and use cronJobs() from "@helipod/scheduler"
 
 ## Unsupported (1)
 
-- `stackbase/search.ts:9`: vector/search index. **Fix:** search/vector is not yet supported in Stackbase (see roadmap)
+- `helipod/search.ts:9`: vector/search index. **Fix:** search/vector is not yet supported in Helipod (see roadmap)
 ```
 
 Every finding, including the auto-fixed ones, is listed for visibility, not just the ones that need
@@ -309,17 +309,17 @@ work. It's a full diff of what the tool touched, in one file, without needing `g
 <Callout type="warn" title="Scaffold only">
 
 If `migrate` detects a `crons.ts` file (or a bare `cronJobs(...)` call anywhere), it scaffolds a
-starting `stackbase.config.ts` (skipped if one already exists), but it doesn't wire your actual
+starting `helipod.config.ts` (skipped if one already exists), but it doesn't wire your actual
 cron definitions into it. That part is on you, in two small steps below.
 
 </Callout>
 
-```ts title="stackbase.config.ts (scaffolded)"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
+```ts title="helipod.config.ts (scaffolded)"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
 
-// Convex crons map to Stackbase's scheduler component. Move your cron definitions into
-// a convex/crons.ts using cronJobs() from "@stackbase/scheduler".
+// Convex crons map to Helipod's scheduler component. Move your cron definitions into
+// a convex/crons.ts using cronJobs() from "@helipod/scheduler".
 export default defineConfig({ components: [defineScheduler()] });
 ```
 
@@ -331,8 +331,8 @@ Two things to do by hand from there, per [Scheduling](/docs/components/schedulin
 
 ### Add the packages yourself
 
-Add `@stackbase/scheduler` and `@stackbase/component` to `package.json` yourself. Unlike
-`@stackbase/values`/`@stackbase/client`, the scaffold's own dependencies aren't auto-added: the
+Add `@helipod/scheduler` and `@helipod/component` to `package.json` yourself. Unlike
+`@helipod/values`/`@helipod/client`, the scaffold's own dependencies aren't auto-added: the
 `package.json` edit only reacts to what the import-rewrite pass introduced into your walked source
 files, and the scaffolded config file isn't part of that pass.
 
@@ -342,11 +342,11 @@ files, and the scaffolded config file isn't part of that pass.
 
 ### Wire your actual crons in
 
-`cronJobs()` in stackbase is imported from `./_generated/server` (not `@stackbase/scheduler`
+`cronJobs()` in helipod is imported from `./_generated/server` (not `@helipod/scheduler`
 directly), and the registry it builds does nothing until it's passed to
 `defineScheduler({ crons })`:
 
-```ts title="stackbase/crons.ts"
+```ts title="helipod/crons.ts"
 import { cronJobs } from "./_generated/server";
 
 const crons = cronJobs();
@@ -355,10 +355,10 @@ crons.interval("cleanup", { minutes: 5 }, internal.maintenance.purge, {});
 export default crons;
 ```
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import crons from "./stackbase/crons";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import crons from "./helipod/crons";
 
 export default defineConfig({ components: [defineScheduler({ crons })] });
 ```
@@ -375,7 +375,7 @@ The report's `action-needed` entry for crons points you at exactly this.
 
 <Accordion id="the-source-adapter-seam" title="The source-adapter seam">
 
-`stackbase migrate --from <source>` is not hardcoded to Convex internally. It dispatches through a
+`helipod migrate --from <source>` is not hardcoded to Convex internally. It dispatches through a
 small `MigrationSource` interface:
 
 ```ts
@@ -401,11 +401,11 @@ const SOURCES: Record<string, MigrationSource> = { convex: convexSource };
 `convex` is the only value `--from` accepts today. Passing anything else fails fast:
 
 ```bash
-$ stackbase migrate --from supabase
+$ helipod migrate --from supabase
 unknown migration source "supabase" (available: convex)
 ```
 
-Convex is a near-free first source specifically because stackbase's runtime already executes
+Convex is a near-free first source specifically because helipod's runtime already executes
 Convex-shaped query/mutation/action functions. The whole migration is an import codemod plus a
 report, never a data or logic transform. A source for a fundamentally different backend
 (Supabase's relational SQL/RLS, Firebase's collection model) would need to translate the data
@@ -431,23 +431,23 @@ always depends on `convex`) is unaffected.
 
 ## Moving data between deployments
 
-`stackbase migrate export` and `stackbase migrate import` move an app's actual rows between two
+`helipod migrate export` and `helipod migrate import` move an app's actual rows between two
 running deployments. Most commonly this means moving between a portable
 SQLite/Postgres/container deployment and a Cloudflare DO-native one, since [those two store data in
 physically different topologies](/docs/deploy/cloudflare#moving-data-between-hosts) and data never
 teleports between them on its own.
 
-Both are HTTP clients, modeled on `stackbase deploy`, that call a **running** deployment's
+Both are HTTP clients, modeled on `helipod deploy`, that call a **running** deployment's
 bearer-gated admin endpoints (`GET /_admin/export`, `POST /_admin/import`), authenticated with the
-same `STACKBASE_ADMIN_KEY` the dashboard and `stackbase deploy --allow-deploy` use. Both the
+same `HELIPOD_ADMIN_KEY` the dashboard and `helipod deploy --allow-deploy` use. Both the
 container `serve` path and the Cloudflare DO host expose the same `/_admin/*` handler, so one
 client works in either direction. A stopped plain-SQLite file has no HTTP endpoint of its own:
-point a throwaway `stackbase serve`/`stackbase dev` at its data directory first, export from that,
+point a throwaway `helipod serve`/`helipod dev` at its data directory first, export from that,
 then tear it down.
 
 ```bash
-stackbase migrate export --url <source-url> --out dump.json
-stackbase migrate import --url <target-url> --in dump.json
+helipod migrate export --url <source-url> --out dump.json
+helipod migrate import --url <target-url> --in dump.json
 ```
 
 | Flag | Applies to | Default | Meaning |
@@ -455,27 +455,27 @@ stackbase migrate import --url <target-url> --in dump.json
 | `--url <url>` | both | (required) | The deployment to export from / import into |
 | `--out <file>` | `export` | (required) | Where to write the dump |
 | `--in <file>` | `import` | (required) | The dump file to read |
-| `--admin-key <key>` | both | `$STACKBASE_ADMIN_KEY` | Overrides the env var |
+| `--admin-key <key>` | both | `$HELIPOD_ADMIN_KEY` | Overrides the env var |
 
-`STACKBASE_ADMIN_KEY` (env or `--admin-key`) is required for both verbs. Missing it fails
+`HELIPOD_ADMIN_KEY` (env or `--admin-key`) is required for both verbs. Missing it fails
 immediately, before any network call:
 
 ```bash
-$ stackbase migrate export --url http://localhost:3210 --out dump.json
-✗ STACKBASE_ADMIN_KEY is required (or pass --admin-key)
+$ helipod migrate export --url http://localhost:3210 --out dump.json
+✗ HELIPOD_ADMIN_KEY is required (or pass --admin-key)
 ```
 
 A wrong key against a real deployment gets a clean `401`, not a stack trace:
 
 ```bash
-$ stackbase migrate export --url http://localhost:3210 --out dump.json --admin-key wrong
-✗ unauthorized, check STACKBASE_ADMIN_KEY / --admin-key
+$ helipod migrate export --url http://localhost:3210 --out dump.json --admin-key wrong
+✗ unauthorized, check HELIPOD_ADMIN_KEY / --admin-key
 ```
 
 ### Export
 
 ```bash
-$ STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://source.example.com --out dump.json
+$ HELIPOD_ADMIN_KEY=… helipod migrate export --url https://source.example.com --out dump.json
 ✓ exported 5 documents, 2 index rows → dump.json
 ```
 
@@ -483,7 +483,7 @@ The dump is a self-describing JSON file:
 
 ```json title="dump.json (shape)"
 {
-  "format": "stackbase-migration-dump",
+  "format": "helipod-migration-dump",
   "documents": [ /* every document across every table, with its real _id and _creationTime */ ],
   "indexUpdates": [ /* … */ ],
   "tableNumbers": { "messages": 3, "users": 4 }
@@ -493,7 +493,7 @@ The dump is a self-describing JSON file:
 ### Import
 
 ```bash
-$ STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://target.example.com --in dump.json
+$ HELIPOD_ADMIN_KEY=… helipod migrate import --url https://target.example.com --in dump.json
 ✓ imported 5 documents, 2 index rows
 ```
 
@@ -505,7 +505,7 @@ gates on a table-number collision guard and rejects outright, with everything le
 the dump's table numbers don't match the target's:
 
 ```bash
-$ stackbase migrate import --url https://target.example.com --in dump.json --admin-key …
+$ helipod migrate import --url https://target.example.com --in dump.json --admin-key …
 ✗ import failed: wrong table number for "messages" (dump has 12348, target has 3)
 ```
 
@@ -531,7 +531,7 @@ fix.
 
 <Step>
 
-### Run `stackbase dev` and exercise the app
+### Run `helipod dev` and exercise the app
 
 A broken `action-needed` fix (for example a leftover `.withIndex`) surfaces as a load error
 immediately, not a silent runtime divergence.
@@ -542,10 +542,10 @@ immediately, not a silent runtime divergence.
 
 ### Port your tests, if you have them
 
-`stackbase migrate` rewrites only your app's own function-directory source (renamed from `convex/`
-to `stackbase/` as part of the same run). It does not touch `convex-test` call sites. Switch those
-to [`@stackbase/test`](/docs/reference/testing) yourself.
-The fixture shape (`createTestStackbase`) is different enough that it isn't auto-rewritten.
+`helipod migrate` rewrites only your app's own function-directory source (renamed from `convex/`
+to `helipod/` as part of the same run). It does not touch `convex-test` call sites. Switch those
+to [`@helipod/test`](/docs/reference/testing) yourself.
+The fixture shape (`createTestHelipod`) is different enough that it isn't auto-rewritten.
 
 </Step>
 
@@ -566,7 +566,7 @@ One table for "will my app port?". Every "not available" row is exactly what the
 [divergence scan](#the-divergence-scan) flags at the call site, so nothing here surprises you at
 runtime.
 
-| Feature | Convex | stackbase |
+| Feature | Convex | helipod |
 |---|---|---|
 | Queries / mutations / actions / internal functions | Yes | Shipped, same `./_generated/server` authoring shape |
 | Argument and return validators (`v.*`) | Yes | Shipped |
@@ -578,16 +578,16 @@ runtime.
 | Optimistic updates | Yes | Shipped, Convex-verbatim `withOptimisticUpdate` (promise resolves at commit, see below) |
 | Durable offline mutations | No first-party equivalent | Shipped: durable outbox, client-supplied ids, cross-tab rendering |
 | HTTP actions (`httpRouter`/`httpAction`) | Yes | Shipped (no automatic CORS, path params, or middleware, by design) |
-| `ctx.scheduler.runAfter`/`runAt` and crons | Yes | Shipped via the `@stackbase/scheduler` component, composed explicitly |
-| Durable workflows | `@convex-dev/workflow` | Shipped via `@stackbase/workflow`, including saga/compensation |
+| `ctx.scheduler.runAfter`/`runAt` and crons | Yes | Shipped via the `@helipod/scheduler` component, composed explicitly |
+| Durable workflows | `@convex-dev/workflow` | Shipped via `@helipod/workflow`, including saga/compensation |
 | File storage (`ctx.storage`) | Yes | Shipped (two-phase uploads; `store`/`get` are action-only) |
-| Auth | Convex Auth, or third-party JWT | `@stackbase/auth` (sessions, OAuth, JWT/OIDC, MFA, passkeys); Convex Auth itself doesn't port |
-| Convex Components (`app.use`) | Yes | Different model: compose `@stackbase/*` components in `stackbase.config.ts` |
+| Auth | Convex Auth, or third-party JWT | `@helipod/auth` (sessions, OAuth, JWT/OIDC, MFA, passkeys); Convex Auth itself doesn't port |
+| Convex Components (`app.use`) | Yes | Different model: compose `@helipod/*` components in `helipod.config.ts` |
 | Full-text search / vector search | Yes | Not built; the migrator flags usage as `unsupported` |
 
 ## Honest compatibility notes
 
-**Near-free, by design, not a coincidence.** stackbase's runtime already executes Convex-shaped
+**Near-free, by design, not a coincidence.** helipod's runtime already executes Convex-shaped
 query/mutation/action functions natively, so migrating is overwhelmingly an import-specifier
 rewrite plus `_generated/` regeneration, not a rewrite of your handlers, your schema shape, or your
 client code.
@@ -595,40 +595,40 @@ client code.
 The divergences that do exist are real, not cosmetic, and the scanner is built specifically to
 catch every one of them at the call site rather than let them surface later as a runtime bug:
 
-- **No `ctx.db.patch`.** stackbase's writer is `insert`/`replace`/`delete` only. A Convex `patch`
+- **No `ctx.db.patch`.** helipod's writer is `insert`/`replace`/`delete` only. A Convex `patch`
   call becomes a read, spread-merge, and `replace`. See [Mutations](/docs/core-concepts/mutations).
-- **No `.withIndex(...)`.** stackbase's query builder is `ctx.db.query(table, index)` with chained
+- **No `.withIndex(...)`.** helipod's query builder is `ctx.db.query(table, index)` with chained
   `.eq`/`.gt`/`.gte`/`.lt`/`.lte`/`.order`/`.where`. See [Queries](/docs/core-concepts/queries).
 - **A mutation's promise resolves at commit, not at gate-time.** If your client code relied on a
   Convex-specific gate-time resolution timing for optimistic-update sequencing, revisit it against
   [Optimistic updates](/docs/client/optimistic-updates)'s documented promise-timing migration note.
-- **No full-text or vector search.** `.searchIndex(...)`/`.vectorIndex(...)` have no stackbase
+- **No full-text or vector search.** `.searchIndex(...)`/`.vectorIndex(...)` have no helipod
   equivalent. The scan flags every occurrence as `unsupported` rather than silently dropping it.
 - **Crons need an explicit component.** `cronJobs()` only takes effect once composed into
-  `stackbase.config.ts` via `defineScheduler({ crons })`. Convex's implicit registration doesn't
+  `helipod.config.ts` via `defineScheduler({ crons })`. Convex's implicit registration doesn't
   carry over.
 - **`ctx.auth` is a string token, not a JWT-claims object**, resolved via a context provider (e.g.
-  [`@stackbase/auth`](/docs/components/auth)) rather than baked into the runtime.
-- **Convex Components and Convex Auth don't map 1:1.** Recompose the equivalent stackbase
-  component(s): [`@stackbase/auth`](/docs/components/auth),
-  [`@stackbase/scheduler`](/docs/components/scheduling),
-  [`@stackbase/workflow`](/docs/components/workflows),
-  [`@stackbase/triggers`](/docs/components/triggers),
-  [`@stackbase/notifications`](/docs/components/notifications), via `stackbase.config.ts`.
+  [`@helipod/auth`](/docs/components/auth)) rather than baked into the runtime.
+- **Convex Components and Convex Auth don't map 1:1.** Recompose the equivalent helipod
+  component(s): [`@helipod/auth`](/docs/components/auth),
+  [`@helipod/scheduler`](/docs/components/scheduling),
+  [`@helipod/workflow`](/docs/components/workflows),
+  [`@helipod/triggers`](/docs/components/triggers),
+  [`@helipod/notifications`](/docs/components/notifications), via `helipod.config.ts`.
 
-`@stackbase/*` is the canonical surface, permanently. This isn't a temporary migration artifact.
-stackbase's own default function directory is `stackbase/`, not `convex/`; `convex/` was never the
-target, only where a Convex app starts from, and `stackbase migrate` renames it as part of the same
+`@helipod/*` is the canonical surface, permanently. This isn't a temporary migration artifact.
+helipod's own default function directory is `helipod/`, not `convex/`; `convex/` was never the
+target, only where a Convex app starts from, and `helipod migrate` renames it as part of the same
 run. There's no alias path back to `convex/*` imports to maintain: once migrated, you're simply
-writing a native stackbase app.
+writing a native helipod app.
 
 ## Related
 
-- [What is stackbase?](/docs/get-started/what-is-stackbase): why the canonical surface is
-  `@stackbase/*`, not `convex/*`.
-- [CLI reference](/docs/reference/cli#migrate): the terse flag reference for every `stackbase`
+- [What is helipod?](/docs/get-started/what-is-helipod): why the canonical surface is
+  `@helipod/*`, not `convex/*`.
+- [CLI reference](/docs/reference/cli#migrate): the terse flag reference for every `helipod`
   subcommand, including `migrate`/`migrate export`/`migrate import`.
-- [Testing](/docs/reference/testing): `@stackbase/test` vs. `convex-test`.
+- [Testing](/docs/reference/testing): `@helipod/test` vs. `convex-test`.
 - [Scheduling](/docs/components/scheduling): the full `cronJobs()`/`defineScheduler()` surface a
   migrated `crons.ts` needs.
 - [Cloudflare](/docs/deploy/cloudflare#moving-data-between-hosts): why `migrate export`/`import`

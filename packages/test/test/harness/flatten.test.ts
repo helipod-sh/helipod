@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mutation, query, httpAction } from "@stackbase/executor";
+import { mutation, query, httpAction } from "@helipod/executor";
 import { flattenModules } from "../../src/flatten";
 
 describe("flattenModules", () => {
@@ -34,15 +34,15 @@ describe("flattenModules", () => {
     expect(out.moduleMap["http:default"]).toBeUndefined();
   });
 
-  it("normalizes import.meta.glob-style keys (./stackbase/ prefix, the DEFAULT_FUNCTIONS_ROOT) to the same function-path root as explicit keys", async () => {
+  it("normalizes import.meta.glob-style keys (./helipod/ prefix, the DEFAULT_FUNCTIONS_ROOT) to the same function-path root as explicit keys", async () => {
     const send = mutation(async () => "ok");
     const ping = httpAction(async () => new Response("ok"));
     const schema = { __isSchema: true };
     const router = { __isRouter: true, routes: [] };
     const out = await flattenModules({
-      "./stackbase/messages.ts": { send },
-      "./stackbase/schema.ts": { default: schema },
-      "./stackbase/http.ts": { default: router, ping },
+      "./helipod/messages.ts": { send },
+      "./helipod/schema.ts": { default: schema },
+      "./helipod/http.ts": { default: router, ping },
     });
     expect(out.moduleMap["messages:send"]).toBe(send);
     expect(out.schemaModule).toBe(schema);
@@ -62,7 +62,7 @@ describe("flattenModules", () => {
     expect(out.moduleMap["messages:send"]).toBe(send);
   });
 
-  it("does NOT implicitly strip a legacy convex/ prefix when functionsRoot defaults to stackbase", async () => {
+  it("does NOT implicitly strip a legacy convex/ prefix when functionsRoot defaults to helipod", async () => {
     const send = mutation(async () => "ok");
     const out = await flattenModules({ "./convex/messages.ts": { send } });
     // No implicit convex/ tolerance: the segment survives as part of the module path.

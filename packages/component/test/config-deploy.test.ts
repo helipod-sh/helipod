@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { defineConfig, env, type StackbaseConfig } from "../src/index";
+import { defineConfig, env, type HelipodConfig } from "../src/index";
 
 describe("defineConfig deploy block", () => {
   it("carries a deploy block through unchanged", () => {
-    const cfg: StackbaseConfig = defineConfig({
+    const cfg: HelipodConfig = defineConfig({
       components: [],
       deploy: { defaultTarget: "cloudflare", targets: { cloudflare: { provider: "cloudflare" } } },
     });

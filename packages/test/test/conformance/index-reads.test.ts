@@ -1,21 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
+import { createTestHelipod, type TestHelipod } from "../../src";
 import { schema, mod } from "../fixtures/conformance-app";
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type A = any;
 
-// D1: Stackbase has no `.withIndex(cb)` — range predicates chain directly on the
+// D1: Helipod has no `.withIndex(cb)` — range predicates chain directly on the
 // QueryBuilder returned by `ctx.db.query(table, index)`:
 //   ctx.db.query(table, index).eq(field, val).gte(field, val).lt(field, val).order(dir).collect()
 
 describe("conformance — index reads", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
   });
 
   afterEach(async () => {
@@ -78,7 +78,7 @@ describe("conformance — index reads", () => {
   });
 });
 
-// A second, INLINE `createTestStackbase` over a single-field index (`by_n`, not the shared
+// A second, INLINE `createTestHelipod` over a single-field index (`by_n`, not the shared
 // fixture's compound `by_owner_n`) — exercises operators/behaviors the shared `mod.ts` doesn't
 // expose: `.gt`/`.lte` (opposite-boundary inclusivity from the `.gte`/`.lt` test above),
 // `.order("desc")` on a non-`by_creation` index, and `.take(n)` (the `limit`/`consumedRange`-trim
@@ -98,10 +98,10 @@ const idxMod = {
 };
 
 describe("conformance — index reads (inline single-field index, gt/lte/desc/take)", () => {
-  let t2: TestStackbase;
+  let t2: TestHelipod;
 
   beforeEach(async () => {
-    t2 = await createTestStackbase({ modules: { "mod.ts": idxMod, "schema.ts": { default: idxSchema } } });
+    t2 = await createTestHelipod({ modules: { "mod.ts": idxMod, "schema.ts": { default: idxSchema } } });
     await t2.run(async (ctx) => {
       for (const n of [1, 2, 3, 4, 5]) await ctx.db.insert("items", { n });
     });

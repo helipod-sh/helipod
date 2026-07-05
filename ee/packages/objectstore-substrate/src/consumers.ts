@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Consumer watermarks (Tier 3 Slice 5, Task 5.2, design record §6c) — a per-shard
  * `s{shard}/consumers/{id}` object per registered consumer (a replica's `ObjectStoreReplicaTailer`,
@@ -25,7 +25,7 @@
  * own restart) — handled with a small bounded retry (re-read, re-CAS) rather than treated as a hard
  * error on the first conflict.
  */
-import { isCasConflict, type ObjectStore } from "@stackbase/objectstore";
+import { isCasConflict, type ObjectStore } from "@helipod/objectstore";
 
 function consumersPrefix(shard: string): string {
   return `s${shard}/consumers/`;

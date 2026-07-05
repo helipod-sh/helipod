@@ -1,4 +1,4 @@
-# Packlist — the Stackbase offline demo
+# Packlist — the Helipod offline demo
 
 A packing-list app that exists to make the durable offline sync story visible: the durable
 outbox (queue → reload → drain → exactly-once), optimistic updates, client-minted ids
@@ -12,7 +12,7 @@ From the repo root (once): `bun install && bun run build`. Then:
 ```bash
 cd examples/offline-demo
 bun run web:build   # bundle the SPA (web/main.js is gitignored)
-bun run dev         # stackbase dev on http://localhost:3220
+bun run dev         # helipod dev on http://localhost:3220
 ```
 
 Open <http://localhost:3220>.

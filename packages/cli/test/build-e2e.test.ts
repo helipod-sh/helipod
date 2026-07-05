@@ -4,7 +4,7 @@ import { existsSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-// `bun run --filter @stackbase/cli test` resolves `vitest` off PATH (node_modules/.bin/vitest), which
+// `bun run --filter @helipod/cli test` resolves `vitest` off PATH (node_modules/.bin/vitest), which
 // carries a `#!/usr/bin/env node` shebang — Bun execs it honoring that shebang, so the vitest process
 // (and its test workers) run under real Node here, not Bun. The `Bun` global is undefined throughout
 // (confirmed directly: `typeof globalThis.Bun` is `"undefined"` even in vitest's main process). The
@@ -33,14 +33,14 @@ function readReadyLine(stdout: NodeJS.ReadableStream): Promise<{ url: string }> 
   });
 }
 
-describe("stackbase build (real compiled binary)", () => {
+describe("helipod build (real compiled binary)", () => {
   it("compiles a fixture app (with a component) and the binary serves a committing mutation", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", OUT, "--no-dashboard"]);
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/helipod", "--outfile", OUT, "--no-dashboard"]);
     expect(rc).toBe(0);
     expect(existsSync(OUT)).toBe(true);
 
     const proc = spawn(OUT, ["--port", "3599", "--hostname", "127.0.0.1", "--data-dir", DATA], {
-      env: { ...process.env, STACKBASE_ADMIN_KEY: "e2e" },
+      env: { ...process.env, HELIPOD_ADMIN_KEY: "e2e" },
       stdio: ["ignore", "pipe", "inherit"],
     });
     try {
@@ -57,16 +57,16 @@ describe("stackbase build (real compiled binary)", () => {
   }, 120_000);
 
   it("cross-compiles to linux-x64 (produces a non-empty file, not executed here)", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", `${OUT}-linux`, "--target", "linux-x64", "--no-dashboard"]);
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/helipod", "--outfile", `${OUT}-linux`, "--target", "linux-x64", "--no-dashboard"]);
     expect(rc).toBe(0);
     expect(statSync(`${OUT}-linux`).size).toBeGreaterThan(1_000_000);
   }, 120_000);
 
   it("embeds the dashboard by default (served) and omits it with --no-dashboard", async () => {
-    const rc = await buildCommand(["--dir", "test/fixtures/build-app/stackbase", "--outfile", `${OUT}-dash`]); // dashboard ON
+    const rc = await buildCommand(["--dir", "test/fixtures/build-app/helipod", "--outfile", `${OUT}-dash`]); // dashboard ON
     expect(rc).toBe(0);
     const proc = spawn(`${OUT}-dash`, ["--port", "3601", "--hostname", "127.0.0.1", "--data-dir", `${DATA}-dash`], {
-      env: { ...process.env, STACKBASE_ADMIN_KEY: "e2e" },
+      env: { ...process.env, HELIPOD_ADMIN_KEY: "e2e" },
       stdio: ["ignore", "pipe", "inherit"],
     });
     try {
@@ -74,7 +74,7 @@ describe("stackbase build (real compiled binary)", () => {
       const root = await fetch(`${url}/`);
       expect(root.status).toBe(200);
       const html = await root.text();
-      expect(html.toLowerCase()).toContain("stackbase");
+      expect(html.toLowerCase()).toContain("helipod");
 
       // Regression guard: index.html (vite base:"/_dashboard/") references its JS bundle at
       // `/_dashboard/assets/index-<hash>.js`, but the embedded asset map's keys are root-relative

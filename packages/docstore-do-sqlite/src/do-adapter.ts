@@ -34,7 +34,7 @@
  *    narrows those to `number` before they reach `sql.exec`.
  *
  * ## The `bigint`/`number` precision note (why `number` is safe here)
- * Stackbase's only INTEGER columns are logical timestamps (`ts`/`prev_ts`/`commit_ts` — a per-store
+ * Helipod's only INTEGER columns are logical timestamps (`ts`/`prev_ts`/`commit_ts` — a per-store
  * monotonic `MAX(ts)+1` counter seeded at 1) and millisecond wall-clocks (`created_at`/`updated_at`).
  * Both stay far under `Number.MAX_SAFE_INTEGER` (2^53): a single DO would need ~9 quadrillion commits
  * to overflow, and ms-time overflows in year ~+287000. Document ids and index keys are BLOBs, never
@@ -46,7 +46,7 @@
  * that ONE failure into a typed `DatabaseFullError` (see `errors.ts`) instead of an opaque throw,
  * while every other error (constraint violations, etc.) propagates untouched.
  */
-import type { DatabaseAdapter, PreparedStatement, RunResult, SqlRow, SqlValue } from "@stackbase/docstore-sqlite";
+import type { DatabaseAdapter, PreparedStatement, RunResult, SqlRow, SqlValue } from "@helipod/docstore-sqlite";
 import { DatabaseFullError, isDatabaseFullError } from "./errors";
 
 /** A DO-SQLite scalar, both as a binding and as a result cell:
@@ -85,7 +85,7 @@ export interface DoSqliteOptions {
 /** Narrow a DocStore-side binding (`SqlValue`) to what DO-SQLite's `exec` accepts. The only real work
  *  is `bigint → number` (DO has no bigint binding type); `Uint8Array` blobs and everything else pass
  *  through. Throws — rather than silently truncating — if a `bigint` exceeds the 2^53 safe range
- *  (unreachable for Stackbase's monotonic-counter timestamps; see the module note). */
+ *  (unreachable for Helipod's monotonic-counter timestamps; see the module note). */
 function toDoBinding(v: SqlValue): DoSqlValue {
   if (typeof v === "bigint") {
     if (v > 9007199254740991n || v < -9007199254740991n) {

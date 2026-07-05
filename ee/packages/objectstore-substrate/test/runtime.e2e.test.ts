@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 2.4 — the slice's HEADLINE E2E (design record §4/§6a/§7, whole-arc plan): the full engine —
  * transactor, query engine, and reactive read-set recording — runs over `ObjectStoreDocStore`, wired
@@ -17,13 +17,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import type { ObjectStore } from "@stackbase/objectstore";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import type { ObjectStore } from "@helipod/objectstore";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 
 const SHARD = "0";

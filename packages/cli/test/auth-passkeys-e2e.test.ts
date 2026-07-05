@@ -1,6 +1,6 @@
 /**
- * Auth passkeys/WebAuthn — E2E through the real `stackbase dev` server (e2e-through-shipped-entrypoint
- * rule). A REAL `@stackbase/client` over a REAL WebSocket to a REAL server with `@stackbase/auth`
+ * Auth passkeys/WebAuthn — E2E through the real `helipod dev` server (e2e-through-shipped-entrypoint
+ * rule). A REAL `@helipod/client` over a REAL WebSocket to a REAL server with `@helipod/auth`
  * composed WITH a `passkeys` config, mirroring `auth-session-e2e.test.ts`/`auth-external-e2e.test.ts`
  * (`loadProject` + `createEmbeddedRuntime` + `startDevServer` + real client/WebSocket transport,
  * event-driven `waitFor` — no bare sleeps for correctness-critical waits). The genuine
@@ -14,12 +14,12 @@
  *  (2) a counter-regression assertion is rejected and the subscription stays put (clone detection).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { query } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineAuth, type MintResult } from "@stackbase/auth";
+import { defineSchema } from "@helipod/values";
+import { query } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineAuth, type MintResult } from "@helipod/auth";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 import { createMockAuthenticator } from "./support/mock-authenticator";
 
@@ -80,7 +80,7 @@ describe("auth passkeys E2E through the real dev server", () => {
   it("(1) register-while-anon, then usernameless sign-in on a fresh connection flips a live whoami subscription to the registered user", async () => {
     const { wsUrl } = await startServer();
     // Connection A: sign in anonymously and register a passkey against that account.
-    const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const a = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     const authenticator = createMockAuthenticator();
     let userId: string;
     let credentialId: string;
@@ -104,7 +104,7 @@ describe("auth passkeys E2E through the real dev server", () => {
 
     // Connection B (FRESH, unauthenticated): open a live whoami subscription (null), then drive a
     // usernameless passkey sign-in and hand the minted token to setAuth.
-    const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const b = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const seen: Array<string | null> = [];
       b.subscribe(api.whoami.get, {}, (v) => seen.push(v as string | null));
@@ -138,7 +138,7 @@ describe("auth passkeys E2E through the real dev server", () => {
 
   it("(2) a counter-regression assertion is rejected — clone detection; the subscription stays authenticated", async () => {
     const { wsUrl } = await startServer();
-    const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const a = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     const authenticator = createMockAuthenticator();
     let userId: string;
     let credentialId: string;
@@ -156,7 +156,7 @@ describe("auth passkeys E2E through the real dev server", () => {
       a.close();
     }
 
-    const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const b = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       // First sign-in advances the stored counter to 5.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

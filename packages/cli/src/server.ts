@@ -8,10 +8,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
-import type { EmbeddedRuntime, RuntimeHost, ServeOptions, ServerHandle } from "@stackbase/runtime-embedded";
-import type { SyncWebSocket } from "@stackbase/sync";
-import type { AdminApi } from "@stackbase/admin";
-import type { StorageRoute } from "@stackbase/storage";
+import type { EmbeddedRuntime, RuntimeHost, ServeOptions, ServerHandle } from "@helipod/runtime-embedded";
+import type { SyncWebSocket } from "@helipod/sync";
+import type { AdminApi } from "@helipod/admin";
+import type { StorageRoute } from "@helipod/storage";
 import { handleHttpRequest, type ServerInfo, type FleetHandles } from "./http-handler";
 import type { ResolvedRoute } from "./project";
 import type { DeployWireResult } from "./deploy-apply";
@@ -55,7 +55,7 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 // `DevServer`/`DevServerOptions` are the process host's concrete instantiations of the neutral
-// `ServerHandle`/`ServeOptions` seam (in `@stackbase/runtime-embedded`), pinning its generic
+// `ServerHandle`/`ServeOptions` seam (in `@helipod/runtime-embedded`), pinning its generic
 // parameters to the CLI's own types. The seam carries the per-field docs (lifted verbatim from
 // here); the names are kept so every existing importer (tests, benches, `binary-main`) is unchanged.
 // NOTE: `componentRoutes` (reserved routes contributed by composed components, e.g. auth's OAuth

@@ -3,12 +3,12 @@
  * a socket. Routes: the `_dashboard` status page, a health check, `POST /api/run` for direct
  * function invocation, and `/_admin/*` for the admin API (behind an admin key).
  */
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { getHttpStatus, toStackbaseError, NotShardOwnerError, CommitGuardRejection } from "@stackbase/errors";
-import { matchRoute } from "@stackbase/executor";
-import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { handleAdminRequest, verifyAdminKey, type AdminApi } from "@stackbase/admin";
+import { convexToJson, type JSONValue, type Value } from "@helipod/values";
+import { getHttpStatus, toHelipodError, NotShardOwnerError, CommitGuardRejection } from "@helipod/errors";
+import { matchRoute } from "@helipod/executor";
+import { DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { handleAdminRequest, verifyAdminKey, type AdminApi } from "@helipod/admin";
 import type { ResolvedRoute } from "./project";
 import type { DeployWireResult } from "./deploy-apply";
 
@@ -22,7 +22,7 @@ export interface HttpRequest {
 }
 
 /**
- * The fleet node handle the HTTP layer consumes (structural mirror of `@stackbase/fleet`'s
+ * The fleet node handle the HTTP layer consumes (structural mirror of `@helipod/fleet`'s
  * `FleetHandles` — declared here so core cli has no static dependency on the enterprise package).
  * `role()` decides whether a sync node proxies public httpActions to the writer; `writerUrl()` is
  * that proxy target. Present only when `serve --fleet` is active.
@@ -34,23 +34,23 @@ export interface FleetHandles {
   /** Frontier-lag reading for /api/health (B2a, D5): the fleet-wide `min(frontier_ts)`, how long it's
    *  been stuck (ms), and which shard is pinning it. Null before the first frontier beat. Optional so
    *  older/stub `FleetHandles` (and pre-B2a fleet builds) satisfy the structural mirror; the health
-   *  handler optional-chains it. The real `@stackbase/fleet` node always provides it. */
+   *  handler optional-chains it. The real `@helipod/fleet` node always provides it. */
   frontierStats?(): { frontier: bigint; lagMs: number; pinningShard: string } | null;
   /**
    * Group-commit counters (Fleet B4, T4 health observability): the aggregate `EmbeddedRuntime.
    * groupCommitStats()` reading plus a derived `flushesPerSec` (a rolling delta between successive
-   * calls — see `@stackbase/fleet`'s `node.ts`). Structurally all-zero when `STACKBASE_GROUP_COMMIT`
+   * calls — see `@helipod/fleet`'s `node.ts`). Structurally all-zero when `HELIPOD_GROUP_COMMIT`
    * is off (the underlying counters are simply never touched on the single-commit path), so the
    * health handler below shows zeroed fields rather than omitting them once fleet mode + this method
    * are both present — `undefined` is reserved for "not wired at all" (an older/stub `FleetHandles`),
-   * mirroring `frontierStats?`'s same optional-for-backward-compat shape. The real `@stackbase/fleet`
+   * mirroring `frontierStats?`'s same optional-for-backward-compat shape. The real `@helipod/fleet`
    * node always provides it.
    */
   groupCommitStats?(): { lastBatchSize: number; maxBatchSize: number; flushCount: number; flushesPerSec: number };
   /**
    * Per-shard ownership (B2b, D1): true when THIS node currently holds `shardId`'s write lease.
    * Backs the `/_fleet/run` single-hop guard below — optional so older/stub `FleetHandles` satisfy
-   * the structural mirror; the guard skips (fail open) when absent. The real `@stackbase/fleet` node
+   * the structural mirror; the guard skips (fail open) when absent. The real `@helipod/fleet` node
    * always provides it (delegates to its `WriteForwarder.isLocalWriter`).
    */
   isLocalWriter?(shardId: string): boolean;
@@ -59,7 +59,7 @@ export interface FleetHandles {
    * replay decision — a hit means this write already committed (possibly on a sibling concurrent
    * attempt) and the caller must NOT re-execute. Optional so older/stub `FleetHandles` satisfy the
    * structural mirror; the `/_fleet/run` handler below skips the whole idempotency path when absent
-   * (byte-identical to before this feature existed). The real `@stackbase/fleet` node always
+   * (byte-identical to before this feature existed). The real `@helipod/fleet` node always
    * provides it (delegates to `LeaseManager.lookupIdempotency`).
    */
   idempotencyLookup?(key: string): Promise<{ commitTs: bigint; hasValue: boolean; value: JSONValue | null; oversized: boolean } | null>;
@@ -131,10 +131,10 @@ function escapeHtml(s: string): string {
 
 function dashboardHtml(info: ServerInfo): string {
   const li = (items: string[]) => items.map((i) => `<li><code>${escapeHtml(i)}</code></li>`).join("") || "<li><em>none</em></li>";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Stackbase</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Helipod</title>
 <style>body{font:14px system-ui;margin:2rem;max-width:48rem}code{background:#f4f4f5;padding:.1rem .3rem;border-radius:4px}</style>
 </head><body>
-<h1>Stackbase — dev</h1>
+<h1>Helipod — dev</h1>
 <p>The reactive backend is running.</p>
 <h2>Tables (${info.tables.length})</h2><ul>${li(info.tables)}</ul>
 <h2>Functions (${info.functions.length})</h2><ul>${li(info.functions)}</ul>
@@ -303,7 +303,7 @@ export async function handleHttpRequest(
       // full serialized error (`errorJson`) so the forwarding SYNC node can rehydrate it and surface
       // the correct 4xx/5xx + code/retryable, instead of collapsing every forwarded failure to a 500.
       // `error` (the flat message) is kept for back-compat / human-readable logs.
-      const err = toStackbaseError(e);
+      const err = toHelipodError(e);
       return json(getHttpStatus(err), { error: err.message, code: err.code, errorJson: err.toJSON() });
     }
   }
@@ -356,7 +356,7 @@ export async function handleHttpRequest(
     // Fleet B4 (T4) group-commit counters: additive `fleet.groupCommit`, nested inside the SAME `fleet`
     // gate as the frontier reading above (so a build/fleet-mode that hasn't reported ANY health data
     // yet stays byte-identical to before this field existed). `gc` is zeroed (not absent) when
-    // `STACKBASE_GROUP_COMMIT` is off — `groupCommitStats()` structurally returns zeros in that case
+    // `HELIPOD_GROUP_COMMIT` is off — `groupCommitStats()` structurally returns zeros in that case
     // (see its doc comment) — and the field is omitted only when `groupCommitStats` itself isn't wired
     // (an older/stub `FleetHandles`), which is what `?.` falls through to `null` for.
     const gc = fleet?.groupCommitStats?.() ?? null;
@@ -390,7 +390,7 @@ export async function handleHttpRequest(
       if (parsed.forwarded && replicaWriterUrl !== undefined) {
         return json(409, {
           error:
-            "stackbase: this node is a read replica configured to forward writes (--writer-url) and " +
+            "helipod: this node is a read replica configured to forward writes (--writer-url) and " +
             "received an already-forwarded write — check --writer-url points at the actual writer, not another replica.",
         });
       }
@@ -408,7 +408,7 @@ export async function handleHttpRequest(
         commitTs: String(result.oplog?.commitTs ?? result.commitTs ?? 0n),
       });
     } catch (e) {
-      const err = toStackbaseError(e);
+      const err = toHelipodError(e);
       return json(getHttpStatus(err), { error: err.message, code: err.code });
     }
   }
@@ -466,7 +466,7 @@ export async function handleHttpRequest(
       response.headers.forEach((v, k) => { outHeaders[k] = v; });
       return { status: response.status, headers: outHeaders, body: await response.text() };
     } catch (e) {
-      const err = toStackbaseError(e);
+      const err = toHelipodError(e);
       return json(getHttpStatus(err), { error: err.message, code: err.code });
     }
   }

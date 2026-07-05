@@ -4,9 +4,9 @@
  * (`table:<enc>`, NOT `index:...`), and returns a single document object or `null`. Anything else —
  * multiple ranges, an index/collect read, a span range, an array result — is RERUN (safe fallback).
  */
-import type { Value } from "@stackbase/values";
-import { deserializeKeyRange, keySuccessor, compareKeyBytes, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { FilterExpr } from "@stackbase/query-engine";
+import type { Value } from "@helipod/values";
+import { deserializeKeyRange, keySuccessor, compareKeyBytes, type SerializedKeyRange } from "@helipod/index-key-codec";
+import type { FilterExpr } from "@helipod/query-engine";
 
 export interface ByIdRead {
   keyspace: string;

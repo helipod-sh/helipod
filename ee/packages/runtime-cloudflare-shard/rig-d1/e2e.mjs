@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Real-Cloudflare E2E for the COMBINED multi-shard + `.global()`/D1 deployment.
  *
@@ -11,14 +11,14 @@
  *   4. the D1 `by_key` UNIQUE index is enforced ACROSS shards: a duplicate-key insert routed to a
  *      THIRD shard-DO fails, and the original value is unchanged (no partial/global corruption).
  *
- * Usage: node e2e.mjs --url https://stackbase-do-shard-d1-fixture.<subdomain>.workers.dev --admin-key <KEY>
+ * Usage: node e2e.mjs --url https://helipod-do-shard-d1-fixture.<subdomain>.workers.dev --admin-key <KEY>
  */
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : fallback;
 }
 const URL = arg("url");
-const ADMIN_KEY = arg("admin-key", process.env.STACKBASE_ADMIN_KEY);
+const ADMIN_KEY = arg("admin-key", process.env.HELIPOD_ADMIN_KEY);
 if (!URL) {
   console.error("usage: node e2e.mjs --url https://<app>.workers.dev [--admin-key <KEY>]");
   process.exit(2);

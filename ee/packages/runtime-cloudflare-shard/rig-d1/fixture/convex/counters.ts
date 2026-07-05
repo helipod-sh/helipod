@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
-import { query, mutation } from "@stackbase/executor";
-import { v } from "@stackbase/values";
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
+import { query, mutation } from "@helipod/executor";
+import { v } from "@helipod/values";
 
 // `counters` is a `.global()` table: its rows live in the shared D1 database, not in any one shard's
 // DO-SQLite. A write routed to shard A's DO and a read routed to shard B's DO see the SAME row —

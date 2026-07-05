@@ -1,7 +1,7 @@
 /**
- * Notifications push channel — E2E through the real `stackbase dev` server (e2e-through-shipped-
- * entrypoint rule). A REAL `@stackbase/client` over a REAL WebSocket to a REAL server with
- * `@stackbase/notifications` composed with a `push` channel (capture `expo` adapter).
+ * Notifications push channel — E2E through the real `helipod dev` server (e2e-through-shipped-
+ * entrypoint rule). A REAL `@helipod/client` over a REAL WebSocket to a REAL server with
+ * `@helipod/notifications` composed with a `push` channel (capture `expo` adapter).
  *  (1) a client mutation registers a device push token (the same wire path `registerForPush`
  *      calls — `notifications:registerPushToken`);
  *  (2) an app mutation calls `ctx.notifications.send({ channels: ["push"] })`;
@@ -15,12 +15,12 @@
  * devices is not a failure, skip-when-empty).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineNotifications, type PushMessage, type PushProvider } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineNotifications, type PushMessage, type PushProvider } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -102,7 +102,7 @@ describe("notifications push channel — E2E through the real dev server", () =>
   it("registers a device token, sends, and the driver delivers via the capture provider", async () => {
     const capture = capturePush();
     const { wsUrl } = await bootServer(capture);
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       c.setAuth("user-1");
       // Same wire path `registerForPush` (packages/client/src/notifications.tsx) calls.
@@ -125,7 +125,7 @@ describe("notifications push channel — E2E through the real dev server", () =>
   it("prunes an invalid token after delivery — a second send finds no devices, provider not called again", async () => {
     const capture = capturePush({ invalidateFirst: "device-tok-2" });
     const { wsUrl } = await bootServer(capture);
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       c.setAuth("user-2");
       await c.mutation("notifications:registerPushToken", { token: "device-tok-2", provider: "expo" });

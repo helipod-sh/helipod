@@ -6,10 +6,10 @@ description: React to table changes.
 {/* diataxis: explanation */}
 
 A trigger is a small piece of code that runs itself whenever a table changes. Think of it as a
-database trigger, except it's an ordinary Stackbase function, and Stackbase runs it durably with no
+database trigger, except it's an ordinary Helipod function, and Helipod runs it durably with no
 dropped events.
 
-`@stackbase/triggers` runs a handler you choose whenever documents in a table you're watching are
+`@helipod/triggers` runs a handler you choose whenever documents in a table you're watching are
 inserted, updated, or deleted. It fills the gap between mutations, which are synchronous and run
 inside the writer's own transaction with no external effects, and
 [workflows](/docs/components/workflows), which are explicit and caller-initiated. A trigger reacts on
@@ -18,16 +18,16 @@ notification fan-out, kicking off a durable workflow, or syncing to an external 
 
 <Callout type="info" title="Opt-in component">
 
-Like [`@stackbase/scheduler`](/docs/components/scheduling) and
-[`@stackbase/workflow`](/docs/components/workflows), triggers are an opt-in component. There's no CLI
-`init` command that installs it for you. You compose it in `stackbase.config.ts`;
-`examples/chat/stackbase.config.ts` is the reference pattern real projects copy from.
+Like [`@helipod/scheduler`](/docs/components/scheduling) and
+[`@helipod/workflow`](/docs/components/workflows), triggers are an opt-in component. There's no CLI
+`init` command that installs it for you. You compose it in `helipod.config.ts`;
+`examples/chat/helipod.config.ts` is the reference pattern real projects copy from.
 
 </Callout>
 
 ## The core idea: a durable cursor over the log, not a queue
 
-Every write in Stackbase lands in an append-only MVCC log. That log is the change feed itself, so
+Every write in Helipod lands in an append-only MVCC log. That log is the change feed itself, so
 there's no separate queue for anything to fall out of.
 
 A trigger owns one durable cursor row, `cursorTs`, recording how far it has read. A background driver
@@ -54,9 +54,9 @@ flowchart LR
 
 ## Enabling and configuring a trigger
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineTriggers } from "@stackbase/triggers";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineTriggers } from "@helipod/triggers";
 
 export default defineConfig({
   components: [
@@ -143,10 +143,10 @@ not as "nothing changed."
 ## Handlers and the change batch
 
 `handler` is an ordinary registered `mutation` or `action`, the same `mutation`/`action` builder from
-`./_generated/server` you'd use for anything else, whose path is internal. Stackbase's convention for
+`./_generated/server` you'd use for anything else, whose path is internal. Helipod's convention for
 "internal" is a `_`-prefixed function or module-segment name somewhere in the path (for example
 `notifications:_onMessage`, or a whole module named `_internal`), the same convention
-`@stackbase/scheduler` job targets use. There's no separate `internalMutation`/`internalAction`
+`@helipod/scheduler` job targets use. There's no separate `internalMutation`/`internalAction`
 factory. The `_` prefix alone is what makes a function internal, meaning not directly client-callable.
 
 This is enforced at boot, before the driver ever tries to dispatch to it. Three checks run, and the
@@ -158,7 +158,7 @@ first violation found throws immediately with an instructive message:
 3. **Wrong kind.** The path resolves and is internal, but is a `query`, not a `mutation` or `action`.
 
 ```
-@stackbase/triggers: trigger "messages" references handler "notifications:_onMessage", which is
+@helipod/triggers: trigger "messages" references handler "notifications:_onMessage", which is
 not a registered function. Check the path matches an exported mutation or action
 (e.g. "notifications:_onMessage").
 ```
@@ -194,9 +194,9 @@ A mutation handler runs inside its own transaction, exactly like any other mutat
 it's OCC-replayed on conflict, and any writes it makes are immediately visible and fan out reactively
 to any live subscription that overlaps them (the chat example's counter and audit-log pattern):
 
-```ts title="stackbase/audit.ts"
+```ts title="helipod/audit.ts"
 import { mutation } from "./_generated/server";
-import type { LogChange } from "@stackbase/component";
+import type { LogChange } from "@helipod/component";
 
 export const _onChange = mutation<{ changes: LogChange[] }, null>({
   handler: async (ctx, { changes }) => {
@@ -219,7 +219,7 @@ export const _onChange = mutation<{ changes: LogChange[] }, null>({
 
 This is exactly `examples/chat`'s `_onChange` handler, a durable audit log on the `messages` table,
 driven entirely by `defineTriggers({ messages: { handler: "audit:_onChange" } })` in that example's
-`stackbase.config.ts`. Nothing in `messages.ts`'s own mutations is aware the handler exists.
+`helipod.config.ts`. Nothing in `messages.ts`'s own mutations is aware the handler exists.
 
 Reach for a mutation handler when the reaction is itself a write your app should see reactively:
 denormalized counters, an audit table, chaining into `ctx.workflow.start`.
@@ -232,9 +232,9 @@ An action handler works the same way, but runs outside the transaction: no `ctx.
 `fetch`/`Date`/clock, exactly like any other [action](/docs/core-concepts/actions). This is the shape
 for notification fan-out or syncing to an external system:
 
-```ts title="stackbase/notifications.ts"
+```ts title="helipod/notifications.ts"
 import { action } from "./_generated/server";
-import type { LogChange } from "@stackbase/component";
+import type { LogChange } from "@helipod/component";
 
 export const _onMessage = action({
   handler: async (_ctx, { changes }: { changes: LogChange[] }) => {
@@ -256,7 +256,7 @@ third-party API call, that has no place inside a transaction.
 
 ## How the driver decides what to deliver: the durable cursor loop
 
-Under the hood, `@stackbase/triggers` runs one independent event loop per configured trigger. Each
+Under the hood, `@helipod/triggers` runs one independent event loop per configured trigger. Each
 trigger name gets its own coalescing state, so a slow handler on one trigger can never
 head-of-line-block another trigger's backlog. They're separate promise chains, woken by the same
 commit fan-out.
@@ -269,7 +269,7 @@ Each trigger has two wake sources, with no fixed-interval polling driving normal
   noticed by the periodic backstop beat instead, within about 30 seconds (see
   [Failure handling](#failure-handling-pausing-and-resuming) below).
 - **Timer.** A failed delivery arms a single retry timer for that one trigger, at an exponential
-  backoff delay (`@stackbase/scheduler`'s `computeBackoff`).
+  backoff delay (`@helipod/scheduler`'s `computeBackoff`).
 
 A trigger's own routine cursor-bookkeeping writes (`_advanceCursor`/`_recordFailure`/`_pause`) do not
 themselves re-wake the loop. If they did, a trigger would perpetually rediscover its own housekeeping
@@ -367,7 +367,7 @@ instead of spinning the node, recognizably distinct from a `"max-failures"` paus
 may have been succeeding on every single call. It was just running far too often. Fix the recursive
 write pattern, then `triggers:resume`.
 
-```ts title="stackbase/loops.ts"
+```ts title="helipod/loops.ts"
 // The recursion footgun, deliberately: this handler writes its OWN watched table on every
 // delivery, one row per call. With a low maxDeliveriesPerWindow the breaker trips well before
 // this melts the node.
@@ -379,7 +379,7 @@ export const _spin = mutation({
 });
 ```
 
-```ts title="stackbase.config.ts"
+```ts title="helipod.config.ts"
 defineTriggers({ loops: { handler: "app:_spin", maxDeliveriesPerWindow: 8 } });
 ```
 
@@ -417,11 +417,11 @@ Triggers pair naturally with [durable workflows](/docs/components/workflows): re
 by kicking off a durable, multi-step, resumable workflow, instead of doing the multi-step work inline
 in the handler itself.
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow, workflow } from "@stackbase/workflow";
-import { defineTriggers } from "@stackbase/triggers";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow, workflow } from "@helipod/workflow";
+import { defineTriggers } from "@helipod/triggers";
 
 const fulfillOrder = workflow.define({
   handler: async (step, { orderId }: { orderId: string }) => {
@@ -440,9 +440,9 @@ export default defineConfig({
 });
 ```
 
-```ts title="stackbase/orders.ts"
+```ts title="helipod/orders.ts"
 import { mutation } from "./_generated/server";
-import type { LogChange } from "@stackbase/component";
+import type { LogChange } from "@helipod/component";
 
 export const _onOrderChange = mutation({
   handler: async (ctx, { changes }: { changes: LogChange[] }) => {
@@ -460,7 +460,7 @@ export const _onOrderChange = mutation({
 Every new order insert reactively kicks off a durable `fulfillOrder` run. The trigger is the reactive
 edge (data change to workflow start), and the workflow is the durable multi-step body: retries,
 resumability, and saga-style rollback if a step declares `compensate`, all coming from
-`@stackbase/workflow` itself, not from anything triggers-specific.
+`@helipod/workflow` itself, not from anything triggers-specific.
 
 ## What triggers are not
 
@@ -472,7 +472,7 @@ resumability, and saga-style rollback if a step declares `compensate`, all comin
 - **Not ordered across tables.** Only within one trigger's own watched table, and only within that one
   trigger: there's no cross-trigger ordering guarantee even on the same table.
 - **Not dynamically registerable at runtime.** Like crons, a trigger is declared in
-  `stackbase.config.ts` and fixed for the deployment's life. Adding or removing one needs a restart.
+  `helipod.config.ts` and fixed for the deployment's life. Adding or removing one needs a restart.
 - **Not a substitute for the scheduler or workflows.** A trigger reacts to data that already changed.
   It doesn't schedule future work on its own (pair it with
   `ctx.workflow.start`/`ctx.scheduler.runAfter` for that), and it doesn't orchestrate multi-step
@@ -480,8 +480,8 @@ resumability, and saga-style rollback if a step declares `compensate`, all comin
 
 ## Renamed or dropped watched tables
 
-A cursor row is keyed by the table's name. Stackbase deploys are additive-only (no table renames or
-drops via `stackbase deploy`), so this mostly can't happen in the ordinary flow. But if a table a
+A cursor row is keyed by the table's name. Helipod deploys are additive-only (no table renames or
+drops via `helipod deploy`), so this mostly can't happen in the ordinary flow. But if a table a
 trigger watches does disappear from the schema (a local schema edit plus restart, say), there is no
 name-resolution error: the trigger simply stops matching any changes for that name. It goes quiet
 rather than pausing. Its cursor keeps advancing along with the log (a watched-but-nonexistent table

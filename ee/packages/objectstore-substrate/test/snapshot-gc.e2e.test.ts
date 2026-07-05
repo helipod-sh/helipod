@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 3.4 — the Slice-3 HEADLINE E2E (design record §7, Tier 3 whole-arc plan): over a LONG commit
  * history, snapshot cadence (Task 3.2) + `gc()` (Task 3.3) keep the durable object set BOUNDED — and
@@ -15,7 +15,7 @@
  *
  * Runs against `objectstore-fs` (always-on, no docker) AND, gated, against a real `minio/minio`
  * container — same harness shape as `bootstrap.e2e.test.ts`. The default
- * `bun run --filter @stackbase/objectstore-substrate test` must stay green with the MinIO variant
+ * `bun run --filter @helipod/objectstore-substrate test` must stay green with the MinIO variant
  * skipped (no docker/env required).
  */
 import { spawnSync } from "node:child_process";
@@ -24,12 +24,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { newDocumentId, documentIdKey, encodeStorageTableId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import type { ObjectStore } from "@stackbase/objectstore";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import { S3ObjectStore } from "@stackbase/objectstore-s3";
+import { newDocumentId, documentIdKey, encodeStorageTableId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import type { ObjectStore } from "@helipod/objectstore";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import { S3ObjectStore } from "@helipod/objectstore-s3";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 
 const TABLE = 30001;
@@ -231,13 +231,13 @@ function dockerAvailable(): boolean {
   }
 }
 
-const RUN = dockerAvailable() && process.env.STACKBASE_OBJECTSTORE_S3 === "1";
+const RUN = dockerAvailable() && process.env.HELIPOD_OBJECTSTORE_S3 === "1";
 const maybeDescribe = RUN ? describe : describe.skip;
 
 const MINIO_CONTAINER = `sb-minio-objectstore-substrate-snapgc-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-objectstore-substrate-snapshot-gc";
+const BUCKET = "helipod-objectstore-substrate-snapshot-gc";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });

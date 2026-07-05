@@ -1,12 +1,12 @@
-import type { Value } from "@stackbase/values";
-import { getFunctionPath, type FunctionReference } from "@stackbase/client";
+import type { Value } from "@helipod/values";
+import { getFunctionPath, type FunctionReference } from "@helipod/client";
 import { buildRuntime, type CreateTestOptions, type BuiltRuntime } from "./compose";
 import type { TestSubscription } from "./reactivity";
 import { finishScheduledFunctions, advanceTimers } from "./scheduler";
 
 type Args = Record<string, Value>;
 
-export interface TestStackbase {
+export interface TestHelipod {
   query<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
   mutation<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
   action<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
@@ -18,7 +18,7 @@ export interface TestStackbase {
    */
   run<T>(fn: (ctx: any) => Promise<T>): Promise<T>;
   /**
-   * Routes `request` through the app's `http.ts` router, exactly as the real `stackbase dev`/`serve`
+   * Routes `request` through the app's `http.ts` router, exactly as the real `helipod dev`/`serve`
    * HTTP handler dispatches to an `httpAction` (see `packages/cli/src/http-handler.ts`). Returns a
    * plain 404 `Response` for an unmatched method+path — it never throws for that case. This view's
    * identity (set via `withIdentity`) is passed through as the httpAction's `ctx` identity, taking
@@ -27,7 +27,7 @@ export interface TestStackbase {
   fetch(request: Request): Promise<Response>;
   /**
    * Subscribes to a reactive query over the REAL client -> sync protocol -> SubscriptionManager ->
-   * engine path (a loopback `StackbaseClient`, shared across every `subscribe` call on this
+   * engine path (a loopback `HelipodClient`, shared across every `subscribe` call on this
    * backend and every view of it — built lazily on first use, closed in `close()`). A committed
    * write re-runs and re-pushes only when its write set intersects this query's recorded read
    * set (surgical, range-based invalidation) — no polling.
@@ -42,29 +42,29 @@ export interface TestStackbase {
    * `build({ identity })`, e.g. `components/auth`'s `ctx.auth` — there is no bare `ctx.identity`).
    * `run`/`close` remain shared with the backend, not per-view.
    */
-  withIdentity(identity: string): TestStackbase;
+  withIdentity(identity: string): TestHelipod;
   /**
    * Deterministically drives every currently- and eventually-due `ctx.scheduler.runAfter`/`runAt`
    * job (including cascades) to completion by advancing the harness's virtual clock — no real
-   * timers/sleeps. A clean no-op if no `@stackbase/scheduler` component was composed (via
-   * `opts.components`). Throws if `opts.now` was supplied to `createTestStackbase` (the harness
+   * timers/sleeps. A clean no-op if no `@helipod/scheduler` component was composed (via
+   * `opts.components`). Throws if `opts.now` was supplied to `createTestHelipod` (the harness
    * then doesn't own the clock). See `./scheduler.ts`.
    */
   finishScheduledFunctions(): Promise<void>;
   /**
    * Advances the harness's virtual clock by `ms` and drives one scheduler-driver pass (a no-op
    * pass if no scheduler is composed) — the one-shot counterpart to `finishScheduledFunctions`.
-   * Throws if `opts.now` was supplied to `createTestStackbase`. See `./scheduler.ts`.
+   * Throws if `opts.now` was supplied to `createTestHelipod`. See `./scheduler.ts`.
    */
   advanceTimers(ms: number): Promise<void>;
   close(): Promise<void>;
 }
 
-export async function createTestStackbase(opts: CreateTestOptions): Promise<TestStackbase> {
+export async function createTestHelipod(opts: CreateTestOptions): Promise<TestHelipod> {
   const built: BuiltRuntime = await buildRuntime(opts);
   const { runtime } = built;
 
-  function makeView(identity: string | null): TestStackbase {
+  function makeView(identity: string | null): TestHelipod {
     return {
       async query(ref, args = {}) {
         return (await runtime.run(getFunctionPath(ref), args as never, { identity })).value as never;

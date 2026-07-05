@@ -1,5 +1,5 @@
 /**
- * Unit coverage for the `stackbase migrate export`/`import` CLI clients' argument handling and verb
+ * Unit coverage for the `helipod migrate export`/`import` CLI clients' argument handling and verb
  * dispatch — the happy path + collision guard + 401 are proven end-to-end in `migrate-data-e2e`.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -8,7 +8,7 @@ import { migrateExportCommand, migrateImportCommand } from "../src/migrate/data"
 
 afterEach(() => {
   vi.restoreAllMocks();
-  delete process.env.STACKBASE_ADMIN_KEY;
+  delete process.env.HELIPOD_ADMIN_KEY;
 });
 
 function silenceStderr(): void {

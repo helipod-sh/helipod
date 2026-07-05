@@ -5,7 +5,7 @@ import { FakeSpawner } from "./support/fake-spawner";
 
 function ctx(spawn: FakeSpawner, over: Partial<DeployContext> = {}): DeployContext {
   return {
-    cwd: "/proj", functionsDir: "/proj/stackbase", env: "production",
+    cwd: "/proj", functionsDir: "/proj/helipod", env: "production",
     target: {
       targetName: "aws", provider: "aws", env: "production",
       settings: { serviceArn: "arn:aws:apprunner:us-east-1:123456789012:service/my-app/abc123" },

@@ -9,8 +9,8 @@
  * behavior is provably unchanged (a default-shard-only `ShardedTransactor` is byte-identical —
  * see `sharded-transactor.test.ts`).
  */
-import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import type { DocStore, TimestampOracle } from "@stackbase/docstore";
+import { DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import type { DocStore, TimestampOracle } from "@helipod/docstore";
 import { DEFAULT_HEADROOM, type HeadroomLimits } from "./headroom";
 import { ShardWriter, type RecentCommit } from "./shard-writer";
 import type { CommitResult, RunInTransactionOptions, TransactionContext, Transactor, WriteFanout } from "./types";

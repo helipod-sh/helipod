@@ -4,8 +4,8 @@
  * carry a stable creation order. On a write, `computeIndexUpdates` diffs old vs new and
  * emits the `Deleted`/`NonClustered` index entries the write path must apply.
  */
-import { encodeIndexKey, compareKeyBytes, type IndexableValue } from "@stackbase/index-key-codec";
-import type { DatabaseIndexUpdate, DocumentValue, InternalDocumentId } from "@stackbase/docstore";
+import { encodeIndexKey, compareKeyBytes, type IndexableValue } from "@helipod/index-key-codec";
+import type { DatabaseIndexUpdate, DocumentValue, InternalDocumentId } from "@helipod/docstore";
 import { evaluateFieldPath } from "./filter";
 
 export interface IndexSpec {

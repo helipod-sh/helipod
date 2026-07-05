@@ -6,8 +6,8 @@
 // `EnqueueOpts.retry.maxFailures`). No new mechanism: these are new `step` methods + `NewStep`
 // kinds that thread through the same `_advance` dispatch loop / `_stepDone` journal Task 2/3 built.
 import { describe, it, expect } from "vitest";
-import { mutation, action } from "@stackbase/executor";
-import { workflow } from "@stackbase/workflow"; // the authoring surface: workflow.define
+import { mutation, action } from "@helipod/executor";
+import { workflow } from "@helipod/workflow"; // the authoring surface: workflow.define
 import { makeRuntimeWithWorkflow, readTable } from "./helpers";
 
 describe("workflow action steps + sleep + retries", () => {

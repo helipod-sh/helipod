@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * The flagship real-Cloudflare MULTI-SHARD E2E — the honest gate. This worktree has NO Cloudflare
  * login, so it is DEPLOY-READY-BUT-UNRUN: a human runs `wrangler deploy` (see ./README.md) and then
@@ -8,7 +8,7 @@
  * Cloudflare, real per-DO placement across shards, real cross-datacenter routing.
  *
  * Usage:
- *   node e2e.mjs --url https://stackbase-do-shard-fixture.<subdomain>.workers.dev
+ *   node e2e.mjs --url https://helipod-do-shard-fixture.<subdomain>.workers.dev
  *
  * Proves, against REAL shard-DOs on real Cloudflare:
  *   1. GET /api/health → 200

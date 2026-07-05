@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/example-auth-demo",
+  "name": "@helipod/example-auth-demo",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,20 +11,20 @@
     "dev": "bun ../../packages/cli/dist/bin.js dev --web web --port 3211"
   },
   "dependencies": {
-    "@stackbase/auth": "workspace:*",
-    "@stackbase/component": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/scheduler": "workspace:*",
-    "@stackbase/values": "workspace:*",
-    "@stackbase/workflow": "workspace:*"
+    "@helipod/auth": "workspace:*",
+    "@helipod/component": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/scheduler": "workspace:*",
+    "@helipod/values": "workspace:*",
+    "@helipod/workflow": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/admin": "workspace:*",
-    "@stackbase/cli": "workspace:*",
-    "@stackbase/client": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/runtime-embedded": "workspace:*",
+    "@helipod/admin": "workspace:*",
+    "@helipod/cli": "workspace:*",
+    "@helipod/client": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",

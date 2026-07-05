@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 8.1a — the `startReplicaReactiveTailer` helper drives cross-node reactivity, mirroring the
  * Slice-5 `cross-node-reactivity.e2e.test.ts` scenario but THROUGH THE HELPER rather than an inlined
@@ -11,13 +11,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import type { ObjectStore } from "@stackbase/objectstore";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import type { ObjectStore } from "@helipod/objectstore";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { readManifest } from "../src/manifest";
 import { readConsumerWatermarks } from "../src/consumers";

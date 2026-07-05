@@ -1,6 +1,6 @@
 ---
 title: Self-hosting with Docker
-description: stackbase serve and docker compose up, the baseline production self-host path.
+description: helipod serve and docker compose up, the baseline production self-host path.
 ---
 
 {/* diataxis: how-to */}
@@ -8,17 +8,17 @@ description: stackbase serve and docker compose up, the baseline production self
 Think of `docker compose up` as the one command that starts your whole backend: the sync engine,
 the HTTP API, any `httpAction` webhooks, and the dashboard, all in one container.
 
-This is the baseline way to self-host stackbase. A generic `stackbase:latest` image runs
-`stackbase serve`, your app's `stackbase/` folder is mounted in, and its SQLite database sits on a
+This is the baseline way to self-host helipod. A generic `helipod:latest` image runs
+`helipod serve`, your app's `helipod/` folder is mounted in, and its SQLite database sits on a
 named volume so data survives restarts.
 
 This page covers `serve` itself (what it hardens versus `dev`, and every flag and environment
 variable it reads), the shipped Docker setup and why its two non-obvious fixes exist, the
 immutable-image alternative, and what's deliberately left to a reverse proxy.
 
-## `stackbase serve`: the production entrypoint
+## `helipod serve`: the production entrypoint
 
-`stackbase serve` is `stackbase dev` minus the file watcher and codegen-write, plus production
+`helipod serve` is `helipod dev` minus the file watcher and codegen-write, plus production
 hardening.
 
 Both share one boot core, `bootProject()` (`packages/cli/src/boot.ts`). It loads the project,
@@ -28,12 +28,12 @@ byte-identical options either way: routes, drivers, boot steps, context provider
 Nothing about how your functions run (schedulers, workflows, actions, `httpAction`s, triggers) is
 `dev`-only or `serve`-only. Only the process-level behavior around that shared core differs:
 
-| | `stackbase dev` | `stackbase serve` |
+| | `helipod dev` | `helipod serve` |
 |---|---|---|
 | Codegen | Runs on every change, writes `_generated/` | **Never runs**, fails fast if `_generated/` is missing |
 | Bind address | Loopback (`127.0.0.1`) | `0.0.0.0` by default |
-| Admin key | Ephemeral, auto-generated, embedded in the dashboard HTML | **Required** (`STACKBASE_ADMIN_KEY`), never embedded |
-| File watching | Watches `stackbase/` and hot-reloads | None, restart (or `stackbase deploy`) to pick up changes |
+| Admin key | Ephemeral, auto-generated, embedded in the dashboard HTML | **Required** (`HELIPOD_ADMIN_KEY`), never embedded |
+| File watching | Watches `helipod/` and hot-reloads | None, restart (or `helipod deploy`) to pick up changes |
 | Shutdown | Ctrl-C exits immediately | `SIGTERM`/`SIGINT` trigger a graceful drain |
 
 ### Fail-fast checks, before anything binds
@@ -41,11 +41,11 @@ Nothing about how your functions run (schedulers, workflows, actions, `httpActio
 `serveCommand` validates two things up front, before opening the store or binding a port, and exits
 `1` with a one-line, actionable message on either:
 
-1. **`STACKBASE_ADMIN_KEY` must be set and non-blank.** There is no default and no fallback. A
+1. **`HELIPOD_ADMIN_KEY` must be set and non-blank.** There is no default and no fallback. A
    trimmed-empty value is treated as unset.
 
    ```text
-   ✗ STACKBASE_ADMIN_KEY is required for `serve`: set it to a strong secret.
+   ✗ HELIPOD_ADMIN_KEY is required for `serve`: set it to a strong secret.
    ```
 
 2. **`<dir>/_generated/server.ts` must already exist.** `serve` never runs codegen. That step
@@ -53,11 +53,11 @@ Nothing about how your functions run (schedulers, workflows, actions, `httpActio
    before deploying:
 
    ```bash
-   stackbase codegen --dir stackbase
+   helipod codegen --dir helipod
    ```
 
    ```text
-   ✗ stackbase/_generated not found: run `stackbase codegen --dir stackbase` and commit _generated/ before deploying.
+   ✗ helipod/_generated not found: run `helipod codegen --dir helipod` and commit _generated/ before deploying.
    ```
 
 ### Binding and graceful shutdown
@@ -85,7 +85,7 @@ in a torn state.
 
 One process answers everything on one origin: the sync WebSocket, `/api/run` and `/api/action` HTTP
 endpoints, `httpAction` routes from your app's `http.ts`, the always-on `/api/storage/*` file-serving
-routes, any component-contributed routes (for example `@stackbase/auth`'s OAuth callbacks), and,
+routes, any component-contributed routes (for example `@helipod/auth`'s OAuth callbacks), and,
 unless disabled, the dashboard SPA at `/_dashboard`.
 
 ### The dashboard is served key-less
@@ -95,7 +95,7 @@ that key only ever exists on loopback), `serve` calls `loadDashboard(undefined)`
 **never** baked into the HTML the browser receives.
 
 Instead, the dashboard SPA prompts you for the key on load. You paste in whatever you set
-`STACKBASE_ADMIN_KEY` to, and it's used from then on to authenticate `/_admin` calls.
+`HELIPOD_ADMIN_KEY` to, and it's used from then on to authenticate `/_admin` calls.
 
 This matters because a `0.0.0.0`-bound `serve` is reachable by anyone who can reach the port.
 Embedding a persistent secret in served HTML would leak it to any visitor, not just the operator.
@@ -110,29 +110,29 @@ these.
 
 | Flag | Env var | Default | What it does |
 |---|---|---|---|
-| `--dir <path>` | | `stackbase` | The app directory to load (schema, functions, `stackbase.config.ts`, `_generated/`). |
-| `--data <path>` | `STACKBASE_DATA_DIR` (sets `<dir>/db.sqlite`) | `./data/db.sqlite` | SQLite database file path. Ignored when `--database-url` selects Postgres. |
+| `--dir <path>` | | `helipod` | The app directory to load (schema, functions, `helipod.config.ts`, `_generated/`). |
+| `--data <path>` | `HELIPOD_DATA_DIR` (sets `<dir>/db.sqlite`) | `./data/db.sqlite` | SQLite database file path. Ignored when `--database-url` selects Postgres. |
 | `--ip <address>` | | `0.0.0.0` | Bind address. |
 | `--port <n>` | `PORT` | `3000` | Bind port. |
-| `--no-dashboard` | `STACKBASE_DASHBOARD=off` | dashboard on | Disable the dashboard SPA entirely (not just hide it, the route isn't served). |
-| `--allow-deploy` | `STACKBASE_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy`, the target of `stackbase deploy`'s live hot-swap. See [Deploy and build](/docs/deploy/deploy-and-build). |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` | unset (SQLite) | Point at a Postgres database instead of the SQLite file. See [Postgres](/docs/deploy/postgres). |
-| `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` | unset (local FS) | Selects the S3-compatible file-storage backend; presence of a bucket is what switches `ctx.storage` from local disk to S3/MinIO/R2. |
-| `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` | AWS default | Custom S3 endpoint (MinIO, R2, etc.), only meaningful alongside a bucket. |
-| `--web <dir>` | `STACKBASE_WEB_DIR` | unset | Serve a static frontend (`index.html` + assets) at the site root, same origin as the sync WebSocket. |
+| `--no-dashboard` | `HELIPOD_DASHBOARD=off` | dashboard on | Disable the dashboard SPA entirely (not just hide it, the route isn't served). |
+| `--allow-deploy` | `HELIPOD_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy`, the target of `helipod deploy`'s live hot-swap. See [Deploy and build](/docs/deploy/deploy-and-build). |
+| `--database-url <url>` | `HELIPOD_DATABASE_URL` | unset (SQLite) | Point at a Postgres database instead of the SQLite file. See [Postgres](/docs/deploy/postgres). |
+| `--storage-bucket <name>` | `HELIPOD_STORAGE_BUCKET` | unset (local FS) | Selects the S3-compatible file-storage backend; presence of a bucket is what switches `ctx.storage` from local disk to S3/MinIO/R2. |
+| `--storage-endpoint <url>` | `HELIPOD_STORAGE_ENDPOINT` | AWS default | Custom S3 endpoint (MinIO, R2, etc.), only meaningful alongside a bucket. |
+| `--web <dir>` | `HELIPOD_WEB_DIR` | unset | Serve a static frontend (`index.html` + assets) at the site root, same origin as the sync WebSocket. |
 
-`STACKBASE_ADMIN_KEY` is required and has no flag equivalent. That's deliberate: a secret belongs in
+`HELIPOD_ADMIN_KEY` is required and has no flag equivalent. That's deliberate: a secret belongs in
 the environment, not in a process argument list visible via `ps`.
 
 ## Docker: the baseline self-host path
 
 <Callout title="Before you start">
 
-You need a `stackbase/` directory with **committed `_generated/`**. `serve` fails fast without it, as
+You need a `helipod/` directory with **committed `_generated/`**. `serve` fails fast without it, as
 covered above. Generate it before building the image:
 
 ```bash
-stackbase codegen --dir stackbase
+helipod codegen --dir helipod
 ```
 
 You also need Docker and Docker Compose.
@@ -148,11 +148,11 @@ You also need Docker and Docker Compose.
 Put it in a `.env` file next to `docker-compose.yml`. Compose loads `.env` automatically:
 
 ```bash title=".env"
-STACKBASE_ADMIN_KEY=$(openssl rand -hex 32)
+HELIPOD_ADMIN_KEY=$(openssl rand -hex 32)
 ```
 
 The shipped `docker-compose.yml` requires this at the environment-variable level
-(`STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}`). Compose
+(`HELIPOD_ADMIN_KEY: ${HELIPOD_ADMIN_KEY:?set HELIPOD_ADMIN_KEY in a .env file}`). Compose
 itself refuses to start the container if the variable is unset, before `serve`'s own check ever
 runs.
 
@@ -170,36 +170,36 @@ The shipped `docker-compose.yml`:
 
 ```yaml title="docker-compose.yml"
 services:
-  stackbase:
+  helipod:
     build:
       context: .
       target: runner
-    image: stackbase:latest
+    image: helipod:latest
     ports:
       - "3000:3000"
     environment:
-      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY:?set STACKBASE_ADMIN_KEY in a .env file}
-      STACKBASE_DATA_DIR: /data
+      HELIPOD_ADMIN_KEY: ${HELIPOD_ADMIN_KEY:?set HELIPOD_ADMIN_KEY in a .env file}
+      HELIPOD_DATA_DIR: /data
     volumes:
-      - ./stackbase:/app/stackbase:ro
-      - stackbase-data:/data
-    command: ["serve", "--dir", "/app/stackbase", "--data", "/data/db.sqlite"]
+      - ./helipod:/app/helipod:ro
+      - helipod-data:/data
+    command: ["serve", "--dir", "/app/helipod", "--data", "/data/db.sqlite"]
     restart: unless-stopped
 
 volumes:
-  stackbase-data:
+  helipod-data:
 ```
 
 This builds the `runner` stage of the repo `Dockerfile`, binds the container to `0.0.0.0:3000`,
-bind-mounts `./stackbase` **read-only** into `/app/stackbase`, and persists SQLite on the named
-`stackbase-data` volume at `/data/db.sqlite`. The container's command is exactly
-`serve --dir /app/stackbase --data /data/db.sqlite`.
+bind-mounts `./helipod` **read-only** into `/app/helipod`, and persists SQLite on the named
+`helipod-data` volume at `/data/db.sqlite`. The container's command is exactly
+`serve --dir /app/helipod --data /data/db.sqlite`.
 
 ```mermaid
 flowchart LR
-  AppDir["./stackbase (read-only)"] -->|"bind mount"| Container["stackbase:latest running serve"]
+  AppDir["./helipod (read-only)"] -->|"bind mount"| Container["helipod:latest running serve"]
   Container -->|"port 3000"| You["Your browser or client"]
-  Container --> Data[("stackbase-data volume: db.sqlite")]
+  Container --> Data[("helipod-data volume: db.sqlite")]
 ```
 
 </Step>
@@ -219,7 +219,7 @@ same origin.
 
 ### Confirm data survives a restart
 
-The SQLite database lives on the `stackbase-data` Docker volume, not inside the container's
+The SQLite database lives on the `helipod-data` Docker volume, not inside the container's
 writable layer. `docker compose down && docker compose up` does not lose data. Only
 `docker compose down -v` (which explicitly deletes volumes) does.
 
@@ -265,12 +265,12 @@ running a real container, not by any host-based test.
 **1. Workspace packages are symlinked into the root `node_modules`**
 
 `turbo prune --docker` (used in the `prepare` stage) plus Bun's install keep workspace
-`@stackbase/*` package links **nested per-package**, for example
-`/app/packages/cli/node_modules/@stackbase/executor`, never at `/app/node_modules`.
+`@helipod/*` package links **nested per-package**, for example
+`/app/packages/cli/node_modules/@helipod/executor`, never at `/app/node_modules`.
 
-That's fine for code living inside a workspace package. But your bind-mounted `/app/stackbase` is not
-under any package. Its bare `import "@stackbase/values"` (every `schema.ts`) and the
-`_generated/server` module's re-export of `@stackbase/executor` resolve by walking **up** to
+That's fine for code living inside a workspace package. But your bind-mounted `/app/helipod` is not
+under any package. Its bare `import "@helipod/values"` (every `schema.ts`) and the
+`_generated/server` module's re-export of `@helipod/executor` resolve by walking **up** to
 `/app/node_modules`, and find nothing there.
 
 This broke the default bind-mount self-host path for every app until the `runner` stage was given
@@ -280,14 +280,14 @@ an explicit fixup:
 RUN <<'EOF'
 bun -e '
   const fs = require("fs");
-  fs.mkdirSync("node_modules/@stackbase", { recursive: true });
+  fs.mkdirSync("node_modules/@helipod", { recursive: true });
   for (const base of ["packages", "components"]) {
     if (!fs.existsSync(base)) continue;
     for (const d of fs.readdirSync(base)) {
       const pj = base + "/" + d + "/package.json";
       if (!fs.existsSync(pj)) continue;
       const name = JSON.parse(fs.readFileSync(pj, "utf8")).name;
-      if (!name || !name.startsWith("@stackbase/")) continue;
+      if (!name || !name.startsWith("@helipod/")) continue;
       try { fs.symlinkSync("/app/" + base + "/" + d, "node_modules/" + name); } catch {}
     }
   }
@@ -296,7 +296,7 @@ EOF
 ```
 
 This walks every `packages/*` and `components/*` package's `package.json` and symlinks its
-`@stackbase/*` name straight into `/app/node_modules/`, so a mounted (or baked-in) `stackbase/`
+`@helipod/*` name straight into `/app/node_modules/`, so a mounted (or baked-in) `helipod/`
 resolves its imports exactly the way it would in a normal workspace checkout.
 
 **2. `/data` is chowned to the non-root `bun` user before dropping privileges**
@@ -311,12 +311,12 @@ crash-loops on the **very first** `docker compose up` under `restart: unless-sto
 while still root, before `USER bun`:
 
 ```dockerfile title="Dockerfile"
-RUN mkdir -p /data /app/.stackbase-deploy && chown bun:bun /data /app /app/.stackbase-deploy
+RUN mkdir -p /data /app/.helipod-deploy && chown bun:bun /data /app /app/.helipod-deploy
 USER bun
 ```
 
-(The same `RUN` also creates and chowns `/app/.stackbase-deploy`, the scratch directory
-`stackbase deploy`'s push target writes to. It's the same class of bug: `/app`'s directory node
+(The same `RUN` also creates and chowns `/app/.helipod-deploy`, the scratch directory
+`helipod deploy`'s push target writes to. It's the same class of bug: `/app`'s directory node
 itself is still root-owned after the earlier `COPY` chowned only its *contents*.)
 
 Both fixes are guarded against regression by a text-assertion test
@@ -333,35 +333,35 @@ volume, and the dashboard served key-less.
 
 <Accordion title="Bake the app into an immutable image">
 
-The default compose file bind-mounts `stackbase/` at run time. That's convenient for local
+The default compose file bind-mounts `helipod/` at run time. That's convenient for local
 self-hosting, but the image alone isn't a deployable artifact: it's empty without the mount.
 
 For an immutable image, one you can push to a registry and deploy elsewhere without carrying a
-separate `stackbase/` directory around, build a small wrapper `Dockerfile` on top of
-`stackbase:latest` that copies your app in instead of mounting it:
+separate `helipod/` directory around, build a small wrapper `Dockerfile` on top of
+`helipod:latest` that copies your app in instead of mounting it:
 
 ```dockerfile title="Dockerfile"
-FROM stackbase:latest
-COPY ./stackbase /app/stackbase
-# ENTRYPOINT/CMD are inherited from stackbase:latest:
-#   serve --dir /app/stackbase --data /data/db.sqlite
+FROM helipod:latest
+COPY ./helipod /app/helipod
+# ENTRYPOINT/CMD are inherited from helipod:latest:
+#   serve --dir /app/helipod --data /data/db.sqlite
 ```
 
 ```bash
 docker build -t myapp:latest .
-docker run -p 3000:3000 -e STACKBASE_ADMIN_KEY=... -v stackbase-data:/data myapp:latest
+docker run -p 3000:3000 -e HELIPOD_ADMIN_KEY=... -v helipod-data:/data myapp:latest
 ```
 
-Because the root-`node_modules` symlink fixup above is part of the base `stackbase:latest` image
+Because the root-`node_modules` symlink fixup above is part of the base `helipod:latest` image
 (baked into the `runner` stage, not something the bind-mount does at run time), a `COPY`ed
-`stackbase/` resolves its `@stackbase/*` imports exactly the same way a mounted one does. No extra
+`helipod/` resolves its `@helipod/*` imports exactly the same way a mounted one does. No extra
 step is needed in the wrapper `Dockerfile`.
 
 </Accordion>
 
 <Accordion title="Multi-node and object-storage flags (advanced)">
 
-`serve` also accepts `--fleet`/`STACKBASE_FLEET`, `--advertise-url`, `--object-store`,
+`serve` also accepts `--fleet`/`HELIPOD_FLEET`, `--advertise-url`, `--object-store`,
 `--replica`, `--shards`, and related knobs. These select the multi-node write-scaling story
 (`ee/`-licensed) or the object-storage substrate. Both are their own tier above the single-node
 baseline this page covers. See [Scaling](/docs/deploy/scaling) and
@@ -377,7 +377,7 @@ with `docker compose up`.
 ## Using Postgres
 
 SQLite is the zero-config default. Point `serve` at Postgres instead with `--database-url` or
-`STACKBASE_DATABASE_URL`. No other change to the compose file's shape is required beyond swapping
+`HELIPOD_DATABASE_URL`. No other change to the compose file's shape is required beyond swapping
 the SQLite volume for the connection string.
 
 Postgres is a **single-node durability** upgrade (a managed database instead of a SQLite file on a
@@ -388,8 +388,8 @@ compose example, the single-writer constraint, and its known limitations.
 ## Other platforms (Railway, Fly.io)
 
 Any platform that can run a long-lived process with WebSocket support and a persistent disk can
-host `stackbase serve`; Docker is the baseline, not a requirement. The checklist is always the
-same: set `STACKBASE_ADMIN_KEY` as a platform secret (never in a config file), mount a persistent
+host `helipod serve`; Docker is the baseline, not a requirement. The checklist is always the
+same: set `HELIPOD_ADMIN_KEY` as a platform secret (never in a config file), mount a persistent
 volume for the data directory, and point health checks at `GET /api/health`.
 
 <Tabs items={['Railway', 'Fly.io']}>
@@ -401,7 +401,7 @@ volume for the data directory, and point health checks at `GET /api/health`.
 builder = "nixpacks"
 
 [deploy]
-startCommand = "stackbase serve --dir ./stackbase --data /app/data/db.sqlite"
+startCommand = "helipod serve --dir ./helipod --data /app/data/db.sqlite"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 
@@ -410,14 +410,14 @@ source = "data"
 destination = "/app/data"
 ```
 
-Set `STACKBASE_ADMIN_KEY` in the service's Railway variables. Railway terminates TLS for you.
+Set `HELIPOD_ADMIN_KEY` in the service's Railway variables. Railway terminates TLS for you.
 
 </Tab>
 
 <Tab value="Fly.io">
 
 ```toml title="fly.toml"
-app = "my-stackbase-app"
+app = "my-helipod-app"
 primary_region = "iad"
 
 [mounts]
@@ -434,15 +434,15 @@ timeout = "2s"
 path = "/api/health"
 ```
 
-Set the secret with `fly secrets set STACKBASE_ADMIN_KEY=...`, and start the process as
-`stackbase serve --dir ./stackbase --data /app/data/db.sqlite`. Fly terminates TLS at its edge.
+Set the secret with `fly secrets set HELIPOD_ADMIN_KEY=...`, and start the process as
+`helipod serve --dir ./helipod --data /app/data/db.sqlite`. Fly terminates TLS at its edge.
 
 </Tab>
 
 </Tabs>
 
-A managed Postgres on either platform works through the same `STACKBASE_DATABASE_URL` as anywhere
-else. Both platforms also have an automated push path: `stackbase deploy --target railway` and
+A managed Postgres on either platform works through the same `HELIPOD_DATABASE_URL` as anywhere
+else. Both platforms also have an automated push path: `helipod deploy --target railway` and
 `--target fly` shell out to the platform's own CLI (`railway up`, `fly deploy`) after refreshing
 codegen. See [Deploy and build](/docs/deploy/deploy-and-build#the-six-deploy-targets).
 
@@ -450,8 +450,8 @@ codegen. See [Deploy and build](/docs/deploy/deploy-and-build#the-six-deploy-tar
 
 <Callout type="warn" title="No built-in TLS">
 
-stackbase serves plain HTTP. `serve` has no TLS termination built in. Put a reverse proxy (nginx,
-Caddy, or Traefik) in front of the container to terminate TLS and forward to `stackbase:3000`.
+helipod serves plain HTTP. `serve` has no TLS termination built in. Put a reverse proxy (nginx,
+Caddy, or Traefik) in front of the container to terminate TLS and forward to `helipod:3000`.
 
 The sync WebSocket and `httpAction` routes both proxy transparently over standard HTTP upgrade. No
 special configuration is needed beyond normal WebSocket passthrough in your proxy of choice.
@@ -462,8 +462,8 @@ special configuration is needed beyond normal WebSocket passthrough in your prox
 
 - [Postgres](/docs/deploy/postgres): swap the SQLite volume for a Postgres database, still
   single-node.
-- [Deploy and build](/docs/deploy/deploy-and-build): `stackbase deploy` for live hot-swap onto a
-  running `serve` (no restart, `--allow-deploy` opt-in), and `stackbase build` for a single
+- [Deploy and build](/docs/deploy/deploy-and-build): `helipod deploy` for live hot-swap onto a
+  running `serve` (no restart, `--allow-deploy` opt-in), and `helipod build` for a single
   self-contained binary instead of a runtime-based image.
 - [Scaling](/docs/deploy/scaling): when one `serve` process isn't enough, the multi-node fleet
   story (`--fleet`) built on the same Postgres backend.

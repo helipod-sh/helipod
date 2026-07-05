@@ -7,10 +7,10 @@
  *   - `bigint` (ts/prev_ts)      → decimal string
  *   - `Uint8Array` (id bytes, index keys) → base64
  * A document's own field VALUES (`ResolvedDocument.value`, a `Record<string, Value>`) reuse
- * `@stackbase/values`' existing `convexToJson`/`jsonToConvex` — the same tagged-JSON transport the rest
+ * `@helipod/values`' existing `convexToJson`/`jsonToConvex` — the same tagged-JSON transport the rest
  * of the engine already round-trips `Value` (including nested `bigint`/`ArrayBuffer`) through.
  */
-import { convexToJson, jsonToConvex, type JSONValue } from "@stackbase/values";
+import { convexToJson, jsonToConvex, type JSONValue } from "@helipod/values";
 import type {
   DatabaseIndexUpdate,
   DatabaseIndexValue,
@@ -18,7 +18,7 @@ import type {
   IndexWrite,
   InternalDocumentId,
   ResolvedDocument,
-} from "@stackbase/docstore";
+} from "@helipod/docstore";
 
 /** One segment's worth of staged rows — the unit `encodeSegment`/`decodeSegment` round-trip. */
 export interface SegmentPayload {
@@ -26,7 +26,7 @@ export interface SegmentPayload {
   indexUpdates: IndexWrite[];
 }
 
-/* --- base64 (portable: global btoa/atob, no Node Buffer — matches @stackbase/values' json.ts) --- */
+/* --- base64 (portable: global btoa/atob, no Node Buffer — matches @helipod/values' json.ts) --- */
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";

@@ -3,8 +3,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeSqliteAdapter, SqliteDocStore } from "../src/index";
-import { newDocumentId, encodeStorageTableId } from "@stackbase/id-codec";
-import type { DocumentLogEntry, InternalDocumentId } from "@stackbase/docstore";
+import { newDocumentId, encodeStorageTableId } from "@helipod/id-codec";
+import type { DocumentLogEntry, InternalDocumentId } from "@helipod/docstore";
 
 const TABLE = 10002;
 const TABLE_ID = encodeStorageTableId(TABLE);

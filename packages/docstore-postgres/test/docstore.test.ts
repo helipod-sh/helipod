@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { runDocStoreConformance } from "@stackbase/docstore/test-support/conformance";
-import { newDocumentId } from "@stackbase/id-codec";
+import { runDocStoreConformance } from "@helipod/docstore/test-support/conformance";
+import { newDocumentId } from "@helipod/id-codec";
 import type { PgClient, PgRow, PgValue } from "../src/pg-client";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { NodePgClient } from "../src/node-pg-client";
@@ -87,8 +87,8 @@ describe("postgres load_documents limit is pushed into the SQL", () => {
   });
 });
 
-// Additionally: a real Postgres server when STACKBASE_TEST_DATABASE_URL is set (skipped otherwise).
-const REAL_PG = process.env.STACKBASE_TEST_DATABASE_URL;
+// Additionally: a real Postgres server when HELIPOD_TEST_DATABASE_URL is set (skipped otherwise).
+const REAL_PG = process.env.HELIPOD_TEST_DATABASE_URL;
 if (REAL_PG) {
   runDocStoreConformance(
     "postgres (real)",

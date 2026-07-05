@@ -1,4 +1,4 @@
-import { mutation, query, action, commitThenThrow, type ActionCtx, type ComponentContext, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, action, commitThenThrow, type ActionCtx, type ComponentContext, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@helipod/executor";
 import { hashSecret, verifySecret, needsRehash, generateToken, sha256base64url } from "./crypto";
 import type { AuthConfig } from "./config";
 import { generateOtp, generateLinkToken, isTokenFlow } from "./email/codes";

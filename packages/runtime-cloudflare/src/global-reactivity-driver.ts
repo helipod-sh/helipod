@@ -8,7 +8,7 @@
  * storage reaper) rather than a free-running `setTimeout`/`setInterval` chain (the shape
  * `startReplicaReactiveTailer` uses for a long-lived Node/Bun process, which is explicitly the WRONG
  * shape here: a DO with idle-but-open WebSocket subscriptions can hibernate, and a free timer would
- * keep it artificially alive). This mirrors `@stackbase/storage`'s `storageReaper` almost exactly
+ * keep it artificially alive). This mirrors `@helipod/storage`'s `storageReaper` almost exactly
  * (`ctx.setTimer`/`ctx.clearTimer`, a `stopped`-guarded `wake()`/`armTimer()` pair, a `__tick` test
  * seam) — EXCEPT cadence: unlike the reaper, this driver's re-arm is a plain `intervalMs`, never
  * routed through `ctx.backstopMs` (see `armTimer`'s doc — global reactivity is latency-sensitive, and
@@ -37,7 +37,7 @@
  * directly at construction time (`globalReactivityPollerDriver(globalStore.readVersions.bind(...))`)
  * is the smaller diff.
  */
-import type { Driver, DriverContext } from "@stackbase/component";
+import type { Driver, DriverContext } from "@helipod/component";
 import { GlobalReactivityPoller, type GlobalReactivityDeps } from "./global-reactivity-poller";
 
 /** Default poll cadence — see the M2c spec / Task 6 brief ("~2000ms"). */
@@ -76,7 +76,7 @@ export function globalReactivityPollerDriver(
    * Re-arm the next wake. `force` (used only by `start()`) arms unconditionally, covering the
    * boot-ordering race a DO's eager-rehydrate-on-wake introduces: this driver's `start()` runs
    * INSIDE `createEmbeddedRuntime`, which resolves and returns from `bootDurableObjectRuntime`
-   * BEFORE `StackbaseDurableObject`'s constructor calls `rehydrateAll()` (which replays every
+   * BEFORE `HelipodDurableObject`'s constructor calls `rehydrateAll()` (which replays every
    * hibernated socket's `Subscribe`, populating `subscribedGlobalTables()` for the FIRST time on a
    * post-hibernation wake) — so an unconditional `subscribedGlobalTables().length === 0` gate at
    * `start()` time would see zero subscribers (nothing has rehydrated yet) and never arm anything,

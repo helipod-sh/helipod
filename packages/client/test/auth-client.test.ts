@@ -8,9 +8,9 @@ import {
   type RefreshLock,
   type SessionInfo,
 } from "../src/auth-client"; // own-package tests import via src, per the existing client test idiom
-import { StackbaseClient } from "../src/client";
+import { HelipodClient } from "../src/client";
 import { memoryOutbox } from "../src/outbox-storage";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 // A minimal transport for the fingerprint-switch tests below (same shape as the existing
 // set-auth.test.ts / outbox-enqueue.test.ts MockTransport, kept local to avoid cross-file coupling).
@@ -302,7 +302,7 @@ describe("createAuthClient", () => {
   });
 });
 
-// The outbox identityFingerprint switch (spec decision 9), against a REAL StackbaseClient — proves
+// The outbox identityFingerprint switch (spec decision 9), against a REAL HelipodClient — proves
 // (a) the raw `setAuth(token)` path (no `createAuthClient`) is BYTE-IDENTICAL to pre-A1 behavior
 // (token-hash fingerprint, still flips on every rotation), and (b) once `createAuthClient` calls
 // `setSessionFingerprint`, the fingerprint is pinned to the stable sessionId and does NOT move
@@ -313,7 +313,7 @@ describe("outbox identityFingerprint switch — raw setAuth vs managed sessionId
 
   it("raw setAuth(token): fingerprint is the token hash and CHANGES on every rotation (unchanged from pre-A1)", async () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
 
     client.setAuth("tok-1");
     await waitFor(() => client.__outboxFingerprint !== "anon");
@@ -328,7 +328,7 @@ describe("outbox identityFingerprint switch — raw setAuth vs managed sessionId
 
   it("managed session: fingerprint derives from sessionId and stays STABLE across a token rotation", async () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
 
     client.setSessionFingerprint("sess-1");
     await waitFor(() => client.__outboxFingerprint !== "anon");
@@ -356,7 +356,7 @@ describe("outbox identityFingerprint switch — raw setAuth vs managed sessionId
 
   it("setSessionFingerprint(null) hands the fingerprint back to the raw setAuth token-hash path", async () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
 
     client.setAuth("tok-A");
     client.setSessionFingerprint("sess-1"); // now managed — token-hash recompute suppressed

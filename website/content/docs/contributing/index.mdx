@@ -1,16 +1,16 @@
 ---
-title: Contributing to stackbase
-description: "An orientation to how stackbase is built: the architecture, the codebase, and how to extend it."
+title: Contributing to helipod
+description: "An orientation to how helipod is built: the architecture, the codebase, and how to extend it."
 icon: Compass
 ---
 
 {/* diataxis: explanation */}
 
-This section is for a different reader than the rest of the docs. It's for people who want to work *on* stackbase itself: reading the engine source, fixing a bug, adding a storage adapter, or writing a new component. If you just want to use stackbase in your app, go to [Get Started](/docs/get-started/what-is-stackbase) or [Core Concepts](/docs/core-concepts/schema-and-tables) instead.
+This section is for a different reader than the rest of the docs. It's for people who want to work *on* helipod itself: reading the engine source, fixing a bug, adding a storage adapter, or writing a new component. If you just want to use helipod in your app, go to [Get Started](/docs/get-started/what-is-helipod) or [Core Concepts](/docs/core-concepts/schema-and-tables) instead.
 
-## stackbase in one breath
+## helipod in one breath
 
-stackbase is an open-source, self-hostable, reactive backend. You write ordinary TypeScript functions: queries, mutations, and actions. They run on the server inside a transaction.
+helipod is an open-source, self-hostable, reactive backend. You write ordinary TypeScript functions: queries, mutations, and actions. They run on the server inside a transaction.
 
 Every client subscribed to the data those functions touch gets pushed a fresh result over a WebSocket the instant it changes. You never write polling code, manual refetch calls, or cache-invalidation logic.
 
@@ -47,12 +47,12 @@ If you want the user-facing version of this same idea first, that's [Core Concep
 
 ## Where this architecture came from
 
-stackbase is loosely inspired by [Convex](https://github.com/get-convex/convex-backend) and by a project called concave. To be precise about what that means for a contributor: the internal architecture notes under `docs/dev/` were written by *studying* Convex's and concave's published, documented behavior as reference material, never by copying their source. Both are source-available under a non-compete license (FSL), so this codebase treats them the way you'd treat a spec: read for ideas, reimplement from scratch.
+helipod is loosely inspired by [Convex](https://github.com/get-convex/convex-backend) and by a project called concave. To be precise about what that means for a contributor: the internal architecture notes under `docs/dev/` were written by *studying* Convex's and concave's published, documented behavior as reference material, never by copying their source. Both are source-available under a non-compete license (FSL), so this codebase treats them the way you'd treat a spec: read for ideas, reimplement from scratch.
 
 Two practical consequences worth knowing before you dive into the deeper architecture pages:
 
 - Those internal notes are dense, expert-written, and occasionally describe *intent* rather than *what shipped*: a design that was proposed, then later built differently, deferred, or superseded.
-- The familiar *authoring style* (how you write a query or a schema) is not a promise to be a drop-in replacement for anything. stackbase's canonical imports are its own (`@stackbase/*`), and it has already grown capabilities its prior art doesn't have: durable workflows with saga/compensation, a Postgres adapter, a single-binary build. Compatibility with an existing project shows up as a migration on-ramp (`stackbase migrate`), not the product's identity.
+- The familiar *authoring style* (how you write a query or a schema) is not a promise to be a drop-in replacement for anything. helipod's canonical imports are its own (`@helipod/*`), and it has already grown capabilities its prior art doesn't have: durable workflows with saga/compensation, a Postgres adapter, a single-binary build. Compatibility with an existing project shows up as a migration on-ramp (`helipod migrate`), not the product's identity.
 
 <Callout type="info">
   This Contributing section is the reconciled, ships-are-real view. Where the internal `docs/dev/` notes and the shipped code disagree, the shipped code wins.
@@ -82,7 +82,7 @@ graph TD
   - [The monorepo](/docs/contributing/codebase/monorepo): what lives where and why.
   - [Development setup](/docs/contributing/codebase/development): clone, install, build, test, the dev loop.
 - **[Extending](/docs/contributing/extending/custom-component)**: the seams you can build against without touching the engine core.
-  - [A custom component](/docs/contributing/extending/custom-component): like `@stackbase/auth` or `@stackbase/scheduler`.
+  - [A custom component](/docs/contributing/extending/custom-component): like `@helipod/auth` or `@helipod/scheduler`.
   - [A custom storage adapter](/docs/contributing/extending/storage-adapter): a new database backend.
   - [Custom providers](/docs/contributing/extending/providers): email, OAuth, or blob-store backends for existing components.
 - **Meta**: the [contributing guide](/docs/contributing/contributing-guide) (how a change actually gets proposed and landed) and [licensing](/docs/contributing/licensing) (the FSL license and the `ee/` split).
@@ -102,7 +102,7 @@ If you're new here, read in this order:
 Shipped and covered by end-to-end tests against the real running server, not just unit tests of internal mechanisms:
 
 - The reactive core.
-- Single-node/single-binary production tooling: `stackbase serve`, Docker self-host, live hot-deploy, a compiled standalone binary.
+- Single-node/single-binary production tooling: `helipod serve`, Docker self-host, live hot-deploy, a compiled standalone binary.
 - The Postgres adapter and file storage.
 - The six built-in components: auth, authz, scheduler, workflow, triggers, notifications.
 

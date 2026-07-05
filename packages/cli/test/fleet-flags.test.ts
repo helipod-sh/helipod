@@ -1,5 +1,5 @@
 /**
- * Unit tests for the `stackbase serve --fleet` flag parsing + fail-fast validation (Task 6).
+ * Unit tests for the `helipod serve --fleet` flag parsing + fail-fast validation (Task 6).
  * No spawned processes, no containers — this exercises the pure parser/validator only. The real
  * 2-process fleet E2E is Task 7.
  */
@@ -11,7 +11,7 @@ import {
   FLEET_ERR_NO_ADVERTISE,
 } from "../src/serve";
 
-const ENV_KEYS = ["STACKBASE_FLEET", "STACKBASE_ADVERTISE_URL", "STACKBASE_DATABASE_URL"] as const;
+const ENV_KEYS = ["HELIPOD_FLEET", "HELIPOD_ADVERTISE_URL", "HELIPOD_DATABASE_URL"] as const;
 
 describe("resolveServeOptions — fleet flags", () => {
   const saved: Record<string, string | undefined> = {};
@@ -41,28 +41,28 @@ describe("resolveServeOptions — fleet flags", () => {
     expect(opts.fleet).toBe(true);
   });
 
-  it("STACKBASE_FLEET=1 env fallback enables fleet", () => {
+  it("HELIPOD_FLEET=1 env fallback enables fleet", () => {
     for (const k of ENV_KEYS) stash(k, undefined);
-    stash("STACKBASE_FLEET", "1");
+    stash("HELIPOD_FLEET", "1");
     expect(resolveServeOptions([]).fleet).toBe(true);
   });
 
-  it("STACKBASE_FLEET=0 keeps fleet off", () => {
+  it("HELIPOD_FLEET=0 keeps fleet off", () => {
     for (const k of ENV_KEYS) stash(k, undefined);
-    stash("STACKBASE_FLEET", "0");
+    stash("HELIPOD_FLEET", "0");
     expect(resolveServeOptions([]).fleet).toBe(false);
   });
 
   it("--advertise-url flag wins over env", () => {
     for (const k of ENV_KEYS) stash(k, undefined);
-    stash("STACKBASE_ADVERTISE_URL", "http://env:3000");
+    stash("HELIPOD_ADVERTISE_URL", "http://env:3000");
     const opts = resolveServeOptions(["--advertise-url", "http://flag:3000"]);
     expect(opts.advertiseUrl).toBe("http://flag:3000");
   });
 
-  it("STACKBASE_ADVERTISE_URL env fallback", () => {
+  it("HELIPOD_ADVERTISE_URL env fallback", () => {
     for (const k of ENV_KEYS) stash(k, undefined);
-    stash("STACKBASE_ADVERTISE_URL", "http://env:3000");
+    stash("HELIPOD_ADVERTISE_URL", "http://env:3000");
     expect(resolveServeOptions([]).advertiseUrl).toBe("http://env:3000");
   });
 });

@@ -46,8 +46,8 @@ the first call. Each invocation gets its own `ActionCtx`, its own outer try/catc
 
 ## Defining an action
 
-```ts title="stackbase/tasks.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/tasks.ts"
+import { v } from "@helipod/values";
 import { action } from "./_generated/server";
 
 export const sendReminder = action({
@@ -112,7 +112,7 @@ query or mutation, or its own action execution for a nested action.
   }}
 />
 
-```ts title="stackbase/orders.ts"
+```ts title="helipod/orders.ts"
 export const checkout = action({
   args: { cartId: v.id("carts") },
   handler: async (ctx, { cartId }) => {
@@ -178,8 +178,8 @@ flowchart LR
 Over the same WebSocket sync connection as queries and mutations, with a plain non-reactive call:
 
 ```tsx title="web/ReminderButton.tsx"
-import { useAction } from "@stackbase/client/react";
-import { api } from "../stackbase/_generated/server";
+import { useAction } from "@helipod/client/react";
+import { api } from "../helipod/_generated/server";
 
 function ReminderButton({ taskId }: { taskId: string }) {
   const sendReminder = useAction(api.tasks.sendReminder);
@@ -302,7 +302,7 @@ mutation may never perform, so they simply don't exist on the mutation-mode faca
 the same "no non-determinism in a transaction" rule as `fetch`, expressed as a capability that's
 structurally present in one context and absent in the other, rather than as a runtime check:
 
-```ts title="stackbase/images.ts"
+```ts title="helipod/images.ts"
 export const resize = action({
   args: { id: v.id("_storage") },
   handler: async (ctx, { id }) => {
@@ -326,7 +326,7 @@ facade's full surface.
 `httpAction` is an action whose input and output are a raw Web `Request`/`Response` instead of typed
 JSON args and a return value:
 
-```ts title="stackbase/http.ts"
+```ts title="helipod/http.ts"
 import { httpAction, httpRouter } from "./_generated/server";
 
 export const receiveWebhook = httpAction(async (ctx, request) => {

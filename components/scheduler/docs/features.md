@@ -8,8 +8,8 @@ Research sources: `.reference/scheduling-research/{convex,trigger-dev,inngest,db
 
 | Component | Layers | Unit of work |
 |---|---|---|
-| **`@stackbase/scheduler`** (this catalog's ①–④, ⑥–⑨) | one-off scheduling · crons · durable job runner · flow control | **one function invocation** per job, durable + retried |
-| **`@stackbase/workflow`** (§5, later slice) | multi-step step-journaling durable execution | **many steps**, resumes mid-run; built on `requires: ["scheduler"]` |
+| **`@helipod/scheduler`** (this catalog's ①–④, ⑥–⑨) | one-off scheduling · crons · durable job runner · flow control | **one function invocation** per job, durable + retried |
+| **`@helipod/workflow`** (§5, later slice) | multi-step step-journaling durable execution | **many steps**, resumes mid-run; built on `requires: ["scheduler"]` |
 
 **Our structural advantage (design around it):** we own the OCC transaction and a reactive engine. Transactional enqueue, same-transaction step recording (exactly-once DB writes), and *event-driven* (poll-free) dispatch are things every other system fakes on a DB they don't control — for us they're native. The scheduler should be **reactive-driven**, not a polling daemon.
 
@@ -52,7 +52,7 @@ Research sources: `.reference/scheduling-research/{convex,trigger-dev,inngest,db
 - **Priority** — higher-priority jobs dispatch first.
 - **Virtual queues / partitioning** — a key expression creates isolated lanes; fairness across tenants (no noisy-neighbor starvation).
 
-## §5. Durable multi-step workflows  *(`@stackbase/workflow`, later slice — cataloged for completeness)*
+## §5. Durable multi-step workflows  *(`@helipod/workflow`, later slice — cataloged for completeness)*
 
 - **Steps with journaling** — `step.run(id, fn)` executes once, result persisted; on resume the body re-runs top-down but completed steps return cached results (Convex/Inngest/DBOS memoize-replay; **not** CRIU process-checkpoint — that's Linux-infra-only and out for us).
 - **Determinism model** — code *between* steps must be deterministic; all side effects live inside steps. Documented constraint.
@@ -93,7 +93,7 @@ Research sources: `.reference/scheduling-research/{convex,trigger-dev,inngest,db
 ## §9. Developer experience
 
 - **Typed function references + typed args** — `runAfter(ms, api.email.send, { … })` fully type-checked (codegen).
-- **Runs in `stackbase dev`** — local, no external broker; the heartbeat/driver is in-process at Tier 0.
+- **Runs in `helipod dev`** — local, no external broker; the heartbeat/driver is in-process at Tier 0.
 - **Testable time** — inject/advance a clock in tests; deterministic scheduling tests (no real sleeps).
 - **Cron definition versioning/migration** — changing a cron file safely reconciles registered occurrences.
 - **Clear error surfaces** — CLI/SDK messages for bad schedules, non-existent function refs, non-serializable args.

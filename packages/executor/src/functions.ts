@@ -13,7 +13,7 @@ import {
   type ValidatorJSON,
   type ObjectType,
   type Validator,
-} from "@stackbase/values";
+} from "@helipod/values";
 
 /**
  * A validator over an arbitrary return type `T`. Deliberately constrained to `"required"` —

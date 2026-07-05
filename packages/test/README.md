@@ -1,6 +1,6 @@
-# @stackbase/test
+# @helipod/test
 
-An in-process test harness for Stackbase apps: `createTestStackbase` boots a real
+An in-process test harness for Helipod apps: `createTestHelipod` boots a real
 `EmbeddedRuntime` — the actual transactor, query engine, and reactive subscription manager — over
 an in-memory SQLite database, so your query/mutation/action tests exercise real behavior instead of
 a mocked `ctx.db`.
@@ -11,12 +11,12 @@ testing model, usage, and the documented differences from Convex's testing tooli
 ## Public API
 
 ```ts
-import { createTestStackbase, type TestStackbase, type CreateTestOptions, type TestSubscription } from "@stackbase/test";
+import { createTestHelipod, type TestHelipod, type CreateTestOptions, type TestSubscription } from "@helipod/test";
 ```
 
-- `createTestStackbase(opts: CreateTestOptions): Promise<TestStackbase>` — boots a fresh, isolated
+- `createTestHelipod(opts: CreateTestOptions): Promise<TestHelipod>` — boots a fresh, isolated
   backend (its own `:memory:` SQLite database and temp blob directory).
-- `TestStackbase` — `query` / `mutation` / `action`, `run` (privileged, bypasses the public gate),
+- `TestHelipod` — `query` / `mutation` / `action`, `run` (privileged, bypasses the public gate),
   `withIdentity`, `fetch`, `subscribe`, `finishScheduledFunctions` / `advanceTimers`, `close`.
 - `CreateTestOptions` — `{ modules, components?, schema?, now? }`.
 - `TestSubscription<T>` — the value returned by `t.subscribe(...)`: `value()`, `onChange(cb)`,

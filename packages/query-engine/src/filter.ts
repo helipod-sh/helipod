@@ -3,8 +3,8 @@
  * of a query that the index can't narrow). Evaluated with the canonical value comparison so
  * filtering agrees with index ordering.
  */
-import { compareValues, type Value } from "@stackbase/values";
-import type { DocumentValue } from "@stackbase/docstore";
+import { compareValues, type Value } from "@helipod/values";
+import type { DocumentValue } from "@helipod/docstore";
 
 export type ComparisonOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte";
 

@@ -8,11 +8,11 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { browseTableModule } from "@stackbase/admin";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
+import { browseTableModule } from "@helipod/admin";
 import { loadProject, startDevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */

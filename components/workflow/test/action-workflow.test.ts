@@ -7,8 +7,8 @@
 // `./src/events.ts`) via `ctx.runMutation`, exactly the way `ctx.scheduler`'s action-mode facade
 // delegates to `scheduler:_enqueue`/`_cancel`.
 import { describe, it, expect } from "vitest";
-import { mutation, action } from "@stackbase/executor";
-import { workflow } from "@stackbase/workflow";
+import { mutation, action } from "@helipod/executor";
+import { workflow } from "@helipod/workflow";
 import { makeRuntimeWithWorkflow, readTable } from "./helpers";
 
 describe("ctx.workflow in actions (buildAction → runMutation delegation)", () => {

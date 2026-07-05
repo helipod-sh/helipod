@@ -1,4 +1,4 @@
-import { defineComponent, type ComponentDefinition } from "@stackbase/component";
+import { defineComponent, type ComponentDefinition } from "@helipod/component";
 import { notificationsSchema } from "./schema";
 import { resolveNotificationsConfig, type NotificationsOptions } from "./config";
 import { notificationsContext, notificationsActionContext } from "./facade";
@@ -49,7 +49,7 @@ export { fcmPush } from "./provider-fcm";
 export { apnsPush } from "./provider-apns";
 
 /**
- * `defineNotifications(opts)` — the `@stackbase/notifications` component: the `messages`/
+ * `defineNotifications(opts)` — the `@helipod/notifications` component: the `messages`/
  * `notifications`/`sendReceipts` schema, the `ctx.notifications` facade (`send`, mutation-side +
  * `sendNow` action-side), the internal send/inbox modules, and the queued-send driver.
  *
@@ -81,7 +81,7 @@ export function defineNotifications(opts: NotificationsOptions): ComponentDefini
     schema: notificationsSchema,
     modules: { ...makeSendModules(config), ...makeInboxModules(), ...makeWebhookModules(config), ...makePreferenceModules(config), ...makeTopicModules(config), ...makeDigestModules(config), ...makePushModules(config) },
     context: (cctx) => notificationsContext(cctx, config),
-    contextType: { import: "@stackbase/notifications", type: "NotificationsContext" },
+    contextType: { import: "@helipod/notifications", type: "NotificationsContext" },
     contextWrite: true,
     buildAction: (api) => notificationsActionContext(api, config),
     driver: notificationsDriver(config),

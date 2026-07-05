@@ -17,7 +17,7 @@
  * `segment.ts` proved, reimplemented here because core cannot depend on the `ee/` package):
  *   - `bigint` (ts/prev_ts)              → decimal string
  *   - `Uint8Array` (id bytes, index keys) → base64
- *   - a document's field `Value`s         → `@stackbase/values`' `convexToJson`/`jsonToConvex`
+ *   - a document's field `Value`s         → `@helipod/values`' `convexToJson`/`jsonToConvex`
  *
  * ## The table-number collision guard (THE load-bearing check)
  * A document's physical `table_id` IS its table number; the number→name mapping lives only in the
@@ -26,7 +26,7 @@
  * REFUSES an import whose numbers don't match the target — otherwise a dump's rows would be served
  * under the WRONG table (the object-store table-number-clash bug this program already hit).
  */
-import { convexToJson, jsonToConvex, type JSONValue } from "@stackbase/values";
+import { convexToJson, jsonToConvex, type JSONValue } from "@helipod/values";
 import type {
   ConflictStrategy,
   DatabaseIndexUpdate,
@@ -38,7 +38,7 @@ import type {
   ShardId,
 } from "./types";
 
-/* --- base64 (portable: global btoa/atob, no Node Buffer — matches @stackbase/values' json.ts) --- */
+/* --- base64 (portable: global btoa/atob, no Node Buffer — matches @helipod/values' json.ts) --- */
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -81,7 +81,7 @@ export interface WireIndexWrite {
 }
 
 /** The current dump format version. Bumped only on a breaking wire change. */
-export const MIGRATION_DUMP_FORMAT = "stackbase-migration-dump";
+export const MIGRATION_DUMP_FORMAT = "helipod-migration-dump";
 export const MIGRATION_DUMP_VERSION = 1;
 
 /**

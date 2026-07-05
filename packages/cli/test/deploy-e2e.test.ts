@@ -1,5 +1,5 @@
 /**
- * End-to-end test: `stackbase deploy` through the REAL `startServe` + the REAL `deployCommand` —
+ * End-to-end test: `helipod deploy` through the REAL `startServe` + the REAL `deployCommand` —
  * mirrors `serve-e2e.test.ts`/`http-action-e2e.test.ts`'s "test through the shipped entrypoint"
  * pattern. This is the load-bearing gate for slice 6b: it proves a live deploy hot-swaps functions
  * on a RUNNING server AND its writes still fan out reactively to an already-open WS subscription —
@@ -26,14 +26,14 @@ import { startServe } from "../src/serve";
 import { deployCommand } from "../src/deploy";
 import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
-import { writeGenerated } from "@stackbase/codegen";
+import { writeGenerated } from "@helipod/codegen";
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                    */
 /* -------------------------------------------------------------------------- */
 
 function fixtureFunctionsDir(name: string): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "stackbase");
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "helipod");
 }
 
 /** Refresh a fixture's committed `_generated/` in place — the same load->push->write codegen
@@ -116,7 +116,7 @@ async function subscribeToNotesList(wsUrl: string): Promise<{ ws: WebSocket; mes
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
-describe("stackbase deploy — end-to-end through the real serve server", () => {
+describe("helipod deploy — end-to-end through the real serve server", () => {
   it("v1 -> v2 live hot-swap with reactive fan-out; destructive rejected; opt-in gate; wrong key 401", async () => {
     const v1Dir = fixtureFunctionsDir("deploy-v1");
     const v2Dir = fixtureFunctionsDir("deploy-v2");
@@ -125,8 +125,8 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
     await regenerate(v2Dir);
     await regenerate(badDir);
 
-    const deployRoot = join(process.cwd(), ".stackbase-deploy");
-    const OLD_ADMIN_KEY = process.env.STACKBASE_ADMIN_KEY;
+    const deployRoot = join(process.cwd(), ".helipod-deploy");
+    const OLD_ADMIN_KEY = process.env.HELIPOD_ADMIN_KEY;
 
     let round1: Awaited<ReturnType<typeof startServe>> | undefined;
     let round2: Awaited<ReturnType<typeof startServe>> | undefined;
@@ -152,7 +152,7 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       /*    moment ago — now it's callable, and its write fans out to the       */
       /*    subscription opened BEFORE the deploy.                              */
       /* ---------------------------------------------------------------------- */
-      process.env.STACKBASE_ADMIN_KEY = "k";
+      process.env.HELIPOD_ADMIN_KEY = "k";
       const deployV2Code = await deployCommand(["--url", round1.server.url, "--dir", v2Dir]);
       expect(deployV2Code).toBe(0);
 
@@ -233,8 +233,8 @@ describe("stackbase deploy — end-to-end through the real serve server", () => 
       expect(deployDisabledCode).toBe(1);
       expect(stderrChunks.join("")).toMatch(/not enabled/);
     } finally {
-      if (OLD_ADMIN_KEY === undefined) delete process.env.STACKBASE_ADMIN_KEY;
-      else process.env.STACKBASE_ADMIN_KEY = OLD_ADMIN_KEY;
+      if (OLD_ADMIN_KEY === undefined) delete process.env.HELIPOD_ADMIN_KEY;
+      else process.env.HELIPOD_ADMIN_KEY = OLD_ADMIN_KEY;
       if (round1) {
         await round1.server.close();
         round1.store.close();

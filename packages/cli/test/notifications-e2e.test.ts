@@ -1,7 +1,7 @@
 /**
- * Notifications N1 — E2E through the real `stackbase dev` server (e2e-through-shipped-entrypoint
- * rule). A REAL `@stackbase/client` over a REAL WebSocket to a REAL server with
- * `@stackbase/notifications` composed. The reactive-inbox proof is the headline:
+ * Notifications N1 — E2E through the real `helipod dev` server (e2e-through-shipped-entrypoint
+ * rule). A REAL `@helipod/client` over a REAL WebSocket to a REAL server with
+ * `@helipod/notifications` composed. The reactive-inbox proof is the headline:
  *  (1) a client mutation calls `ctx.notifications.send` for in_app + email;
  *  (2) a LIVE inbox subscription (opened BEFORE) sees the in_app notification appear reactively;
  *  (3) the driver delivers the email (capture provider records it, woken by the commit fan-out);
@@ -12,12 +12,12 @@
  * token), and the app mutation targets that same id.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, action } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineNotifications, type EmailMessage, type EmailProvider } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, action } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineNotifications, type EmailMessage, type EmailProvider } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -92,7 +92,7 @@ async function bootServer(): Promise<{ server: DevServer; capture: ReturnType<ty
 describe("notifications N1 — E2E through the real dev server", () => {
   it("in_app appears reactively, the driver delivers email, and markRead drops the unread count live", async () => {
     const { capture, wsUrl } = await bootServer();
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       c.setAuth("user-1"); // the ambient identity → the inbox recipient id
       const inbox: Array<Array<{ _id: string; body: string }>> = [];
@@ -126,7 +126,7 @@ describe("notifications N1 — E2E through the real dev server", () => {
 
   it("sendNow delivers email synchronously (returns the provider result), writes the in_app row, and dedups on key", async () => {
     const { capture, wsUrl } = await bootServer();
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       c.setAuth("user-2");
       const inbox: Array<Array<{ _id: string; body: string }>> = [];

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `ReplicaTailer` (Fleet slice 2, Task 2; Fenced Frontier B1, D5/D6) — tails the Postgres
  * primary's MVCC log VERBATIM onto a local embedded replica `DocStore` (an in-process SQLite
@@ -61,19 +61,19 @@
  *      resolve any satisfied `waitFor()`s — a throwing/slow handler must not cause a range to be
  *      silently skipped.
  */
-import type { PostgresDocStore } from "@stackbase/docstore-postgres";
+import type { PostgresDocStore } from "@helipod/docstore-postgres";
 import type {
   DatabaseIndexValue,
   DocStore,
   DocumentLogEntry,
   IndexWrite,
   InternalDocumentId,
-} from "@stackbase/docstore";
-import { decodeStorageTableId, encodeStorageTableId } from "@stackbase/id-codec";
+} from "@helipod/docstore";
+import { decodeStorageTableId, encodeStorageTableId } from "@helipod/id-codec";
 import type { CommitChannelClient } from "./commit-notifier";
 import { stablePrefixFromFrontier, type StablePrefixTs } from "./stable-prefix";
 
-const COMMIT_CHANNEL = "stackbase_commits";
+const COMMIT_CHANNEL = "helipod_commits";
 const DEFAULT_POLL_MS = 1000;
 const DEFAULT_BATCH_SIZE = 1000;
 /** Default shard count (B1 single-shard behavior) when `numShards` is unset — `min(frontier_ts)` over

@@ -1,5 +1,5 @@
 /**
- * The DO's `WakeHost` — the firing seam for `@stackbase/scheduler`/`@stackbase/triggers` drivers on a
+ * The DO's `WakeHost` — the firing seam for `@helipod/scheduler`/`@helipod/triggers` drivers on a
  * host that hibernates between requests. Implements `armWake(atMs)` via `ctx.storage.setAlarm`, the
  * single durable alarm a Durable Object offers (`docs/superpowers/specs/2026-03-20-do-alarm-driver-seam-design.md`).
  *
@@ -14,7 +14,7 @@
  * override alarm()" landmine is specific to `@cloudflare/containers`, which uses the alarm for
  * container lifecycle. A DO-native host owns its alarm outright.
  */
-import type { WakeHost } from "@stackbase/component";
+import type { WakeHost } from "@helipod/component";
 import type { DurableObjectStorageLike } from "./cf-types";
 
 export class DoAlarmWakeHost implements WakeHost {

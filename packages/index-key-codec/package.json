@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/index-key-codec",
+  "name": "@helipod/index-key-codec",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,7 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/values": "workspace:*"
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
     "tsup": "catalog:",

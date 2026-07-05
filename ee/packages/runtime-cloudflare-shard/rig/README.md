@@ -8,13 +8,13 @@ Cloudflare, real per-DO placement across shards, real cross-datacenter routing.
 
 ## What's here
 
-- `wrangler.jsonc` — the deploy config: `nodejs_compat`, ONE `STACKBASE_DO` Durable Object binding
+- `wrangler.jsonc` — the deploy config: `nodejs_compat`, ONE `HELIPOD_DO` Durable Object binding
   (the multi-shard router addresses N instances of it by shard-key name), a `new_sqlite_classes`
   migration (DO-SQLite storage).
 - `fixture/worker.ts` — the multi-shard Worker/DO entry (hand-written stand-in for what
   `generateShardWorkerEntrySource` codegens): static imports of the fixture `convex/`, `export class
-  StackbaseDO extends StackbaseDurableObject` (the **unmodified free** host — a shard-DO IS Slice 3),
-  and `export default createShardWorkerHandler("STACKBASE_DO", { mode: "key", loaded })` (this ee
+  HelipodDO extends HelipodDurableObject` (the **unmodified free** host — a shard-DO IS Slice 3),
+  and `export default createShardWorkerHandler("HELIPOD_DO", { mode: "key", loaded })` (this ee
   package). The single-shard rig default-exports `createWorkerHandler` instead — that one line is the
   **licensing switch** (free single-shard vs paid multi-shard).
 - `fixture/convex/` — a minimal SHARDED app: `messages` partitioned by `.shardKey("roomId")`, so
@@ -32,14 +32,14 @@ cd ee/packages/runtime-cloudflare-shard/rig
 npx wrangler login
 
 # 2. set the admin key as a SECRET (do NOT leave a placeholder in wrangler.jsonc)
-npx wrangler secret put STACKBASE_ADMIN_KEY      # paste a strong secret
+npx wrangler secret put HELIPOD_ADMIN_KEY      # paste a strong secret
 
-# 3. deploy — builds fixture/worker.ts into a Worker + the StackbaseDO Durable Object class
+# 3. deploy — builds fixture/worker.ts into a Worker + the HelipodDO Durable Object class
 npx wrangler deploy
-#    → prints a URL like https://stackbase-do-shard-fixture.<subdomain>.workers.dev
+#    → prints a URL like https://helipod-do-shard-fixture.<subdomain>.workers.dev
 
 # 4. run the multi-shard E2E against the real deployment
-node e2e.mjs --url https://stackbase-do-shard-fixture.<subdomain>.workers.dev
+node e2e.mjs --url https://helipod-do-shard-fixture.<subdomain>.workers.dev
 ```
 
 ## Geographic placement — the point of per-shard DOs
@@ -51,7 +51,7 @@ shard can be placed near **its own** audience via `get(id, { locationHint })` �
 honored** (it is pinned thereafter), so the router derives a **stable-per-key** hint where possible.
 Placement precedence (see the package README for detail):
 
-1. **Explicit** `?region=<hint>` / `X-Stackbase-Region: <hint>` — deterministic, app-controlled;
+1. **Explicit** `?region=<hint>` / `X-Helipod-Region: <hint>` — deterministic, app-controlled;
    an invalid hint is a hard `INVALID_REGION_HINT` 400 (never mis-places a DO permanently).
 2. **Region-prefixed key** (`regionPrefixedKeys: true`) — `"enam:room123"` → `enam` (opt-in; the full
    value still names the DO).

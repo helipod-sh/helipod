@@ -14,7 +14,7 @@ function makeProject(wrangler?: string): string {
 
 function ctx(dir: string, spawn: FakeSpawner, over: Partial<DeployContext> = {}): DeployContext {
   return {
-    cwd: dir, functionsDir: join(dir, "stackbase"), env: "production",
+    cwd: dir, functionsDir: join(dir, "helipod"), env: "production",
     target: { targetName: "cloudflare", provider: "cloudflare", env: "production", settings: {} },
     interactive: true, spawn, log: () => {},
     packageApp: async () => ({ files: [] }), codegen: async () => {},
@@ -52,7 +52,7 @@ describe("cloudflareTarget", () => {
     expect(codegenRan).toBe(true);
     const written = readFileSync(join(dir, "wrangler.jsonc"), "utf8");
     const parsed = JSON.parse(written);
-    expect(parsed.durable_objects.bindings[0]).toEqual({ name: "STACKBASE_DO", class_name: "StackbaseDO" });
+    expect(parsed.durable_objects.bindings[0]).toEqual({ name: "HELIPOD_DO", class_name: "HelipodDO" });
     expect(parsed.vars).toEqual({ K: "v" });
   });
 

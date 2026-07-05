@@ -1,4 +1,4 @@
-import { httpRouter, httpAction } from "@stackbase/executor";
+import { httpRouter, httpAction } from "@helipod/executor";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const ping = httpAction(async (_ctx: any, req: Request) => {

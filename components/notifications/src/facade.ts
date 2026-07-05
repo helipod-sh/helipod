@@ -1,4 +1,4 @@
-import type { ComponentContext, ActionApi, GuestDatabaseWriter } from "@stackbase/executor";
+import type { ComponentContext, ActionApi, GuestDatabaseWriter } from "@helipod/executor";
 import type { NotificationsConfig, SendArgs, Channel } from "./config";
 import type { SendResult } from "./provider";
 import { recordSend, deliverOutbound } from "./modules";
@@ -10,7 +10,7 @@ import { compact } from "./render";
 
 /**
  * Resolve the ambient caller's user id for a facade write, mirroring `inbox.ts`'s `callerId`: prefer
- * a composed `@stackbase/auth`'s verified `getUserId()` (available via `cctx.components.auth` when
+ * a composed `@helipod/auth`'s verified `getUserId()` (available via `cctx.components.auth` when
  * auth is composed before notifications), else fall back to the raw ambient identity. A component
  * facade only ever sees `cctx`, never the full guest ctx `callerId` reads from — this is the
  * facade-side equivalent, kept in sync so `ctx.notifications.setPreference` (this file) and the

@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime, type IndexSpec } from "@stackbase/query-engine";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { serializeKeyRange } from "@stackbase/index-key-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime, type IndexSpec } from "@helipod/query-engine";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { serializeKeyRange } from "@helipod/index-key-codec";
 import {
   InlineUdfExecutor,
   SimpleIndexCatalog,

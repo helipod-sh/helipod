@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { runBlobStoreConformance } from "@stackbase/blobstore/test-support/conformance";
+import { runBlobStoreConformance } from "@helipod/blobstore/test-support/conformance";
 import { FsBlobStore } from "../src/fs-blobstore";
 
 const dir = mkdtempSync(join(tmpdir(), "sb-fs-blob-"));

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `WriteForwarder`'s Receipted Outbox owner-placement threading (verdict §(c) repair 3): a resend
  * through a NON-owner node carries the durable `(clientId, seq)` dedup key in the `/_fleet/run` body
@@ -11,7 +11,7 @@
  * `forwarder-ryow.test.ts`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
 import { LeaseManager } from "../src/lease";
 import { WriteForwarder, type ReplicaWaiter } from "../src/forwarder";
 

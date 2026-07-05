@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 4.2 — the manifest lease + acquire/heartbeat/commit-gating protocol (design record §4/§7,
  * Tier 3 Slice 4). Four scenarios (plan's 4.2a-d): a fresh acquire succeeds and unblocks commits; an
@@ -10,10 +10,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { FencedError } from "../src/fenced-error";
 import type { Manifest } from "../src/manifest";

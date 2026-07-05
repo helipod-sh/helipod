@@ -1,12 +1,12 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
- * `@stackbase/runtime-cloudflare-shard` — the MULTI-SHARD Cloudflare Durable Object front (Slice 6,
+ * `@helipod/runtime-cloudflare-shard` — the MULTI-SHARD Cloudflare Durable Object front (Slice 6,
  * Milestone 1: `.shardBy(key)` write scale-out). A paid-tier (ee/) SIBLING of `ee/fleet`: this is the
  * Cloudflare-native analog of the portable multi-node scale-out. It routes each request to the owning
  * shard-DO by the shard key (CF's `getByName(shardKey)` model — the DO NAME is the shard key, no shard
- * map, no coordinator), and each shard-DO is an UNMODIFIED `StackbaseDurableObject` from the FREE
- * `@stackbase/runtime-cloudflare` package. N distinct keys ⇒ N distinct DOs ⇒ N× write throughput +
+ * map, no coordinator), and each shard-DO is an UNMODIFIED `HelipodDurableObject` from the FREE
+ * `@helipod/runtime-cloudflare` package. N distinct keys ⇒ N distinct DOs ⇒ N× write throughput +
  * N×10 GB storage. No engine change: M1 is pure routing over independent Slice-3 hosts.
  *
  * NON-GOALS (M1, enforced not silently broken): a reactive query/mutation spanning MULTIPLE shards, and
@@ -37,4 +37,4 @@ export { generateShardWorkerEntrySource, type ShardWorkerEntryInputs } from "./w
 
 // Re-export the FREE DO host class so an app imports ONE package at its Worker entry. This is a plain
 // re-export of the free class — the multi-shard host is the SAME DO, addressed N times by the router.
-export { StackbaseDurableObject, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare";
+export { HelipodDurableObject, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare";

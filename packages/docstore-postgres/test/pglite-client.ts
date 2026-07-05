@@ -50,7 +50,7 @@ export class PgliteClient implements PgClient {
   private readonly pg = new PGlite({ parsers: { 20: (v: string) => BigInt(v) } });
   /** Monotonic per-instance counter so concurrent `queryStream` callers on this ONE shared
    *  connection (e.g. a mutation's own read alongside a background driver's sweep — both real in
-   *  `@stackbase/test`'s embedded runtime) never collide on a cursor name. See `queryStream` below. */
+   *  `@helipod/test`'s embedded runtime) never collide on a cursor name. See `queryStream` below. */
   private cursorSeq = 0;
   /** Promise-chain mutex serializing `queryStream` calls on the single shared PGlite connection.
    *  See `queryStream` below for why this — not `WITH HOLD` — is the fix for cursor collisions. */
@@ -101,7 +101,7 @@ export class PgliteClient implements PgClient {
    * through the lock too risks a deadlock (a consumer that issues a read mid-stream, from inside
    * the same logical operation that's draining the stream, would block on its own lock). This is a
    * TEST-SUBSTRATE constraint only, with zero production impact: `NodePgClient` streams over
-   * independent pool/pinned connections (see its own doc comment), `@stackbase/test` defaults to
+   * independent pool/pinned connections (see its own doc comment), `@helipod/test` defaults to
    * `SqliteDocStore` (unaffected), and the conformance suite that exercises this client runs
    * sequentially. The `finally` chain always CLOSEs the cursor, COMMITs (or best-effort no-throws
    * on cleanup), and releases the lock — including on an early `break`/throw from the consumer (an
@@ -159,7 +159,7 @@ export class PgliteClient implements PgClient {
   // connection with no pool, so leaving it undefined keeps `PostgresDocStore.commitWrite` on its
   // poolless pinned-connection path — the exact path the shared conformance suite (which runs on
   // this client) must keep proving byte-identical. The real two-connection pool is proven by the
-  // `STACKBASE_TEST_DATABASE_URL`-gated test + the T6 fleet E2E against real Postgres. The two
+  // `HELIPOD_TEST_DATABASE_URL`-gated test + the T6 fleet E2E against real Postgres. The two
   // members below ARE implemented as no-ops: they're consulted only by fleet lease code, never by
   // the store, so they can't divert any conformance path.
 

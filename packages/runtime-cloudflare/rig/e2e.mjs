@@ -5,7 +5,7 @@
  * against the resulting `*.workers.dev` URL. It does NOT fake a deploy.
  *
  * Usage:
- *   node e2e.mjs --url https://stackbase-do-fixture.<subdomain>.workers.dev --admin-key <KEY>
+ *   node e2e.mjs --url https://helipod-do-fixture.<subdomain>.workers.dev --admin-key <KEY>
  *
  * Proves, against a REAL DO on real Cloudflare:
  *   1. GET /api/health → 200
@@ -28,7 +28,7 @@ function arg(name, fallback) {
 }
 
 const URL = arg("url");
-const ADMIN_KEY = arg("admin-key", process.env.STACKBASE_ADMIN_KEY);
+const ADMIN_KEY = arg("admin-key", process.env.HELIPOD_ADMIN_KEY);
 if (!URL) {
   console.error("usage: node e2e.mjs --url https://<app>.workers.dev [--admin-key <KEY>]");
   process.exit(2);

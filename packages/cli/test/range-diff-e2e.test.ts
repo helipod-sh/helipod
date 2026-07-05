@@ -1,6 +1,6 @@
 /**
  * DLR Stage 2b Task 8 — the range `QueryDiff` round-trip (index `collect()`), proven end-to-end
- * through a REAL `stackbase dev` server over a REAL WebSocket with a REAL `@stackbase/client`.
+ * through a REAL `helipod dev` server over a REAL WebSocket with a REAL `@helipod/client`.
  * Models `byid-diff-e2e.test.ts` (Stage 2a Task 7) but exercises the RANGE differ instead of the
  * by-id differ: `ctx.db.query(table, index).eq(...).collect()` over a `by_channel` index.
  *
@@ -19,12 +19,12 @@
  *      (the RERUN path), never a `QueryDiff`.
  */
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi, type ClientTransport } from "@stackbase/client";
-import type { ServerMessage } from "@stackbase/sync";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi, type ClientTransport } from "@helipod/client";
+import type { ServerMessage } from "@helipod/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -146,7 +146,7 @@ describe("DLR 2b E2E — range QueryDiff round-trip through the real dev server"
   it("(1)(2)(3)(4) initial range reset, incremental add/edit/remove — all via QueryDiff, correctly ordered", async () => {
     const { server, runtime } = await startItemsServer();
     const recorded = recordingTransport(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
-    const client = new StackbaseClient(recorded.transport);
+    const client = new HelipodClient(recorded.transport);
     try {
       // Seed 2 rows in channel "c" BEFORE subscribing, so the first frame is a range reset.
       const id1 = (await client.mutation(api.items.add, { channelId: "c", n: 1 })) as string;
@@ -220,7 +220,7 @@ describe("DLR 2b E2E — range QueryDiff round-trip through the real dev server"
   it("(5) a .where()-filtered subscription never surfaces a row that fails the filter", async () => {
     const { server, runtime } = await startItemsServer();
     const recorded = recordingTransport(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
-    const client = new StackbaseClient(recorded.transport);
+    const client = new HelipodClient(recorded.transport);
     try {
       // Seed one row that PASSES the filter (n > 0) so the sub starts non-empty and provably alive.
       const passId = (await client.mutation(api.items.add, { channelId: "c", n: 5 })) as string;
@@ -265,7 +265,7 @@ describe("DLR 2b E2E — range QueryDiff round-trip through the real dev server"
     const recorded = recordingTransport(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }), {
       corruptFirstDiffChecksum: true,
     });
-    const client = new StackbaseClient(recorded.transport);
+    const client = new HelipodClient(recorded.transport);
     try {
       const id1 = (await client.mutation(api.items.add, { channelId: "c", n: 1 })) as string;
       const id2 = (await client.mutation(api.items.add, { channelId: "c", n: 2 })) as string;
@@ -296,7 +296,7 @@ describe("DLR 2b E2E — range QueryDiff round-trip through the real dev server"
     const recorded = recordingTransport(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }), {
       stripConnect: true,
     });
-    const client = new StackbaseClient(recorded.transport);
+    const client = new HelipodClient(recorded.transport);
     try {
       const id1 = (await client.mutation(api.items.add, { channelId: "c", n: 1 })) as string;
 

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as ts from "typescript";
-import { v, defineSchema, defineTable } from "@stackbase/values";
+import { v, defineSchema, defineTable } from "@helipod/values";
 import {
   validatorToTsType,
   generateDataModel,
@@ -149,23 +149,23 @@ describe("generateInternalApi", () => {
 describe("generateServer", () => {
   it("re-exports the runtime function builders and the generated types", () => {
     const server = generateServer(schema);
-    expect(server.content).toContain('export { query, mutation, action, httpAction, httpRouter } from "@stackbase/executor";');
+    expect(server.content).toContain('export { query, mutation, action, httpAction, httpRouter } from "@helipod/executor";');
     expect(server.content).toContain('export type { DataModel, TableNames, Doc, Id } from "./dataModel";');
     expect(server.content).toContain('export type { Internal } from "./internal";');
   });
 
   it("emits runtime `api`/`internal` proxy values typed against the generated Api/Internal", () => {
     const server = generateServer(schema);
-    expect(server.content).toContain('import { anyApi } from "@stackbase/client";');
+    expect(server.content).toContain('import { anyApi } from "@helipod/client";');
     expect(server.content).toContain("export const api = anyApi as Api;");
     expect(server.content).toContain("export const internal = anyApi as Internal;");
   });
 
   it("re-exports a component's serverExports from its contextType.import", () => {
     const server = generateServer(schema, {
-      components: [{ name: "scheduler", contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" }, serverExports: ["cronJobs"] }],
+      components: [{ name: "scheduler", contextType: { import: "@helipod/scheduler", type: "SchedulerContext" }, serverExports: ["cronJobs"] }],
     });
-    expect(server.content).toContain('export { cronJobs } from "@stackbase/scheduler";');
+    expect(server.content).toContain('export { cronJobs } from "@helipod/scheduler";');
   });
 
   it("does not emit a re-export for a component with serverExports but no contextType", () => {

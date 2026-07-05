@@ -4,13 +4,13 @@ import type { RuntimeHost, ServeOptions, ServerHandle } from "../src/index";
 
 /**
  * Compile-time contract for the `RuntimeHost` seam (Task 1). The real implementation
- * (`ProcessRuntimeHost`) lives in `@stackbase/cli` and is asserted `satisfies RuntimeHost` there
- * (Task 2). Here we only prove the neutral seam is IMPLEMENTABLE with `@stackbase`-only types — a
+ * (`ProcessRuntimeHost`) lives in `@helipod/cli` and is asserted `satisfies RuntimeHost` there
+ * (Task 2). Here we only prove the neutral seam is IMPLEMENTABLE with `@helipod`-only types — a
  * dummy host built from the runtime-embedded surface alone. If this file type-checks, the seam's
  * shape is coherent; the assertions below just keep vitest from complaining about an empty suite.
  */
 describe("RuntimeHost seam contract", () => {
-  it("is implementable with neutral (@stackbase-only) types", () => {
+  it("is implementable with neutral (@helipod-only) types", () => {
     const handle: ServerHandle = {
       url: "http://127.0.0.1:0",
       port: 0,

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `ObjectStoreReplicaTailer` (Tier 3 Slice 5, Task 5.1, design record §7/§8) — the object-storage
  * analog of the shipped fleet `ReplicaTailer` (`ee/packages/fleet/src/replica-tailer.ts`): polls a
@@ -39,10 +39,10 @@
  * way, the caller MUST have already run `local.setupSchema()` before handing it over (`open()`'s own
  * first step) — this tailer never creates the schema itself, only applies rows into it.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import type { DocumentLogEntry, IndexWrite, InternalDocumentId } from "@stackbase/docstore";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { encodeStorageTableId, internalIdToHex } from "@stackbase/id-codec";
+import type { ObjectStore } from "@helipod/objectstore";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId } from "@helipod/docstore";
+import type { SqliteDocStore } from "@helipod/docstore-sqlite";
+import { encodeStorageTableId, internalIdToHex } from "@helipod/id-codec";
 import { readManifest, type Manifest } from "./manifest";
 import { readSnapshot } from "./snapshot";
 import { decodeSegment } from "./segment";
@@ -57,7 +57,7 @@ const MAX_MISSING_SEGMENT_RETRIES = 8;
 
 /** Mirrors the fleet tailer's `AppliedInvalidation` shape byte-for-byte (see that file's doc for why
  *  this is a deliberate parallel type, not a shared import — the substrate must not depend on
- *  `@stackbase/fleet`). `newMaxTs` is the ts THROUGH which this round applied — the manifest's
+ *  `@helipod/fleet`). `newMaxTs` is the ts THROUGH which this round applied — the manifest's
  *  `frontierTs` at the moment this round finished (see `#tickOnce`'s doc for why that, not a
  *  row-derived max, is the authoritative value here). */
 export interface AppliedInvalidation {
@@ -387,7 +387,7 @@ export class ObjectStoreReplicaTailer {
   /** `${tableId}|${internalIdHex}` — the doc-identity key `#buildInvalidation`'s dedupe uses to
    *  distinguish applied documents by `(tableId, internalId)`. (The snapshot-restore diff this
    *  method used to also serve, Finding 1, now lives in the shared `applySnapshotState` helper,
-   *  keyed by `@stackbase/id-codec`'s own `documentIdKey` — see `apply-snapshot.ts`.) */
+   *  keyed by `@helipod/id-codec`'s own `documentIdKey` — see `apply-snapshot.ts`.) */
   #docKey(id: InternalDocumentId): string {
     return `${encodeStorageTableId(id.tableNumber)}|${internalIdToHex(id.internalId)}`;
   }

@@ -1,11 +1,11 @@
 /**
  * Task 4 (browser-ux Part B, spec Testing §4) — the headless drain E2E: `drainOutboxOnce` (no
- * `StackbaseClient`, no UI) draining a durable outbox against a REAL `stackbase dev` server.
+ * `HelipodClient`, no UI) draining a durable outbox against a REAL `helipod dev` server.
  *
  * Mirrors the reload-fidelity model `outbox-e2e.test.ts:13-22` documents: a single `IDBFactory`
- * shared across a seeding `StackbaseClient` and the headless drain is the faithful analog of a real
+ * shared across a seeding `HelipodClient` and the headless drain is the faithful analog of a real
  * browser reload / a Service Worker `sync` event firing after the tab that queued the work is gone.
- * Session 1 (a normal `StackbaseClient`) seeds mutations OFFLINE — pointed at a dead port that never
+ * Session 1 (a normal `HelipodClient`) seeds mutations OFFLINE — pointed at a dead port that never
  * accepts a connection, so every mutation lands durably `unsent` without ever touching the real
  * server (the same "durability unconditional on connection state" trick `outbox-fs-e2e.test.ts`
  * uses for its journal, applied here to IndexedDB) — then `close()`s (the "reload" boundary).
@@ -16,7 +16,7 @@
  *   (1) K=4 offline mutations drain exactly-once: `{drained: 4, failed: 0, remaining: 0}`.
  *   (2) a second `drainOutboxOnce` call on the now-empty durable queue is an idempotent no-op:
  *       `{drained: 0, failed: 0, remaining: 0}` — no duplicate rows.
- *   (3) a poison entry (a coded, non-retryable `StackbaseError` throw) is counted in `failed`; the
+ *   (3) a poison entry (a coded, non-retryable `HelipodError` throw) is counted in `failed`; the
  *       queue continues past it under the default `poisonPolicy: "skip"` (the OTHER offline entries
  *       still commit, in FIFO order).
  *   (4) an injected held lock (`OutboxLockManager` whose `ifAvailable` probe yields `null`, mimicking
@@ -27,20 +27,20 @@ import { describe, it, expect } from "vitest";
 import { createServer } from "node:net";
 import WebSocket from "ws";
 import { IDBFactory } from "fake-indexeddb";
-import { v, defineSchema, defineTable, type Value } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { DocumentValidationError } from "@stackbase/errors";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable, type Value } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { DocumentValidationError } from "@helipod/errors";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import {
-  StackbaseClient,
+  HelipodClient,
   webSocketTransport,
   indexedDBOutbox,
   memoryOutbox,
   drainOutboxOnce,
   type ClientTransport,
   type OutboxLockManager,
-} from "@stackbase/client";
+} from "@helipod/client";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -60,11 +60,11 @@ const notesModule = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (ctx.db.query("notes", "by_box") as any).eq("box", box).collect(),
   }),
-  // A deliberate poison unit (scenario 3): a coded, NON-retryable `StackbaseError` throw so the wire
+  // A deliberate poison unit (scenario 3): a coded, NON-retryable `HelipodError` throw so the wire
   // response carries `.code` (`DOCUMENT_VALIDATION`) — the outbox drain's "coded terminal failure"
   // path (settle-and-continue under the default `poisonPolicy: "skip"`), never its "codeless" path
   // (which the drain instead treats as transient and retries forever under backoff — a plain
-  // non-`StackbaseError` throw never gets `.code` threaded onto a FRESH response, per
+  // non-`HelipodError` throw never gets `.code` threaded onto a FRESH response, per
   // `packages/sync/src/handler.ts#processMutation`'s doc comment, so it would hang this test).
   poison: mutation<{ box: string; text: string }, string>({
     handler: () => {
@@ -137,13 +137,13 @@ function freePort(): Promise<number> {
   });
 }
 
-/** Seed `mutations` offline via a normal `StackbaseClient` pointed at a dead port, over the given
+/** Seed `mutations` offline via a normal `HelipodClient` pointed at a dead port, over the given
  *  IDB factory, then `close()` it (the "reload" boundary) — the durable queue this leaves behind is
  *  exactly what a Service Worker would find on disk with no live tab around. */
 async function seedOffline(idb: IDBFactory, mutations: Array<{ udfPath: string; args: Record<string, Value> }>): Promise<void> {
   const deadPort = await freePort();
   const outbox = indexedDBOutbox({ indexedDB: idb });
-  const client = new StackbaseClient(nodeWsTransport(wsUrlFor(deadPort)), {
+  const client = new HelipodClient(nodeWsTransport(wsUrlFor(deadPort)), {
     outbox,
     outboxLocks: null,
     outboxDrainIntervalMs: 0,
@@ -166,7 +166,7 @@ async function seedOffline(idb: IDBFactory, mutations: Array<{ udfPath: string; 
 /** A one-off live query against the real server, reading straight through a throwaway client (no
  *  outbox drain involved — just `.query()`). */
 async function listNotes(port: number, box: string): Promise<Array<{ text: string }>> {
-  const reader = new StackbaseClient(nodeWsTransport(wsUrlFor(port)), {
+  const reader = new HelipodClient(nodeWsTransport(wsUrlFor(port)), {
     outbox: memoryOutbox(),
     outboxLocks: null,
     outboxDrainIntervalMs: 0,

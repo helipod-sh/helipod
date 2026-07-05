@@ -15,11 +15,11 @@
  *      know which table the mutation means, so the type check is skipped (kernel guards still
  *      catch a real mismatch at write time, per-document, regardless).
  *
- * Runs once per `push()` (dev boot + every hot reload, `serve` boot, `stackbase codegen`) — see
+ * Runs once per `push()` (dev boot + every hot reload, `serve` boot, `helipod codegen`) — see
  * `packages/cli/src/project.ts`'s `loadProject`, the one place a `RegisteredFunction`'s runtime
  * `shardBy`/`argsJson` and the schema's `shardKey` metadata are both in scope together.
  */
-import type { SchemaDefinitionJSON, ValidatorJSON } from "@stackbase/values";
+import type { SchemaDefinitionJSON, ValidatorJSON } from "@helipod/values";
 import { validatorToTsType } from "./validator-to-ts";
 
 /** One mutation's `shardBy` declaration, reduced to what the cross-check needs — extracted from a
@@ -98,6 +98,6 @@ export function assertShardByDeclarations(
 ): void {
   const errors = validateShardByDeclarations(schema, declarations);
   if (errors.length > 0) {
-    throw new Error(`stackbase: invalid shardBy declaration(s):\n  - ${errors.join("\n  - ")}`);
+    throw new Error(`helipod: invalid shardBy declaration(s):\n  - ${errors.join("\n  - ")}`);
   }
 }

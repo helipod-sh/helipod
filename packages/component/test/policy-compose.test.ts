@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { defineComponent, composeComponents } from "../src/index";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 const appSchema = defineSchema({ todos: defineTable({ ownerId: v.string(), text: v.string() }) });
 

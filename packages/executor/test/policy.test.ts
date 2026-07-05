@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compileWhere, mergeReadPolicy, evalReadPolicy } from "../src/policy";
-import type { FilterExpr } from "@stackbase/query-engine";
+import type { FilterExpr } from "@helipod/query-engine";
 
 describe("compileWhere", () => {
   it("true/undefined → null (no clause); false → always-false", () => {

@@ -13,9 +13,9 @@ import {
   indexKeyRangeStart,
   indexKeyRangeEnd,
   type SerializedKeyRange,
-} from "@stackbase/index-key-codec";
-import type { Value } from "@stackbase/values";
-import type { DiffablePage } from "@stackbase/executor";
+} from "@helipod/index-key-codec";
+import type { Value } from "@helipod/values";
+import type { DiffablePage } from "@helipod/executor";
 import type { RangeRead } from "../src/classify";
 import { orderKeyFor } from "../src/commit-differ";
 import {

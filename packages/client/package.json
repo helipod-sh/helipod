@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/client",
+  "name": "@helipod/client",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -35,16 +35,16 @@
     "react": { "optional": true }
   },
   "dependencies": {
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/sync": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/sync": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/runtime-embedded": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
     "@testing-library/react": "^16.1.0",
     "@types/node": "catalog:",
     "@types/react": "^18.3.18",

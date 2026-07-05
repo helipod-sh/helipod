@@ -44,9 +44,9 @@ import { describe, it, expect } from "vitest";
 import { LayeredQueryStore, queryHash, type OptimisticStoreView } from "../src/layered-store";
 import { Reconciler } from "../src/reconcile";
 import type { PendingMutation } from "../src/mutation-log";
-import { StackbaseClient, memoryOutbox, OUTBOX_VERSION, type ClientTransport } from "../src/index";
+import { HelipodClient, memoryOutbox, OUTBOX_VERSION, type ClientTransport } from "../src/index";
 import type { OutboxEntry, OutboxStorage } from "../src/outbox-storage";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 /* -------------------------------------------------------------------------- */
 /* MockTransport — the outbox-handshake.test.ts / reconnect.test.ts pattern     */
@@ -171,10 +171,10 @@ describe("Subscription.lastHash — stored/cleared from QueryUpdated.hash", () =
 /* Test 2 — resync()'s conditional resultHash echo                             */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — resync() echoes resultHash only for answered+defined+hashed subs", () => {
+describe("HelipodClient — resync() echoes resultHash only for answered+defined+hashed subs", () => {
   it("an answered sub with a stored hash echoes it; a failed sub and a never-answered sub echo nothing", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     client.subscribe("messages:a", {}, () => {}); // queryId 1 — will be answered with a hash
     client.subscribe("messages:b", {}, () => {}, () => {}); // queryId 2 — will FAIL
@@ -272,7 +272,7 @@ describe("Reconciler — optimistic layers over a QueryUnchanged-resumed base", 
 /* Test 5 — RED-FIRST: the drain-gate composition regression                   */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — QueryUnchanged vs. the first-connect drain gate (Task 2 regression)", () => {
+describe("HelipodClient — QueryUnchanged vs. the first-connect drain gate (Task 2 regression)", () => {
   /** Wraps a real `OutboxStorage` so `loadAll` (the drain's hydrate) hangs until released —
    *  simulates a slow IndexedDB open / a hydrate that hasn't resolved yet on a fresh page load.
    *  (Identical to `outbox-handshake.test.ts`'s helper of the same name.) */
@@ -323,7 +323,7 @@ describe("StackbaseClient — QueryUnchanged vs. the first-connect drain gate (T
     const { outbox: delayed, release: releaseLoad } = delayedLoadAllOutbox(real);
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
 
     // Natural app-code ordering: subscribe immediately on construction, well before the drain's
     // queued `becomeLeader` microtask even runs. The server resumes this subscription as

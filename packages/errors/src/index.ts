@@ -1,5 +1,5 @@
 /**
- * `@stackbase/errors` — the structured error hierarchy for the Stackbase engine.
+ * `@helipod/errors` — the structured error hierarchy for the Helipod engine.
  *
  * Every error carries a stable `code`, an HTTP `httpStatus`, and a `retryable` flag,
  * and serializes losslessly via `toJSON()` so it can cross the syscall and wire
@@ -11,7 +11,7 @@
  *  - {@link ConflictError}  — optimistic-concurrency / write conflict (409, retryable).
  */
 
-export interface StackbaseErrorJSON {
+export interface HelipodErrorJSON {
   name: string;
   code: string;
   message: string;
@@ -20,7 +20,7 @@ export interface StackbaseErrorJSON {
   data?: unknown;
 }
 
-export interface StackbaseErrorOptions {
+export interface HelipodErrorOptions {
   /** The underlying cause (sets `Error.cause`). */
   cause?: unknown;
   /** Structured, serializable payload surfaced to clients / logs. */
@@ -28,7 +28,7 @@ export interface StackbaseErrorOptions {
 }
 
 /** Base class for every error the engine raises deliberately. */
-export abstract class StackbaseError extends Error {
+export abstract class HelipodError extends Error {
   /** Stable, machine-readable identifier (e.g. `"OCC_CONFLICT"`). */
   abstract readonly code: string;
   /** The HTTP status this error maps to at the edge. */
@@ -38,14 +38,14 @@ export abstract class StackbaseError extends Error {
   /** Optional structured payload. */
   readonly data?: unknown;
 
-  constructor(message: string, options?: StackbaseErrorOptions) {
+  constructor(message: string, options?: HelipodErrorOptions) {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     // `new.target.name` gives the concrete subclass name even after minification-safe builds.
     this.name = new.target.name;
     if (options?.data !== undefined) this.data = options.data;
   }
 
-  toJSON(): StackbaseErrorJSON {
+  toJSON(): HelipodErrorJSON {
     return {
       name: this.name,
       code: this.code,
@@ -61,7 +61,7 @@ export abstract class StackbaseError extends Error {
 /* User errors — 4xx, not retryable                                           */
 /* -------------------------------------------------------------------------- */
 
-export abstract class UserError extends StackbaseError {
+export abstract class UserError extends HelipodError {
   override readonly httpStatus: number = 400;
   override readonly retryable = false;
 }
@@ -116,7 +116,7 @@ export class IdAlreadyInUseError extends UserError {
 /* Conflict errors — 409, retryable (the OCC family)                          */
 /* -------------------------------------------------------------------------- */
 
-export class ConflictError extends StackbaseError {
+export class ConflictError extends HelipodError {
   override readonly code: string = "CONFLICT";
   override readonly httpStatus: number = 409;
   override readonly retryable: boolean = true;
@@ -168,7 +168,7 @@ export class CommitGuardRejection extends ConflictError {
     readonly unitIndex: number,
     readonly rejectionCode: string,
     readonly detail: string,
-    options?: StackbaseErrorOptions,
+    options?: HelipodErrorOptions,
   ) {
     super(`commit guard rejected unit ${unitIndex}: ${rejectionCode} (${detail})`, {
       ...options,
@@ -185,7 +185,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /* System errors — 5xx, not retryable                                         */
 /* -------------------------------------------------------------------------- */
 
-export abstract class SystemError extends StackbaseError {
+export abstract class SystemError extends HelipodError {
   override readonly httpStatus: number = 500;
   override readonly retryable = false;
 }
@@ -205,7 +205,7 @@ export class UdfExecutionError extends SystemError {
 export class ModuleLoadError extends SystemError {
   override readonly code = "MODULE_LOAD_ERROR";
 }
-/** Catch-all used by {@link toStackbaseError} to normalize unknown throwables. */
+/** Catch-all used by {@link toHelipodError} to normalize unknown throwables. */
 export class InternalError extends SystemError {
   override readonly code = "INTERNAL";
 }
@@ -214,7 +214,7 @@ export class InternalError extends SystemError {
 /* Transient errors — retryable                                               */
 /* -------------------------------------------------------------------------- */
 
-export abstract class TransientError extends StackbaseError {
+export abstract class TransientError extends HelipodError {
   override readonly httpStatus: number = 503;
   override readonly retryable = true;
 }
@@ -236,18 +236,18 @@ export class ServiceUnavailableError extends TransientError {
 /* -------------------------------------------------------------------------- */
 
 /**
- * A {@link StackbaseError} reconstructed from a serialized {@link StackbaseErrorJSON} that crossed a
+ * A {@link HelipodError} reconstructed from a serialized {@link HelipodErrorJSON} that crossed a
  * process boundary (e.g. a fleet SYNC node rehydrating the error a forwarded mutation raised on the
  * WRITER). Carries the ORIGINAL `code`/`httpStatus`/`retryable`/`name`/`data` verbatim, so edge
  * status mapping ({@link getHttpStatus}) and client retry semantics ({@link isRetryableError})
  * survive the hop — without needing a code→class registry. Its `name` is the original error's
- * concrete class name, so `instanceof StackbaseError` holds and log/message shape is preserved.
+ * concrete class name, so `instanceof HelipodError` holds and log/message shape is preserved.
  */
-export class RemoteError extends StackbaseError {
+export class RemoteError extends HelipodError {
   override readonly code: string;
   override readonly httpStatus: number;
   override readonly retryable: boolean;
-  constructor(json: StackbaseErrorJSON) {
+  constructor(json: HelipodErrorJSON) {
     super(json.message, json.data !== undefined ? { data: json.data } : undefined);
     this.code = json.code;
     this.httpStatus = json.httpStatus;
@@ -256,10 +256,10 @@ export class RemoteError extends StackbaseError {
   }
 }
 
-/** Rehydrate a {@link StackbaseError} from its serialized form (the inverse of `toJSON()`). Used at
+/** Rehydrate a {@link HelipodError} from its serialized form (the inverse of `toJSON()`). Used at
  *  wire boundaries so a typed error's status/code/retryable identity is not flattened to a generic
- *  500 by {@link toStackbaseError}. */
-export function stackbaseErrorFromJSON(json: StackbaseErrorJSON): StackbaseError {
+ *  500 by {@link toHelipodError}. */
+export function helipodErrorFromJSON(json: HelipodErrorJSON): HelipodError {
   return new RemoteError(json);
 }
 
@@ -267,23 +267,23 @@ export function stackbaseErrorFromJSON(json: StackbaseErrorJSON): StackbaseError
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-export function isStackbaseError(error: unknown): error is StackbaseError {
-  return error instanceof StackbaseError;
+export function isHelipodError(error: unknown): error is HelipodError {
+  return error instanceof HelipodError;
 }
 
-/** True when retrying the operation could plausibly succeed. Non-Stackbase errors → false. */
+/** True when retrying the operation could plausibly succeed. Non-Helipod errors → false. */
 export function isRetryableError(error: unknown): boolean {
-  return isStackbaseError(error) ? error.retryable : false;
+  return isHelipodError(error) ? error.retryable : false;
 }
 
-/** Map any thrown value to an HTTP status. Non-Stackbase errors → 500. */
+/** Map any thrown value to an HTTP status. Non-Helipod errors → 500. */
 export function getHttpStatus(error: unknown): number {
-  return isStackbaseError(error) ? error.httpStatus : 500;
+  return isHelipodError(error) ? error.httpStatus : 500;
 }
 
-/** Normalize ANY thrown value into a {@link StackbaseError} (preserving the cause). */
-export function toStackbaseError(error: unknown): StackbaseError {
-  if (isStackbaseError(error)) return error;
+/** Normalize ANY thrown value into a {@link HelipodError} (preserving the cause). */
+export function toHelipodError(error: unknown): HelipodError {
+  if (isHelipodError(error)) return error;
   if (error instanceof Error) return new InternalError(error.message, { cause: error });
   return new InternalError(typeof error === "string" ? error : "Unknown error", { data: error });
 }

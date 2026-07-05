@@ -37,9 +37,9 @@ import { performance } from "node:perf_hooks";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import type { PgClient, PgQuerier, PgRow, PgValue } from "../src/pg-client";
 import { PgliteClient } from "../test/pglite-client";
-import { newDocumentId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@stackbase/docstore";
+import { newDocumentId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@helipod/docstore";
 
 // ── Instrumented clients ──────────────────────────────────────────────────────────────────────
 
@@ -337,9 +337,9 @@ async function main(): Promise<void> {
       "The production NodePgClient path opens a fresh connection per index_scan (no pool yet); its real-network latency profile is UNMEASURED by this bench.",
   );
 
-  // Smoke-test override, e.g. `STACKBASE_BENCH_PGSTREAM_N=200 bun ...`. Unset in normal use — the
+  // Smoke-test override, e.g. `HELIPOD_BENCH_PGSTREAM_N=200 bun ...`. Unset in normal use — the
   // gate is defined against the real [1_000, 100_000] grid.
-  const override = process.env["STACKBASE_BENCH_PGSTREAM_N"];
+  const override = process.env["HELIPOD_BENCH_PGSTREAM_N"];
   const grid = override ? override.split(",").map((s) => Number(s.trim())) : [1_000, 100_000];
 
   const results: NResult[] = [];

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Receipted Outbox, Task 2 — the guard slot→chain migration's spec-review-flagged hazard
  * (`docs/superpowers/specs/2026-07-10-receipted-outbox-design.md`, decision 2): `armWriter`
@@ -16,9 +16,9 @@
  * calls it — a "double promote" (two re-arms) followed by ONE forwarded commit.
  */
 import { describe, it, expect } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
 import { LeaseManager } from "../src/lease";
 import { installCommitGuard } from "../src/node";
 import { PgliteClient } from "./pglite-client";

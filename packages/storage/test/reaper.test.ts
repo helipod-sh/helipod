@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import type { DriverContext } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import type { DriverContext } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
 import type {
   BlobStore,
   UploadTarget,
@@ -11,7 +11,7 @@ import type {
   ByteRange,
   CreateUploadTargetOpts,
   SignUrlOpts,
-} from "@stackbase/blobstore";
+} from "@helipod/blobstore";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/system-table";
 import { storageModules } from "../src/modules";
 import { storageReaper } from "../src/reaper";
@@ -19,7 +19,7 @@ import type { StorageReaperDriver } from "../src/reaper";
 
 /**
  * A minimal in-file `BlobStore` fake (mirrors `test/context.test.ts`'s `FakeBlobStore` — the real
- * `MemoryBlobStore` in `@stackbase/blobstore`'s test-support isn't a published export). `delete`
+ * `MemoryBlobStore` in `@helipod/blobstore`'s test-support isn't a published export). `delete`
  * can be told to throw for specific keys, to exercise the reaper's best-effort robustness.
  */
 class FakeBlobStore implements BlobStore {
@@ -296,7 +296,7 @@ describe("storageReaper — orphan sweep driver", () => {
   it("stop() while a tick is in flight does not resurrect the driver once that tick settles", async () => {
     // Regression test for the driver-resurrection race: `wake()`'s `.finally(() => armTimer())`
     // used to run unconditionally when an in-flight tick settled, with no "stopped" guard — so if
-    // `stop()` raced in while a sweep's `runFunction` was still awaiting (e.g. a `stackbase dev`
+    // `stop()` raced in while a sweep's `runFunction` was still awaiting (e.g. a `helipod dev`
     // hot-reload teardown racing a sweep), the settling tick would arm a brand-new timer and the
     // driver would keep running forever after `stop()` returned.
     const runtime = await makeRuntime();

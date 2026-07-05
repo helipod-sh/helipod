@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * The object-storage writer's lease-heartbeat driver (Tier 3 Slice 6, Task 6.2) — a recurring
- * `Driver` (the same seam `@stackbase/scheduler`/`@stackbase/triggers`/`storageReaper`/
+ * `Driver` (the same seam `@helipod/scheduler`/`@helipod/triggers`/`storageReaper`/
  * `receiptsReaper` run on) that keeps this node's `ObjectStoreDocStore` lease alive by calling
  * `store.heartbeat({now, leaseTtlMs})` on a fixed cadence, so a long-running writer never lets its
  * lease lapse just because nobody happened to commit recently.
@@ -25,7 +25,7 @@
  * exactly the resilience `receiptsReaper`'s "one bad pass doesn't kill the reaper" policy embodies,
  * just with the fence case carved out as the one terminal exception.
  */
-import type { Driver, DriverContext } from "@stackbase/component";
+import type { Driver, DriverContext } from "@helipod/component";
 import { FencedError } from "./fenced-error";
 
 /** The minimal surface this driver needs from `ObjectStoreDocStore` — kept narrow (rather than

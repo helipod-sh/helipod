@@ -1,4 +1,4 @@
-import { action, mutation, query, commitThenThrow, type ActionCtx, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import { action, mutation, query, commitThenThrow, type ActionCtx, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@helipod/executor";
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from "@simplewebauthn/server";
 import type { AuthConfig } from "./config";
 import { currentSessionOf, finishSignIn, normalizeEmail, type FacadeCtx, type MintResult, type MfaRequired } from "./functions";

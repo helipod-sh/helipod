@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/id-codec",
+  "name": "@helipod/id-codec",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -15,7 +15,7 @@
   },
   "files": ["dist"],
   "dependencies": {
-    "@stackbase/index-key-codec": "workspace:*"
+    "@helipod/index-key-codec": "workspace:*"
   },
   "scripts": {
     "build": "tsup",

@@ -1,21 +1,21 @@
 import { StrictMode, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  StackbaseClient,
+  HelipodClient,
   anyApi,
   indexedDBOutbox,
   type MutationFailedInfo,
   type OptimisticLocalStore,
   type OptimisticUpdateFn,
-} from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation, usePendingMutations } from "@stackbase/client/react";
+} from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation, usePendingMutations } from "@helipod/client/react";
 import { offlineToggleTransport } from "./offline-transport";
 // Type-only imports — erased at bundle time, so the server-side `_generated/server.ts` re-exports
 // never reach the browser bundle. `ids.ts` is a VALUE import (mintId runs in the browser); it pulls
-// only `@stackbase/id-codec`, which is browser-safe.
-import type { Api } from "../stackbase/_generated/api";
-import type { Doc, Id } from "../stackbase/_generated/dataModel";
-import { mintId } from "../stackbase/_generated/ids";
+// only `@helipod/id-codec`, which is browser-safe.
+import type { Api } from "../helipod/_generated/api";
+import type { Doc, Id } from "../helipod/_generated/dataModel";
+import { mintId } from "../helipod/_generated/ids";
 
 const api = anyApi as Api;
 
@@ -94,7 +94,7 @@ function toggleItemOptimistic(store: OptimisticLocalStore, args: { id: Id<"items
  * is what re-renders queued entries after a reload and mirrors other tabs' queued entries live.
  * ---------------------------------------------------------------------------------------------- */
 
-const client = new StackbaseClient(transport, {
+const client = new HelipodClient(transport, {
   outbox: indexedDBOutbox(),
   optimisticUpdates: {
     "lists:create": createListOptimistic as OptimisticUpdateFn,
@@ -273,9 +273,9 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <App />
-      </StackbaseProvider>
+      </HelipodProvider>
     </StrictMode>,
   );
 }

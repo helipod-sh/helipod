@@ -26,7 +26,7 @@ function Sidebar() {
   const { data: tables } = useQuery({ queryKey: ["tables"], queryFn: () => adminGet<TableInfo[]>("/tables") });
   return (
     <aside className="w-60 shrink-0 overflow-y-auto border-r border-border bg-card p-4">
-      <div className="mb-4 text-base font-bold">⚡ Stackbase</div>
+      <div className="mb-4 text-base font-bold">⚡ Helipod</div>
       <div className="mb-1.5 mt-4 text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
       {(tables ?? []).map((t) => (
         <Link key={t.name} to="/data/$table" params={{ table: t.name }} className={navItem} activeProps={{ className: cn(navItem, navActive) }}>

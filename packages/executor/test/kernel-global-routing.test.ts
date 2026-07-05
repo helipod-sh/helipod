@@ -14,12 +14,12 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { DocumentNotFoundError, InvalidClientIdError } from "@stackbase/errors";
-import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@stackbase/docstore-d1";
-import { DEFAULT_SHARD, encodeInternalDocumentId, encodeStorageIndexId, newDocumentId } from "@stackbase/id-codec";
-import type { DocumentValue, InternalDocumentId } from "@stackbase/docstore";
-import type { TransactionContext } from "@stackbase/transactor";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { DocumentNotFoundError, InvalidClientIdError } from "@helipod/errors";
+import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@helipod/docstore-d1";
+import { DEFAULT_SHARD, encodeInternalDocumentId, encodeStorageIndexId, newDocumentId } from "@helipod/id-codec";
+import type { DocumentValue, InternalDocumentId } from "@helipod/docstore";
+import type { TransactionContext } from "@helipod/transactor";
 import {
   createKernelRouter,
   SimpleIndexCatalog,

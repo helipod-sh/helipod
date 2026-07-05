@@ -7,7 +7,7 @@ import { resolveServeOptions, serveCommand } from "../src/serve";
 // Tier 3 Slice 8, Task 8.2a: `bootLoaded` with a `file://` object-store URL + `replica: true`
 // constructs a read-only REPLICA node — materialized (no acquire), tailing, serving reads, and
 // rejecting mutations — proving the CLI boot wiring end-to-end at the boot-core level. The full
-// E2E through two real `stackbase serve` processes over one bucket (fs + MinIO, WebSocket
+// E2E through two real `helipod serve` processes over one bucket (fs + MinIO, WebSocket
 // subscription fan-out from a writer's commit onto a replica) is Task 8.3's job — deliberately not
 // duplicated here.
 
@@ -16,7 +16,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — Tier 3 Slice 8 object-store replica node", () => {
   it("materializes the writer's committed state from the bucket, stays live, and rejects a mutation with a clear message", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     const bucket = `file://${ROOT}/bucket`;
 
     // ── WRITER: commits data BEFORE the replica ever opens ────────────────────────────────────
@@ -91,22 +91,22 @@ describe("bootLoaded — Tier 3 Slice 8 object-store replica node", () => {
   });
 
   it("serveCommand rejects --replica without --object-store with a clear, fast (no boot work) error", async () => {
-    const originalAdminKey = process.env.STACKBASE_ADMIN_KEY;
+    const originalAdminKey = process.env.HELIPOD_ADMIN_KEY;
     const originalWrite = process.stderr.write.bind(process.stderr);
     let captured = "";
-    process.env.STACKBASE_ADMIN_KEY = "test-admin-key";
+    process.env.HELIPOD_ADMIN_KEY = "test-admin-key";
     process.stderr.write = (chunk: string) => {
       captured += chunk;
       return true;
     };
     try {
-      const code = await serveCommand(["--replica", "--dir", "test/fixtures/deploy-v2/stackbase"]);
+      const code = await serveCommand(["--replica", "--dir", "test/fixtures/deploy-v2/helipod"]);
       expect(code).toBe(1);
       expect(captured).toMatch(/--replica requires --object-store/);
     } finally {
       process.stderr.write = originalWrite;
-      if (originalAdminKey === undefined) delete process.env.STACKBASE_ADMIN_KEY;
-      else process.env.STACKBASE_ADMIN_KEY = originalAdminKey;
+      if (originalAdminKey === undefined) delete process.env.HELIPOD_ADMIN_KEY;
+      else process.env.HELIPOD_ADMIN_KEY = originalAdminKey;
     }
   });
 });

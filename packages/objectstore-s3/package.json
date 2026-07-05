@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/objectstore-s3",
+  "name": "@helipod/objectstore-s3",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,7 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/objectstore": "workspace:*",
+    "@helipod/objectstore": "workspace:*",
     "@aws-sdk/client-s3": "catalog:"
   },
   "devDependencies": {

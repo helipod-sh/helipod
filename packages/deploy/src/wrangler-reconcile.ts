@@ -50,15 +50,15 @@ function removeTrailingCommas(text: string): string {
   return out;
 }
 
-const DO_BINDING = "STACKBASE_DO";
-const DO_CLASS = "StackbaseDO";
+const DO_BINDING = "HELIPOD_DO";
+const DO_CLASS = "HelipodDO";
 const R2_BINDING = "STORAGE_BUCKET";
 const COMPAT_FLAG = "nodejs_compat";
 
 export interface ReconcileOpts { needsR2?: boolean; r2BucketName?: string; }
 export interface ReconcileResult { config: Record<string, unknown>; changed: boolean; added: string[]; }
 
-/** Additively ensure the Stackbase DO bindings/migration/compat flag (+ optional R2) exist. Never
+/** Additively ensure the Helipod DO bindings/migration/compat flag (+ optional R2) exist. Never
  *  drops a user field. Returns a fresh config object; `changed` says whether anything was added. */
 export function reconcileWrangler(input: Record<string, unknown>, opts: ReconcileOpts): ReconcileResult {
   const config: Record<string, unknown> = structuredClone(input);
@@ -91,7 +91,7 @@ export function reconcileWrangler(input: Record<string, unknown>, opts: Reconcil
   if (opts.needsR2) {
     const buckets = (config.r2_buckets ??= []) as Array<{ binding: string; bucket_name: string }>;
     if (!buckets.some((b) => b.binding === R2_BINDING)) {
-      buckets.push({ binding: R2_BINDING, bucket_name: opts.r2BucketName ?? "stackbase-storage" });
+      buckets.push({ binding: R2_BINDING, bucket_name: opts.r2BucketName ?? "helipod-storage" });
       added.push(`r2_buckets.${R2_BINDING}`);
     }
   }

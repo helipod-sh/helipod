@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { loadProject, push, type LoadedProject } from "@stackbase/cli";
-import schema from "../stackbase/schema";
-import * as lists from "../stackbase/lists";
-import * as items from "../stackbase/items";
-import { mintId } from "../stackbase/_generated/ids";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { loadProject, push, type LoadedProject } from "@helipod/cli";
+import schema from "../helipod/schema";
+import * as lists from "../helipod/lists";
+import * as items from "../helipod/items";
+import { mintId } from "../helipod/_generated/ids";
 
 const loaded: LoadedProject = { schema, modules: { lists, items } };
 
@@ -67,9 +67,9 @@ describe("packlist — locked lists reject adds with a coded, terminal error", (
 });
 
 describe("codegen — the committed _generated matches the schema", () => {
-  it("stackbase/_generated is up to date (no drift)", () => {
+  it("helipod/_generated is up to date (no drift)", () => {
     const { generated } = push(loaded);
-    const dir = join(dirname(fileURLToPath(import.meta.url)), "../stackbase/_generated");
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "../helipod/_generated");
     for (const file of generated.files) {
       expect(readFileSync(join(dir, file.path), "utf8"), `${file.path} is stale — run \`bun run scripts/codegen.ts\``).toBe(
         file.content,

@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Get a stackbase backend running and watch it update live, in a few minutes.
+description: Get a helipod backend running and watch it update live, in a few minutes.
 ---
 
 {/* diataxis: tutorial */}
@@ -11,7 +11,7 @@ and every step below is real.
 
 <Callout title="Before you start">
   You need **Bun** or **Node.js 22.5+** and a package manager. Your backend lives in a folder called
-  `stackbase/`. That's just the default name (everything you import is `@stackbase/*`), and you can
+  `helipod/`. That's just the default name (everything you import is `@helipod/*`), and you can
   change it later with `--dir`.
 </Callout>
 
@@ -19,32 +19,32 @@ and every step below is real.
 
 <Step>
 
-### Install stackbase
+### Install helipod
 
 <Tabs items={['npm', 'pnpm', 'bun']}>
 
 ```bash tab="npm"
 mkdir my-app && cd my-app && npm init -y
-npm install @stackbase/values @stackbase/client
-npm install -D @stackbase/cli
+npm install @helipod/values @helipod/client
+npm install -D @helipod/cli
 ```
 
 ```bash tab="pnpm"
 mkdir my-app && cd my-app && pnpm init
-pnpm add @stackbase/values @stackbase/client
-pnpm add -D @stackbase/cli
+pnpm add @helipod/values @helipod/client
+pnpm add -D @helipod/cli
 ```
 
 ```bash tab="bun"
 mkdir my-app && cd my-app && bun init -y
-bun add @stackbase/values @stackbase/client
-bun add -d @stackbase/cli
+bun add @helipod/values @helipod/client
+bun add -d @helipod/cli
 ```
 
 </Tabs>
 
 `values` gives you the schema and validators, `client` is the browser and Node client, and `cli` is
-the `stackbase` command you'll run.
+the `helipod` command you'll run.
 
 </Step>
 
@@ -52,10 +52,10 @@ the `stackbase` command you'll run.
 
 ### Define a schema
 
-Create `stackbase/schema.ts`. It lists your tables and the shape of each row:
+Create `helipod/schema.ts`. It lists your tables and the shape of each row:
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   messages: defineTable({
@@ -75,10 +75,10 @@ list of field types (`v.number()`, `v.id(...)`, `v.optional(...)`, and so on) is
 
 ### Write a query and a mutation
 
-Create `stackbase/messages.ts`:
+Create `helipod/messages.ts`:
 
-```ts title="stackbase/messages.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/messages.ts"
+import { v } from "@helipod/values";
 import { query, mutation } from "./_generated/server";
 
 // Reads data. Your app subscribes to this and gets live updates.
@@ -107,18 +107,18 @@ no index of your own.
 ### Run it
 
 ```bash
-npx stackbase dev
+npx helipod dev
 ```
 
-`stackbase dev` generates the typed `stackbase/_generated/` helpers, starts the engine on a local SQLite
+`helipod dev` generates the typed `helipod/_generated/` helpers, starts the engine on a local SQLite
 file, serves a dashboard, and reloads whenever you edit a file. It prints its URL and a dev admin key:
 
 ```
-stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+helipod dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
 admin key → 3q2xN7vRkYw8pTzL5mA9cB1dE6fGhJ0u
 ```
 
-The admin key is a fresh random value on each run (unless you set `STACKBASE_ADMIN_KEY` yourself).
+The admin key is a fresh random value on each run (unless you set `HELIPOD_ADMIN_KEY` yourself).
 Yours will differ.
 
 </Step>
@@ -130,7 +130,7 @@ Yours will differ.
 You don't even need client code to see reactivity. The dashboard's data browser is itself a live
 subscription:
 
-1. Open the dashboard URL that `stackbase dev` printed.
+1. Open the dashboard URL that `helipod dev` printed.
 2. Open the **data browser** and select the `messages` table. Leave it on screen.
 3. Open the **function runner** and call `messages:send` with `{ "author": "Ada", "body": "hello" }`.
 4. The new row shows up in the data browser right away, with no refresh.
@@ -153,11 +153,11 @@ With the server running, point a client at the `ws://127.0.0.1:3000/api/sync` en
 <Tab value="React">
 
 ```tsx title="App.tsx"
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
-import { api } from "./stackbase/_generated/server";
+import { HelipodClient, webSocketTransport } from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation } from "@helipod/client/react";
+import { api } from "./helipod/_generated/server";
 
-const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
+const client = new HelipodClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
 
 function Messages() {
   const messages = useQuery(api.messages.list, {});
@@ -168,9 +168,9 @@ function Messages() {
 
 export function App() {
   return (
-    <StackbaseProvider client={client}>
+    <HelipodProvider client={client}>
       <Messages />
-    </StackbaseProvider>
+    </HelipodProvider>
   );
 }
 ```
@@ -183,10 +183,10 @@ arrives, then re-renders on its own every time the result changes. That's the wh
 <Tab value="Plain JS">
 
 ```ts title="client.ts"
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { api } from "./stackbase/_generated/server";
+import { HelipodClient, webSocketTransport } from "@helipod/client";
+import { api } from "./helipod/_generated/server";
 
-const client = new StackbaseClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
+const client = new HelipodClient(webSocketTransport("ws://127.0.0.1:3000/api/sync"));
 
 // Subscribe. The callback fires again every time the result changes.
 client.subscribe(api.messages.list, {}, (messages) => {
@@ -208,40 +208,40 @@ See [Client SDK](/docs/client/client-sdk) for the full hook surface, and
 
 <Accordions type="single">
 
-<Accordion title="stackbase dev flags">
+<Accordion title="helipod dev flags">
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--port` | `3000` | HTTP and WebSocket port |
 | `--ip` | `127.0.0.1` | Bind address |
-| `--dir` | `stackbase` | Function directory |
-| `--data` | `.stackbase/data.db` | SQLite file path |
+| `--dir` | `helipod` | Function directory |
+| `--data` | `.helipod/data.db` | SQLite file path |
 | `--web` | (none) | Serve a built web UI alongside the API |
 | `--database-url` | (SQLite) | Use Postgres instead |
 | `--storage-bucket` | (local disk) | Use S3-compatible file storage |
 | `--storage-endpoint` | (none) | S3-compatible endpoint URL (MinIO, R2, a non-default AWS region) |
 
-Run `stackbase help` for every command and flag.
+Run `helipod help` for every command and flag.
 
 </Accordion>
 
-<Accordion title="What's in stackbase/_generated/">
+<Accordion title="What's in helipod/_generated/">
 
-After the first run, `stackbase/_generated/` holds typed helpers derived from your schema and functions:
+After the first run, `helipod/_generated/` holds typed helpers derived from your schema and functions:
 
 - `Doc<"messages">` and `Id<"messages">`: the type of a row, and a typed id to reference one.
 - `api`: a typed object mirroring your functions (`api.messages.list`, `api.messages.send`). Pass
   these to `useQuery`/`useMutation` and the client infers the argument and return types.
 
-`stackbase dev` regenerates these on every change, so you rarely run codegen by hand. You do need to
-commit `_generated/` before a `stackbase serve` or `stackbase build` deploy, since those don't run
+`helipod dev` regenerates these on every change, so you rarely run codegen by hand. You do need to
+commit `_generated/` before a `helipod serve` or `helipod build` deploy, since those don't run
 codegen at boot.
 
 </Accordion>
 
 <Accordion title="Where does the data live?">
 
-By default, everything is a single SQLite file at `.stackbase/data.db` (change it with `--data`).
+By default, everything is a single SQLite file at `.helipod/data.db` (change it with `--data`).
 Nothing to install. To use Postgres instead, pass `--database-url postgres://...` and change nothing
 in your app. See [Postgres](/docs/deploy/postgres).
 

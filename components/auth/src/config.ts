@@ -20,7 +20,7 @@ export interface EmailConfig {
   requireEmailVerification: boolean;
   createUsersOnEmailSignIn: boolean;
   templates: EmailTemplates;
-  /** N4 auth-unification: the `category` passed to a composed `@stackbase/notifications`' `send`
+  /** N4 auth-unification: the `category` passed to a composed `@helipod/notifications`' `send`
    *  (preferences/criticality key on that side). Defaults to `"auth"`. Irrelevant when no
    *  notifications component is composed (the `e.provider.send` fallback ignores it). */
   notificationCategory: string;
@@ -130,7 +130,7 @@ export interface EmailOptions {
   requireEmailVerification?: boolean;
   createUsersOnEmailSignIn?: boolean;
   templates?: Partial<EmailTemplates>;
-  /** N4 auth-unification: the `category` auth passes to a composed `@stackbase/notifications`'
+  /** N4 auth-unification: the `category` auth passes to a composed `@helipod/notifications`'
    *  `send` when routing through it (default `"auth"`). Has no effect on the no-notifications
    *  fallback (`e.provider.send` doesn't take a category). */
   notificationCategory?: string;
@@ -182,7 +182,7 @@ const DEFAULTS: Omit<AuthConfig, "email"> = {
 };
 
 const EMAIL_DEFAULTS = {
-  appName: "Stackbase app",
+  appName: "Helipod app",
   otpAttempts: 5,
   otpTtlMs: 10 * 60 * 1000,
   magicLinkTtlMs: 60 * 60 * 1000,
@@ -254,7 +254,7 @@ function resolveJwtConfig(opts: JwtOptions): JwtConfig {
 }
 
 const MFA_DEFAULTS = {
-  issuer: "Stackbase",
+  issuer: "Helipod",
   recoveryCodeCount: 10,
   challengeTtlMs: 5 * 60 * 1000,
   mfaAttempts: 5,

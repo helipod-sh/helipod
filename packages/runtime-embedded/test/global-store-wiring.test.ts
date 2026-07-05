@@ -8,11 +8,11 @@
  */
 import { describe, it, expect } from "vitest";
 import Database from "better-sqlite3";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, mutation, query, type RegisteredFunction } from "@stackbase/executor";
-import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@stackbase/docstore-d1";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog, mutation, query, type RegisteredFunction } from "@helipod/executor";
+import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@helipod/docstore-d1";
 import { createEmbeddedRuntime } from "../src/index";
 
 // ── in-memory D1Client (mirrors packages/docstore-d1/test/support/sqlite-d1-client.ts and

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { AdminApi, systemModules } from "@stackbase/admin";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { AdminApi, systemModules } from "@helipod/admin";
 import { handleHttpRequest } from "../src/http-handler";
 
 const schema = defineSchema({ notes: defineTable({ title: v.string() }) });

@@ -1,8 +1,8 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * Licensing-direction gate (locked decision, coordinator clarification). The dependency edge is
- * ONE-WAY: this paid (ee/) package depends on the FREE `@stackbase/runtime-cloudflare` and reuses its
+ * ONE-WAY: this paid (ee/) package depends on the FREE `@helipod/runtime-cloudflare` and reuses its
  * DO class — but NOTHING under the free package may statically import THIS package back. If a
  * single-shard free deploy had to link ee code, "free single-node forever" would break. The switch is
  * the app's Worker entry (which handler it default-exports), never a runtime gate.
@@ -35,10 +35,10 @@ function scanTs(root: string, visit: (file: string, text: string) => void): void
 }
 
 describe("licensing direction — free never imports the paid shard package", () => {
-  it("packages/runtime-cloudflare/src references no @stackbase/runtime-cloudflare-shard", () => {
+  it("packages/runtime-cloudflare/src references no @helipod/runtime-cloudflare-shard", () => {
     const offenders: string[] = [];
     scanTs(freePkgSrc, (file, text) => {
-      if (text.includes("@stackbase/runtime-cloudflare-shard")) offenders.push(file);
+      if (text.includes("@helipod/runtime-cloudflare-shard")) offenders.push(file);
     });
     expect(offenders, offenders.join("\n")).toEqual([]);
   });
@@ -46,12 +46,12 @@ describe("licensing direction — free never imports the paid shard package", ()
   it("the free host package.json does not depend on the shard package", () => {
     const pkg = JSON.parse(readFileSync(join(repoRoot, "packages", "runtime-cloudflare", "package.json"), "utf8"));
     const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}), ...(pkg.peerDependencies ?? {}) };
-    expect(Object.keys(allDeps)).not.toContain("@stackbase/runtime-cloudflare-shard");
+    expect(Object.keys(allDeps)).not.toContain("@helipod/runtime-cloudflare-shard");
   });
 
-  it("this package does NOT depend on @stackbase/fleet (a sibling, not a consumer)", () => {
+  it("this package does NOT depend on @helipod/fleet (a sibling, not a consumer)", () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"));
     const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
-    expect(Object.keys(allDeps)).not.toContain("@stackbase/fleet");
+    expect(Object.keys(allDeps)).not.toContain("@helipod/fleet");
   });
 });

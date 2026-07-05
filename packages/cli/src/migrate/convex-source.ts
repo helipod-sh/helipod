@@ -16,11 +16,11 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** Which @stackbase/* package a rewritten specifier introduces (for the package.json edit). */
+/** Which @helipod/* package a rewritten specifier introduces (for the package.json edit). */
 const INTRODUCED_PKG: Record<string, string> = {
-  "@stackbase/values": "@stackbase/values",
-  "@stackbase/client/react": "@stackbase/client",
-  "@stackbase/client": "@stackbase/client",
+  "@helipod/values": "@helipod/values",
+  "@helipod/client/react": "@helipod/client",
+  "@helipod/client": "@helipod/client",
 };
 
 export const convexSource: MigrationSource = {
@@ -55,7 +55,7 @@ export const convexSource: MigrationSource = {
       if (file.endsWith("crons.ts") || /\bcronJobs\s*\(/.test(src)) hasCrons = true;
     }
 
-    // package.json edit: drop convex deps, add the introduced @stackbase/* packages.
+    // package.json edit: drop convex deps, add the introduced @helipod/* packages.
     const pkgPath = join(projectRoot, "package.json");
     if (existsSync(pkgPath)) {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -71,12 +71,12 @@ export const convexSource: MigrationSource = {
     // Scaffold a scheduler config only when crons were detected.
     if (hasCrons) {
       scaffold.push({
-        path: join(projectRoot, "stackbase.config.ts"),
+        path: join(projectRoot, "helipod.config.ts"),
         content:
-          `import { defineConfig } from "@stackbase/component";\n` +
-          `import { defineScheduler } from "@stackbase/scheduler";\n\n` +
-          `// Convex crons map to Stackbase's scheduler component. Move your cron definitions into\n` +
-          `// a stackbase/crons.ts using cronJobs() from "@stackbase/scheduler".\n` +
+          `import { defineConfig } from "@helipod/component";\n` +
+          `import { defineScheduler } from "@helipod/scheduler";\n\n` +
+          `// Convex crons map to Helipod's scheduler component. Move your cron definitions into\n` +
+          `// a helipod/crons.ts using cronJobs() from "@helipod/scheduler".\n` +
           `export default defineConfig({ components: [defineScheduler()] });\n`,
       });
     }

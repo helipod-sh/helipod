@@ -8,7 +8,7 @@
  * is versioned-by-shape and deliberately extensible (e.g. the non-commit `Broadcast` kind for
  * the ephemeral path) so the wire can later gain a binary delta encoding.
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import type { Change } from "./change";
 
 export interface StateVersion {

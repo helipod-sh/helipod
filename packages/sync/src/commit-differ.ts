@@ -4,13 +4,13 @@
  * re-run of the UDF). Pure + unit-tested in isolation from the handler, which owns the per-sub
  * `byIdRowMap` lifecycle (seed on subscribe/reset, update on each diff, drop on unsubscribe).
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import type { ByIdRead, RangeRead } from "./classify";
 import { applyChanges, type Change, type RowVersion } from "./change";
-import type { WrittenDoc } from "@stackbase/transactor";
-import type { DocumentValue } from "@stackbase/docstore";
-import { evaluateFilter, extractIndexKey } from "@stackbase/query-engine";
-import { deserializeKeyRange, keyInRange, serializeKeyRange } from "@stackbase/index-key-codec";
+import type { WrittenDoc } from "@helipod/transactor";
+import type { DocumentValue } from "@helipod/docstore";
+import { evaluateFilter, extractIndexKey } from "@helipod/query-engine";
+import { deserializeKeyRange, keyInRange, serializeKeyRange } from "@helipod/index-key-codec";
 
 /**
  * Given the sub's current row-map and the matching written doc (or `undefined` if this commit's
@@ -78,7 +78,7 @@ function fromBase64(b64: string): Uint8Array {
 
 /**
  * The base64 index-entry key for `row` under `range.fields`: `extractIndexKey` (the engine's OWN
- * key extraction, `@stackbase/query-engine`) already appends the system `_creationTime`/`_id`
+ * key extraction, `@helipod/query-engine`) already appends the system `_creationTime`/`_id`
  * tiebreak fields, so this is byte-identical to the doc's real stored index entry — no hand
  * concatenation needed. Used both for membership bounds-checking and as the client's sort key.
  */

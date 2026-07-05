@@ -1,8 +1,8 @@
 /**
- * Fleet B4, Task 4 — `STACKBASE_GROUP_COMMIT` env parsing (`groupCommitEnabled`, boot.ts) and its
+ * Fleet B4, Task 4 — `HELIPOD_GROUP_COMMIT` env parsing (`groupCommitEnabled`, boot.ts) and its
  * threading into `bootLoaded` (non-fleet path — the fleet path threads its own already-resolved
- * value via `opts.fleet.groupCommit`, covered at the `@stackbase/fleet` level). Default OFF at this
- * task; mirrors `@stackbase/fleet`'s `fleetMultiWriterEnabled` boolean-env shape.
+ * value via `opts.fleet.groupCommit`, covered at the `@helipod/fleet` level). Default OFF at this
+ * task; mirrors `@helipod/fleet`'s `fleetMultiWriterEnabled` boolean-env shape.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
@@ -56,10 +56,10 @@ describe("resolveGroupCommit — store-conditional default (single-node)", () =>
   });
 });
 
-describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fleet)", () => {
+describe("bootLoaded — HELIPOD_GROUP_COMMIT threads into the runtime (non-fleet)", () => {
   const DATA_DIR = "./.tmp-groupcommit-boot";
   const DATA = `${DATA_DIR}/db.sqlite`;
-  const ENV_KEY = "STACKBASE_GROUP_COMMIT";
+  const ENV_KEY = "HELIPOD_GROUP_COMMIT";
   const savedEnv = process.env[ENV_KEY];
 
   afterEach(() => {
@@ -70,16 +70,16 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
 
   it("absent + SQLite store: runtime.groupCommitStats() stays all-zero after a committing mutation (store-conditional default → OFF for SQLite)", async () => {
     delete process.env[ENV_KEY];
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     expect(runtime.groupCommitStats()).toEqual({ lastBatchSize: 0, maxBatchSize: 0, flushCount: 0 });
     store.close();
   });
 
-  it("STACKBASE_GROUP_COMMIT=1: a committing mutation flushes through the grouped path", async () => {
+  it("HELIPOD_GROUP_COMMIT=1: a committing mutation flushes through the grouped path", async () => {
     process.env[ENV_KEY] = "1";
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     const stats = runtime.groupCommitStats();
@@ -88,9 +88,9 @@ describe("bootLoaded — STACKBASE_GROUP_COMMIT threads into the runtime (non-fl
     store.close();
   });
 
-  it("STACKBASE_GROUP_COMMIT=0: byte-identical to absent — all-zero counters", async () => {
+  it("HELIPOD_GROUP_COMMIT=0: byte-identical to absent — all-zero counters", async () => {
     process.env[ENV_KEY] = "0";
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     await runtime.run("messages:send", { channelId: "c1", body: "hi" });
     expect(runtime.groupCommitStats()).toEqual({ lastBatchSize: 0, maxBatchSize: 0, flushCount: 0 });

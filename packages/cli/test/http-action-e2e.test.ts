@@ -6,7 +6,7 @@
  * Tasks 1-5 built the pieces (the httpAction definer/executor path, the HttpRouter/matchRoute
  * table, `runtime.runHttpAction`, project loading resolving `http.ts` -> `ProjectArtifacts.routes`,
  * and both server backends' dispatch arm) — each proven by unit/integration tests against handlers
- * directly. This test proves the WHOLE path works through the shipped `stackbase dev` server:
+ * directly. This test proves the WHOLE path works through the shipped `helipod dev` server:
  *
  *   real HTTP request -> the dev server's route table (built from `loadProject`'s resolved
  *   `http.ts` routes) -> `runtime.runHttpAction` -> the executor's httpAction branch ->
@@ -19,10 +19,10 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation, httpAction, httpRouter } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation, httpAction, httpRouter } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
 import { loadProject, startDevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */

@@ -1,6 +1,6 @@
 /**
  * A faithful in-process stand-in for the Durable Object runtime surface the host drives — enough to
- * exercise `StackbaseDurableObject` under plain Node/vitest WITHOUT workerd. It pairs the SHIPPED
+ * exercise `HelipodDurableObject` under plain Node/vitest WITHOUT workerd. It pairs the SHIPPED
  * `MemorySqlStorage` (docstore-do-sqlite's DO-SQLite stand-in, real `node:sqlite`) with fakes for the
  * alarm, hibernation socket registry, and `blockConcurrencyWhile`.
  *
@@ -10,7 +10,7 @@
  * real hibernation eviction, `WebSocketPair`, or `setWebSocketAutoResponse` — those are the province
  * of the deferred `vitest-pool-workers` run and the real-Cloudflare E2E.
  */
-import { MemorySqlStorage } from "@stackbase/docstore-do-sqlite/test-support";
+import { MemorySqlStorage } from "@helipod/docstore-do-sqlite/test-support";
 import type { DurableObjectStateLike, DoWebSocketLike, DurableObjectStorageLike } from "../src/cf-types";
 
 /** A fake hibernatable WebSocket: records sent frames and round-trips a serialized attachment (a

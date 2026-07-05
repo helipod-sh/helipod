@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * The mode-"hash" fanOut real-workerd project (M2d) — a SIBLING of `vitest.workers.config.ts` (mode

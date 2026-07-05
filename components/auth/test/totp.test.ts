@@ -136,16 +136,16 @@ describe("verifyTotp", () => {
 describe("buildOtpauthUri", () => {
   it("produces a spec-shaped otpauth://totp/ URI that parses", () => {
     const uri = buildOtpauthUri({
-      issuer: "Stackbase",
+      issuer: "Helipod",
       accountName: "alice@example.com",
       secretBase32: RFC_SECRET_BASE32,
     });
     expect(uri.startsWith("otpauth://totp/")).toBe(true);
     const parsed = new URL(uri);
     expect(parsed.protocol).toBe("otpauth:");
-    expect(decodeURIComponent(parsed.pathname).replace(/^\/+/, "")).toBe("Stackbase:alice@example.com");
+    expect(decodeURIComponent(parsed.pathname).replace(/^\/+/, "")).toBe("Helipod:alice@example.com");
     expect(parsed.searchParams.get("secret")).toBe(RFC_SECRET_BASE32);
-    expect(parsed.searchParams.get("issuer")).toBe("Stackbase");
+    expect(parsed.searchParams.get("issuer")).toBe("Helipod");
     expect(parsed.searchParams.get("algorithm")).toBe("SHA1");
     expect(parsed.searchParams.get("digits")).toBe("6");
     expect(parsed.searchParams.get("period")).toBe("30");

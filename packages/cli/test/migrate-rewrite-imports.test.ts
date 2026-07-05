@@ -2,27 +2,27 @@ import { describe, it, expect } from "vitest";
 import { rewriteImports } from "../src/migrate/rewrite-imports";
 
 describe("rewriteImports", () => {
-  it("rewrites convex/values → @stackbase/values (import + entry)", () => {
+  it("rewrites convex/values → @helipod/values (import + entry)", () => {
     const r = rewriteImports(`import { v } from "convex/values";\n`, "schema.ts");
-    expect(r.output).toBe(`import { v } from "@stackbase/values";\n`);
+    expect(r.output).toBe(`import { v } from "@helipod/values";\n`);
     expect(r.entries).toHaveLength(1);
     expect(r.entries[0]).toMatchObject({ severity: "auto-fixed", file: "schema.ts", line: 1 });
   });
 
-  it("rewrites convex/react → @stackbase/client/react and convex/browser → @stackbase/client", () => {
-    expect(rewriteImports(`import { X } from "convex/react";`, "a.tsx").output).toContain(`"@stackbase/client/react"`);
-    expect(rewriteImports(`import { X } from "convex/browser";`, "a.ts").output).toContain(`"@stackbase/client"`);
+  it("rewrites convex/react → @helipod/client/react and convex/browser → @helipod/client", () => {
+    expect(rewriteImports(`import { X } from "convex/react";`, "a.tsx").output).toContain(`"@helipod/client/react"`);
+    expect(rewriteImports(`import { X } from "convex/browser";`, "a.ts").output).toContain(`"@helipod/client"`);
   });
 
   it("covers export-from, require, and dynamic import forms", () => {
-    expect(rewriteImports(`export { v } from "convex/values";`, "a.ts").output).toContain(`"@stackbase/values"`);
-    expect(rewriteImports(`const { v } = require("convex/values");`, "a.ts").output).toContain(`"@stackbase/values"`);
-    expect(rewriteImports(`await import("convex/values");`, "a.ts").output).toContain(`"@stackbase/values"`);
+    expect(rewriteImports(`export { v } from "convex/values";`, "a.ts").output).toContain(`"@helipod/values"`);
+    expect(rewriteImports(`const { v } = require("convex/values");`, "a.ts").output).toContain(`"@helipod/values"`);
+    expect(rewriteImports(`await import("convex/values");`, "a.ts").output).toContain(`"@helipod/values"`);
   });
 
-  it("convex/server: schema symbols → @stackbase/values", () => {
+  it("convex/server: schema symbols → @helipod/values", () => {
     const r = rewriteImports(`import { defineSchema, defineTable } from "convex/server";`, "schema.ts");
-    expect(r.output).toContain(`from "@stackbase/values"`);
+    expect(r.output).toContain(`from "@helipod/values"`);
     expect(r.entries[0]?.severity).toBe("auto-fixed");
   });
 
@@ -43,12 +43,12 @@ describe("rewriteImports", () => {
     const r = rewriteImports(`import { cronJobs } from "convex/server";`, "crons.ts");
     expect(r.entries).toHaveLength(1);
     expect(r.entries[0]).toMatchObject({ severity: "action-needed", file: "crons.ts" });
-    expect(r.entries[0]?.fix).toMatch(/@stackbase\/scheduler|defineScheduler/);
+    expect(r.entries[0]?.fix).toMatch(/@helipod\/scheduler|defineScheduler/);
   });
 
   it("convex/server: cronJobs mixed with another symbol still surfaces cron-specific advice", () => {
     const r = rewriteImports(`import { defineSchema, cronJobs } from "convex/server";`, "x.ts");
-    expect(r.entries[0]?.fix).toMatch(/@stackbase\/scheduler|defineScheduler/);
+    expect(r.entries[0]?.fix).toMatch(/@helipod\/scheduler|defineScheduler/);
   });
 
   it("leaves ./_generated/server untouched", () => {

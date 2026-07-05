@@ -1,4 +1,4 @@
-# `@stackbase/workflow` — Architecture Notes
+# `@helipod/workflow` — Architecture Notes
 
 *Source-dive mechanisms + the architectural decision, with citations. Companion to `features.md`. Research: `.reference/workflow-research/{convex-workflow,dbos-workflow,lunora-cloudflare-and-market}.md` and `.reference/scheduling-research/{workflow-source,dbos-source}.md`. Clean-room extraction — mechanisms paraphrased, never copied (`.reference` is FSL-licensed).*
 
@@ -14,11 +14,11 @@ Three durable-execution models exist in the references:
 | **Checkpoint** | Re-invoke the handler; a monotonic **`function_id` counter** addresses each step's recorded output; short-circuit if present | Body's step *call order* must be stable; violations caught **reactively** at recovery, or silently wrong if step names coincide | DBOS Transact |
 | **DO memoization** | Each instance is a Durable Object that memoizes step results by name; sleep/wait truly hibernate | Per-step memoization; DO is the isolation + persistence unit | Cloudflare Workflows / Lunora |
 
-**Decision: build the deterministic-replay model.** The reasoning is not aesthetic — it's that Stackbase's engine *already is* a deterministic-replay machine:
+**Decision: build the deterministic-replay model.** The reasoning is not aesthetic — it's that Helipod's engine *already is* a deterministic-replay machine:
 
-1. **Exactly-once mutations come free.** DBOS builds an entire pluggable-datasource abstraction (per-ORM `transaction_completion` tables written into the user's schema — `dbos-workflow.md` §2, correcting the older extraction) to get step-level exactly-once. In Stackbase a mutation step already *is* one atomic OCC-committed unit — the journal row and the step's writes commit together in the scheduler's transactional enqueue. No trick needed.
-2. **The determinism bug class is already unwriteable.** Convex's syscall ABI never exposes `Date`/`Math.random`/network to deterministic code (`convex-workflow.md` §5); DBOS's `function_id` model *permits* non-deterministic control flow and only catches it reactively during a real production crash-recovery, or fails silently (`dbos-workflow.md` §1). Stackbase already enforces the Convex discipline for queries/mutations (seeded RNG, fixed clock, no network) — the workflow handler slots into the same executor with the same profile.
-3. **The advance mechanism is already shipped.** Convex advances a workflow by having a finished step's `onComplete` callback re-enqueue the workflow mutation with the same `generationNumber` (`convex-workflow.md` §4; `pool.ts:176-192`) — *no separate scanner process*. `@stackbase/scheduler` shipped exactly this: `onComplete` + an opaque `context` round-trip (built, per `workflow-source.md §11`, expressly for this layer).
+1. **Exactly-once mutations come free.** DBOS builds an entire pluggable-datasource abstraction (per-ORM `transaction_completion` tables written into the user's schema — `dbos-workflow.md` §2, correcting the older extraction) to get step-level exactly-once. In Helipod a mutation step already *is* one atomic OCC-committed unit — the journal row and the step's writes commit together in the scheduler's transactional enqueue. No trick needed.
+2. **The determinism bug class is already unwriteable.** Convex's syscall ABI never exposes `Date`/`Math.random`/network to deterministic code (`convex-workflow.md` §5); DBOS's `function_id` model *permits* non-deterministic control flow and only catches it reactively during a real production crash-recovery, or fails silently (`dbos-workflow.md` §1). Helipod already enforces the Convex discipline for queries/mutations (seeded RNG, fixed clock, no network) — the workflow handler slots into the same executor with the same profile.
+3. **The advance mechanism is already shipped.** Convex advances a workflow by having a finished step's `onComplete` callback re-enqueue the workflow mutation with the same `generationNumber` (`convex-workflow.md` §4; `pool.ts:176-192`) — *no separate scanner process*. `@helipod/scheduler` shipped exactly this: `onComplete` + an opaque `context` round-trip (built, per `workflow-source.md §11`, expressly for this layer).
 
 So the replay model isn't just compatible with our engine — our engine makes it *strictly safer to implement here than the checkpoint model would be*. We borrow DBOS's ideas selectively (recovery-attempts cap, idempotency-key dedup) but not its architecture.
 
@@ -55,11 +55,11 @@ From `convex-workflow.md` §4 + `workflow-source.md` §4:
 - **Bumped on cancel and restart.** After a cancel bumps the generation, any in-flight step's `_stepDone` (carrying the old generation in its `context`) no-ops — so a step that finishes *after* cancel can't resurrect the workflow.
 - Prevents: double-advance from a duplicate poll, a concurrent poll racing itself, a post-cancel step re-advancing. This is the workflow analogue of the scheduler's `_claim` OCC guard — same discipline, different table.
 
-## 4. What Stackbase already provides vs. what workflow adds
+## 4. What Helipod already provides vs. what workflow adds
 
 | Need | Source | Status |
 |---|---|---|
-| Dispatch a step now/after delay (`runAfter`/`runAt`) | `@stackbase/scheduler` facade | ✅ shipped |
+| Dispatch a step now/after delay (`runAfter`/`runAt`) | `@helipod/scheduler` facade | ✅ shipped |
 | Cancel in-flight steps (cascading) | scheduler cascading cancel | ✅ shipped |
 | Notify workflow when a step finishes (`onComplete` + opaque `context`) | scheduler — **built for this** | ✅ shipped |
 | `RunResult = success \| failed \| canceled` uniform outcome | scheduler `OnCompleteResult` | ✅ shipped |

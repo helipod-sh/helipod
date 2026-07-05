@@ -53,12 +53,12 @@ export async function startBackend(opts: StartBackendOptions, deps: { spawn: Spa
   const interval = opts.pollIntervalMs ?? 200;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (exited) { stop(); throw new Error(`stackbase dev exited before becoming ready (code ${exitCode})`); }
+    if (exited) { stop(); throw new Error(`helipod dev exited before becoming ready (code ${exitCode})`); }
     if (await deps.probe(opts.port)) return { stop };
     await new Promise((r) => setTimeout(r, interval));
   }
   stop();
-  throw new Error(`stackbase dev did not become ready on port ${opts.port} within ${timeout}ms`);
+  throw new Error(`helipod dev did not become ready on port ${opts.port} within ${timeout}ms`);
 }
 
 export interface CleanupProc { once(ev: string, cb: (...a: unknown[]) => void): void; }

@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { query, type QueryCtx } from "@stackbase/executor";
+import { defineSchema } from "@helipod/values";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { query, type QueryCtx } from "@helipod/executor";
 import { generateKeyPair, SignJWT } from "jose";
 import { defineAuth } from "../src/component";
 import { oauthProvider } from "../src/oauth";

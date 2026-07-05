@@ -8,7 +8,7 @@
  * catch-and-replay, the app-schema-vs-fleet-table 23505 distinction), not the real Postgres guard.
  *
  * The final `describe` block ("the concurrent-duplicate race") is a REAL integration test: a real
- * `PostgresDocStore` over PGlite + `LeaseManager` + `installCommitGuard` (from `@stackbase/fleet`,
+ * `PostgresDocStore` over PGlite + `LeaseManager` + `installCommitGuard` (from `@helipod/fleet`,
  * already a devDependency here) wired into a real `FleetHandles`, proving the actual end-to-end
  * scenario the design doc requires — two concurrent forwards of the SAME idempotencyKey commit
  * exactly one row, with the loser's response a replay of the winner's commitTs, not a 500.
@@ -17,13 +17,13 @@
  * left untouched — these are additive tests.
  */
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@stackbase/executor";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
-import { LeaseManager, installCommitGuard, type IdempotencyReplay } from "@stackbase/fleet";
-import { CommitGuardRejection } from "@stackbase/errors";
-import type { JSONValue } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog, mutation } from "@helipod/executor";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
+import { LeaseManager, installCommitGuard, type IdempotencyReplay } from "@helipod/fleet";
+import { CommitGuardRejection } from "@helipod/errors";
+import type { JSONValue } from "@helipod/values";
 import { handleHttpRequest, type FleetHandles } from "../src/http-handler";
 import { PgliteClient } from "./pglite-client";
 

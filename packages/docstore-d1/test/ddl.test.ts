@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 import { columnTypeFor, tableDdl, schemaDdl } from "../src/ddl";
 
 const schema = defineSchema({

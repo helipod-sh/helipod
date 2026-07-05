@@ -7,11 +7,11 @@
  * Channel ids (numShards = 8): chan-3 → default · chan-1 → s1 · chan-5 → s2.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { ShardedTransactor } from "@stackbase/transactor";
-import { QueryRuntime, type IndexSpec } from "@stackbase/query-engine";
-import { encodeStorageIndexId, type ShardId } from "@stackbase/id-codec";
-import type { JSONValue } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { ShardedTransactor } from "@helipod/transactor";
+import { QueryRuntime, type IndexSpec } from "@helipod/query-engine";
+import { encodeStorageIndexId, type ShardId } from "@helipod/id-codec";
+import type { JSONValue } from "@helipod/values";
 import {
   InlineUdfExecutor,
   SimpleIndexCatalog,

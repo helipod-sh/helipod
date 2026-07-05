@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { decodeDocumentId } from "@stackbase/id-codec";
-import { DocumentNotFoundError } from "@stackbase/errors";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { decodeDocumentId } from "@helipod/id-codec";
+import { DocumentNotFoundError } from "@helipod/errors";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/system-table";
 import { storageModules } from "../src/modules";
 
@@ -13,11 +13,11 @@ import { storageModules } from "../src/modules";
  * PRIVILEGED built-ins rather than a component's own namespaced modules: the `_storage` table
  * lives in the APP-root schema (see `src/system-table.ts`'s doc comment), and `storageModules`'
  * `"_storage:_op"` keys are exactly the `EmbeddedRuntime.systemModules` shape (mirroring
- * `@stackbase/admin`'s `_system:*` modules — see `packages/admin/src/system-functions.ts`) —
+ * `@helipod/admin`'s `_system:*` modules — see `packages/admin/src/system-functions.ts`) —
  * the intended integration point for later tasks' `ctx.runMutation("_storage:_op", ...)` /
  * `runSystem` callers. `runtime.run(...)` (the public, client-facing surface) rejects ANY
  * `_`-prefixed path segment, so these are invoked here via `runtime.runSystem(...)`, the same
- * trusted entrypoint `@stackbase/admin`'s API uses for `_system:*`. Privileged calls bypass
+ * trusted entrypoint `@helipod/admin`'s API uses for `_system:*`. Privileged calls bypass
  * namespace prefixing entirely, so `ctx.db`'s bare `"_storage"` table name resolves correctly.
  *
  * `existingTableNumbers` seeds the registry with `_storage`'s reserved, forever-stable number
@@ -51,7 +51,7 @@ async function makeRuntime(now?: () => number): Promise<EmbeddedRuntime> {
   });
 }
 
-describe("@stackbase/storage internal _storage metadata modules", () => {
+describe("@helipod/storage internal _storage metadata modules", () => {
   it("_createPending inserts a pending row and returns an id decoding to the _storage table", async () => {
     const runtime = await makeRuntime();
     const id = (

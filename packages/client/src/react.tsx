@@ -11,22 +11,22 @@
  * the pre-existing `Record<string, Value>`/`Value` shape with an explicit `T` override, unchanged.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { convexToJson, type Value } from "@stackbase/values";
-import { StackbaseClient, type PendingMutationEntry } from "./client";
+import { convexToJson, type Value } from "@helipod/values";
+import { HelipodClient, type PendingMutationEntry } from "./client";
 import { getFunctionPath, type AnyFunctionRef, type FunctionReference } from "./api";
 import type { AnyFunctionReference, FunctionArgs, FunctionReturnType } from "./function-types";
 import type { OptimisticLocalStore } from "./optimistic-store";
 import type { OptimisticUpdate } from "./layered-store";
 
-const ClientContext = createContext<StackbaseClient | null>(null);
+const ClientContext = createContext<HelipodClient | null>(null);
 
-export function StackbaseProvider(props: { client: StackbaseClient; children: ReactNode }) {
+export function HelipodProvider(props: { client: HelipodClient; children: ReactNode }) {
   return <ClientContext.Provider value={props.client}>{props.children}</ClientContext.Provider>;
 }
 
-export function useStackbaseClient(): StackbaseClient {
+export function useHelipodClient(): HelipodClient {
   const client = useContext(ClientContext);
-  if (!client) throw new Error("useStackbaseClient must be used within <StackbaseProvider>");
+  if (!client) throw new Error("useHelipodClient must be used within <HelipodProvider>");
   return client;
 }
 
@@ -38,7 +38,7 @@ function argsKey(ref: AnyFunctionRef, args: Record<string, Value>): string {
 export function useQuery<Q extends AnyFunctionReference<any, any>>(ref: Q, args?: FunctionArgs<Q>): FunctionReturnType<Q> | undefined;
 export function useQuery<T = Value>(ref: FunctionReference | string, args?: Record<string, Value>): T | undefined;
 export function useQuery(ref: AnyFunctionRef, args: Record<string, Value> = {}): unknown {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   const [value, setValue] = useState<Value | undefined>(undefined);
   const key = argsKey(ref, args);
 
@@ -75,7 +75,7 @@ export interface MutationCallback<Args = Record<string, Value>, Returns = Value>
  * necessity — there is no way to detect two closures are "the same update" without a reference.
  */
 function createMutationCallback<Args, Returns>(
-  client: StackbaseClient,
+  client: HelipodClient,
   path: string,
   updater?: OptimisticUpdateHandler<Args>,
 ): MutationCallback<Args, Returns> {
@@ -103,7 +103,7 @@ export function useMutation<Q extends AnyFunctionReference<any, any>>(
 ): MutationCallback<FunctionArgs<Q>, FunctionReturnType<Q>>;
 export function useMutation<T = Value>(ref: FunctionReference | string): MutationCallback<Record<string, Value>, T>;
 export function useMutation(ref: AnyFunctionRef): MutationCallback<any, any> {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   const path = getFunctionPath(ref);
   return useMemo(() => createMutationCallback(client, path), [client, path]);
 }
@@ -112,14 +112,14 @@ export function useMutation(ref: AnyFunctionRef): MutationCallback<any, any> {
 export function useAction<Q extends AnyFunctionReference<any, any>>(ref: Q): (args?: FunctionArgs<Q>) => Promise<FunctionReturnType<Q>>;
 export function useAction<T = Value>(ref: FunctionReference | string): (args?: Record<string, Value>) => Promise<T>;
 export function useAction(ref: AnyFunctionRef): (args?: Record<string, Value>) => Promise<Value> {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   const path = getFunctionPath(ref);
   return useCallback((args: Record<string, Value> = {}) => client.action(path, args), [client, path]);
 }
 
 /**
  * T5 (R9) — a live snapshot of the durable outbox: `[]` until the first read resolves (and forever,
- * without an `outbox` configured — `StackbaseClient.pendingMutations()`'s own no-outbox behavior).
+ * without an `outbox` configured — `HelipodClient.pendingMutations()`'s own no-outbox behavior).
  * Re-reads on every `client.onOutboxChange` notification — every local outbox-mutating op AND, when
  * a `BroadcastChannel` is available, an incoming cross-tab nudge from ANOTHER tab sharing the same
  * durable store (verdict §(d) "Observability": "usePendingMutations() reactive... a BroadcastChannel
@@ -127,7 +127,7 @@ export function useAction(ref: AnyFunctionRef): (args?: Record<string, Value>) =
  * (`packages/client/test/pending-tray-recipe.test.tsx` is its compiling fixture).
  */
 export function usePendingMutations(): PendingMutationEntry[] {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   const [entries, setEntries] = useState<PendingMutationEntry[]>([]);
 
   useEffect(() => {
@@ -148,6 +148,6 @@ export function usePendingMutations(): PendingMutationEntry[] {
   return entries;
 }
 
-// Reactive in-app inbox helper (@stackbase/notifications) — see ./notifications.
+// Reactive in-app inbox helper (@helipod/notifications) — see ./notifications.
 export { useNotifications, Inbox, useNotificationPreferences, registerForPush, unregisterForPush } from "./notifications";
 export type { InboxNotification, UseNotificationsResult, InboxProps, NotificationPreference, UseNotificationPreferencesResult } from "./notifications";

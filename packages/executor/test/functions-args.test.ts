@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { v } from "@stackbase/values";
+import { v } from "@helipod/values";
 import { mutation, query, action } from "../src/functions";
 
 describe("functions.ts — args validator surface", () => {

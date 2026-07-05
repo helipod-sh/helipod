@@ -1,5 +1,5 @@
 /**
- * End-to-end test: incremental (delta) `stackbase deploy` through the REAL `startServe` + the
+ * End-to-end test: incremental (delta) `helipod deploy` through the REAL `startServe` + the
  * REAL `deployCommand` — mirrors `deploy-e2e.test.ts`'s "test through the shipped entrypoint"
  * pattern, but targets the ONE-FILE DELTA path specifically (the incremental-push slice), not the
  * legacy full-push path `deploy-e2e.test.ts` already covers.
@@ -34,14 +34,14 @@ import { startServe } from "../src/serve";
 import { deployCommand } from "../src/deploy";
 import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
-import { writeGenerated } from "@stackbase/codegen";
+import { writeGenerated } from "@helipod/codegen";
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures                                                                    */
 /* -------------------------------------------------------------------------- */
 
 function fixtureFunctionsDir(name: string): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "stackbase");
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", name, "helipod");
 }
 
 /** Refresh a fixture's committed `_generated/` in place — same codegen step `deployCommand`
@@ -143,15 +143,15 @@ async function captureDeployPosts<T>(fn: () => Promise<T>): Promise<{ result: T;
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
-describe("stackbase deploy — incremental (delta) push end-to-end through the real serve server", () => {
+describe("helipod deploy — incremental (delta) push end-to-end through the real serve server", () => {
   it("v1 full push populates /modules; v2 one-file delta is live + reactive; unrelated module untouched", async () => {
     const v1Dir = fixtureFunctionsDir("incremental-v1");
     const v2Dir = fixtureFunctionsDir("incremental-v2");
     await regenerate(v1Dir);
     await regenerate(v2Dir);
 
-    const deployRoot = join(process.cwd(), ".stackbase-deploy");
-    const OLD_ADMIN_KEY = process.env.STACKBASE_ADMIN_KEY;
+    const deployRoot = join(process.cwd(), ".helipod-deploy");
+    const OLD_ADMIN_KEY = process.env.HELIPOD_ADMIN_KEY;
 
     let round1: Awaited<ReturnType<typeof startServe>> | undefined;
     try {
@@ -168,7 +168,7 @@ describe("stackbase deploy — incremental (delta) push end-to-end through the r
         dashboard: false,
         allowDeploy: true,
       });
-      process.env.STACKBASE_ADMIN_KEY = "k";
+      process.env.HELIPOD_ADMIN_KEY = "k";
       const headers = { authorization: "Bearer k" };
 
       /* ---------------------------------------------------------------------- */
@@ -263,8 +263,8 @@ describe("stackbase deploy — incremental (delta) push end-to-end through the r
 
       ws.close();
     } finally {
-      if (OLD_ADMIN_KEY === undefined) delete process.env.STACKBASE_ADMIN_KEY;
-      else process.env.STACKBASE_ADMIN_KEY = OLD_ADMIN_KEY;
+      if (OLD_ADMIN_KEY === undefined) delete process.env.HELIPOD_ADMIN_KEY;
+      else process.env.HELIPOD_ADMIN_KEY = OLD_ADMIN_KEY;
       if (round1) {
         await round1.server.close();
         round1.store.close();

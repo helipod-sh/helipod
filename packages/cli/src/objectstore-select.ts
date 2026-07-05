@@ -12,7 +12,7 @@
  *
  *   - unset / empty string          -> `null` (object-store mode not requested)
  *   - `file://<path>`               -> `FsObjectStore` rooted at `<path>`
- *       (e.g. `file:///var/lib/stackbase/objects` -> dir `/var/lib/stackbase/objects`)
+ *       (e.g. `file:///var/lib/helipod/objects` -> dir `/var/lib/helipod/objects`)
  *   - a bare filesystem path (no URL-scheme prefix) -> same, `FsObjectStore` rooted at that path
  *       (e.g. `--object-store ./objects`)
  *   - `s3://[accessKeyId:secretAccessKey@]host[:port]/bucket[?region=…&endpoint=…&forcePathStyle=…]`
@@ -39,15 +39,15 @@
  *       place of the intended shared bucket).
  *
  * Examples:
- *   `s3://minioadmin:minioadmin@localhost:9000/stackbase-objects?region=us-east-1`
- *   `s3+https://minioadmin:minioadmin@objects.example.com/stackbase-objects`
+ *   `s3://minioadmin:minioadmin@localhost:9000/helipod-objects?region=us-east-1`
+ *   `s3+https://minioadmin:minioadmin@objects.example.com/helipod-objects`
  *   `s3:///my-prod-bucket?region=us-west-2`                (real AWS S3, creds from env)
  *   `file:///data/objects`
  *   `./objects`
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import { S3ObjectStore } from "@stackbase/objectstore-s3";
+import type { ObjectStore } from "@helipod/objectstore";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import { S3ObjectStore } from "@helipod/objectstore-s3";
 
 export type ObjectStoreKind = "s3" | "fs";
 
@@ -82,7 +82,7 @@ function parseBoolParam(v: string | null): boolean | undefined {
   if (v === null) return undefined;
   if (v === "true") return true;
   if (v === "false") return false;
-  throw new Error(`stackbase: invalid --object-store URL — forcePathStyle must be "true" or "false", got "${v}"`);
+  throw new Error(`helipod: invalid --object-store URL — forcePathStyle must be "true" or "false", got "${v}"`);
 }
 
 /** Parse an `s3://…` URL per the grammar documented above. Pure — no I/O. Throws a clear `Error`
@@ -95,13 +95,13 @@ export function parseS3ObjectStoreUrl(
   try {
     u = new URL(url);
   } catch (e) {
-    throw new Error(`stackbase: invalid --object-store URL "${url}": ${(e as Error).message}`);
+    throw new Error(`helipod: invalid --object-store URL "${url}": ${(e as Error).message}`);
   }
 
   const bucket = decodeURIComponent(u.pathname.replace(/^\//, "").split("/")[0] ?? "");
   if (!bucket) {
     throw new Error(
-      `stackbase: --object-store S3 URL "${url}" has no bucket — use s3://host/<bucket> ` +
+      `helipod: --object-store S3 URL "${url}" has no bucket — use s3://host/<bucket> ` +
         `(or s3:///<bucket> for real AWS S3 with no custom endpoint).`,
     );
   }
@@ -121,7 +121,7 @@ export function parseS3ObjectStoreUrl(
   const secretAccessKey = (u.password ? decodeURIComponent(u.password) : undefined) ?? env.AWS_SECRET_ACCESS_KEY;
   if (!accessKeyId || !secretAccessKey) {
     throw new Error(
-      `stackbase: --object-store S3 URL "${url}" is missing credentials — supply them in the URL ` +
+      `helipod: --object-store S3 URL "${url}" is missing credentials — supply them in the URL ` +
         `(s3://accessKeyId:secretAccessKey@…) or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.`,
     );
   }
@@ -144,7 +144,7 @@ const SCHEME_RE = /^([a-zA-Z][a-zA-Z0-9+.\-]*):\/\//;
 const SUPPORTED_SCHEMES = "s3://, s3+http://, s3+https://, file:// (or a bare filesystem path with no scheme)";
 
 /**
- * Resolve `--object-store <url>` / `STACKBASE_OBJECT_STORE` to a constructed `ObjectStore`
+ * Resolve `--object-store <url>` / `HELIPOD_OBJECT_STORE` to a constructed `ObjectStore`
  * adapter. `undefined`/empty -> `null` (object-store mode not requested — the CLI falls through
  * to its normal `makeStore` SQLite/Postgres selection). Pure: parses and constructs only, no
  * live I/O (the caller runs `assertCasSupported()`/`ensureGlobals`/lease-acquire separately).
@@ -179,7 +179,7 @@ export function resolveObjectStore(
       return { objectStore: new FsObjectStore({ dir: parseFsObjectStorePath(trimmed) }), kind: "fs" };
     default:
       throw new Error(
-        `stackbase: --object-store URL "${trimmed}" uses an unsupported scheme "${schemeMatch[1]}://" — ` +
+        `helipod: --object-store URL "${trimmed}" uses an unsupported scheme "${schemeMatch[1]}://" — ` +
           `supported schemes are ${SUPPORTED_SCHEMES}.`,
       );
   }

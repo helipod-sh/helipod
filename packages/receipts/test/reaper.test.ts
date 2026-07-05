@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { DriverContext } from "@stackbase/component";
-import type { DocStore } from "@stackbase/docstore";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { DriverContext } from "@helipod/component";
+import type { DocStore } from "@helipod/docstore";
 import { receiptsReaper } from "../src/reaper";
 import type { ReceiptsReaperDriver } from "../src/reaper";
 
 /**
  * A manual/controllable fake `DriverContext`: `now()`/timers are driven explicitly by the test (no
- * real `setTimeout`) — mirrors `@stackbase/storage`'s `test/reaper.test.ts` harness, minus the
+ * real `setTimeout`) — mirrors `@helipod/storage`'s `test/reaper.test.ts` harness, minus the
  * `runFunction`/`onCommit` plumbing this driver doesn't use (see `reaper.ts`'s doc comment for why).
  */
 function makeFakeDriverContext(): {

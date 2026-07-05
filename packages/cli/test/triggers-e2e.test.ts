@@ -1,14 +1,14 @@
 /**
- * End-to-end test: `@stackbase/triggers` — the durable onChange loop — through the REAL dev server.
+ * End-to-end test: `@helipod/triggers` — the durable onChange loop — through the REAL dev server.
  *
  * Tasks 1-2 built the core seams (`DriverContext.readLog` + the stable-prefix bound; the component's
  * cursor-over-the-log driver loop, breaker, backoff) — each proven by unit tests against fakes and a
- * hand-composed runtime. This test proves the WHOLE loop works through the shipped `stackbase dev`
+ * hand-composed runtime. This test proves the WHOLE loop works through the shipped `helipod dev`
  * server (real `loadProject` + `createEmbeddedRuntime` + `startDevServer`, real WebSocket, real HTTP
  * admin browse) the way "test through the shipped entrypoint" has caught wiring gaps before in this
  * project (admin browse, scheduler driver wiring — see `./scheduler-e2e.test.ts`). The fixture
  * composes `defineTriggers()` ALONGSIDE `defineScheduler()` (the multi-component composition a real
- * `stackbase.config.ts` would list — see `examples/auth-demo/stackbase.config.ts`), and wires the
+ * `helipod.config.ts` would list — see `examples/auth-demo/helipod.config.ts`), and wires the
  * composed `bootSteps`/`drivers`/`tableNumbers` exactly as `packages/cli/src/cli.ts`'s `devCommand`
  * does.
  *
@@ -43,14 +43,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation, action, InMemoryLogSink } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { AdminApi, browseTableModule, verifyAdminKey } from "@stackbase/admin";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineTriggers } from "@stackbase/triggers";
-import type { ComponentDefinition } from "@stackbase/component";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation, action, InMemoryLogSink } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { AdminApi, browseTableModule, verifyAdminKey } from "@helipod/admin";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineTriggers } from "@helipod/triggers";
+import type { ComponentDefinition } from "@helipod/component";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */

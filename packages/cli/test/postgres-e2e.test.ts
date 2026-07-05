@@ -1,14 +1,14 @@
 /**
  * End-to-end ship gate for slice 6c (Postgres storage backend): proves the EXACT production path —
- * `stackbase serve` running under BUN (the primary runtime; `PostgresDocStore` was only proven
+ * `helipod serve` running under BUN (the primary runtime; `PostgresDocStore` was only proven
  * against PGlite/an in-process fixture in Tasks 1-7) → `pg` (node-postgres) → a REAL `postgres:16`
  * Docker container. Unlike `serve-e2e.test.ts`/`deploy-e2e.test.ts`, which call `startServe()`
  * in-process (so they run under vitest's Node host, never touching the `Bun` global), this test
- * spawns the real `stackbase` CLI entrypoint (`src/bin.ts`) as a child process via `bun`, mirroring
+ * spawns the real `helipod` CLI entrypoint (`src/bin.ts`) as a child process via `bun`, mirroring
  * `build-e2e.test.ts`'s "launch the real artifact, read the JSON ready line off stdout" pattern —
  * because a container + the production runtime binary is the whole point of this gate.
  *
- * Proves, through the real `stackbase serve` process + a real Postgres container:
+ * Proves, through the real `helipod serve` process + a real Postgres container:
  *   1. `POST /api/run` a `notes:add` mutation commits.
  *   2. Its write fans out reactively to a WebSocket `notes:list` subscription opened BEFORE the
  *      write (event-driven — no polling on the socket itself).
@@ -29,7 +29,7 @@ import type { Readable } from "node:stream";
 import WebSocket from "ws";
 import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
-import { writeGenerated } from "@stackbase/codegen";
+import { writeGenerated } from "@helipod/codegen";
 
 /* -------------------------------------------------------------------------- */
 /* Docker availability + container lifecycle                                  */
@@ -93,7 +93,7 @@ function stopPostgresContainer(): void {
 /* -------------------------------------------------------------------------- */
 
 function fixtureFunctionsDir(): string {
-  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "stackbase");
+  return resolve(new URL(".", import.meta.url).pathname, "fixtures", "deploy-v2", "helipod");
 }
 
 /** Refresh the fixture's committed `_generated/` in place (same load->push->write step `deploy`/
@@ -151,7 +151,7 @@ function spawnServe(databaseUrl: string): ServeProcess {
   return spawn(
     "bun",
     [CLI_BIN, "serve", "--dir", fixtureFunctionsDir(), "--port", "0", "--ip", "127.0.0.1", "--no-dashboard", "--database-url", databaseUrl],
-    { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY }, stdio: ["ignore", "pipe", "pipe"] },
+    { env: { ...process.env, HELIPOD_ADMIN_KEY: ADMIN_KEY }, stdio: ["ignore", "pipe", "pipe"] },
   );
 }
 
@@ -227,7 +227,7 @@ async function subscribeToNotesList(wsUrl: string): Promise<{ ws: WebSocket; mes
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
-maybeDescribe("stackbase serve — Postgres ship gate (real container, real bun process)", () => {
+maybeDescribe("helipod serve — Postgres ship gate (real container, real bun process)", () => {
   afterAll(() => {
     stopPostgresContainer();
   });

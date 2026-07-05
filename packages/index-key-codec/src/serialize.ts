@@ -20,7 +20,7 @@ export interface WriteInvalidation {
   ranges: readonly SerializedKeyRange[];
 }
 
-/** Exported (DLR 2b) so client-side code (e.g. `@stackbase/client`'s range render mode) can decode
+/** Exported (DLR 2b) so client-side code (e.g. `@helipod/client`'s range render mode) can decode
  *  an `orderKey` the exact same way the server encoded it via `orderKeyFor` (`commit-differ.ts`,
  *  which itself routes through `serializeKeyRange`/`deserializeKeyRange` — same codec, no drift).
  *  Never hand-roll a second base64 codec; import these instead. */

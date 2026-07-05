@@ -1,12 +1,12 @@
 {
   // The wrangler config the vitest-pool-workers project loads to spin up a real DO inside workerd.
-  "name": "stackbase-do-workers-tests",
+  "name": "helipod-do-workers-tests",
   "main": "test-worker.ts",
   "compatibility_date": "2024-11-27",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "STACKBASE_DO", "class_name": "FixtureStackbaseDO" },
+      { "name": "HELIPOD_DO", "class_name": "FixtureHelipodDO" },
       { "name": "SQL_PROBE", "class_name": "SqlProbeDO" },
       { "name": "AUDIT_DO", "class_name": "AuditDO" },
       { "name": "STORAGE_DO", "class_name": "StorageDO" },
@@ -16,13 +16,13 @@
   },
   // The R2 bucket bound to the file-storage fixture DO (`StorageDO` reads `env.STORAGE_BUCKET`).
   // vitest-pool-workers/miniflare provides an in-memory R2 emulation, so no real bucket is needed.
-  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "stackbase-test-bucket" }],
+  "r2_buckets": [{ "binding": "STORAGE_BUCKET", "bucket_name": "helipod-test-bucket" }],
   // The D1 database bound to the `.global()`-table fixture DO (`GlobalD1DO` reads `env.DB`).
   // vitest-pool-workers/miniflare provides a REAL local D1 (workerd's actual SQLite dialect) — the
   // `database_id` is a placeholder UUID (no real Cloudflare account needed for local/test D1).
-  "d1_databases": [{ "binding": "DB", "database_name": "stackbase-test-global-db", "database_id": "00000000-0000-0000-0000-000000000001" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "helipod-test-global-db", "database_id": "00000000-0000-0000-0000-000000000001" }],
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["FixtureStackbaseDO", "SqlProbeDO"] },
+    { "tag": "v1", "new_sqlite_classes": ["FixtureHelipodDO", "SqlProbeDO"] },
     { "tag": "v2", "new_sqlite_classes": ["AuditDO"] },
     { "tag": "v3", "new_sqlite_classes": ["StorageDO"] },
     { "tag": "v4", "new_sqlite_classes": ["GlobalD1DO"] },

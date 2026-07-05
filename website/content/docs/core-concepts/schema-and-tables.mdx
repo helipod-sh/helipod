@@ -8,8 +8,8 @@ description: How you describe your data, tables, documents, validators, and inde
 Think of your schema as a bouncer at the door of your database. It checks the shape of every
 document before letting it in, and turns away anything that doesn't fit.
 
-A stackbase schema is a single TypeScript file. It lists every table in your database and the
-shape of the documents each one holds. Your editor and the compiler understand it, and stackbase
+A helipod schema is a single TypeScript file. It lists every table in your database and the
+shape of the documents each one holds. Your editor and the compiler understand it, and helipod
 enforces it at write time: a document that doesn't match its table's shape is rejected before it
 ever reaches storage.
 
@@ -25,11 +25,11 @@ flowchart LR
 
 ## Defining a schema
 
-Your `stackbase/schema.ts` file default-exports a `defineSchema` call. It maps table names to
+Your `helipod/schema.ts` file default-exports a `defineSchema` call. It maps table names to
 `defineTable` definitions:
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   conversations: defineTable({
@@ -68,14 +68,14 @@ fields you never set:
   mutation's own transaction snapshot time, not `Date.now()`. That keeps it deterministic, like
   everything else a mutation touches.
 
-stackbase assigns both on insert. Every table also gets a built-in `by_creation` index (creation
+helipod assigns both on insert. Every table also gets a built-in `by_creation` index (creation
 order) for free. That's why `ctx.db.query("messages", "by_creation").collect()` works with no
 index declared in the schema at all.
 
 ## The `v.*` validator catalog
 
 Every field in `defineTable` is described by a validator built from the `v` namespace, imported
-from `@stackbase/values`.
+from `@helipod/values`.
 
 A validator does two jobs. It checks a value at runtime, which is what makes write enforcement
 possible. And it carries the TypeScript type that flows into `Doc<"table">`, function
@@ -227,7 +227,7 @@ same `v.*` builders.
 
 So the validator that runs inside a transaction on a real server is never a reimplementation of
 the one in your `schema.ts`. It's the same concrete class, rehydrated. This is also what lets
-`stackbase deploy` reason about schema compatibility purely from JSON (see
+`helipod deploy` reason about schema compatibility purely from JSON (see
 [Schema evolution](#schema-evolution) below), without re-executing your TypeScript.
 
 </Accordion>
@@ -239,7 +239,7 @@ the one in your `schema.ts`. It's the same concrete class, rehydrated. This is a
 An index lets a query find documents efficiently instead of scanning the whole table. Declare one
 with `.index(name, [fields])`, chained off `defineTable`:
 
-```ts title="stackbase/schema.ts"
+```ts title="helipod/schema.ts"
 messages: defineTable({
   conversationId: v.id("conversations"),
   author: v.string(),
@@ -282,7 +282,7 @@ time.
 lets a table's writes fan out across multiple independent single-writer shards instead of
 funneling through one, at Tier 2 scale:
 
-```ts title="stackbase/schema.ts"
+```ts title="helipod/schema.ts"
 messages: defineTable({
   conversationId: v.id("conversations"),
   author: v.string(),
@@ -292,7 +292,7 @@ messages: defineTable({
   .shardKey("conversationId"),
 ```
 
-At Tier 0/1 (the default: a single `stackbase dev`/`serve` process), `.shardKey` is metadata only.
+At Tier 0/1 (the default: a single `helipod dev`/`serve` process), `.shardKey` is metadata only.
 There's exactly one shard, `"default"`, and the app behaves byte-identically to an app that never
 declared it.
 
@@ -323,7 +323,7 @@ fails fast with a clear error rather than silently landing in the local store. S
 
 ## System tables
 
-Some tables are built into stackbase itself, rather than declared in your `schema.ts`. The current
+Some tables are built into helipod itself, rather than declared in your `schema.ts`. The current
 one is `_storage`, the file-storage feature's metadata table. Every project gets it automatically,
 whether or not you use file storage.
 
@@ -331,7 +331,7 @@ System tables are **first-class**. `Id<"_storage">` and `v.id("_storage")` type-
 schema exactly like a reference to any table you defined yourself. Codegen merges the system
 tables into your `DataModel` ahead of your own tables, so the types are always available.
 
-```ts title="stackbase/schema.ts"
+```ts title="helipod/schema.ts"
 export default defineSchema({
   photos: defineTable({
     caption: v.string(),
@@ -371,7 +371,7 @@ row before its creating mutation has even run: create a conversation offline, th
 queue a message into it, without waiting for the create to round-trip. For that, the client can
 mint a real id up front and pass it explicitly:
 
-```ts title="stackbase/conversations.ts"
+```ts title="helipod/conversations.ts"
 export const create = mutation({
   args: { _id: v.optional(v.id("conversations")), title: v.string() },
   handler: (ctx, { _id, title }) => ctx.db.insert("conversations", { _id, title }),
@@ -394,11 +394,11 @@ rings, so two concurrent inserts of the same id on different shards could otherw
 Both restrictions are enforced with the same `INVALID_CLIENT_ID` code and an error message that
 names the fix.
 
-In practice you won't hand-decode ids yourself. `stackbase codegen` emits a typed `mintId` in
+In practice you won't hand-decode ids yourself. `helipod codegen` emits a typed `mintId` in
 `_generated/ids.ts` for exactly this:
 
 ```ts
-import { mintId } from "../stackbase/_generated/ids";
+import { mintId } from "../helipod/_generated/ids";
 
 const conversationId = mintId("conversations"); // a real Id<"conversations">, minted client-side now
 ```
@@ -408,7 +408,7 @@ exists for.
 
 ## Schema evolution
 
-Your schema changes as your app does. stackbase's live deploy (`stackbase deploy`) enforces an
+Your schema changes as your app does. helipod's live deploy (`helipod deploy`) enforces an
 **additive-only** rule, so a schema change can never leave a running deployment holding data its
 own schema now rejects. A deploy diffs your new schema against the one currently running, table by
 table and field by field.
@@ -460,7 +460,7 @@ to end, including what a rejected deploy leaves running.
 
 ## Physically schemaless storage
 
-Underneath `schema.ts`, stackbase's storage is **schemaless**. On both the SQLite and Postgres
+Underneath `schema.ts`, helipod's storage is **schemaless**. On both the SQLite and Postgres
 adapters, your app's tables and fields are *data*, not DDL.
 
 There's a small, fixed set of internal storage tables shared by every app: an append-only log of
@@ -481,8 +481,8 @@ because the storage layer never had app-shaped columns to begin with.
 - [Mutations](/docs/core-concepts/mutations): the only place `ctx.db.insert`/`replace`/`delete`
   run, and where document validation is enforced.
 - [Deploy and build](/docs/deploy/deploy-and-build): how the additive-schema gate applies to a
-  live `stackbase deploy`.
+  live `helipod deploy`.
 - [Scaling](/docs/deploy/scaling): what `.shardKey` actually buys you once you're running more
   than one shard.
 - [Configuration reference](/docs/reference/configuration): the same `v.*` catalog in quick
-  lookup form, alongside `stackbase.config.ts` and environment variables.
+  lookup form, alongside `helipod.config.ts` and environment variables.

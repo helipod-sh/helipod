@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * The offline fleet reshard tool (B5 Part 1, Task 9.1): change a STOPPED Postgres fleet's shard
  * count N→M by updating the persist-once `fleet:numShards` global + creating/deleting
@@ -25,12 +25,12 @@
  * raise or hold `min(frontier_ts)`, never lower it. Net effect: EVERY post-reshard lane is
  * `>= MAX(ts)`, making the post-verify's F1 check a true post-condition rather than a best-effort one.
  */
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
-import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
+import { DEFAULT_SHARD, shardIdList, type ShardId } from "@helipod/id-codec";
 
 /** The `persistence_globals` key the resolved shard count is stamped under — byte-identical to
  *  `packages/cli/src/boot.ts`'s `NUM_SHARDS_GLOBAL_KEY` (kept as an independent literal here: the
- *  ee `@stackbase/fleet` package has no dependency on core `packages/cli`, mirroring the same
+ *  ee `@helipod/fleet` package has no dependency on core `packages/cli`, mirroring the same
  *  independent-literal choice `boot.ts`'s own doc comment makes for `DEFAULT_NUM_SHARDS`). */
 export const NUM_SHARDS_GLOBAL_KEY = "fleet:numShards";
 
@@ -67,7 +67,7 @@ export class ReshardNotAFleetError extends Error {
   constructor() {
     super(
       "this database is not a fleet store (no shard_leases/fleet_nodes tables) — a fleet is " +
-        "initialized by `stackbase serve --fleet`; run the fleet at least once before resharding",
+        "initialized by `helipod serve --fleet`; run the fleet at least once before resharding",
     );
     this.name = "ReshardNotAFleetError";
   }

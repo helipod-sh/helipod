@@ -7,7 +7,7 @@ export function consoleEmail(): EmailProvider {
     channel: "email",
     async send(m) {
       console.log(
-        `\n[stackbase notifications] email →\n  to:      ${m.to}\n  from:    ${m.from}\n  subject: ${m.subject}\n  ${m.text.replace(/\n/g, "\n  ")}\n`,
+        `\n[helipod notifications] email →\n  to:      ${m.to}\n  from:    ${m.from}\n  subject: ${m.subject}\n  ${m.text.replace(/\n/g, "\n  ")}\n`,
       );
       return {};
     },
@@ -20,7 +20,7 @@ export function consoleSms(): SmsProvider {
     channel: "sms",
     async send(m) {
       const kind = m.kind === "whatsapp" ? "whatsapp" : "sms";
-      console.log(`\n[stackbase notifications] ${kind} →\n  to:   ${m.to}\n  from: ${m.from}\n  ${m.body.replace(/\n/g, "\n  ")}\n`);
+      console.log(`\n[helipod notifications] ${kind} →\n  to:   ${m.to}\n  from: ${m.from}\n  ${m.body.replace(/\n/g, "\n  ")}\n`);
       return {};
     },
   };

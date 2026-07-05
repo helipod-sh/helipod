@@ -1,5 +1,5 @@
 /**
- * Shards B2a, Task 5 — dev-tier proof: `bootLoaded` is the exact boot core `stackbase dev` runs
+ * Shards B2a, Task 5 — dev-tier proof: `bootLoaded` is the exact boot core `helipod dev` runs
  * (see boot-loaded.test.ts for the established pattern of driving it directly, in-process, as a
  * "dev-server-level" test without needing a real HTTP server/watcher). Before this task,
  * `RunOptions.numShards` was never threaded past its `?? 1` default anywhere in
@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
@@ -25,7 +25,7 @@ const NUM_SHARDS = 8;
 
 /**
  * Two channel ids that jump-hash to DIFFERENT non-"default" shards under `NUM_SHARDS` — found via
- * the SAME exported router (`shardIdForKeyValue`, `@stackbase/id-codec`) the executor and kernel
+ * the SAME exported router (`shardIdForKeyValue`, `@helipod/id-codec`) the executor and kernel
  * guards use, rather than a hardcoded pair that could silently stop proving anything if the hash's
  * internals ever changed.
  */
@@ -48,7 +48,7 @@ describe("dev-tier shard routing (Shards B2a, T5)", () => {
     const [channelA, channelB] = distinctShardPair();
     expect(shardIdForKeyValue(channelA, NUM_SHARDS)).not.toBe(shardIdForKeyValue(channelB, NUM_SHARDS));
 
-    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/shard-dev/helipod");
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: DATA, adminKey: "k" });
     try {
       // Real per-shard routing: both channels' sends succeed (neither errors as an "undeclared

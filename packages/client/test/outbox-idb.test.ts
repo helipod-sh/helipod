@@ -22,8 +22,8 @@ runOutboxStorageContract("indexedDBOutbox (fake-indexeddb)", async () => {
 });
 
 describe("IndexedDBOutboxStorage — schema", () => {
-  it("opens ONE database named stackbase-outbox with both `entries` and `meta` stores (hazard 1: co-eviction is structural)", async () => {
-    expect(OUTBOX_DB_NAME).toBe("stackbase-outbox");
+  it("opens ONE database named helipod-outbox with both `entries` and `meta` stores (hazard 1: co-eviction is structural)", async () => {
+    expect(OUTBOX_DB_NAME).toBe("helipod-outbox");
     await openIndexedDBOutbox(idb, OUTBOX_DB_NAME);
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
       const req = idb.open(OUTBOX_DB_NAME);

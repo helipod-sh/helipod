@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * The M2d fanOut ship gate — the multi-shard router's cross-shard READ path proven on REAL Durable

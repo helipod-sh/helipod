@@ -5,7 +5,7 @@
  * hydrate-time machinery (`addHydratedEntry`, proven in `outbox-registry.test.ts`) with live
  * broadcast-driven callers.
  *
- * Two `StackbaseClient`s share one `IDBFactory` (fake-indexeddb) — a faithful two-tab model — and
+ * Two `HelipodClient`s share one `IDBFactory` (fake-indexeddb) — a faithful two-tab model — and
  * communicate over the REAL Node `BroadcastChannel` global (Node >= 18), exactly as two real
  * browser tabs on the same origin would. `MockTransport` gives each client full control over its
  * own wire frames (no real server), per the `gated-ledger.test.ts` precedent.
@@ -13,7 +13,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import {
-  StackbaseClient,
+  HelipodClient,
   indexedDBOutbox,
   memoryOutbox,
   type OptimisticLocalStore,
@@ -21,7 +21,7 @@ import {
   type OptimisticUpdateFn,
   type OutboxLockManager,
 } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 /** A serialized single-holder lock manager (the `outbox-drain.test.ts` "leader handoff" precedent):
  *  a second `request` for the same name waits until the first callback's promise resolves — the
@@ -73,7 +73,7 @@ class MockTransport {
  *  `originTag()` falls back to `"app"`; no `outboxDeployment` passed -> `"default"`). Opening a
  *  raw channel under this exact name lets a test simulate an out-of-band leader broadcast without
  *  reaching into client internals. */
-const CHANNEL_NAME = "stackbase:outbox:app:default:pending";
+const CHANNEL_NAME = "helipod:outbox:app:default:pending";
 
 async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
@@ -95,7 +95,7 @@ function makeUpdater(marker: string): OptimisticUpdateFn {
 
 /** Subscribes to `messages:list` and answers the subscription with an empty base — the composed
  *  view is then whatever optimistic layers replay on top. Returns the frame log. */
-function baseSubscribe(t: MockTransport, client: StackbaseClient): unknown[][] {
+function baseSubscribe(t: MockTransport, client: HelipodClient): unknown[][] {
   const frames: unknown[][] = [];
   client.subscribe("messages:list", {}, (v) => frames.push(v as unknown[]));
   t.emit({
@@ -116,11 +116,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const registryFn = makeUpdater("mine");
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
     const framesA = baseSubscribe(tA, clientA);
 
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, {
+    const clientB = new HelipodClient(tB, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -150,11 +150,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const tA = new MockTransport();
-      const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+      const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
       baseSubscribe(tA, clientA);
 
       const tB = new MockTransport();
-      const clientB = new StackbaseClient(tB, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 }); // no registry
+      const clientB = new HelipodClient(tB, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 }); // no registry
       const framesB = baseSubscribe(tB, clientB);
 
       void clientA.mutation("messages:send", { body: "hi" }).catch(() => {});
@@ -183,11 +183,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const registryFn = makeUpdater("mine");
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, {
+    const clientB = new HelipodClient(tB, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -229,11 +229,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const tA = new MockTransport();
-      const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+      const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
       baseSubscribe(tA, clientA);
 
       const tB = new MockTransport();
-      const clientB = new StackbaseClient(tB, {
+      const clientB = new HelipodClient(tB, {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -269,7 +269,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const registryFn = makeUpdater("mine");
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     // A's own live mutation — sent directly over the wire (inflight); never acked in this test, so
@@ -316,11 +316,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
 
     const outboxA = indexedDBOutbox({ indexedDB: idb });
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, {
+    const clientB = new HelipodClient(tB, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -355,7 +355,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const tB = new MockTransport();
-      const clientB = new StackbaseClient(tB, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+      const clientB = new HelipodClient(tB, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
       const framesB = baseSubscribe(tB, clientB);
       const changeSpy = vi.fn();
       clientB.onOutboxChange(changeSpy);
@@ -385,14 +385,14 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const registryFn = makeUpdater("mine");
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     // Shares the SAME broadcast channel name (default origin/deployment) but its OWN private,
     // non-shared `memoryOutbox()` — the durable-offline verdict's "non-durable clients share
     // nothing" rule.
     const tC = new MockTransport();
-    const clientC = new StackbaseClient(tC, {
+    const clientC = new HelipodClient(tC, {
       outbox: memoryOutbox(),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -422,11 +422,11 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
 
     const outboxA = indexedDBOutbox({ indexedDB: idb });
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, {
+    const clientB = new HelipodClient(tB, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -477,7 +477,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const registryFn = makeUpdater("mine");
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, {
+    const clientA = new HelipodClient(tA, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -522,12 +522,12 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
 
     const outboxA = indexedDBOutbox({ indexedDB: idb });
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: outboxA, outboxLocks: null, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     const failures: Array<{ clientId?: string; seq?: number; udfPath: string; error: { message: string; code?: string } }> = [];
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, {
+    const clientB = new HelipodClient(tB, {
       outbox: indexedDBOutbox({ indexedDB: idb }),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -569,7 +569,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     try {
       const outbox = indexedDBOutbox({ indexedDB: idb });
       const tB = new MockTransport();
-      const clientB = new StackbaseClient(tB, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+      const clientB = new HelipodClient(tB, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
       baseSubscribe(tB, clientB);
       // Let construction-time work (identity mint, the R9 resume scan) settle on the REAL outbox
       // before breaking it — this test targets `mirrorFromStore`'s rejection specifically, not those.
@@ -612,7 +612,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const locks = new FakeLockManager(); // ONE shared lock manager — real Web Locks semantics
 
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox: indexedDBOutbox({ indexedDB: idb }), outboxLocks: locks, outboxDrainIntervalMs: 0 });
     baseSubscribe(tA, clientA);
 
     // A becomes leader and holds the lock for its whole lifetime (never closed until after B is
@@ -630,7 +630,7 @@ describe("cross-tab live optimistic rendering (T-crosstab)", () => {
     const postSpy = vi.spyOn(BroadcastChannel.prototype, "postMessage");
     try {
       const tB = new MockTransport();
-      const clientB = new StackbaseClient(tB, {
+      const clientB = new HelipodClient(tB, {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: locks, // SAME shared manager — B genuinely cannot win leadership from A
         outboxDrainIntervalMs: 0,

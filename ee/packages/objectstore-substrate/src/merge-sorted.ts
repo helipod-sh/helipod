@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * A generic k-way merge over N already-sorted `AsyncGenerator`s, used by
  * `ShardedObjectStoreDocStore` to merge each lane's own `index_scan`/`load_documents` stream into

@@ -17,12 +17,12 @@
  *    Postgres semantics, in-process) — demonstrating exactly the corruption the pool prevents.
  *  - PGlite is single-connection and cannot share a DB across instances, so the REAL two-connection
  *    concurrency proof (shard A's commit held open across an await while shard B's completes first)
- *    is a `STACKBASE_TEST_DATABASE_URL`-gated test in `commit-pool-real-pg.test.ts` + the T6 fleet E2E
+ *    is a `HELIPOD_TEST_DATABASE_URL`-gated test in `commit-pool-real-pg.test.ts` + the T6 fleet E2E
  *    against real Postgres — it cannot be expressed here.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import type { PgClient, PgQuerier, PgRow, PgTransactionalQuerier, PgValue } from "../src/pg-client";
 import { SHARD_ADVISORY_LOCK_CLASS } from "../src/pg-client";
@@ -112,7 +112,7 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
   it("opens NO commit connection until commitQuerierFor is first called, one per shard, reused", async () => {
     const client = new NodePgClient({
       connectionString: "postgres://fake",
-      applicationName: "stackbase-fleet-4000",
+      applicationName: "helipod-fleet-4000",
       commitPool: { shards: ["default", "s1"] },
     });
     // Constructor built only the pinned connection.
@@ -121,11 +121,11 @@ describe("NodePgClient commit pool — wiring (pg mocked)", () => {
     await client.commitQuerierFor!("s1");
     expect(state.instances).toHaveLength(2);
     const s1 = state.instances[1]!;
-    expect(s1.opts.application_name).toBe("stackbase-fleet-4000-commit-s1");
+    expect(s1.opts.application_name).toBe("helipod-fleet-4000-commit-s1");
 
     await client.commitQuerierFor!("default");
     expect(state.instances).toHaveLength(3);
-    expect(state.instances[2]!.opts.application_name).toBe("stackbase-fleet-4000-commit-default");
+    expect(state.instances[2]!.opts.application_name).toBe("helipod-fleet-4000-commit-default");
 
     // Same shard again → reuses the existing connection, opens nothing new.
     await client.commitQuerierFor!("s1");

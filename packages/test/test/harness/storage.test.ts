@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
+import { createTestHelipod } from "../../src";
 import * as files from "../fixtures/files";
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 
 describe("ctx.storage", () => {
   it("ctx.storage works: generateUploadUrl (mutation) + store/get bytes (action)", async () => {
-    const t = await createTestStackbase({
+    const t = await createTestHelipod({
       modules: { "files.ts": files, "schema.ts": { default: defineSchema({}) } },
     });
     try {

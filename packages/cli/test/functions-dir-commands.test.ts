@@ -5,7 +5,7 @@
  * rather than silently defaulting to `convex/` or crashing with a raw fs error or an unhandled
  * rejection. All five now route the check through the shared `ensureFunctionsDirExists` helper
  * (`../src/functions-dir.ts`), so every assertion below is the same shape: exit code 1, and stderr
- * containing both the missing path and the `stackbase migrate` hint.
+ * containing both the missing path and the `helipod migrate` hint.
  *
  * `serveCommand([])` + `process.chdir` (as sketched in the plan) is deliberately NOT used here:
  * this suite's tests share a vitest worker process, and mutating `process.cwd()` for one test can
@@ -48,18 +48,18 @@ async function captureStderr(fn: () => Promise<number>): Promise<{ code: number;
 describe("commands fail loudly on a missing functions directory", () => {
   it("serve reports the missing directory and the migrate hint", async () => {
     const dir = missingDir();
-    const prevKey = process.env.STACKBASE_ADMIN_KEY;
-    process.env.STACKBASE_ADMIN_KEY = "test-key";
+    const prevKey = process.env.HELIPOD_ADMIN_KEY;
+    process.env.HELIPOD_ADMIN_KEY = "test-key";
     let result: { code: number; err: string };
     try {
       result = await captureStderr(() => serveCommand(["--dir", dir]));
     } finally {
-      if (prevKey === undefined) delete process.env.STACKBASE_ADMIN_KEY;
-      else process.env.STACKBASE_ADMIN_KEY = prevKey;
+      if (prevKey === undefined) delete process.env.HELIPOD_ADMIN_KEY;
+      else process.env.HELIPOD_ADMIN_KEY = prevKey;
     }
     expect(result.code).toBe(1);
     expect(result.err).toContain(dir);
-    expect(result.err).toContain("stackbase migrate");
+    expect(result.err).toContain("helipod migrate");
   });
 
   it("codegen reports the missing directory and the migrate hint", async () => {
@@ -67,7 +67,7 @@ describe("commands fail loudly on a missing functions directory", () => {
     const { code, err } = await captureStderr(() => codegenCommand(["--dir", dir]));
     expect(code).toBe(1);
     expect(err).toContain(dir);
-    expect(err).toContain("stackbase migrate");
+    expect(err).toContain("helipod migrate");
   });
 
   it("build reports the missing directory and the migrate hint (not a raw fs crash)", async () => {
@@ -75,7 +75,7 @@ describe("commands fail loudly on a missing functions directory", () => {
     const { code, err } = await captureStderr(() => buildCommand(["--dir", dir]));
     expect(code).toBe(1);
     expect(err).toContain(dir);
-    expect(err).toContain("stackbase migrate");
+    expect(err).toContain("helipod migrate");
   });
 
   it("deploy's --check drift check reports the missing directory and the migrate hint (not a raw fs crash)", async () => {
@@ -85,7 +85,7 @@ describe("commands fail loudly on a missing functions directory", () => {
     );
     expect(code).toBe(1);
     expect(err).toContain(dir);
-    expect(err).toContain("stackbase migrate");
+    expect(err).toContain("helipod migrate");
   });
 
   it("objectstore reshard reports the missing directory and the migrate hint (not a raw fs crash)", async () => {
@@ -95,6 +95,6 @@ describe("commands fail loudly on a missing functions directory", () => {
     );
     expect(code).toBe(1);
     expect(err).toContain(dir);
-    expect(err).toContain("stackbase migrate");
+    expect(err).toContain("helipod migrate");
   });
 });

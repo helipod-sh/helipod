@@ -27,7 +27,7 @@ function fakeServer(opts: {
 
 function ctxFor(port: number, files: Array<{ path: string; code: string }>): DeployContext {
   return {
-    cwd: "/x", functionsDir: "/x/stackbase", env: "production",
+    cwd: "/x", functionsDir: "/x/helipod", env: "production",
     target: { targetName: "serve", provider: "serve", env: "production", settings: { url: `http://127.0.0.1:${port}`, adminKey: "k" } },
     interactive: false, spawn: { run: async () => ({ code: 0, stdout: "", stderr: "" }) }, log: () => {},
     packageApp: async () => ({ files }),

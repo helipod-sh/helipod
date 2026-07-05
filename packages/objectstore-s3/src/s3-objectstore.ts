@@ -6,7 +6,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
-import { CasConflict, isCasConflict, type ObjectStore } from "@stackbase/objectstore";
+import { CasConflict, isCasConflict, type ObjectStore } from "@helipod/objectstore";
 
 export interface S3ObjectStoreOpts {
   endpoint?: string;
@@ -15,7 +15,7 @@ export interface S3ObjectStoreOpts {
   secretAccessKey: string;
   bucket: string;
   /** Path-style addressing (required for MinIO / most non-AWS S3-compatible endpoints). Defaults
-   *  to true whenever `endpoint` is set (mirrors `@stackbase/blobstore-s3`'s `makeS3Client`). */
+   *  to true whenever `endpoint` is set (mirrors `@helipod/blobstore-s3`'s `makeS3Client`). */
   forcePathStyle?: boolean;
 }
 
@@ -47,7 +47,7 @@ export class S3ObjectStore implements ObjectStore {
     });
   }
 
-  /** Write-once/keep-first (matches fs/memory — see `@stackbase/objectstore`'s `ObjectStore` doc).
+  /** Write-once/keep-first (matches fs/memory — see `@helipod/objectstore`'s `ObjectStore` doc).
    *  Issues the SAME create-only conditional PUT `casPut(key, body, null)` uses (`IfNoneMatch: "*"`);
    *  a precondition failure means the key already exists — that is a KEEP-FIRST NO-OP (the existing
    *  object wins), not an error, so this stays idempotent-by-key like the other adapters. This is the

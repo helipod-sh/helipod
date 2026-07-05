@@ -1,9 +1,9 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { httpAction } from "@stackbase/executor";
-import { defineComponent, composeComponents, type ComponentDefinition } from "@stackbase/component";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { httpAction } from "@helipod/executor";
+import { defineComponent, composeComponents, type ComponentDefinition } from "@helipod/component";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 const servers: DevServer[] = [];

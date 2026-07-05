@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
-import { query, mutation } from "@stackbase/executor";
-import { v } from "@stackbase/values";
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
+import { query, mutation } from "@helipod/executor";
+import { v } from "@helipod/values";
 
 // `shardBy: "roomId"` — the router routes each send to the DO owning that room's shard.
 export const send = mutation({

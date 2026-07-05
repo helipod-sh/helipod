@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { action, type ActionCtx } from "@stackbase/executor";
-import { createTestStackbase, type TestStackbase } from "@stackbase/test";
+import { action, type ActionCtx } from "@helipod/executor";
+import { createTestHelipod, type TestHelipod } from "@helipod/test";
 import { defineAuth, googleProvider, sha256base64url } from "../src";
 import type { MintResult, MfaRequired, EmailMessage, EmailProvider } from "../src";
 import { totpCodeAt, currentStep } from "../src/mfa/totp";
@@ -41,11 +41,11 @@ const testModules = {
   },
 };
 
-let t: TestStackbase;
+let t: TestHelipod;
 
 async function setup(nowRef: { value: number }): Promise<{ sent: EmailMessage[] }> {
   const { sent, provider } = captureProvider();
-  t = await createTestStackbase({
+  t = await createTestHelipod({
     modules: testModules,
     components: [
       defineAuth({
@@ -87,7 +87,7 @@ function liveCodeFor(secret: string, now: number): string {
 }
 
 /** Privileged full-table scan (the `by_creation` default index every table gets — same idiom as
- *  `@stackbase/test`'s own `scanSchedulerJobs`), filtered in JS by `userId`. Used to assert on the
+ *  `@helipod/test`'s own `scanSchedulerJobs`), filtered in JS by `userId`. Used to assert on the
  *  pending `mfaChallenges` row without a public read path (there isn't one — the challenge is
  *  invisible to everyone but `completeMfaSignIn`, by design). */
 async function challengesFor(userId: string): Promise<Array<Record<string, unknown>>> {
@@ -368,7 +368,7 @@ describe("A4 Task 5: the gate — finishSignIn / completeMfaSignIn", () => {
   it("no `mfa` config at all ⇒ finishSignIn is a pure passthrough — every gated site mints directly, byte-identical to a pre-MFA deployment", async () => {
     const nowRef = { value: NOW };
     const { sent, provider } = captureProvider();
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: {},
       components: [defineAuth({ email: { provider, from: "noreply@app.co", baseUrl: "https://app.example.com" } })],
       schema: false,
@@ -434,7 +434,7 @@ describe("A4 review fix: completeMfaSignIn's per-USER windowed second-factor rat
    *  advance or a huge attempt count. */
   async function setupTightWindow(nowRef: { value: number }): Promise<void> {
     const { provider } = captureProvider();
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: {},
       components: [
         defineAuth({

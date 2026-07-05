@@ -1,6 +1,6 @@
 /**
- * `stackbase deploy` — package the local functions directory and push it to a target via the
- * `@stackbase/deploy` seam. Targets: `serve` (slice-6b live hot-swap, back-compat default),
+ * `helipod deploy` — package the local functions directory and push it to a target via the
+ * `@helipod/deploy` seam. Targets: `serve` (slice-6b live hot-swap, back-compat default),
  * `cloudflare` (Workers via wrangler), `docker` (build + push an image). This module: resolve
  * flags → build a DeployContext (packageApp/codegen closures over the existing CLI machinery,
  * a real NodeSpawner) → lazy-load the target adapter → preflight → package → push (skipped on
@@ -10,8 +10,8 @@ import { readdirSync, statSync, readFileSync, mkdtempSync, rmSync, existsSync } 
 import { join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { transform } from "esbuild";
-import { writeGenerated } from "@stackbase/codegen";
-import { resolveDeploy, loadTarget, NodeSpawner, type Spawner, type DeployContext, DeployError } from "@stackbase/deploy";
+import { writeGenerated } from "@helipod/codegen";
+import { resolveDeploy, loadTarget, NodeSpawner, type Spawner, type DeployContext, DeployError } from "@helipod/deploy";
 import { loadFunctionsDir } from "./load-modules";
 import { loadConfig } from "./load-config";
 import { push } from "./push-pipeline";
@@ -26,15 +26,15 @@ export interface DeployOptions {
 
 /** @deprecated see DeployOptions. */
 export async function resolveDeployOptions(args: string[], env: NodeJS.ProcessEnv): Promise<DeployOptions | { error: string }> {
-  let url = env.STACKBASE_DEPLOY_URL?.trim() ?? "";
+  let url = env.HELIPOD_DEPLOY_URL?.trim() ?? "";
   let dirFlag: string | undefined;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--url" && args[i + 1]) url = args[++i]!;
     else if (args[i] === "--dir" && args[i + 1]) dirFlag = args[++i]!;
   }
-  const adminKey = env.STACKBASE_ADMIN_KEY?.trim() ?? "";
-  if (!url) return { error: "missing target URL — pass --url <url> or set STACKBASE_DEPLOY_URL" };
-  if (!adminKey) return { error: "STACKBASE_ADMIN_KEY is required to deploy" };
+  const adminKey = env.HELIPOD_ADMIN_KEY?.trim() ?? "";
+  if (!url) return { error: "missing target URL — pass --url <url> or set HELIPOD_DEPLOY_URL" };
+  if (!adminKey) return { error: "HELIPOD_ADMIN_KEY is required to deploy" };
   const { functionsDir } = await resolveFunctionsDir(dirFlag, process.cwd());
   return { url, functionsDir, adminKey };
 }
@@ -53,7 +53,7 @@ export async function packageApp(functionsDir: string): Promise<Array<{ path: st
   const out: Array<{ path: string; code: string }> = [];
   for (const abs of absFiles) {
     const source = readFileSync(abs, "utf8");
-    // `transform` strips TS types and leaves import specifiers untouched — bare `@stackbase/*`
+    // `transform` strips TS types and leaves import specifiers untouched — bare `@helipod/*`
     // resolve from the remote's node_modules; relative imports resolve within the pushed tree.
     const { code } = await transform(source, { loader: "ts", format: "esm", target: "esnext" });
     const rel = relative(functionsDir, abs).split(sep).join("/").replace(/\.ts$/, ".js");
@@ -71,7 +71,7 @@ export interface DeployDeps {
 function parseDeployFlags(args: string[]): { target?: string; env?: string; url?: string; dirFlag?: string; dryRun: boolean; check: boolean } {
   let target: string | undefined;
   let env: string | undefined;
-  let url: string | undefined = process.env.STACKBASE_DEPLOY_URL?.trim() || undefined;
+  let url: string | undefined = process.env.HELIPOD_DEPLOY_URL?.trim() || undefined;
   let dirFlag: string | undefined;
   let dryRun = false;
   let check = false;
@@ -125,7 +125,7 @@ function dirsEqual(a: string, b: string): boolean {
 export async function deployCommand(args: string[], deps: DeployDeps = {}): Promise<number> {
   const flags = parseDeployFlags(args);
   const cwd = deps.cwd ?? process.cwd();
-  // `resolveFunctionsDir` handles the precedence (--dir > `functionsDir` in stackbase.config.ts >
+  // `resolveFunctionsDir` handles the precedence (--dir > `functionsDir` in helipod.config.ts >
   // DEFAULT_FUNCTIONS_DIR) and always returns an absolute path, so no separate `resolve()` of
   // `flags.dirFlag` is needed here the way a bare flag default would have required.
   const { functionsDir } = await resolveFunctionsDir(flags.dirFlag, cwd);
@@ -137,7 +137,7 @@ export async function deployCommand(args: string[], deps: DeployDeps = {}): Prom
   if (flags.check) {
     const drift = await checkDrift(functionsDir, config.components);
     if (drift) {
-      process.stderr.write(`✗ ${functionsDir}/_generated is out of date — run \`stackbase codegen\` and commit the result\n`);
+      process.stderr.write(`✗ ${functionsDir}/_generated is out of date — run \`helipod codegen\` and commit the result\n`);
       return 1;
     }
     process.stdout.write(`✓ ${functionsDir}/_generated is up to date\n`);

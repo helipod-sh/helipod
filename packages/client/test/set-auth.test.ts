@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { StackbaseClient } from "../src/client";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { HelipodClient } from "../src/client";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MinimalTransport {
   readonly sent: ClientMessage[] = [];
@@ -26,7 +26,7 @@ class MinimalTransport {
 describe("client.setAuth", () => {
   it("sends a SetAuth message with the given token over the transport", () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     client.setAuth("tok-9");
     expect(t.sent).toContainEqual({ type: "SetAuth", token: "tok-9" });
@@ -34,7 +34,7 @@ describe("client.setAuth", () => {
 
   it("sends a SetAuth message with null to clear the session identity", () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     client.setAuth(null);
     expect(t.sent).toContainEqual({ type: "SetAuth", token: null });
@@ -42,7 +42,7 @@ describe("client.setAuth", () => {
 
   it("sends both token and null in sequence", () => {
     const t = new MinimalTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     client.setAuth("tok-9");
     client.setAuth(null);

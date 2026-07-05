@@ -3,7 +3,7 @@
  *
  * Document validation (a wrong-typed / extra-field / missing-required insert or replace
  * throws `DocumentValidationError`) is enforced at the executor/kernel layer and proven there
- * by unit/kernel tests. This test proves the WHOLE path works through the shipped `stackbase
+ * by unit/kernel tests. This test proves the WHOLE path works through the shipped `helipod
  * dev` server (real `startDevServer` + `loadProject`, real HTTP + WebSocket) — the way "test
  * through the shipped entrypoint" has caught wiring gaps before in this project (admin browse,
  * scheduler driver wiring, client actions):
@@ -16,10 +16,10 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
 import { loadProject, startDevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */

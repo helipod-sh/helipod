@@ -1,4 +1,4 @@
-import { UserError } from "@stackbase/errors";
+import { UserError } from "@helipod/errors";
 
 /** Refresh presented the PREVIOUS refresh hash within the grace window — an honest racing-tab replay.
  *  No revocation; the loser waits for the winner's broadcast pair (spec decision 4). */

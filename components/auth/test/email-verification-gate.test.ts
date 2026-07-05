@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, type QueryCtx } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { query, type QueryCtx } from "@helipod/executor";
 import { defineAuth } from "../src/component";
 import type { AuthOptions, EmailMessage, EmailProvider, MintResult, NeedsVerification } from "../src";
 

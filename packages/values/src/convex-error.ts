@@ -3,7 +3,7 @@ import type { Value } from "./value";
 /**
  * An application error thrown from inside a query/mutation/action and surfaced to the
  * client with its structured `data` payload intact (Convex-compatible). Distinct from
- * `@stackbase/errors` (engine errors) — this one is part of the user-facing function API.
+ * `@helipod/errors` (engine errors) — this one is part of the user-facing function API.
  */
 export class ConvexError<TData extends Value = Value> extends Error {
   override name = "ConvexError";

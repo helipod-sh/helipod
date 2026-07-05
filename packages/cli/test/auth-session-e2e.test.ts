@@ -1,6 +1,6 @@
 /**
- * Auth A1 — E2E through the real `stackbase dev` server (e2e-through-shipped-entrypoint rule).
- * A REAL `@stackbase/client` over a REAL WebSocket to a REAL server with `@stackbase/auth` composed.
+ * Auth A1 — E2E through the real `helipod dev` server (e2e-through-shipped-entrypoint rule).
+ * A REAL `@helipod/client` over a REAL WebSocket to a REAL server with `@helipod/auth` composed.
  *
  *  (1) reactive revocation: a live `whoami` subscription flips to null when ANOTHER connection calls
  *      `auth:revokeSession` — the session-row delete fans out through the read-set;
@@ -10,12 +10,12 @@
  *      through the SAME live subscription (userId continuity).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineAuth, type MintResult } from "@stackbase/auth";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineAuth, type MintResult } from "@helipod/auth";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -81,8 +81,8 @@ afterAll(async () => { for (const s of servers) await s.close(); });
 describe("auth A1 E2E through the real dev server", () => {
   it("(1) revocation fans out reactively to a live whoami subscription", async () => {
     const { wsUrl } = await startServer();
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
-    const admin = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const admin = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const s = (await c.mutation(api.auth.signUp, { email: "a@b.co", password: "pw", deviceLabel: "Chrome" })) as unknown as MintResult;
       c.setAuth(s.token);
@@ -102,7 +102,7 @@ describe("auth A1 E2E through the real dev server", () => {
 
   it("(2) rotate-while-subscribed keeps identity continuous", async () => {
     const { wsUrl } = await startServer();
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const s = (await c.mutation(api.auth.signUp, { email: "b@b.co", password: "pw" })) as unknown as MintResult;
       c.setAuth(s.token);
@@ -124,7 +124,7 @@ describe("auth A1 E2E through the real dev server", () => {
 
   it("(3) anonymous → upgrade: a row written while anonymous survives, readable by the upgraded user", async () => {
     const { wsUrl } = await startServer();
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const anon = (await c.mutation(api.auth.signInAnonymously, {})) as unknown as MintResult;
       c.setAuth(anon.token);

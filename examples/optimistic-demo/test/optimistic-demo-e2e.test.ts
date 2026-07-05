@@ -1,6 +1,6 @@
 /**
- * Pulse E2E — the demo's headline claims through the REAL machinery: the real `stackbase dev`
- * server, a real StackbaseClient over a real WebSocket, and the demo's own delayTransport
+ * Pulse E2E — the demo's headline claims through the REAL machinery: the real `helipod dev`
+ * server, a real HelipodClient over a real WebSocket, and the demo's own delayTransport
  * injecting write latency.
  *
  * Claim 1 (why optimistic exists): under 500ms injected write latency, a subscribed query
@@ -12,13 +12,13 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, type ClientTransport, type OptimisticStoreView } from "@stackbase/client";
-import { loadProject, startDevServer, type DevServer } from "@stackbase/cli";
-import schema from "../stackbase/schema";
-import * as polls from "../stackbase/polls";
-import * as options from "../stackbase/options";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, type ClientTransport, type OptimisticStoreView } from "@helipod/client";
+import { loadProject, startDevServer, type DevServer } from "@helipod/cli";
+import schema from "../helipod/schema";
+import * as polls from "../helipod/polls";
+import * as options from "../helipod/options";
 import { delayTransport } from "../web/delay-transport";
 
 type OptionRow = { _id: string; label: string; votes: number };
@@ -97,14 +97,14 @@ function bump(store: OptimisticStoreView, id: string, delta: number): void {
 
 describe("pulse E2E — optimistic votes render before the server answers; rollback is exact", () => {
   it("claim 1: under 500ms write latency, optimistic ON shows the vote pre-ack (and never flickers); OFF waits for the server", async () => {
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       const s = await startServer();
       server = s.server;
 
       const transport = delayTransport(`ws://127.0.0.1:${server.port}/api/sync`, nodeInner);
-      client = new StackbaseClient(transport);
+      client = new HelipodClient(transport);
 
       const pollId = (await client.mutation("polls:create", { question: "Lunch?", options: ["Pizza", "Sushi"] })) as string;
 
@@ -151,14 +151,14 @@ describe("pulse E2E — optimistic votes render before the server answers; rollb
   }, 60_000);
 
   it("claim 2: a vote into a closed poll rejects with POLL_CLOSED and rolls back to the exact pre-vote count", async () => {
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       const s = await startServer();
       server = s.server;
 
       const transport = delayTransport(`ws://127.0.0.1:${server.port}/api/sync`, nodeInner);
-      client = new StackbaseClient(transport);
+      client = new HelipodClient(transport);
 
       const pollId = (await client.mutation("polls:create", { question: "Closed?", options: ["Yes"] })) as string;
       const optionId = ((await client.query("options:list", { pollId })) as OptionRow[])[0]!._id;

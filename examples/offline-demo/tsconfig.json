@@ -5,5 +5,5 @@
     "types": ["node"],
     "jsx": "react-jsx"
   },
-  "include": ["stackbase", "test", "scripts", "web"]
+  "include": ["helipod", "test", "scripts", "web"]
 }

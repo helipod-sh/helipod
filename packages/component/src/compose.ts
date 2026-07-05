@@ -1,7 +1,7 @@
-import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog } from "@stackbase/executor";
-import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@stackbase/executor";
-import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
+import { MemoryTableRegistry, getFullTableName, encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog } from "@helipod/executor";
+import type { RegisteredFunction, ContextProvider, TablePolicy, PolicyContextProvider, RelationRegistry } from "@helipod/executor";
+import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@helipod/values";
 import { assertValidComponentRoutePrefix, type ComponentDefinition, type BootContext, type Driver, type ComponentHttpRoute } from "./define-component";
 
 const DEFAULT_INDEX = "by_creation";
@@ -12,7 +12,7 @@ export interface ComposeInput {
   /**
    * Seed the registry with a running deploy's table numbers (full name -> number) before
    * allocating. `MemoryTableRegistry.allocate` is idempotent by name, so a seeded name keeps its
-   * number and only genuinely-new tables get fresh ones — this is what makes `stackbase deploy`
+   * number and only genuinely-new tables get fresh ones — this is what makes `helipod deploy`
    * safe to add an app table without renumbering (and thus rejecting) untouched component tables
    * that share the "user" visibility counter. Absent (default): today's from-scratch positional
    * allocation, unchanged.

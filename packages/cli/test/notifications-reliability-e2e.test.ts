@@ -4,12 +4,12 @@
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { createHmac } from "node:crypto";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineNotifications, type EmailProvider, type WebhookEvent } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineNotifications, type EmailProvider, type WebhookEvent } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 const SECRET = "whsec_" + Buffer.from("n2-e2e-signing-key").toString("base64");
@@ -80,7 +80,7 @@ describe("notifications N2 — reliability E2E", () => {
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1", componentRoutes });
     servers.push(server);
     const base = `http://127.0.0.1:${server.port}`;
-    const c = new StackbaseClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
     try {
       c.setAuth("user-1");
       const statuses: Array<Array<{ status: string; deliveryStatus: string | null; providerMessageId: string | null }>> = [];

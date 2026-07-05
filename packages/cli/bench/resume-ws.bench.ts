@@ -14,22 +14,22 @@
  * every resubscribe) is unchanged either way. See the recorded doc's "honest note" for the v2
  * compute-saving seam (retained read-sets) this does not attempt.
  *
- * Opt-in: STACKBASE_BENCH_RESUME=1 (heavier than a plain unit test — spins a server + a TCP proxy
+ * Opt-in: HELIPOD_BENCH_RESUME=1 (heavier than a plain unit test — spins a server + a TCP proxy
  * + a real WebSocket). Without the env this file's suite is skipped entirely.
  */
 import { describe, it, expect } from "vitest";
 import { performance } from "node:perf_hooks";
 import net from "node:net";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
 import { loadProject, startDevServer } from "../src/index";
-import { StackbaseClient, webSocketTransport, type ClientTransport } from "@stackbase/client";
-import { encodeServerMessage, type ServerMessage, type ClientMessage } from "@stackbase/sync";
+import { HelipodClient, webSocketTransport, type ClientTransport } from "@helipod/client";
+import { encodeServerMessage, type ServerMessage, type ClientMessage } from "@helipod/sync";
 
-const RUN = process.env["STACKBASE_BENCH_RESUME"] === "1";
+const RUN = process.env["HELIPOD_BENCH_RESUME"] === "1";
 const benchDescribe = RUN ? describe : describe.skip;
 
 const N = 50;
@@ -211,7 +211,7 @@ async function runCell(
     },
   });
 
-  const client = new StackbaseClient(transport);
+  const client = new HelipodClient(transport);
   try {
     // Initial subscribe to all 50 (NOT measured — only the post-reconnect resume window is).
     let subscribedCount = 0;
@@ -255,7 +255,7 @@ async function runCell(
 /* The benchmark                                                              */
 /* -------------------------------------------------------------------------- */
 
-benchDescribe("bench-resume-ws — reconnect resume: bytes + time-to-answered, fingerprints on/off (opt-in: STACKBASE_BENCH_RESUME=1)", () => {
+benchDescribe("bench-resume-ws — reconnect resume: bytes + time-to-answered, fingerprints on/off (opt-in: HELIPOD_BENCH_RESUME=1)", () => {
   it("50 subscriptions (~2-10KB results each), forced reconnect: fingerprints ON vs OFF", async () => {
     const project = loadProject({ schema, modules: { bench: appModule } });
     const runtime = await createEmbeddedRuntime({

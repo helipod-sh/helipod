@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { v, validate, isValid } from "@stackbase/values";
+import { v, validate, isValid } from "@helipod/values";
 import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "../src/index";
 
 describe("_storage system-table definition", () => {
@@ -47,7 +47,7 @@ describe("Id<\"_storage\"> is a valid runtime reference on a user table", () => 
   // The id validator's runtime `check` only asserts the id is a string (the table name is a
   // compile-time brand), so a user field typed `v.id(\"_storage\")` validates as long as its value
   // is a string. This proves the round-trip point 2 of the task at the unit level; the id CODEC's
-  // table-number stability is proven in @stackbase/id-codec's registry test.
+  // table-number stability is proven in @helipod/id-codec's registry test.
   const userTable = v.object({ image: v.id("_storage"), caption: v.string() });
 
   it("accepts a document whose image field is a storage id string", () => {

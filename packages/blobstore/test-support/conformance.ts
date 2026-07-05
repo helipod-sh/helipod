@@ -33,11 +33,11 @@ export function runBlobStoreConformance(
 
     it("stores and reads back bytes", async () => {
       const store = await makeStore();
-      const data = new TextEncoder().encode("hello stackbase");
+      const data = new TextEncoder().encode("hello helipod");
       const res = await store.store("k1", data);
       expect(res.size).toBe(data.byteLength);
       const round = await drain(await store.read("k1"));
-      expect(new TextDecoder().decode(round)).toBe("hello stackbase");
+      expect(new TextDecoder().decode(round)).toBe("hello helipod");
     });
 
     it("computes sha256 on store()", async () => {

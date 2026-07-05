@@ -1,14 +1,14 @@
 // Integration-level counterpart to packages/executor/test/action-run.test.ts: that test exercises
 // the executor's action branch + invoke seam directly (self-contained, no component composition,
-// to avoid a package-graph cycle — @stackbase/component/@stackbase/runtime-embedded both depend on
-// @stackbase/executor). This test lives here instead, where composeComponents/EmbeddedRuntime are
+// to avoid a package-graph cycle — @helipod/component/@helipod/runtime-embedded both depend on
+// @helipod/executor). This test lives here instead, where composeComponents/EmbeddedRuntime are
 // already real (non-cyclic) dependencies, and exercises the FULL path: runtime.ts's `let executorRef`
 // closure wiring `invoke` into the executor, and the public `runtime.runAction`.
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { query, mutation, action } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { query, mutation, action } from "@helipod/executor";
 import { EmbeddedRuntime } from "../src/index";
 
 async function makeRuntime(modules: Record<string, any>) {

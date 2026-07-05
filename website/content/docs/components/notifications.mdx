@@ -5,7 +5,7 @@ description: Email, SMS, in-app, and push.
 
 {/* diataxis: explanation */}
 
-Think of a notification as just another row in a table. `@stackbase/notifications` is an opt-in
+Think of a notification as just another row in a table. `@helipod/notifications` is an opt-in
 component that sends messages across four channels: **email**, **SMS/WhatsApp**, an in-app
 **inbox**, and mobile/web **push**. Each channel goes through a swappable provider adapter, so
 you're never locked into one vendor.
@@ -44,11 +44,11 @@ contract instead of waiting on a built-in one.
 
 ## Enabling it
 
-Compose the component in `stackbase.config.ts`, like any other opt-in component:
+Compose the component in `helipod.config.ts`, like any other opt-in component:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineNotifications, consoleEmail, twilioSms } from "@stackbase/notifications";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineNotifications, consoleEmail, twilioSms } from "@helipod/notifications";
 
 export default defineConfig({
   components: [
@@ -101,7 +101,7 @@ the **calling mutation's own transaction**: an enqueue rolls back if the mutatio
 fans out reactively to any live subscription (like the in-app inbox) the instant the mutation
 commits:
 
-```ts title="stackbase/users.ts"
+```ts title="helipod/users.ts"
 import { mutation } from "./_generated/server";
 
 export const welcome = mutation({
@@ -218,12 +218,12 @@ Everything else (`setPreference`, `subscribe`, `unsubscribe`, `registerPushToken
 `unregisterPushToken`, `identity()`) exists only on the mutation facade. Calling one of them from
 an action is a runtime TypeError, not a silent no-op. Do that work in a mutation the action invokes
 via `ctx.runMutation` instead. `ctx.notifications.identity()` (mutation facade) returns the raw
-ambient caller token (the fallback identity `callerId` uses when `@stackbase/auth` isn't composed).
+ambient caller token (the fallback identity `callerId` uses when `@helipod/auth` isn't composed).
 Most app code never needs it directly.
 
 #### `sendNow`: synchronous delivery from an action
 
-```ts title="stackbase/blast.ts"
+```ts title="helipod/blast.ts"
 import { action } from "./_generated/server";
 
 export const blast = action({
@@ -315,8 +315,8 @@ beyond `title`/`body` land on the inbox row's `data`.
 A provider is a small adapter with one method:
 
 ```ts
-import type { EmailProvider, EmailMessage, SendResult } from "@stackbase/notifications";
-import { NotificationSendError } from "@stackbase/notifications";
+import type { EmailProvider, EmailMessage, SendResult } from "@helipod/notifications";
+import { NotificationSendError } from "@helipod/notifications";
 
 export function myEmail(opts: { apiKey: string }): EmailProvider {
   return {
@@ -401,9 +401,9 @@ reusing the exact same `send`/preferences/topics/retry machinery as every other 
 
 ### Setup
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineNotifications, expoPush, fcmPush, apnsPush } from "@stackbase/notifications";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineNotifications, expoPush, fcmPush, apnsPush } from "@helipod/notifications";
 
 export default defineConfig({
   components: [
@@ -459,7 +459,7 @@ push service registers `provider: "expo"`. There is no platform-sniffing: `platf
 metadata only.
 
 ```ts
-import { registerForPush, unregisterForPush } from "@stackbase/client/react";
+import { registerForPush, unregisterForPush } from "@helipod/client/react";
 
 // After acquiring the OS token yourself (Expo getExpoPushTokenAsync(), a native FCM/APNs SDK, or a
 // web PushManager.subscribe()): acquiring the token is your app's responsibility, not the SDK's.
@@ -535,7 +535,7 @@ Same small `send`-only shape, fanned out per **provider group** (not per token).
 calls `send` once per configured provider with every token routed to it in that call's `to` array:
 
 ```ts
-import type { PushProvider, PushMessage, PushSendResult } from "@stackbase/notifications";
+import type { PushProvider, PushMessage, PushSendResult } from "@helipod/notifications";
 
 export function myPush(opts: { apiKey: string }): PushProvider {
   return {
@@ -570,7 +570,7 @@ export function myPush(opts: { apiKey: string }): PushProvider {
 The in-app inbox is a live query. Subscribe and it updates itself, no polling. From a React app:
 
 ```tsx
-import { useNotifications } from "@stackbase/client/react";
+import { useNotifications } from "@helipod/client/react";
 
 function InboxBell() {
   const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
@@ -623,7 +623,7 @@ whether it exists.
 
 <Callout type="warn" title="Per-user isolation requires a verified identity">
 
-With `@stackbase/auth` composed (or an upstream token-verifying proxy), the resolved id is
+With `@helipod/auth` composed (or an upstream token-verifying proxy), the resolved id is
 trustworthy and isolation is enforced. Without either, the identity falls back to the raw
 `setAuth(...)` bearer token, which an unauthenticated client can set to any value it likes.
 Compose [Auth](/docs/components/auth) (or verify the token upstream) before relying on inbox
@@ -680,7 +680,7 @@ await ctx.notifications.send({
 ```
 
 `critical` is a **server-authority** flag. Set it only from your own server code (a mutation/action
-you write, or a composed component like `@stackbase/auth`, see
+you write, or a composed component like `@helipod/auth`, see
 [Auth unification](#auth-unification)). Never forward it straight from client input: it's exactly
 the same trust boundary as `to`.
 
@@ -701,7 +701,7 @@ returning the caller's own `{ category, channel?, enabled }[]` rows. It's reacti
 From React, `useNotificationPreferences()` wraps both:
 
 ```tsx
-import { useNotificationPreferences } from "@stackbase/client/react";
+import { useNotificationPreferences } from "@helipod/client/react";
 
 function PreferencesPanel() {
   const { preferences, setPreference } = useNotificationPreferences();
@@ -850,7 +850,7 @@ reclaim is out of scope.
 
 ### Delivery webhooks and normalized status
 
-Point your provider's delivery webhook (Resend, Twilio) at your deployment and Stackbase verifies
+Point your provider's delivery webhook (Resend, Twilio) at your deployment and Helipod verifies
 its signature, then reactively updates the message row with a normalized `deliveryStatus` as the
 provider reports what happened after the send: bounces, opens, clicks, complaints.
 
@@ -891,7 +891,7 @@ A verified, well-formed batch is applied event-by-event via an internal mutation
 answers `200` so the provider stops retrying.
 
 **Reverse-proxy URL reconstruction (Twilio).** Twilio's signature is computed over the exact public
-`https://…` URL configured in its console, but Stackbase serves plain HTTP behind your
+`https://…` URL configured in its console, but Helipod serves plain HTTP behind your
 TLS-terminating reverse proxy. The route reconstructs the public URL from `X-Forwarded-Proto`/
 `X-Forwarded-Host` (the common proxy default) before verifying, falling back to the raw request URL
 if neither header is set (direct exposure or local dev). Forging these headers can never make
@@ -970,8 +970,8 @@ defineNotifications({
 
 ## Auth unification
 
-Compose **both** `@stackbase/auth` and `@stackbase/notifications` in the same
-`stackbase.config.ts`, and auth's own transactional emails (verification, password reset, magic
+Compose **both** `@helipod/auth` and `@helipod/notifications` in the same
+`helipod.config.ts`, and auth's own transactional emails (verification, password reset, magic
 link, OTP) automatically route through the notifications delivery path instead of auth's
 standalone email provider. There's no extra wiring:
 
@@ -994,7 +994,7 @@ export default defineConfig({
   server-side code sets this. A client can never trigger it.
 - **Category.** Auth's emails use the `"auth"` category by default, configurable per email channel
   via `defineAuth({ email: { notificationCategory: "security" } })`.
-- **Graceful fallback.** `@stackbase/auth` does not depend on `@stackbase/notifications` as a
+- **Graceful fallback.** `@helipod/auth` does not depend on `@helipod/notifications` as a
   package. It duck-types a minimal `ctx.notifications` shape at runtime. If notifications isn't
   composed in your project, auth silently falls back to its own standalone `EmailProvider`,
   byte-identical to how it behaved before this feature existed. Composing (or later removing)

@@ -1,12 +1,12 @@
-# `@stackbase/workflow` — Feature Catalog
+# `@helipod/workflow` — Feature Catalog
 
 *What a durable-workflow component should do, drawn from a source-dive of Convex's `@convex-dev/workflow`, DBOS Transact, Cloudflare Workflows (via Lunora), and the market (Temporal, Restate, Inngest, Trigger.dev). Research in `.reference/workflow-research/*` + `.reference/scheduling-research/{workflow-source,dbos-source}.md`. This is the pre-design catalog — the buildable subset is decided in the spec.*
 
 ## What this component is
 
-A **durable, multi-step orchestration layer** on top of `@stackbase/scheduler`. A workflow is an ordinary async function whose progress **survives crashes, restarts, and redeploys**: each step's result is persisted, so a 20-step order-fulfillment flow that dies at step 14 resumes at step 14, never re-running steps 1–13's side effects. It is the Convex-parity capstone that makes the scheduler + actions investment compound — the thing you reach for when "schedule one function" isn't enough and you need *a sequence with memory*.
+A **durable, multi-step orchestration layer** on top of `@helipod/scheduler`. A workflow is an ordinary async function whose progress **survives crashes, restarts, and redeploys**: each step's result is persisted, so a 20-step order-fulfillment flow that dies at step 14 resumes at step 14, never re-running steps 1–13's side effects. It is the Convex-parity capstone that makes the scheduler + actions investment compound — the thing you reach for when "schedule one function" isn't enough and you need *a sequence with memory*.
 
-**The one concept to get right (the whole component rests on it): durable execution via deterministic replay.** The workflow handler is re-run from the top on every advance. Each `step.*()` call consults a persisted **journal**: if this step already completed, it returns the recorded value *without re-executing*; if it's new, it's dispatched (via the scheduler) and the handler suspends. So the function replays deterministically, and the journal is the source of truth for "where are we." Get the journal + replay + the OCC advance-guard right and everything else follows. (See `architecture-notes.md` for why the **replay** model — not DBOS's checkpoint model — is the right fit for Stackbase's OCC/deterministic core.)
+**The one concept to get right (the whole component rests on it): durable execution via deterministic replay.** The workflow handler is re-run from the top on every advance. Each `step.*()` call consults a persisted **journal**: if this step already completed, it returns the recorded value *without re-executing*; if it's new, it's dispatched (via the scheduler) and the handler suspends. So the function replays deterministically, and the journal is the source of truth for "where are we." Get the journal + replay + the OCC advance-guard right and everything else follows. (See `architecture-notes.md` for why the **replay** model — not DBOS's checkpoint model — is the right fit for Helipod's OCC/deterministic core.)
 
 ---
 
@@ -18,8 +18,8 @@ A **durable, multi-step orchestration layer** on top of `@stackbase/scheduler`. 
 | 1.2 | **Deterministic replay advance** — handler re-runs top-to-top on each poll; completed steps short-circuit from the journal; the first incomplete step dispatches then suspends | Convex `StepExecutor.run` (`step.ts:84-112`). No separate scanner — advance is scheduler-`onComplete`-driven. |
 | 1.3 | **Crash/restart resumption** — an interrupted workflow resumes from its last journaled step with no lost or double-executed steps | DBOS recovery (`system_database.ts`); Convex re-poll. |
 | 1.4 | **OCC advance guard (generationNumber)** — a monotonic guard prevents double-advance / concurrent polls / stale writers after cancel-restart | Convex `generationNumber` (`workflow.ts`); lock-free, stale writers self-discard. |
-| 1.5 | **Transactional step enqueue** — a step's journal row + its dispatch commit in one transaction (rides the scheduler's transactional enqueue) | Reuses `@stackbase/scheduler`'s in-txn enqueue. |
-| 1.6 | **Exactly-once mutation steps / at-most-once action steps** — inherits the scheduler's delivery contract per step kind | Stackbase gets mutation-exactly-once *free* from the OCC transactor — no journal-write trick (unlike DBOS's datasource abstraction). |
+| 1.5 | **Transactional step enqueue** — a step's journal row + its dispatch commit in one transaction (rides the scheduler's transactional enqueue) | Reuses `@helipod/scheduler`'s in-txn enqueue. |
+| 1.6 | **Exactly-once mutation steps / at-most-once action steps** — inherits the scheduler's delivery contract per step kind | Helipod gets mutation-exactly-once *free* from the OCC transactor — no journal-write trick (unlike DBOS's datasource abstraction). |
 
 ## 2. Step primitives — the authoring surface (MUST unless noted)
 
@@ -75,14 +75,14 @@ A **durable, multi-step orchestration layer** on top of `@stackbase/scheduler`. 
 
 ## Priority matrix (for the buildable-subset decision)
 
-- **MUST (v1 core):** §1 all; §2.1–2.6; §4.1–4.4; §5 all. This is "Convex-workflow parity on the Stackbase engine" — durable multi-step (mutation/query/action steps), sleep, retries, start/status/cancel/onComplete, deterministic replay with OCC guard.
+- **MUST (v1 core):** §1 all; §2.1–2.6; §4.1–4.4; §5 all. This is "Convex-workflow parity on the Helipod engine" — durable multi-step (mutation/query/action steps), sleep, retries, start/status/cancel/onComplete, deterministic replay with OCC guard.
 - **SHOULD (v1 if scope allows, else fast-follow):** §2.7 journal-mismatch validation; §3.1 `waitForEvent` (the top market gap); §3.2 fan-out/fan-in; §4.5–4.7; §6.1–6.2.
 - **COULD (v1.1+):** §3.3 saga/compensation (differentiator); §3.4 sub-workflows; §6.3 replay-debugging.
 - **WON'T (v1):** §3.5 continue-as-new; Temporal-style in-place versioning of in-flight workflows (drain-on-old-version is what most of the field does); the full Inngest throttle/rate-limit/batch matrix (a single concurrency-by-key knob covers the 80%).
 
 ## Non-goals (explicitly out of scope)
 
-- **In-place versioning/migration of long-running in-flight workflows** (Temporal `GetVersion`/patching). Bloat at Stackbase's scale; in-flight instances drain on their original code version.
+- **In-place versioning/migration of long-running in-flight workflows** (Temporal `GetVersion`/patching). Bloat at Helipod's scale; in-flight instances drain on their original code version.
 - **The full throttle / rate-limit / batch / CEL-keyed virtual-queue matrix** (Inngest). Queue-ops sophistication for high-volume multi-tenant SaaS; one concurrency-limit-by-key knob is the lean 80%.
 - **A separate workflow runtime/interpreter** — the workflow runs on the *same* executor as queries/mutations (deterministic replay reuses the OCC discipline). No CRIU/process-snapshot (Trigger.dev), no DO-per-instance (CF/Lunora).
-- **Its own scheduler** — the workflow layer touches *only* `@stackbase/scheduler`'s public surface (`requires: ["scheduler"]`); it never re-implements dispatch, retries, or timers.
+- **Its own scheduler** — the workflow layer touches *only* `@helipod/scheduler`'s public surface (`requires: ["scheduler"]`); it never re-implements dispatch, retries, or timers.

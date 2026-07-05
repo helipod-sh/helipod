@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { DocStore, DocumentLogEntry, InternalDocumentId, IndexWrite } from "../src/types";
 import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "../src/types";
-import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
+import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
 
 const TABLE = 10001;
 const TABLE_ID = encodeStorageTableId(TABLE);

@@ -12,12 +12,12 @@
  *
  * NOT product code — a test fixture. Safe to delete with this branch's tests.
  */
-import { query, mutation, httpAction } from "@stackbase/executor";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { defineComponent } from "@stackbase/component";
-import type { LoadedProject } from "@stackbase/cli/project";
-import { StackbaseDurableObject, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare";
-import { R2BlobStore, type R2BucketLike } from "@stackbase/blobstore-r2";
+import { query, mutation, httpAction } from "@helipod/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { defineComponent } from "@helipod/component";
+import type { LoadedProject } from "@helipod/cli/project";
+import { HelipodDurableObject, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare";
+import { R2BlobStore, type R2BucketLike } from "@helipod/blobstore-r2";
 
 // `ctx.storage` is contributed at runtime by the always-on storage provider, not part of the exported
 // ctx type — a local structural type lets the fixture typecheck (mirrors the container storage fixture).
@@ -47,7 +47,7 @@ const files = {
 };
 
 // An OAuth-callback-style component route: a GET httpAction under a reserved `/api/authfixture/oauth/`
-// prefix. Stands in for `@stackbase/auth`'s external-identity callbacks (audit gap 8c).
+// prefix. Stands in for `@helipod/auth`'s external-identity callbacks (audit gap 8c).
 const oauthCallback = httpAction(async (_ctx, request: Request) => {
   const url = new URL(request.url);
   return new Response(JSON.stringify({ ok: true, code: url.searchParams.get("code"), path: url.pathname }), {
@@ -65,7 +65,7 @@ const authfixture = defineComponent({
 
 const loaded: LoadedProject = { schema, modules: { files } };
 
-export class StorageDO extends StackbaseDurableObject {
+export class StorageDO extends HelipodDurableObject {
   protected appConfig(env: unknown): DurableObjectAppConfig {
     const bucket = (env as { STORAGE_BUCKET?: R2BucketLike }).STORAGE_BUCKET;
     return {

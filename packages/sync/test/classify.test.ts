@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { classifyByIdRead, rangeReadFromDiffable, pageReadFromDiffable, type RangeRead } from "../src/classify";
-import { serializeKeyRange, keySuccessor, indexKeyspaceId, tableKeyspaceId } from "@stackbase/index-key-codec";
+import { serializeKeyRange, keySuccessor, indexKeyspaceId, tableKeyspaceId } from "@helipod/index-key-codec";
 
 const b = (...n: number[]) => new Uint8Array(n);
 const pointRange = (keyspace: string, start: Uint8Array) =>

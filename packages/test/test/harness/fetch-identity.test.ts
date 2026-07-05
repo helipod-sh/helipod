@@ -1,11 +1,11 @@
 import { it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
+import { createTestHelipod } from "../../src";
 import * as http from "../fixtures/http";
 import { identityProbe } from "../fixtures/whoami";
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 
 it("t.fetch threads a view's withIdentity through to the httpAction's ctx identity", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "http.ts": http, "schema.ts": { default: defineSchema({}) } },
     components: [identityProbe],
   });
@@ -22,7 +22,7 @@ it("t.fetch threads a view's withIdentity through to the httpAction's ctx identi
 });
 
 it("t.fetch falls back to the request's Authorization header (Bearer-stripped, engine parity) when the view has no identity", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "http.ts": http, "schema.ts": { default: defineSchema({}) } },
     components: [identityProbe],
   });

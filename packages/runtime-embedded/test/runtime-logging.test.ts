@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog, query } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog, query } from "@helipod/executor";
 import { EmbeddedRuntime } from "../src/index";
 
 describe("runtime logging", () => {

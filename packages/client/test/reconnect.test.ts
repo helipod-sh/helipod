@@ -6,13 +6,13 @@
  *  - `webSocketTransport` itself: the reconnect/backoff state machine, driven through a fake
  *    `WebSocket` constructor injected via `createWebSocket` + vitest fake timers, so the backoff
  *    schedule is directly observable and controllable.
- *  - `StackbaseClient`'s reopen sequence: a `MockTransport` that can synthesize `onClose`/`onReopen`
+ *  - `HelipodClient`'s reopen sequence: a `MockTransport` that can synthesize `onClose`/`onReopen`
  *    on demand, proving the client's SetAuth-replay -> resubscribe -> flush-unsent ordering and the
  *    FIFO-with-original-requestId contract.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { StackbaseClient, webSocketTransport, reconnectDelayMs, type ClientTransport } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { HelipodClient, webSocketTransport, reconnectDelayMs, type ClientTransport } from "../src/index";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 // ================================================================================================
 // `reconnectDelayMs` — the backoff formula in isolation.
@@ -114,7 +114,7 @@ describe("webSocketTransport — reconnect state machine", () => {
   it("a FAILED first-connect attempt (socket dies before ever opening) makes the NEXT open fire onReopen too — the 8ff4dda fix, isolated", () => {
     // Companion to the first test above, which proves the OTHER half of the same contract (a
     // never-failed first open does NOT fire onReopen). Together they pin both branches of
-    // `hadFailedConnect` directly at the transport, without going through `StackbaseClient` — this
+    // `hadFailedConnect` directly at the transport, without going through `HelipodClient` — this
     // is the isolated proof the 8ff4dda fix commit shipped without (it was caught only by the real-
     // WebSocket flagship E2E's authed-reload scenario, per that commit's message).
     vi.useFakeTimers();
@@ -260,7 +260,7 @@ describe("webSocketTransport — reconnect state machine", () => {
 });
 
 // ================================================================================================
-// `StackbaseClient`'s reopen sequence — via a MockTransport that can synthesize reopen on demand.
+// `HelipodClient`'s reopen sequence — via a MockTransport that can synthesize reopen on demand.
 // ================================================================================================
 class MockTransport implements ClientTransport {
   readonly sent: ClientMessage[] = [];
@@ -299,10 +299,10 @@ class MockTransport implements ClientTransport {
   }
 }
 
-describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => {
+describe("HelipodClient — reconnect reopen sequence (S4 flush path)", () => {
   it("ordered: SetAuth replay, THEN resubscribe (existing resync path), THEN FIFO flush of unsent", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     client.setAuth("tok-1");
     client.subscribe("messages:list", { conversationId: "c1" }, () => {});
@@ -335,7 +335,7 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
 
   it("unsent flushed FIFO with ORIGINAL requestIds; their promises resolve on the new session's responses", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     t.emitClose();
 
     const first = client.mutation("messages:send", { conversationId: "c1", body: "A" });
@@ -360,7 +360,7 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
 
   it("closed clears on reopen: a mutation issued right after reopen sends immediately (not queued as unsent)", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     t.emitClose();
 
     void client.mutation("messages:send", { conversationId: "c1", body: "queued" });
@@ -376,7 +376,7 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
 
   it("inflight-at-close still rejects with MutationUndeliveredError (T4 — unmodified) and is never re-flushed on reopen", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
 
     const inflight = client.mutation("messages:send", { conversationId: "c1", body: "in-flight" });
     expect(client.__pending[0]!.status.type).toBe("inflight");
@@ -403,12 +403,12 @@ describe("StackbaseClient — reconnect reopen sequence (S4 flush path)", () => 
       onClose: (l) => t.onClose(l),
       close: () => t.close(),
     };
-    expect(() => new StackbaseClient(bare)).not.toThrow();
+    expect(() => new HelipodClient(bare)).not.toThrow();
   });
 
   it("a resume resubscribe echoes sinceTs = maxObservedTs; a fresh subscribe does not (DLR Stage 3)", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     client.subscribe("notes:list", { box: "a" }, () => {});
     const firstAdd = (t.sent.find((m) => m.type === "ModifyQuerySet") as Extract<ClientMessage, { type: "ModifyQuerySet" }>).add[0] as {
       sinceTs?: number;

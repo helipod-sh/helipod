@@ -9,7 +9,7 @@
  * `indexKey` holds the field values in JSON-transport form (`convexToJson` per field) so the
  * cursor is a plain string on the wire.
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 
 export interface SimpleCursor {
   kind: "simple";

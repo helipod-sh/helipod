@@ -8,18 +8,18 @@
  * on the DO, but the runtime's own `fireDueTimers` still gates each due driver timer on its in-process
  * `atMs <= now()` check. A REAL Durable Object's module scope is its own isolated evaluation — a test
  * file cannot share a mutable injected clock with it the way the Node-fake `global-reactivity-driver.test.ts`
- * shares its `let clock` closure directly with an in-process `StackbaseDurableObject` instance. Instead,
+ * shares its `let clock` closure directly with an in-process `HelipodDurableObject` instance. Instead,
  * this fixture arms the poller at an effectively-zero interval (`globalReactivityPollMs: 0` — the poller
  * still fires ONLY when explicitly triggered via `runDurableObjectAlarm`, never a free-running timer),
  * so that by the time the test's own inherent async overhead (WS upgrade, D1 round-trips) elapses, the
  * armed timer's `atMs` (= arm-time + 0) is already <= real `now()` — genuinely due, with no explicit
  * `setTimeout`/sleep anywhere in the test.
  */
-import { query, mutation } from "@stackbase/executor";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import type { LoadedProject } from "@stackbase/cli/project";
-import { StackbaseDurableObject, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare";
-import { bindingD1Client, type D1Binding } from "@stackbase/docstore-d1";
+import { query, mutation } from "@helipod/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import type { LoadedProject } from "@helipod/cli/project";
+import { HelipodDurableObject, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare";
+import { bindingD1Client, type D1Binding } from "@helipod/docstore-d1";
 
 const schema = defineSchema({
   counters: defineTable({ key: v.string(), value: v.number() })
@@ -50,7 +50,7 @@ const counters = {
 
 const loaded: LoadedProject = { schema, modules: { counters } };
 
-export class GlobalReactivityDO extends StackbaseDurableObject {
+export class GlobalReactivityDO extends HelipodDurableObject {
   protected appConfig(env: unknown): DurableObjectAppConfig {
     const db = (env as { DB?: D1Binding }).DB;
     return {

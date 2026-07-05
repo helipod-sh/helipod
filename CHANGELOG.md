@@ -15,8 +15,8 @@ Validated end-to-end against real PostgreSQL 16.
 
 ### Added
 
-- **Streaming `index_scan` for Postgres** (`@stackbase/docstore-postgres`, default-on; kill switch `STACKBASE_PG_STREAM=0`). Paginated/limited reads (`paginate`, `.take(n)`, `.first()`) now stream from a server-side cursor that stops fetching the moment the query engine breaks early, instead of materializing the whole index range — measured **−92% p50 wall-clock and ≈1000× fewer rows fetched** at 100k rows on the paginated shape (PGlite substrate; the win is work-avoided, not just transfer). `NodePgClient` streams via `pg-cursor` over a bounded read-connection pool; the cursor is non-holdable/lazy with adaptive `FETCH` batching (64→2048). Reactivity is unchanged — the recorded read-set already tracked loop consumption, not fetch. A client without cursor support transparently falls back to buffered reads, so results are always identical (proven by running the full docstore conformance suite over both the streaming and buffered paths).
-- **Native Bun.SQL Postgres client** (`BunSqlClient`, selected automatically under the Bun runtime; `NodePgClient`/`pg` stays the client on Node). ≈10–17% faster per query on a local server, a per-query constant that applies to every query. Implements the full `PgClient` seam: pinned-connection single-writer advisory lock, per-shard commit connections + two-int shard advisory locks (fleet), a bounded stream-reservation pool, and `queryStream` (built on `DECLARE`/`FETCH`, since Bun.SQL exposes no native cursor API). Type-codec parity with `pg`: `bigint: true` for int8 columns, bytea → `Uint8Array`, and SQLSTATE re-tagged from Bun.SQL's `.errno` onto `.code` so the shared duplicate-object race-swallow works. `stackbase serve`'s fleet shard-count probe and `fleet reshard` also select it under Bun.
+- **Streaming `index_scan` for Postgres** (`@helipod/docstore-postgres`, default-on; kill switch `HELIPOD_PG_STREAM=0`). Paginated/limited reads (`paginate`, `.take(n)`, `.first()`) now stream from a server-side cursor that stops fetching the moment the query engine breaks early, instead of materializing the whole index range — measured **−92% p50 wall-clock and ≈1000× fewer rows fetched** at 100k rows on the paginated shape (PGlite substrate; the win is work-avoided, not just transfer). `NodePgClient` streams via `pg-cursor` over a bounded read-connection pool; the cursor is non-holdable/lazy with adaptive `FETCH` batching (64→2048). Reactivity is unchanged — the recorded read-set already tracked loop consumption, not fetch. A client without cursor support transparently falls back to buffered reads, so results are always identical (proven by running the full docstore conformance suite over both the streaming and buffered paths).
+- **Native Bun.SQL Postgres client** (`BunSqlClient`, selected automatically under the Bun runtime; `NodePgClient`/`pg` stays the client on Node). ≈10–17% faster per query on a local server, a per-query constant that applies to every query. Implements the full `PgClient` seam: pinned-connection single-writer advisory lock, per-shard commit connections + two-int shard advisory locks (fleet), a bounded stream-reservation pool, and `queryStream` (built on `DECLARE`/`FETCH`, since Bun.SQL exposes no native cursor API). Type-codec parity with `pg`: `bigint: true` for int8 columns, bytea → `Uint8Array`, and SQLSTATE re-tagged from Bun.SQL's `.errno` onto `.code` so the shared duplicate-object race-swallow works. `helipod serve`'s fleet shard-count probe and `fleet reshard` also select it under Bun.
 
 ### Fixed
 
@@ -26,7 +26,7 @@ Validated end-to-end against real PostgreSQL 16.
 
 ## [1.6.0] — 2026-06-06
 
-**Cloudflare deployment tier — validated on real Cloudflare.** Stackbase now runs
+**Cloudflare deployment tier — validated on real Cloudflare.** Helipod now runs
 natively on Cloudflare's Durable-Object platform, from a single global DO up to a
 multi-shard fleet with a shared global table in D1. The tier was built as a seam
 (the engine never learns it's on Cloudflare) across the preceding week; this
@@ -35,11 +35,11 @@ real Cloudflare**, not just the local `workerd`/miniflare emulator.
 
 ### Added
 
-- **Durable-Object-native host** (`@stackbase/runtime-cloudflare`). A `StackbaseDurableObject` co-locates the single-writer transactor, storage, WebSockets, and the subscription index in one DO. Storage is `@stackbase/docstore-do-sqlite` (`DoSqliteAdapter` over `ctx.storage.sql`, full docstore-conformance parity); file storage is `@stackbase/blobstore-r2` (a Workers-safe R2 `BlobStore`, wired into `ctx.storage`). A `RuntimeHost` seam extracted the serve/single-writer/wake/storage responsibilities out of the CLI with zero behavior change, so the same engine hosts on a process or a DO. Includes a portable⇄DO-native data-migration tool (dump codec + admin endpoints + CLI).
-- **Multi-shard writers** (`@stackbase/runtime-cloudflare-shard`, EE). `.shardBy(key)` routes each key to its own DO (one single-threaded writer + 10 GB DO-SQLite each) via a stateless router — `"key"` mode (one DO per key value) or `"hash"` mode (fixed-N jump-hash). Geographic `locationHint` placement. Write throughput and storage both scale with the number of active shard keys.
-- **Global tables in Cloudflare D1** (`@stackbase/docstore-d1` + `.global()` schema mode). A `.global()` table lives in one shared D1 database, readable and writable from every shard-DO — write-through with read-your-own-writes, an additive-only unique-index gate, and a co-write guard (a single mutation cannot write both a sharded and a global table). Global reactivity is poll-based (an alarm-driven poller over a `_global_versions` counter); a push/CDC upgrade is deferred.
+- **Durable-Object-native host** (`@helipod/runtime-cloudflare`). A `HelipodDurableObject` co-locates the single-writer transactor, storage, WebSockets, and the subscription index in one DO. Storage is `@helipod/docstore-do-sqlite` (`DoSqliteAdapter` over `ctx.storage.sql`, full docstore-conformance parity); file storage is `@helipod/blobstore-r2` (a Workers-safe R2 `BlobStore`, wired into `ctx.storage`). A `RuntimeHost` seam extracted the serve/single-writer/wake/storage responsibilities out of the CLI with zero behavior change, so the same engine hosts on a process or a DO. Includes a portable⇄DO-native data-migration tool (dump codec + admin endpoints + CLI).
+- **Multi-shard writers** (`@helipod/runtime-cloudflare-shard`, EE). `.shardBy(key)` routes each key to its own DO (one single-threaded writer + 10 GB DO-SQLite each) via a stateless router — `"key"` mode (one DO per key value) or `"hash"` mode (fixed-N jump-hash). Geographic `locationHint` placement. Write throughput and storage both scale with the number of active shard keys.
+- **Global tables in Cloudflare D1** (`@helipod/docstore-d1` + `.global()` schema mode). A `.global()` table lives in one shared D1 database, readable and writable from every shard-DO — write-through with read-your-own-writes, an additive-only unique-index gate, and a co-write guard (a single mutation cannot write both a sharded and a global table). Global reactivity is poll-based (an alarm-driven poller over a `_global_versions` counter); a push/CDC upgrade is deferred.
 - **Cross-shard `fanOut` reads** (M2d). An opt-in, non-reactive, HTTP-only query (`POST /api/run?fanout=1`) that reads a sharded table across every shard of a fixed-shard-count (`"hash"`) deployment and concatenates the results, with bounded concurrency, a per-shard timeout, and failures-as-data (`partial.failedShards`). Read-only by construction: a mutation or action sent to the fan-out is rejected (`FANOUT_NOT_A_QUERY`), and a total-failure fan-out returns 502 rather than masking auth/outage as an empty result.
-- **Turnkey `cloudflare` deploy target** (`stackbase deploy --target cloudflare`). Reconciles `wrangler.jsonc` bindings (DO + `new_sqlite_classes` migration + `nodejs_compat`, optional R2) and shells `wrangler deploy`; never bundles a provider SDK.
+- **Turnkey `cloudflare` deploy target** (`helipod deploy --target cloudflare`). Reconciles `wrangler.jsonc` bindings (DO + `new_sqlite_classes` migration + `nodejs_compat`, optional R2) and shells `wrangler deploy`; never bundles a provider SDK.
 
 ### Validated
 
@@ -55,18 +55,18 @@ real Cloudflare**, not just the local `workerd`/miniflare emulator.
 
 ## [1.5.0] — 2026-05-15
 
-Authentication hardening and notification delivery. `@stackbase/auth` gains TOTP
-two-factor and passkeys/WebAuthn; `@stackbase/notifications` gains multi-provider
+Authentication hardening and notification delivery. `@helipod/auth` gains TOTP
+two-factor and passkeys/WebAuthn; `@helipod/notifications` gains multi-provider
 fallback and a mobile/web push channel. All four are **opt-in** and
 backward-compatible — a deployment that configures none is byte-identical to
 before. Each shipped through an adversarial whole-branch security review.
 
 ### Added
 
-- **TOTP two-factor authentication** (`@stackbase/auth`, opt-in via `defineAuth({ mfa })`). RFC 6238 TOTP (Google Authenticator/Authy/1Password/…) with one-time recovery codes. The TOTP secret is **AES-256-GCM-encrypted at rest** (AAD-bound to the user id; recoverable because verification must recompute the code — unlike the one-way-hashed session tokens/email codes), under a keyring sourced from the environment with fail-fast validation. Enrollment is two-phase (`startMfaEnrollment` → `confirmMfaEnrollment` proving a live code, so a user can't lock themselves out mid-setup). Every first-factor path (password, magic-link, OTP, email verification, password reset, and OAuth/JWT sign-in) routes through one `finishSignIn` interposition that returns `{ mfaRequired, pendingToken, expiresAt }` instead of a session; `completeMfaSignIn` (a live TOTP **or** a recovery code) then mints. `disableMfa`/`regenerateRecoveryCodes` require a fresh second factor (proof of possession, so a stolen live token can't strip 2FA). `finishSignIn` never replaces the `mintSession` chokepoint — a static-source guard test fails CI if a gated site ever mints directly.
-- **Passkeys / WebAuthn** (`@stackbase/auth`, opt-in via `defineAuth({ passkeys })`). Phishing-resistant passwordless sign-in (Face ID / Touch ID / Windows Hello / security keys / synced platform passkeys). Registration attestation + authentication assertion run behind the sole `@simplewebauthn/server` seam, with all crypto confined to actions (the transactor stays crypto-free). Usernameless (discoverable) **and** email-scoped sign-in; anonymous-then-register is a passwordless-bootstrap path. Atomic signature-counter **clone detection** (a regressed/repeated counter is rejected with no mint and no state change), consume-before-validate single-use challenges, per-user credential limit, and anti-enumeration (an unknown email's `begin` is byte-shaped like a known one; every failure is one generic message). Reactive device management — `listPasskeys`/`renamePasskey`/`revokePasskey` (display metadata only; the public key and counter never leave the server). Client recipe uses `@simplewebauthn/browser` + `client.action(...)`.
-- **Multi-provider fallback for notifications** (`@stackbase/notifications`). An email/SMS channel can configure `fallbacks: Provider[]` alongside its `provider`. Within **one** delivery attempt, `deliverOutbound` walks the ordered `[provider, ...fallbacks]` list and succeeds on the first provider that works; only an all-fail attempt fails, re-entering the unchanged retry/backoff/dead-letter path (its `retryable` verdict is the OR across every tried provider). The inbound delivery webhook tries every configured provider's `verify()` in order (first match wins; only the primary receives the channel-level `webhookSecret`, each fallback carries its own signing material). One additive `messages.providerName` field; zero behavior change when no fallbacks are set.
-- **Push channel for notifications** (`@stackbase/notifications`). A fourth `"push"` channel plugging into the same `recordSend` chokepoint, driver, retry/backoff, and preferences/critical-bypass/topics machinery as email/SMS/in-app. A **self-only** device-token registry (`registerPushToken`/`unregisterPushToken` resolve the subject from the caller, never a `userId` arg); a send snapshots the server-chosen recipient's tokens, groups them by provider, fans out, and prunes tokens a provider reports permanently invalid. Three adapters on the `PushProvider` seam: `expoPush` (chunked batch), `fcmPush` (service-account OAuth2 + cached access token), and `apnsPush` (ES256 JWT via `jose`, over `node:http2` — Apple's provider API is HTTP/2-only). Per-user push preferences honored with the same critical-bypass as other channels. Additive schema (`pushTokens` table; `messages.tokens`).
+- **TOTP two-factor authentication** (`@helipod/auth`, opt-in via `defineAuth({ mfa })`). RFC 6238 TOTP (Google Authenticator/Authy/1Password/…) with one-time recovery codes. The TOTP secret is **AES-256-GCM-encrypted at rest** (AAD-bound to the user id; recoverable because verification must recompute the code — unlike the one-way-hashed session tokens/email codes), under a keyring sourced from the environment with fail-fast validation. Enrollment is two-phase (`startMfaEnrollment` → `confirmMfaEnrollment` proving a live code, so a user can't lock themselves out mid-setup). Every first-factor path (password, magic-link, OTP, email verification, password reset, and OAuth/JWT sign-in) routes through one `finishSignIn` interposition that returns `{ mfaRequired, pendingToken, expiresAt }` instead of a session; `completeMfaSignIn` (a live TOTP **or** a recovery code) then mints. `disableMfa`/`regenerateRecoveryCodes` require a fresh second factor (proof of possession, so a stolen live token can't strip 2FA). `finishSignIn` never replaces the `mintSession` chokepoint — a static-source guard test fails CI if a gated site ever mints directly.
+- **Passkeys / WebAuthn** (`@helipod/auth`, opt-in via `defineAuth({ passkeys })`). Phishing-resistant passwordless sign-in (Face ID / Touch ID / Windows Hello / security keys / synced platform passkeys). Registration attestation + authentication assertion run behind the sole `@simplewebauthn/server` seam, with all crypto confined to actions (the transactor stays crypto-free). Usernameless (discoverable) **and** email-scoped sign-in; anonymous-then-register is a passwordless-bootstrap path. Atomic signature-counter **clone detection** (a regressed/repeated counter is rejected with no mint and no state change), consume-before-validate single-use challenges, per-user credential limit, and anti-enumeration (an unknown email's `begin` is byte-shaped like a known one; every failure is one generic message). Reactive device management — `listPasskeys`/`renamePasskey`/`revokePasskey` (display metadata only; the public key and counter never leave the server). Client recipe uses `@simplewebauthn/browser` + `client.action(...)`.
+- **Multi-provider fallback for notifications** (`@helipod/notifications`). An email/SMS channel can configure `fallbacks: Provider[]` alongside its `provider`. Within **one** delivery attempt, `deliverOutbound` walks the ordered `[provider, ...fallbacks]` list and succeeds on the first provider that works; only an all-fail attempt fails, re-entering the unchanged retry/backoff/dead-letter path (its `retryable` verdict is the OR across every tried provider). The inbound delivery webhook tries every configured provider's `verify()` in order (first match wins; only the primary receives the channel-level `webhookSecret`, each fallback carries its own signing material). One additive `messages.providerName` field; zero behavior change when no fallbacks are set.
+- **Push channel for notifications** (`@helipod/notifications`). A fourth `"push"` channel plugging into the same `recordSend` chokepoint, driver, retry/backoff, and preferences/critical-bypass/topics machinery as email/SMS/in-app. A **self-only** device-token registry (`registerPushToken`/`unregisterPushToken` resolve the subject from the caller, never a `userId` arg); a send snapshots the server-chosen recipient's tokens, groups them by provider, fans out, and prunes tokens a provider reports permanently invalid. Three adapters on the `PushProvider` seam: `expoPush` (chunked batch), `fcmPush` (service-account OAuth2 + cached access token), and `apnsPush` (ES256 JWT via `jose`, over `node:http2` — Apple's provider API is HTTP/2-only). Per-user push preferences honored with the same critical-bypass as other channels. Additive schema (`pushTokens` table; `messages.tokens`).
 
 ### Security
 
@@ -78,7 +78,7 @@ before. Each shipped through an adversarial whole-branch security review.
 
 ### Changed
 
-- **Group commit now defaults ON for single-node Postgres deployments** (OFF for SQLite). `STACKBASE_GROUP_COMMIT` still overrides either direction. Group commit batches concurrent commits into one fsync: benchmarked as a **+39% (8 clients) to +58% (64 clients)** write-throughput win on real containerized Postgres — with lower p50 latency and *byte-identical* latency at 1 client (the opportunistic "batch of 1 when idle" design adds no wait), so there is no low-traffic regression. It stays off on CPU-bound SQLite, where batching is pure overhead (~−8%). Refines Fleet B4's single global 2× auto-enable gate (which missed at 1.63× and shipped dark-off) into the correct store-conditional default. See `docs/dev/research/writes-benchmark.md`.
+- **Group commit now defaults ON for single-node Postgres deployments** (OFF for SQLite). `HELIPOD_GROUP_COMMIT` still overrides either direction. Group commit batches concurrent commits into one fsync: benchmarked as a **+39% (8 clients) to +58% (64 clients)** write-throughput win on real containerized Postgres — with lower p50 latency and *byte-identical* latency at 1 client (the opportunistic "batch of 1 when idle" design adds no wait), so there is no low-traffic regression. It stays off on CPU-bound SQLite, where batching is pure overhead (~−8%). Refines Fleet B4's single global 2× auto-enable gate (which missed at 1.63× and shipped dark-off) into the correct store-conditional default. See `docs/dev/research/writes-benchmark.md`.
 
 ### Added
 
@@ -183,8 +183,8 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 
 ### Storage (pluggable — the engine never imports a driver)
 
-- **`@stackbase/docstore-sqlite`** (zero-config default) and **`@stackbase/docstore-postgres`** (`pg` driver, `pg_advisory_lock` single-writer, no app-schema migrations), selected via `--database-url`/`STACKBASE_DATABASE_URL`. Behavioral parity via a shared conformance suite.
-- **File storage** (`@stackbase/storage`): `_storage` system table + `ctx.storage`, two-phase proxied (FS) / presigned (S3) uploads behind a `BlobStore` seam (`@stackbase/blobstore-fs`, `@stackbase/blobstore-s3`), private-by-default HMAC capability URLs, background orphan reaper, Range requests.
+- **`@helipod/docstore-sqlite`** (zero-config default) and **`@helipod/docstore-postgres`** (`pg` driver, `pg_advisory_lock` single-writer, no app-schema migrations), selected via `--database-url`/`HELIPOD_DATABASE_URL`. Behavioral parity via a shared conformance suite.
+- **File storage** (`@helipod/storage`): `_storage` system table + `ctx.storage`, two-phase proxied (FS) / presigned (S3) uploads behind a `BlobStore` seam (`@helipod/blobstore-fs`, `@helipod/blobstore-s3`), private-by-default HMAC capability URLs, background orphan reaper, Range requests.
 
 ### Functions
 
@@ -194,9 +194,9 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 
 ### Scheduling, workflows, triggers (opt-in components)
 
-- **`@stackbase/scheduler`** — `runAfter`/`runAt`/`cancel`, `cronJobs()` with catch-up policies, retries/backoff, cascading cancel, on a recurring **driver** seam.
-- **`@stackbase/workflow`** — durable multi-step workflows via deterministic replay over a `workflows`/`steps`/`events` journal; `step.run*`/`sleep`/`waitForEvent`, `Promise.all` fan-out, a live `workflow:status` query, and **saga/compensation** (reverse-order unwind, halt-on-failed-compensation, cancel-compensates).
-- **`@stackbase/triggers`** — durable cursor over the MVCC log (missed changes impossible by construction), at-least-once in-order per-document delivery, self-pause + circuit breaker.
+- **`@helipod/scheduler`** — `runAfter`/`runAt`/`cancel`, `cronJobs()` with catch-up policies, retries/backoff, cascading cancel, on a recurring **driver** seam.
+- **`@helipod/workflow`** — durable multi-step workflows via deterministic replay over a `workflows`/`steps`/`events` journal; `step.run*`/`sleep`/`waitForEvent`, `Promise.all` fan-out, a live `workflow:status` query, and **saga/compensation** (reverse-order unwind, halt-on-failed-compensation, cancel-compensates).
+- **`@helipod/triggers`** — durable cursor over the MVCC log (missed changes impossible by construction), at-least-once in-order per-document delivery, self-pause + circuit breaker.
 
 ### Client SDK
 
@@ -207,14 +207,14 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 
 ### Deploy & operations
 
-- **`stackbase dev`** — watch + codegen + hot reload + serve sync/HTTP/dashboard.
-- **`stackbase serve`** — production entrypoint (required admin key, `0.0.0.0`, graceful shutdown), working **Docker `docker compose up`** self-host, key-less dashboard.
-- **`stackbase deploy`** — opt-in push-based live hot-swap of functions + additive-only schema onto a running `serve`, atomic swap.
-- **`stackbase build`** — single self-contained executable via `bun build --compile`, cross-compile targets, `{"ready":…}` startup line.
-- **`stackbase migrate`** — Convex-first on-ramp (import codemod + divergence report).
+- **`helipod dev`** — watch + codegen + hot reload + serve sync/HTTP/dashboard.
+- **`helipod serve`** — production entrypoint (required admin key, `0.0.0.0`, graceful shutdown), working **Docker `docker compose up`** self-host, key-less dashboard.
+- **`helipod deploy`** — opt-in push-based live hot-swap of functions + additive-only schema onto a running `serve`, atomic swap.
+- **`helipod build`** — single self-contained executable via `bun build --compile`, cross-compile targets, `{"ready":…}` startup line.
+- **`helipod migrate`** — Convex-first on-ramp (import codemod + divergence report).
 - **Dashboard** (`apps/dashboard`) — live data browser (admin sync subscriptions, cursor pagination, structured filters), logs viewer, function runner.
 
-### Tiered scale-out (Tier 2, `ee/@stackbase/fleet`)
+### Tiered scale-out (Tier 2, `ee/@helipod/fleet`)
 
 - Multi-node **fleet** with store-as-coordinator leases and failover; embedded read replicas (RYOW); **write sharding** on the Fenced Frontier protocol (per-shard OCC, rendezvous balancing, epoch fencing, hybrid nodes, group-commit escape hatch).
 
@@ -226,8 +226,8 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 ### Tooling & DX
 
 - **Codegen** — typed `Doc`/`Id`/`api`, args + returns validators driving the typed client.
-- **`@stackbase/test`** — Layer-1 `createTestStackbase` over the real engine + a conformance suite.
-- **`@stackbase/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
+- **`@helipod/test`** — Layer-1 `createTestHelipod` over the real engine + a conformance suite.
+- **`@helipod/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
 [1.5.0]: https://example.com/releases/tag/v1.5.0
 [1.4.0]: https://example.com/releases/tag/v1.4.0

@@ -1,5 +1,5 @@
 /**
- * `@stackbase/runtime-embedded` — the Tier 0 engine: composes the full stack into one
+ * `@helipod/runtime-embedded` — the Tier 0 engine: composes the full stack into one
  * process, exposes in-memory loopback connections, and drives the swappable write-fan-out
  * seam. The single-binary core.
  */
@@ -13,7 +13,7 @@ export { EmbeddedRuntime, createEmbeddedRuntime } from "./runtime";
 export { clientReceiptsGuard } from "./client-dedup";
 
 // The neutral serving seam (Slice 1). Types only — the process host implementation lives in
-// `@stackbase/cli`; a Durable Object host (Slice 3) will implement the same interface.
+// `@helipod/cli`; a Durable Object host (Slice 3) will implement the same interface.
 export type { RuntimeHost, ServerHandle, ServeOptions } from "./host";
 
 export type { LoopbackConnection, ServerMessageListener, LoopbackHandler } from "./loopback";

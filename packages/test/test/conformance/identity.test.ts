@@ -1,15 +1,15 @@
-// Documented divergence from Convex: Stackbase identity is a plain STRING token (resolved by the
+// Documented divergence from Convex: Helipod identity is a plain STRING token (resolved by the
 // app's auth component and surfaced to user code only via a context provider — there is no bare
 // `ctx.identity` on a plain UDF ctx), NOT Convex's stateless JWT-claims object. `withIdentity`
 // therefore takes a string, not a claims object. This file is the executable record of that
 // divergence: it composes the `identityProbe` test component (`ctx.probe.get()` reads
 // `cctx.identity`) rather than asserting a fake/direct `ctx.identity`.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
+import { createTestHelipod, type TestHelipod } from "../../src";
 import { me, identityProbe } from "../fixtures/whoami";
 import * as httpFixture from "../fixtures/http";
-import { defineSchema } from "@stackbase/values";
-import { action, mutation } from "@stackbase/executor";
+import { defineSchema } from "@helipod/values";
+import { action, mutation } from "@helipod/executor";
 
 // Local (test-only) probes composing the SAME `identityProbe` component fixture from a
 // mutation/action ctx, so we can assert identity threading through every function kind without
@@ -29,10 +29,10 @@ const meViaNestedRuns = action(async (ctx: any) => ({
 }));
 
 describe("conformance — identity", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: {
         "whoami.ts": { me },
         "probes.ts": { meMutation, meAction, meViaNestedRuns },

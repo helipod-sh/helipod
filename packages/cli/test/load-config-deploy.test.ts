@@ -11,7 +11,7 @@ describe("loadConfig deploy passthrough", () => {
   it("returns the deploy block, not just components", async () => {
     dir = mkdtempSync(join(tmpdir(), "sb-cfg-"));
     writeFileSync(
-      join(dir, "stackbase.config.js"),
+      join(dir, "helipod.config.js"),
       `export default { components: [], deploy: { defaultTarget: "docker", targets: { docker: { provider: "docker" } } } };`,
     );
     const cfg = await loadConfig(dir);

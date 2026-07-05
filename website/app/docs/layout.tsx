@@ -32,14 +32,14 @@ function tabIcon(icon: ReactNode): ReactNode {
 // on its own pages, where both `/docs` and `/docs/contributing` are prefixes.
 const tabs = [
   {
-    title: 'stackbase',
+    title: 'helipod',
     description: 'Guides and reference',
     url: '/docs',
     icon: tabIcon(<Layers />),
   },
   {
     title: 'Contributing',
-    description: 'How stackbase is built',
+    description: 'How helipod is built',
     url: '/docs/contributing',
     icon: tabIcon(<Blocks />),
   },

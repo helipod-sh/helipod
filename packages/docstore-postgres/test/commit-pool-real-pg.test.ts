@@ -6,14 +6,14 @@
  * a single shared connection (there, B's work would either queue behind A or interleave into A's txn
  * and corrupt atomicity; see the PGlite hazard test in `commit-pool.test.ts`). It requires TWO real
  * Postgres connections, which PGlite cannot provide (single in-process instance, no cross-instance DB
- * sharing), so it runs against a real server: `STACKBASE_TEST_DATABASE_URL` when provided, else an
+ * sharing), so it runs against a real server: `HELIPOD_TEST_DATABASE_URL` when provided, else an
  * embedded native Postgres booted by the harness (`test-support/embedded-pg.ts`) — so it runs in
  * every gate rather than lying dormant behind the env var. The T6 fleet E2E exercises the same
  * property end-to-end through the real server.
  *
  * To point it at your own server instead:
- *   STACKBASE_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
- *     bun run --filter @stackbase/docstore-postgres test
+ *   HELIPOD_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+ *     bun run --filter @helipod/docstore-postgres test
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { NodePgClient } from "../src/node-pg-client";
@@ -21,7 +21,7 @@ import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "../test-s
 
 // Prefer an explicitly-provided server; otherwise boot an embedded one (real native Postgres, no
 // Docker) so this proof runs in every gate instead of lying dormant behind an env var.
-const ENV_URL = process.env.STACKBASE_TEST_DATABASE_URL;
+const ENV_URL = process.env.HELIPOD_TEST_DATABASE_URL;
 
 describe.skipIf(!ENV_URL && !embeddedPgAvailable())("commit pool — genuine cross-shard concurrency (real Postgres)", () => {
   let DATABASE_URL = ENV_URL;
@@ -41,7 +41,7 @@ describe.skipIf(!ENV_URL && !embeddedPgAvailable())("commit pool — genuine cro
   it("holds shard A's commit open while shard B's commit completes and is visible (two connections)", async () => {
     const client = new NodePgClient({
       connectionString: DATABASE_URL!,
-      applicationName: "stackbase-b2a-pool-test",
+      applicationName: "helipod-b2a-pool-test",
       sessionTimeouts: { idleInTransactionMs: 5000, statementMs: 10000 },
       commitPool: { shards: ["s0", "s1"] },
     });
@@ -93,14 +93,14 @@ describe.skipIf(!ENV_URL && !embeddedPgAvailable())("commit pool — genuine cro
   it("releaseShardLock frees a slot for a GENUINELY DIFFERENT connection to acquire, while the original connection stays alive (B2b, D2)", async () => {
     const client = new NodePgClient({
       connectionString: DATABASE_URL!,
-      applicationName: "stackbase-b2b-unlock-test",
+      applicationName: "helipod-b2b-unlock-test",
       commitPool: { shards: ["s0"] },
     });
     // A second, independent client — its own commit connection for the SAME slot's shard — models
     // "another node" (or this node re-acquiring on a fresh connection after a restart).
     const other = new NodePgClient({
       connectionString: DATABASE_URL!,
-      applicationName: "stackbase-b2b-unlock-test-other",
+      applicationName: "helipod-b2b-unlock-test-other",
       commitPool: { shards: ["s0"] },
     });
 

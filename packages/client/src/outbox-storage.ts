@@ -4,7 +4,7 @@
  * today's behavior byte-for-byte; nothing persists across a reload) and `indexedDBOutbox()`
  * (probe-and-fallback: real durability in a browser, transparently degrades to `memoryOutbox()`
  * wherever IndexedDB is unavailable or fails to open — Node, private-mode Safari, a corrupt
- * origin). Durability is opt-in constructor config (`new StackbaseClient(transport, { outbox:
+ * origin). Durability is opt-in constructor config (`new HelipodClient(transport, { outbox:
  * indexedDBOutbox() })`); a client constructed without `outbox` never touches this file's runtime
  * branches that matter — `memoryOutbox()`'s Maps are just as ephemeral as the pre-outbox client.
  *
@@ -15,7 +15,7 @@
  * just within one clientId's entries.
  *
  * Identity (verdict §(d) "Identity", hazard 8): **one clientId per tab-session, minted at client
- * construction, never reused across a reload.** A fresh `StackbaseClient` instance always mints a
+ * construction, never reused across a reload.** A fresh `HelipodClient` instance always mints a
  * BRAND NEW clientId — there is no reseed protocol, so there is nothing to get wrong (hazard 8:
  * "reload resets counters — dissolved structurally"). Entries persisted under an OLDER clientId
  * from a previous session are untouched by minting a new one; they hydrate and drain under their
@@ -26,7 +26,7 @@
  * recorded `nextSeq` instead of silently reusing a seq that already named a payload (verdict §(b)'s
  * governing invariant: the map `(clientId, seq) -> payload` is written exactly once).
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import { OUTBOX_DB_NAME, OUTBOX_VERSION, dropStaleVersion, openIndexedDBOutbox } from "./outbox-idb";
 
 export { OUTBOX_VERSION };
@@ -125,7 +125,7 @@ export interface OutboxStorage {
 
 /** Default cap on how many outbox-tracked entries (`unsent`/`inflight`/`parked` — not yet fully
  *  settled) may sit in `client.ts`'s live log at once, per verdict §(d) "Enqueue": "bounded
- *  (default 1000)". Overridable via `new StackbaseClient(transport, { outboxMaxQueueSize })`. */
+ *  (default 1000)". Overridable via `new HelipodClient(transport, { outboxMaxQueueSize })`. */
 export const DEFAULT_OUTBOX_MAX_QUEUE_SIZE = 1000;
 
 /** Thrown (as a rejected `mutation()` promise, never a synchronous throw) when the durable outbox
@@ -165,7 +165,7 @@ export class OfflineClientResetError extends Error {
 }
 
 /** The in-memory default — what a client gets when it passes no `outbox` at all. Nothing here
- *  survives past this `StackbaseClient` instance's lifetime, which is exactly today's (pre-outbox)
+ *  survives past this `HelipodClient` instance's lifetime, which is exactly today's (pre-outbox)
  *  behavior: a reload has no durable queue to hydrate, because there never was one. */
 export function memoryOutbox(): OutboxStorage {
   const entries = new Map<string, OutboxEntry>();

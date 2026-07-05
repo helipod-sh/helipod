@@ -5,18 +5,18 @@
  * `WebSocketPair`/hibernation), with each backend implementing this one method.
  *
  * NEUTRALITY RULE (a Slice-1 gate — asserted mechanically in
- * `packages/runtime-embedded/test/host-neutral.test.ts`): this file imports ONLY `@stackbase/*`
+ * `packages/runtime-embedded/test/host-neutral.test.ts`): this file imports ONLY `@helipod/*`
  * symbols and TS type-only imports. It contains NO host I/O primitive — no `bun`, `node:*`, `ws`,
  * no cloudflare type, no `DurableObjectNamespace`. Where a concept cannot be expressed neutrally it
  * is documented, not papered over (see `ServerHandle.close` and `ServeOptions` below).
  *
  * WHY GENERIC: `ServeOptions`/`ServerHandle` are lifted verbatim (no field changes) from the
  * process host's `DevServerOptions`/`DevServer`. Several of those fields reference types that live
- * in `@stackbase/cli`, `@stackbase/admin`, and `@stackbase/storage` — all of which depend ON
- * `@stackbase/runtime-embedded`, so importing them here would be a dependency cycle AND would drag
+ * in `@helipod/cli`, `@helipod/admin`, and `@helipod/storage` — all of which depend ON
+ * `@helipod/runtime-embedded`, so importing them here would be a dependency cycle AND would drag
  * a host I/O concern into the neutral seam. The route/admin/storage/deploy/fleet shapes are
  * therefore carried as type parameters (defaulting to `unknown`): the neutral seam stays parametric
- * and each concrete host pins the parameters (`@stackbase/cli` re-aliases them as `DevServer`/
+ * and each concrete host pins the parameters (`@helipod/cli` re-aliases them as `DevServer`/
  * `DevServerOptions`). The FIELDS are unchanged; only their concrete types are supplied by the host.
  */
 import type { EmbeddedRuntime } from "./runtime";
@@ -70,7 +70,7 @@ export interface ServeOptions<
   /**
    * The dashboard SPA. Two variants:
    *  - `dev`/`serve`: `{ distDir, html }` — dist dir (hashed Vite assets) + key-injected index.html.
-   *  - a compiled `stackbase build` binary: `{ assets, html }` — a urlPath→embedded-path map.
+   *  - a compiled `helipod build` binary: `{ assets, html }` — a urlPath→embedded-path map.
    */
   dashboard?: { distDir: string; html: string } | { assets: Record<string, string>; html: string };
   /** The app's `http.ts` routes, resolved to `path:name` function paths for dispatch. */
@@ -103,7 +103,7 @@ export interface ServeOptions<
 /**
  * The seam. A host binds an `EmbeddedRuntime` to a transport and starts serving; the returned
  * {@link ServerHandle} is the whole post-serve lifecycle surface. Slice 1 ships one implementation
- * (`@stackbase/cli`'s `ProcessRuntimeHost`); a Durable Object host (Slice 3) implements the same
+ * (`@helipod/cli`'s `ProcessRuntimeHost`); a Durable Object host (Slice 3) implements the same
  * method, wiring Worker `fetch` → the engine's HTTP dispatch and `WebSocketPair`/hibernation →
  * `runtime.handler.connect`. `serve()` is called once per host instance (one call per process, or
  * one per DO incarnation) — it must not assume it is the only call in a process's lifetime.

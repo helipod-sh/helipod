@@ -3,15 +3,15 @@
  * on commit it produces a `CommitResult` and emits an `OplogDelta` to the `WriteFanout`
  * (the transactor→sync seam, scale-seam #4). Pure-read transactions skip the commit path.
  */
-import type { ShardId } from "@stackbase/id-codec";
-import type { KeyRange, RangeSet, SerializedKeyRange } from "@stackbase/index-key-codec";
+import type { ShardId } from "@helipod/id-codec";
+import type { KeyRange, RangeSet, SerializedKeyRange } from "@helipod/index-key-codec";
 import type {
   DatabaseIndexUpdate,
   DocumentValue,
   IndexOverlayEntry,
   InternalDocumentId,
-} from "@stackbase/docstore";
-import type { JSONValue } from "@stackbase/values";
+} from "@helipod/docstore";
+import type { JSONValue } from "@helipod/values";
 import type { HeadroomLimits } from "./headroom";
 
 /** One document written by a commit, carried through the in-process fan-out so the sync tier can

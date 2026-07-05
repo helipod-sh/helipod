@@ -1,5 +1,5 @@
-import { v } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
+import { v } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
 
 // `messages` is sharded by `channelId` (schema.ts). A mutation that writes it must declare which
 // shard it runs on — `shardBy: "channelId"` routes each send to the shard owning that channel.
@@ -27,7 +27,7 @@ export const scheduleSend = mutation({
 });
 
 // Sharded read-modify-write: read the (single, pre-seeded) message for `channelId` on the shard that
-// owns it, then replace its body with a bumped `<body>#<n>` suffix. Stackbase has no `ctx.db.patch`
+// owns it, then replace its body with a bumped `<body>#<n>` suffix. Helipod has no `ctx.db.patch`
 // (a documented Convex divergence) — read-merge-replace, same shape as `notes:update`. `shardBy`
 // routes the whole RMW to the channel's owning shard. Used by the B4 group-commit concurrent-load
 // E2E as the 20% RMW slice of the storm (each client bumps its OWN dedicated channel, so the RMWs

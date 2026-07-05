@@ -1,4 +1,4 @@
-import type { ComponentContext } from "@stackbase/executor";
+import type { ComponentContext } from "@helipod/executor";
 import { type AuthzConfig } from "./roles";
 import { candidateKeys } from "./effective-permissions";
 import { hasRelation as relHasRelation, objectsWith as relObjectsWith } from "./relations";

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `ShardLeaseBalancer` — the deterministic, coordinator-free shard placement loop (B2b, D3).
  *
@@ -30,7 +30,7 @@
  * injected thunks (`node.ts` wires them over `LeaseManager`/the runtime), so this class is a pure
  * orchestrator and unit-testable with lightweight fakes.
  */
-import { DEFAULT_SHARD, shardIdList, type ShardId } from "@stackbase/id-codec";
+import { DEFAULT_SHARD, shardIdList, type ShardId } from "@helipod/id-codec";
 import { rendezvousOwner } from "./rendezvous";
 
 /** The narrow slice of `LeaseManager` the balancer reads — a structural interface so tests can pass a

@@ -1,4 +1,4 @@
-import { mutation, query, GuestDatabaseWriter, type MutationCtx, type QueryCtx, type SyscallChannel, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, GuestDatabaseWriter, type MutationCtx, type QueryCtx, type SyscallChannel, type RegisteredFunction } from "@helipod/executor";
 import type { NotificationsConfig, DigestItem } from "./config";
 import { digestWindowMs } from "./config";
 import type { EmailContent } from "./provider";

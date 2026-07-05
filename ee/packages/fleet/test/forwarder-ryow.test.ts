@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `WriteForwarder`'s Task 3 read-your-own-writes wait: after a successful `/_fleet/run` POST,
  * `forward()` waits for a locally attached replica tailer to catch up to the write's `commitTs`
@@ -14,7 +14,7 @@
  * (`lease.test.ts`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
 import { LeaseManager } from "../src/lease";
 import { WriteForwarder, type ReplicaWaiter } from "../src/forwarder";
 

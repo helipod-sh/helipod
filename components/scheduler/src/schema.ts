@@ -1,7 +1,7 @@
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 /**
- * The `@stackbase/scheduler` component schema (namespaced `scheduler/*` when composed).
+ * The `@helipod/scheduler` component schema (namespaced `scheduler/*` when composed).
  *
  * - `jobs` / `job_args`: split so a job's identity/state (small, hot — scanned by the driver's
  *   `by_next_ts` index) never carries the (possibly large) `args`/`context` payload.

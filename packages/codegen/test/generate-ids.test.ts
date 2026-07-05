@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
+import { v, defineSchema, defineTable } from "@helipod/values";
 import { generateIds, generateAll } from "../src/generate";
 import type { AnalyzedFunctionManifest } from "../src/generate";
 

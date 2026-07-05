@@ -1,11 +1,11 @@
 ---
 title: Local development
-description: stackbase dev's hot-reload server and the built-in dashboard.
+description: helipod dev's hot-reload server and the built-in dashboard.
 ---
 
 {/* diataxis: how-to */}
 
-Think of `stackbase dev` as your app's dev server, except the backend behind it is the real one, not
+Think of `helipod dev` as your app's dev server, except the backend behind it is the real one, not
 a mock. One command loads your project, generates types, boots the actual reactive engine, and
 serves it all on one port, with hot reload on every save.
 
@@ -14,29 +14,29 @@ does.
 
 ## Start the dev server
 
-From your app's root (where `stackbase/` lives):
+From your app's root (where `helipod/` lives):
 
 ```bash
-npx stackbase dev
+npx helipod dev
 ```
 
 Under the hood, one command does five things, in order:
 
-1. **Loads your project.** It resolves `stackbase.config.ts` (component composition), then reads
-   `stackbase/schema.ts` and every function file under `stackbase/`.
-2. **Generates `stackbase/_generated/`**: the typed `api`/`Doc`/`Id` helpers your functions and client
+1. **Loads your project.** It resolves `helipod.config.ts` (component composition), then reads
+   `helipod/schema.ts` and every function file under `helipod/`.
+2. **Generates `helipod/_generated/`**: the typed `api`/`Doc`/`Id` helpers your functions and client
    import.
 3. **Boots the embedded engine** against a local SQLite database, or Postgres if you pass
    [`--database-url`](#flag-reference) (see below).
 4. **Serves everything on one port**: the sync WebSocket (`/api/sync`), the `/api/*` HTTP surface,
    your `httpAction` routes, the `/_admin/*` admin API, and the dashboard at `/_dashboard`.
-5. **Starts watching `stackbase/`** for changes and hot-reloads your functions on every save (see
+5. **Starts watching `helipod/`** for changes and hot-reloads your functions on every save (see
    [Hot reload](#hot-reload) below).
 
 On startup it prints the server URL, the dashboard URL, and the admin key:
 
 ```
-stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+helipod dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
 admin key → 7f3a9c2e1b8d4f6a...
 ```
 
@@ -45,25 +45,25 @@ dashboard package hasn't been built, the server still runs but prints a note ins
 URL:
 
 ```
-(dashboard SPA not built: run `bun run --filter @stackbase/dashboard build`)
+(dashboard SPA not built: run `bun run --filter @helipod/dashboard build`)
 ```
 
 The process runs until you kill it with `Ctrl-C`. There's no separate stop step.
 
 ## Flag reference
 
-Here's every flag `stackbase dev` accepts:
+Here's every flag `helipod dev` accepts:
 
 | Flag | Default | What it does |
 |---|---|---|
 | `--port <n>` | `3000` | HTTP/WebSocket port. |
 | `--ip <addr>` | `127.0.0.1` | Bind address. `127.0.0.1`, `::1`, and `localhost` all count as loopback (see [Admin key](#admin-key) below); anything else exposes the server on your network. |
-| `--dir <path>` | `stackbase` | Where your schema and functions live. |
-| `--data <path>` | `.stackbase/data.db` | SQLite database file path. Ignored when `--database-url` is set. |
+| `--dir <path>` | `helipod` | Where your schema and functions live. |
+| `--data <path>` | `.helipod/data.db` | SQLite database file path. Ignored when `--database-url` is set. |
 | `--web <dir>` | unset | Serve a static web UI (a built frontend, for example) alongside the API. `GET` requests that don't match `/api/*`, `/_admin/*`, or `/_dashboard` fall through to files in this directory. |
-| `--database-url <url>` | unset | A `postgres://` or `postgresql://` connection string. When set, stackbase uses Postgres instead of SQLite; see [Postgres](/docs/deploy/postgres). Also readable from `STACKBASE_DATABASE_URL`, though the flag wins. |
-| `--storage-bucket <name>` | unset | Select the S3-compatible file storage backend (bucket name). Unset means local filesystem storage under `<data dir>/storage`. Also readable from `STACKBASE_STORAGE_BUCKET`. |
-| `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, and so on), only meaningful alongside `--storage-bucket`. Also readable from `STACKBASE_STORAGE_ENDPOINT`. |
+| `--database-url <url>` | unset | A `postgres://` or `postgresql://` connection string. When set, helipod uses Postgres instead of SQLite; see [Postgres](/docs/deploy/postgres). Also readable from `HELIPOD_DATABASE_URL`, though the flag wins. |
+| `--storage-bucket <name>` | unset | Select the S3-compatible file storage backend (bucket name). Unset means local filesystem storage under `<data dir>/storage`. Also readable from `HELIPOD_STORAGE_BUCKET`. |
+| `--storage-endpoint <url>` | unset | S3-compatible endpoint (MinIO, R2, and so on), only meaningful alongside `--storage-bucket`. Also readable from `HELIPOD_STORAGE_ENDPOINT`. |
 
 A CLI flag always wins over its environment-variable equivalent when both are set.
 
@@ -72,8 +72,8 @@ A CLI flag always wins over its environment-variable equivalent when both are se
 Every project gets a `_storage` system table and `ctx.storage`. There's no opt-in flag for it:
 `--storage-bucket`/`--storage-endpoint` only choose which byte backend serves it.
 
-Setting `STACKBASE_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` without a bucket is a misconfiguration,
-and `stackbase dev` refuses to boot from it. Otherwise it would silently write uploads to local disk
+Setting `HELIPOD_STORAGE_ENDPOINT`/`REGION`/`PUBLIC_URL` without a bucket is a misconfiguration,
+and `helipod dev` refuses to boot from it. Otherwise it would silently write uploads to local disk
 when you meant to configure S3. Set the bucket too, or drop the other settings.
 
 See [File storage](/docs/core-concepts/file-storage) for the full byte-storage story.
@@ -91,11 +91,11 @@ The runtime is auto-detected: Bun if you invoke the CLI under Bun, Node otherwis
 <Tabs items={['Bun', 'Node']}>
 
 ```bash tab="Bun"
-bun stackbase dev
+bun helipod dev
 ```
 
 ```bash tab="Node"
-npx stackbase dev
+npx helipod dev
 ```
 
 </Tabs>
@@ -110,10 +110,10 @@ see `Cannot find module 'node:sqlite'`, check your Node version.
 Every admin-gated surface (the `/_admin/*` API the dashboard runs on, `/_admin/deploy`, `/_admin/wake`)
 is protected by a single bearer token: the **admin key**.
 
-- If `STACKBASE_ADMIN_KEY` is set in your environment, `stackbase dev` uses it as is.
-- If it's unset, `stackbase dev` generates a fresh ephemeral key on every run and prints it to
+- If `HELIPOD_ADMIN_KEY` is set in your environment, `helipod dev` uses it as is.
+- If it's unset, `helipod dev` generates a fresh ephemeral key on every run and prints it to
   stdout. Nothing persists it. Restart the server and you get a new one.
-- If `STACKBASE_ADMIN_KEY` is set but blank or whitespace, `stackbase dev` treats it as unset (a
+- If `HELIPOD_ADMIN_KEY` is set but blank or whitespace, `helipod dev` treats it as unset (a
   blank key would authenticate everything) and prints a warning before falling back to an ephemeral
   key.
 
@@ -129,19 +129,19 @@ you type is kept in `sessionStorage`.
 This is deliberate: an admin key baked into unauthenticated HTML is only safe when the only thing
 that can reach that HTML is the same machine.
 
-A persistent `STACKBASE_ADMIN_KEY` is never embedded in the HTML, loopback or not.
+A persistent `HELIPOD_ADMIN_KEY` is never embedded in the HTML, loopback or not.
 
 </Callout>
 
 ## Hot reload
 
-`stackbase dev` watches `stackbase/` (recursively) via a filesystem watch, ignoring anything under
-`stackbase/_generated/` so codegen's own writes don't re-trigger themselves. On every change, after a
+`helipod dev` watches `helipod/` (recursively) via a filesystem watch, ignoring anything under
+`helipod/_generated/` so codegen's own writes don't re-trigger themselves. On every change, after a
 short debounce, this is the loop:
 
 ```mermaid
 flowchart LR
-  Edit["You save a file in stackbase/"] --> Debounce["Watcher debounces"]
+  Edit["You save a file in helipod/"] --> Debounce["Watcher debounces"]
   Debounce --> Reload["Reload schema + functions, regenerate _generated/"]
   Reload --> Push["setModules + setRoutes"]
   Push --> Live["Live subscriptions re-run on the next invalidation"]
@@ -152,10 +152,10 @@ In detail, it:
 1. Re-loads and re-pushes your project (schema, functions, and composed components), catching load
    errors. A bad `schema.ts` or a syntax error prints `✗ reload failed: <message>` and leaves the
    previous, working set of functions running rather than crashing the server.
-2. Re-writes `stackbase/_generated/` with the freshly generated types.
+2. Re-writes `helipod/_generated/` with the freshly generated types.
 3. Calls `runtime.setModules(...)` with the new function map. This replaces the module map
-   wholesale, so `stackbase dev` re-applies the always-on `_storage:*` built-in functions on every
-   reload. They aren't part of your `stackbase/` source, so they'd otherwise vanish on the first save.
+   wholesale, so `helipod dev` re-applies the always-on `_storage:*` built-in functions on every
+   reload. They aren't part of your `helipod/` source, so they'd otherwise vanish on the first save.
 4. Calls `server.setRoutes(...)` with the freshly resolved `http.ts` routes, so `httpAction` changes
    take effect immediately too.
 
@@ -166,18 +166,18 @@ time something invalidates it.
 ## Generate types without starting a server
 
 ```bash
-stackbase codegen
-stackbase codegen --dir stackbase   # if your functions aren't in ./stackbase
+helipod codegen
+helipod codegen --dir helipod   # if your functions aren't in ./helipod
 ```
 
-This regenerates `stackbase/_generated/` and exits: no server, no watch loop. `stackbase dev` does this
+This regenerates `helipod/_generated/` and exits: no server, no watch loop. `helipod dev` does this
 automatically on every change. You need the explicit command before
-[`stackbase serve`](/docs/deploy/self-hosting), which never runs codegen itself (it fails fast at
+[`helipod serve`](/docs/deploy/self-hosting), which never runs codegen itself (it fails fast at
 boot if `_generated/` is missing).
 
 ## Call a function without the dashboard
 
-There's no `stackbase run` command. Either use the dashboard's [function runner](#function-runner),
+There's no `helipod run` command. Either use the dashboard's [function runner](#function-runner),
 or hit the HTTP API directly:
 
 ```bash
@@ -201,7 +201,7 @@ curl http://localhost:3000/api/health
 
 ## The dashboard
 
-Open the URL `stackbase dev` prints: `http://localhost:<port>/_dashboard`. In dev mode, on a loopback
+Open the URL `helipod dev` prints: `http://localhost:<port>/_dashboard`. In dev mode, on a loopback
 bind, the admin key is embedded in the served HTML, so it opens straight into the app with no login
 prompt (see [Admin key](#admin-key) above for when that's not true).
 
@@ -260,24 +260,24 @@ store.
 The dashboard has no authentication of its own beyond the admin key, and the admin key grants
 unrestricted read/write access to your whole database, plus the ability to run any function.
 
-That's the right tradeoff for local development, and it's why `stackbase dev` hands you the key with
+That's the right tradeoff for local development, and it's why `helipod dev` hands you the key with
 zero friction on a loopback bind. But never expose an unprotected admin key over the network.
 
-[`stackbase serve`](/docs/deploy/self-hosting) serves the same dashboard build in production, but
+[`helipod serve`](/docs/deploy/self-hosting) serves the same dashboard build in production, but
 key-less by default (no key embedded in the HTML at all: it prompts you), and requires you to set a
-real `STACKBASE_ADMIN_KEY` before it will even start.
+real `HELIPOD_ADMIN_KEY` before it will even start.
 
 </Callout>
 
 ## Related
 
-- [Quickstart](/docs/get-started/quickstart): install stackbase and see the whole loop end to end.
-- [Self-hosting with Docker](/docs/deploy/self-hosting): `stackbase serve`, the production
-  counterpart of `stackbase dev` (no codegen, required admin key, binds `0.0.0.0`, dashboard served
+- [Quickstart](/docs/get-started/quickstart): install helipod and see the whole loop end to end.
+- [Self-hosting with Docker](/docs/deploy/self-hosting): `helipod serve`, the production
+  counterpart of `helipod dev` (no codegen, required admin key, binds `0.0.0.0`, dashboard served
   key-less).
-- [Deploying without a restart](/docs/deploy/deploy-and-build): `stackbase deploy`, for pushing a
+- [Deploying without a restart](/docs/deploy/deploy-and-build): `helipod deploy`, for pushing a
   schema and function change to an already-running `serve` without hot-reload's dev-only watch loop.
-- [Vite plugin](/docs/deploy/vite-plugin): a Vite app can run `stackbase dev` for you as part of
+- [Vite plugin](/docs/deploy/vite-plugin): a Vite app can run `helipod dev` for you as part of
   its own dev server.
 - [Queries](/docs/core-concepts/queries): the `.paginate()`/`scanCapped` contract the data browser
   itself relies on.

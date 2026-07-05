@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
-import { httpRouter, httpAction, mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod, type TestHelipod } from "../../src";
+import { httpRouter, httpAction, mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type A = any;
@@ -80,10 +80,10 @@ const httpModule = {
 };
 
 describe("conformance — http router", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: { "http.ts": httpModule, "mod.ts": mod, "schema.ts": { default: schema } },
     });
   });
@@ -159,9 +159,9 @@ describe("conformance — http router", () => {
   });
 
   it("an httpAction handler can read the request's query string", async () => {
-    const res = await t.fetch(new Request("http://t/echo-query?name=stackbase", { method: "GET" }));
+    const res = await t.fetch(new Request("http://t/echo-query?name=helipod", { method: "GET" }));
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("stackbase");
+    expect(await res.text()).toBe("helipod");
   });
 
   it("an httpAction's ctx has no ctx.db — actions run outside the transaction", async () => {
@@ -181,7 +181,7 @@ describe("conformance — http router", () => {
     const badHttpModule = { default: badRouter };
 
     await expect(
-      createTestStackbase({
+      createTestHelipod({
         modules: { "http.ts": badHttpModule, "mod.ts": mod, "schema.ts": { default: schema } },
       }),
     ).rejects.toThrow(/must be an exported httpAction/);

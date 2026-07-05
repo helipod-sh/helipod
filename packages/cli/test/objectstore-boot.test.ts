@@ -1,13 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
+import { FsObjectStore } from "@helipod/objectstore-fs";
 import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
 
 // Tier 3 Slice 6, Task 6.3 smoke test: `bootLoaded` with a `file://` object-store URL constructs an
 // acquired, working writer node whose store is the object-storage substrate — proving the wiring
 // (ee-gate → resolve → ensureGlobals → materialize → acquire → drivers) end-to-end at the boot-core
-// level. The full E2E through the real `stackbase serve` entrypoint (fs + MinIO, second-node takeover,
+// level. The full E2E through the real `helipod serve` entrypoint (fs + MinIO, second-node takeover,
 // reactive fan-out over a WebSocket) is Task 6.4's job — deliberately not duplicated here.
 
 const ROOT = "./.tmp-objectstore-boot";
@@ -15,7 +15,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   it("boots over a file:// bucket, acquires the lease, and commits + reads back a mutation", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     const { runtime, store, objectStoreRelease } = await bootLoaded({
       loaded,
       components: [],
@@ -38,7 +38,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("multi-shard (--shards 3): boots+acquires all 3 lanes, the runtime commits+reads over the ShardedObjectStoreDocStore composite, and the bucket has every lane's manifest", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     const bucketDir = `${ROOT}/ms-bucket`;
     const { runtime, store, objectStoreRelease } = await bootLoaded({
       loaded,
@@ -71,7 +71,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("a fresh boot against the SAME bucket (different local dir) ADOPTS the existing deploymentId and takes over immediately after relinquish (Task 6.5)", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     const bucket = `file://${ROOT}/bucket-adopt`;
 
     const nodeA = await bootLoaded({
@@ -130,7 +130,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   // real (short) sweep cadence + a real sleep — `createEmbeddedRuntime`'s DriverContext.setTimer
   // is backed by real `setTimeout`, same pattern `storage-e2e.test.ts` uses for the storage reaper.
   it("the gc-driver reclaims superseded segments/snapshots automatically while the node stays live and queryable", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     const bucketDir = `${ROOT}/bucket-gc`;
     const boot = await bootLoaded({
       loaded,
@@ -188,7 +188,7 @@ describe("bootLoaded — Tier 3 Slice 6 object-store writer node", () => {
   });
 
   it("throws a clear error when combined with fleet wiring", async () => {
-    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/stackbase");
+    const loaded = await loadFunctionsDir("test/fixtures/deploy-v2/helipod");
     await expect(
       bootLoaded({
         loaded,

@@ -22,48 +22,48 @@ function makeFixtureFunctionsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbservedeploy-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
   writeFileSync(
     join(dir, "schema.ts"),
     `
-    import { v, defineSchema, defineTable } from "@stackbase/values";
+    import { v, defineSchema, defineTable } from "@helipod/values";
     export default defineSchema({ items: defineTable({ body: v.string() }) });
     `,
   );
   writeFileSync(
     join(dir, "app.ts"),
     `
-    import { query } from "@stackbase/executor";
+    import { query } from "@helipod/executor";
     export const list = query({ handler: async () => [] });
     `,
   );
   return dir;
 }
 
-describe("resolveServeOptions — --allow-deploy / STACKBASE_ALLOW_DEPLOY", () => {
-  const OLD = process.env.STACKBASE_ALLOW_DEPLOY;
+describe("resolveServeOptions — --allow-deploy / HELIPOD_ALLOW_DEPLOY", () => {
+  const OLD = process.env.HELIPOD_ALLOW_DEPLOY;
   afterEach(() => {
-    if (OLD === undefined) delete process.env.STACKBASE_ALLOW_DEPLOY;
-    else process.env.STACKBASE_ALLOW_DEPLOY = OLD;
+    if (OLD === undefined) delete process.env.HELIPOD_ALLOW_DEPLOY;
+    else process.env.HELIPOD_ALLOW_DEPLOY = OLD;
   });
 
   it("defaults to false", () => {
-    delete process.env.STACKBASE_ALLOW_DEPLOY;
+    delete process.env.HELIPOD_ALLOW_DEPLOY;
     expect(resolveServeOptions([]).allowDeploy).toBe(false);
   });
 
   it("--allow-deploy sets it true", () => {
-    delete process.env.STACKBASE_ALLOW_DEPLOY;
+    delete process.env.HELIPOD_ALLOW_DEPLOY;
     expect(resolveServeOptions(["--allow-deploy"]).allowDeploy).toBe(true);
   });
 
-  it("STACKBASE_ALLOW_DEPLOY=1 sets it true", () => {
-    process.env.STACKBASE_ALLOW_DEPLOY = "1";
+  it("HELIPOD_ALLOW_DEPLOY=1 sets it true", () => {
+    process.env.HELIPOD_ALLOW_DEPLOY = "1";
     expect(resolveServeOptions([]).allowDeploy).toBe(true);
   });
 
-  it("STACKBASE_ALLOW_DEPLOY unset or any other value stays false", () => {
-    process.env.STACKBASE_ALLOW_DEPLOY = "true";
+  it("HELIPOD_ALLOW_DEPLOY unset or any other value stays false", () => {
+    process.env.HELIPOD_ALLOW_DEPLOY = "true";
     expect(resolveServeOptions([]).allowDeploy).toBe(false);
   });
 });

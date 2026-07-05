@@ -3,10 +3,10 @@
 // `runtime.runHttpAction` (Task 3): dispatch an httpAction by path, pass the raw `Request`
 // through untouched, and return the handler's `Response`.
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { query, mutation, httpAction } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { query, mutation, httpAction } from "@helipod/executor";
 import { EmbeddedRuntime } from "../src/index";
 
 async function makeRuntime(modules: Record<string, any>) {

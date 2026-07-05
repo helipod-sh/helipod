@@ -1,6 +1,6 @@
 /**
  * Task 3 — the `Connect` resume handshake, per-verdict settlement, the baseline-gated drop rule,
- * and `onClientReset`, through the REAL `StackbaseClient`. Two harnesses (the verdict §(h) split):
+ * and `onClientReset`, through the REAL `HelipodClient`. Two harnesses (the verdict §(h) split):
  *
  *  - `MockTransport` (the `reconnect.test.ts` / `outbox-enqueue.test.ts` pattern) for the frames the
  *    engine can't be coaxed to produce on demand: the exact `Connect` shape, each `ConnectAck`
@@ -12,13 +12,13 @@
  *    path end-to-end against the actual server.
  */
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { IndexSpec } from "@stackbase/query-engine";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import type { IndexSpec } from "@helipod/query-engine";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import {
-  StackbaseClient,
+  HelipodClient,
   OfflineClientResetError,
   memoryOutbox,
   OUTBOX_VERSION,
@@ -26,7 +26,7 @@ import {
   type ClientTransport,
 } from "../src/index";
 import type { OutboxEntry, OutboxStorage } from "../src/outbox-storage";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 /* -------------------------------------------------------------------------- */
 /* MockTransport — full control over server frames + reopen synthesis          */
@@ -91,7 +91,7 @@ async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
 /** Issue a mutation while the transport is synthetically closed → it retains as `unsent`, durably
  *  appended. Returns the (kept-pending) mutation promise SYNCHRONOUSLY (never awaited here — a bare
  *  `await` would flatten onto the never-settling promise); flush + await the append separately. */
-function enqueueUnsent(client: StackbaseClient, body: string): Promise<unknown> {
+function enqueueUnsent(client: HelipodClient, body: string): Promise<unknown> {
   return client.mutation("messages:send", { body });
 }
 
@@ -99,10 +99,10 @@ function enqueueUnsent(client: StackbaseClient, body: string): Promise<unknown> 
 /* The Connect handshake shape                                                  */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — the Connect handshake on reopen (T3)", () => {
+describe("HelipodClient — the Connect handshake on reopen (T3)", () => {
   it("no-outbox reopen sends only a capability-only Connect (no resume handshake); the naive unsent flush is unchanged", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     t.emitClose();
     void client.mutation("messages:send", { body: "A" });
     t.emitReopen();
@@ -120,7 +120,7 @@ describe("StackbaseClient — the Connect handshake on reopen (T3)", () => {
 
   it("sends Connect{clientId, held, ackedThrough} on reopen for a configured outbox — held = every unsettled durable entry, ackedThrough omitted when the lowest held seq is 0", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setOutboxArmed(true);
     const cid = (await client.getOutboxIdentity())!.clientId;
 
@@ -145,7 +145,7 @@ describe("StackbaseClient — the Connect handshake on reopen (T3)", () => {
 
   it("ackedThrough = (lowest held seq) - 1 once an earlier seq has settled and dequeued", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     const cid = (await client.getOutboxIdentity())!.clientId;
 
     // seq0 committed online → acked + dequeued + removed from the log.
@@ -170,10 +170,10 @@ describe("StackbaseClient — the Connect handshake on reopen (T3)", () => {
 /* Per-verdict settlement                                                       */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — ConnectAck verdict settlement (T3)", () => {
-  function armedClient(outbox: OutboxStorage = memoryOutbox()): { t: MockTransport; client: StackbaseClient } {
+describe("HelipodClient — ConnectAck verdict settlement (T3)", () => {
+  function armedClient(outbox: OutboxStorage = memoryOutbox()): { t: MockTransport; client: HelipodClient } {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox });
+    const client = new HelipodClient(t, { outbox });
     return { t, client };
   }
 
@@ -276,10 +276,10 @@ describe("StackbaseClient — ConnectAck verdict settlement (T3)", () => {
 /* The baseline await — ordering                                                */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — the baseline await (T3 / spec decision 5)", () => {
+describe("HelipodClient — the baseline await (T3 / spec decision 5)", () => {
   it("whenBaselineAdopted() and the applied-drop fire ONLY after the first post-Connect Transition is adopted — never before", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setOutboxArmed(true);
     const cid = (await client.getOutboxIdentity())!.clientId;
 
@@ -313,14 +313,14 @@ describe("StackbaseClient — the baseline await (T3 / spec decision 5)", () => 
 
   it("with no live subscriptions the baseline is adopted immediately (nothing to re-baseline)", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     t.emitReopen(); // no subs → resync no-ops → baseline immediate
     await expect(client.whenBaselineAdopted()).resolves.toBeUndefined();
   });
 
   it("the drop rule fires as an S3 reconcile event only after adoption — spied", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     client.setOutboxArmed(true);
     const cid = (await client.getOutboxIdentity())!.clientId;
     const spy = vi.spyOn((client as unknown as { reconciler: { onVerdictAfterBaseline: (r: string) => void } }).reconciler, "onVerdictAfterBaseline");
@@ -344,7 +344,7 @@ describe("StackbaseClient — the baseline await (T3 / spec decision 5)", () => 
 /* First-connect deadlock repro (T4 bug fix): subscribe-before-arm             */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — first-connect handshake vs. a subscription delivered before hydrate finishes (T4 bug fix)", () => {
+describe("HelipodClient — first-connect handshake vs. a subscription delivered before hydrate finishes (T4 bug fix)", () => {
   /** Wraps a real `OutboxStorage` so `loadAll` (the drain's hydrate) hangs until released —
    *  simulates a slow IndexedDB open / a hydrate that hasn't resolved yet on a fresh page load. */
   function delayedLoadAllOutbox(real: OutboxStorage): { outbox: OutboxStorage; release: () => void } {
@@ -383,7 +383,7 @@ describe("StackbaseClient — first-connect handshake vs. a subscription deliver
     const { outbox: delayed, release: releaseLoad } = delayedLoadAllOutbox(real);
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
 
     // NATURAL app-code ordering: subscribe immediately on construction, well before the drain's
     // queued `becomeLeader` microtask even runs. The server answers with the initial Transition
@@ -437,7 +437,7 @@ describe("StackbaseClient — first-connect handshake vs. a subscription deliver
     const { outbox: delayed, release: releaseLoad } = delayedLoadAllOutbox(real);
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox: delayed, outboxLocks: null, outboxDrainIntervalMs: 0 });
 
     // Natural app-code ordering: subscribe immediately, well before the drain's hydrate resolves.
     // The server answers with a QueryFailed WHILE hydrate is still pending — this subscription has
@@ -470,10 +470,10 @@ describe("StackbaseClient — first-connect handshake vs. a subscription deliver
 /* The drop rule — no-flicker (collected frames)                                */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — the applied-drop is flicker-free (T3)", () => {
+describe("HelipodClient — the applied-drop is flicker-free (T3)", () => {
   it("dropping a cross-session applied layer never blinks the authoritative row away — the baseline already renders it", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox() });
+    const client = new HelipodClient(t, { outbox: memoryOutbox() });
     const cid = (await client.getOutboxIdentity())!.clientId;
 
     const frames: unknown[][] = [];
@@ -519,12 +519,12 @@ describe("StackbaseClient — the applied-drop is flicker-free (T3)", () => {
 /* onClientReset (known: false)                                                 */
 /* -------------------------------------------------------------------------- */
 
-describe("StackbaseClient — onClientReset on ConnectAck{known:false} (T3)", () => {
+describe("HelipodClient — onClientReset on ConnectAck{known:false} (T3)", () => {
   it("re-mints the clientId, re-enqueues unsent under NEW seqs, rejects parked LOUDLY, and fires the callback", async () => {
     const outbox = memoryOutbox();
     const resets: ClientResetInfo[] = [];
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, onClientReset: (i) => resets.push(i) });
+    const client = new HelipodClient(t, { outbox, onClientReset: (i) => resets.push(i) });
     client.setOutboxArmed(true);
     const oldCid = (await client.getOutboxIdentity())!.clientId;
 
@@ -632,7 +632,7 @@ function reopenableLoopback(conn: { send: (m: ClientMessage) => unknown; onMessa
   };
 }
 
-describe("StackbaseClient — Connect/ConnectAck against the REAL SyncProtocolHandler (T3)", () => {
+describe("HelipodClient — Connect/ConnectAck against the REAL SyncProtocolHandler (T3)", () => {
   let runtime: EmbeddedRuntime;
 
   async function boot(): Promise<void> {
@@ -644,7 +644,7 @@ describe("StackbaseClient — Connect/ConnectAck against the REAL SyncProtocolHa
   it("the real handler answers a client's Connect with a ConnectAck: the client arms + surfaces a non-empty deploymentId", async () => {
     await boot();
     const wrap = reopenableLoopback(runtime.connect("sess-arm"));
-    const client = new StackbaseClient(wrap.transport, { outbox: memoryOutbox() });
+    const client = new HelipodClient(wrap.transport, { outbox: memoryOutbox() });
     await client.getOutboxIdentity();
 
     // No held entries — a bare Connect still proves capability (known:true, empty results).
@@ -660,7 +660,7 @@ describe("StackbaseClient — Connect/ConnectAck against the REAL SyncProtocolHa
     await boot();
     const resets: ClientResetInfo[] = [];
     const wrap = reopenableLoopback(runtime.connect("sess-reset"));
-    const client = new StackbaseClient(wrap.transport, { outbox: memoryOutbox(), onClientReset: (i) => resets.push(i) });
+    const client = new HelipodClient(wrap.transport, { outbox: memoryOutbox(), onClientReset: (i) => resets.push(i) });
     const oldCid = (await client.getOutboxIdentity())!.clientId;
 
     // Enqueue while down → unsent, held, but the server has no record/floor for this clientId.

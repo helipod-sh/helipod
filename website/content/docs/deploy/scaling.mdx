@@ -5,9 +5,9 @@ description: The tiered model - single-node free forever, plus a Postgres fleet 
 
 {/* diataxis: explanation */}
 
-stackbase runs as a set of tiers, not one fixed shape. Think of it as a building with three floors.
+helipod runs as a set of tiers, not one fixed shape. Think of it as a building with three floors.
 You write your schema, queries, mutations, and subscriptions once, on the ground floor, and the
-same code runs unchanged whether you're on a laptop running `stackbase dev`, one `stackbase serve`
+same code runs unchanged whether you're on a laptop running `helipod dev`, one `helipod serve`
 process, a fleet of nodes sharing a Postgres database, or a fleet of nodes sharing nothing but an
 object-storage bucket.
 
@@ -32,7 +32,7 @@ means operationally and links back to those rather than repeating them.
 ```mermaid
 flowchart TB
   subgraph T1["Tier 0/1: one process"]
-    A1["stackbase serve"] --> D1[("SQLite or Postgres")]
+    A1["helipod serve"] --> D1[("SQLite or Postgres")]
   end
   subgraph T2["Tier 2: fleet"]
     W["writer node"] --> PG[("shared Postgres")]
@@ -48,7 +48,7 @@ flowchart TB
 
 Tier 0/1 is free forever and is documented in [Self-hosting](/docs/deploy/self-hosting),
 [Postgres](/docs/deploy/postgres), and [Deploy and build](/docs/deploy/deploy-and-build). A single
-`stackbase serve` process is one writer: every mutation goes through it, fully serializable, no
+`helipod serve` process is one writer: every mutation goes through it, fully serializable, no
 coordination overhead. This is the right shape for the overwhelming majority of apps. Tiers 2 and 3
 are what you reach for once you've measured a real write-throughput ceiling, need redundancy, or
 want to run with no managed database at all. Each is covered in full below.
@@ -84,9 +84,9 @@ The [glossary](/docs/reference/glossary) has the full list.
 
 </Callout>
 
-## Tier 2: the fleet (`@stackbase/fleet`)
+## Tier 2: the fleet (`@helipod/fleet`)
 
-`stackbase serve --fleet` runs a small, symmetric fleet of `stackbase serve` processes that share
+`helipod serve --fleet` runs a small, symmetric fleet of `helipod serve` processes that share
 one Postgres database. There's no coordinator service and no primary/replica flag. Every node runs
 the identical command, and the fleet decides its own roles using a lease that lives in the database
 itself: the first node to acquire a Postgres advisory lock becomes the **writer**, and every other
@@ -99,8 +99,8 @@ node is a **sync node**.
 <Tab value="CLI flags">
 
 ```bash
-STACKBASE_ADMIN_KEY=secret stackbase serve \
-  --dir stackbase \
+HELIPOD_ADMIN_KEY=secret helipod serve \
+  --dir helipod \
   --database-url postgres://user:pass@host:5432/db \
   --fleet \
   --advertise-url http://10.0.0.5:3000
@@ -114,38 +114,38 @@ Useful for container orchestration: every node runs the same command, only the a
 differs.
 
 ```bash
-export STACKBASE_ADMIN_KEY=secret
-export STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db
-export STACKBASE_FLEET=1
-export STACKBASE_ADVERTISE_URL=http://10.0.0.5:3000
-stackbase serve --dir stackbase
+export HELIPOD_ADMIN_KEY=secret
+export HELIPOD_DATABASE_URL=postgres://user:pass@host:5432/db
+export HELIPOD_FLEET=1
+export HELIPOD_ADVERTISE_URL=http://10.0.0.5:3000
+helipod serve --dir helipod
 ```
 
 </Tab>
 
 </Tabs>
 
-- **`--fleet` / `STACKBASE_FLEET`** turns fleet mode on.
-- **`--database-url` / `STACKBASE_DATABASE_URL`** must point at Postgres. SQLite has no concept of
+- **`--fleet` / `HELIPOD_FLEET`** turns fleet mode on.
+- **`--database-url` / `HELIPOD_DATABASE_URL`** must point at Postgres. SQLite has no concept of
   a shared lease across processes, so `--fleet` against SQLite (or no database URL at all) fails
   fast at boot.
-- **`--advertise-url` / `STACKBASE_ADVERTISE_URL`** is the URL *other* fleet nodes use to reach this
+- **`--advertise-url` / `HELIPOD_ADVERTISE_URL`** is the URL *other* fleet nodes use to reach this
   node. It's recorded on the lease when this node is the writer, and sync nodes use it to forward
   writes and proxy `httpAction`s to it. Every node needs its own value.
-- **The same `STACKBASE_ADMIN_KEY` on every node.** Nodes authenticate to each other's internal
+- **The same `HELIPOD_ADMIN_KEY` on every node.** Nodes authenticate to each other's internal
   forwarding endpoint with this key.
 - **A unique data directory per node.** A node's local replica lives at `<dir>/fleet-replica.db`
-  alongside whatever `--data`/`STACKBASE_DATA_DIR` you gave it. This isn't validated: two nodes
+  alongside whatever `--data`/`HELIPOD_DATA_DIR` you gave it. This isn't validated: two nodes
   sharing a directory silently stomp each other's replica file instead of failing fast.
-- **`@stackbase/fleet` installed.** `serve` loads it via a dynamic `import()` (core stackbase has no
+- **`@helipod/fleet` installed.** `serve` loads it via a dynamic `import()` (core helipod has no
   static dependency on it), so `--fleet` without the package installed fails fast with an install
   instruction instead of a cryptic module-not-found error.
 
 Misconfiguration fails fast with a specific message in every case: a missing Postgres URL, a
-missing advertise URL, `@stackbase/fleet` not installed, or `--fleet` combined with
+missing advertise URL, `@helipod/fleet` not installed, or `--fleet` combined with
 `--object-store` each name exactly what to fix and exit 1 before anything binds. No `--fleet` at
 all is unchanged single-node behavior. The exact messages, and every fleet flag and environment
-variable, are in [the CLI reference](/docs/reference/cli#stackbase-serve).
+variable, are in [the CLI reference](/docs/reference/cli#helipod-serve).
 
 `serve`'s machine-readable startup line gains two additive fields in fleet mode:
 `{"fleet":true,"role":"writer"}` (or `"sync"`), printed once at boot. Watch logs or the dashboard,
@@ -237,7 +237,7 @@ in a fleet, where one node may be fanning out to more connections.
   observing a sync node promote and start serving writes.
 - **A writer that's alive but stuck** (a GC pause, a frozen process, a hung transaction) is a
   different failure: the process never exits, so another node has to notice and take over. Every
-  writer's lease carries a time limit, **`STACKBASE_FLEET_LEASE_TTL_MS`** (default `15000`), that it
+  writer's lease carries a time limit, **`HELIPOD_FLEET_LEASE_TTL_MS`** (default `15000`), that it
   must keep renewing to stay the writer. Once it stops renewing, another node waits out the limit
   and takes the lease away, fencing it: any commit the stuck writer had in flight at that exact
   moment is aborted rather than allowed to land, so a write is never left half-applied. The new
@@ -245,7 +245,7 @@ in a fleet, where one node may be fanning out to more connections.
   unnoticed. Measured end-to-end with the TTL shortened to 4 seconds for testing: takeover completed
   about 4.5 seconds after the writer wedged. A revived frozen writer discovers its lease is gone and
   exits on its own. A process supervisor restarts it, and it rejoins as an ordinary sync node.
-- Lowering `STACKBASE_FLEET_LEASE_TTL_MS` makes a wedged-writer takeover faster at the cost of a
+- Lowering `HELIPOD_FLEET_LEASE_TTL_MS` makes a wedged-writer takeover faster at the cost of a
   healthy writer needing to renew more often (a transient GC pause could trigger an unnecessary
   failover); raising it does the opposite. Set the same value on every node.
 - **The writer's Postgres connection has its own fixed limits, independent of the lease**: a single
@@ -262,7 +262,7 @@ in a fleet, where one node may be fanning out to more connections.
 Every forwarded write (sync-node-to-writer, or node-to-node under multi-writer distribution) carries
 a one-time marker recorded atomically as part of the same commit as the write itself. If the same
 forwarded write is retried, because the original response never made it back to the caller,
-stackbase recognizes the marker and hands back the original result instead of running the write a
+helipod recognizes the marker and hands back the original result instead of running the write a
 second time. Precisely stated:
 
 - Your mutation's handler body can still run more than once if two retries of the very same write
@@ -307,8 +307,8 @@ Sharding is what lets writes themselves parallelize: annotate a table with `.sha
 mutation that writes it with `shardBy`, and that table's writes route across multiple independent
 shards instead of funneling through one bottleneck.
 
-```ts title="stackbase/schema.ts"
-import { defineSchema, defineTable, v } from "@stackbase/values";
+```ts title="helipod/schema.ts"
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export default defineSchema({
   messages: defineTable({
@@ -321,7 +321,7 @@ export default defineSchema({
 });
 ```
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   shardBy: "conversationId",
@@ -335,7 +335,7 @@ codegen cross-checks, and every runtime-enforced rule (a sharded mutation must d
 every write in it must route to that shard, the shard-key field is immutable after insert, a
 sharded mutation may only scan its own shard via an index led by the shard key, and it may freely
 insert into global tables but not replace or delete them). These rules fire identically on a laptop
-running `stackbase dev`, a single `stackbase serve`, or a fleet. `stackbase dev` runs the full shard
+running `helipod dev`, a single `helipod serve`, or a fleet. `helipod dev` runs the full shard
 count (8 by default) as separate virtual shards in-process, so a shard mistake is a dev-time error,
 never a production surprise. An app that never declares `.shardKey`/`shardBy` is byte-identical to
 before, at every tier.
@@ -343,7 +343,7 @@ before, at every tier.
 ### The protocol behind the guarantee: Fenced Frontier
 
 Sharding only works if a subscription spanning multiple shards can never show effect before cause,
-and if a wedged writer can never corrupt or fork a shard's history. Stackbase's design for this,
+and if a wedged writer can never corrupt or fork a shard's history. Helipod's design for this,
 called the **Fenced Frontier**, keeps one global, monotone visibility line even though writes happen
 on N independent per-shard writers:
 
@@ -387,26 +387,26 @@ flowchart LR
 - **Queries and subscriptions are untouched.** They always read one consistent snapshot across every
   shard. This guarantee predates sharding, and sharding doesn't weaken it.
 
-### Shard count: `STACKBASE_FLEET_SHARDS`
+### Shard count: `HELIPOD_FLEET_SHARDS`
 
 The shard count is a **deployment-wide constant**, not per-table or per-app:
 
-- **Default: 8**, whether on `stackbase dev`, a single `serve`, or a fleet.
-- **Set explicitly with `STACKBASE_FLEET_SHARDS`** (a positive integer) before the deployment's very
+- **Default: 8**, whether on `helipod dev`, a single `serve`, or a fleet.
+- **Set explicitly with `HELIPOD_FLEET_SHARDS`** (a positive integer) before the deployment's very
   first boot. It's read once, persisted, and every later boot reads the persisted value back.
-- **Immutable after first boot.** A `STACKBASE_FLEET_SHARDS` value that disagrees with what's
+- **Immutable after first boot.** A `HELIPOD_FLEET_SHARDS` value that disagrees with what's
   already persisted fails fast at boot rather than silently picking one. Pick generously up front if
   you expect to need write parallelism. Growing into it later is an offline operation (below), not a
   live one.
 
-### Changing shard count on a stopped fleet: `stackbase fleet reshard`
+### Changing shard count on a stopped fleet: `helipod fleet reshard`
 
 ```bash
-stackbase fleet reshard --shards 16 --database-url postgres://user:pass@host:5432/db
+helipod fleet reshard --shards 16 --database-url postgres://user:pass@host:5432/db
 ```
 
 This changes a **stopped** Postgres fleet's shard count N to M. It's Postgres-only (`--database-url`,
-or `STACKBASE_DATABASE_URL`, must resolve to a real Postgres URL) and refuses to run against a fleet
+or `HELIPOD_DATABASE_URL`, must resolve to a real Postgres URL) and refuses to run against a fleet
 with any live node. Every fleet node must be stopped first.
 
 The reason this is safe and fast: a fleet shard is a **logical commit-serialization lane over one
@@ -415,7 +415,7 @@ a document belongs to from its key; nothing about a document's storage depends o
 Resharding therefore moves no rows. It updates the persisted shard count and creates or deletes the
 per-shard lease rows to match, in one transaction, healing every remaining shard's frontier forward
 so the fleet comes back up fully consistent. After a successful reshard, update
-`STACKBASE_FLEET_SHARDS` (or unset it) on every node before restarting the fleet. The command's own
+`HELIPOD_FLEET_SHARDS` (or unset it) on every node before restarting the fleet. The command's own
 output tells you the new count to use.
 
 ### On a fleet: parallel commits on the writer
@@ -427,7 +427,7 @@ writer's ceiling, even before spreading shard ownership across nodes.
 
 ### Group commit: a single-shard escape hatch
 
-`STACKBASE_GROUP_COMMIT=1` batches concurrent writes on a single shard (or an unsharded fleet, which
+`HELIPOD_GROUP_COMMIT=1` batches concurrent writes on a single shard (or an unsharded fleet, which
 is just shard count 1) so they share one Postgres round trip instead of each paying its own.
 
 <Callout type="info" title="Worth trying if a single shard is your write bottleneck">
@@ -448,7 +448,7 @@ environment variable changes that: different shards get owned and written by *di
 once, so write throughput scales with node count as well as shard count.
 
 ```bash
-export STACKBASE_FLEET_MULTI_WRITER=1
+export HELIPOD_FLEET_MULTI_WRITER=1
 ```
 
 Set this on **every** node. There's no CLI flag, only the environment variable, and it's a
@@ -463,7 +463,7 @@ whole-deployment setting: mixing nodes with and without it set isn't supported. 
   keeps seeing changes to every shard, not just the ones that node itself owns.
 - **Failover is per-shard.** Losing a writer node stalls only the shards it owned, not the whole
   fleet's writes; other nodes' own shards keep committing throughout. Same
-  `STACKBASE_FLEET_LEASE_TTL_MS` timing as single-writer failover.
+  `HELIPOD_FLEET_LEASE_TTL_MS` timing as single-writer failover.
 - **Adding a node doesn't wait for anything to expire.** Existing writers notice a healthy newcomer
   within a couple of beats and hand it its share of shards directly.
 - **Scheduled functions and crons always run on exactly one node**: whichever one owns the same
@@ -484,7 +484,7 @@ whole-deployment setting: mixing nodes with and without it set isn't supported. 
 <Accordion title="Multi-node write scale-out">
 
 Real distributed write throughput, N `serve --fleet` writer nodes
-(`STACKBASE_FLEET_MULTI_WRITER=1`) over one shared Postgres, 4 shards per node, driver routing every
+(`HELIPOD_FLEET_MULTI_WRITER=1`) over one shared Postgres, 4 shards per node, driver routing every
 write directly to its shard's owner (see `docs/dev/research/multinode-throughput.md` for the full
 harness):
 
@@ -524,7 +524,7 @@ scale-out needs the store sharded too, which is exactly what Tier 3 does.
 
 </Accordions>
 
-## Tier 3: the object-storage substrate (`@stackbase/objectstore-substrate`)
+## Tier 3: the object-storage substrate (`@helipod/objectstore-substrate`)
 
 Tier 2's own benchmark names its ceiling honestly: every fleet node commits to the *same* Postgres
 database, so multi-node write scale-out is real but sublinear. The shared store is what's contended,
@@ -543,32 +543,32 @@ backend with no database at all.
 ### Starting an object-storage node
 
 ```bash
-STACKBASE_ADMIN_KEY=secret stackbase serve --dir stackbase \
+HELIPOD_ADMIN_KEY=secret helipod serve --dir helipod \
   --object-store s3://accessKey:secretKey@localhost:9000/my-bucket?region=us-east-1
 ```
 
-- **`--object-store` / `STACKBASE_OBJECT_STORE`** selects the backend by URL scheme: `s3://` /
+- **`--object-store` / `HELIPOD_OBJECT_STORE`** selects the backend by URL scheme: `s3://` /
   `s3+http://` / `s3+https://` for an S3-compatible bucket (AWS S3, MinIO, R2, GCS via its S3
   interop), `file://<path>` or a bare filesystem path for a local, single-process filesystem store
   (development use). An unsupported scheme is rejected rather than silently falling back to the
   filesystem. Mutually exclusive with `--fleet`: pick one write-scaling story.
-- **`--shards N` / `STACKBASE_FLEET_SHARDS`** (object-store boots only) sizes a **multi-shard
+- **`--shards N` / `HELIPOD_FLEET_SHARDS`** (object-store boots only) sizes a **multi-shard
   single-node writer**: this node owns and writes all N lanes itself. `N = 1` (the default) is the
   single-shard path, unchanged. Requires `--object-store`; invalid combined with `--replica` (a
   replica is always single-shard-per-lane, but tails every lane the bucket has) or `--fleet`.
-- **`--replica` / `STACKBASE_REPLICA`** boots this node as a **read-only replica** of an
+- **`--replica` / `HELIPOD_REPLICA`** boots this node as a **read-only replica** of an
   object-storage bucket. It materializes and tails every shard lane the bucket currently has (derived
   from the bucket's own persisted globals, not a flag), serves queries and subscriptions from its
   local materialized copy, and rejects mutations with a clear "read replica" message. Requires
   `--object-store`.
-- **`--writer-url` / `STACKBASE_WRITER_URL`** (replica boots only) makes a replica **forward**
+- **`--writer-url` / `HELIPOD_WRITER_URL`** (replica boots only) makes a replica **forward**
   mutations/actions to the named writer instead of rejecting them, the same write-forwarding model
   the Postgres fleet uses, on the engine's shared `WriteRouter` seam. Without it, a replica simply
   rejects writes. Not yet supported when the bucket has more than one shard (see
   [Current limits](#current-limits-1) below).
-- **`STACKBASE_OBJECTSTORE_GC_MS`** sets the writer's background garbage-collection sweep cadence
+- **`HELIPOD_OBJECTSTORE_GC_MS`** sets the writer's background garbage-collection sweep cadence
   (default ~60 seconds), reclaiming segments and snapshots already superseded by a later snapshot.
-- **`--wake-url` / `STACKBASE_WAKE_URL`** and **`--backstop-min-ms` / `STACKBASE_BACKSTOP_MIN_MS`**
+- **`--wake-url` / `HELIPOD_WAKE_URL`** and **`--backstop-min-ms` / `HELIPOD_BACKSTOP_MIN_MS`**
   are the *wake seam*: for a host that stops the process between requests (e.g. Cloudflare
   Containers), `--wake-url` gives every recurring driver (the heartbeat, the gc sweep) a way to ask
   the host to wake the process again; `--backstop-min-ms` floors every driver's own backstop poll
@@ -576,7 +576,7 @@ STACKBASE_ADMIN_KEY=secret stackbase serve --dir stackbase \
   often than necessary. Unset, both are a no-op: drivers use their own default 30s/60s cadence.
 
 The full `--object-store` URL grammar (schemes, credential resolution, worked examples) lives in
-[the CLI reference](/docs/reference/cli#stackbase-serve).
+[the CLI reference](/docs/reference/cli#helipod-serve).
 
 ### What's actually shipped
 
@@ -606,10 +606,10 @@ The full `--object-store` URL grammar (schemes, credential resolution, worked ex
   (`SIGTERM`/`SIGINT`) calls `relinquish()`, a best-effort CAS-clear of the lease, so another node
   can take over immediately rather than waiting out the full lease TTL.
 
-### Changing shard count: `stackbase objectstore reshard`
+### Changing shard count: `helipod objectstore reshard`
 
 ```bash
-stackbase objectstore reshard --object-store s3://... --dir stackbase --shards 4
+helipod objectstore reshard --object-store s3://... --dir helipod --shards 4
 ```
 
 Unlike the Postgres fleet's reshard, an object-storage shard has its own physical, append-only log.
@@ -642,14 +642,14 @@ Everything at Tier 0/1 (single-node self-hosting on SQLite or Postgres, the stan
 free, unrestricted, and always will be: deploy anywhere on your own infrastructure with no key
 required.
 
-Both `@stackbase/fleet` (Tier 2) and `@stackbase/objectstore-substrate` (Tier 3) are `ee/`-licensed
-packages: source-available under stackbase's separate, non-converting commercial license, not the
+Both `@helipod/fleet` (Tier 2) and `@helipod/objectstore-substrate` (Tier 3) are `ee/`-licensed
+packages: source-available under helipod's separate, non-converting commercial license, not the
 FSL-1.1-Apache-2.0 license the rest of the repo ships under. In the current phase, both are free to
 use in production, with no license-key gate yet. The intent, per the project's business model, is
 that a future paid license unlocks the `license.has("scale")` capability those packages sit behind.
 Scaling capability, not deployment location, is what the key gates: you can always deploy anywhere,
 on your own infrastructure, at every tier. The key affects whether you can scale past one writer.
-Core stackbase has no hard dependency on either `ee/` package: `serve --fleet` and
+Core helipod has no hard dependency on either `ee/` package: `serve --fleet` and
 `serve --object-store` both dynamically `import()` their package, so a deployment that never opts
 into scale-out never even resolves it.
 

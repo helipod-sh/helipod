@@ -11,13 +11,13 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
-import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@stackbase/docstore-d1";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
+import { D1DocStore, type D1Client, type D1PreparedStatement, type D1Session } from "@helipod/docstore-d1";
+import { encodeStorageIndexId } from "@helipod/id-codec";
 import {
   InlineUdfExecutor,
   SimpleIndexCatalog,

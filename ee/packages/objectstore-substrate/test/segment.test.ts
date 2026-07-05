@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { generateInternalId } from "@stackbase/id-codec";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
+import { generateInternalId } from "@helipod/id-codec";
+import type { DocumentLogEntry, IndexWrite } from "@helipod/docstore";
 import { decodeSegment, encodeSegment, type SegmentPayload } from "../src/segment";
 
 function docId(tableNumber: number) {

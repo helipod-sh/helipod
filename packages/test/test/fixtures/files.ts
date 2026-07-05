@@ -1,4 +1,4 @@
-import { mutation, action } from "@stackbase/executor";
+import { mutation, action } from "@helipod/executor";
 export const makeUpload = mutation(async (ctx: any) => ctx.storage.generateUploadUrl({}));
 export const storeBytes = action(async (ctx: any, { text }: { text: string }) =>
   ctx.storage.store(new TextEncoder().encode(text), { contentType: "text/plain" }));

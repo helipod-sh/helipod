@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/docstore",
+  "name": "@helipod/docstore",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -25,11 +25,11 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/index-key-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

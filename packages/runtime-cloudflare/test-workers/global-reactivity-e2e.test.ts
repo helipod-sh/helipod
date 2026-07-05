@@ -8,7 +8,7 @@
  * workerd's actual D1/SQLite dialect), with a live WebSocket subscription on one DO observing a
  * `.global()` write committed on the OTHER. Two differently-named stubs of the SAME `GLOBAL_REACTIVITY_DO`
  * namespace already ARE "two DOs sharing one D1 binding" (exactly how `global-d1-e2e.test.ts`'s own
- * five scenarios work across `GLOBAL_D1_DO`), and `StackbaseDurableObject`'s `/api/sync` WebSocket
+ * five scenarios work across `GLOBAL_D1_DO`), and `HelipodDurableObject`'s `/api/sync` WebSocket
  * upgrade is available on every subclass already.
  *
  * The poller's cadence is driven DETERMINISTICALLY, never by a wall-clock sleep: `runDurableObjectAlarm`
@@ -17,7 +17,7 @@
  * `alarm()` handler calls) still gates each due driver timer on its OWN in-process `atMs <= now()`
  * check, and a REAL DO's module scope can't share a mutable injected clock with the test file the way
  * the Node-fake `global-reactivity-driver.test.ts` shares its `let clock` closure directly with an
- * in-process `StackbaseDurableObject`. So this file's fixture (`GlobalReactivityDO`) is armed with a
+ * in-process `HelipodDurableObject`. So this file's fixture (`GlobalReactivityDO`) is armed with a
  * new `DurableObjectAppConfig.globalReactivityPollMs: 0` (a Task-7 addition to `durable-object.ts`,
  * threaded straight through to `bootDurableObjectRuntime`'s existing `globalReactivityPollMs` option) —
  * the poller STILL only ever fires when explicitly triggered via `runDurableObjectAlarm` (never a

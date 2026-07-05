@@ -3,7 +3,7 @@
  *
  * The routing seam (`./shard.ts`) declares WHAT a router does; this file is HOW B2a does it:
  * a shard-key value is canonicalized to bytes the way the engine already canonicalizes index
- * keys (`encodeIndexKey` from `@stackbase/index-key-codec` — never a hand-rolled encoding, so
+ * keys (`encodeIndexKey` from `@helipod/index-key-codec` — never a hand-rolled encoding, so
  * a `1` routes the same whether it arrives as an arg or is read back off a document), hashed to
  * a 64-bit key, and mapped to a bucket in `[0, numShards)` by jump consistent hash. Slot 0 is
  * the reserved `"default"` shard (unsharded tables + no-`shardBy` mutations); slot k>0 is `"s"+k`.
@@ -12,7 +12,7 @@
  * n' only ever moves a key to one of the NEW buckets `[n, n')`, never reshuffles a key among the
  * old buckets — the property B5's offline resharding tool leans on.
  */
-import { encodeIndexKey, type IndexableValue } from "@stackbase/index-key-codec";
+import { encodeIndexKey, type IndexableValue } from "@helipod/index-key-codec";
 import { DEFAULT_SHARD, type ShardId, type ShardKey } from "./shard";
 import type { ShardRouter } from "./shard";
 

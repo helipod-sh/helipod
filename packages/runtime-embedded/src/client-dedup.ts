@@ -15,13 +15,13 @@
 import {
   CommitGuardRejection,
   isRetryableError,
-  isStackbaseError,
-} from "@stackbase/errors";
-import type { ShardId } from "@stackbase/id-codec";
-import type { ClientReplay } from "@stackbase/executor";
-import type { ClientMutationVerdict } from "@stackbase/sync";
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import type { CommitGuardUnit, DocStore, ClientVerdictRecord } from "@stackbase/docstore";
+  isHelipodError,
+} from "@helipod/errors";
+import type { ShardId } from "@helipod/id-codec";
+import type { ClientReplay } from "@helipod/executor";
+import type { ClientMutationVerdict } from "@helipod/sync";
+import { convexToJson, type JSONValue, type Value } from "@helipod/values";
+import type { CommitGuardUnit, DocStore, ClientVerdictRecord } from "@helipod/docstore";
 
 /** The durable per-tab dedup key threaded from the wire (`Mutation.clientId`/`seq`). */
 export interface DedupKey {
@@ -124,7 +124,7 @@ export async function handleDedupError(
     return rec ? replayFromRecord(rec) : null;
   }
   if (!isRetryableError(e)) {
-    const code = isStackbaseError(e) ? e.code : "MUTATION_FAILED";
+    const code = isHelipodError(e) ? e.code : "MUTATION_FAILED";
     await store.recordClientVerdict(id, dedup.clientId, dedup.seq, { verdict: "failed", commitTs: 0n, errorCode: code });
   }
   return null;

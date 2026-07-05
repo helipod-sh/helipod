@@ -13,7 +13,7 @@
 // `cctx.functionKind`), so a cron targeting an action is tagged `kind:"action"` and `_reclaim`'s
 // already-correct action branch (dead-letter, never retry) fires for real.
 import { describe, it, expect } from "vitest";
-import { action, mutation } from "@stackbase/executor";
+import { action, mutation } from "@helipod/executor";
 import { cronJobs } from "../src/index";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 

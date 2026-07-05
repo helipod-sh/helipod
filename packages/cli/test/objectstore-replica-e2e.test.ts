@@ -1,6 +1,6 @@
 /**
  * Tier 3 Slice 8, Task 8.3 — the HEADLINE E2E: a WRITER node + a REPLICA node over the SAME
- * object-store bucket, each a real `stackbase serve` boot through the shipped `startServe` entrypoint
+ * object-store bucket, each a real `helipod serve` boot through the shipped `startServe` entrypoint
  * (real HTTP + WebSocket servers, real `ObjectStoreDocStore`s, real bucket I/O — the same "two real
  * serve processes" pattern `objectstore-serve-e2e.test.ts` (Slice 6) already established for a
  * writer-vs-successor-writer takeover; this file is its read-scaled sibling), fs (hermetic, always
@@ -15,7 +15,7 @@
  *      tailer round needed.
  *   3. A `notes:list` WS subscription opened on the REPLICA; a mutation committed on the WRITER via
  *      `POST /api/run`; the REPLICA's subscription FIRES with the writer's new data — cross-node
- *      reactive propagation through TWO real `stackbase serve` processes, over object storage alone
+ *      reactive propagation through TWO real `helipod serve` processes, over object storage alone
  *      (the replica's own reactive tailer, Task 8.1/8.2, driving it — no shared database).
  *   4. A mutation via `POST /api/run` on the REPLICA is REJECTED (non-2xx, the clear "read replica"
  *      message) — free from the lease requirement (the replica never `acquire()`d) — and the writer's
@@ -33,14 +33,14 @@ import { createRequire } from "node:module";
 import WebSocket from "ws";
 import { startServe } from "../src/serve";
 import { resolveObjectStore } from "../src/objectstore-select";
-import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
+import { readConsumerWatermarks } from "@helipod/objectstore-substrate";
 
 /* -------------------------------------------------------------------------- */
 /* Fixture: the same committed deploy-v2 fixture (notes.add/list) used by     */
 /* Slice 6/7/8's other object-store CLI tests.                                */
 /* -------------------------------------------------------------------------- */
 
-const FUNCTIONS_DIR = "test/fixtures/deploy-v2/stackbase";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/helipod";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors objectstore-serve-e2e.test.ts / serve-e2e.test.ts) */
@@ -269,7 +269,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 /* fs arm — hermetic, always on                                               */
 /* -------------------------------------------------------------------------- */
 
-describe("stackbase serve --object-store --replica — end-to-end (fs, real server)", () => {
+describe("helipod serve --object-store --replica — end-to-end (fs, real server)", () => {
   it(
     "writer + replica over one bucket: cross-node reactive fan-out, replica rejects writes, replica publishes its watermark",
     async () => {
@@ -293,25 +293,25 @@ function dockerAvailable(): boolean {
   }
 }
 
-const RUN_MINIO = dockerAvailable() && process.env.STACKBASE_OBJECTSTORE_S3 === "1";
+const RUN_MINIO = dockerAvailable() && process.env.HELIPOD_OBJECTSTORE_S3 === "1";
 const maybeDescribe = RUN_MINIO ? describe : describe.skip;
 
 const MINIO_CONTAINER = `sb-minio-objstore-replica-e2e-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-objstore-replica-e2e";
+const BUCKET = "helipod-objstore-replica-e2e";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-/** Resolve `@aws-sdk/client-s3` from `@stackbase/objectstore-s3`'s own node_modules (used only for
+/** Resolve `@aws-sdk/client-s3` from `@helipod/objectstore-s3`'s own node_modules (used only for
  * bucket creation — the scenario itself goes entirely through the shipped `--object-store` URL /
  * `resolveObjectStore` path, never constructing an `S3ObjectStore` directly). */
 function loadS3Sdk(): { S3Client: any; CreateBucketCommand: any } {
   const reqRoot = createRequire(import.meta.url);
-  const reqS3 = createRequire(reqRoot.resolve("@stackbase/objectstore-s3"));
+  const reqS3 = createRequire(reqRoot.resolve("@helipod/objectstore-s3"));
   return reqS3("@aws-sdk/client-s3");
 }
 
@@ -367,7 +367,7 @@ function stopMinio(): void {
   runDocker(["rm", "-f", MINIO_CONTAINER]);
 }
 
-maybeDescribe("stackbase serve --object-store --replica — end-to-end (real MinIO, gated)", () => {
+maybeDescribe("helipod serve --object-store --replica — end-to-end (real MinIO, gated)", () => {
   afterAll(() => stopMinio());
 
   it(

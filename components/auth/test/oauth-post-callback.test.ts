@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { defineSchema } from "@helipod/values";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
 import { defineAuth } from "../src/component";
 import { oauthProvider } from "../src/oauth";
 import type { MintResult } from "../src/functions";

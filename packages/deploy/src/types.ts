@@ -13,7 +13,7 @@ export interface ResolvedTarget {
 
 export interface DeployContext {
   cwd: string;                           // project root (dir containing the functions dir)
-  functionsDir: string;                  // path to the functions dir (default "stackbase/")
+  functionsDir: string;                  // path to the functions dir (default "helipod/")
   env: string;                           // = ResolvedTarget.env
   target: ResolvedTarget;
   interactive: boolean;                  // stdin.isTTY && !process.env.CI — false gates all prompts

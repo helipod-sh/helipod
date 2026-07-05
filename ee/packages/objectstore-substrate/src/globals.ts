@@ -6,7 +6,7 @@
  * create-only-via-`casPut` + JSON-encode/decode shape, but for a single bucket-wide key instead of a
  * per-shard one.
  */
-import { isCasConflict, type ObjectStore } from "@stackbase/objectstore";
+import { isCasConflict, type ObjectStore } from "@helipod/objectstore";
 
 /** The deployment-wide identity every node adopts on open. `numShards` is recorded once at deployment
  *  creation (Task 4.3 composes `numShards` independent per-shard lanes over the same bucket). */

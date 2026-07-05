@@ -1,6 +1,6 @@
-import type { Driver, DriverContext } from "@stackbase/component";
-import type { JSONValue } from "@stackbase/values";
-import { isStackbaseError } from "@stackbase/errors";
+import type { Driver, DriverContext } from "@helipod/component";
+import type { JSONValue } from "@helipod/values";
+import { isHelipodError } from "@helipod/errors";
 import type { ClaimResult, JobResult, PeekDueResult } from "./modules";
 import { SWEEP_MS } from "./modules";
 
@@ -23,7 +23,7 @@ export interface SchedulerDriver extends Driver {
 }
 
 /**
- * `@stackbase/scheduler`'s driver — the event-driven loop that actually RUNS due jobs.
+ * `@helipod/scheduler`'s driver — the event-driven loop that actually RUNS due jobs.
  *
  * Two wake sources, NO fixed-interval polling:
  *  - **Reactive**: taps the runtime's commit fan-out (`DriverContext.onCommit`) and re-runs
@@ -84,7 +84,7 @@ export function schedulerDriver(): SchedulerDriver {
   // already returned, and the loop keeps running forever. Checked at every AUTOMATIC re-entry/
   // re-arm point — `wake` (the onCommit/timer callback), `runPass`'s end-of-pass re-arm, and
   // `armSweep` — so a timer/commit callback that fires concurrently with `stop()` can't start or
-  // re-schedule work either. (Mirrors the same guard in `@stackbase/storage`'s reaper driver.)
+  // re-schedule work either. (Mirrors the same guard in `@helipod/storage`'s reaper driver.)
   //
   // `iterate()` itself is deliberately NOT guarded: the ONLY caller that reaches it while
   // `stopped` is the `__tick()` test seam (an explicit, synchronous manual drive), which tests
@@ -148,7 +148,7 @@ export function schedulerDriver(): SchedulerDriver {
 
         // Mutations and actions dispatch through the identical path: `ctx.runFunction` routes to
         // the runtime, which routes to the executor's action branch for a `kind:"action"` fnPath
-        // (CLAUDE.md build-order #5's action runtime — see @stackbase/executor) — the driver
+        // (CLAUDE.md build-order #5's action runtime — see @helipod/executor) — the driver
         // itself doesn't need to know which kind it claimed. At-most-once for actions is NOT this
         // try/catch's job: it's already guaranteed by `_claim` committing `state:"inProgress"`
         // BEFORE this call runs, so a crash mid-action leaves the job for `_reclaim`'s lease sweep
@@ -162,9 +162,9 @@ export function schedulerDriver(): SchedulerDriver {
         } catch (e) {
           // Preserve the error's retryability so `_complete` can fail fast on a deterministic,
           // non-retryable failure (e.g. a `DocumentValidationError` from a schema-violating write)
-          // instead of burning every retry. A plain (non-Stackbase) error defaults to retryable, so
+          // instead of burning every retry. A plain (non-Helipod) error defaults to retryable, so
           // the scheduler's existing "retry unknown failures up to maxFailures" behavior is unchanged.
-          result = { kind: "failed", error: String(e), retryable: isStackbaseError(e) ? e.retryable : true };
+          result = { kind: "failed", error: String(e), retryable: isHelipodError(e) ? e.retryable : true };
         }
         // `result.value` (an action/mutation's arbitrary return) is `unknown`, not provably a
         // `JSONValue` — it's already been through the same JSON syscall round-trip as any other

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ResumeRegistry, regKey, TTL_MS } from "../src/resume-registry";
-import { indexKeyspaceId, keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
+import { indexKeyspaceId, keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@helipod/index-key-codec";
 
 /** A point range in the `notes` table's `by_<field>` index for a given value. */
 function rangeFor(field: string, value: string): SerializedKeyRange {

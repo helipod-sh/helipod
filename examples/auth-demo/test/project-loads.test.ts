@@ -4,10 +4,10 @@
  * Two complementary assertions:
  *
  * 1. loadConfig(exampleRoot) → components includes the auth component (name === "auth").
- *    This proves stackbase.config.ts is read and the `auth` component is declared.
+ *    This proves helipod.config.ts is read and the `auth` component is declared.
  *
  * 2. loadProject(handBuiltProject, [auth]) → moduleMap contains "auth:signIn" and "whoami:get",
- *    and componentNames contains "auth". This proves the composition that stackbase dev performs
+ *    and componentNames contains "auth". This proves the composition that helipod dev performs
  *    would expose the right functions.
  *
  * We don't use loadConvexDir here because dynamic-importing .ts files from a vitest test running
@@ -17,15 +17,15 @@
 import { describe, it, expect } from "vitest";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query } from "@stackbase/executor";
-import { defineSchema } from "@stackbase/values";
-import { loadConfig, loadProject } from "@stackbase/cli";
-import { auth } from "@stackbase/auth";
+import { query } from "@helipod/executor";
+import { defineSchema } from "@helipod/values";
+import { loadConfig, loadProject } from "@helipod/cli";
+import { auth } from "@helipod/auth";
 
 const exampleRoot = resolve(fileURLToPath(import.meta.url), "../../");
 
 describe("auth-demo project loads", () => {
-  it("loadConfig reads stackbase.config.ts and reports the auth component", async () => {
+  it("loadConfig reads helipod.config.ts and reports the auth component", async () => {
     const cfg = await loadConfig(exampleRoot);
     const names = cfg.components.map((c) => c.name);
     expect(names).toContain("auth");
@@ -35,7 +35,7 @@ describe("auth-demo project loads", () => {
     const appSchema = defineSchema({});
 
     // Reproduce what loadConvexDir + loadProject does for this project:
-    // one module file "whoami" exporting a query named "get" (mirrors stackbase/whoami.ts).
+    // one module file "whoami" exporting a query named "get" (mirrors helipod/whoami.ts).
     const whoamiGet = query(
       async (ctx) =>
         (ctx as unknown as { auth: { getUserId(): Promise<string | null> } }).auth.getUserId(),

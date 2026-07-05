@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, query, mutation, action, type RegisteredFunction } from "@stackbase/executor";
-import type { IndexSpec } from "@stackbase/query-engine";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi, memoryOutbox, type ClientTransport } from "../src/index";
-import type { Value } from "@stackbase/values";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog, query, mutation, action, type RegisteredFunction } from "@helipod/executor";
+import type { IndexSpec } from "@helipod/query-engine";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, loopbackTransport, anyApi, memoryOutbox, type ClientTransport } from "../src/index";
+import type { Value } from "@helipod/values";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 const MESSAGES = 10001;
 const byConversation: IndexSpec = {
@@ -48,8 +48,8 @@ async function waitFor(cond: () => boolean, timeoutMs = 1000): Promise<void> {
 }
 
 let runtime: EmbeddedRuntime;
-function newClient(session: string): StackbaseClient {
-  return new StackbaseClient(loopbackTransport(runtime.connect(session)));
+function newClient(session: string): HelipodClient {
+  return new HelipodClient(loopbackTransport(runtime.connect(session)));
 }
 
 beforeEach(async () => {
@@ -58,7 +58,7 @@ beforeEach(async () => {
   runtime = await createEmbeddedRuntime({ store, catalog, modules });
 });
 
-describe("StackbaseClient — reactive subscriptions", () => {
+describe("HelipodClient — reactive subscriptions", () => {
   it("delivers the initial result, then updates live when another client mutates", async () => {
     const clientA = newClient("sA");
     const clientB = newClient("sB");
@@ -89,7 +89,7 @@ describe("StackbaseClient — reactive subscriptions", () => {
   });
 });
 
-describe("StackbaseClient — one-shot query and mutation", () => {
+describe("HelipodClient — one-shot query and mutation", () => {
   it("query() resolves with the current value", async () => {
     const client = newClient("s1");
     await client.mutation(api.messages.send, { conversationId: "c1", body: "seed" });
@@ -138,10 +138,10 @@ class MockTransport implements ClientTransport {
   }
 }
 
-describe("StackbaseClient — protocol safety", () => {
+describe("HelipodClient — protocol safety", () => {
   it("a dropped transition (version gap) triggers a resync and never delivers stale values", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const seen: Array<Array<{ body: string }>> = [];
     client.subscribe(api.messages.list, { conversationId: "c1" }, (v) => seen.push(v as Array<{ body: string }>));
 
@@ -168,7 +168,7 @@ describe("StackbaseClient — protocol safety", () => {
 
   it("rejects pending mutations when the transport closes (no hung promises)", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const pending = client.mutation(api.messages.send, { conversationId: "c1", body: "x" });
     t.close();
     await expect(pending).rejects.toThrow(/connection closed/);
@@ -176,7 +176,7 @@ describe("StackbaseClient — protocol safety", () => {
 
   it("action() sends an Action message and resolves on the matching ActionResponse", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const pending = client.action(api.messages.echo, { body: "hi" });
     expect(t.sent.at(-1)).toMatchObject({ type: "Action", udfPath: "messages:echo", args: { body: "hi" } });
     const requestId = (t.sent.at(-1) as any).requestId;
@@ -186,14 +186,14 @@ describe("StackbaseClient — protocol safety", () => {
 
   it("rejects pending actions when the transport closes (no hung promises)", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const pending = client.action(api.messages.echo, { body: "x" });
     t.close();
     await expect(pending).rejects.toThrow(/connection closed/);
   });
 });
 
-describe("StackbaseClient — query failure surfacing (no silent QueryFailed drop)", () => {
+describe("HelipodClient — query failure surfacing (no silent QueryFailed drop)", () => {
   it("fires onError (and never onUpdate) when a subscribed query throws server-side", async () => {
     const client = newClient("sErr");
     const updates: unknown[] = [];
@@ -215,14 +215,14 @@ describe("StackbaseClient — query failure surfacing (no silent QueryFailed dro
   });
 });
 
-describe("StackbaseClient — the OutboxStorage seam (Task 1: identity only)", () => {
+describe("HelipodClient — the OutboxStorage seam (Task 1: identity only)", () => {
   it("no-outbox-config byte-identity: a client constructed without `outbox` has no durable identity", () => {
     const client = newClient("sNoOutbox");
     expect(client.getOutboxIdentity()).toBeUndefined();
   });
 
   it("mints a durable clientId when constructed with an `outbox`", async () => {
-    const client = new StackbaseClient(loopbackTransport(runtime.connect("sOutbox1")), { outbox: memoryOutbox() });
+    const client = new HelipodClient(loopbackTransport(runtime.connect("sOutbox1")), { outbox: memoryOutbox() });
     const identity = await client.getOutboxIdentity();
     expect(identity).toBeDefined();
     expect(typeof identity?.clientId).toBe("string");
@@ -232,15 +232,15 @@ describe("StackbaseClient — the OutboxStorage seam (Task 1: identity only)", (
 
   it("two client instances sharing the same outbox mint DIFFERENT clientIds — never reused across a reload", async () => {
     const outbox = memoryOutbox();
-    const a = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxA")), { outbox });
-    const b = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxB")), { outbox });
+    const a = new HelipodClient(loopbackTransport(runtime.connect("sOutboxA")), { outbox });
+    const b = new HelipodClient(loopbackTransport(runtime.connect("sOutboxB")), { outbox });
     const [idA, idB] = await Promise.all([a.getOutboxIdentity(), b.getOutboxIdentity()]);
     expect(idA?.clientId).not.toBe(idB?.clientId);
   });
 
   it("the minted clientId's meta row is durable in the outbox itself", async () => {
     const outbox = memoryOutbox();
-    const client = new StackbaseClient(loopbackTransport(runtime.connect("sOutboxMeta")), { outbox });
+    const client = new HelipodClient(loopbackTransport(runtime.connect("sOutboxMeta")), { outbox });
     const identity = await client.getOutboxIdentity();
     expect(identity).toBeDefined();
     const meta = await outbox.getMeta(identity!.clientId);

@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import { byIdChangesFor, byIdResetChanges, rangeChangesFor, rangeResetChanges, orderKeyFor } from "../src/commit-differ";
 import { applyChanges, driftChecksum, type RowVersion } from "../src/change";
 import type { RangeRead } from "../src/classify";
-import type { WrittenDoc } from "@stackbase/transactor";
-import type { FilterExpr } from "@stackbase/query-engine";
-import { serializeKeyRange, indexKeyRangeStart, indexKeyRangeEnd, indexKeyspaceId } from "@stackbase/index-key-codec";
+import type { WrittenDoc } from "@helipod/transactor";
+import type { FilterExpr } from "@helipod/query-engine";
+import { serializeKeyRange, indexKeyRangeStart, indexKeyRangeEnd, indexKeyspaceId } from "@helipod/index-key-codec";
 
 const byId = { keyspace: "table:3", key: "AAE=", docId: "docs|a" };
 const wd = (newRow: unknown, wasPresent: boolean, ts: number): WrittenDoc =>

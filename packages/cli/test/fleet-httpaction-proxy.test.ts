@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog } from "@stackbase/executor";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog } from "@helipod/executor";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
 import { handleHttpRequest, type FleetHandles } from "../src/http-handler";
 import type { ResolvedRoute } from "../src/project";
 

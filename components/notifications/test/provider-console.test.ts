@@ -7,7 +7,7 @@ describe("console providers", () => {
     try {
       const res = await consoleEmail().send({ to: "a@b.test", from: "no-reply@x", subject: "Hi", text: "line1\nline2" });
       expect(res).toEqual({});
-      expect(spy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("stackbase notifications] email") && a.includes("a@b.test") && a.includes("Hi")))).toBe(true);
+      expect(spy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("helipod notifications] email") && a.includes("a@b.test") && a.includes("Hi")))).toBe(true);
     } finally {
       spy.mockRestore();
     }

@@ -1,7 +1,7 @@
 /**
  * Packlist E2E — the README's demo flows, through the REAL machinery end-to-end: the real
- * `stackbase dev` server (startDevServer), a real StackbaseClient over a real WebSocket, the
- * demo's OWN `offlineToggleTransport` as the offline switch, the demo's own stackbase functions,
+ * `helipod dev` server (startDevServer), a real HelipodClient over a real WebSocket, the
+ * demo's OWN `offlineToggleTransport` as the offline switch, the demo's own helipod functions,
  * and a client-minted id from the committed `_generated/ids.ts`. This is the protocol-level
  * twin of driving the app in a browser (the React layer is the only thing not under test here;
  * `packages/cli/test/crosstab-e2e.test.ts` covers the cross-tab rendering mechanism).
@@ -24,15 +24,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, type ClientTransport, type PendingMutationEntry } from "@stackbase/client";
-import { fsOutbox } from "@stackbase/client/outbox-fs";
-import { loadProject, startDevServer, type DevServer } from "@stackbase/cli";
-import schema from "../stackbase/schema";
-import * as lists from "../stackbase/lists";
-import * as items from "../stackbase/items";
-import { mintId } from "../stackbase/_generated/ids";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, type ClientTransport, type PendingMutationEntry } from "@helipod/client";
+import { fsOutbox } from "@helipod/client/outbox-fs";
+import { loadProject, startDevServer, type DevServer } from "@helipod/cli";
+import schema from "../helipod/schema";
+import * as lists from "../helipod/lists";
+import * as items from "../helipod/items";
+import { mintId } from "../helipod/_generated/ids";
 import { offlineToggleTransport, type OfflineToggleTransport } from "../web/offline-transport";
 
 /* ------------------------------------ harness ------------------------------------ */
@@ -95,8 +95,8 @@ describe("packlist E2E — Flow 1: offline mintId chain → reload → reconnect
   it("create-then-reference queued offline survives a client 'reload' and drains exactly once", async () => {
     const dir = mkdtempSync(join(tmpdir(), "packlist-e2e-"));
     const storage = flagStorage();
-    let session1: StackbaseClient | undefined;
-    let session2: StackbaseClient | undefined;
+    let session1: HelipodClient | undefined;
+    let session2: HelipodClient | undefined;
     let transport2: OfflineToggleTransport | undefined;
     let server: DevServer | undefined;
     let runtime: EmbeddedRuntime | undefined;
@@ -108,7 +108,7 @@ describe("packlist E2E — Flow 1: offline mintId chain → reload → reconnect
        * README's star-flow writes: a mintId'd list create plus two adds referencing it. ---- */
       const transport1 = offlineToggleTransport(wsUrl(port), nodeInner(port), storage);
       const outbox1 = fsOutbox({ dir });
-      session1 = new StackbaseClient(transport1, {
+      session1 = new HelipodClient(transport1, {
         outbox: outbox1,
         outboxLocks: null, // single-tab leader (Web Locks don't exist under Node)
         outboxDrainIntervalMs: 0,
@@ -140,7 +140,7 @@ describe("packlist E2E — Flow 1: offline mintId chain → reload → reconnect
        * or the outbox handshake latches and the drain never arms. ---- */
       transport2 = offlineToggleTransport(wsUrl(port), nodeInner(port), storage);
       expect(transport2.isOffline()).toBe(true); // the flag survived the reload
-      session2 = new StackbaseClient(transport2, {
+      session2 = new HelipodClient(transport2, {
         outbox: fsOutbox({ dir }),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,
@@ -180,7 +180,7 @@ describe("packlist E2E — Flow 3: a queued add into a locked list terminal-fail
   it("the conflict path surfaces as a coded terminal failure with working retry()/dismiss()", async () => {
     const dir = mkdtempSync(join(tmpdir(), "packlist-e2e-"));
     const storage = flagStorage();
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let server: DevServer | undefined;
     let runtime: EmbeddedRuntime | undefined;
     const failures: string[] = [];
@@ -188,7 +188,7 @@ describe("packlist E2E — Flow 3: a queued add into a locked list terminal-fail
       ({ runtime, server } = await startServer());
 
       const transport = offlineToggleTransport(wsUrl(server.port), nodeInner(server.port), storage);
-      client = new StackbaseClient(transport, {
+      client = new HelipodClient(transport, {
         outbox: fsOutbox({ dir }),
         outboxLocks: null,
         outboxDrainIntervalMs: 0,

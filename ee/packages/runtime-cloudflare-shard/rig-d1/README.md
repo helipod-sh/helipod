@@ -1,6 +1,6 @@
 # Deploy rig — multi-shard + `.global()`/D1 on real Cloudflare
 
-The first-ever composition of the multi-shard router (`@stackbase/runtime-cloudflare-shard`) with the
+The first-ever composition of the multi-shard router (`@helipod/runtime-cloudflare-shard`) with the
 `.global()`/D1 tier. Sharded tables (`messages`, one DO per room) live in each shard-DO's own
 DO-SQLite; the `.global()` table (`counters`) lives in ONE shared D1 database that every shard-DO
 binds as `env.DB`. This rig proves — on real Cloudflare, not the emulator — that a global row written
@@ -8,7 +8,7 @@ through one shard-DO is readable through another, and that the D1 unique index i
 shards.
 
 The only wiring difference from the sharded-only rig (`../rig`) is in `fixture/worker.ts`: it spreads
-`d1: bindingD1Client(env.DB)` into every shard-DO's `appConfig` (from `@stackbase/docstore-d1`, added
+`d1: bindingD1Client(env.DB)` into every shard-DO's `appConfig` (from `@helipod/docstore-d1`, added
 as a devDependency of this package). The router entry (`createShardWorkerHandler`) is unchanged.
 
 ## What each assertion proves
@@ -30,18 +30,18 @@ npx wrangler login
 
 # 2. provision the shared D1 database, then paste its database_id into wrangler.jsonc's
 #    d1_databases[0].database_id (the committed id is a throwaway from the original proof run).
-npx wrangler d1 create stackbase-shard-d1
+npx wrangler d1 create helipod-shard-d1
 
 # 3. deploy (pass the admin key as a --var override so no secret/var conflict with the placeholder)
-npx wrangler deploy --var STACKBASE_ADMIN_KEY:<a-strong-key>
-#    → https://stackbase-do-shard-d1-fixture.<subdomain>.workers.dev
+npx wrangler deploy --var HELIPOD_ADMIN_KEY:<a-strong-key>
+#    → https://helipod-do-shard-d1-fixture.<subdomain>.workers.dev
 
 # 4. run the E2E against the live deployment
-node e2e.mjs --url https://stackbase-do-shard-d1-fixture.<subdomain>.workers.dev --admin-key <same-key>
+node e2e.mjs --url https://helipod-do-shard-d1-fixture.<subdomain>.workers.dev --admin-key <same-key>
 
 # 5. tear down
 npx wrangler delete
-npx wrangler d1 delete stackbase-shard-d1
+npx wrangler d1 delete helipod-shard-d1
 ```
 
 ## Notes

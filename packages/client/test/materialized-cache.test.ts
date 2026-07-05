@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { LayeredQueryStore } from "../src/layered-store";
 import { Reconciler } from "../src/reconcile";
-import { driftChecksum, type Change, type RowVersion, type StateModification } from "@stackbase/sync";
+import { driftChecksum, type Change, type RowVersion, type StateModification } from "@helipod/sync";
 
 function ck(rows: [string, RowVersion][]): string {
   return driftChecksum(new Map(rows));
@@ -61,7 +61,7 @@ describe("LayeredQueryStore.applyDiff (by-id materialized cache)", () => {
 
 /** Builds a `base64ToBytes`-decodable `orderKey` from raw bytes, so tests reason about actual byte
  *  ordering (via `compareKeyBytes`) rather than hand-guessed base64 letters — exercises the exact
- *  decode path `renderRangeValue` uses (`@stackbase/index-key-codec`'s `base64ToBytes`, the mirror
+ *  decode path `renderRangeValue` uses (`@helipod/index-key-codec`'s `base64ToBytes`, the mirror
  *  of `bytesToBase64` the server's `orderKeyFor` encodes through). */
 function orderKeyB64(bytes: number[]): string {
   return Buffer.from(bytes).toString("base64");

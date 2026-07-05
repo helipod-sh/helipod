@@ -5,24 +5,24 @@ description: runAfter, runAt, and cron jobs.
 
 {/* diataxis: explanation */}
 
-Think of `@stackbase/scheduler` as cron built into your database, not bolted on beside it. A
+Think of `@helipod/scheduler` as cron built into your database, not bolted on beside it. A
 scheduled job is a row in a `jobs` table. Running it later, once, at an exact time, or on a
-recurring cadence, works the same as any other write in stackbase: durably, with nothing polling in
+recurring cadence, works the same as any other write in helipod: durably, with nothing polling in
 the background.
 
 A background driver dispatches the work. It wakes reactively on every commit, plus a wall-clock
 timer armed to the earliest pending job, so nothing is lost to a crash between claiming a job and
 finishing it.
 
-It's the foundation two other components build on. [`@stackbase/workflow`](/docs/components/workflows)
-dispatches every step through the scheduler's own job queue, and both `@stackbase/triggers` and
-`@stackbase/notifications` reuse the same recurring-driver seam for their own background loops.
+It's the foundation two other components build on. [`@helipod/workflow`](/docs/components/workflows)
+dispatches every step through the scheduler's own job queue, and both `@helipod/triggers` and
+`@helipod/notifications` reuse the same recurring-driver seam for their own background loops.
 
 ## Enabling it
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
 
 export default defineConfig({ components: [defineScheduler()] });
 ```
@@ -77,7 +77,7 @@ accordingly. This matters because the two have different delivery guarantees, co
 `runAfter`/`runAt` are the common case, and they only accept a delay or a timestamp. The facade also
 carries a lower-level `enqueue(fnRef, args, opts)` method for the rest of the options. The code
 marks it internal: it exists as the primitive component authors build on (it's how
-`@stackbase/workflow` schedules every step), and its option surface is narrower than the type
+`@helipod/workflow` schedules every step), and its option surface is narrower than the type
 suggests.
 
 <Callout type="info" title="runAt wins over runAfter">
@@ -138,7 +138,7 @@ await ctx.scheduler.enqueue(
   }}
 />
 
-This is also the primitive other components build on. `@stackbase/workflow` schedules every step
+This is also the primitive other components build on. `@helipod/workflow` schedules every step
 through this same `enqueue` path, using `onComplete`/`context` to learn when a step finished and
 what it returned.
 
@@ -158,7 +158,7 @@ guarantees, because only mutations are safely retryable:
   doing external work, the job dead-letters (`state: "failed"`) instead of being re-dispatched.
 
 Retries for an action are opt-in. Passing `retry: { maxFailures }` on the lower-level `enqueue`
-path (which is how `@stackbase/workflow` threads a step's declared `maxAttempts` through) is your
+path (which is how `@helipod/workflow` threads a step's declared `maxAttempts` through) is your
 statement that the target is safe to re-run, and a cleanly-failed action then retries with backoff
 exactly like a mutation. An infra kill still dead-letters even with the opt-in, because an expired
 lease can't tell the scheduler whether the side effects already ran. Make any action you opt into
@@ -196,7 +196,7 @@ await ctx.scheduler.cancel(jobId);
 A job scheduled while its parent is already `canceled` is born canceled: it never gets a chance to
 run at all. One honest note on scope, though: nothing in production sets `parentId` today. The
 schema field, the `by_parent` cascade walk, and the born-canceled check all exist and work, but
-`@stackbase/workflow` cancels its step jobs directly via `scheduler.cancel` rather than chaining
+`@helipod/workflow` cancels its step jobs directly via `scheduler.cancel` rather than chaining
 them, and a plain `ctx.scheduler.runAfter` call made from inside another job's own handler is a
 top-level job, not a child. The mechanism is wired for a future slice that threads a real "current
 job id" through the driver; until then, the cascade only reaches jobs whose `parentId` was set
@@ -234,14 +234,14 @@ current commit lands) with `{ jobId, context, result }` on every terminal transi
 
 `context` is never interpreted by the scheduler. It's stored alongside the job's args and handed
 back byte-for-byte. This pair, a callback plus an opaque payload, is exactly what
-[`@stackbase/workflow`](/docs/components/workflows) is built on: every step dispatch is a scheduled
+[`@helipod/workflow`](/docs/components/workflows) is built on: every step dispatch is a scheduled
 job whose `onComplete` advances the workflow's own journal.
 
 ## Recurring jobs: `cronJobs()`
 
 An app's `crons.ts` declares recurring work:
 
-```ts title="stackbase/crons.ts"
+```ts title="helipod/crons.ts"
 import { cronJobs } from "./_generated/server";
 
 const crons = cronJobs();
@@ -256,10 +256,10 @@ crons.monthly("invoice", { day: 1, hourUTC: 6, minuteUTC: 0 }, internal.billing.
 export default crons;
 ```
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import crons from "./stackbase/crons";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import crons from "./helipod/crons";
 
 export default defineConfig({ components: [defineScheduler({ crons })] });
 ```

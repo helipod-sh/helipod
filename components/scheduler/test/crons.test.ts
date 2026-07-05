@@ -1,8 +1,8 @@
 // components/scheduler/test/crons.test.ts
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
-import { anyApi } from "@stackbase/client";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
+import { mutation } from "@helipod/executor";
+import { anyApi } from "@helipod/client";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
 import { cronJobs, computeNextRun, CATCHUP_CAP } from "../src/index";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
@@ -294,7 +294,7 @@ describe("duplicate-cadence-chain fix — a crashed cadence job never spawns a s
 describe("Convex parity", () => {
   it("a verbatim Convex-style crons.ts (cronJobs() + internal.* refs) registers and fires unchanged", async () => {
     let clock = 4_000_000;
-    // Mimics the generated `internal` proxy: `@stackbase/client`'s `anyApi`, the same untyped
+    // Mimics the generated `internal` proxy: `@helipod/client`'s `anyApi`, the same untyped
     // path-building proxy codegen's `_generated/server` re-exports as `internal` (cast to the
     // generated `Internal` type at the import site) — `internal.maintenance.purge` resolves to
     // the path "maintenance:purge" exactly the way a real generated project's would.

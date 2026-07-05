@@ -13,9 +13,9 @@
  * an updater that throws mid-run contributes NOTHING (its buffered writes are discarded) and is
  * reported for the caller to drop — a mid-rebuild throw never leaves the composed store half-built.
  */
-import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
-import { applyChanges, driftChecksum, type Change, type RowVersion } from "@stackbase/sync";
-import { base64ToBytes, compareKeyBytes } from "@stackbase/index-key-codec";
+import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@helipod/values";
+import { applyChanges, driftChecksum, type Change, type RowVersion } from "@helipod/sync";
+import { base64ToBytes, compareKeyBytes } from "@helipod/index-key-codec";
 import { getFunctionPath, type FunctionReference } from "./api";
 import type { PendingMutation } from "./mutation-log";
 
@@ -41,7 +41,7 @@ function renderByIdValue(rows: Map<string, RowVersion>): Value | undefined {
  * `orderKey` (byte comparison via `compareKeyBytes`, matching the engine's own index-key ordering),
  * reversed for `orderDir === "desc"`. Always an array, never `undefined` — an empty range is `[]`,
  * mirroring the RERUN path's own "a range query's value is a list" contract. `orderKey` decodes via
- * `base64ToBytes` (`@stackbase/index-key-codec`), the exact decoder-half of the codec the server's
+ * `base64ToBytes` (`@helipod/index-key-codec`), the exact decoder-half of the codec the server's
  * `orderKeyFor` (`commit-differ.ts`) encodes through — never hand-roll a second base64 codec, or the
  * client's sort order can silently diverge from the server's. Mints a fresh array every call (never
  * mutates/reuses a prior render), so `recompose`'s reference-inequality check fires listeners.

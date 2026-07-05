@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
+import { createTestHelipod } from "../../src";
 import * as messages from "../fixtures/messages";
 import schema from "../fixtures/schema";
 
-describe("createTestStackbase — core", () => {
+describe("createTestHelipod — core", () => {
   it("runs a mutation then a query against the real engine (in-memory)", async () => {
-    const t = await createTestStackbase({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
+    const t = await createTestHelipod({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
     try {
       const id = await t.mutation("messages:send", { body: "hi" });
       expect(typeof id).toBe("string");
@@ -18,7 +18,7 @@ describe("createTestStackbase — core", () => {
   });
 
   it("rejects when a function throws", async () => {
-    const t = await createTestStackbase({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
+    const t = await createTestHelipod({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
     try {
       await expect(t.query("messages:missing", {})).rejects.toThrow();
     } finally {

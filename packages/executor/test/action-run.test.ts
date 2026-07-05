@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { jsonToConvex, type JSONValue } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { jsonToConvex, type JSONValue } from "@helipod/values";
 import { InlineUdfExecutor, SimpleIndexCatalog, mutation, query, action, type RegisteredFunction, type UdfResult } from "../src/index";
 
 // Self-contained harness (mirrors row-policy.test.ts) rather than EmbeddedRuntime/composeComponents:
-// `@stackbase/component` and `@stackbase/runtime-embedded` both depend on `@stackbase/executor`, so
+// `@helipod/component` and `@helipod/runtime-embedded` both depend on `@helipod/executor`, so
 // pulling either into packages/executor's own devDependencies would make the workspace's package
 // graph cyclic (turbo's `^build` topological order rejects it outright). This harness exercises the
 // exact same seam runtime.ts wires — a `let executorRef` closure resolving paths through a module

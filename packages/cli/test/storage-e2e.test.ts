@@ -1,5 +1,5 @@
 /**
- * Slice 4 (file storage) SHIP GATE — proves the whole feature works through the REAL `stackbase
+ * Slice 4 (file storage) SHIP GATE — proves the whole feature works through the REAL `helipod
  * serve` server, on BOTH byte backends:
  *
  *   • FS (hermetic, no container): the zero-config proxied-upload path — `generateUploadUrl` →
@@ -11,7 +11,7 @@
  *     reap → `delete` blob reclaim. Gated on Docker like `postgres-e2e.test.ts`.
  *
  * Both boot the real `startServe` (the production entry `serve-e2e.test.ts` uses) against an
- * on-disk fixture `stackbase/` dir with a `files` table holding `image: v.id("_storage")`, and both
+ * on-disk fixture `helipod/` dir with a `files` table holding `image: v.id("_storage")`, and both
  * assert the reactive path: a `files:list` subscription opened BEFORE `files:save` sees the new
  * row (an `Id<"_storage">` in a user doc fanning out like any other write).
  *
@@ -28,27 +28,27 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import WebSocket from "ws";
 import { startServe } from "../src/serve";
-import { S3BlobStore } from "@stackbase/blobstore-s3";
+import { S3BlobStore } from "@helipod/blobstore-s3";
 
 /* -------------------------------------------------------------------------- */
 /* Shared: the storage-app fixture, WS helpers, byte assertions                */
 /* -------------------------------------------------------------------------- */
 
 /** The committed fixture functions dir (schema.ts + files.ts + _generated). Copied into a temp dir
- * per run so a fresh `node_modules/@stackbase` symlink can resolve the bare `@stackbase/*` imports
+ * per run so a fresh `node_modules/@helipod` symlink can resolve the bare `@helipod/*` imports
  * the dynamic `loadFunctionsDir` import needs (mirrors `serve-e2e.test.ts`). */
 function cliNodeModules(): string {
   return resolve(new URL(".", import.meta.url).pathname, "../node_modules");
 }
 
 function makeFixtureFunctionsDir(): string {
-  const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "stackbase");
+  const src = resolve(new URL(".", import.meta.url).pathname, "fixtures", "storage-app", "helipod");
   const root = mkdtempSync(join(tmpdir(), "sb-storage-e2e-"));
-  const dir = join(root, "stackbase");
+  const dir = join(root, "helipod");
   cpSync(src, dir, { recursive: true });
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
   return dir;
 }
 
@@ -231,19 +231,19 @@ const maybeDescribe = HAS_DOCKER ? describe : describe.skip;
 const MINIO_CONTAINER = `sb-minio-e2e-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-e2e";
+const BUCKET = "helipod-e2e";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-/** Resolve `@aws-sdk/client-s3` from `@stackbase/blobstore-s3`'s own node_modules (it isn't a
- * direct `@stackbase/cli` dependency, but the S3 adapter carries it). Used only for bucket
+/** Resolve `@aws-sdk/client-s3` from `@helipod/blobstore-s3`'s own node_modules (it isn't a
+ * direct `@helipod/cli` dependency, but the S3 adapter carries it). Used only for bucket
  * creation — read/delete assertions go through the shipped `S3BlobStore`. */
 function loadS3Sdk(): { S3Client: any; CreateBucketCommand: any } {
   const reqRoot = createRequire(import.meta.url);
-  const reqS3 = createRequire(reqRoot.resolve("@stackbase/blobstore-s3"));
+  const reqS3 = createRequire(reqRoot.resolve("@helipod/blobstore-s3"));
   return reqS3("@aws-sdk/client-s3");
 }
 
@@ -325,7 +325,7 @@ maybeDescribe("file storage — MinIO container ship gate (real serve, presigned
       const prevEnv = { ...process.env };
       process.env.AWS_ACCESS_KEY_ID = MINIO_USER;
       process.env.AWS_SECRET_ACCESS_KEY = MINIO_PASS;
-      process.env.STACKBASE_STORAGE_REGION = "us-east-1";
+      process.env.HELIPOD_STORAGE_REGION = "us-east-1";
 
       try {
         // A comfortable upload TTL for the confirmed-file path below: `createUpload →

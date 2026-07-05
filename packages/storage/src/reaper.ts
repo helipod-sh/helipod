@@ -1,5 +1,5 @@
-import type { Driver, DriverContext } from "@stackbase/component";
-import type { BlobStore } from "@stackbase/blobstore";
+import type { Driver, DriverContext } from "@helipod/component";
+import type { BlobStore } from "@helipod/blobstore";
 import { STORAGE_TABLE } from "./system-table";
 
 /** Default sweep interval: 60s — see `storageReaper`'s doc comment. */
@@ -15,7 +15,7 @@ export interface StorageReaperDriver extends Driver {
 }
 
 /**
- * `@stackbase/storage`'s orphan-reaper `Driver` — a periodic sweep that closes the two windows
+ * `@helipod/storage`'s orphan-reaper `Driver` — a periodic sweep that closes the two windows
  * `./context.ts`'s facade doc comments call out as the reaper's job:
  *  - An abandoned/never-finalized upload: `generateUploadUrl` inserts a `pending` `_storage` row
  *    with an `expiresAt`, but if the client never calls `_finalize` (dropped upload, direct-path

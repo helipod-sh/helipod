@@ -35,6 +35,6 @@ describe("location hints — the validated set", () => {
   });
 
   it("names the deployment-level env var", () => {
-    expect(DEPLOYMENT_LOCATION_HINT_ENV).toBe("STACKBASE_DO_LOCATION_HINT");
+    expect(DEPLOYMENT_LOCATION_HINT_ENV).toBe("HELIPOD_DO_LOCATION_HINT");
   });
 });

@@ -4,7 +4,7 @@
  * mapping mirrors the value model — `v.id("users")` → `Id<"users">`, `v.int64()` → `bigint`,
  * `v.optional(...)` → an optional object field, etc.
  */
-import { jsonToConvex, type JSONValue, type ValidatorJSON } from "@stackbase/values";
+import { jsonToConvex, type JSONValue, type ValidatorJSON } from "@helipod/values";
 
 export interface TypeEmitContext {
   /** Indentation prefix for nested object types (cosmetic). */

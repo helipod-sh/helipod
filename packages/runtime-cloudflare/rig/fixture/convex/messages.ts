@@ -1,4 +1,4 @@
-import { query, mutation } from "@stackbase/executor";
+import { query, mutation } from "@helipod/executor";
 
 export const send = mutation<{ conversationId: string; body: string }, string>({
   handler: (ctx, { conversationId, body }) => ctx.db.insert("messages", { conversationId, body }),

@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "@stackbase/test";
-import { mutation } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod, type TestHelipod } from "@helipod/test";
+import { mutation } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { PgliteClient } from "./pglite-client";
 
@@ -31,10 +31,10 @@ const mod = {
 };
 
 describe("read-your-own-writes on Postgres (PGlite)", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   const boot = async () => {
-    t = await createTestStackbase({
+    t = await createTestHelipod({
       modules: { "mod.ts": mod, "schema.ts": { default: schema } },
       store: new PostgresDocStore(new PgliteClient()),
     });

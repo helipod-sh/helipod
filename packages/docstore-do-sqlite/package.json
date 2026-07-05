@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/docstore-do-sqlite",
+  "name": "@helipod/docstore-do-sqlite",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -25,13 +25,13 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/docstore-sqlite": "workspace:*"
+    "@helipod/docstore-sqlite": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/values": "workspace:*",
+    "@helipod/docstore": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/values": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

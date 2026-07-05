@@ -1,10 +1,10 @@
 import { it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
+import { createTestHelipod } from "../../src";
 import * as http from "../fixtures/http";
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 
 it("t.fetch routes a Request through http.ts and returns the Response", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "http.ts": http, "schema.ts": { default: defineSchema({}) } },
   });
   try {
@@ -23,7 +23,7 @@ it("t.fetch routes a Request through http.ts and returns the Response", async ()
 });
 
 it("t.fetch returns 404 for an unmatched path", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "http.ts": http, "schema.ts": { default: defineSchema({}) } },
   });
   try {

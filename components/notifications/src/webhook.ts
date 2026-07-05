@@ -1,4 +1,4 @@
-import { httpAction, mutation, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@stackbase/executor";
+import { httpAction, mutation, type ActionCtx, type MutationCtx, type RegisteredFunction } from "@helipod/executor";
 import type { NotificationsConfig } from "./config";
 import type { DeliveryStatus, EmailProvider, SmsProvider } from "./provider";
 import { compact } from "./render";
@@ -30,7 +30,7 @@ function resolveWebhookProviders(config: NotificationsConfig, channel: string): 
 }
 
 /** Reconstruct the PUBLIC URL a URL-signing provider (Twilio) signed over, honoring a TLS-terminating
- *  reverse proxy. Stackbase serves plain HTTP and is fronted by nginx/Caddy/Traefik (a locked deploy
+ *  reverse proxy. Helipod serves plain HTTP and is fronted by nginx/Caddy/Traefik (a locked deploy
  *  decision), which set `X-Forwarded-Proto`/`X-Forwarded-Host`. Twilio's `X-Twilio-Signature` is
  *  computed over the exact PUBLIC `https://…` URL configured in its console, which differs in scheme
  *  (and often host) from the internal `request.url` behind the proxy — so without this reconstruction

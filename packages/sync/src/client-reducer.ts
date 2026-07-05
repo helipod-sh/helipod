@@ -5,7 +5,7 @@
  * scratch**. This is what makes server-side frame drops (backpressure) safe. The real client
  * SDK (M10) builds on this.
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import { versionsEqual, INITIAL_VERSION, type ServerMessage, type StateVersion } from "./protocol";
 
 export interface MutationOutcome {

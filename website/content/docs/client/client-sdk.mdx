@@ -5,28 +5,28 @@ description: useQuery, useMutation, useAction.
 
 {/* diataxis: how-to */}
 
-`@stackbase/client` is the framework-agnostic client that runs the reactive sync protocol underneath
-your app: a transport, a `StackbaseClient` built on top of it, and (via `@stackbase/client/react`)
+`@helipod/client` is the framework-agnostic client that runs the reactive sync protocol underneath
+your app: a transport, a `HelipodClient` built on top of it, and (via `@helipod/client/react`)
 hooks that subscribe a component to a query and re-render it on every push.
 
-This page covers the whole client surface: construction, transports, every `StackbaseClient` method,
+This page covers the whole client surface: construction, transports, every `HelipodClient` method,
 the React hooks, the wire lifecycle, auth, typed codegen, and error handling. For deep dives on the
 two biggest features built on this client, see [Optimistic updates](/docs/client/optimistic-updates)
 and [Offline sync](/docs/client/offline-sync).
 
 ## Construct a client
 
-`StackbaseClient` takes a **transport** (the thing that actually carries the sync protocol) plus
+`HelipodClient` takes a **transport** (the thing that actually carries the sync protocol) plus
 optional configuration:
 
 ```tsx title="examples/chat/web/main.tsx"
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
+import { HelipodClient, webSocketTransport } from "@helipod/client";
 
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
+const client = new HelipodClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 ```
 
-`StackbaseClient` itself never touches the network directly. Every method (`subscribe`, `query`,
+`HelipodClient` itself never touches the network directly. Every method (`subscribe`, `query`,
 `mutation`, `action`, `setAuth`) goes through the transport. That's what makes an embedded, in-process
 connection (`loopbackTransport`) and a networked one (`webSocketTransport`) behave identically from
 the app's point of view.
@@ -37,7 +37,7 @@ The second constructor argument configures durable offline sync and a few knobs 
 to touch:
 
 ```ts
-new StackbaseClient(transport, {
+new HelipodClient(transport, {
   outbox: indexedDBOutbox(),        // opt into the durable offline outbox, see Offline sync
   onClientReset: (info) => { ... }, // the server disowned this client's mutation history
   onMutationFailed: (info) => { ... }, // a terminal durable failure with no live awaiter
@@ -64,7 +64,7 @@ The client logic itself is transport-agnostic. There are two transports to pick 
 <Tab value="loopbackTransport">
 
 `loopbackTransport(connection)` is for an embedded, in-process connection: no network hop, used when
-the client and the engine run in the same process (tests, `@stackbase/test`, single-process
+the client and the engine run in the same process (tests, `@helipod/test`, single-process
 deployments). It wraps anything shaped like `{ send, onMessage, close }` and never reconnects.
 `onReopen` is simply absent, and the client treats a transport without it as one that doesn't support
 reconnection.
@@ -73,11 +73,11 @@ reconnection.
 
 <Tab value="webSocketTransport">
 
-`webSocketTransport(url, options?)` is for a real deployment, talking to `stackbase dev`/`stackbase
+`webSocketTransport(url, options?)` is for a real deployment, talking to `helipod dev`/`helipod
 serve` over the network:
 
 ```ts
-import { webSocketTransport } from "@stackbase/client";
+import { webSocketTransport } from "@helipod/client";
 
 const transport = webSocketTransport("wss://myapp.example.com/api/sync", {
   reconnect: true,          // default true
@@ -133,7 +133,7 @@ equal jitter: half the exponential delay, plus up to another half at random. Thi
 zero wait, which avoids a thundering-herd reconnect storm the instant a server comes back:
 
 ```ts
-import { reconnectDelayMs } from "@stackbase/client";
+import { reconnectDelayMs } from "@helipod/client";
 
 // half of min(maxBackoffMs, initialBackoffMs * 2**attempt), plus up to another half at random
 const delay = reconnectDelayMs(attempt, 300, 30_000);
@@ -179,7 +179,7 @@ mutation that actually succeeded. With a durable outbox configured and armed (se
 exactly once via server-side dedup.
 
 ```ts
-import { MutationUndeliveredError } from "@stackbase/client";
+import { MutationUndeliveredError } from "@helipod/client";
 
 try {
   await client.mutation(api.messages.send, { body });
@@ -212,23 +212,23 @@ what it remembers": first connect after a failed attempt, and every subsequent r
 The React hooks read the client from context:
 
 ```tsx title="examples/chat/web/main.tsx"
-import { StackbaseProvider } from "@stackbase/client/react";
+import { HelipodProvider } from "@helipod/client/react";
 
 createRoot(root).render(
-  <StackbaseProvider client={client}>
+  <HelipodProvider client={client}>
     <Chat />
-  </StackbaseProvider>,
+  </HelipodProvider>,
 );
 ```
 
-`useStackbaseClient()` reads it back out. It throws if called outside a `StackbaseProvider` (every
+`useHelipodClient()` reads it back out. It throws if called outside a `HelipodProvider` (every
 other hook below is built on it):
 
 ```tsx
-import { useStackbaseClient } from "@stackbase/client/react";
+import { useHelipodClient } from "@helipod/client/react";
 
 function DebugPanel() {
-  const client = useStackbaseClient();
+  const client = useHelipodClient();
   return <button onClick={() => client.close()}>Disconnect</button>;
 }
 ```
@@ -239,8 +239,8 @@ function DebugPanel() {
 the current result: `undefined` until the first result arrives.
 
 ```tsx title="examples/chat/web/main.tsx"
-import { useQuery } from "@stackbase/client/react";
-import { api } from "../stackbase/_generated/api";
+import { useQuery } from "@helipod/client/react";
+import { api } from "../helipod/_generated/api";
 
 function Chat({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });
@@ -268,7 +268,7 @@ that works.
 
 ## The lower-level client: `subscribe`, `query`, `mutation`, `action`
 
-`useQuery`/`useMutation`/`useAction` are thin wrappers over `StackbaseClient` methods you can also
+`useQuery`/`useMutation`/`useAction` are thin wrappers over `HelipodClient` methods you can also
 call directly. That's useful outside React, or when you need a one-shot read rather than a live
 subscription.
 
@@ -347,7 +347,7 @@ await client.action(api.users.sendWelcomeEmail, { userId });
 `useMutation` returns a callable that runs a mutation and resolves with its return value:
 
 ```tsx title="examples/chat/web/main.tsx"
-import { useMutation } from "@stackbase/client/react";
+import { useMutation } from "@helipod/client/react";
 
 function Chat() {
   const send = useMutation(api.messages.send);
@@ -384,7 +384,7 @@ and the no-flicker reconciliation contract, is in [Optimistic updates](/docs/cli
 transaction (`fetch`, timers, and so on):
 
 ```tsx
-import { useAction } from "@stackbase/client/react";
+import { useAction } from "@helipod/client/react";
 
 const sendWelcomeEmail = useAction(api.users.sendWelcomeEmail);
 await sendWelcomeEmail({ userId });
@@ -439,17 +439,17 @@ full API.
 
 ## Typed codegen api
 
-`stackbase codegen` generates a typed `api` object from your `stackbase/` functions. That's what makes
+`helipod codegen` generates a typed `api` object from your `helipod/` functions. That's what makes
 `api.messages.list` a real, autocompleting, type-checked reference instead of a magic string.
 
 ### `anyApi` and `getFunctionPath`
 
 Underneath, a function reference is just `{ __path: string }`: a module path plus a function name
-(`"messages:list"`, or `"admin/users:list"` for a nested module). `@stackbase/client` exports the
+(`"messages:list"`, or `"admin/users:list"` for a nested module). `@helipod/client` exports the
 untyped proxy this is built on, `anyApi`, for hosts without codegen output at hand:
 
 ```ts
-import { anyApi, getFunctionPath } from "@stackbase/client";
+import { anyApi, getFunctionPath } from "@helipod/client";
 
 const api = anyApi as Api; // your app's `_generated/server.ts` does exactly this
 getFunctionPath(api.messages.list); // "messages:list"
@@ -459,7 +459,7 @@ Every public entry point that accepts a function reference (`client.query`/`muta
 `action`, `useQuery`/`useMutation`/`useAction`) also accepts a raw string path or the untyped `anyApi`
 value directly. A generated typed `api` isn't required, just recommended.
 
-In the same spirit, `@stackbase/client` also exports an untyped `mintDocumentId`, the core mint
+In the same spirit, `@helipod/client` also exports an untyped `mintDocumentId`, the core mint
 underneath codegen's typed `mintId` helper for client-supplied ids. Reach for it only in hosts
 without codegen output; see [Offline sync](/docs/client/offline-sync) for the typed path.
 
@@ -469,7 +469,7 @@ Codegen's generated reference type carries phantom `__args`/`__returns` fields d
 function's declared `args`/`returns` validators. Two type helpers extract them:
 
 ```ts
-import type { FunctionArgs, FunctionReturnType } from "@stackbase/client";
+import type { FunctionArgs, FunctionReturnType } from "@helipod/client";
 
 type SendArgs = FunctionArgs<typeof api.messages.send>;       // { conversationId, author, body }
 type SendResult = FunctionReturnType<typeof api.messages.send>; // whatever `returns` declares
@@ -491,7 +491,7 @@ which requires `returns` to type its store).
 | `OutboxOverflowError` (`.code === "OUTBOX_OVERFLOW"`) | `client.mutation()`, synchronously as a rejected promise | The durable outbox is at its cap (`outboxMaxQueueSize`, default 1000 unsettled entries). The new call is rejected rather than evicting an older queued entry, since an older entry may have no live promise awaiter at all (it could have survived a reload). |
 
 ```ts
-import { MutationUndeliveredError, OfflineClientResetError, OutboxOverflowError } from "@stackbase/client";
+import { MutationUndeliveredError, OfflineClientResetError, OutboxOverflowError } from "@helipod/client";
 
 try {
   await client.mutation(api.messages.send, { body });
@@ -519,7 +519,7 @@ already-recorded when the client starts up. `onMutationFailed`, passed at client
 an app hears about those:
 
 ```ts
-new StackbaseClient(transport, {
+new HelipodClient(transport, {
   outbox: indexedDBOutbox(),
   onMutationFailed: ({ clientId, seq, udfPath, error }) => {
     console.error(`mutation ${udfPath} failed:`, error.message);
@@ -538,7 +538,7 @@ tray, see the recipe in [Offline sync](/docs/client/offline-sync).
 configured, and forever after:
 
 ```tsx
-import { usePendingMutations } from "@stackbase/client/react";
+import { usePendingMutations } from "@helipod/client/react";
 
 function PendingTray() {
   const pending = usePendingMutations();
@@ -572,12 +572,12 @@ durable-outbox model in [Offline sync](/docs/client/offline-sync).
 
 ## Notifications helpers
 
-`@stackbase/client/react` re-exports a small set of typed hooks for
-[`@stackbase/notifications`](/docs/components/notifications)'s reactive in-app inbox. No per-app
+`@helipod/client/react` re-exports a small set of typed hooks for
+[`@helipod/notifications`](/docs/components/notifications)'s reactive in-app inbox. No per-app
 codegen is required, since these hooks call the component's well-known function paths directly:
 
 ```tsx
-import { useNotifications, Inbox, useNotificationPreferences } from "@stackbase/client/react";
+import { useNotifications, Inbox, useNotificationPreferences } from "@helipod/client/react";
 
 function Bell() {
   const { notifications, unreadCount, markRead, markAllRead } = useNotifications({ limit: 50 });
@@ -643,7 +643,7 @@ client.close();
 
 Stops the durable-outbox drain (if any), tears down the transport, and rejects every in-flight action
 promise with a "connection closed" error. A closed client should be discarded: construct a new
-`StackbaseClient` (with a fresh transport) rather than reusing a closed instance.
+`HelipodClient` (with a fresh transport) rather than reusing a closed instance.
 
 ## Related
 

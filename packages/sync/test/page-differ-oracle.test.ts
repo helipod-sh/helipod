@@ -31,10 +31,10 @@ import { describe, it, expect } from "vitest";
 import { rangeChangesFor, rangeResetChanges } from "../src/commit-differ";
 import type { RowVersion } from "../src/change";
 import type { RangeRead } from "../src/classify";
-import type { WrittenDoc } from "@stackbase/transactor";
-import type { JSONValue } from "@stackbase/values";
-import type { DocumentValue } from "@stackbase/docstore";
-import { evaluateFilter, extractIndexKey } from "@stackbase/query-engine";
+import type { WrittenDoc } from "@helipod/transactor";
+import type { JSONValue } from "@helipod/values";
+import type { DocumentValue } from "@helipod/docstore";
+import { evaluateFilter, extractIndexKey } from "@helipod/query-engine";
 import {
   compareKeyBytes,
   deserializeKeyRange,
@@ -42,7 +42,7 @@ import {
   serializeKeyRange,
   encodeIndexKey,
   indexKeyspaceId,
-} from "@stackbase/index-key-codec";
+} from "@helipod/index-key-codec";
 
 // -------------------------------------------------------------------------------------------
 // The independent oracle (identical technique to 2b's — see range-differ-oracle.test.ts)

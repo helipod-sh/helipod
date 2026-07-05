@@ -1,6 +1,6 @@
 // packages/sync/test/auth-identity.test.ts
 import { describe, it, expect } from "vitest";
-import type { Value, JSONValue } from "@stackbase/values";
+import type { Value, JSONValue } from "@helipod/values";
 import { SyncProtocolHandler, type SyncUdfExecutor, type SyncWebSocket } from "../src/handler";
 
 function mockSocket(): SyncWebSocket & { sent: unknown[] } {

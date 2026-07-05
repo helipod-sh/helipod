@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import { PGlite } from "@electric-sql/pglite";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
-import { ADVISORY_LOCK_KEY } from "@stackbase/docstore-postgres";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
+import { ADVISORY_LOCK_KEY } from "@helipod/docstore-postgres";
 
 /**
  * Test-only `PgClient` over PGlite (real Postgres in WASM, in-process, single connection) —

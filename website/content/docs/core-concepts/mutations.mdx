@@ -5,18 +5,18 @@ description: The only writers. Every mutation runs as one serializable transacti
 
 {/* diataxis: explanation */}
 
-A mutation is a function that writes data. It's the only place in stackbase allowed to write:
+A mutation is a function that writes data. It's the only place in helipod allowed to write:
 queries can only read, and actions don't get a `ctx.db` at all.
 
-Every write in a stackbase app happens inside a mutation, no matter what triggered it: a client call,
+Every write in a helipod app happens inside a mutation, no matter what triggered it: a client call,
 a scheduled job, a webhook, a trigger.
 
 ## Defining a mutation
 
 A mutation takes a context (`ctx`) and, optionally, arguments, and returns a value:
 
-```ts title="stackbase/messages.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/messages.ts"
+import { v } from "@helipod/values";
 import { mutation } from "./_generated/server";
 
 export const send = mutation({
@@ -46,7 +46,7 @@ client's WebSocket mutation call, `POST /api/run`, an action's inner `ctx.runMut
 scheduler/cron driver calling a job's target, boot steps. None of them reach a handler with
 unvalidated arguments.
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), body: v.string() },
   handler: (ctx, args) => ctx.db.insert("messages", { conversationId: args.conversationId, body: args.body }),
@@ -116,7 +116,7 @@ update. To change one field, read the document first and write back every field,
 
 </Callout>
 
-```ts title="stackbase/items.ts"
+```ts title="helipod/items.ts"
 export const toggle = mutation({
   args: { id: v.id("items"), done: v.boolean() },
   handler: async (ctx, { id, done }) => {
@@ -243,7 +243,7 @@ yourself if you need a deterministic order among documents created in the same t
 
 </Callout>
 
-```ts title="stackbase/steps.ts"
+```ts title="helipod/steps.ts"
 export const createSteps = mutation({
   args: { workflowId: v.id("workflows"), labels: v.array(v.string()) },
   handler: async (ctx, { workflowId, labels }) => {
@@ -265,7 +265,7 @@ mutation runs unless it opts into sharding.
 
 A mutation that writes a sharded table must declare which shard it's routing to, with `shardBy`:
 
-```ts title="stackbase/schema.ts"
+```ts title="helipod/schema.ts"
 export default defineSchema({
   conversations: defineTable({ title: v.string() }),
   messages: defineTable({
@@ -278,7 +278,7 @@ export default defineSchema({
 });
 ```
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const send = mutation({
   args: { conversationId: v.id("conversations"), author: v.string(), body: v.string() },
   returns: v.id("messages"),
@@ -303,7 +303,7 @@ By default, `ctx.db.insert` mints a random `_id`. A mutation can instead accept 
 **client-minted** id and pass it straight through as `_id` in the insert value. The engine
 validates and accepts it in place of minting its own:
 
-```ts title="stackbase/conversations.ts"
+```ts title="helipod/conversations.ts"
 export const create = mutation({
   args: { _id: v.optional(v.string()), name: v.string() },
   handler: (ctx, args) => ctx.db.insert("conversations", args),
@@ -311,11 +311,11 @@ export const create = mutation({
 ```
 
 The client side mints a real id (same format and 128-bit entropy as an engine-minted one, just
-generated locally) via the typed `mintId` that `stackbase codegen` (and `stackbase dev`'s
+generated locally) via the typed `mintId` that `helipod codegen` (and `helipod dev`'s
 regeneration on every push) emits to `_generated/ids.ts`:
 
 ```ts
-import { mintId } from "../stackbase/_generated/ids";
+import { mintId } from "../helipod/_generated/ids";
 
 const conversationId = mintId("conversations");                                   // a real Id<"conversations">, minted now
 await client.mutation(api.conversations.create, { _id: conversationId, name });   // can enqueue offline
@@ -335,11 +335,11 @@ are all in **Going deeper** below.
 
 ## Calling component facades from a mutation
 
-When a project composes a component in `stackbase.config.ts`, its facade is attached to `ctx`
+When a project composes a component in `helipod.config.ts`, its facade is attached to `ctx`
 under that component's name. For components that opt into writing, it's usable from inside a
 mutation's own transaction, so its writes commit and roll back with the rest of the handler:
 
-```ts title="stackbase/reminders.ts"
+```ts title="helipod/reminders.ts"
 export const remind = mutation({
   args: { taskId: v.id("tasks"), delayMs: v.number() },
   handler: async (ctx, { taskId, delayMs }) => {
@@ -363,8 +363,8 @@ and the client docs cover the ones with the richest mutation-side surface.
 On the client, `useMutation` returns a callback bound to a typed function reference:
 
 ```tsx
-import { useMutation } from "@stackbase/client/react";
-import { api } from "../stackbase/_generated/server";
+import { useMutation } from "@helipod/client/react";
+import { api } from "../helipod/_generated/server";
 
 function Composer({ author }: { author: string }) {
   const send = useMutation(api.messages.send);

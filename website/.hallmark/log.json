@@ -1,4 +1,4 @@
 [
-  { "date": "2026-07-03", "macrostructure": "Bento Grid", "theme": "Coral", "enrichment": "none", "brief": "stackbase landing REDESIGN (warm Coral bento, single-file docs home)" },
-  { "date": "2026-07-03", "macrostructure": "Workbench", "theme": "Cobalt", "enrichment": "Tier-A CSS reactive-loop diagram", "brief": "stackbase - open-source self-hostable reactive backend landing (docs home route)" }
+  { "date": "2026-07-03", "macrostructure": "Bento Grid", "theme": "Coral", "enrichment": "none", "brief": "helipod landing REDESIGN (warm Coral bento, single-file docs home)" },
+  { "date": "2026-07-03", "macrostructure": "Workbench", "theme": "Cobalt", "enrichment": "Tier-A CSS reactive-loop diagram", "brief": "helipod - open-source self-hostable reactive backend landing (docs home route)" }
 ]

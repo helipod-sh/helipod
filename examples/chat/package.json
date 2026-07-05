@@ -1,5 +1,5 @@
 {
-  "name": "stackbase-example-chat",
+  "name": "helipod-example-chat",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,18 +12,18 @@
     "dev": "bun ../../packages/cli/dist/bin.js dev --web web --port 3210"
   },
   "dependencies": {
-    "@stackbase/component": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/triggers": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/component": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/triggers": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/cli": "workspace:*",
-    "@stackbase/client": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/runtime-embedded": "workspace:*",
+    "@helipod/cli": "workspace:*",
+    "@helipod/client": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",

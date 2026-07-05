@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Fleet writer liveness monitor (Task 4, C4). Runs ONLY while a node is the writer. Its job: notice
  * when this node has lost its exclusive writer lease and exit the process so it can rejoin the fleet

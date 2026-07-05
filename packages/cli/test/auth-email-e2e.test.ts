@@ -1,6 +1,6 @@
 /**
- * Auth A2 (email flows) — E2E through the real `stackbase dev` server (e2e-through-shipped-entrypoint
- * rule). A REAL `@stackbase/client` over a REAL WebSocket to a REAL server with `@stackbase/auth`
+ * Auth A2 (email flows) — E2E through the real `helipod dev` server (e2e-through-shipped-entrypoint
+ * rule). A REAL `@helipod/client` over a REAL WebSocket to a REAL server with `@helipod/auth`
  * composed WITH an `email` config block, mirroring `auth-session-e2e.test.ts` exactly
  * (`loadProject` + `createEmbeddedRuntime` + `startDevServer` + real client/WebSocket transport,
  * event-driven `waitFor` — no bare sleeps for correctness-critical waits).
@@ -16,18 +16,18 @@
  *      server logs the code and the action returns `{ sent: true }` — the zero-config path works E2E.
  */
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
 import {
   defineAuth,
   consoleEmail,
   type EmailMessage,
   type EmailProvider,
   type MintResult,
-} from "@stackbase/auth";
+} from "@helipod/auth";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -111,7 +111,7 @@ describe("auth A2 email flows — E2E through the real dev server", () => {
   it("(1) magic-link round trip: request → redeem → a live whoami subscription sees the new userId", async () => {
     const capture = captureProvider();
     const { wsUrl } = await startServer({ provider: capture.provider });
-    const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       // Live subscription opened BEFORE the sign-in — starts unauthenticated (null).
       const seen: Array<string | null> = [];
@@ -141,8 +141,8 @@ describe("auth A2 email flows — E2E through the real dev server", () => {
   it("(2) reset revocation fans out reactively to a live whoami subscription", async () => {
     const capture = captureProvider();
     const { wsUrl } = await startServer({ provider: capture.provider });
-    const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
-    const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const a = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const b = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const email = "reset@user.test";
       const s = (await a.mutation(api.auth.signUp, { email, password: "pw", deviceLabel: "Chrome" })) as unknown as MintResult;
@@ -173,7 +173,7 @@ describe("auth A2 email flows — E2E through the real dev server", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const { wsUrl } = await startServer({ provider: consoleEmail() });
-      const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
       try {
         // A known account so the OTP flow issues a real, redeemable code (and thus a real send).
         await c.mutation(api.auth.signUp, { email: "otp@user.test", password: "pw" });
@@ -181,12 +181,12 @@ describe("auth A2 email flows — E2E through the real dev server", () => {
         expect(r.sent).toBe(true);
         // The zero-config console provider logged the email (incl. the code) to the server console.
         await waitFor(
-          () => logSpy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("stackbase auth"))),
+          () => logSpy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("helipod auth"))),
           5000,
           "console log",
         );
         expect(
-          logSpy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("stackbase auth"))),
+          logSpy.mock.calls.some((args) => args.some((a) => typeof a === "string" && a.includes("helipod auth"))),
         ).toBe(true);
       } finally {
         c.close();

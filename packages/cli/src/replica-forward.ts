@@ -1,11 +1,11 @@
 /**
- * Tier 3 Slice 8 follow-on: replica write-forwarding. `stackbase serve --object-store <url>
+ * Tier 3 Slice 8 follow-on: replica write-forwarding. `helipod serve --object-store <url>
  * --replica --writer-url <url>` FORWARDS every mutation/action a caller sends to this replica
  * over to the writer node, instead of rejecting it (`boot.ts`'s `wrapReplicaWriteRejection` —
  * still the behavior when `--writer-url` is unset, unchanged/non-breaking).
  *
- * Implements the engine's CORE `WriteRouter` seam (`@stackbase/executor`, re-exported by
- * `@stackbase/runtime-embedded`) — the SAME seam `@stackbase/fleet`'s `WriteForwarder` (ee)
+ * Implements the engine's CORE `WriteRouter` seam (`@helipod/executor`, re-exported by
+ * `@helipod/runtime-embedded`) — the SAME seam `@helipod/fleet`'s `WriteForwarder` (ee)
  * implements for Tier 2 (see `ee/packages/fleet/src/forwarder.ts`), but deliberately simpler:
  * ONE fixed writer URL (no shard-lease discovery — the object-store substrate is single-shard-
  * node by construction, see `boot.ts`'s Tier 3 Slice 6/8 scope-boundary note), no idempotency
@@ -32,9 +32,9 @@
  *     writer) classifies it, per the "classification runs where the commit runs" placement rule
  *     `runtime.ts`'s `syncExecutor.runMutation` already documents for the fleet case.
  */
-import type { WriteRouter, ClientReplay } from "@stackbase/runtime-embedded";
-import type { ShardId } from "@stackbase/id-codec";
-import type { JSONValue } from "@stackbase/values";
+import type { WriteRouter, ClientReplay } from "@helipod/runtime-embedded";
+import type { ShardId } from "@helipod/id-codec";
+import type { JSONValue } from "@helipod/values";
 
 /** Strip a single trailing slash so `${writerUrl}/api/run` never doubles up (`//api/run`). */
 function trimTrailingSlash(url: string): string {
@@ -91,7 +91,7 @@ export class ReplicaWriteForwarder implements WriteRouter {
       // A network-level failure (writer unreachable, DNS, connection refused, …) — surface a
       // clear, actionable error rather than an opaque fetch rejection or a silent success.
       throw new Error(
-        `stackbase: replica write-forward to writer "${this.writerUrl}" failed (unreachable) for ${kind} "${path}" — ${
+        `helipod: replica write-forward to writer "${this.writerUrl}" failed (unreachable) for ${kind} "${path}" — ${
           e instanceof Error ? e.message : String(e)
         }`,
       );
@@ -106,7 +106,7 @@ export class ReplicaWriteForwarder implements WriteRouter {
     if (!res.ok || parsed.error !== undefined) {
       throw new Error(
         parsed.error ??
-          `stackbase: replica write-forward to writer "${this.writerUrl}" returned HTTP ${res.status} for ${kind} "${path}"`,
+          `helipod: replica write-forward to writer "${this.writerUrl}" returned HTTP ${res.status} for ${kind} "${path}"`,
       );
     }
     if (parsed.clientReplay) return { value: parsed.clientReplay.value ?? null, replay: parsed.clientReplay };

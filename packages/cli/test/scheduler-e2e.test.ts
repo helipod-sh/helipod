@@ -2,8 +2,8 @@
  * End-to-end test: Convex-parity `ctx.scheduler` through the REAL dev server.
  *
  * Proves the whole chain works in the shipped binary, not just in a `makeRuntimeWithScheduler`
- * unit-test harness: `loadProject` composes `@stackbase/scheduler` exactly the way a project's
- * `stackbase.config.ts` would (see `examples/auth-demo/stackbase.config.ts`), `createEmbeddedRuntime`
+ * unit-test harness: `loadProject` composes `@helipod/scheduler` exactly the way a project's
+ * `helipod.config.ts` would (see `examples/auth-demo/helipod.config.ts`), `createEmbeddedRuntime`
  * is wired with the composed `bootSteps`/`drivers`/`tableNumbers` the same way `packages/cli/src/
  * cli.ts`'s `devCommand` wires them, and a mutation is invoked over the real HTTP `/api/run` path
  * (mirroring `packages/cli/test/admin-browse-e2e.test.ts`'s "through the real server" pattern).
@@ -18,13 +18,13 @@
  * `onCommit` wake, wired through the real commit fan-out, exactly as it would for an app author.
  */
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation } from "@stackbase/executor";
-import { InMemoryLogSink } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { AdminApi, browseTableModule, verifyAdminKey } from "@stackbase/admin";
-import { defineScheduler } from "@stackbase/scheduler";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation } from "@helipod/executor";
+import { InMemoryLogSink } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
+import { AdminApi, browseTableModule, verifyAdminKey } from "@helipod/admin";
+import { defineScheduler } from "@helipod/scheduler";
 import { loadProject, startDevServer } from "../src/index";
 
 const schema = defineSchema({ results: defineTable({ tag: v.string() }) });
@@ -54,8 +54,8 @@ async function waitFor(cond: () => Promise<boolean>, timeoutMs = 5000): Promise<
 
 describe("scheduler — Convex parity end-to-end through the real dev server", () => {
   it("ctx.scheduler.runAfter(0, ...) dispatches through the shipped dev server via reactive wake", async () => {
-    // Compose the app + the scheduler component exactly as a real `stackbase.config.ts` listing
-    // `defineScheduler()` would (see `../src/load-config.ts` / `examples/auth-demo/stackbase.config.ts`).
+    // Compose the app + the scheduler component exactly as a real `helipod.config.ts` listing
+    // `defineScheduler()` would (see `../src/load-config.ts` / `examples/auth-demo/helipod.config.ts`).
     const project = loadProject({ schema, modules: { app: appModule } }, [defineScheduler()]);
 
     const logSink = new InMemoryLogSink();

@@ -1,13 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { defineComponent, type ComponentDefinition } from "@stackbase/component";
-import { mutation, type RegisteredFunction } from "@stackbase/executor";
+import { defineComponent, type ComponentDefinition } from "@helipod/component";
+import { mutation, type RegisteredFunction } from "@helipod/executor";
 import { notificationsSchema } from "../src/schema";
 import { resolveNotificationsConfig } from "../src/config";
 import { makeSendModules } from "../src/modules";
 import { makePreferenceModules } from "../src/preferences";
 import { notificationsContext } from "../src/facade";
 import { makeNotifRuntime, type BuiltNotifRuntime } from "./helpers";
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 
 function comp(): ComponentDefinition {
   const config = resolveNotificationsConfig({

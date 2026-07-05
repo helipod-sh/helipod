@@ -2,14 +2,14 @@
  * The configuration-constructible `WakeHost` — `serve --wake-url <url>`'s implementation.
  *
  * A `WakeHost` is a JS closure, but the deployment rig can't inject one: what runs is the SHIPPED
- * `stackbase serve` inside a built image. So the host is built from configuration instead, exactly
+ * `helipod serve` inside a built image. So the host is built from configuration instead, exactly
  * like `--object-store`/`--database-url` already are, and the engine's whole knowledge of the host
  * is "POST an integer to a URL" — no host primitive anywhere in `packages/`/`components/`. On
  * Cloudflare the URL is an Outbound-Workers magic hostname (`http://wake.do/arm`): the request never
  * leaves the Workers runtime, and the Worker turns it into a Durable Object alarm. Any other host
  * can implement the same two lines.
  */
-import type { WakeHost } from "@stackbase/component";
+import type { WakeHost } from "@helipod/component";
 
 /**
  * POSTs the next wake's ABSOLUTE `atMs` (the body is the bare integer; `null` — nothing pending —

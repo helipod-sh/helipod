@@ -7,7 +7,7 @@
  * Uses the same controllable-`SyncUdfExecutor` + mock-socket harness as `origin-frontier.test.ts`.
  */
 import { describe, it, expect } from "vitest";
-import type { SerializedKeyRange } from "@stackbase/index-key-codec";
+import type { SerializedKeyRange } from "@helipod/index-key-codec";
 import { SyncProtocolHandler, type SyncUdfExecutor, type ServerMessage } from "../src/index";
 
 type Transition = Extract<ServerMessage, { type: "Transition" }>;

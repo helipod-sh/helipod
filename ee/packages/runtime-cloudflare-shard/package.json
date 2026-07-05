@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/runtime-cloudflare-shard",
+  "name": "@helipod/runtime-cloudflare-shard",
   "version": "0.0.0",
   "type": "module",
   "license": "SEE LICENSE IN ../../LICENSE",
@@ -22,17 +22,17 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/runtime-cloudflare": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/cli": "workspace:*"
+    "@helipod/runtime-cloudflare": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/cli": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.5.40",
     "@cloudflare/workers-types": "^4.20241127.0",
-    "@stackbase/docstore-d1": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/values": "workspace:*",
+    "@helipod/docstore-d1": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/values": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

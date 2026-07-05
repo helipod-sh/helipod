@@ -22,8 +22,8 @@ actions (an action has no commit timestamp to gate a layer's removal on, see
 ## Chain `.withOptimisticUpdate` onto `useMutation`
 
 ```tsx title="examples/chat/web/main.tsx"
-import { useMutation } from "@stackbase/client/react";
-import type { OptimisticLocalStore } from "@stackbase/client";
+import { useMutation } from "@helipod/client/react";
+import type { OptimisticLocalStore } from "@helipod/client";
 
 function appendOptimistic(
   store: OptimisticLocalStore,
@@ -134,7 +134,7 @@ function bumpVotes(store: OptimisticLocalStore, id: Id<"options">, delta: number
 type. That type comes from an explicit `returns` validator on the query, the same way `args` already
 works:
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const list = query({
   args: { conversationId: v.id("conversations") },
   returns: v.array(v.object({

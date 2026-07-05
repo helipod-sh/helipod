@@ -1,6 +1,6 @@
 /**
  * `useNotifications()` / `<Inbox>` — the typed reactive in-app inbox helper (Global Constraints:
- * "the reactive in-app inbox is the flagship"). Wraps the well-known `@stackbase/notifications`
+ * "the reactive in-app inbox is the flagship"). Wraps the well-known `@helipod/notifications`
  * component query/mutation paths (`notifications:inbox`/`unreadCount`/`markRead`/`markAllRead`) so
  * consumers get a live feed + unread count + typed mark-read callbacks with zero per-app codegen.
  * Component functions aren't in an app's generated `Api`, so typing lives HERE (well-known paths),
@@ -8,9 +8,9 @@
  * augmentation.
  */
 import type { ReactNode } from "react";
-import type { Value } from "@stackbase/values";
+import type { Value } from "@helipod/values";
 import { useQuery, useMutation } from "./react";
-import type { StackbaseClient } from "./client";
+import type { HelipodClient } from "./client";
 
 /** An inbox row as delivered to the UI (mirrors the server `InboxItem`). */
 export interface InboxNotification {
@@ -101,11 +101,11 @@ const UNREGISTER_PUSH_PATH = "notifications:unregisterPushToken";
  *  more, matching `useNotifications`'s scope boundary for the inbox. A plain async function (not a
  *  hook): registration typically happens once at app-boot/permission-grant time, not on every
  *  render. */
-export async function registerForPush(client: StackbaseClient, args: { token: string; provider: "expo" | "fcm" | "apns"; platform?: "ios" | "android" | "web" }): Promise<void> {
+export async function registerForPush(client: HelipodClient, args: { token: string; provider: "expo" | "fcm" | "apns"; platform?: "ios" | "android" | "web" }): Promise<void> {
   await client.mutation(REGISTER_PUSH_PATH, args as unknown as Record<string, Value>);
 }
 
 /** Unregister this device's push token (e.g. on sign-out / permission revoke). */
-export async function unregisterForPush(client: StackbaseClient, args: { token: string }): Promise<void> {
+export async function unregisterForPush(client: HelipodClient, args: { token: string }): Promise<void> {
   await client.mutation(UNREGISTER_PUSH_PATH, args as unknown as Record<string, Value>);
 }

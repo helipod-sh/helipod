@@ -1,5 +1,5 @@
-import type { Driver, DriverContext, LogChange } from "@stackbase/component";
-import type { JSONValue } from "@stackbase/values";
+import type { Driver, DriverContext, LogChange } from "@helipod/component";
+import type { JSONValue } from "@helipod/values";
 import { validateHandlers, ensureCursor } from "./boot";
 
 export interface TriggerConfig {
@@ -27,7 +27,7 @@ export const BREAKER_WINDOW_MS = 10_000;
  * The driver's ONLY periodic timer — everything else is reactive. Backstops an external
  * `triggers:resume` call with no accompanying watched-table write to react to (see `start()`'s
  * `onCommit` filter for why resume isn't wired reactively) by re-`wakeAll()`ing on this cadence;
- * also a general defense-in-depth re-check, mirroring `@stackbase/scheduler`'s `SWEEP_MS`. A
+ * also a general defense-in-depth re-check, mirroring `@helipod/scheduler`'s `SWEEP_MS`. A
  * test drives this deterministically via `__tick()` (no `name`) rather than waiting on this timer
  * — see `TriggersDriver`'s doc comment.
  */
@@ -49,9 +49,9 @@ export interface TriggersDriver extends Driver {
 }
 
 /**
- * `@stackbase/triggers`' driver — one independent event loop PER configured trigger (design spec
+ * `@helipod/triggers`' driver — one independent event loop PER configured trigger (design spec
  * D2), not a single shared loop: each trigger name gets its own `running`/`pendingWake`/`inFlight`
- * coalescing state (mirroring `@stackbase/scheduler`'s `schedulerDriver` shape, but keyed by
+ * coalescing state (mirroring `@helipod/scheduler`'s `schedulerDriver` shape, but keyed by
  * name), so a slow handler on trigger A can never head-of-line-block trigger B's independent
  * backlog — they're just separate promise chains woken by the same commit fan-out.
  *
@@ -61,7 +61,7 @@ export interface TriggersDriver extends Driver {
  *    `"triggers/cursors"` itself is touched (an external `triggers:resume` call, which any
  *    trigger's paused state could be waiting on).
  *  - **Timer**: a failed delivery arms a single retry timer for that trigger, per
- *    `computeBackoff` (`@stackbase/scheduler`) — see `_recordFailure`'s doc comment (`./modules.ts`)
+ *    `computeBackoff` (`@helipod/scheduler`) — see `_recordFailure`'s doc comment (`./modules.ts`)
  *    for why the delay itself is in-memory, not persisted.
  *
  * Each trigger's attempt (`runOnePass`) loops internally — draining quiet-table progress and
@@ -102,7 +102,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
 
   function iterate(name: string): Promise<void> {
     if (running.get(name)) {
-      // Mirrors `@stackbase/scheduler`'s coalescing (see its `driver.ts` for the full rationale):
+      // Mirrors `@helipod/scheduler`'s coalescing (see its `driver.ts` for the full rationale):
       // a wake landing mid-pass sets a bit the in-flight pass checks before releasing `running`,
       // so it loops for one more fresh pass instead of a stale re-arm stranding new work.
       pendingWake.set(name, true);
@@ -112,7 +112,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
     const pass = runPass(name).finally(() => {
       running.set(name, false);
       inFlight.delete(name);
-      // Closes a residual micro-window (mirrors `@stackbase/scheduler`'s `iterate()`): a wake can
+      // Closes a residual micro-window (mirrors `@helipod/scheduler`'s `iterate()`): a wake can
       // land between `runPass`'s own internal `do..while(pendingWake)` loop (below) making its
       // final check and THIS `finally` running. Without this, that wake would set `pendingWake`
       // but nothing would ever consume it.
@@ -130,7 +130,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
    * mid-drain (a real external write to `name`'s watched table landing while this pass is
    * mid-`readLog`, or a concurrent caller's own `iterate(name)` call coalescing into this one) sets
    * `pendingWake`, and this loop re-runs `runOnePass` (with a FRESH `targetBound` peek) instead of
-   * returning with a stale view. Mirrors `@stackbase/scheduler`'s `runPass` shape exactly — this
+   * returning with a stale view. Mirrors `@helipod/scheduler`'s `runPass` shape exactly — this
    * is now safe to do (see `start()`'s `onCommit` filter): `pendingWake` can only be set here by a
    * GENUINE external event, never by this trigger's own routine cursor-bookkeeping writes (those
    * no longer reactively wake anything, precisely to avoid this loop chasing its own tail).
@@ -196,7 +196,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
       try {
         // `LogChange[]` isn't structurally a `JSONValue` (it's a concrete interface, not an index
         // signature) even though every field IS JSON-safe — same bridging cast
-        // `@stackbase/scheduler`'s driver uses for a job's arbitrary `result.value` (see its
+        // `@helipod/scheduler`'s driver uses for a job's arbitrary `result.value` (see its
         // `driver.ts`).
         await ctx.runFunction(cfg.handler, { changes: batch } as unknown as JSONValue);
       } catch (e) {
@@ -245,7 +245,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
 
   // The driver's periodic backstop — the ONLY thing an external `triggers:resume` call relies on
   // to be noticed (see `start()`'s `onCommit` filter below for why resume ISN'T wired reactively).
-  // Re-arms itself after every fire, mirroring `@stackbase/scheduler`'s `armSweep`/`sweepOnce`.
+  // Re-arms itself after every fire, mirroring `@helipod/scheduler`'s `armSweep`/`sweepOnce`.
   function armBeat(): void {
     if (stopped) return;
     if (beatTimer !== null) ctx.clearTimer(beatTimer);
@@ -266,7 +266,7 @@ export function triggersDriver(opts: TriggersOpts): TriggersDriver {
       validateHandlers(ctx, opts); // fail-fast — see ./boot.ts for why this can't be a literal boot step
       unsubscribeCommit = ctx.onCommit((inv) => {
         // Deliberately NOT waking on `"triggers/cursors"` writes here (unlike
-        // `@stackbase/scheduler`'s onCommit filter, which DOES react to its own control-table
+        // `@helipod/scheduler`'s onCommit filter, which DOES react to its own control-table
         // writes): `triggers:_advanceCursor`/`_recordFailure`/`_pause` are THEMSELVES commits to
         // `triggers/cursors`, so reacting to them would make a trigger's own routine cursor
         // bookkeeping re-wake itself forever, one tick at a time — see this file's `runPass` doc

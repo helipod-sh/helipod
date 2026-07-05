@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import {
   loadProject,
   push,
@@ -60,7 +60,7 @@ describe("push (load → codegen)", () => {
 
 describe("resolveDevOptions", () => {
   it("applies defaults and overrides", () => {
-    expect(resolveDevOptions()).toMatchObject({ port: 3000, ip: "127.0.0.1", functionsDir: "stackbase" });
+    expect(resolveDevOptions()).toMatchObject({ port: 3000, ip: "127.0.0.1", functionsDir: "helipod" });
     expect(resolveDevOptions({ port: 9000, functionsDir: "backend" })).toMatchObject({ port: 9000, functionsDir: "backend" });
   });
 });
@@ -72,7 +72,7 @@ describe("HTTP routing", () => {
 
     const dash = await handleHttpRequest(runtime, { method: "GET", path: "/_dashboard" }, info);
     expect(dash.status).toBe(200);
-    expect(dash.body).toContain("Stackbase");
+    expect(dash.body).toContain("Helipod");
 
     const health = await handleHttpRequest(runtime, { method: "GET", path: "/api/health" }, info);
     expect(JSON.parse(health.body)).toMatchObject({ status: "ok" });
@@ -104,7 +104,7 @@ describe("dev server (real node:http)", () => {
     try {
       const dash = await fetch(`${server.url}/_dashboard`);
       expect(dash.status).toBe(200);
-      expect(await dash.text()).toContain("Stackbase");
+      expect(await dash.text()).toContain("Helipod");
 
       const run = await fetch(`${server.url}/api/run`, {
         method: "POST",
@@ -157,8 +157,8 @@ describe("hot reload (setModules)", () => {
 });
 
 describe("dev options: functions directory", () => {
-  it("resolves to stackbase by default", () => {
-    expect(resolveDevOptions({}).functionsDir).toBe("stackbase");
+  it("resolves to helipod by default", () => {
+    expect(resolveDevOptions({}).functionsDir).toBe("helipod");
   });
 
   it("honors an explicit value", () => {

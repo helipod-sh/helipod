@@ -1,7 +1,7 @@
 /**
  * FILE STORAGE + COMPONENT (OAuth) ROUTES on a REAL Durable Object (workerd) — the highest fidelity
- * achievable without a Cloudflare login. `StorageDO extends StackbaseDurableObject` boots with an
- * R2-backed `BlobStore` (`@stackbase/blobstore-r2` over miniflare's in-memory R2 emulation bound as
+ * achievable without a Cloudflare login. `StorageDO extends HelipodDurableObject` boots with an
+ * R2-backed `BlobStore` (`@helipod/blobstore-r2` over miniflare's in-memory R2 emulation bound as
  * `env.STORAGE_BUCKET`), proving end-to-end INSIDE a genuine DO:
  *   - `ctx.storage.generateUploadUrl` → a proxied upload target served by the DO's own `fetch`;
  *   - the proxied upload POSTs bytes → they land in R2 → the `_storage` row flips to `ready`;

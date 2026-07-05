@@ -1,20 +1,20 @@
-import { query, mutation } from "@stackbase/executor";
-import type { QueryCtx, MutationCtx } from "@stackbase/executor";
-import { DocumentNotFoundError } from "@stackbase/errors";
+import { query, mutation } from "@helipod/executor";
+import type { QueryCtx, MutationCtx } from "@helipod/executor";
+import { DocumentNotFoundError } from "@helipod/errors";
 import { STORAGE_TABLE } from "./system-table";
 
 /**
- * Internal `_storage` metadata mutations/queries for `@stackbase/storage` — the low-level ops
+ * Internal `_storage` metadata mutations/queries for `@helipod/storage` — the low-level ops
  * the Task 6 context provider, Task 7 HTTP endpoints, and Task 9 reaper call. Registered under
  * fully-qualified keys (`storageModules`, below) meant for `EmbeddedRuntime.systemModules` /
- * `ctx.runMutation`-style trusted callers, mirroring `@stackbase/admin`'s `_system:*` built-ins
- * (`packages/admin/src/system-functions.ts`) — NOT `@stackbase/component`'s namespaced-component
+ * `ctx.runMutation`-style trusted callers, mirroring `@helipod/admin`'s `_system:*` built-ins
+ * (`packages/admin/src/system-functions.ts`) — NOT `@helipod/component`'s namespaced-component
  * `modules` map, since `_storage` is an APP-ROOT system table (see `./system-table.ts`'s doc
  * comment), not a component's own namespace.
  *
  * Because these are always invoked privileged (bypassing namespace prefixing entirely — see
  * `packages/executor/src/kernel.ts`'s `requireTable`), `ctx.db` here uses the bare `STORAGE_TABLE`
- * name (`"_storage"`), exactly like `@stackbase/admin`'s built-ins use bare table names such as
+ * name (`"_storage"`), exactly like `@helipod/admin`'s built-ins use bare table names such as
  * the dashboard's edited table.
  */
 

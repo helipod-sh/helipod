@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 import { D1DocStore } from "../src/d1-doc-store";
 import { UniqueConstraintError, type D1Client } from "../src/index";
 

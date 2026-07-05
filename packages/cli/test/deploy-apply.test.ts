@@ -1,5 +1,5 @@
 /**
- * `applyDeploy` — the server-side funnel for `stackbase deploy`: write the pushed tree, reuse
+ * `applyDeploy` — the server-side funnel for `helipod deploy`: write the pushed tree, reuse
  * loadFunctionsDir -> push, gate on an additive-schema diff, then atomically swap modules/routes/
  * schema. All validation happens before the first swap, so a rejected deploy leaves the running
  * version fully live — proven here by re-exercising the previously-live function after each
@@ -14,8 +14,8 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { defineComponent } from "@stackbase/component";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { defineComponent } from "@helipod/component";
 import { bootProject } from "../src/boot";
 import { packageApp } from "../src/deploy";
 import { applyDeploy, type DeployDeps } from "../src/deploy-apply";
@@ -23,7 +23,7 @@ import { loadFunctionsDir } from "../src/load-modules";
 import { push } from "../src/push-pipeline";
 import type { DeploySchema } from "../src/schema-diff";
 
-/** A temp dir NESTED under packages/cli so `@stackbase/*` resolves via its node_modules
+/** A temp dir NESTED under packages/cli so `@helipod/*` resolves via its node_modules
  * (Node/Bun module resolution walks up parent directories looking for node_modules). */
 function cliDir(): string {
   return resolve(new URL(".", import.meta.url).pathname, "..");
@@ -47,12 +47,12 @@ async function schemaOf(dir: string): Promise<{ schemaJson: DeploySchema["schema
 }
 
 const SCHEMA_V1 = `
-import { v, defineSchema, defineTable } from "@stackbase/values";
+import { v, defineSchema, defineTable } from "@helipod/values";
 export default defineSchema({ items: defineTable({ name: v.string() }) });
 `;
 
 const ITEMS_V1 = `
-import { query } from "@stackbase/executor";
+import { query } from "@helipod/executor";
 export const list = query({
   handler: async (ctx) => (await ctx.db.query("items", "by_creation").collect()).map((d) => d.name),
 });
@@ -60,12 +60,12 @@ export const list = query({
 
 // v2: additive — adds an optional field + a mutation.
 const SCHEMA_V2 = `
-import { v, defineSchema, defineTable } from "@stackbase/values";
+import { v, defineSchema, defineTable } from "@helipod/values";
 export default defineSchema({ items: defineTable({ name: v.string(), note: v.optional(v.string()) }) });
 `;
 
 const ITEMS_V2 = `
-import { query, mutation } from "@stackbase/executor";
+import { query, mutation } from "@helipod/executor";
 export const list = query({
   handler: async (ctx) => (await ctx.db.query("items", "by_creation").collect()).map((d) => d.name),
 });
@@ -76,7 +76,7 @@ export const add = mutation({
 
 // v3: same additive schema as v2, but a module that throws on import.
 const ITEMS_V3_BROKEN = `
-import { query, mutation } from "@stackbase/executor";
+import { query, mutation } from "@helipod/executor";
 throw new Error("boom - simulated load failure");
 export const list = query({ handler: async () => [] });
 export const add = mutation({ handler: () => null });
@@ -84,7 +84,7 @@ export const add = mutation({ handler: () => null });
 
 // v4: destructive — drops the "items" table entirely.
 const SCHEMA_V4_DESTRUCTIVE = `
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 export default defineSchema({});
 `;
 
@@ -94,14 +94,14 @@ export default defineSchema({});
 // component tables, positionally — adding one app table used to shift every component table's
 // number by one, and diffSchema then rejected the deploy for a table the developer never touched).
 const SCHEMA_V5_NEW_TABLE = `
-import { v, defineSchema, defineTable } from "@stackbase/values";
+import { v, defineSchema, defineTable } from "@helipod/values";
 export default defineSchema({
   items: defineTable({ name: v.string() }),
   notes: defineTable({ body: v.string() }),
 });
 `;
 
-// A minimal fake component (mirrors a real component like @stackbase/scheduler's "jobs" table)
+// A minimal fake component (mirrors a real component like @helipod/scheduler's "jobs" table)
 // used to prove its table number survives an app-only deploy that adds a new table.
 const fakeComponent = defineComponent({
   name: "scheduler",

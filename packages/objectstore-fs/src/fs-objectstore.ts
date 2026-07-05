@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
-import { CasConflict, type ObjectStore } from "@stackbase/objectstore";
+import { CasConflict, type ObjectStore } from "@helipod/objectstore";
 import { KeyedMutex } from "./keyed-mutex";
 
 export interface FsObjectStoreOpts {

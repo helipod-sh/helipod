@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 6.2a — the lease-heartbeat driver, over a REAL `ObjectStoreDocStore` on an fs bucket (per
- * `test/lease.test.ts`'s own harness) + a controllable fake `DriverContext` (per `@stackbase/
+ * `test/lease.test.ts`'s own harness) + a controllable fake `DriverContext` (per `@helipod/
  * receipts`' `test/reaper.test.ts` harness). Two scenarios: (1) a normal renew advances the
  * manifest's `leaseExpiresAt` and re-arms; (2) once a challenger fences this store, the driver's
  * `wake()` catches `FencedError`, does NOT re-arm, and fires `onFenced` exactly once. `stop()`
@@ -11,10 +11,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { newDocumentId } from "@stackbase/id-codec";
-import type { DriverContext } from "@stackbase/component";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
+import { newDocumentId } from "@helipod/id-codec";
+import type { DriverContext } from "@helipod/component";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { FencedError } from "../src/fenced-error";
 import type { Manifest } from "../src/manifest";
@@ -37,7 +37,7 @@ async function readManifestRaw(os: FsObjectStore): Promise<Manifest> {
   return JSON.parse(new TextDecoder().decode(e!.body));
 }
 
-/** A manual/controllable fake `DriverContext` — mirrors `@stackbase/receipts`'
+/** A manual/controllable fake `DriverContext` — mirrors `@helipod/receipts`'
  *  `test/reaper.test.ts`'s harness (no real timers; the test fires timers explicitly). */
 function makeFakeDriverContext(): {
   ctx: DriverContext;
@@ -75,7 +75,7 @@ function makeFakeDriverContext(): {
     },
     liveTimerCount: () => timers.size,
     // A fired callback (`wake()`) kicks off a fire-and-forget async chain (real fs I/O against the
-    // temp-dir bucket + re-arm) — unlike `@stackbase/receipts`' reaper test (SQLite, effectively
+    // temp-dir bucket + re-arm) — unlike `@helipod/receipts`' reaper test (SQLite, effectively
     // synchronous), this needs a real macrotask-scale delay, not just one microtask flush, for that
     // chain to settle before the next due-timer check.
     fireDueTimers: async () => {

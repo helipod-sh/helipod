@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { ClientTransport } from "@stackbase/client";
+import type { ClientTransport } from "@helipod/client";
 import { delayTransport } from "../web/delay-transport";
 
 type Sent = Parameters<ClientTransport["send"]>[0];

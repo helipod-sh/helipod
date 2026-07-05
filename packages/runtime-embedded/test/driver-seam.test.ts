@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { mutation } from "@helipod/executor";
 
 describe("driver seam", () => {
   it("starts a component driver after boot; onCommit fires on a commit; runFunction runs a registered fn", async () => {
@@ -146,7 +146,7 @@ describe("driver seam", () => {
     // Encode "counters"'s table number the same way `adapter.subscribe`'s real payload would
     // (a fleet's `AppliedInvalidation.writtenTables` carries this same encoded-storage-id shape —
     // see `replica-tailer.ts`'s doc comment on `AppliedInvalidation`).
-    const { encodeStorageTableId } = await import("@stackbase/id-codec");
+    const { encodeStorageTableId } = await import("@helipod/id-codec");
     const countersTableNumber = c.tableNumbers["counters"]!;
     const encoded = encodeStorageTableId(countersTableNumber);
 

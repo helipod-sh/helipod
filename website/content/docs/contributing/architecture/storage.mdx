@@ -5,15 +5,15 @@ description: "The append-only MVCC document log, the narrow DocStore seam, and w
 
 {/* diataxis: explanation */}
 
-Everything in Stackbase, queries, mutations, reactivity, the dashboard's data browser, ultimately
+Everything in Helipod, queries, mutations, reactivity, the dashboard's data browser, ultimately
 bottoms out in one thing: a log of document revisions on disk. If you understand how that log
 works, the rest of the engine makes a lot more sense. This page walks through it from the ground
-up. No prior Stackbase knowledge assumed.
+up. No prior Helipod knowledge assumed.
 
 ## The one thing to understand first: nothing is ever overwritten
 
 Most databases store the *current* value of a row and overwrite it in place when it changes.
-Stackbase's storage layer does something different: it **never overwrites**. Every write, insert,
+Helipod's storage layer does something different: it **never overwrites**. Every write, insert,
 update, or delete, appends a brand-new entry to a log. The "current" value of a document is just
 whichever entry for it happened most recently.
 
@@ -57,7 +57,7 @@ In the diagram above, reading at `readTimestamp = 8` lands on the `ts = 7` revis
 delete hasn't happened yet as of time 8, so it's invisible to that read. Reading at
 `readTimestamp = 20` would land on the tombstone, and the document would appear deleted.
 
-This one rule is the whole of **snapshot isolation** in Stackbase: the same scan, run again later
+This one rule is the whole of **snapshot isolation** in Helipod: the same scan, run again later
 at the same `readTimestamp`, always returns exactly the same answer, no matter how many more
 writes have landed since. Nothing about the past ever changes. That stability is what makes two
 other big features possible:
@@ -103,7 +103,7 @@ batch write) is a valid storage backend.
 
 ```mermaid
 flowchart TD
-    Engine["Transactor / query engine<br/>(imports only the DocStore interface)"] --> Iface["DocStore interface<br/>@stackbase/docstore"]
+    Engine["Transactor / query engine<br/>(imports only the DocStore interface)"] --> Iface["DocStore interface<br/>@helipod/docstore"]
     Iface --> Sqlite["SqliteDocStore<br/>sync DatabaseAdapter (node:sqlite / bun:sqlite)"]
     Iface --> Postgres["PostgresDocStore<br/>async PgClient (pg driver)"]
     Iface --> DO["DO-SQLite adapter<br/>Cloudflare Durable Objects"]
@@ -258,7 +258,7 @@ two are unrelated.)
 
 Look back at the `DocStore` interface: it's really just "ordered point-in-time range scans" plus
 "atomic batch writes" plus a tiny KV store. Nothing about SQL, nothing about a specific database
-product. That narrowness is deliberate. It's what lets Stackbase claim **deploy anywhere** without
+product. That narrowness is deliberate. It's what lets Helipod claim **deploy anywhere** without
 the engine's transaction logic, query planner, or reactivity code ever needing to change. Any
 backend that can answer "give me the newest row per key up to this timestamp, in order" and "write
 this batch atomically" is a legal `DocStore`.
@@ -270,7 +270,7 @@ this batch atomically" is a legal `DocStore`.
 
 ## Two shipped adapters, one synchronous and one async
 
-Stackbase ships two database backends today, plus a Cloudflare-native adapter, and the two
+Helipod ships two database backends today, plus a Cloudflare-native adapter, and the two
 databases intentionally look different under the hood because their underlying drivers do.
 
 <Tabs items={['SqliteDocStore', 'PostgresDocStore', 'DO-SQLite']}>
@@ -280,7 +280,7 @@ databases intentionally look different under the hood because their underlying d
 `SqliteDocStore` (`packages/docstore-sqlite`) sits on top of a small **synchronous**
 `DatabaseAdapter` seam (`exec`/`prepare`/`transaction`), matching `node:sqlite`/`bun:sqlite`,
 which are themselves synchronous APIs. Its commit allocates the next timestamp with a plain
-`MAX(ts) + 1` computed inside its own transaction. Because Stackbase enforces a single writer at a
+`MAX(ts) + 1` computed inside its own transaction. Because Helipod enforces a single writer at a
 time, that read-then-increment can never race with another writer.
 
 </Tab>
@@ -289,7 +289,7 @@ time, that read-then-increment can never race with another writer.
 
 `PostgresDocStore` (`packages/docstore-postgres`) sits on an **async** `PgClient` seam instead,
 because talking to Postgres always means awaiting network round trips. Its commit calls
-`nextval('stackbase_ts')` inside the same transaction as the row inserts, so the timestamp becomes
+`nextval('helipod_ts')` inside the same transaction as the row inserts, so the timestamp becomes
 visible atomically with the rows it stamps. It also takes a Postgres advisory lock on startup, so
 a second engine instance pointed at the same database fails fast instead of silently corrupting
 things by writing concurrently. Because index scans can't rely on SQLite's per-row logic, they're
@@ -312,7 +312,7 @@ adapter had to change.
 </Tabs>
 
 Selecting between SQLite and Postgres is a deployment-time choice, `--database-url`/
-`STACKBASE_DATABASE_URL`, with no code changes and no migrations, since the physical schema (next
+`HELIPOD_DATABASE_URL`, with no code changes and no migrations, since the physical schema (next
 section) is identical either way. See [self-hosting](/docs/deploy/self-hosting) and
 [Postgres](/docs/deploy/postgres) for how that's configured in practice, and
 [Writing a storage adapter](/docs/contributing/extending/storage-adapter) if you want to add a new
@@ -339,7 +339,7 @@ flowchart TD
 Every row above lives side by side in the very same physical table, distinguished only by the
 `table_id` column. There's no per-table SQL object for the engine to create, alter, or migrate.
 
-This is also why Stackbase never needs a migration step as your app's `schema.ts` evolves: there's
+This is also why Helipod never needs a migration step as your app's `schema.ts` evolves: there's
 no DDL to run in the first place. (Additive schema changes are still validated at deploy time, see
 [Deploy & build](/docs/deploy/deploy-and-build), but that validation is a code-level check, not a
 database one.)
@@ -362,7 +362,7 @@ base32( varint(tableNumber)  ++  internalId (16 bytes)  ++  fletcher16-checksum 
 | Trailing checksum (2 bytes) | A Fletcher-16 over everything before it. A mistyped or truncated id string is caught immediately by the codec alone. No database round trip is needed to discover it's invalid. |
 | Base32 encoding | The whole byte string is encoded in Crockford Base32, a text alphabet that deliberately skips the letters `i`, `l`, `o`, and `u` to avoid confusion with `1`, `0`, and `v`. |
 
-Table numbers are partitioned by range: **1 to 9999 are reserved for Stackbase's own internal
+Table numbers are partitioned by range: **1 to 9999 are reserved for Helipod's own internal
 system tables** (for example, the file-storage table lives permanently at table number 20), and
 **user-defined tables start at 10001**. Because the table *number*, not its name, is what's baked
 into every id, renaming a table in `schema.ts` never invalidates any existing document id.

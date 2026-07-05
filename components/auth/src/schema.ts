@@ -1,4 +1,4 @@
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export const authSchema = defineSchema({
   // `email` is optional now: anonymous users have none (spec §8). `anonymous` is a new optional

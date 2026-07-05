@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 import { docToRow, rowToDoc } from "../src/codec";
 
 const users = defineSchema({

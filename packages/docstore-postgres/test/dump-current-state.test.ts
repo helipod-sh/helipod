@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { newDocumentId, encodeStorageIndexId, internalIdToHex, type InternalDocumentId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
+import { newDocumentId, encodeStorageIndexId, internalIdToHex, type InternalDocumentId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, IndexWrite } from "@helipod/docstore";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { PgliteClient } from "./pglite-client";
 

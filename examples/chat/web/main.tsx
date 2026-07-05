@@ -1,22 +1,22 @@
 import { StrictMode, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { StackbaseClient, webSocketTransport, anyApi, type OptimisticLocalStore } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation } from "@stackbase/client/react";
+import { HelipodClient, webSocketTransport, anyApi, type OptimisticLocalStore } from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation } from "@helipod/client/react";
 // Type-only import — erased at bundle time (verbatimModuleSyntax), so this never pulls the
-// server-side `@stackbase/executor` re-exports in `_generated/server.ts` into the browser bundle.
+// server-side `@helipod/executor` re-exports in `_generated/server.ts` into the browser bundle.
 // `Api` is codegen's typed surface (docs/enduser/optimistic-updates.md#return-type-typing): both
 // `list` and `send` below declare `returns`, so `OptimisticLocalStore.getQuery`/`setQuery` and
 // `useQuery`/`useMutation` all infer real arg/return types instead of falling back to `Value`.
-import type { Api } from "../stackbase/_generated/api";
-import type { Doc, Id } from "../stackbase/_generated/dataModel";
+import type { Api } from "../helipod/_generated/api";
+import type { Doc, Id } from "../helipod/_generated/dataModel";
 
 const api = anyApi as Api;
 
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
+const client = new HelipodClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 
 // No real `conversations` row ever gets created in this example — "general" is used directly as
-// the shard key (see stackbase/messages.ts). Cast once so every call site is a real `Id<"conversations">`.
+// the shard key (see helipod/messages.ts). Cast once so every call site is a real `Id<"conversations">`.
 const CONVERSATION_ID = "general" as Id<"conversations">;
 
 type Message = Doc<"messages">;
@@ -61,7 +61,7 @@ function Chat() {
   return (
     <div className="app">
       <header>
-        <h1>💬 Stackbase Chat</h1>
+        <h1>💬 Helipod Chat</h1>
         <span className="me">you are <b>{author}</b></span>
       </header>
       <ul className="messages">
@@ -87,9 +87,9 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <Chat />
-      </StackbaseProvider>
+      </HelipodProvider>
     </StrictMode>,
   );
 }

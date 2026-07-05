@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Cross-shard frontier (Tier 3 Slice 5, Task 5.1, design record §8) — the object-storage analog of
  * the shipped fleet `ReplicaTailer.readFrontier`'s `min(shard_leases.frontier_ts)` — but read
@@ -16,7 +16,7 @@
  * belt-and-braces should track its own last-observed value and compare across calls, mirroring
  * `ReplicaTailer`'s `lastF` if it wants that defense-in-depth.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
+import type { ObjectStore } from "@helipod/objectstore";
 import { readManifest } from "./manifest";
 
 /** `min(frontierTs)` over every shard's manifest — `0n` if any shard's manifest is absent (a

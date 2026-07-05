@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { PgliteClient } from "./pglite-client";
-import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@stackbase/docstore";
+import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@helipod/docstore";
 
 const TABLE = 10001;
 const INDEX_ID = encodeStorageIndexId(TABLE, "by_key");
@@ -67,7 +67,7 @@ describe("index_scan / load_documents / previous_revisions", () => {
     await store.write([rev(a, 1n, null, "A1")], [], "Error");
     await store.write([rev(a, 2n, 1n, "A2")], [], "Error");
     await store.write([rev(b, 2n, null, "B1")], [], "Error");
-    const { getPrevRevQueryKey } = await import("@stackbase/docstore");
+    const { getPrevRevQueryKey } = await import("@helipod/docstore");
     const res = await store.previous_revisions([{ id: a, ts: 1n }, { id: b, ts: 5n }]);
     expect(res.get(getPrevRevQueryKey(a, 1n))!.value!.value.body).toBe("A1");
     expect(res.get(getPrevRevQueryKey(b, 5n))!.value!.value.body).toBe("B1");

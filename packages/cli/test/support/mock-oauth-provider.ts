@@ -3,7 +3,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 
 /**
  * A local mock OAuth/OIDC provider (no live third-party network) for `auth-external-e2e.test.ts` —
- * the Task-7 E2E through the REAL `stackbase dev` server. Loopback (`127.0.0.1`), so
+ * the Task-7 E2E through the REAL `helipod dev` server. Loopback (`127.0.0.1`), so
  * `isLoopbackUrl`'s insecure-http gate lets the server's own `oauth4webapi`/`jose` calls through
  * with no app-settable flag (see `components/auth/src/oauth.ts`'s `assertProviderEndpointsSecure`/
  * `allowInsecureForUrl`).
@@ -26,7 +26,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
  *    `signInWithIdToken` third-party-JWT half, which needs no OAuth provider server interaction:
  *    the test signs a token with THIS keypair (whose public JWK `/jwks` serves) and hands it
  *    straight to `client.action(api.auth.signInWithIdToken, { idToken })`. `aud` defaults to
- *    `"stackbase"` (the repo's `jwt.issuers[].audience` convention, matching `jwt-signin.test.ts`).
+ *    `"helipod"` (the repo's `jwt.issuers[].audience` convention, matching `jwt-signin.test.ts`).
  */
 export interface MockProvider {
   url: string;
@@ -53,7 +53,7 @@ export interface MockProvider {
  *  agree on when a test doesn't override it — kept as a named export so the test file's `oauthProvider`
  *  config and this mock's default never drift apart from a single source. */
 export const DEFAULT_CLIENT_ID = "test-client";
-const DEFAULT_JWT_AUDIENCE = "stackbase";
+const DEFAULT_JWT_AUDIENCE = "helipod";
 
 export async function startMockProvider(): Promise<MockProvider> {
   const { publicKey, privateKey } = await generateKeyPair("RS256");

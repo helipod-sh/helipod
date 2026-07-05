@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/objectstore-fs",
+  "name": "@helipod/objectstore-fs",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,7 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/objectstore": "workspace:*"
+    "@helipod/objectstore": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

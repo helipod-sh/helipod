@@ -5,8 +5,8 @@
  * itself is unit-tested in `resume-registry.test.ts` — this suite only proves the WIRING.
  */
 import { describe, it, expect } from "vitest";
-import { indexKeyspaceId, keySuccessor, serializeKeyRange, tableKeyspaceId, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { Value } from "@stackbase/values";
+import { indexKeyspaceId, keySuccessor, serializeKeyRange, tableKeyspaceId, type SerializedKeyRange } from "@helipod/index-key-codec";
+import type { Value } from "@helipod/values";
 import { regKey } from "../src/resume-registry";
 import { SyncProtocolHandler, type SyncUdfExecutor, type SyncWebSocket, type ServerMessage, type WriteInvalidation } from "../src/index";
 

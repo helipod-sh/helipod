@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod } from "../../src";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 const mod = {
   add: mutation(async (ctx: any, a: { room: string; body: string }) => ctx.db.insert("messages", a)),
@@ -20,7 +20,7 @@ async function waitFor(pred: () => boolean, ms = 1000) {
 }
 
 it("subscribe re-fires on an intersecting write and NOT on a non-intersecting one", async () => {
-  const t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+  const t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
   try {
     const sub = t.subscribe("mod:byRoom", { room: "general" });
     let changes = 0;

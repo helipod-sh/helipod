@@ -34,9 +34,9 @@
  * AHEAD of what this node's own `docStore.maxTimestamp()` would report (the local read replica
  * hasn't caught up yet) — a shard created after that observation must not seed behind it.
  */
-import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import type { DocStore } from "@stackbase/docstore";
+import { DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import type { DocStore } from "@helipod/docstore";
 import { DEFAULT_HEADROOM, type HeadroomLimits } from "./headroom";
 import { ShardWriter } from "./shard-writer";
 import type { CommitResult, RunInTransactionOptions, TransactionContext, Transactor, WriteFanout } from "./types";
@@ -53,7 +53,7 @@ export interface ShardedTransactorOptions {
   /**
    * Fleet B4 (group commit): route EVERY shard's commits through the two-buffer stage-then-flush
    * committer loop. Default false = the byte-identical single-commit path on every shard. The
-   * runtime threads this from `STACKBASE_GROUP_COMMIT` (T4); leaving it unset keeps a non-fleet /
+   * runtime threads this from `HELIPOD_GROUP_COMMIT` (T4); leaving it unset keeps a non-fleet /
    * flag-off deployment structurally on today's path.
    */
   groupCommit?: boolean;

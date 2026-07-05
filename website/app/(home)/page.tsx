@@ -12,7 +12,7 @@ export default function HomePage() {
           </p>
           <h1>The reactive backend you run yourself.</h1>
           <p className="lede">
-            Write your backend as TypeScript queries and mutations. Subscribe once, and stackbase{' '}
+            Write your backend as TypeScript queries and mutations. Subscribe once, and helipod{' '}
             <b>pushes fresh results to every client</b> the moment the data changes. No polling, no
             refetching.
           </p>
@@ -20,7 +20,7 @@ export default function HomePage() {
             <Link className="btn btn--primary" href="/docs/get-started/quickstart">
               Read the quickstart →
             </Link>
-            <Link className="btn btn--ghost" href="/docs/get-started/what-is-stackbase">
+            <Link className="btn btn--ghost" href="/docs/get-started/what-is-helipod">
               How it works
             </Link>
           </div>
@@ -31,7 +31,7 @@ export default function HomePage() {
           {/* code tile — the reactive read */}
           <article className="cell cell--code s4" aria-hidden="true">
             <div className="code-head">
-              <span className="file">stackbase/messages.ts</span>
+              <span className="file">helipod/messages.ts</span>
               <span className="chip">reactive</span>
             </div>
             <pre>
@@ -250,7 +250,7 @@ export default function HomePage() {
       <footer className="foot">
         <div className="wrap foot-row">
           <p className="foot-brand">
-            stackbase <span>the reactive backend you self-host</span>
+            helipod <span>the reactive backend you self-host</span>
           </p>
           <nav className="foot-links" aria-label="Footer">
             <Link href="/docs">Docs</Link>

@@ -6,7 +6,7 @@
  * thereafter (https://developers.cloudflare.com/durable-objects/reference/data-location/).
  *
  * This module is the ONE source of truth for the valid hint set, shared by BOTH the free single-shard
- * host (which pins its one DO via `STACKBASE_DO_LOCATION_HINT`) and the ee multi-shard router (which
+ * host (which pins its one DO via `HELIPOD_DO_LOCATION_HINT`) and the ee multi-shard router (which
  * places each shard-DO near its audience). It lives in the FREE package so the ee package can reuse it
  * WITHOUT the free package ever importing back into ee — the licensing edge stays one-way.
  *
@@ -20,7 +20,7 @@
 
 /** The env var the free single-shard host reads to pin its ONE Durable Object's home region. Unset ⇒
  *  no hint (Cloudflare places the DO near the first requester — the pre-hint default behavior). */
-export const DEPLOYMENT_LOCATION_HINT_ENV = "STACKBASE_DO_LOCATION_HINT";
+export const DEPLOYMENT_LOCATION_HINT_ENV = "HELIPOD_DO_LOCATION_HINT";
 
 /**
  * The complete set of `locationHint` values Cloudflare accepts, verified against the current

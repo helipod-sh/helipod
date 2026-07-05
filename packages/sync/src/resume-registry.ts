@@ -11,8 +11,8 @@
  * indexed the whole time it's retained — a write landing during that "gap" still has to advance
  * `lastInvalidatedTs`, or a resuming client would wrongly believe its stale result is current.
  */
-import { deserializeKeyRange, IntervalIndex, type KeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { JSONValue } from "@stackbase/values";
+import { deserializeKeyRange, IntervalIndex, type KeyRange, type SerializedKeyRange } from "@helipod/index-key-codec";
+import type { JSONValue } from "@helipod/values";
 
 export const TTL_MS = 60_000;
 

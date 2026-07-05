@@ -1,14 +1,14 @@
-import { query, mutation } from "@stackbase/executor";
-import type { QueryCtx, MutationCtx } from "@stackbase/executor";
-import { computeBackoff } from "@stackbase/scheduler";
+import { query, mutation } from "@helipod/executor";
+import type { QueryCtx, MutationCtx } from "@helipod/executor";
+import { computeBackoff } from "@helipod/scheduler";
 
 /**
- * Internal modules for `@stackbase/triggers` — registered on `defineTriggers()`'s `modules` map
+ * Internal modules for `@helipod/triggers` — registered on `defineTriggers()`'s `modules` map
  * (reachable as `triggers:_initCursor` / `triggers:_getCursor` / etc.), consumed by the driver
  * loop (`./driver.ts`) via `DriverContext.runFunction`, which dispatches privileged
  * (`runtime-embedded/src/runtime.ts`'s `driverCtx.runFunction` sets `privileged: true`) —
  * privileged calls bypass namespace prefixing, so these modules use the fully-qualified table
- * name `"triggers/cursors"` (mirrors `@stackbase/scheduler`'s `./modules.ts` module doc comment).
+ * name `"triggers/cursors"` (mirrors `@helipod/scheduler`'s `./modules.ts` module doc comment).
  *
  * `resume` is deliberately NOT `_`-prefixed (unlike every other module here): it's meant to be an
  * ordinary callable mutation an operator/the dashboard's function runner invokes directly
@@ -18,7 +18,7 @@ import { computeBackoff } from "@stackbase/scheduler";
 /** After this many CONSECUTIVE handler failures, a trigger pauses itself (design spec D2). */
 export const MAX_CONSECUTIVE_FAILURES = 8;
 
-/** Drop `undefined`-valued keys before a `db.replace` (the wire codec rejects `undefined`). Mirrors `@stackbase/scheduler`'s `compact` (duplicated per that package's own established convention — see its `modules.ts`/`facade.ts`). */
+/** Drop `undefined`-valued keys before a `db.replace` (the wire codec rejects `undefined`). Mirrors `@helipod/scheduler`'s `compact` (duplicated per that package's own established convention — see its `modules.ts`/`facade.ts`). */
 function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) if (v !== undefined) out[k] = v;
@@ -108,8 +108,8 @@ export const _advanceCursor = mutation(
  * how many in a row, survives a restart.
  *
  * Uses `ctx.random` (the mutation's own seeded PRNG) for `computeBackoff`'s jitter — the same
- * determinism-for-OCC-replay property `@stackbase/scheduler`'s `_complete` relies on (see
- * `computeBackoff`'s doc comment, `@stackbase/scheduler`): a replay of this exact mutation call
+ * determinism-for-OCC-replay property `@helipod/scheduler`'s `_complete` relies on (see
+ * `computeBackoff`'s doc comment, `@helipod/scheduler`): a replay of this exact mutation call
  * computes the exact same delay.
  */
 export const _recordFailure = mutation(

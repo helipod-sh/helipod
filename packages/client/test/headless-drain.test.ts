@@ -1,7 +1,7 @@
 /**
  * Task 3 (browser-ux Part B) — `drainOutboxOnce`, the headless one-shot outbox drain. A `MockTransport`
  * injected via the `_transport` test seam gives full control over the wire, exactly like
- * `outbox-drain.test.ts`'s harness for the REAL `StackbaseClient` — here there is no client at all,
+ * `outbox-drain.test.ts`'s harness for the REAL `HelipodClient` — here there is no client at all,
  * only the store-only host + the shared `OutboxDrain`.
  */
 import { describe, it, expect } from "vitest";
@@ -15,7 +15,7 @@ import {
   type OutboxLockManager,
   type OutboxStorage,
 } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 import type { ClientTransport } from "../src/transport";
 
 /* -------------------------------------------------------------------------- */

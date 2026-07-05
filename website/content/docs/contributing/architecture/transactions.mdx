@@ -5,7 +5,7 @@ description: "The single-writer OCC transactor and 3-phase commit."
 
 {/* diataxis: explanation */}
 
-Picture a small shop with one register. Any number of customers can wander the aisles and fill their carts at the same time, but only one person checks out at a time. That's the whole trick behind how Stackbase keeps every mutation safe without making every read stand in line.
+Picture a small shop with one register. Any number of customers can wander the aisles and fill their carts at the same time, but only one person checks out at a time. That's the whole trick behind how Helipod keeps every mutation safe without making every read stand in line.
 
 Every mutation you write runs inside a transaction: a `ctx.db.insert(...)`, a `ctx.db.replace(...)`, all of it. This page explains how that transaction stays safe (no two mutations can silently step on each other) and cheap (no locks while reading, no waiting) at the same time. It also explains how the same bookkeeping that makes this safe gets reused to power live queries.
 
@@ -13,11 +13,11 @@ If you haven't read `/docs/core-concepts/mutations` yet, start there for the dev
 
 ## The one trick: only one writer at a time, per shard
 
-Stackbase's engine is organized into **shards**. In the default single-binary setup there's exactly one shard, so for now just think of it as "the database." (Sharding is how Stackbase scales writes horizontally at Tier 2, see `/docs/contributing/architecture/runtimes`. Everything on this page applies per shard either way.)
+Helipod's engine is organized into **shards**. In the default single-binary setup there's exactly one shard, so for now just think of it as "the database." (Sharding is how Helipod scales writes horizontally at Tier 2, see `/docs/contributing/architecture/runtimes`. Everything on this page applies per shard either way.)
 
 The class that fans a commit out across multiple shards is `ShardedTransactor` (`packages/transactor/src/sharded-transactor.ts`). It holds N independent `ShardWriter`s behind the same single `Transactor` interface that `SingleWriterTransactor` implements, so callers don't need to know whether they're talking to one shard or many.
 
-Inside one shard, Stackbase makes a deliberate simplifying choice: only one transaction is allowed to commit at a time. A per-shard lock (`AsyncMutex`, in `packages/transactor/src/shard-writer.ts`) makes commits happen one after another, never in parallel.
+Inside one shard, Helipod makes a deliberate simplifying choice: only one transaction is allowed to commit at a time. A per-shard lock (`AsyncMutex`, in `packages/transactor/src/shard-writer.ts`) makes commits happen one after another, never in parallel.
 
 Alongside that lock sits a monotonic clock: an oracle that only ever hands out increasing numbers, or "timestamps." Every committed transaction gets a timestamp strictly greater than every timestamp committed before it on that shard.
 
@@ -150,19 +150,19 @@ const updated = await ctx.db.get(userId);
 // updated.credits is 10, even though nothing has been committed yet
 ```
 
-The write to `userId` is only staged at this point. It hasn't reached the document store yet. But the very next read has to see it anyway, or the mutation's own logic would be reading stale data mid-execution. Stackbase handles this by checking the transaction's own staged writes before falling through to the document store: a `get()` call first asks "did this transaction already write this document?" and only asks the store if the answer is no.
+The write to `userId` is only staged at this point. It hasn't reached the document store yet. But the very next read has to see it anyway, or the mutation's own logic would be reading stale data mid-execution. Helipod handles this by checking the transaction's own staged writes before falling through to the document store: a `get()` call first asks "did this transaction already write this document?" and only asks the store if the answer is no.
 
 The same idea applies to scans. A `.collect()` over an index merges the transaction's pending writes over the persisted results, so a document you just inserted shows up in a scan you run afterward, in the right sorted position, and a document you just deleted disappears from one, all before anything is actually committed. This keeps a mutation's view of the database internally consistent from its own perspective, even though nothing it has written is visible to anyone else yet.
 
 ## From write set to reactivity
 
-When Phase 3 finishes, the commit produces exactly the payload the rest of the system needs: the assigned commit timestamp, plus the write set, the key ranges that were just written, described the same way read sets are. That pair is handed off (Stackbase calls it an "oplog delta") to the sync tier, whose job is to intersect it against every live subscription's stored read set and decide who needs a fresh push. That intersection logic, not the WebSocket plumbing around it, is the actual reactivity engine. It's covered in `/docs/contributing/architecture/reactivity`.
+When Phase 3 finishes, the commit produces exactly the payload the rest of the system needs: the assigned commit timestamp, plus the write set, the key ranges that were just written, described the same way read sets are. That pair is handed off (Helipod calls it an "oplog delta") to the sync tier, whose job is to intersect it against every live subscription's stored read set and decide who needs a fresh push. That intersection logic, not the WebSocket plumbing around it, is the actual reactivity engine. It's covered in `/docs/contributing/architecture/reactivity`.
 
 The important thing to take away here: reactivity isn't a notification system bolted onto the database. It falls directly out of the same read-set/write-set bookkeeping that OCC already needed for correctness. There's only one source of truth about what changed and what each query depended on, and both correctness and liveness are computed from it.
 
 ## Limits: protecting the one writer you have
 
-Because every mutation on a shard funnels through a single lock and a single retry loop, a single runaway mutation could, in principle, monopolize it: scanning millions of rows, staging an unbounded number of writes, or retrying forever. Stackbase bounds this with a per-transaction resource budget, called headroom.
+Because every mutation on a shard funnels through a single lock and a single retry loop, a single runaway mutation could, in principle, monopolize it: scanning millions of rows, staging an unbounded number of writes, or retrying forever. Helipod bounds this with a per-transaction resource budget, called headroom.
 
 <Accordions type="single">
 

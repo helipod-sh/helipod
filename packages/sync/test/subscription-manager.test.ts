@@ -3,7 +3,7 @@ import { SubscriptionManager, type Subscription } from "../src/subscription-mana
 import {
   serializeKeyRange, deserializeKeyRange, rangesOverlap, keySuccessor,
   indexKeyspaceId, tableOfKeyspaceId, type SerializedKeyRange, type KeyRange,
-} from "@stackbase/index-key-codec";
+} from "@helipod/index-key-codec";
 
 // --- seeded RNG (mulberry32) so failures reproduce; no Math.random ---
 function rng(seed: number) {

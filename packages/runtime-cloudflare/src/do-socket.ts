@@ -8,7 +8,7 @@
  * not exposing `ping` here the heartbeat is disarmed by construction; the runtime is ALSO booted with
  * `disableSyncBackgroundTimers: true` as belt-and-suspenders (and to disarm the flush sweep).
  */
-import type { SyncWebSocket } from "@stackbase/sync";
+import type { SyncWebSocket } from "@helipod/sync";
 import type { DoWebSocketLike } from "./cf-types";
 
 export function doSyncSocket(ws: DoWebSocketLike): SyncWebSocket {

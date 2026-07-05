@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/query-engine",
+  "name": "@helipod/query-engine",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,13 +21,13 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/docstore": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore-sqlite": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

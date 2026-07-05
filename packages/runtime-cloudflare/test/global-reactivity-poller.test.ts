@@ -58,7 +58,7 @@ describe("GlobalReactivityPoller.tick", () => {
     expect(h.notifyWrites).toHaveBeenCalledTimes(1);
     // M2c Critical fix: `commitTs` is a harmless placeholder (0) on a global invalidation — never a
     // wall-clock/counter value fed into the local-ts frontier — and `global: true` is set so the sync
-    // handler treats it as frontier-neutral. See `WriteInvalidation.global`'s doc in `@stackbase/sync`.
+    // handler treats it as frontier-neutral. See `WriteInvalidation.global`'s doc in `@helipod/sync`.
     expect(h.notifyWrites).toHaveBeenCalledWith({
       tables: ["users"],
       ranges: [],

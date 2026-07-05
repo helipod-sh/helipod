@@ -1,5 +1,5 @@
 /**
- * Task 4 — the drain, through the REAL `StackbaseClient` (verdict §(d) "Drain"). A `MockTransport`
+ * Task 4 — the drain, through the REAL `HelipodClient` (verdict §(d) "Drain"). A `MockTransport`
  * gives full control over the wire: the drain sends `MutationBatch` chunks, the test emits the
  * per-unit `MutationResponse` frames back. Covers hydrate-into-log + FIFO, chunking + one-unacked,
  * every per-unit outcome, poison skip-vs-pause, the transient-stop re-send, the flush-time identity
@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
-  StackbaseClient,
+  HelipodClient,
   memoryOutbox,
   OUTBOX_VERSION,
   OFFLINE_IDENTITY_CHANGED,
@@ -25,7 +25,7 @@ import {
   type OutboxLockManager,
   type OutboxStorage,
 } from "../src/index";
-import type { ClientMessage, MutationBatchEntry, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, MutationBatchEntry, ServerMessage } from "@helipod/sync";
 
 /* -------------------------------------------------------------------------- */
 /* Harness                                                                      */
@@ -129,7 +129,7 @@ describe("OutboxDrain — hydrate + FIFO by persisted order (T4)", () => {
     ]);
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -147,7 +147,7 @@ describe("OutboxDrain — hydrate + FIFO by persisted order (T4)", () => {
       { seq: 1, order: 2 },
     ]);
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -171,7 +171,7 @@ describe("OutboxDrain — MutationBatch chunks of 50, one unacked at a time (T4)
       Array.from({ length: 120 }, (_, i) => ({ seq: i, order: i + 1 })),
     );
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length === 1);
@@ -209,7 +209,7 @@ describe("OutboxDrain — coded failure is skip-and-record: settle terminal + CO
       { seq: 2, order: 3 },
     ]);
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -245,7 +245,7 @@ describe("OutboxDrain — poisonPolicy: 'pause' halts on a coded failure (T4)", 
     const paused: Array<{ code: string; udfPath: string }> = [];
     const t = new MockTransport();
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const client = new StackbaseClient(t, {
+    const client = new HelipodClient(t, {
       ...armedClientOpts,
       outbox,
       poisonPolicy: "pause",
@@ -283,7 +283,7 @@ describe("OutboxDrain — the transient-stop chunk contract (T4)", () => {
       { seq: 2, order: 3 },
     ]);
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox, outboxBackoffMs: () => 0 });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox, outboxBackoffMs: () => 0 });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -317,7 +317,7 @@ describe("OutboxDrain — a transport drop mid-chunk never wedges the drain (T4,
       { seq: 1, order: 2 },
     ]);
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length === 1);
@@ -353,7 +353,7 @@ describe("OutboxDrain — the applied-drop routes by `replayed`: fresh vs replay
   it("a FRESH (non-replayed) drain apply holds its layer until the covering Transition — no flicker", async () => {
     const outbox = memoryOutbox();
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
     client.setOutboxArmed(true);
     const cid = (await client.getOutboxIdentity())!.clientId;
 
@@ -411,7 +411,7 @@ describe("OutboxDrain — the applied-drop routes by `replayed`: fresh vs replay
   it("a REPLAY (`replayed: true`) drops immediately once the baseline is adopted — no further Transition needed", async () => {
     const outbox = memoryOutbox();
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
     client.setOutboxArmed(true);
     const cid = (await client.getOutboxIdentity())!.clientId;
 
@@ -447,7 +447,7 @@ describe("OutboxDrain — a mutation issued mid-chunk queues behind it, never di
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old", [{ seq: 0, order: 1 }]); // the chunk will consume the WHOLE backlog
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length === 1); // the chunk is in flight (its unit is `inflight`)
@@ -485,7 +485,7 @@ describe("OutboxDrain — the flush-time identity gate (T4, hazard 9)", () => {
     ]);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -539,7 +539,7 @@ describe("OutboxDrain — leader handoff across two tabs sharing one queue (T4, 
 
     // Tab A becomes leader, sends the chunk, acks only seq0, then dies (close releases the lock).
     const tA = new MockTransport();
-    const clientA = new StackbaseClient(tA, { outbox, outboxLocks: locks, outboxDrainIntervalMs: 0 });
+    const clientA = new HelipodClient(tA, { outbox, outboxLocks: locks, outboxDrainIntervalMs: 0 });
     clientA.setOutboxArmed(true);
     await waitFor(() => clientA.__outboxDrain!.isLeader && tA.batches().length > 0);
     const batchA = tA.batches()[0]!;
@@ -550,7 +550,7 @@ describe("OutboxDrain — leader handoff across two tabs sharing one queue (T4, 
 
     // Tab B acquires leadership, hydrates the remaining durable entry, and drains it.
     const tB = new MockTransport();
-    const clientB = new StackbaseClient(tB, { outbox, outboxLocks: locks, outboxDrainIntervalMs: 0 });
+    const clientB = new HelipodClient(tB, { outbox, outboxLocks: locks, outboxDrainIntervalMs: 0 });
     clientB.setOutboxArmed(true);
     await waitFor(() => clientB.__outboxDrain!.isLeader && tB.batches().length > 0, 3000);
     const batchB = tB.batches()[0]!;
@@ -575,7 +575,7 @@ describe("OutboxDrain — first-connect (reload) fires the handshake + drain (T4
 
     const t = new MockTransport();
     // NOTE: no setOutboxArmed here — the drain must arm itself via the first-connect ConnectAck.
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
 
     // The drain becomes leader, hydrates the backlog, and (because drainable > 0) sends Connect —
     // no reopen event needed (the reload analog).
@@ -595,7 +595,7 @@ describe("OutboxDrain — first-connect (reload) fires the handshake + drain (T4
 
   it("an EMPTY outbox sends NO first-connect Connect (byte-identical to the pre-drain client)", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox: memoryOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
     await tick();
     expect(t.connects()).toHaveLength(0); // nothing to drain → defers to the normal reopen handshake
     expect(t.batches()).toHaveLength(0);
@@ -613,7 +613,7 @@ describe("OutboxDrain — a terminal drain failure never frees its seq for reuse
     await seedOutbox(outbox, "old", [{ seq: 0, order: 1 }]);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);
@@ -647,7 +647,7 @@ describe("OutboxDrain — dead-clientId meta rows are pruned at hydrate (T4 / T1
     await seedOutbox(outbox, "live-tab", [{ seq: 1, order: 1 }]);
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
     const currentId = (await client.getOutboxIdentity())!.clientId;
 
@@ -676,7 +676,7 @@ describe("OutboxDrain — a hand-crafted auth:refresh entry is dropped at hydrat
 
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { ...armedClientOpts, outbox });
+    const client = new HelipodClient(t, { ...armedClientOpts, outbox });
     client.setOutboxArmed(true);
 
     await waitFor(() => t.batches().length > 0);

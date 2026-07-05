@@ -7,17 +7,17 @@
  * Storage is injected (a `DocStore`), so the runtime is storage- and runtime-agnostic — the
  * CLI picks `BunSqliteAdapter` or `NodeSqliteAdapter`.
  */
-import { namespaceForPath, type Driver, type DriverContext, type LogChange, type WakeHost } from "@stackbase/component";
-import { FunctionNotFoundError } from "@stackbase/errors";
-import { decodeStorageTableId, decodeDocumentId, encodeInternalDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import { jsonToConvex, convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import type { DocStore, DocumentLogEntry } from "@stackbase/docstore";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor, ShardedTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
-import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry, type WriteRouter } from "@stackbase/executor";
-import { SyncProtocolHandler, type SyncUdfExecutor, type RunMutationResult, type MutationReplay, type ClientMutationVerdict } from "@stackbase/sync";
+import { namespaceForPath, type Driver, type DriverContext, type LogChange, type WakeHost } from "@helipod/component";
+import { FunctionNotFoundError } from "@helipod/errors";
+import { decodeStorageTableId, decodeDocumentId, encodeInternalDocumentId, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import { writtenTablesFromRanges, serializeKeyRange, type SerializedKeyRange } from "@helipod/index-key-codec";
+import { jsonToConvex, convexToJson, type JSONValue, type Value } from "@helipod/values";
+import type { DocStore, DocumentLogEntry } from "@helipod/docstore";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor, ShardedTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
+import { InlineUdfExecutor, mutation, type GuestDatabaseWriter, type ContextProvider, type IndexCatalog, type LogSink, type RegisteredFunction, type UdfResult, type PolicyContextProvider, type TablePolicy, type RelationRegistry, type WriteRouter } from "@helipod/executor";
+import { SyncProtocolHandler, type SyncUdfExecutor, type RunMutationResult, type MutationReplay, type ClientMutationVerdict } from "@helipod/sync";
 import {
   EmbeddedWriteFanout,
   InMemoryWriteFanoutAdapter,
@@ -34,11 +34,11 @@ import {
   recordZeroWriteApplied,
   type DedupKey,
 } from "./client-dedup";
-import type { ClientReplay } from "@stackbase/executor";
+import type { ClientReplay } from "@helipod/executor";
 
 /**
  * The `persistence_globals` key the deployment id is stamped under — reused verbatim from
- * `@stackbase/fleet`'s `FLEET_DEPLOYMENT_ID_KEY` (core has no static dep on the enterprise package,
+ * `@helipod/fleet`'s `FLEET_DEPLOYMENT_ID_KEY` (core has no static dep on the enterprise package,
  * so the literal is duplicated, not imported). Both stamp with `writeGlobalIfAbsent` (first-wins), so
  * a fleet + non-fleet boot against the same store agree on one id. Powers `ConnectAck.deploymentId`
  * (the same-timeline proof, verdict §(g) hazard 15).
@@ -83,7 +83,7 @@ function replayToRunResult(replay: ClientReplay): RunMutationResult {
 }
 
 /** The payload shape `DriverContext.onCommit` callbacks receive (same shape as
- *  `@stackbase/component`'s `DriverContext["onCommit"]` parameter — kept as a local alias here
+ *  `@helipod/component`'s `DriverContext["onCommit"]` parameter — kept as a local alias here
  *  rather than importing it, since the interface only inlines the object type). */
 type CommitEvent = { tables: string[]; ranges: readonly SerializedKeyRange[]; commitTs: number };
 
@@ -122,15 +122,15 @@ function fireCommitSubs(commitSubs: ReadonlySet<(inv: CommitEvent) => void>, inv
 }
 
 /**
- * Fleet write-routing seam (Tier 2), PER-SHARD. Defined in `@stackbase/executor` (where the
+ * Fleet write-routing seam (Tier 2), PER-SHARD. Defined in `@helipod/executor` (where the
  * per-shard forward chokepoint on `ExecutorDeps.writeRouter` references it, avoiding a circular dep
- * back to this package) and re-exported here as the core seam `@stackbase/fleet` implements. A node
+ * back to this package) and re-exported here as the core seam `@helipod/fleet` implements. A node
  * that doesn't own a mutation's resolved shard forwards it to that shard's owner; queries are never
  * routed. Actions still forward wholesale at the runtime level (below) to the default-shard holder —
  * an action's INNER mutations then route per-shard from wherever the action runs. See
  * `InlineUdfExecutor.run`'s routing hook.
  */
-export type { WriteRouter, ClientReplay } from "@stackbase/executor";
+export type { WriteRouter, ClientReplay } from "@helipod/executor";
 
 export interface EmbeddedRuntimeOptions {
   store: DocStore;
@@ -243,7 +243,7 @@ export interface EmbeddedRuntimeOptions {
    * Fleet B4 (group commit): route commits through the two-buffer stage-then-flush committer loop
    * instead of the byte-identical single-commit path. Threaded straight into the transactor
    * (`ShardedTransactor`/`SingleWriterTransactor`) constructed below — every shard batches when this
-   * is set, none do when it's unset/false. The CLI resolves this from `STACKBASE_GROUP_COMMIT`
+   * is set, none do when it's unset/false. The CLI resolves this from `HELIPOD_GROUP_COMMIT`
    * (default OFF at Fleet B4/T4 — T5 owns flipping the production default); leaving it unset keeps a
    * non-fleet / flag-off deployment structurally on today's path, byte-identical to before this
    * option existed. See `ShardedTransactorOptions.groupCommit`'s doc comment for the mechanism.
@@ -267,7 +267,7 @@ export interface EmbeddedRuntimeOptions {
    * `.global()` ops fail fast in the kernel (`requireGlobalTxn`), byte-identical to before this
    * option existed. NOT `DocStore`-shaped; it never enters a transactor/`QueryRuntime`.
    */
-  globalStore?: import("@stackbase/docstore-d1").D1DocStore;
+  globalStore?: import("@helipod/docstore-d1").D1DocStore;
   /**
    * The AUTHORITATIVE receipts store for the `Connect` resume handshake — where the outbox verdict
    * classification (`classifyClientMutation`) and ack-prune (`pruneClientMutations`) reads/writes
@@ -527,7 +527,7 @@ export class EmbeddedRuntime {
     const systemModules: Record<string, RegisteredFunction> = { ...(options.systemModules ?? {}) };
     const adminModules: Record<string, RegisteredFunction> = { ...(options.adminModules ?? {}) };
     // Resolves a target path's REAL registered kind — threaded onto every `ComponentContext` so
-    // component facades (e.g. `@stackbase/scheduler`'s `kindOf`) can tag a job's
+    // component facades (e.g. `@helipod/scheduler`'s `kindOf`) can tag a job's
     // kind:"mutation"|"action" accurately instead of guessing. See `ComponentContext.functionKind`'s
     // doc comment (packages/executor/src/executor.ts). A plain lookup against the SAME mutable
     // `modules` map `setModules` hot-swaps in place, so it stays correct across a dev reload.
@@ -676,10 +676,10 @@ export class EmbeddedRuntime {
     });
     const queue: Array<{
       tables: string[];
-      ranges: import("@stackbase/index-key-codec").SerializedKeyRange[];
+      ranges: import("@helipod/index-key-codec").SerializedKeyRange[];
       commitTs: number;
       origin?: string;
-      writtenDocs?: import("@stackbase/transactor").WrittenDoc[];
+      writtenDocs?: import("@helipod/transactor").WrittenDoc[];
     }> = [];
     let draining = false;
     const drain = async (): Promise<void> => {
@@ -824,7 +824,7 @@ export class EmbeddedRuntime {
       backstopMs,
       // Same resolver as `create()`'s local `functionKind` closure (used elsewhere for
       // `ComponentContext.functionKind`) — reused here, not recomputed, so a driver's path
-      // validation (e.g. `@stackbase/triggers`' boot-time handler check) and every other kind
+      // validation (e.g. `@helipod/triggers`' boot-time handler check) and every other kind
       // lookup in this runtime always agree.
       functionKind,
       readLog: async (opts) => {
@@ -841,7 +841,7 @@ export class EmbeddedRuntime {
         if (bound <= afterTs) return { changes: [], maxScannedTs: Number(afterTs) };
 
         // `limit: 0` is a DELIBERATE, DOCUMENTED escape hatch (triggers D2's boot idiom — see
-        // `@stackbase/triggers`' `src/boot.ts`): "peek the current stable bound without scanning
+        // `@helipod/triggers`' `src/boot.ts`): "peek the current stable bound without scanning
         // anything." A caller that only wants to know the log's current tip (e.g. to seed a new
         // trigger's cursor AT the tip rather than replay history) asks for zero scanned entries and
         // gets `maxScannedTs = bound` back for free — `bound` was already computed above with no
@@ -1038,7 +1038,7 @@ export class EmbeddedRuntime {
    * `adapter.subscribe` callback — the LOCAL commit fan-out. In an opt-in multi-writer fleet, a
    * co-writer's commit reaches THIS node only through the hybrid-tailer `invalidationSink`
    * (`ee/packages/fleet/src/node.ts`), which calls `handler.notifyWrites` directly — bypassing
-   * `adapter.subscribe` entirely, so a driver here (e.g. `@stackbase/triggers`) never woke on a
+   * `adapter.subscribe` entirely, so a driver here (e.g. `@helipod/triggers`) never woke on a
    * foreign writer's commit and instead slept up to its own wall-clock beat. Delivery was always
    * guaranteed (the durable cursor over the log) — this is a LATENCY fix, not a correctness one.
    *
@@ -1455,7 +1455,7 @@ export class EmbeddedRuntime {
    * `SingleWriterTransactor.groupCommitStats()` mirrors it for the one writer. Both are
    * structurally all-zero when `EmbeddedRuntimeOptions.groupCommit` is unset/false (the underlying
    * `ShardWriter` never touches these fields on the single-commit path) — callers need no separate
-   * on/off branch. The fleet health seam (`@stackbase/fleet`'s `node.ts`) reads this to derive
+   * on/off branch. The fleet health seam (`@helipod/fleet`'s `node.ts`) reads this to derive
    * `flushesPerSec` between successive `/api/health` reads.
    */
   groupCommitStats(): { lastBatchSize: number; maxBatchSize: number; flushCount: number } {

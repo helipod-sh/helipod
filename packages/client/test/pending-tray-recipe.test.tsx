@@ -3,13 +3,13 @@
  * T5 (c): `usePendingMutations()` through a REAL rendered React tree, and the documented
  * pending-tray recipe as a COMPILING docs fixture (mirrors `optimistic-store.test.ts`'s "type-level
  * compile fixture" pattern — `PendingTray`/`appendMessage` below are exactly the shape
- * `docs/enduser/offline.md` documents; `bun run --filter @stackbase/client typecheck` is what
+ * `docs/enduser/offline.md` documents; `bun run --filter @helipod/client typecheck` is what
  * actually proves the types, this file proves it also RUNS).
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import {
-  StackbaseClient,
+  HelipodClient,
   memoryOutbox,
   OUTBOX_VERSION,
   type OptimisticUpdateFn,
@@ -17,8 +17,8 @@ import {
   type OutboxEntry,
   type OutboxStorage,
 } from "../src/index";
-import { StackbaseProvider, usePendingMutations } from "../src/react";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { HelipodProvider, usePendingMutations } from "../src/react";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MockTransport {
   readonly sent: ClientMessage[] = [];
@@ -130,12 +130,12 @@ describe("usePendingMutations() — reactive over the durable store, through a r
   it("renders the durable backlog and re-renders on a local outbox change", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "c", [{ seq: 0, order: 0, body: "a" }]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
 
     render(
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <PendingTray />
-      </StackbaseProvider>,
+      </HelipodProvider>,
     );
     await waitFor(() => expect(screen.getAllByLabelText("pending-row")).toHaveLength(1));
 
@@ -146,13 +146,13 @@ describe("usePendingMutations() — reactive over the durable store, through a r
   it("re-renders on a CROSS-TAB nudge (a faked BroadcastChannel, two client instances sharing one durable store)", async () => {
     const outbox = memoryOutbox();
     const bus = new FakeBroadcastBus();
-    const clientA = new StackbaseClient(new MockTransport(), {
+    const clientA = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
       outboxBroadcast: new FakeBroadcastChannel(bus),
     });
-    const clientB = new StackbaseClient(new MockTransport(), {
+    const clientB = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -160,9 +160,9 @@ describe("usePendingMutations() — reactive over the durable store, through a r
     });
 
     render(
-      <StackbaseProvider client={clientB}>
+      <HelipodProvider client={clientB}>
         <PendingTray />
-      </StackbaseProvider>,
+      </HelipodProvider>,
     );
     await waitFor(() => expect(screen.queryAllByLabelText("pending-row")).toHaveLength(0));
 
@@ -174,12 +174,12 @@ describe("usePendingMutations() — reactive over the durable store, through a r
   it("a failed entry's retry()/dismiss() buttons work end-to-end through the rendered tray", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "c", [{ seq: 0, order: 0, body: "boom", status: "failed", error: { message: "went wrong", code: "APP_ERR" } }]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
 
     render(
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <PendingTray />
-      </StackbaseProvider>,
+      </HelipodProvider>,
     );
     await waitFor(() => expect(screen.getByLabelText("error").textContent).toBe("went wrong"));
 
@@ -190,12 +190,12 @@ describe("usePendingMutations() — reactive over the durable store, through a r
   it("retry() clears the failed row and re-enqueues a fresh one (unsent, not failed)", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "c", [{ seq: 0, order: 0, body: "boom", status: "failed", error: { message: "went wrong", code: "APP_ERR" } }]);
-    const client = new StackbaseClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
+    const client = new HelipodClient(new MockTransport(), { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, outboxBroadcast: null });
 
     render(
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <PendingTray />
-      </StackbaseProvider>,
+      </HelipodProvider>,
     );
     await waitFor(() => expect(screen.getByLabelText("error").textContent).toBe("went wrong"));
 
@@ -210,7 +210,7 @@ describe("the undefined-tolerant registry updater — compiling docs fixture (T5
   it("a hydrated entry with a registered updater that tolerates an undefined base drains without throwing", async () => {
     const outbox = memoryOutbox();
     await seedOutbox(outbox, "old", [{ seq: 0, order: 0, body: "hi" }]);
-    const client = new StackbaseClient(new MockTransport(), {
+    const client = new HelipodClient(new MockTransport(), {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,

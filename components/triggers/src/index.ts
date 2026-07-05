@@ -1,4 +1,4 @@
-import { defineComponent, type ComponentDefinition } from "@stackbase/component";
+import { defineComponent, type ComponentDefinition } from "@helipod/component";
 import { triggersSchema } from "./schema";
 import { _initCursor, _getCursor, _advanceCursor, _recordFailure, _pause, resume, _status } from "./modules";
 import { triggersDriver, type TriggersOpts } from "./driver";
@@ -10,13 +10,13 @@ export type { CursorRow } from "./modules";
 export { MAX_CONSECUTIVE_FAILURES } from "./modules";
 
 /**
- * `defineTriggers(opts)` — the `@stackbase/triggers` component: react to committed data changes
+ * `defineTriggers(opts)` — the `@helipod/triggers` component: react to committed data changes
  * server-side, durably, without a queue — a trigger is a durable cursor over the MVCC log (the
  * design spec's core idea; see `docs/superpowers/specs/2025-10-16-onchange-triggers-design.md`).
  *
  * ```ts
- * // stackbase.config.ts
- * import { defineTriggers } from "@stackbase/triggers";
+ * // helipod.config.ts
+ * import { defineTriggers } from "@helipod/triggers";
  * export default defineConfig({
  *   components: [
  *     defineTriggers({
@@ -28,9 +28,9 @@ export { MAX_CONSECUTIVE_FAILURES } from "./modules";
  * ```
  *
  * Each key is a WATCHED TABLE NAME; `handler` is an internal (`_`-prefixed) mutation or action
- * receiving `{ changes: LogChange[] }` (`@stackbase/component`'s `LogChange` — see its doc
+ * receiving `{ changes: LogChange[] }` (`@helipod/component`'s `LogChange` — see its doc
  * comment for `op`/`oldDoc`/`changeId` semantics). No `context`/`contextType` — unlike
- * `@stackbase/scheduler`, nothing calls a `ctx.triggers.*` facade from a mutation; the whole
+ * `@helipod/scheduler`, nothing calls a `ctx.triggers.*` facade from a mutation; the whole
  * surface is this declarative config plus the `triggers:resume` mutation
  * (`./modules.ts`) for un-pausing a tripped/failed trigger.
  *

@@ -8,7 +8,7 @@ export function consoleEmail(): EmailProvider {
     async send(msg) {
       // Intentionally logs the raw code/link — dev-only convenience, documented as such.
       console.log(
-        `\n[stackbase auth] email →\n  to:      ${msg.to}\n  from:    ${msg.from}\n  subject: ${msg.subject}\n  ${msg.text.replace(/\n/g, "\n  ")}\n`,
+        `\n[helipod auth] email →\n  to:      ${msg.to}\n  from:    ${msg.from}\n  subject: ${msg.subject}\n  ${msg.text.replace(/\n/g, "\n  ")}\n`,
       );
     },
   };

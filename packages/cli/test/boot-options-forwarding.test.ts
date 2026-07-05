@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { bootProject, type BootLoadedOptions, type BootProjectOptions } from "../src/boot";
-import type { WakeHost } from "@stackbase/component";
+import type { WakeHost } from "@helipod/component";
 
 // ── Guard 1: every `bootLoaded` option is reachable through `bootProject` (compile-time) ──────────
 
@@ -72,7 +72,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     const wakeHost: WakeHost = { armWake: (atMs) => void arms.push(atMs) };
 
     const { store } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/stackbase",
+      functionsDir: "test/fixtures/deploy-v1/helipod",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       wakeHost,
@@ -97,7 +97,7 @@ describe("bootProject forwards its options through to the runtime", () => {
     };
 
     const { store } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/stackbase",
+      functionsDir: "test/fixtures/deploy-v1/helipod",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       backstopMs,
@@ -122,7 +122,7 @@ describe("bootProject forwards its options through to the runtime", () => {
   it("forwards a plain pass-through option it has no special handling for", async () => {
     const dir = mkdtempSync(join(tmpdir(), "boot-fwd-"));
     const { store, runtime } = await bootProject({
-      functionsDir: "test/fixtures/deploy-v1/stackbase",
+      functionsDir: "test/fixtures/deploy-v1/helipod",
       dataPath: join(dir, "db.sqlite"),
       adminKey: "k",
       storageReaperSweepMs: 999_999,

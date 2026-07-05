@@ -7,9 +7,9 @@ description: "Implement the DocStore interface to back the engine with a databas
 
 ## Why this seam exists
 
-Every backend Stackbase ships today, SQLite and Postgres, talks to the engine through the exact same doorway. Stackbase's engine (the transactor, the query engine, reactivity) never talks to a database directly. It talks to one narrow TypeScript interface called `DocStore`. Whatever sits behind that interface (SQLite, Postgres, a Durable Object's embedded SQLite, or something you write yourself) is invisible to everything above it.
+Every backend Helipod ships today, SQLite and Postgres, talks to the engine through the exact same doorway. Helipod's engine (the transactor, the query engine, reactivity) never talks to a database directly. It talks to one narrow TypeScript interface called `DocStore`. Whatever sits behind that interface (SQLite, Postgres, a Durable Object's embedded SQLite, or something you write yourself) is invisible to everything above it.
 
-That's the whole pitch of this page: **to back Stackbase with a different database, you implement one interface, and nothing else in the engine has to change.**
+That's the whole pitch of this page: **to back Helipod with a different database, you implement one interface, and nothing else in the engine has to change.**
 
 ```mermaid
 flowchart TB
@@ -137,7 +137,7 @@ A backend that gets these wrong will not throw an obvious error. It will corrupt
 
 1. **Append-only.** Never `UPDATE` or `DELETE` a row in place. A change is always a new row with a new timestamp; a deletion is a new row whose value is `null` (a tombstone).
 2. **Snapshot semantics.** A read at `readTimestamp` must return the newest revision of each key with `ts <= readTimestamp`. Nothing newer, nothing skipped.
-3. **Strictly increasing commit timestamps, allocated inside your own transaction.** Two commits must never get the same timestamp, and a timestamp must never become visible before its own rows do. This is only safe because Stackbase is single-writer: at most one writer is ever committing to a given store at a time (see the `pg_advisory_lock` discussion below for how Postgres enforces this).
+3. **Strictly increasing commit timestamps, allocated inside your own transaction.** Two commits must never get the same timestamp, and a timestamp must never become visible before its own rows do. This is only safe because Helipod is single-writer: at most one writer is ever committing to a given store at a time (see the `pg_advisory_lock` discussion below for how Postgres enforces this).
 4. **`index_scan` must yield keys in encoded byte order**, and only the revision that was actually visible at the requested timestamp. Never a newer one that happens to exist.
 5. **Documents and their index rows commit together, atomically.** A crash (or a concurrent reader) must never see a document without its index entry, or vice versa.
 
@@ -147,20 +147,20 @@ Both implementations model the same three logical concerns: `documents` (the rev
 
 ### docstore-sqlite: synchronous
 
-`@stackbase/docstore-sqlite`'s `SqliteDocStore` sits on a small synchronous `DatabaseAdapter` seam (`exec`, `prepare`, `transaction`). See `packages/docstore-sqlite/src/adapter.ts`. Two concrete adapters exist today: a Node one (`node-adapter.ts`, built on `node:sqlite`) and a Bun one, both sharing the same base `SqliteDocStore` logic.
+`@helipod/docstore-sqlite`'s `SqliteDocStore` sits on a small synchronous `DatabaseAdapter` seam (`exec`, `prepare`, `transaction`). See `packages/docstore-sqlite/src/adapter.ts`. Two concrete adapters exist today: a Node one (`node-adapter.ts`, built on `node:sqlite`) and a Bun one, both sharing the same base `SqliteDocStore` logic.
 
 Because the underlying driver is synchronous, a commit guard registered here **must also be synchronous**. There is no `await` inside a single-transaction SQLite commit, and returning a promise from a guard is treated as a caller bug.
 
-The commit timestamp is allocated as `MAX(ts) + 1`, computed inside the same transaction as the writes. Since Stackbase enforces single-writer, no other writer can race in a higher timestamp between the `MAX(ts)` read and the insert. The whole thing is race-free by construction, not by locking.
+The commit timestamp is allocated as `MAX(ts) + 1`, computed inside the same transaction as the writes. Since Helipod enforces single-writer, no other writer can race in a higher timestamp between the `MAX(ts)` read and the insert. The whole thing is race-free by construction, not by locking.
 
 ### docstore-postgres: asynchronous
 
-`@stackbase/docstore-postgres`'s `PostgresDocStore` sits on a narrow *async* seam called `PgClient` (`query`, `transaction`, `acquireWriterLock`, `close`). See `packages/docstore-postgres/src/pg-client.ts`, implemented concretely by `node-pg-client.ts` on top of the `pg` driver. Commit guards here are always awaited. Async is the native mode.
+`@helipod/docstore-postgres`'s `PostgresDocStore` sits on a narrow *async* seam called `PgClient` (`query`, `transaction`, `acquireWriterLock`, `close`). See `packages/docstore-postgres/src/pg-client.ts`, implemented concretely by `node-pg-client.ts` on top of the `pg` driver. Commit guards here are always awaited. Async is the native mode.
 
 Two things make single-writer safety hold on a database that, unlike SQLite, could physically accept multiple concurrent writers:
 
 - **A `pg_advisory_lock`**, taken once at boot (`acquireWriterLock`). If a second engine process tries to start against the same database, it fails fast instead of silently corrupting state.
-- **A Postgres sequence** (`nextval('stackbase_ts')`), drawn from inside the same commit transaction as the row inserts. This is the async equivalent of SQLite's `MAX(ts) + 1`, using Postgres's own atomic counter instead of a table scan.
+- **A Postgres sequence** (`nextval('helipod_ts')`), drawn from inside the same commit transaction as the row inserts. This is the async equivalent of SQLite's `MAX(ts) + 1`, using Postgres's own atomic counter instead of a table scan.
 
 Reads lean on set-based SQL (`DISTINCT ON`, `LATERAL` joins) to resolve "the newest visible revision per key" in one query, rather than one round trip per row. Worth knowing if you're tuning a Postgres-shaped backend for latency.
 
@@ -172,7 +172,7 @@ flowchart LR
         s3 --> s4["sync commit guards"]
     end
     subgraph Postgres["Postgres (asynchronous)"]
-        p1["await db.transaction(async tx => ...)"] --> p2["nextval('stackbase_ts')"]
+        p1["await db.transaction(async tx => ...)"] --> p2["nextval('helipod_ts')"]
         p2 --> p3["insert rows"]
         p3 --> p4["awaited commit guards"]
     end
@@ -182,11 +182,11 @@ Both sides land on the same guarantee: one strictly increasing timestamp per com
 
 ### DO-SQLite: the same class, a different driver
 
-Cloudflare Durable Objects ship their own embedded SQLite (`ctx.storage.sql`). Rather than reimplement the MVCC logic a third time, `@stackbase/docstore-do-sqlite` reuses `SqliteDocStore` **verbatim** and only supplies a new `DatabaseAdapter` (`DoSqliteAdapter`) that talks to the Durable Object's SQL surface instead of `node:sqlite`. This is the cleanest illustration of why the adapter seam is drawn where it is: SQLite-shaped logic (schema, query building, transaction semantics) lives once in `docstore-sqlite`; only the thin driver differs per platform.
+Cloudflare Durable Objects ship their own embedded SQLite (`ctx.storage.sql`). Rather than reimplement the MVCC logic a third time, `@helipod/docstore-do-sqlite` reuses `SqliteDocStore` **verbatim** and only supplies a new `DatabaseAdapter` (`DoSqliteAdapter`) that talks to the Durable Object's SQL surface instead of `node:sqlite`. This is the cleanest illustration of why the adapter seam is drawn where it is: SQLite-shaped logic (schema, query building, transaction semantics) lives once in `docstore-sqlite`; only the thin driver differs per platform.
 
 ## Physically schemaless: the pattern to copy
 
-If you build a new backend, copy this shape. A Stackbase app can define any number of tables and indexes in its `schema.ts`, but the physical database underneath never grows new tables or columns to match. Instead:
+If you build a new backend, copy this shape. A Helipod app can define any number of tables and indexes in its `schema.ts`, but the physical database underneath never grows new tables or columns to match. Instead:
 
 - **One `documents` table** holds every logical table's rows, discriminated by a `table_id` column.
 - **One `indexes` table** holds every logical index's entries, discriminated by an `index_id` column.
@@ -200,18 +200,18 @@ Both are versioned by `ts`, exactly as described above. Adding an application ta
 A new backend is considered "done" when:
 
 1. It passes the shared conformance suite unmodified.
-2. If it's meant to be a real deployment target (not just a local experiment), it also has an end-to-end test through the real `stackbase serve` entrypoint, ideally against a real instance of the backing database, not just an in-process fake.
+2. If it's meant to be a real deployment target (not just a local experiment), it also has an end-to-end test through the real `helipod serve` entrypoint, ideally against a real instance of the backing database, not just an in-process fake.
 
 This is the acceptance bar, not a suggestion: passing your own hand-written tests is not the same claim as passing the same suite every other backend passes.
 
 ## How the runtime picks an adapter
 
-The `stackbase` CLI doesn't ask you to choose an adapter in code. It selects one by configuration, at startup:
+The `helipod` CLI doesn't ask you to choose an adapter in code. It selects one by configuration, at startup:
 
 - No flag set → SQLite (the zero-config default for local dev and single-node deploys).
-- `--database-url postgres://...` or the `STACKBASE_DATABASE_URL` environment variable set → Postgres. The flag wins if both are present.
+- `--database-url postgres://...` or the `HELIPOD_DATABASE_URL` environment variable set → Postgres. The flag wins if both are present.
 
-This is the same "select by config, not by code" pattern Stackbase uses for its file-storage backend seam (see `/docs/contributing/extending/providers`). The engine and your application code never need to know or care which one is active. For the Postgres flag details and a worked example, see `/docs/deploy/postgres`; for the general self-hosting story, see `/docs/deploy/self-hosting`.
+This is the same "select by config, not by code" pattern Helipod uses for its file-storage backend seam (see `/docs/contributing/extending/providers`). The engine and your application code never need to know or care which one is active. For the Postgres flag details and a worked example, see `/docs/deploy/postgres`; for the general self-hosting story, see `/docs/deploy/self-hosting`.
 
 ## What's deliberately out of scope
 

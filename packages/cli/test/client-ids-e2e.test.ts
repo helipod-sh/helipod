@@ -6,7 +6,7 @@
  * INVALID_CLIENT_ID/ID_ALREADY_IN_USE rejections), `mintEncodedDocumentId` mints the same shape
  * id client-side, and codegen emits `_generated/ids.ts` (a table→number map + a typed `mintId`).
  * This file proves the COMPOSITION — mint → offline-enqueue → drain → reference, and the wire-level
- * rejection matrix — through the real `stackbase dev` server (the "test through the shipped
+ * rejection matrix — through the real `helipod dev` server (the "test through the shipped
  * entrypoint" rule), mirroring `outbox-fs-e2e.test.ts`'s harness shape.
  *
  * Fixture: `conversations {name}` (UNSHARDED — client ids are default-ring-only per the spec's
@@ -22,13 +22,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, mintDocumentId, type ClientTransport } from "@stackbase/client";
-import { fsOutbox } from "@stackbase/client/outbox-fs";
-import { generateAll } from "@stackbase/codegen";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, mintDocumentId, type ClientTransport } from "@helipod/client";
+import { fsOutbox } from "@helipod/client/outbox-fs";
+import { generateAll } from "@helipod/codegen";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -53,7 +53,7 @@ interface MessageDoc {
 }
 
 const appModule = {
-  // `_id` passed straight through to `ctx.db.insert` — the client-supplied-ids surface a Stackbase
+  // `_id` passed straight through to `ctx.db.insert` — the client-supplied-ids surface a Helipod
   // app author writes exactly like this (see the spec's authoring section).
   createConversation: mutation({
     args: { _id: v.optional(v.string()), name: v.string() },
@@ -172,8 +172,8 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
       // client pointed at an already-running server would just complete online, defeating the
       // "offline create-then-reference chain" this test exists to prove.
       const dir = mkdtempSync(join(tmpdir(), "sb-client-ids-e2e-"));
-      let client1: StackbaseClient | undefined;
-      let client2: StackbaseClient | undefined;
+      let client1: HelipodClient | undefined;
+      let client2: HelipodClient | undefined;
       let server: DevServer | undefined;
       try {
         // Table numbers are allocated deterministically from the fixed schema (no components, no
@@ -189,7 +189,7 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
         /* ---- Session 1: offline (dead port) — enqueue create-then-reference ---- */
         const deadPort = await freePort();
         const outbox1 = fsOutbox({ dir });
-        client1 = new StackbaseClient(nodeWsTransport(wsUrlFor(deadPort)), {
+        client1 = new HelipodClient(nodeWsTransport(wsUrlFor(deadPort)), {
           outbox: outbox1,
           outboxLocks: null, // single-tab leader
           outboxDrainIntervalMs: 0,
@@ -227,7 +227,7 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
         /* ---- Session 2: fresh client + fresh fsOutbox on the SAME dir, against the now-running
          * real server. Hydrate replays the 2 journaled entries; the drain sends them. ---- */
         const outbox2 = fsOutbox({ dir });
-        client2 = new StackbaseClient(nodeWsTransport(wsUrlFor(server.port)), {
+        client2 = new HelipodClient(nodeWsTransport(wsUrlFor(server.port)), {
           outbox: outbox2,
           outboxLocks: null,
           outboxDrainIntervalMs: 0,
@@ -292,12 +292,12 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
   /* ------------------------------------------------------------------------ */
 
   it("rejects a wrong-table minted id with INVALID_CLIENT_ID, and a reused id with ID_ALREADY_IN_USE", async () => {
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       const started = await startServer();
       server = started.server;
-      client = new StackbaseClient(nodeWsTransport(wsUrlFor(started.port)));
+      client = new HelipodClient(nodeWsTransport(wsUrlFor(started.port)));
 
       // A minted MESSAGES-table id used as `_id` on `createConversation` — wrong table. The executor
       // throws `InvalidClientIdError` (code `INVALID_CLIENT_ID`, proven at the unit level by
@@ -339,12 +339,12 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
   /* ------------------------------------------------------------------------ */
 
   it("regression: createConversation without _id still works — the server mints", async () => {
-    let client: StackbaseClient | undefined;
+    let client: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       const started = await startServer();
       server = started.server;
-      client = new StackbaseClient(nodeWsTransport(wsUrlFor(started.port)));
+      client = new HelipodClient(nodeWsTransport(wsUrlFor(started.port)));
 
       const id = await client.mutation("app:createConversation", { name: "server-minted" });
       expect(typeof id).toBe("string");
@@ -386,14 +386,14 @@ describe("client-supplied ids — end-to-end through the real dev server", () =>
   /* ------------------------------------------------------------------------ */
 
   it("two clients racing createConversation with the SAME minted _id: exactly one row, the loser gets ID_ALREADY_IN_USE", async () => {
-    let clientA: StackbaseClient | undefined;
-    let clientB: StackbaseClient | undefined;
+    let clientA: HelipodClient | undefined;
+    let clientB: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       const started = await startServer(8); // the real fleet-default shard count
       server = started.server;
-      clientA = new StackbaseClient(nodeWsTransport(wsUrlFor(started.port)));
-      clientB = new StackbaseClient(nodeWsTransport(wsUrlFor(started.port)));
+      clientA = new HelipodClient(nodeWsTransport(wsUrlFor(started.port)));
+      clientB = new HelipodClient(nodeWsTransport(wsUrlFor(started.port)));
 
       const cid = mintDocumentId(started.conversationsTableNumber);
 

@@ -1,11 +1,11 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Fleet B3, Task 2 — HYBRID nodes (multi-writer writer-ish nodes that keep a local replica and serve
  * queries from it while committing to the primary). Driven through the REAL `startFleetNode` over a
  * real `EmbeddedRuntime` + `PostgresDocStore` (PGlite primary) + `SqliteDocStore` replica, wired the
  * way `prepareFleetNode`'s multi-writer branch does (store = primary, queryStore = the switchable
  * replica, beforeNotify = the forwarder's replica-catch-up wait). `prepareFleetNode` itself needs a
- * live `NodePgClient` connection string so it's proven end to end only in the `stackbase serve
+ * live `NodePgClient` connection string so it's proven end to end only in the `helipod serve
  * --fleet` E2E (Task 5) — here we build the runtime the way it does and exercise `startFleetNode`'s
  * hybrid wiring directly (the same pattern `node-lifecycle.test.ts` uses).
  *
@@ -25,13 +25,13 @@ import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } fr
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
-import type { NodePgClient } from "@stackbase/docstore-postgres";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { newDocumentId, encodeStorageIndexId, shardIdList, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
+import type { NodePgClient } from "@helipod/docstore-postgres";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { newDocumentId, encodeStorageIndexId, shardIdList, shardIdForKeyValue, DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import { PgliteClient } from "./pglite-client";
 import { LeaseManager } from "../src/lease";
 import { WriteForwarder, type ReplicaWaiter } from "../src/forwarder";
@@ -39,7 +39,7 @@ import { openSyncReplica, startFleetNode, relinquish, REPLICA_DB_FILENAME } from
 import { ReplicaTailer } from "../src/replica-tailer";
 import { SwitchableDocStore } from "../src/switchable-store";
 
-// `@stackbase/query-engine`/`@stackbase/sync` are transitive-only deps of `@stackbase/fleet` (not
+// `@helipod/query-engine`/`@helipod/sync` are transitive-only deps of `@helipod/fleet` (not
 // declared), so their types aren't nameable here — the index spec is a plain literal (checked against
 // executor's own param type) and server messages are read structurally (mirrors writer-invalidation.test.ts).
 const MESSAGES = 30201;
@@ -105,14 +105,14 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "fleet-hybrid-"));
-    process.env.STACKBASE_FLEET_MULTI_WRITER = "1";
+    process.env.HELIPOD_FLEET_MULTI_WRITER = "1";
     // Count how many ReplicaTailer instances actually START across a node's lifecycle — the direct
     // "the superseded invalidateOnly listener is never started" spy (a listener would be a 2nd start()).
     startSpy = vi.spyOn(ReplicaTailer.prototype, "start");
   });
   afterEach(() => {
     startSpy.mockRestore();
-    delete process.env.STACKBASE_FLEET_MULTI_WRITER;
+    delete process.env.HELIPOD_FLEET_MULTI_WRITER;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -183,7 +183,7 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
   // ONLY `runtime.handler.notifyWrites` on a foreign co-writer's commit — that re-runs live QUERY
   // subscriptions but never touches `commitSubs`, the driver `onCommit` fan-out (which normally
   // fires only from a node's own LOCAL `adapter.subscribe`, in `packages/runtime-embedded`). A
-  // driver here (e.g. `@stackbase/triggers`) would sleep on its wall-clock beat instead of waking
+  // driver here (e.g. `@helipod/triggers`) would sleep on its wall-clock beat instead of waking
   // immediately on a foreign commit. This proves the wiring: driving a REAL foreign commit through
   // the REAL `startFleetNode` hybrid tailer reaches `runtime.notifyExternalCommit` — spied on the
   // real runtime instance, not a hand-rolled stand-in for `invalidationSink`.
@@ -401,7 +401,7 @@ describe("Fleet B3 Task 2 — hybrid nodes", () => {
   });
 
   it("single-writer WRITER boot (multi-writer OFF) is byte-identical: NO replica tailer is stood up", async () => {
-    delete process.env.STACKBASE_FLEET_MULTI_WRITER; // single-writer topology
+    delete process.env.HELIPOD_FLEET_MULTI_WRITER; // single-writer topology
     const client = new PgliteClient();
     const primary = new PostgresDocStore(client);
     await primary.setupSchema();
@@ -442,10 +442,10 @@ describe("Fleet B3 hazard — re-acquired shard re-floors the WRITE oracle (no s
   let tmp: string;
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "fleet-reacq-"));
-    process.env.STACKBASE_FLEET_MULTI_WRITER = "1"; // hybrid regime — observeTimestamp feeds the QUERY oracle
+    process.env.HELIPOD_FLEET_MULTI_WRITER = "1"; // hybrid regime — observeTimestamp feeds the QUERY oracle
   });
   afterEach(() => {
-    delete process.env.STACKBASE_FLEET_MULTI_WRITER;
+    delete process.env.HELIPOD_FLEET_MULTI_WRITER;
     rmSync(tmp, { recursive: true, force: true });
   });
 

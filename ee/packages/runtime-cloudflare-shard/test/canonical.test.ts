@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import { describe, it, expect } from "vitest";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 import { shardDoName, DEFAULT_SHARD_DO_NAME } from "../src/canonical";
 
 describe("shardDoName — mode 'key' (one DO per value)", () => {

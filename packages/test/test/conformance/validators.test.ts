@@ -1,10 +1,10 @@
 import { it, expect, describe, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
-import { mutation } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod, type TestHelipod } from "../../src";
+import { mutation } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 describe("conformance — runtime document validation (enforced)", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
   const schema = defineSchema({
     nums: defineTable({ n: v.number() }),
     picks: defineTable({ c: v.union(v.literal("a"), v.literal("b")) }),
@@ -22,7 +22,7 @@ describe("conformance — runtime document validation (enforced)", () => {
     } as any,
     "schema.ts": { default: schema },
   };
-  beforeEach(async () => { t = await createTestStackbase({ modules }); });
+  beforeEach(async () => { t = await createTestHelipod({ modules }); });
   afterEach(async () => { await t.close(); });
 
   it("rejects a wrong-typed insert", async () => {
@@ -51,7 +51,7 @@ describe("conformance — runtime document validation (enforced)", () => {
 
   it("does not validate when schemaValidation is disabled", async () => {
     const loose = defineSchema({ nums: defineTable({ n: v.number() }) }, { schemaValidation: false });
-    const tl = await createTestStackbase({
+    const tl = await createTestHelipod({
       modules: { "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("nums", a)) } as any, "schema.ts": { default: loose } },
     });
     try {
@@ -68,26 +68,26 @@ describe("conformance — runtime document validation (extended type coverage)",
   // a genuine `bigint`/`ArrayBuffer` value. `ctx.db.insert` itself still round-trips through
   // `convexToJson`/`jsonToConvex` at the syscall boundary (see `packages/executor/src/guest.ts` and
   // `kernel.ts`), which correctly preserves both types.
-  let t: TestStackbase;
+  let t: TestHelipod;
   afterEach(async () => { if (t) await t.close(); });
 
   it("v.int64 accepts a bigint, rejects a plain number", async () => {
     const schema = defineSchema({ ints: defineTable({ n: v.int64() }) });
-    t = await createTestStackbase({ modules: { "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "schema.ts": { default: schema } } });
     await expect(t.run(async (ctx: any) => ctx.db.insert("ints", { n: 5n }))).resolves.toBeTruthy();
     await expect(t.run(async (ctx: any) => ctx.db.insert("ints", { n: 5 }))).rejects.toThrow(/does not match schema/);
   });
 
   it("v.float64/v.number accepts a number, rejects a bigint", async () => {
     const schema = defineSchema({ floats: defineTable({ n: v.float64() }) });
-    t = await createTestStackbase({ modules: { "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "schema.ts": { default: schema } } });
     await expect(t.run(async (ctx: any) => ctx.db.insert("floats", { n: 5 }))).resolves.toBeTruthy();
     await expect(t.run(async (ctx: any) => ctx.db.insert("floats", { n: 5n }))).rejects.toThrow(/does not match schema/);
   });
 
   it("v.bytes accepts an ArrayBuffer, rejects a non-ArrayBuffer", async () => {
     const schema = defineSchema({ blobs: defineTable({ b: v.bytes() }) });
-    t = await createTestStackbase({ modules: { "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "schema.ts": { default: schema } } });
     const buf = new Uint8Array([1, 2, 3]).buffer;
     await expect(t.run(async (ctx: any) => ctx.db.insert("blobs", { b: buf }))).resolves.toBeTruthy();
     await expect(t.run(async (ctx: any) => ctx.db.insert("blobs", { b: "not-bytes" }))).rejects.toThrow(/does not match schema/);
@@ -100,7 +100,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("lists", a)) } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:ins", { xs: [1, "two", 3] })).rejects.toThrow(/does not match schema/);
     await expect(t.mutation("mod:ins", { xs: [1, 2, 3] })).resolves.toBeTruthy();
     await expect(t.mutation("mod:ins", { xs: [] })).resolves.toBeTruthy();
@@ -112,7 +112,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("recs", a)) } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:ins", { r: { a: 1, b: 2 } })).resolves.toBeTruthy();
     await expect(t.mutation("mod:ins", { r: { a: 1, b: "not-a-number" } })).rejects.toThrow(/does not match schema/);
   });
@@ -123,7 +123,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("bools", a)) } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:ins", { b: true })).resolves.toBeTruthy();
     await expect(t.mutation("mod:ins", { b: "true" })).rejects.toThrow(/does not match schema/);
   });
@@ -134,7 +134,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("nulls", a)) } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:ins", { n: null })).resolves.toBeTruthy();
     await expect(t.mutation("mod:ins", { n: 0 })).rejects.toThrow(/does not match schema/);
   });
@@ -151,7 +151,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     const docId = await t.mutation<string>("mod:insDoc", { label: "x" });
     await expect(t.mutation("mod:insRef", { target: docId })).resolves.toBeTruthy();
     // FINDING: IdValidator.check (packages/values/src/validator.ts) only asserts `typeof value ===
@@ -173,7 +173,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:insFive", { n: 5 })).resolves.toBeTruthy();
     await expect(t.mutation("mod:insFive", { n: 6 })).rejects.toThrow(/does not match schema/);
     await expect(t.mutation("mod:insTrue", { b: true })).resolves.toBeTruthy();
@@ -188,7 +188,7 @@ describe("conformance — runtime document validation (extended type coverage)",
       "mod.ts": { ins: mutation(async (ctx: any, a: any) => ctx.db.insert("deep", a)) } as any,
       "schema.ts": { default: schema },
     };
-    t = await createTestStackbase({ modules });
+    t = await createTestHelipod({ modules });
     await expect(t.mutation("mod:ins", { items: [{ k: 1 }, { k: "bad" }] })).rejects.toThrow(/does not match schema/);
     await expect(t.mutation("mod:ins", { items: [{ k: 1 }, {}] })).resolves.toBeTruthy();
   });

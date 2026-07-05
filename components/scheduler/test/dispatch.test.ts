@@ -1,7 +1,7 @@
 // components/scheduler/test/dispatch.test.ts
 import { describe, it, expect } from "vitest";
-import { action, mutation } from "@stackbase/executor";
-import { jsonToConvex } from "@stackbase/values";
+import { action, mutation } from "@helipod/executor";
+import { jsonToConvex } from "@helipod/values";
 import { _claim, type ClaimResult } from "../src/modules";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
@@ -126,7 +126,7 @@ describe("schedulerDriver — event-driven dispatch", () => {
   });
 
   it("a kind:'action' job dispatches and runs (the driver's action guard was removed)", async () => {
-    // Actions now execute (CLAUDE.md build-order #5's action runtime — see @stackbase/executor's
+    // Actions now execute (CLAUDE.md build-order #5's action runtime — see @helipod/executor's
     // action branch, Task 1 of the action-runtime slice), so the driver no longer special-cases
     // `kind:"action"` jobs into an automatic "unsupported" failure — it dispatches them through
     // the SAME `runFunction(claimed.fnPath, claimed.args)` path a mutation job uses. There's no

@@ -1,7 +1,7 @@
 /**
  * fsOutbox E2E — the Node/Electron twin of the browser flagship (outbox-e2e.test.ts 1a):
  * offline → process exit → fresh process → exactly-once drain, with the durable queue on the
- * FILESYSTEM (fsOutbox) instead of IndexedDB. Session 1 = a real StackbaseClient over a real
+ * FILESYSTEM (fsOutbox) instead of IndexedDB. Session 1 = a real HelipodClient over a real
  * WebSocket whose transport never connects (pointed at a dead port — the server for this run
  * doesn't exist yet), enqueueing K mutations into a tmpdir journal; `close()` releases the dir
  * lock. Session 2 = a genuinely fresh client + fresh fsOutbox on the SAME dir against a now-
@@ -26,12 +26,12 @@ import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, type ClientTransport, type ClientResetInfo } from "@stackbase/client";
-import { fsOutbox } from "@stackbase/client/outbox-fs";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, type ClientTransport, type ClientResetInfo } from "@helipod/client";
+import { fsOutbox } from "@helipod/client/outbox-fs";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -125,8 +125,8 @@ describe("fsOutbox client E2E — the Node/Electron twin of the flagship: offlin
     const journalPath = join(dir, "journal.jsonl");
     const lockPath = join(dir, "lock");
 
-    let client1: StackbaseClient | undefined;
-    let client2: StackbaseClient | undefined;
+    let client1: HelipodClient | undefined;
+    let client2: HelipodClient | undefined;
     let server: DevServer | undefined;
     try {
       /* ---- Session 1: a client whose transport points at a dead port — the server for this
@@ -134,7 +134,7 @@ describe("fsOutbox client E2E — the Node/Electron twin of the flagship: offlin
        * regardless — durability is unconditional on connection state. ---- */
       const deadPort = await freePort();
       const outbox1 = fsOutbox({ dir });
-      client1 = new StackbaseClient(nodeWsTransport(wsUrlFor(deadPort)), {
+      client1 = new HelipodClient(nodeWsTransport(wsUrlFor(deadPort)), {
         outbox: outbox1,
         outboxLocks: null, // single-tab leader
         outboxDrainIntervalMs: 0,
@@ -174,7 +174,7 @@ describe("fsOutbox client E2E — the Node/Electron twin of the flagship: offlin
        * now-running real server. Hydrate replays the K journaled entries; the drain sends them. */
       const resets: ClientResetInfo[] = [];
       const outbox2 = fsOutbox({ dir });
-      client2 = new StackbaseClient(nodeWsTransport(wsUrlFor(server.port)), {
+      client2 = new HelipodClient(nodeWsTransport(wsUrlFor(server.port)), {
         outbox: outbox2,
         outboxLocks: null,
         outboxDrainIntervalMs: 0,

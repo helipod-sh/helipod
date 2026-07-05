@@ -7,6 +7,6 @@ import { env } from "cloudflare:test";
 describe("workerd toolchain smoke", () => {
   it("exposes the DO bindings", () => {
     expect(typeof (env as { SQL_PROBE?: { idFromName?: unknown } }).SQL_PROBE?.idFromName).toBe("function");
-    expect(typeof (env as { STACKBASE_DO?: { idFromName?: unknown } }).STACKBASE_DO?.idFromName).toBe("function");
+    expect(typeof (env as { HELIPOD_DO?: { idFromName?: unknown } }).HELIPOD_DO?.idFromName).toBe("function");
   });
 });

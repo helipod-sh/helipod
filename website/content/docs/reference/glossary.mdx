@@ -1,6 +1,6 @@
 ---
 title: Glossary
-description: Plain-language definitions of the terms used across the stackbase docs.
+description: Plain-language definitions of the terms used across the helipod docs.
 ---
 
 {/* diataxis: reference */}
@@ -17,12 +17,12 @@ use randomness. Actions have no direct database handle; they read and write thro
 ### Component
 
 A packaged backend feature (scheduler, workflows, auth, triggers, notifications) that you compose
-into a project in `stackbase.config.ts`. Each component brings its own tables, functions, and
+into a project in `helipod.config.ts`. Each component brings its own tables, functions, and
 background drivers. See [Components](/docs/components/overview).
 
 ### DLR (Differential Log-Tail Reactivity)
 
-stackbase's strategy for keeping subscriptions cheap: instead of always re-running a subscribed
+helipod's strategy for keeping subscriptions cheap: instead of always re-running a subscribed
 query from scratch and re-sending the whole result, the engine diffs the tail of the
 [MVCC log](#mvcc-log) and pushes only what changed. See
 [Reactivity internals](/docs/contributing/architecture/reactivity).
@@ -54,7 +54,7 @@ Blocking a stale writer from committing after it has lost the writer role, usual
 
 ### Frontier
 
-The timestamp up to which a client session (or a node) has observed committed writes. stackbase
+The timestamp up to which a client session (or a node) has observed committed writes. helipod
 guarantees your session's frontier covers your own commits, so you never read your own write as
 stale. See [Reactivity](/docs/core-concepts/reactivity#the-frontier-guarantees-your-own-commit-is-never-stale).
 
@@ -85,7 +85,7 @@ writer role is a lease: if the holder dies and stops renewing, another node take
 
 ### MVCC log
 
-The append-only format stackbase stores data in: a write never overwrites a document in place, it
+The append-only format helipod stores data in: a write never overwrites a document in place, it
 appends a new version with a timestamp. That history is what makes consistent snapshots, diffing,
 and [triggers](/docs/components/triggers) possible. See
 [Storage internals](/docs/contributing/architecture/storage).
@@ -124,7 +124,7 @@ engine can record exactly what it read and re-run it safely whenever that data c
 
 A query a client subscribes to over the WebSocket. The server pushes a fresh result whenever a
 committed write overlaps what the query read; the client never polls. This is the heart of
-stackbase. See [Reactivity](/docs/core-concepts/reactivity).
+helipod. See [Reactivity](/docs/core-concepts/reactivity).
 
 ### Read set / write set
 
@@ -147,13 +147,13 @@ decides which shard a document lives on. See [Scaling](/docs/deploy/scaling).
 ### Single-writer
 
 The invariant that exactly one process commits writes at a time (per [shard](#shard--shard-key)).
-It is what lets stackbase give serializable transactions without distributed coordination on every
+It is what lets helipod give serializable transactions without distributed coordination on every
 commit. See [Transactions](/docs/contributing/architecture/transactions).
 
-### `.stackbase/`
+### `.helipod/`
 
-Local working data, most importantly the SQLite database file when you run `stackbase dev`. It is
-created automatically and belongs in `.gitignore`. Not to be confused with `stackbase/`, which holds
+Local working data, most importantly the SQLite database file when you run `helipod dev`. It is
+created automatically and belongs in `.gitignore`. Not to be confused with `helipod/`, which holds
 the backend functions you write and commit.
 
 ### Syscall boundary
@@ -166,7 +166,7 @@ See [Execution internals](/docs/contributing/architecture/execution).
 
 A deployment shape; the same app code runs at every tier.
 
-- **Tier 0**: one process, embedded SQLite. The default, and what `stackbase dev` runs.
+- **Tier 0**: one process, embedded SQLite. The default, and what `helipod dev` runs.
 - **Tier 1**: one process, external Postgres.
 - **Tier 2**: a distributed fleet with sharded writers and a shared Postgres store.
 - **Tier 3**: the object-storage substrate: nodes coordinate through object storage, no shared
@@ -182,6 +182,6 @@ mutation, checks it for [OCC](#occ-optimistic-concurrency-control) conflicts, an
 
 ### UDF (user-defined function)
 
-Any function you write in `stackbase/`: a query, mutation, action, or `httpAction`. The docs mostly
+Any function you write in `helipod/`: a query, mutation, action, or `httpAction`. The docs mostly
 say "function"; internals pages say UDF. See
 [Execution internals](/docs/contributing/architecture/execution).

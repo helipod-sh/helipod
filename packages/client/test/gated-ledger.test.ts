@@ -1,6 +1,6 @@
 /**
  * The Gated Ledger — S1-S4 + the verdict §(c) reconciliation algorithm, driven through a REAL
- * `StackbaseClient`. Two harnesses (verdict §(h)):
+ * `HelipodClient`. Two harnesses (verdict §(h)):
  *  - REAL engine over a loopback transport (`newClient`) for the end-to-end gate behavior that
  *    depends on the origin-frontier feed: no-flicker, failure rollback, stacking, temp-id swap,
  *    wrong-guess self-heal, composed one-shot reads.
@@ -12,14 +12,14 @@
  * reverted state across apply->confirm.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { IndexSpec } from "@stackbase/query-engine";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi, MutationUndeliveredError, type ClientTransport, type OptimisticStoreView } from "../src/index";
-import type { Value } from "@stackbase/values";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { SimpleIndexCatalog, query, mutation, type RegisteredFunction } from "@helipod/executor";
+import type { IndexSpec } from "@helipod/query-engine";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, loopbackTransport, anyApi, MutationUndeliveredError, type ClientTransport, type OptimisticStoreView } from "../src/index";
+import type { Value } from "@helipod/values";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 const MESSAGES = 10001;
 const byConversation: IndexSpec = {
@@ -72,8 +72,8 @@ function appendUpdate(tempId: string): (store: OptimisticStoreView, args: Value)
 }
 
 let runtime: EmbeddedRuntime;
-function newClient(session: string): StackbaseClient {
-  return new StackbaseClient(loopbackTransport(runtime.connect(session)));
+function newClient(session: string): HelipodClient {
+  return new HelipodClient(loopbackTransport(runtime.connect(session)));
 }
 
 beforeEach(async () => {
@@ -246,7 +246,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
     vi.restoreAllMocks();
   });
 
-  function baseSubscribe(t: MockTransport, client: StackbaseClient, seed: string[]): string[][] {
+  function baseSubscribe(t: MockTransport, client: HelipodClient, seed: string[]): string[][] {
     const frames: string[][] = [];
     client.subscribe(api.messages.list, { conversationId: "c1" }, (v) => frames.push(bodies(v)));
     t.emit({
@@ -262,7 +262,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const frames = baseSubscribe(t, client, ["seed"]);
 
     void client.mutation(api.messages.send, { conversationId: "c1", body: "opt" }, { optimisticUpdate: appendUpdate("temp-1") });
@@ -279,7 +279,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("resync-with-pending-layers: in-session layers survive, rebuilt over the adopted baseline", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const frames = baseSubscribe(t, client, ["seed"]);
     void client.mutation(api.messages.send, { conversationId: "c1", body: "opt" }, { optimisticUpdate: appendUpdate("temp-1") });
     expect(frames.at(-1)).toEqual(["seed", "opt"]);
@@ -298,7 +298,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("drop-non-unsent-at-close: unsent retained, inflight rejects MutationUndeliveredError, completed drops", async () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
 
     const inflight = client.mutation(api.messages.send, { conversationId: "c1", body: "A" }, { optimisticUpdate: appendUpdate("temp-a") });
@@ -327,7 +327,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
   it("replay-throw containment: the throwing entry drops + warns, the rebuild completes", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const frames = baseSubscribe(t, client, ["seed"]);
 
     // This updater only throws when the base is empty — fine at initiation (base=[seed]).
@@ -355,7 +355,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
   it("ts<=0 leak: warn + drop the layer now", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const frames = baseSubscribe(t, client, ["seed"]);
     void client.mutation(api.messages.send, { conversationId: "c1", body: "opt" }, { optimisticUpdate: appendUpdate("temp-1") });
     const requestId = t.lastMutationRequestId();
@@ -368,7 +368,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("updater-throws-at-initiation: synchronous throw, nothing sent", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
     const before = t.sent.length;
     expect(() =>
@@ -386,7 +386,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("empty ts-advancing Transition (T2): event 2 gates a completed layer with zero special-casing", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
     void client.mutation(api.messages.send, { conversationId: "c1", body: "opt" }, { optimisticUpdate: appendUpdate("temp-1") });
     const requestId = t.lastMutationRequestId();
@@ -401,7 +401,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("events replay in requestId order", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     const frames = baseSubscribe(t, client, ["seed"]);
     void client.mutation(api.messages.send, { conversationId: "c1", body: "A" }, { optimisticUpdate: appendUpdate("temp-a") });
     void client.mutation(api.messages.send, { conversationId: "c1", body: "B" }, { optimisticUpdate: appendUpdate("temp-b") });
@@ -410,7 +410,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("maxObservedTs advances monotonically across transitions", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
     t.emit({ type: "Transition", startVersion: { querySet: 1, ts: 0 }, endVersion: { querySet: 1, ts: 4 }, modifications: [] });
     expect(client.__maxObservedTs).toBe(4);
@@ -418,7 +418,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("maxObservedTs resets at close", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
     t.emit({ type: "Transition", startVersion: { querySet: 1, ts: 0 }, endVersion: { querySet: 1, ts: 7 }, modifications: [] });
     expect(client.__maxObservedTs).toBe(7);
@@ -428,7 +428,7 @@ describe("Gated Ledger — controlled frames (MockTransport)", () => {
 
   it("T5: the optimisticUpdate closure runs BEFORE the Mutation frame hits the wire (order proof)", () => {
     const t = new MockTransport();
-    const client = new StackbaseClient(t);
+    const client = new HelipodClient(t);
     baseSubscribe(t, client, ["seed"]);
     const order: string[] = [];
     const sendSpy = vi.spyOn(t, "send");

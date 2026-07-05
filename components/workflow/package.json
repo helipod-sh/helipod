@@ -1,9 +1,9 @@
 {
-  "name": "@stackbase/workflow", "version": "0.0.0", "private": true,
+  "name": "@helipod/workflow", "version": "0.0.0", "private": true,
   "license": "FSL-1.1-Apache-2.0", "type": "module",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "main": "./dist/index.js", "types": "./dist/index.d.ts",
   "scripts": { "build": "tsup", "typecheck": "tsc --noEmit", "test": "vitest run" },
-  "dependencies": { "@stackbase/component": "workspace:*", "@stackbase/executor": "workspace:*", "@stackbase/values": "workspace:*", "@stackbase/scheduler": "workspace:*" },
-  "devDependencies": { "@stackbase/client": "workspace:*", "@stackbase/docstore-sqlite": "workspace:*", "@stackbase/runtime-embedded": "workspace:*", "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+  "dependencies": { "@helipod/component": "workspace:*", "@helipod/executor": "workspace:*", "@helipod/values": "workspace:*", "@helipod/scheduler": "workspace:*" },
+  "devDependencies": { "@helipod/client": "workspace:*", "@helipod/docstore-sqlite": "workspace:*", "@helipod/runtime-embedded": "workspace:*", "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
 }

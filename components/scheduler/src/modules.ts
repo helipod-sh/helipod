@@ -1,13 +1,13 @@
-import { query, mutation } from "@stackbase/executor";
-import type { QueryCtx, MutationCtx } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
+import { query, mutation } from "@helipod/executor";
+import type { QueryCtx, MutationCtx } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
 import type { JobState } from "./facade";
 import { fireOnComplete, type EnqueueTables } from "./facade";
 import { computeBackoff } from "./backoff";
 import { computeNextRun, computePrevRun, enqueueCadenceJob, type CronSpec, type CatchUpPolicy } from "./crons";
 
 /**
- * Internal modules for `@stackbase/scheduler` — registered on `defineScheduler()`'s `modules` map
+ * Internal modules for `@helipod/scheduler` — registered on `defineScheduler()`'s `modules` map
  * (so they're reachable as `scheduler:_peekDue` / `scheduler:_claim` / `scheduler:_complete`),
  * consumed ONLY by the Task 3 driver loop (`./driver.ts`) via `DriverContext.runFunction`, which
  * always calls privileged (`runtime-embedded/src/runtime.ts`'s `driverCtx.runFunction` sets
@@ -501,7 +501,7 @@ export const _cronTick = mutation(async (ctx: MutationCtx, args: { cronName: str
  *    `retry` opt-in — because an expired lease can't tell us whether the action's side effects
  *    already ran. Fires `onComplete` (if set) with a `"failed"` result — same as `_complete`'s
  *    dead-letter branch — so a caller relying on the onComplete round-trip (e.g.
- *    `@stackbase/workflow`'s `_stepDone`) actually observes the terminal failure instead of
+ *    `@helipod/workflow`'s `_stepDone`) actually observes the terminal failure instead of
  *    hanging forever waiting for a callback that never fires.
  *
  * Uses the `by_next_ts` index (`["state","nextTs"]`) to scan `state:"inProgress"` cheaply, then a

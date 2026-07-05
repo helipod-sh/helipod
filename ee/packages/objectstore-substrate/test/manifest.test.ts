@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MemoryObjectStore } from "@stackbase/objectstore/test-support/memory-objectstore";
-import { isCasConflict } from "@stackbase/objectstore";
+import { MemoryObjectStore } from "@helipod/objectstore/test-support/memory-objectstore";
+import { isCasConflict } from "@helipod/objectstore";
 import { casManifest, createManifest, readManifest, type Manifest } from "../src/manifest";
 
 describe("manifest helpers", () => {

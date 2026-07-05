@@ -9,8 +9,8 @@
  * (`packages/docstore/test-support/conformance.ts`).
  */
 import { describe, it, expect } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
 import { NodeSqliteAdapter, SqliteDocStore } from "../src/index";
 
 const TABLE = 20010;

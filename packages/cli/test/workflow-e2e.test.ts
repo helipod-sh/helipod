@@ -1,15 +1,15 @@
 /**
- * End-to-end test: Convex-parity `@stackbase/workflow` through the REAL dev server.
+ * End-to-end test: Convex-parity `@helipod/workflow` through the REAL dev server.
  *
  * Tasks 1-6 built the durable workflow engine (replay, journal, OCC guard, cancel, action/sleep
  * steps, fan-out, waitForEvent) — each proven by unit/integration tests against a hand-composed
  * `EmbeddedRuntime` (`components/workflow/test/helpers.ts`'s `makeRuntimeWithWorkflow`). This test
- * proves the WHOLE loop works through the shipped `stackbase dev` server (real `startDevServer` +
+ * proves the WHOLE loop works through the shipped `helipod dev` server (real `startDevServer` +
  * `loadProject`, real WebSocket, real HTTP admin browse) the way "test through the shipped
  * entrypoint" has caught wiring gaps before in this project (admin browse, scheduler driver
  * wiring — see `./scheduler-e2e.test.ts`'s doc comment): `loadProject` composes
- * `@stackbase/scheduler` + `@stackbase/workflow` exactly the way a project's `stackbase.config.ts`
- * would (see `examples/auth-demo/stackbase.config.ts`), and `createEmbeddedRuntime` is wired with
+ * `@helipod/scheduler` + `@helipod/workflow` exactly the way a project's `helipod.config.ts`
+ * would (see `examples/auth-demo/helipod.config.ts`), and `createEmbeddedRuntime` is wired with
  * the composed `bootSteps`/`drivers`/`tableNumbers` the same way `packages/cli/src/cli.ts`'s
  * `devCommand` wires them.
  *
@@ -27,13 +27,13 @@
  */
 import { describe, it, expect } from "vitest";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, action, InMemoryLogSink } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { AdminApi, browseTableModule, verifyAdminKey } from "@stackbase/admin";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow, workflow } from "@stackbase/workflow";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, action, InMemoryLogSink } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
+import { AdminApi, browseTableModule, verifyAdminKey } from "@helipod/admin";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow, workflow } from "@helipod/workflow";
 import { loadProject, startDevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -151,9 +151,9 @@ describe("workflow — Convex parity end-to-end through the real dev server", ()
   it(
     "a WS client starts a multi-step workflow, watches it park on waitForEvent, sends the event, and watches it complete — via reactive wake only",
     async () => {
-      // Compose the app + scheduler + workflow components exactly as a real `stackbase.config.ts`
+      // Compose the app + scheduler + workflow components exactly as a real `helipod.config.ts`
       // listing `defineScheduler()`/`defineWorkflow()` would (see
-      // `examples/auth-demo/stackbase.config.ts`). `workflow` requires `scheduler` — see
+      // `examples/auth-demo/helipod.config.ts`). `workflow` requires `scheduler` — see
       // `defineWorkflow`'s doc comment in `components/workflow/src/index.ts`.
       const project = loadProject({ schema, modules: { app: appModule } }, [
         defineScheduler(),

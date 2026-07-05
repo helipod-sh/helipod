@@ -29,10 +29,10 @@ import type {
   ShardId,
   TimestampRange,
   InternalDocumentId,
-} from "@stackbase/docstore";
-import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "@stackbase/docstore";
-import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
-import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
+} from "@helipod/docstore";
+import { getPrevRevQueryKey, CLIENT_VERDICT_VALUE_CAP_BYTES } from "@helipod/docstore";
+import { encodeStorageTableId, decodeStorageTableId, DEFAULT_SHARD } from "@helipod/id-codec";
+import { convexToJson, jsonToConvex, type JSONValue, type Value } from "@helipod/values";
 import type { DatabaseAdapter, PreparedStatement, SqlRow, SqlValue } from "./adapter";
 
 const SCHEMA_SQL = `

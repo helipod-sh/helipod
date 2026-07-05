@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { composeComponents } from "../src/index";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 const schema = defineSchema({
   orgs: defineTable({ ownerId: v.string() }),

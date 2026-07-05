@@ -1,18 +1,18 @@
 ---
 title: FAQ
-description: Honest answers about what stackbase is, what it isn't, and what isn't built yet.
+description: Honest answers about what helipod is, what it isn't, and what isn't built yet.
 ---
 
 {/* diataxis: explanation */}
 
-## Is stackbase production-ready?
+## Is helipod production-ready?
 
 For a single node, yes. The reactive engine, client SDK, dashboard, and CLI are real, and they're
 used end-to-end.
 
 That includes schema plus typed query, mutation, and action functions; transactional execution
 through a `DatabaseAdapter` seam; WebSocket reactive subscriptions with index-range-precise
-invalidation (not table-level); optimistic updates; a durable offline outbox; `stackbase
+invalidation (not table-level); optimistic updates; a durable offline outbox; `helipod
 dev`/`serve`; a single-binary compile; and a working `docker compose up` self-host. All of it ships
 and is exercised by tests that run through the real CLI server, not just unit mocks.
 
@@ -20,7 +20,7 @@ The full opt-in component set is built the same way: authentication, notificatio
 crons, durable workflows with saga/compensation, change triggers, and an authorization component
 are all proven through the shipped entrypoints, not in-process harnesses alone.
 
-Multi-node scale is newer, and it lives under a separate license. `stackbase serve --fleet` (Tier
+Multi-node scale is newer, and it lives under a separate license. `helipod serve --fleet` (Tier
 2, Postgres-backed write scale-out with live failover) and the Cloudflare-native multi-shard router
 are `ee/`-licensed packages, not the FSL-1.1-Apache-2.0 core. See
 [Can I self-host for free?](#can-i-self-host-for-free) below.
@@ -29,11 +29,11 @@ They're functional and benchmarked (see [How fast is it?](#how-fast-is-it-measur
 below), but they're the newest part of the system and haven't run in production nearly as long as
 the single-node core.
 
-If you're choosing stackbase today, start with single-node self-hosting (SQLite or Postgres). It's
+If you're choosing helipod today, start with single-node self-hosting (SQLite or Postgres). It's
 the safe, well-exercised default for most apps. Reach for the fleet only once you've actually
 measured a write-throughput ceiling or need failover.
 
-See [What is stackbase?](/docs/get-started/what-is-stackbase) for the full pitch and
+See [What is helipod?](/docs/get-started/what-is-helipod) for the full pitch and
 [What's deferred](#whats-deferred--not-shipped) below for what's honestly not built.
 
 ## What's deferred / not shipped
@@ -45,7 +45,7 @@ None of these are documented as shipped features anywhere else in these docs.
 <Accordion title="Full-text and vector search">
 
 Not built. There's no `.searchIndex()`/`.vectorIndex()`, and no builder for either is in progress.
-`stackbase migrate` flags a Convex app's use of either as unsupported in its migration report
+`helipod migrate` flags a Convex app's use of either as unsupported in its migration report
 rather than pretending to translate it. See
 [Migrate from Convex](/docs/reference/migrate-from-convex#unsupported-patterns-it-detects). If your
 app needs search today, reach for an external service.
@@ -65,7 +65,7 @@ code it runs.
 
 <Accordion title="Built-in TLS termination">
 
-stackbase serves plain HTTP. Put a reverse proxy (nginx, Caddy, Traefik) in front for HTTPS. This
+helipod serves plain HTTP. Put a reverse proxy (nginx, Caddy, Traefik) in front for HTTPS. This
 is true on every deploy path except the Cloudflare Worker paths, where Cloudflare itself terminates
 TLS at the edge.
 
@@ -83,7 +83,7 @@ finer rules, check ownership yourself in the function that hands out the file's 
 
 <Accordion title="Sub-workflows, replay-debugging, and handler versioning">
 
-Within `@stackbase/workflow`: a workflow can't start and await another workflow as one of its own
+Within `@helipod/workflow`: a workflow can't start and await another workflow as one of its own
 steps. There's no built-in UI to step through or visualize a run's journal (query
 `workflow:status` or browse the `workflows`/`steps`/`events` tables via the dashboard instead). And
 a workflow's registered handler/step sequence is fixed for the deployment's lifetime, so changing it
@@ -96,10 +96,10 @@ silently reinterpreting history.
 
 The object-storage substrate (no database at all: an object store as the write-only durable log,
 local SQLite as queryable state) has its core shipped and E2E-proven on both filesystem and real
-MinIO, and its tail items have shipped since: a multi-shard writer (`stackbase serve
+MinIO, and its tail items have shipped since: a multi-shard writer (`helipod serve
 --object-store <url> --shards N`, one node owning all N lanes), read replicas (`--replica`, with
 `--writer-url` to forward writes to the writer), a background GC driver (sweep cadence via
-`STACKBASE_OBJECTSTORE_GC_MS`), and an offline reshard tool (`stackbase objectstore reshard`).
+`HELIPOD_OBJECTSTORE_GC_MS`), and an offline reshard tool (`helipod objectstore reshard`).
 
 The remaining gap is spreading shard ownership across multiple Tier-3 nodes. A multi-shard writer
 owns every lane itself. You can add replicas for reads, but you can't split those N shards across
@@ -129,12 +129,12 @@ application-code change.
 <Tab value="SQLite">
 
 The zero-config default: an embedded, MVCC, single-writer store with nothing external to run. It's
-the right choice for `stackbase dev`, and for self-hosted single-node production too. It's
+the right choice for `helipod dev`, and for self-hosted single-node production too. It's
 measurably the faster single-node store, since there's no network round trip and no
 fsync-per-commit cost: it's in-memory and CPU-bound.
 
 ```bash
-stackbase serve --dir stackbase
+helipod serve --dir helipod
 ```
 
 </Tab>
@@ -143,12 +143,12 @@ stackbase serve --dir stackbase
 
 The opt-in alternative for when you want a managed, externally-durable database (backups,
 replicas, monitoring you already run) under the identical engine: `--database-url postgres://…`
-(or `STACKBASE_DATABASE_URL`), no code changes. It's also the required shared substrate if you're
+(or `HELIPOD_DATABASE_URL`), no code changes. It's also the required shared substrate if you're
 headed toward the multi-node fleet (see [How fast is it?](#how-fast-is-it-measured-numbers)
 below).
 
 ```bash
-stackbase serve --dir stackbase --database-url postgres://user:pass@host:5432/db
+helipod serve --dir helipod --database-url postgres://user:pass@host:5432/db
 ```
 
 </Tab>
@@ -178,7 +178,7 @@ run, on either store. See [Postgres](/docs/deploy/postgres) for the full mechani
 commit (a free +39 to 58% Postgres throughput win, on by default there and off by default on
 SQLite where it's a net loss with no fsync to amortize).
 
-## How does stackbase compare to Convex?
+## How does helipod compare to Convex?
 
 The reactive model is directly inspired by Convex's public architecture on purpose. A query
 records a read set as precise index ranges, a mutation commits a write set, and a subscription
@@ -189,19 +189,19 @@ can *do* with it:
 - Self-hostable by design, with no managed-cloud dependency. `docker compose up` brings up the
   engine, database, and dashboard in one container on your own infrastructure.
 - Storage is pluggable (SQLite or Postgres), not fixed to one proprietary database.
-- A single-binary compile (`stackbase build`) embeds the engine, your app, and the dashboard in one
+- A single-binary compile (`helipod build`) embeds the engine, your app, and the dashboard in one
   executable, useful for Electron/Tauri-style distribution.
-- Native `@stackbase/*` imports are canonical, not `convex/*`. stackbase is its own product, not a
-  Convex account or drop-in replacement. `stackbase migrate --from convex` is the on-ramp (see
+- Native `@helipod/*` imports are canonical, not `convex/*`. helipod is its own product, not a
+  Convex account or drop-in replacement. `helipod migrate --from convex` is the on-ramp (see
   [Migrate from Convex](/docs/reference/migrate-from-convex)), not the identity.
-- stackbase has already grown past Convex's shipped feature set in some areas: durable workflows
+- helipod has already grown past Convex's shipped feature set in some areas: durable workflows
   with saga/compensation, a Postgres storage adapter, and a durable offline mutation outbox with
   client-supplied ids all ship today.
 
 <Callout type="warn" title="Two API divergences worth knowing before you port code">
 
 There is no `ctx.db.patch(...)`. Read the document, spread-merge the changes yourself, and call
-`ctx.db.replace(id, { ...doc, ...changes })`. `stackbase migrate` flags every `.patch(...)` call it
+`ctx.db.replace(id, { ...doc, ...changes })`. `helipod migrate` flags every `.patch(...)` call it
 finds with this exact fix.
 
 A mutation's client-side promise resolves at commit, not at Convex's later flicker-free gate.
@@ -222,17 +222,17 @@ Measured, not just claimed. Here's a same-substrate benchmark (both backends as 
 on the same host, driven by their own native WebSocket clients through identical measurement code)
 against a matched app:
 
-| metric | stackbase | Convex |
+| metric | helipod | Convex |
 |---|---:|---:|
 | reactive propagation p50 (50 subscribers) | **8.6 ms** | 13.4 ms |
 | reactive propagation p99 | 13.7 ms | 27.3 ms |
 
 Same order of magnitude, and in this same-substrate test, on par with or ahead of the commercial
 Rust reference it's modeled on. See [Performance](/docs/get-started/performance) for the full
-scorecard and its caveats. stackbase is a clean-room build studied against Convex's open, published
+scorecard and its caveats. helipod is a clean-room build studied against Convex's open, published
 architecture documentation, not a fork or a decompilation of Convex's code.
 
-## How does stackbase compare to Firebase/Supabase?
+## How does helipod compare to Firebase/Supabase?
 
 Both are different kinds of reactive backend:
 
@@ -243,21 +243,21 @@ Both are different kinds of reactive backend:
 - Supabase's is Postgres plus a ring of roughly a dozen microservices (PostgREST, Realtime, GoTrue,
   Storage, Studio, and more) wired around row-level security, with its WAL-tailing realtime server
   as a single-threaded path.
-- stackbase's reactivity comes from one mechanism, in one process: deterministic TypeScript
+- helipod's reactivity comes from one mechanism, in one process: deterministic TypeScript
   functions with recorded read/write sets, intersected at commit time. There's no rules DSL to gate
-  access (authorization is ordinary function code, optionally composed via `@stackbase/authz`'s row
+  access (authorization is ordinary function code, optionally composed via `@helipod/authz`'s row
   policies), and no fleet of services to run. One process is the whole backend.
 
-There's also the deploy axis. stackbase deploys anywhere you can run a container, a binary, or a
+There's also the deploy axis. helipod deploys anywhere you can run a container, a binary, or a
 Cloudflare Worker, a portability story that doesn't apply to either Firebase (Google-only) or, in
 practice, Supabase's own hosted product (a dozen-service self-host is heavy compared to a single
 `docker compose up`).
 
 ## Can I self-host for free?
 
-Yes. stackbase is licensed FSL-1.1-Apache-2.0 (the Functional Source License, the same license
+Yes. helipod is licensed FSL-1.1-Apache-2.0 (the Functional Source License, the same license
 Convex itself uses). That means free to use, modify, and self-host, including at scale, on your own
-infrastructure. The license forbids exactly one thing: offering stackbase itself as a competing
+infrastructure. The license forbids exactly one thing: offering helipod itself as a competing
 hosted service. Each release converts to plain Apache 2.0 two years after it ships.
 
 Free forever, not a trial, no bait-and-switch:
@@ -267,12 +267,12 @@ Free forever, not a trial, no bait-and-switch:
   Production-usable for the large majority of real apps.
 - **Deploy anywhere.** Your box, your VPS, your cloud, Docker, an air-gapped server. No phone-home,
   ever.
-- **Data and code portability.** Plain HTTP, open formats, `stackbase migrate` in and `stackbase
+- **Data and code portability.** Plain HTTP, open formats, `helipod migrate` in and `helipod
   migrate export`/`import` your data out. You are never trapped.
 
-What's gated, and when: multi-node write scale-out, meaning `stackbase serve --fleet`
-(`@stackbase/fleet`, Postgres-backed) and the Cloudflare-native multi-shard router
-(`@stackbase/runtime-cloudflare-shard`), lives in a separate `ee/` area under a different commercial
+What's gated, and when: multi-node write scale-out, meaning `helipod serve --fleet`
+(`@helipod/fleet`, Postgres-backed) and the Cloudflare-native multi-shard router
+(`@helipod/runtime-cloudflare-shard`), lives in a separate `ee/` area under a different commercial
 license, not FSL, following the GitLab/n8n open-core pattern (an `ee/` folder, not SSPL-style viral
 copyleft).
 
@@ -286,13 +286,13 @@ key checked offline at boot, the same model n8n and GitLab use.
 ## Does it do full-text or vector search?
 
 Not yet. See [What's deferred](#whats-deferred--not-shipped) above. This is intentionally not
-documented as a feature anywhere else in these docs, and `stackbase migrate` flags a Convex app's
+documented as a feature anywhere else in these docs, and `helipod migrate` flags a Convex app's
 `.searchIndex(...)`/`.vectorIndex(...)` usage as unsupported rather than pretending to translate
 it. If your app needs search today, reach for an external service or a custom adapter.
 
 ## How fast is it? (measured numbers)
 
-Every number stackbase quotes is hand-transcribed from a runnable benchmark harness under
+Every number helipod quotes is hand-transcribed from a runnable benchmark harness under
 `benchmarks/`, measured under the same conditions on both sides of any comparison. The headline
 results:
 
@@ -310,18 +310,18 @@ see [Performance](/docs/get-started/performance).
 
 ## What runtime does it run on?
 
-Bun is primary: `stackbase dev`/`serve`, and the single-binary compile (`bun build --compile`). But
+Bun is primary: `helipod dev`/`serve`, and the single-binary compile (`bun build --compile`). But
 Node is fully supported for running the engine (npm packages, a Node SQLite adapter). The engine
-itself is runtime-agnostic behind its storage/runtime seams. Neither `stackbase dev` nor `serve`
+itself is runtime-agnostic behind its storage/runtime seams. Neither `helipod dev` nor `serve`
 cares which one you're running, as long as the seam is satisfied.
 
 ## Can I run it on Cloudflare?
 
-Yes, via `@stackbase/runtime-cloudflare`, in one of two genuinely different architectures. The
-DO-native path is a first-class deploy target: `stackbase deploy --target cloudflare` reconciles
+Yes, via `@helipod/runtime-cloudflare`, in one of two genuinely different architectures. The
+DO-native path is a first-class deploy target: `helipod deploy --target cloudflare` reconciles
 your `wrangler.jsonc` bindings (the Durable Object class, its SQLite migration, `nodejs_compat`,
 optional R2) and shells out to `wrangler deploy` for you. The Containers path is a hand-wired
-`wrangler deploy` of the portable `stackbase serve` image.
+`wrangler deploy` of the portable `helipod serve` image.
 
 <Tabs items={['DO-native (recommended)', 'Containers (experimental)']}>
 
@@ -341,7 +341,7 @@ Scheduled functions, crons, triggers, and the storage reaper all fire on this pa
 ```mermaid
 flowchart TD
   Client["Client (HTTP / WebSocket)"] --> Worker["Worker (stateless router)"]
-  Worker -->|"forwards every request/upgrade to one DO by name"| DO["StackbaseDurableObject"]
+  Worker -->|"forwards every request/upgrade to one DO by name"| DO["HelipodDurableObject"]
   subgraph internals[" "]
     OCC["OCC writer (the DO's own single-threaded model IS the mutex)"]
     Sqlite["DoSqliteAdapter over ctx.storage.sql"]
@@ -359,7 +359,7 @@ flowchart TD
 
 Known limits: 10 GB DO-SQLite storage per object, 128 MB memory (billed flat), a soft ~200 to 500
 writes/s ceiling for a write-heavy single DO, and, in v1, a single global DO (no built-in sharding;
-that's a separate paid-tier package, `@stackbase/runtime-cloudflare-shard`).
+that's a separate paid-tier package, `@helipod/runtime-cloudflare-shard`).
 
 </Tab>
 
@@ -367,7 +367,7 @@ that's a separate paid-tier package, `@stackbase/runtime-cloudflare-shard`).
 
 This path has a correctness gap worth knowing about before you reach for it.
 
-It runs the exact same portable `stackbase serve` image you'd run under Docker anywhere else,
+It runs the exact same portable `helipod serve` image you'd run under Docker anywhere else,
 fronted by a stateless Worker, with R2 as the object-store source of truth. Container disk is
 ephemeral, so a plain SQLite deployment here would silently lose data on every restart.
 `--object-store` is not optional on this path.
@@ -405,18 +405,18 @@ including `wrangler.jsonc`, the region-pinning hint, and R2-backed file storage.
 
 No. Two things make that concrete, not just a slogan:
 
-- **The same app code runs everywhere.** Your `schema.ts` and `stackbase/` functions run unchanged on
-  `stackbase dev`, `stackbase serve` (SQLite or Postgres), a compiled single binary, a multi-node
+- **The same app code runs everywhere.** Your `schema.ts` and `helipod/` functions run unchanged on
+  `helipod dev`, `helipod serve` (SQLite or Postgres), a compiled single binary, a multi-node
   fleet, or either Cloudflare path. Moving up the tiered architecture changes deployment
   configuration and adapters, never the functions you wrote.
-- **Your data moves too, explicitly.** `stackbase migrate export`/`stackbase migrate import` pulls
+- **Your data moves too, explicitly.** `helipod migrate export`/`helipod migrate import` pulls
   a full point-in-time dump (every live document, every index row, the table-number map) from a
   running deployment's admin API and pushes it into a fresh one. The same tool works between any
-  two hosts or topologies, because every stackbase store shares the same logical MVCC-log shape.
+  two hosts or topologies, because every helipod store shares the same logical MVCC-log shape.
 
 ```bash
-STACKBASE_ADMIN_KEY=… stackbase migrate export --url https://old-host.example.com --out dump.json
-STACKBASE_ADMIN_KEY=… stackbase migrate import --url https://new-host.example.com --in dump.json
+HELIPOD_ADMIN_KEY=… helipod migrate export --url https://old-host.example.com --out dump.json
+HELIPOD_ADMIN_KEY=… helipod migrate import --url https://new-host.example.com --in dump.json
 ```
 
 Caveats worth knowing: import targets a fresh deployment, not a merge, and refuses if the target's
@@ -434,7 +434,7 @@ portability are free forever under FSL, not a trial, not a bait-and-switch. See
 
 An opt-in, composable piece of server-side functionality, such as authentication, notifications,
 scheduling and crons, durable workflows, change triggers, or authorization, that you add to your
-project by listing it in `stackbase.config.ts` (for example, `defineAuth()`, `defineScheduler()`).
+project by listing it in `helipod.config.ts` (for example, `defineAuth()`, `defineScheduler()`).
 The core engine (schema, queries, mutations, reactivity) has no idea what auth or notifications are.
 
 A component adds its own namespaced tables (so `scheduler/jobs` can never collide with your app's
@@ -446,7 +446,7 @@ app needs, and a component can declare a dependency on another (`defineWorkflow(
 
 ## Where do I go next?
 
-- New to stackbase: [What is stackbase?](/docs/get-started/what-is-stackbase) →
+- New to helipod: [What is helipod?](/docs/get-started/what-is-helipod) →
   [Quickstart](/docs/get-started/quickstart).
 - Coming from Convex: [Migrate from Convex](/docs/reference/migrate-from-convex).
 - Choosing storage: [Postgres](/docs/deploy/postgres).

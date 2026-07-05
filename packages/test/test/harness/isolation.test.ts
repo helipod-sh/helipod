@@ -1,19 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
-import { anyApi } from "@stackbase/client";
+import { createTestHelipod } from "../../src";
+import { anyApi } from "@helipod/client";
 import * as messages from "../fixtures/messages";
 import schema from "../fixtures/schema";
 
 /**
- * Harness self-tests — these exercise `@stackbase/test` itself (not an app), proving the
- * properties the rest of the conformance suite silently depends on: every `createTestStackbase()`
+ * Harness self-tests — these exercise `@helipod/test` itself (not an app), proving the
+ * properties the rest of the conformance suite silently depends on: every `createTestHelipod()`
  * call is a fully independent backend (own in-memory SQLite `:memory:`, own temp blob dir), and
  * `close()` actually tears everything down rather than leaking timers/handles across instances.
  */
 describe("harness — isolation", () => {
   it("two instances do not share data (each is its own SQLite :memory:)", async () => {
-    const a = await createTestStackbase({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
-    const b = await createTestStackbase({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
+    const a = await createTestHelipod({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
+    const b = await createTestHelipod({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
     try {
       await a.mutation("messages:send", { body: "only in a" });
       const rowsA = await a.query<{ body: string }[]>("messages:list", {});
@@ -33,7 +33,7 @@ describe("harness — isolation", () => {
     // iterations and either hang the process or blow up resource limits (too many open fds/temp
     // dirs) well before reaching 20. Completing at all, within the test's own timeout, is the proof.
     for (let i = 0; i < 20; i++) {
-      const t = await createTestStackbase({
+      const t = await createTestHelipod({
         modules: { "messages.ts": messages, "schema.ts": { default: schema } },
       });
       await t.mutation("messages:send", { body: `iter ${i}` });
@@ -42,7 +42,7 @@ describe("harness — isolation", () => {
   });
 
   it("a string path and the equivalent anyApi-proxy ref resolve to the SAME function", async () => {
-    const t = await createTestStackbase({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
+    const t = await createTestHelipod({ modules: { "messages.ts": messages, "schema.ts": { default: schema } } });
     try {
       await t.mutation("messages:send", { body: "via string path" });
 
@@ -66,7 +66,7 @@ describe("harness — isolation", () => {
     it("resolves the schema from the modules map's schema.ts (default) — a query over its table/index works", async () => {
       // No explicit `schema` option: 'auto' is the default, so `schema.ts` in `modules` is what
       // defines the table/index below (`messages` + its implicit `by_creation` index).
-      const t = await createTestStackbase({
+      const t = await createTestHelipod({
         modules: { "messages.ts": messages, "schema.ts": { default: schema } },
       });
       try {
@@ -83,13 +83,13 @@ describe("harness — isolation", () => {
       // See `test/conformance/validators.test.ts` for the full enforcement writeup: `Validator.check`
       // is now called on every insert/replace, so a value that doesn't match its schema type is
       // rejected with `DocumentValidationError` rather than round-tripping silently.
-      const { mutation } = await import("@stackbase/executor");
-      const { defineSchema, defineTable, v } = await import("@stackbase/values");
+      const { mutation } = await import("@helipod/executor");
+      const { defineSchema, defineTable, v } = await import("@helipod/values");
       const badSchema = defineSchema({ nums: defineTable({ n: v.number() }) });
       const mod = {
         insert: mutation(async (ctx: any, a: any) => ctx.db.insert("nums", a)),
       };
-      const t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: badSchema } } });
+      const t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: badSchema } } });
       try {
         await expect(t.mutation("mod:insert", { n: "not-a-number" })).rejects.toThrow(/does not match schema/);
       } finally {

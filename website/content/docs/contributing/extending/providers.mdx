@@ -21,13 +21,13 @@ engine.**
 
 By the end of this page you'll be able to:
 
-- Write a custom email/SMS/push provider for `@stackbase/notifications`
-- Add a new OAuth provider to `@stackbase/auth`
+- Write a custom email/SMS/push provider for `@helipod/notifications`
+- Add a new OAuth provider to `@helipod/auth`
 - Write a custom `BlobStore` for file storage
 
 ## Notifications: one interface per channel
 
-`@stackbase/notifications` groups delivery into **channels**: `email`, `sms`, `push`, and
+`@helipod/notifications` groups delivery into **channels**: `email`, `sms`, `push`, and
 `in_app`. A channel is *what kind of message this is*; a **provider** is *who actually sends it*.
 Resend and a plain `console.log` are both email providers; Twilio is an SMS provider; Expo, FCM,
 and APNs are push providers. `in_app` is the odd one out: there's no vendor to call at all. The
@@ -124,7 +124,7 @@ A provider is just a function that returns an object matching the interface. Not
 registered anywhere else. The object *is* the plugin.
 
 ```ts
-import type { EmailProvider } from "@stackbase/notifications";
+import type { EmailProvider } from "@helipod/notifications";
 
 export function myEmailProvider(apiKey: string): EmailProvider {
   return {
@@ -147,8 +147,8 @@ export function myEmailProvider(apiKey: string): EmailProvider {
 
 The provider is wired in at config time, not imported deep inside the engine:
 
-```ts title="stackbase.config.ts"
-import { defineNotifications, twilioSms } from "@stackbase/notifications";
+```ts title="helipod.config.ts"
+import { defineNotifications, twilioSms } from "@helipod/notifications";
 import { myEmailProvider } from "./my-email-provider";
 
 defineNotifications({
@@ -174,7 +174,7 @@ and the reactive inbox, see [Notifications](/docs/components/notifications).
 
 ## Auth: the same email seam, plus OAuth and third-party JWT
 
-`@stackbase/auth` needs external systems too: it sends OTP/magic-link/verification emails, and it
+`@helipod/auth` needs external systems too: it sends OTP/magic-link/verification emails, and it
 needs to verify "yes, this really is that person's Google account." Both are provider seams, and
 both live in `components/auth/src`.
 
@@ -183,7 +183,7 @@ both live in `components/auth/src`.
 Auth's own `EmailProvider` (`components/auth/src/email/provider.ts`) is the same
 `send(msg): Promise<void>` shape as notifications' console/Resend adapters: `consoleEmail` for
 dev, `resendEmail` for production. It's a deliberately independent copy: if you also compose
-`@stackbase/notifications` in your project, auth's verification/reset/magic-link/OTP emails
+`@helipod/notifications` in your project, auth's verification/reset/magic-link/OTP emails
 automatically route through the notifications provider instead (so you configure a vendor once);
 without notifications composed, auth falls back to its own copy, untouched. Either way, writing a
 custom email provider for auth uses the exact same recipe as the notifications section above.
@@ -231,7 +231,7 @@ Sketch of adding a new OIDC-based provider (an identity provider that already sp
 OpenID Connect discovery, e.g. a corporate SSO tenant):
 
 ```ts
-import { oauthProvider } from "@stackbase/auth";
+import { oauthProvider } from "@helipod/auth";
 
 export function myCompanySsoProvider(opts: { clientId: string; clientSecret: string }) {
   return oauthProvider({
@@ -259,11 +259,11 @@ returns, the way `githubProvider` / `discordProvider` / `facebookProvider` do.
 ### Third-party JWT / OIDC issuers
 
 If your client already holds a signed JWT from some other identity provider (Clerk, Auth0, your
-own separate auth service) rather than doing an OAuth redirect through stackbase, that's the `jwt`
+own separate auth service) rather than doing an OAuth redirect through helipod, that's the `jwt`
 config block instead of `oauth`. You list trusted issuers; `verifyIdToken`
 (`components/auth/src/jwt.ts`) fetches that issuer's public keys (a JWKS document) and checks the
 token's signature, issuer, audience, and expiry, once at sign-in, not on every request. A verified
-token is then exchanged for a stackbase session the same way an OAuth login is, through the shared
+token is then exchanged for a helipod session the same way an OAuth login is, through the shared
 identity-resolution path both transports funnel into. The same non-loopback-`http://` guard from
 OAuth applies here too, on the JWKS URL.
 
@@ -284,7 +284,7 @@ flowchart LR
     Seam --> R2["r2"]
 ```
 
-Which adapter is active is decided purely by configuration: set `STACKBASE_STORAGE_BUCKET` (or
+Which adapter is active is decided purely by configuration: set `HELIPOD_STORAGE_BUCKET` (or
 `--storage-bucket`) and you get the S3/R2-compatible adapter; leave it unset and you get the
 zero-config filesystem adapter. The engine and your app code never know or care which one is live.
 
@@ -357,7 +357,7 @@ Every seam on this page is the same three ingredients:
    write (`resendEmail`, `googleProvider`, `blobstore-s3`), and selected in your project's config,
    never inside core code.
 
-Once you've internalized that shape, adding a new vendor anywhere in stackbase is always "write a
+Once you've internalized that shape, adding a new vendor anywhere in helipod is always "write a
 new leaf," never "edit the engine." If you want to see the same idea applied to a whole component
 (not just one seam inside it), read [Build a custom component](/docs/contributing/extending/custom-component)
 next.

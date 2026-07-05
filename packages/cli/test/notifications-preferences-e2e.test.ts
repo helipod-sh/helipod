@@ -3,12 +3,12 @@
  * channel reactively, a critical category bypasses it, and sendToTopic honors each subscriber's prefs.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, action } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineNotifications } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, action } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineNotifications } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, ms = 5000, label = "waitFor"): Promise<void> {
@@ -44,7 +44,7 @@ describe("notifications N3 — preferences + topics E2E", () => {
       bootSteps: project.bootSteps, drivers: project.drivers,
     });
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" }); servers.push(server);
-    const c = new StackbaseClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
     try {
       c.setAuth("user-1");
       const inbox: Array<Array<{ body: string }>> = [];

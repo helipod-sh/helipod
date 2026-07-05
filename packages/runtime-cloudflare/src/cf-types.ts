@@ -9,7 +9,7 @@
  * (`test/neutrality.test.ts`) proves no Cloudflare type leaks BELOW this package into the engine
  * (`runtime-embedded`/`transactor`/`sync`).
  */
-import type { SqlStorageLike, TransactionSyncFn } from "@stackbase/docstore-do-sqlite";
+import type { SqlStorageLike, TransactionSyncFn } from "@helipod/docstore-do-sqlite";
 
 /** `ctx.storage` — the DO's durable SQLite handle + its alarm. `sql`/`transactionSync` feed the
  *  `DoSqliteAdapter`; `setAlarm` is the wake seam's single alarm (`WakeHost.armWake`). */

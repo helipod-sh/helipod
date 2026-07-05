@@ -1,7 +1,7 @@
-import type { ComponentContext, RuleAuth } from "@stackbase/executor";
+import type { ComponentContext, RuleAuth } from "@helipod/executor";
 
 /** Re-exported so app authors can type their policies. */
-export type { WhereInput, FieldOps, TablePolicy, PolicyPredicate } from "@stackbase/executor";
+export type { WhereInput, FieldOps, TablePolicy, PolicyPredicate } from "@helipod/executor";
 
 interface AuthFacade { getUserId(): Promise<string | null> }
 interface AuthzFacade {

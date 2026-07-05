@@ -1,6 +1,6 @@
 /**
  * The DO HOST proven inside a REAL Durable Object (workerd) — the highest fidelity achievable without
- * a Cloudflare account. `FixtureStackbaseDO extends StackbaseDurableObject` boots the fixture app on
+ * a Cloudflare account. `FixtureHelipodDO extends HelipodDurableObject` boots the fixture app on
  * real `ctx.storage.sql`; the test drives it through the DO stub's `fetch` (HTTP) and a REAL
  * WebSocket (the reactive sync socket), proving: boot, health, a committing `/api/run` mutation +
  * read-back, and the flagship subscribe → commit → push fan-out — reactivity ACROSS a real DO.
@@ -16,7 +16,7 @@ interface DoNs {
   idFromName(n: string): unknown;
   get(id: unknown): { fetch(req: Request): Promise<Response & { webSocket?: WebSocket }> };
 }
-const DO = () => (env as { STACKBASE_DO: DoNs }).STACKBASE_DO;
+const DO = () => (env as { HELIPOD_DO: DoNs }).HELIPOD_DO;
 const stub = (name: string) => DO().get(DO().idFromName(name));
 
 function post(path: string, bodyObj: unknown): Request {
@@ -27,7 +27,7 @@ function post(path: string, bodyObj: unknown): Request {
   });
 }
 
-describe("StackbaseDurableObject on REAL workerd", () => {
+describe("HelipodDurableObject on REAL workerd", () => {
   it("serves GET /api/health", async () => {
     const res = await stub("health").fetch(new Request("https://do.test/api/health"));
     expect(res.status).toBe(200);

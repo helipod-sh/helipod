@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { resolveAuthConfig, resolveMfaConfig } from "../src/config";
 import { authSchema } from "../src/schema";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 // A 32-byte key encoded as base64 (standard) — a valid single-key source.
 const VALID_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
@@ -17,7 +17,7 @@ describe("resolveMfaConfig", () => {
     expect(mfa.keyring[0]!.id).toBe("1");
     expect(mfa.keyring[0]!.key.length).toBe(32);
     expect(mfa.keyring[0]!.key.equals(Buffer.alloc(32, 7))).toBe(true);
-    expect(mfa.issuer).toBe("Stackbase");
+    expect(mfa.issuer).toBe("Helipod");
     expect(mfa.recoveryCodeCount).toBe(10);
     expect(mfa.challengeTtlMs).toBe(5 * 60 * 1000);
     expect(mfa.mfaAttempts).toBe(5);

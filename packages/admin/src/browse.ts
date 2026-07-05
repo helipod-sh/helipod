@@ -1,6 +1,6 @@
-import { query, type RegisteredFunction } from "@stackbase/executor";
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import type { ComparisonOp } from "@stackbase/query-engine";
+import { query, type RegisteredFunction } from "@helipod/executor";
+import { convexToJson, type JSONValue, type Value } from "@helipod/values";
+import type { ComparisonOp } from "@helipod/query-engine";
 
 export interface FilterCond { field: string; op: ComparisonOp; value: JSONValue }
 const MAX_SCAN = 1000;

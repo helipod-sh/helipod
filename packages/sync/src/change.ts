@@ -5,7 +5,7 @@
  * fold over `(key, ts)` — a cheap safety net: the client recomputes it after applying and, on
  * mismatch, scoped-resyncs that one query. See docs/dev/architecture/reactivity-differential-log-tail.md §4.3-4.4.
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 
 export type Change =
   | { t: "add"; key: string; row: JSONValue; ts: number; orderKey?: string }

@@ -6,15 +6,15 @@ description: Durable multi-step orchestration.
 {/* diataxis: explanation */}
 
 Some jobs take more than one step. Reserve the stock, charge the card, mark the order fulfilled,
-maybe with a sleep or a wait for an external signal in between. `@stackbase/workflow` runs that
+maybe with a sleep or a wait for an external signal in between. `@helipod/workflow` runs that
 whole sequence durably.
 
 A workflow survives a process restart because it isn't held in memory. Each step's outcome is
-journaled to a durable table, and stackbase **replays the whole handler from the top** every time
+journaled to a durable table, and helipod **replays the whole handler from the top** every time
 the run advances. A step that already succeeded resolves instantly from the journal, so only a
 genuinely new step does real work.
 
-It's built on [`@stackbase/scheduler`](/docs/components/scheduling) (`requires: ["scheduler"]`),
+It's built on [`@helipod/scheduler`](/docs/components/scheduling) (`requires: ["scheduler"]`),
 not a replacement for it. Every step dispatches through the scheduler's own job queue, so it
 inherits the scheduler's retry and backoff, dead lettering, and cascading cancel.
 
@@ -74,13 +74,13 @@ The workflow handler must be deterministic (no random/network/clock calls, no re
 
 ## Enabling it
 
-`@stackbase/workflow` requires `@stackbase/scheduler` to be composed first (or at least alongside
+`@helipod/workflow` requires `@helipod/scheduler` to be composed first (or at least alongside
 it: compose order across `requires` is resolved automatically):
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow, workflow } from "@stackbase/workflow";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow, workflow } from "@helipod/workflow";
 
 const fulfillOrder = workflow.define({
   handler: async (step, { orderId }: { orderId: string }) => {
@@ -108,7 +108,7 @@ export default defineConfig({
   fan-out dispatches in one poll. See [Fan-out and fan-in](#fan-out-and-fan-in-promiseall).
 
 Composing `defineWorkflow()` without `defineScheduler()` throws at compose time (`requires:
-["scheduler"]`), just like composing `@stackbase/scheduler` without a store adapter would fail
+["scheduler"]`), just like composing `@helipod/scheduler` without a store adapter would fail
 elsewhere. The dependency is enforced structurally, not by convention.
 
 ## `ctx.workflow`: starting, canceling, signaling
@@ -144,7 +144,7 @@ that `start` returned.
 
 `ctx.workflow` also works from an **action**. An action has no `ctx.db`, so `start`/`cancel`/
 `sendEvent` there each delegate to an internal `workflow:_start`/`_cancel`/`_sendEvent` mutation via
-`ctx.runMutation`, mirroring exactly how `@stackbase/scheduler`'s own action-mode facade delegates
+`ctx.runMutation`, mirroring exactly how `@helipod/scheduler`'s own action-mode facade delegates
 to `scheduler:_enqueue`/`_cancel`. The calling code looks identical either way:
 
 ```ts
@@ -341,8 +341,8 @@ const status = await client.query(anyApi.workflow.status, { runId });
 ```
 
 ```tsx
-import { useQuery } from "@stackbase/client/react";
-import { anyApi } from "@stackbase/client";
+import { useQuery } from "@helipod/client/react";
+import { anyApi } from "@helipod/client";
 
 function OrderStatus({ runId }: { runId: string }) {
   const status = useQuery(anyApi.workflow.status, { runId });
@@ -454,10 +454,10 @@ mid-unwind is a safe no-op, not a restart or a race (see [Canceling](#canceling)
 
 ### A complete saga example
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow, workflow } from "@stackbase/workflow";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow, workflow } from "@helipod/workflow";
 
 const placeOrder = workflow.define({
   handler: async (step, { orderId, amount }: { orderId: string; amount: number }) => {

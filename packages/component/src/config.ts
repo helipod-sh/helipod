@@ -10,23 +10,23 @@ export interface TargetConfig {
 }
 
 export interface DeployConfig {
-  /** Used when --target is omitted. Effective default is "serve" (resolved in @stackbase/deploy). */
+  /** Used when --target is omitted. Effective default is "serve" (resolved in @helipod/deploy). */
   defaultTarget?: string;
   /** Keyed by target name (the --target value). */
   targets?: Record<string, TargetConfig>;
 }
 
-export interface StackbaseConfig {
+export interface HelipodConfig {
   components: ComponentDefinition[];
   deploy?: DeployConfig;
   /**
-   * Backend functions directory, relative to the project root. Defaults to "stackbase".
+   * Backend functions directory, relative to the project root. Defaults to "helipod".
    * A `--dir` flag on any command wins over this value.
    */
   functionsDir?: string;
 }
 
-export function defineConfig(config: StackbaseConfig): StackbaseConfig {
+export function defineConfig(config: HelipodConfig): HelipodConfig {
   return config;
 }
 

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 7.1 — gc-fencing (design record §6c, Tier 3 Slice 7): `gc()` must abort (delete NOTHING)
  * unless it re-verifies it still owns the CURRENT lease epoch, and must only ever delete snapshots
@@ -9,10 +9,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { newDocumentId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
+import { newDocumentId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 
 const TABLE = 30001;

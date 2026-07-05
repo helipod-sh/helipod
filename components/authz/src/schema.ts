@@ -1,4 +1,4 @@
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 export const authzSchema = defineSchema({
   role_assignments: defineTable({
     userId: v.string(), role: v.string(), scopeType: v.string(), scopeId: v.string(),

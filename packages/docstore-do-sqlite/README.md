@@ -1,16 +1,16 @@
-# @stackbase/docstore-do-sqlite
+# @helipod/docstore-do-sqlite
 
 The MVCC `DocStore` over a **Cloudflare Durable Object's** embedded SQLite (`ctx.storage.sql`) — the
 Cloudflare-native Tier 0 storage backend. Slice 2 of the DO-native host program
 (`docs/superpowers/plans/2026-03-20-cloudflare-do-native-host-roadmap.md`).
 
 DO-SQLite *is* SQLite, so the MVCC document-log implementation is reused **verbatim** from
-[`@stackbase/docstore-sqlite`](../docstore-sqlite) (`SqliteDocStore`). This package adds only the one
+[`@helipod/docstore-sqlite`](../docstore-sqlite) (`SqliteDocStore`). This package adds only the one
 new thing: a `DatabaseAdapter` (`DoSqliteAdapter`) that drives the DO's synchronous SQL API.
 
 ```ts
-import { SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { DoSqliteAdapter } from "@stackbase/docstore-do-sqlite";
+import { SqliteDocStore } from "@helipod/docstore-sqlite";
+import { DoSqliteAdapter } from "@helipod/docstore-do-sqlite";
 
 // inside a Durable Object (the Slice 3 host wires this up):
 const adapter = new DoSqliteAdapter({
@@ -62,7 +62,7 @@ proven to pass a constraint error through).
 
 ### Why `number` timestamps are lossless here
 
-Stackbase's only INTEGER columns are logical timestamps (a per-store monotonic `MAX(ts)+1` counter
+Helipod's only INTEGER columns are logical timestamps (a per-store monotonic `MAX(ts)+1` counter
 seeded at 1) and millisecond wall-clocks. Both stay far under `Number.MAX_SAFE_INTEGER` (2^53) in
 every reachable state — a single DO would need ~9 quadrillion commits to overflow. Document ids and
 index keys are BLOBs, never integers. The bind path throws loudly rather than silently truncate if a
@@ -71,7 +71,7 @@ value ever exceeds the safe range.
 ## Test fidelity — what is (and is not) proven
 
 This package passes the **full shared docstore conformance suite**
-(`@stackbase/docstore/test-support/conformance` — the identical contract SQLite/Postgres/PGlite run),
+(`@helipod/docstore/test-support/conformance` — the identical contract SQLite/Postgres/PGlite run),
 driving `SqliteDocStore` over `DoSqliteAdapter`.
 
 **Fidelity level: API-shape conformance against a faithful in-process `SqlStorage` stand-in — NOT a

@@ -1,7 +1,7 @@
 /**
  * Receipted Outbox (Plan A) — the server E2E gate: the raw-wire proof of exactly-once through real
  * processes. Every scenario drives the sync protocol DIRECTLY over a real WebSocket to a real
- * `stackbase dev` server (`startDevServer` + `createEmbeddedRuntime`) — Plan B's real client (the
+ * `helipod dev` server (`startDevServer` + `createEmbeddedRuntime`) — Plan B's real client (the
  * one that mints `clientId`/`seq` and parks-and-resends) does not exist yet, so this harness IS the
  * client: it sends `Connect`/`Mutation`/`MutationBatch` frames itself and reads the raw
  * `MutationResponse`/`ConnectAck` off the wire (the `ws.test.ts` / `optimistic-e2e.test.ts` pattern).
@@ -17,7 +17,7 @@
  *       resend at/below the floor → the coded terminal (`code: "STALE_CLIENT"`).
  *   (4) MutationBatch: 50 entries applied sequentially, per-unit responses in wire order; a mid-batch
  *       TERMINAL failure records + continues; a mid-batch TRANSIENT failure stops the remainder.
- *   (5) the collateral fix live under STACKBASE_GROUP_COMMIT=1: co-batched innocents from OTHER
+ *   (5) the collateral fix live under HELIPOD_GROUP_COMMIT=1: co-batched innocents from OTHER
  *       clients survive a duplicate-key abort (the T3 split-retry, end-to-end).
  *   (6) fleet + 8 shards (real embedded-postgres, no Docker): a resend arriving via a NON-owner
  *       (sync) node classifies at the OWNER — the per-unit receipt is present exactly once.
@@ -35,14 +35,14 @@ import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { ServiceUnavailableError } from "@stackbase/errors";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { NodePgClient } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { ClientMessage, ServerMessage, MutationBatchEntry } from "@stackbase/sync";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { ServiceUnavailableError } from "@helipod/errors";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { NodePgClient } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import type { ClientMessage, ServerMessage, MutationBatchEntry } from "@helipod/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -417,15 +417,15 @@ describe("outbox server E2E (4) — MutationBatch: sequential, in-order, mid-bat
 });
 
 /* -------------------------------------------------------------------------- */
-/* Scenario 5 — collateral fix under STACKBASE_GROUP_COMMIT=1                   */
+/* Scenario 5 — collateral fix under HELIPOD_GROUP_COMMIT=1                   */
 /* -------------------------------------------------------------------------- */
 
 describe("outbox server E2E (5) — group-commit collateral fix: innocents survive a duplicate-key abort", () => {
   it("across repeated concurrent bursts, co-batched innocents always survive while the duplicate pair collapses to one commit", async () => {
     // The env flag the brief names — resolved by `createEmbeddedRuntime`'s `groupCommit` here; we set
-    // it too so the deployment truly runs under STACKBASE_GROUP_COMMIT=1 semantics.
-    const prev = process.env.STACKBASE_GROUP_COMMIT;
-    process.env.STACKBASE_GROUP_COMMIT = "1";
+    // it too so the deployment truly runs under HELIPOD_GROUP_COMMIT=1 semantics.
+    const prev = process.env.HELIPOD_GROUP_COMMIT;
+    process.env.HELIPOD_GROUP_COMMIT = "1";
     const s = await startServer(new SqliteDocStore(new NodeSqliteAdapter()), { groupCommit: true });
     const w = await RawWire.open(s.wsUrl);
     try {
@@ -507,8 +507,8 @@ describe("outbox server E2E (5) — group-commit collateral fix: innocents survi
     } finally {
       w.close();
       await s.server.close();
-      if (prev === undefined) delete process.env.STACKBASE_GROUP_COMMIT;
-      else process.env.STACKBASE_GROUP_COMMIT = prev;
+      if (prev === undefined) delete process.env.HELIPOD_GROUP_COMMIT;
+      else process.env.HELIPOD_GROUP_COMMIT = prev;
     }
   }, 30_000);
 });
@@ -716,7 +716,7 @@ function spawnFleetServe(databaseUrl: string, port: number, dataDir: string): Se
       "--advertise-url", advertiseUrl,
     ],
     {
-      env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY, STACKBASE_FLEET_SHARDS: "8" },
+      env: { ...process.env, HELIPOD_ADMIN_KEY: ADMIN_KEY, HELIPOD_FLEET_SHARDS: "8" },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );

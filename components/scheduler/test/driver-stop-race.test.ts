@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { DriverContext } from "@stackbase/component";
+import type { DriverContext } from "@helipod/component";
 import { schedulerDriver } from "../src/driver";
 import { SWEEP_MS } from "../src/modules";
 
@@ -8,7 +8,7 @@ import { SWEEP_MS } from "../src/modules";
  * end-of-pass `setTimer` re-arm (`runPass`), and an in-flight `sweepOnce()`'s `finally → armSweep`,
  * both run when the work they were awaiting settles — even if `stop()` raced in mid-await. Without
  * the `stopped` guard, they schedule a fresh timer AFTER `stop()` returned and the driver keeps
- * running forever (matters for `stackbase dev` hot-reload teardown racing a dispatch/sweep).
+ * running forever (matters for `helipod dev` hot-reload teardown racing a dispatch/sweep).
  *
  * Driven with a controllable fake `DriverContext` so `setTimer` calls are directly observable —
  * the real-runtime harness (`./helpers.ts`) can't see the driver's private timers.

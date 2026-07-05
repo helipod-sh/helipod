@@ -1,5 +1,5 @@
 // packages/admin/src/router.ts
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import { verifyAdminKey } from "./auth";
 import type { AdminApi } from "./admin-api";
 

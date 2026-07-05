@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi, type OptimisticLocalStore } from "@stackbase/client";
-import { loadProject, type LoadedProject } from "@stackbase/cli";
-import schema from "../stackbase/schema";
-import * as messages from "../stackbase/messages";
-import * as audit from "../stackbase/audit";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, loopbackTransport, anyApi, type OptimisticLocalStore } from "@helipod/client";
+import { loadProject, type LoadedProject } from "@helipod/cli";
+import schema from "../helipod/schema";
+import * as messages from "../helipod/messages";
+import * as audit from "../helipod/audit";
 
 /**
  * The (i)5 measurement (verdict §(i).5 / spec plan constraint): `LayeredQueryStore.recompose`
@@ -62,7 +62,7 @@ async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
 
 describe("(i)5 — re-renders during an optimistic mutation's pending window", () => {
   it("baseline: one optimistic send, no concurrent traffic", async () => {
-    const client = new StackbaseClient(loopbackTransport(runtime.connect("baseline")));
+    const client = new HelipodClient(loopbackTransport(runtime.connect("baseline")));
     let renders = 0;
     client.subscribe(api.messages.list, { conversationId: "convA" }, () => renders++);
     await waitFor(() => renders >= 1); // the initial empty-list delivery
@@ -80,7 +80,7 @@ describe("(i)5 — re-renders during an optimistic mutation's pending window", (
   });
 
   it("hot: a SECOND pending optimistic mutation to a DIFFERENT conversation is in flight concurrently", async () => {
-    const client = new StackbaseClient(loopbackTransport(runtime.connect("hot")));
+    const client = new HelipodClient(loopbackTransport(runtime.connect("hot")));
     let rendersA = 0;
     client.subscribe(api.messages.list, { conversationId: "convA" }, () => rendersA++);
     client.subscribe(api.messages.list, { conversationId: "convB" }, () => {});

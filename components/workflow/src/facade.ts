@@ -1,11 +1,11 @@
-import type { ComponentContext, ActionApi } from "@stackbase/executor";
-import { GuestDatabaseWriter } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
-import type { FnRef, SchedulerContext } from "@stackbase/scheduler";
-import { getFunctionPath } from "@stackbase/scheduler";
+import type { ComponentContext, ActionApi } from "@helipod/executor";
+import { GuestDatabaseWriter } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
+import type { FnRef, SchedulerContext } from "@helipod/scheduler";
+import { getFunctionPath } from "@helipod/scheduler";
 import { sendEventImpl } from "./events";
 
-export type { FnRef } from "@stackbase/scheduler";
+export type { FnRef } from "@helipod/scheduler";
 
 /** Bare (namespaced) table names `workflowContext.sendEvent` operates on — resolved to `"workflow/events"`/`"workflow/steps"` the same way every other `cctx.db` call on this facade already is. `./events.ts`'s `_sendEvent` (the action-mode delegate, dispatched non-privileged) uses this SAME shape via `ctx.workflow.sendEvent`, not a fully-qualified variant — see that module's doc comment. */
 const FACADE_EVENT_TABLES = { events: "events", steps: "steps" };
@@ -46,7 +46,7 @@ export interface WorkflowActionContext {
 
 /**
  * Builds `ctx.workflow`. Requires `contextWrite: true` on `defineWorkflow()` (mirrors
- * `@stackbase/scheduler`'s `schedulerContext`) — without it, `cctx.db` is read-only and `start`'s
+ * `@helipod/scheduler`'s `schedulerContext`) — without it, `cctx.db` is read-only and `start`'s
  * `db.insert` throws `ForbiddenOperationError`. With it, and ONLY during a mutation call,
  * `start` writes the new `workflows` row in the CALLING mutation's own transaction — exactly like
  * `ctx.scheduler.runAfter` — so it commits (or rolls back) atomically with the rest of the caller's
@@ -98,7 +98,7 @@ export function workflowContext(cctx: ComponentContext): WorkflowContext {
       // only ever stamped once a PRIOR failure has already flipped `state` to `"compensating"`, at
       // which point the guard above already returned) — this half of the loop is defense-in-depth
       // mirroring the `scheduledJobId` cascade, kept symmetric rather than load-bearing today. The
-      // scheduler's own `cancel()` (`@stackbase/scheduler`'s `schedulerContext`) further cascades to
+      // scheduler's own `cancel()` (`@helipod/scheduler`'s `schedulerContext`) further cascades to
       // that job's own descendants (e.g. a retry chain), so we only need to walk OUR direct jobs
       // here, not recurse ourselves.
       //
@@ -162,7 +162,7 @@ export function workflowContext(cctx: ComponentContext): WorkflowContext {
  * The action-mode `ctx.workflow` — wired as `defineWorkflow()`'s `buildAction`. An action has no
  * `db`, so `start`/`cancel`/`sendEvent` can't touch `cctx.db` directly the way `workflowContext`
  * above does; each delegates to an internal `workflow:_start`/`_cancel`/`_sendEvent` mutation via
- * `api.runMutation`, exactly like `@stackbase/scheduler`'s `schedulerActionContext` delegates to
+ * `api.runMutation`, exactly like `@helipod/scheduler`'s `schedulerActionContext` delegates to
  * `scheduler:_enqueue`/`_cancel` (`components/scheduler/src/facade.ts`).
  *
  * `_start`/`_cancel` are registered in `./modules.ts`; `_sendEvent` in `./events.ts`. All three

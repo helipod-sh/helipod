@@ -1,7 +1,7 @@
 /**
- * `@stackbase/values` — the Convex-compatible value system: the `Value` model, the
+ * `@helipod/values` — the Convex-compatible value system: the `Value` model, the
  * canonical total order, JSON transport encoding, the `v` validator builder, schema
- * builders, and `ConvexError`. This is the base package every other Stackbase package
+ * builders, and `ConvexError`. This is the base package every other Helipod package
  * imports its value types from (design §3.1).
  */
 export type { Value, JSONValue, Cmp } from "./value";

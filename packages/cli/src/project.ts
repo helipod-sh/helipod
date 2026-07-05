@@ -3,13 +3,13 @@
  * codegen need: the schema JSON, an index catalog (with table numbers assigned + an implicit
  * `by_creation` index per table), the `path:name → function` map, and the analyzed manifest.
  */
-import type { RegisteredFunction, ContextProvider } from "@stackbase/executor";
-import type { SchemaDefinition, SchemaDefinitionJSON } from "@stackbase/values";
-import type { AnalyzedFunction, AnalyzedFunctionManifest, ShardByDeclaration } from "@stackbase/codegen";
-import { validatorToTsType, assertShardByDeclarations } from "@stackbase/codegen";
-import { composeComponents, type ComponentDefinition, type BootContext, type Driver, type ResolvedComponentRoute } from "@stackbase/component";
-import type { SimpleIndexCatalog } from "@stackbase/executor";
-import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@stackbase/storage";
+import type { RegisteredFunction, ContextProvider } from "@helipod/executor";
+import type { SchemaDefinition, SchemaDefinitionJSON } from "@helipod/values";
+import type { AnalyzedFunction, AnalyzedFunctionManifest, ShardByDeclaration } from "@helipod/codegen";
+import { validatorToTsType, assertShardByDeclarations } from "@helipod/codegen";
+import { composeComponents, type ComponentDefinition, type BootContext, type Driver, type ResolvedComponentRoute } from "@helipod/component";
+import type { SimpleIndexCatalog } from "@helipod/executor";
+import { STORAGE_TABLE, STORAGE_TABLE_NUMBER, storageTableDefinition } from "@helipod/storage";
 
 export const DEFAULT_INDEX = "by_creation";
 
@@ -67,15 +67,15 @@ export function loadProject(
 ): ProjectArtifacts {
   const schemaJson = loaded.schema.export();
 
-  // File storage is an ALWAYS-ON core feature (not read from `stackbase.config.ts`): inject its
+  // File storage is an ALWAYS-ON core feature (not read from `helipod.config.ts`): inject its
   // reserved app-root `_storage` system table into the composed schema so it flows through the same
   // path every other table does — a catalog entry + `by_creation` index (so the `_storage:*`
   // built-ins' `ctx.db` ops resolve) and a stable tableNumber. Seeding the registry with
   // `{ _storage: STORAGE_TABLE_NUMBER }` (below) `preassign`s that number so `_storage` decodes back
   // to the same table forever and never collides with an app/component table. Doing this in the
-  // SHARED load path (not just boot) keeps `stackbase deploy`'s additive-schema diff consistent:
+  // SHARED load path (not just boot) keeps `helipod deploy`'s additive-schema diff consistent:
   // the live schema and every re-pushed schema both carry `_storage`, so a deploy never sees it as
-  // a "dropped table". Codegen already emits `_storage` from `@stackbase/values`' canonical system
+  // a "dropped table". Codegen already emits `_storage` from `@helipod/values`' canonical system
   // defs and filters it out of the app schema, so this injection does not double it there.
   schemaJson.tables[STORAGE_TABLE] = storageTableDefinition.export();
 

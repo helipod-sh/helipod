@@ -2,7 +2,7 @@
  * Exponential backoff (with jitter) for a failed email/SMS send's Nth retry. Pure — takes its
  * randomness as an injected `rng` so it's deterministic-for-replay when called with a mutation's
  * seeded `ctx.random` (a mutation and its OCC-conflict replay draw the same sequence). Copied from
- * `@stackbase/scheduler`'s `backoff.ts` to keep `@stackbase/notifications` self-contained (no
+ * `@helipod/scheduler`'s `backoff.ts` to keep `@helipod/notifications` self-contained (no
  * cross-component dependency), the same choice made for `compact`.
  */
 export interface BackoffOptions {

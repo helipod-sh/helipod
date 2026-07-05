@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { jsonToConvex, type JSONValue } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { jsonToConvex, type JSONValue } from "@helipod/values";
 import { InlineUdfExecutor, SimpleIndexCatalog, mutation, query, action, type RegisteredFunction, type UdfResult } from "../src/index";
 
 // Same self-contained harness as action-run.test.ts (see its comment for why: pulling
-// `@stackbase/component`/`@stackbase/runtime-embedded` into executor's devDependencies would
+// `@helipod/component`/`@helipod/runtime-embedded` into executor's devDependencies would
 // make the workspace package graph cyclic).
 async function makeRuntime(modules: Record<string, RegisteredFunction>) {
   const store = new SqliteDocStore(new NodeSqliteAdapter());

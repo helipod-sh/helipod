@@ -1,12 +1,12 @@
 /**
- * The runtime entry a `stackbase build` binary calls. It is compiled `serve`: boot an already-loaded
+ * The runtime entry a `helipod build` binary calls. It is compiled `serve`: boot an already-loaded
  * project (static imports, not a dir scan), start the shared server, print a machine-readable ready
  * line, and shut down gracefully. `startBinaryServer` is the testable core (no signals/exit).
  */
 import { join } from "node:path";
-import type { ComponentDefinition } from "@stackbase/component";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { DocStore } from "@stackbase/docstore";
+import type { ComponentDefinition } from "@helipod/component";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import type { DocStore } from "@helipod/docstore";
 import type { LoadedProject } from "./project";
 import { bootLoaded } from "./boot";
 import { ProcessRuntimeHost, type DevServer } from "./server";
@@ -16,7 +16,7 @@ export interface BinaryOptions {
   ip: string;
   dataDir: string;
   adminKey: string;
-  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  /** Postgres connection string (flag wins over `HELIPOD_DATABASE_URL`); unset → SQLite. */
   databaseUrl?: string;
 }
 
@@ -35,8 +35,8 @@ export function resolveBinaryOptions(argv: string[], env: Record<string, string 
   let port = env.PORT ? Number(env.PORT) : 3000;
   let ip = "0.0.0.0";
   let dataDir = "./data";
-  let databaseUrl = env.STACKBASE_DATABASE_URL;
-  const adminKey = (env.STACKBASE_ADMIN_KEY ?? "").trim();
+  let databaseUrl = env.HELIPOD_DATABASE_URL;
+  const adminKey = (env.HELIPOD_ADMIN_KEY ?? "").trim();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--port" && argv[i + 1] !== undefined) port = Number(argv[++i]);
@@ -88,7 +88,7 @@ export async function runBinaryServer(
 ): Promise<void> {
   const opts = resolveBinaryOptions(process.argv.slice(2), process.env);
   if (!opts.adminKey) {
-    process.stderr.write("✗ STACKBASE_ADMIN_KEY is required — set it to a strong secret.\n");
+    process.stderr.write("✗ HELIPOD_ADMIN_KEY is required — set it to a strong secret.\n");
     process.exit(1);
   }
   const { server, store } = await startBinaryServer(loaded, components, opts, dashboard);

@@ -6,9 +6,9 @@
  * fail-fast and env/flag resolution live in `boot.ts`, not here.
  */
 import { join } from "node:path";
-import type { BlobStore } from "@stackbase/blobstore";
-import { FsBlobStore } from "@stackbase/blobstore-fs";
-import { S3BlobStore, type S3Config } from "@stackbase/blobstore-s3";
+import type { BlobStore } from "@helipod/blobstore";
+import { FsBlobStore } from "@helipod/blobstore-fs";
+import { S3BlobStore, type S3Config } from "@helipod/blobstore-s3";
 
 /** Resolved storage config. A `bucket` selects the S3 backend; everything else is FS. */
 export type StorageConfig = Partial<S3Config> & { bucket?: string };
@@ -29,18 +29,18 @@ export function isS3Config(storage: StorageConfig | undefined): boolean {
 
 /**
  * Resolve the storage config from env + optional CLI-flag overrides (flags win, mirroring
- * `--database-url` over `STACKBASE_DATABASE_URL`). Unset bucket → the FS backend. Reads the S3
- * settings from `STACKBASE_STORAGE_*` plus the standard AWS credential vars.
+ * `--database-url` over `HELIPOD_DATABASE_URL`). Unset bucket → the FS backend. Reads the S3
+ * settings from `HELIPOD_STORAGE_*` plus the standard AWS credential vars.
  */
 export function resolveStorageConfig(
   env: Record<string, string | undefined>,
   flags?: StorageConfig,
 ): StorageConfig {
   return {
-    bucket: flags?.bucket ?? env.STACKBASE_STORAGE_BUCKET,
-    endpoint: flags?.endpoint ?? env.STACKBASE_STORAGE_ENDPOINT,
-    region: flags?.region ?? env.STACKBASE_STORAGE_REGION,
-    publicBaseUrl: flags?.publicBaseUrl ?? env.STACKBASE_STORAGE_PUBLIC_URL,
+    bucket: flags?.bucket ?? env.HELIPOD_STORAGE_BUCKET,
+    endpoint: flags?.endpoint ?? env.HELIPOD_STORAGE_ENDPOINT,
+    region: flags?.region ?? env.HELIPOD_STORAGE_REGION,
+    publicBaseUrl: flags?.publicBaseUrl ?? env.HELIPOD_STORAGE_PUBLIC_URL,
     accessKeyId: flags?.accessKeyId ?? env.AWS_ACCESS_KEY_ID,
     secretAccessKey: flags?.secretAccessKey ?? env.AWS_SECRET_ACCESS_KEY,
     ...(flags?.forcePathStyle !== undefined ? { forcePathStyle: flags.forcePathStyle } : {}),

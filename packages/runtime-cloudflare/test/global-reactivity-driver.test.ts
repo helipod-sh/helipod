@@ -16,11 +16,11 @@
  */
 import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import type { LoadedProject } from "@stackbase/cli/project";
-import type { D1Client, D1PreparedStatement } from "@stackbase/docstore-d1";
-import { StackbaseDurableObject, type DurableObjectAppConfig } from "../src/index";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import type { LoadedProject } from "@helipod/cli/project";
+import type { D1Client, D1PreparedStatement } from "@helipod/docstore-d1";
+import { HelipodDurableObject, type DurableObjectAppConfig } from "../src/index";
 import { DEFAULT_GLOBAL_REACTIVITY_POLL_MS } from "../src/global-reactivity-driver";
 import { FakeDoState, FakeDoWebSocket, waitFor } from "./do-harness";
 
@@ -35,7 +35,7 @@ import { FakeDoState, FakeDoWebSocket, waitFor } from "./do-harness";
  * RE-armed after this fire" (as opposed to "was the pre-fire value overwritten by a later
  * `setAlarm`") must clear it itself first, or a stale pre-fire value can be mistaken for a fresh one.
  */
-async function fireAlarm(state: FakeDoState, doInstance: StackbaseDurableObject): Promise<void> {
+async function fireAlarm(state: FakeDoState, doInstance: HelipodDurableObject): Promise<void> {
   state.storage.deleteAlarm();
   await doInstance.alarm();
 }
@@ -44,7 +44,7 @@ async function fireAlarm(state: FakeDoState, doInstance: StackbaseDurableObject)
 /**
  * Mirrors `packages/docstore-d1/test/support/sqlite-d1-client.ts`'s `sqliteD1Client()` almost
  * exactly, but backed by Node's built-in `node:sqlite` (already a dependency of this monorepo via
- * `@stackbase/docstore-do-sqlite`'s own test stand-in, `MemorySqlStorage`) instead of adding a new
+ * `@helipod/docstore-do-sqlite`'s own test stand-in, `MemorySqlStorage`) instead of adding a new
  * `better-sqlite3` devDependency to this package just for one test fixture. `.all()` works fine even
  * on an INSERT/UPDATE under `node:sqlite` (returns `[]`), matching D1DocStore's own usage (every
  * non-`batch()` call goes through `.prepare().bind().all()`, never `.run()`).
@@ -122,7 +122,7 @@ function makeSocket(state: FakeDoState, connectionId: string): FakeDoWebSocket {
 describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
   it("polls D1 on the alarm seam and pushes an update after a global write, none for a no-op tick", async () => {
     let clock = 1_000_000;
-    class TestDO extends StackbaseDurableObject {
+    class TestDO extends HelipodDurableObject {
       protected appConfig(): DurableObjectAppConfig {
         return { loaded, adminKey: ADMIN_KEY, d1: nodeSqliteD1Client(), now: () => clock };
       }
@@ -189,7 +189,7 @@ describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
 
   it("with no global subscribers, the poller's bootstrap tick disarms itself (DO can hibernate)", async () => {
     let clock = 1_000_000;
-    class TestDO extends StackbaseDurableObject {
+    class TestDO extends HelipodDurableObject {
       protected appConfig(): DurableObjectAppConfig {
         return { loaded, adminKey: ADMIN_KEY, d1: nodeSqliteD1Client(), now: () => clock };
       }
@@ -214,7 +214,7 @@ describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
 
   it("arms itself on a late global subscribe on a live (never-hibernating) DO instance — busy-DO late-subscribe fix", async () => {
     let clock = 1_000_000;
-    class TestDO extends StackbaseDurableObject {
+    class TestDO extends HelipodDurableObject {
       protected appConfig(): DurableObjectAppConfig {
         return { loaded, adminKey: ADMIN_KEY, d1: nodeSqliteD1Client(), now: () => clock };
       }
@@ -279,7 +279,7 @@ describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
 
   it("the poll cadence is a fixed ~intervalMs re-arm, decoupled from a host's backstopMs floor", async () => {
     let clock = 1_000_000;
-    class TestDO extends StackbaseDurableObject {
+    class TestDO extends HelipodDurableObject {
       protected appConfig(): DurableObjectAppConfig {
         return {
           loaded,
@@ -316,7 +316,7 @@ describe("GlobalReactivityPoller wired at DO boot (M2c Task 6)", () => {
   });
 
   it("additive: no `d1` binding composes no poller driver (unchanged from before M2c Task 6)", async () => {
-    class TestDO extends StackbaseDurableObject {
+    class TestDO extends HelipodDurableObject {
       protected appConfig(): DurableObjectAppConfig {
         // No `d1` — `bootDurableObjectRuntime`'s `globalStore` stays `undefined`, so `boot.ts`'s
         // `drivers` array composes nothing extra (this schema also declares no `.global()` table, so

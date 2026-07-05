@@ -1,8 +1,8 @@
 import { it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
-import { defineScheduler } from "@stackbase/scheduler";
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { createTestHelipod } from "../../src";
+import { defineScheduler } from "@helipod/scheduler";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 const mod = {
   kick: mutation(async (ctx: any) => {
@@ -14,7 +14,7 @@ const mod = {
 const schema = defineSchema({ marks: defineTable({ at: v.string() }) });
 
 it("finishScheduledFunctions runs a scheduled mutation to completion", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "mod.ts": mod, "schema.ts": { default: schema } },
     components: [defineScheduler()],
   });
@@ -29,7 +29,7 @@ it("finishScheduledFunctions runs a scheduled mutation to completion", async () 
 });
 
 it("finishScheduledFunctions is a clean no-op when no scheduler is composed", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "mod.ts": mod, "schema.ts": { default: schema } },
   });
   try {
@@ -54,7 +54,7 @@ it("finishScheduledFunctions drains a cascade (a scheduled job scheduling anothe
     stepC: mutation(async (ctx: any) => ctx.db.insert("marks", { at: "c" })),
     count: query(async (ctx: any) => (await ctx.db.query("marks", "by_creation").collect()).length),
   };
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "chain.ts": chain, "schema.ts": { default: schema } },
     components: [defineScheduler()],
   });
@@ -68,7 +68,7 @@ it("finishScheduledFunctions drains a cascade (a scheduled job scheduling anothe
 });
 
 it("advanceTimers advances the clock and drives one scheduler pass", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "mod.ts": mod, "schema.ts": { default: schema } },
     components: [defineScheduler()],
   });
@@ -85,7 +85,7 @@ it("advanceTimers advances the clock and drives one scheduler pass", async () =>
 });
 
 it("advanceClock/advanceTimers/finishScheduledFunctions throw when opts.now is supplied", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "mod.ts": mod, "schema.ts": { default: schema } },
     components: [defineScheduler()],
     now: () => 1_000_000,

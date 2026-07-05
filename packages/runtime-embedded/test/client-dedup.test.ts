@@ -3,12 +3,12 @@
 // run → replay path in `runtime.run`/the sync `runMutation`, the zero-write standalone receipt, and
 // the reactive fan-out skip on a replay. Real SqliteDocStore, real transactor, real guard chain.
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { defineSchema, defineTable, v, convexToJson, type Value } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { defineSchema, defineTable, v, convexToJson, type Value } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
 import { EmbeddedRuntime } from "../src/index";
-import type { ServerMessage } from "@stackbase/sync";
+import type { ServerMessage } from "@helipod/sync";
 
 // Over `CLIENT_VERDICT_VALUE_CAP_BYTES` (64KB) once JSON-quoted — the fill's oversized-drop case.
 const OVERSIZED_VALUE = "x".repeat(70_000);

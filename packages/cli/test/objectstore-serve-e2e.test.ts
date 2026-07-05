@@ -1,5 +1,5 @@
 /**
- * Tier 3 Slice 6, Task 6.4 — the HEADLINE E2E: a real `stackbase serve --object-store <url>` boots
+ * Tier 3 Slice 6, Task 6.4 — the HEADLINE E2E: a real `helipod serve --object-store <url>` boots
  * a working reactive node over an object store, through the REAL production entrypoint
  * (`startServe`, the same core `serveCommand` calls) — mirrors `serve-e2e.test.ts`'s /
  * `storage-e2e.test.ts`'s "test through the shipped entrypoint" pattern, fs (hermetic, always-on) +
@@ -38,7 +38,7 @@ import { startServe } from "../src/serve";
 /* index) — same convention `objectstore-boot.test.ts` uses for this slice.  */
 /* -------------------------------------------------------------------------- */
 
-const FUNCTIONS_DIR = "test/fixtures/deploy-v2/stackbase";
+const FUNCTIONS_DIR = "test/fixtures/deploy-v2/helipod";
 
 /* -------------------------------------------------------------------------- */
 /* WS + HTTP helpers (mirrors serve-e2e.test.ts / storage-e2e.test.ts)        */
@@ -242,7 +242,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 /* fs arm — hermetic, always on                                               */
 /* -------------------------------------------------------------------------- */
 
-describe("stackbase serve --object-store — end-to-end (fs, real server)", () => {
+describe("helipod serve --object-store — end-to-end (fs, real server)", () => {
   it(
     "commit -> bucket -> reactive fan-out -> read-back; a second node takes over IMMEDIATELY after relinquish (Task 6.5)",
     async () => {
@@ -268,25 +268,25 @@ function dockerAvailable(): boolean {
   }
 }
 
-const RUN_MINIO = dockerAvailable() && process.env.STACKBASE_OBJECTSTORE_S3 === "1";
+const RUN_MINIO = dockerAvailable() && process.env.HELIPOD_OBJECTSTORE_S3 === "1";
 const maybeDescribe = RUN_MINIO ? describe : describe.skip;
 
 const MINIO_CONTAINER = `sb-minio-objstore-serve-e2e-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-objstore-serve-e2e";
+const BUCKET = "helipod-objstore-serve-e2e";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-/** Resolve `@aws-sdk/client-s3` from `@stackbase/objectstore-s3`'s own node_modules (used only for
+/** Resolve `@aws-sdk/client-s3` from `@helipod/objectstore-s3`'s own node_modules (used only for
  * bucket creation — the scenario itself goes entirely through the shipped `--object-store` URL /
  * `resolveObjectStore` path, never constructing an `S3ObjectStore` directly). */
 function loadS3Sdk(): { S3Client: any; CreateBucketCommand: any } {
   const reqRoot = createRequire(import.meta.url);
-  const reqS3 = createRequire(reqRoot.resolve("@stackbase/objectstore-s3"));
+  const reqS3 = createRequire(reqRoot.resolve("@helipod/objectstore-s3"));
   return reqS3("@aws-sdk/client-s3");
 }
 
@@ -342,7 +342,7 @@ function stopMinio(): void {
   runDocker(["rm", "-f", MINIO_CONTAINER]);
 }
 
-maybeDescribe("stackbase serve --object-store — end-to-end (real MinIO, gated)", () => {
+maybeDescribe("helipod serve --object-store — end-to-end (real MinIO, gated)", () => {
   afterAll(() => stopMinio());
 
   it(

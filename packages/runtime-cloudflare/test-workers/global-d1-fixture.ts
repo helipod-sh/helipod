@@ -7,11 +7,11 @@
  * scenario); `localItems` is an ordinary root (MVCC) table (exercises the cross-store co-write
  * guard). NOT product code — a test fixture. Safe to delete with this branch's tests.
  */
-import { query, mutation } from "@stackbase/executor";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import type { LoadedProject } from "@stackbase/cli/project";
-import { StackbaseDurableObject, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare";
-import { bindingD1Client, type D1Binding } from "@stackbase/docstore-d1";
+import { query, mutation } from "@helipod/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import type { LoadedProject } from "@helipod/cli/project";
+import { HelipodDurableObject, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare";
+import { bindingD1Client, type D1Binding } from "@helipod/docstore-d1";
 
 const schema = defineSchema({
   counters: defineTable({ key: v.string(), value: v.number() })
@@ -65,7 +65,7 @@ const localItems = {
 
 const loaded: LoadedProject = { schema, modules: { counters, localItems } };
 
-export class GlobalD1DO extends StackbaseDurableObject {
+export class GlobalD1DO extends HelipodDurableObject {
   protected appConfig(env: unknown): DurableObjectAppConfig {
     const db = (env as { DB?: D1Binding }).DB;
     return {

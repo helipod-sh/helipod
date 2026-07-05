@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Node lifecycle (Fleet slice 2, Task 4) — the pieces of `prepareFleetNode`/`startFleetNode` that
  * are unit-testable in isolation:
@@ -13,20 +13,20 @@
  *
  * `prepareFleetNode`/`startFleetNode` as a whole build a real `NodePgClient` from a connection
  * string and contend a Postgres advisory lock (writer-vs-sync election), so the integrated path is
- * proven only through the real `stackbase serve --fleet` E2E; here we exercise their extracted,
+ * proven only through the real `helipod serve --fleet` E2E; here we exercise their extracted,
  * side-effect-free seams directly.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { newDocumentId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocStore, DocumentLogEntry, IndexWrite, InternalDocumentId } from "@stackbase/docstore";
-import type { NodePgClient } from "@stackbase/docstore-postgres";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { newDocumentId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocStore, DocumentLogEntry, IndexWrite, InternalDocumentId } from "@helipod/docstore";
+import type { NodePgClient } from "@helipod/docstore-postgres";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
 import { PgliteClient } from "./pglite-client";
 import { ReplicaTailer, type AppliedInvalidation } from "../src/replica-tailer";
 import { SwitchableDocStore } from "../src/switchable-store";
@@ -356,7 +356,7 @@ describe("fleet node lifecycle", () => {
     it("the old prepareFleetNode call site is gone: sync boot's prep step never touches pgStore at all", async () => {
       // `prepareFleetNode` itself requires a live `NodePgClient` (a real Postgres connection string),
       // so it can't be exercised directly in this unit suite (see the file's module doc comment) —
-      // the full integration is the `stackbase serve --fleet` E2E. What IS unit-testable here is the
+      // the full integration is the `helipod serve --fleet` E2E. What IS unit-testable here is the
       // structural claim: `openSyncReplica` — what `prepareFleetNode`'s sync branch now calls, with
       // `reconcileReplicaIdentity` no longer inline after it — touches ONLY the local replica file and
       // never queries Postgres. Proven against a PG store whose `persistence_globals` table does NOT
@@ -467,7 +467,7 @@ describe("fleet node lifecycle", () => {
 describe("F1 fix (Fenced Frontier B1 whole-branch review, BLOCKER): writer-boot frontier seed closes the pre-loaded-database bootstrap hole", () => {
   // Reproduces the bug end to end: a single-node Postgres store accumulates real documents via the
   // RAW write() path with NO lease/fleet machinery involved at all (no `shard_leases` row exists) —
-  // exactly what a pre-fleet `stackbase serve` looks like. The operator then enables `--fleet` for
+  // exactly what a pre-fleet `helipod serve` looks like. The operator then enables `--fleet` for
   // the first time. Before the fix, the first `tryAcquire()` seeds `frontier_ts=0` even though the
   // store already holds history, so a fresh sync node's ready gate (`wm=0 < target=0`) is a silent
   // no-op and it reports ready with an EMPTY replica. Drives the REAL `startFleetNode` writer path

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * The mode-"hash" fixture Worker (M2d) — a SIBLING of `test-worker.ts` (mode "key"), run through its
@@ -21,10 +21,10 @@
  *     others still succeed, exercising `worker.ts`'s failures-as-data `partial.failedShards` path
  *     end-to-end rather than only via the Node-level scripted-namespace unit test.
  */
-import { query, mutation } from "@stackbase/executor";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import type { LoadedProject } from "@stackbase/cli/project";
-import { StackbaseDurableObject, createShardWorkerHandler, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare-shard";
+import { query, mutation } from "@helipod/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import type { LoadedProject } from "@helipod/cli/project";
+import { HelipodDurableObject, createShardWorkerHandler, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare-shard";
 
 const schema = defineSchema({
   messages: defineTable({ roomId: v.string(), body: v.string() })
@@ -58,7 +58,7 @@ const messages = {
 
 const loaded: LoadedProject = { schema, modules: { messages } };
 
-export class FixtureStackbaseDOHash extends StackbaseDurableObject {
+export class FixtureHelipodDOHash extends HelipodDurableObject {
   protected appConfig(): DurableObjectAppConfig {
     return { loaded, adminKey: "workerd-test-admin-key-hash" };
   }
@@ -67,4 +67,4 @@ export class FixtureStackbaseDOHash extends StackbaseDurableObject {
 // The Worker's default export is the multi-shard router, fixed at numShards: 4 (mode "hash") — the
 // enumerable shard set fanOut requires. `SELF.fetch(...)` in fanout.worker.test.ts drives this real
 // routing, exactly as multishard.worker.test.ts drives the mode-"key" router in its own project.
-export default createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 4, loaded });
+export default createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 4, loaded });

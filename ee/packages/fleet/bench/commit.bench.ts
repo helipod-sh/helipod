@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Fleet B4, Task 1 — the commit-throughput BENCHMARK, built BEFORE any batching code (the spec's
  * "benchmark-first" abort criterion, `docs/superpowers/specs/2026-07-09-fleet-b4-group-commit-
@@ -23,12 +23,12 @@
  *    recorded baseline can't be silently overwritten by a routine local benchmark-gated CI run).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import type { DocStore } from "@stackbase/docstore";
-import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { shardIdList, encodeStorageIndexId } from "@stackbase/id-codec";
+import { PostgresDocStore, NodePgClient } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import type { DocStore } from "@helipod/docstore";
+import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@helipod/executor";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
+import { shardIdList, encodeStorageIndexId } from "@helipod/id-codec";
 import { PgliteClient } from "../test/pglite-client";
 
 /* -------------------------------------------------------------------------- */
@@ -67,7 +67,7 @@ function benchModules(): Record<string, RegisteredFunction> {
       handler: (ctx, { channelId, tag }) => ctx.db.insert("bench", { channelId, tag, counter: 0 }),
     }),
     // rmw80's 20% slice: read the (single, pre-seeded) doc for this channel, bump its counter.
-    // Stackbase has no `ctx.db.patch` — read-merge-replace, same pattern as the fixture app's
+    // Helipod has no `ctx.db.patch` — read-merge-replace, same pattern as the fixture app's
     // `notes:update` (`test/fixtures/app/convex/notes.ts`).
     "bench:rmw": mutation<{ channelId: string }, null>({
       shardBy: "channelId",
@@ -101,7 +101,7 @@ export interface CommitBenchOpts {
    *  — overridable so CI-fast smoke cells don't have to pay the full warmup. */
   warmupMs?: number;
   /** Fleet B4, T5 — the group-commit flag under test. When true the runtime routes every shard's
-   *  commits through the two-buffer stage-then-flush committer (`STACKBASE_GROUP_COMMIT=1`'s runtime
+   *  commits through the two-buffer stage-then-flush committer (`HELIPOD_GROUP_COMMIT=1`'s runtime
    *  effect). Default false: the "before" run measures the exact shipped path the T1 baseline did, so
    *  the baseline call sites (and the PGlite smokes) are behavior-unchanged. */
   groupCommit?: boolean;
@@ -289,14 +289,14 @@ describe("Fleet B4, Task 1 — commit-throughput benchmark harness (PGlite smoke
 /* -------------------------------------------------------------------------- */
 
 const HAS_EMBEDDED_PG = embeddedPgAvailable();
-// Opt-in on top of the embedded-postgres gate (STACKBASE_BENCH=1): the matrix is ~4.5 minutes of
+// Opt-in on top of the embedded-postgres gate (HELIPOD_BENCH=1): the matrix is ~4.5 minutes of
 // DELIBERATE full-throttle Postgres load. Platform-availability alone made it run inside every full
 // `bun run test`, where it resource-starved the timing-sensitive fleet-e2e scenarios in the same
 // parallel pass — the root cause of the recurring "fleet flake" (diagnosed 2026-07-09: the
 // simultaneous-boot E2E timed out at 42s while the two bench matrices held the machine for 90s +
 // 186s). Benchmarks are load generators, not tests: they run only when explicitly asked for
-// (T5-gate runs, perf work), mirroring bench-fanout-pg's STACKBASE_BENCH_FANOUT_PG pattern.
-const RUN_BENCH = HAS_EMBEDDED_PG && process.env["STACKBASE_BENCH"] === "1";
+// (T5-gate runs, perf work), mirroring bench-fanout-pg's HELIPOD_BENCH_FANOUT_PG pattern.
+const RUN_BENCH = HAS_EMBEDDED_PG && process.env["HELIPOD_BENCH"] === "1";
 const maybeDescribe = RUN_BENCH ? describe : describe.skip;
 
 let pgServer: EmbeddedPg | undefined;
@@ -320,7 +320,7 @@ async function stopPostgresContainer(): Promise<void> {
 function buildRealPgStore(databaseUrl: string, numShards: number): { store: PostgresDocStore; client: NodePgClient } {
   const client = new NodePgClient({
     connectionString: databaseUrl,
-    applicationName: `stackbase-b4-bench-${numShards}`,
+    applicationName: `helipod-b4-bench-${numShards}`,
     commitPool: { shards: shardIdList(numShards) },
   });
   return { store: new PostgresDocStore(client), client };

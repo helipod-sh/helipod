@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { query } from "@stackbase/executor";
-import { createTestStackbase, type TestStackbase } from "@stackbase/test";
+import { query } from "@helipod/executor";
+import { createTestHelipod, type TestHelipod } from "@helipod/test";
 import { defineAuth, sha256base64url, type MintResult } from "../src"; // auth's own tests import via src (existing idiom — no dist rebuild needed)
 
 // A protected query proving `ctx.auth` resolves the ambient identity (used for the legacy-fallback
@@ -10,8 +10,8 @@ const appModules = {
   whoami: { get: query(async (ctx: any) => ctx.auth.getUserId() as Promise<string | null>) },
 };
 
-async function harness(): Promise<TestStackbase> {
-  return createTestStackbase({ modules: appModules, components: [defineAuth()], schema: false });
+async function harness(): Promise<TestHelipod> {
+  return createTestHelipod({ modules: appModules, components: [defineAuth()], schema: false });
 }
 
 describe("auth A1: session model core", () => {

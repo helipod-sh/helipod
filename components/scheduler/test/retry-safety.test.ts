@@ -10,7 +10,7 @@
 //  3. `_reclaim` had no attempts cap for mutations — a mutation that crash-looped its host was
 //     reclaimed to `pending` forever. Now it dead-letters once `attempts >= maxFailures`.
 import { describe, it, expect } from "vitest";
-import { action, mutation } from "@stackbase/executor";
+import { action, mutation } from "@helipod/executor";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 
 describe("EnqueueOpts.runAfter is honored", () => {

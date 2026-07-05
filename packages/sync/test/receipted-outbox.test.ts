@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { convexToJson, type JSONValue, type Value } from "@stackbase/values";
-import { TimeoutError, InvalidClientIdError, OccConflictError } from "@stackbase/errors";
+import { convexToJson, type JSONValue, type Value } from "@helipod/values";
+import { TimeoutError, InvalidClientIdError, OccConflictError } from "@helipod/errors";
 import {
   SyncProtocolHandler,
   type SyncUdfExecutor,
@@ -161,7 +161,7 @@ describe("Receipted Outbox wire — Mutation classification", () => {
   });
 
   it("a FRESH (non-replayed) failure carries the thrown error's typed code on the wire (Task 4 bug fix)", async () => {
-    // Unlike `exec.poison` (a plain `Error`, no code), this throws a REAL StackbaseError — the
+    // Unlike `exec.poison` (a plain `Error`, no code), this throws a REAL HelipodError — the
     // handler's fresh-failure catch (processMutation) must thread its `.code` onto the wire, not
     // just the message. Previously only the dedup-REPLAY branch above populated `code`; a genuinely
     // fresh failure (this one — no prior verdict recorded, no dedup key involved at all) sent
@@ -178,7 +178,7 @@ describe("Receipted Outbox wire — Mutation classification", () => {
     // The wire invariant is "coded ⇒ terminal, server-recorded verdict" (the outbox drain's
     // coded-vs-codeless classification and `handleDedupError`'s own retryable check both depend on
     // it). A fresh (non-replayed) TRANSIENT error — here a real `OccConflictError` — must NOT carry
-    // a `.code`, even though it IS a `StackbaseError` with one: threading it through would make the
+    // a `.code`, even though it IS a `HelipodError` with one: threading it through would make the
     // drain settle a transient failure as terminal (durable mutation lost / poison-pause).
     exec.runMutation = async () => {
       throw new OccConflictError("write conflict, retry");

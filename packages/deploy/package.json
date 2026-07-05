@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/deploy",
+  "name": "@helipod/deploy",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/component": "workspace:*"
+    "@helipod/component": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

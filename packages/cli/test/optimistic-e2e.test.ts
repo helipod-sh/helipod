@@ -1,8 +1,8 @@
 /**
  * Optimistic-updates Task 7 — the E2E battery (client-sync verdict §(h) real-WS mandates).
  *
- * Every scenario drives a REAL `@stackbase/client` `StackbaseClient` over a REAL WebSocket to a
- * REAL `stackbase dev` server (`startDevServer` + `createEmbeddedRuntime`/`bootLoaded`), the way
+ * Every scenario drives a REAL `@helipod/client` `HelipodClient` over a REAL WebSocket to a
+ * REAL `helipod dev` server (`startDevServer` + `createEmbeddedRuntime`/`bootLoaded`), the way
  * `ws.test.ts`/`action-e2e.test.ts` do — not the loopback/mock harness `gated-ledger.test.ts` uses
  * for the pure gate algebra. The six mandates (task-7-brief.md):
  *
@@ -37,23 +37,23 @@ import { rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolve } from "node:path";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import type { Value } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import type { Value } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { PostgresDocStore, NodePgClient } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 import {
-  StackbaseClient,
+  HelipodClient,
   webSocketTransport,
   anyApi,
   MutationUndeliveredError,
   type ClientTransport,
   type OptimisticStoreView,
-} from "@stackbase/client";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+} from "@helipod/client";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 import { loadFunctionsDir } from "../src/load-modules";
 import { bootLoaded } from "../src/boot";
@@ -293,7 +293,7 @@ describe("optimistic E2E (1) — response-before-Transition ordering pinned thro
     const { server, runtime } = await startChatServer();
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
     const recorded = recordingTransport(webSocketTransport(wsUrl, { reconnect: false }));
-    const client = new StackbaseClient(recorded.transport);
+    const client = new HelipodClient(recorded.transport);
     try {
       const frames: unknown[][] = [];
       client.subscribe(api.messages.list, { conversationId: "c1" }, (val) => frames.push(val as unknown[]));
@@ -333,7 +333,7 @@ describe("optimistic E2E (6) — full optimistic chat flow: instant echo → con
   it("send-with-optimistic-update shows an instant local echo that never disappears before server convergence", async () => {
     const { server } = await startChatServer();
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
-    const client = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const client = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     try {
       const frames: string[][] = [];
       client.subscribe(api.messages.list, { conversationId: "c1" }, (val) => frames.push((val as Array<{ body: string }>).map((d) => d.body)));
@@ -374,7 +374,7 @@ describe("optimistic E2E (2) — reconnect kill → resubscribe → unsent flush
     const proxy = await tcpProxy(server.port);
     const wsUrl = `ws://127.0.0.1:${proxy.port}/api/sync`;
     const transport = webSocketTransport(wsUrl, { initialBackoffMs: 300, maxBackoffMs: 800 });
-    const client = new StackbaseClient(transport);
+    const client = new HelipodClient(transport);
     try {
       const frames: string[][] = [];
       client.subscribe(api.messages.list, { conversationId: "c1" }, (val) => frames.push((val as Array<{ body: string }>).map((d) => d.body)));
@@ -416,7 +416,7 @@ describe("optimistic E2E (2) — reconnect kill → resubscribe → unsent flush
     const { server } = await startChatServer();
     const proxy = await tcpProxy(server.port);
     const wsUrl = `ws://127.0.0.1:${proxy.port}/api/sync`;
-    const client = new StackbaseClient(webSocketTransport(wsUrl, { initialBackoffMs: 30, maxBackoffMs: 100 }));
+    const client = new HelipodClient(webSocketTransport(wsUrl, { initialBackoffMs: 30, maxBackoffMs: 100 }));
     try {
       const frames: string[][] = [];
       client.subscribe(api.messages.list, { conversationId: "c1" }, (val) => frames.push((val as Array<{ body: string }>).map((d) => d.body)));
@@ -450,10 +450,10 @@ describe("optimistic E2E (3) — backpressure: Transitions drop, the MutationRes
     const wsUrl = `ws://127.0.0.1:${proxy.port}/api/sync`;
     // The victim client (stalled reader). Reconnect off — a pause is not a close, so it stays put.
     const recorded = recordingTransport(webSocketTransport(wsUrl, { reconnect: false }));
-    const victim = new StackbaseClient(recorded.transport);
+    const victim = new HelipodClient(recorded.transport);
     // A separate committer (direct to the engine port) that generates the Transition flood.
     const flooderUrl = `ws://127.0.0.1:${server.port}/api/sync`;
-    const flooder = new StackbaseClient(webSocketTransport(flooderUrl, { reconnect: false }));
+    const flooder = new HelipodClient(webSocketTransport(flooderUrl, { reconnect: false }));
     try {
       let lastList: Array<{ body: string }> = [];
       let listFrames = 0;
@@ -548,7 +548,7 @@ async function runG4(store: PostgresDocStore | SqliteDocStore): Promise<void> {
   const { server } = await startChatServer(store);
   const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
   const recorded = recordingTransport(webSocketTransport(wsUrl, { reconnect: false }));
-  const client = new StackbaseClient(recorded.transport);
+  const client = new HelipodClient(recorded.transport);
   try {
     const frames: unknown[][] = [];
     client.subscribe(api.messages.list, { conversationId: "c1" }, (val) => frames.push(val as unknown[]));
@@ -649,7 +649,7 @@ function appendAllUpdate(tempId: string, channelId: string, body: string): (stor
  * FIXED at the source (transactor origin-frontier ordering hook). Full write-up in
  * `.superpowers/sdd/task-7-report.md`.
  *
- * ORIGINAL FINDING (measured over the real `stackbase dev` server, 8 shards, this exact fixture):
+ * ORIGINAL FINDING (measured over the real `helipod dev` server, 8 shards, this exact fixture):
  *   • 8 shards + concurrent foreign traffic: FLICKERED 15/15 iterations.
  *   • 1 shard  + concurrent foreign traffic: 0/15 (clean). Sharding was the sole cause.
  *
@@ -675,7 +675,7 @@ function appendAllUpdate(tempId: string, channelId: string, body: string): (stor
 describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test", () => {
   it("across many iterations, the client's own write is NEVER dropped from its composed view before the server base includes it (drop-never-precedes-inclusion)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-"));
-    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "stackbase"));
+    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "helipod"));
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
@@ -683,8 +683,8 @@ describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test"
     const [chA, chB] = distinctShardPair(NUM_SHARDS);
     expect(shardIdForKeyValue(chA, NUM_SHARDS)).not.toBe(shardIdForKeyValue(chB, NUM_SHARDS));
 
-    const clientA = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
-    const foreign = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const clientA = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const foreign = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     // Every composed frame A's cross-shard subscription ever renders (the whole point: collect ALL).
     const frames: Array<Set<string>> = [];
     let unsub: (() => void) | undefined;
@@ -740,14 +740,14 @@ describe("optimistic E2E (5) — THE D12 concurrent cross-shard no-flicker test"
   // mutation converges PROMPTLY with nothing else happening on the server.
   it("with NO foreign traffic, A's own cross-shard write converges promptly (the stale-forever regression is gone)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "sb-opt-d12-solo-"));
-    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "stackbase"));
+    const loaded = await loadFunctionsDir(resolve(new URL(".", import.meta.url).pathname, "fixtures", "optimistic-shard", "helipod"));
     const { runtime, store } = await bootLoaded({ loaded, components: [], dataPath: join(dataDir, "db.sqlite"), adminKey: "k" });
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     const wsUrl = `ws://127.0.0.1:${server.port}/api/sync`;
     const NUM_SHARDS = 8;
     const [chA] = distinctShardPair(NUM_SHARDS);
 
-    const clientA = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+    const clientA = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
     const frames: Array<Set<string>> = [];
     let unsub: (() => void) | undefined;
     try {

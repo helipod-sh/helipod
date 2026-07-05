@@ -1,10 +1,10 @@
 // packages/admin/test/list-tables-components.test.ts
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { InMemoryLogSink, SimpleIndexCatalog } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { InMemoryLogSink, SimpleIndexCatalog } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { encodeStorageIndexId } from "@helipod/id-codec";
 import { AdminApi } from "../src/admin-api";
 
 // App schema has only "notes" — component tables are NOT in schemaJson

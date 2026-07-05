@@ -1,6 +1,6 @@
 ---
 title: Components
-description: Opt-in capabilities composed in stackbase.config.ts.
+description: Opt-in capabilities composed in helipod.config.ts.
 ---
 
 {/* diataxis: explanation */}
@@ -11,7 +11,7 @@ self-contained packages that plug into the engine through one seam, `ComponentDe
 contributes whatever mix of tables, a `ctx.<name>` facade, background behavior, and HTTP routes it
 needs.
 
-A project composes exactly the components it wants in `stackbase.config.ts`. Nothing is installed
+A project composes exactly the components it wants in `helipod.config.ts`. Nothing is installed
 for you, and nothing runs that you didn't list.
 
 This page explains the component model itself: how you compose components, what's built in today,
@@ -22,7 +22,7 @@ see its page: [Auth](/docs/components/auth), [Authorization](/docs/components/au
 
 ```mermaid
 flowchart LR
-  Config["stackbase.config.ts"] --> Compose["composeComponents\n(topological sort by requires)"]
+  Config["helipod.config.ts"] --> Compose["composeComponents\n(topological sort by requires)"]
   Compose --> Tables["Namespaced tables"]
   Compose --> Modules["Namespaced modules"]
   Compose --> Context["ctx.<name> facades"]
@@ -32,14 +32,14 @@ flowchart LR
 
 ## Composing components
 
-You declare which components are active in a single `stackbase.config.ts` at your project root,
+You declare which components are active in a single `helipod.config.ts` at your project root,
 exporting the result of `defineConfig({ components: [...] })`:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineAuth, consoleEmail, googleProvider, githubProvider } from "@stackbase/auth";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow, workflow } from "@stackbase/workflow";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineAuth, consoleEmail, googleProvider, githubProvider } from "@helipod/auth";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow, workflow } from "@helipod/workflow";
 
 const auth = defineAuth({
   email: {
@@ -77,13 +77,13 @@ export default defineConfig({
 });
 ```
 
-(Adapted from `examples/auth-demo/stackbase.config.ts`, the reference pattern real projects copy
-from. `examples/chat/stackbase.config.ts` shows the smallest possible case: a single
+(Adapted from `examples/auth-demo/helipod.config.ts`, the reference pattern real projects copy
+from. `examples/chat/helipod.config.ts` shows the smallest possible case: a single
 `defineTriggers({ messages: { handler: "audit:_onChange" } })` for a table audit log.)
 
 That's the entire surface. There is no separate CLI command that "installs" a component into a
-project. `packages/cli/src/load-config.ts` just imports `stackbase.config.ts` (or
-`stackbase.config.js`, whichever exists) and reads `.components` off the default export. If neither
+project. `packages/cli/src/load-config.ts` just imports `helipod.config.ts` (or
+`helipod.config.js`, whichever exists) and reads `.components` off the default export. If neither
 file is present, the project composes zero components (`{ components: [] }`) and behaves as pure
 core engine.
 
@@ -92,8 +92,8 @@ contributes appears with it. Remove the entry, and all of it disappears. There's
 leftover state to clean up, because none of it was ever installed anywhere outside this one array.
 
 Besides `components`, `defineConfig` accepts one more optional field: `deploy`, the per-target
-configuration `stackbase deploy` reads (see [Deploy & build](/docs/deploy/deploy-and-build)).
-`@stackbase/component` also exports an `env(name, fallback?)` helper for referencing environment
+configuration `helipod deploy` reads (see [Deploy & build](/docs/deploy/deploy-and-build)).
+`@helipod/component` also exports an `env(name, fallback?)` helper for referencing environment
 variables in that deploy config; it returns `""` rather than throwing when a variable is unset, so
 the config still loads without a `.env` file present.
 
@@ -101,12 +101,12 @@ the config still loads without a `.env` file present.
 
 | Component | Package | `requires` | Facade | Driver | HTTP routes |
 |---|---|---|---|---|---|
-| Auth | `@stackbase/auth` | (none) | `ctx.auth` | (none) | `/api/auth/oauth/` (if `oauth` configured) |
-| Authorization | `@stackbase/authz` | `auth` | `ctx.authz` | (none) | (none) |
-| Scheduling | `@stackbase/scheduler` | (none) | `ctx.scheduler` | dispatch loop | (none) |
-| Workflows | `@stackbase/workflow` | `scheduler` | `ctx.workflow` | (via scheduler) | (none) |
-| Triggers | `@stackbase/triggers` | (none) | (none) | log-cursor loop | (none) |
-| Notifications | `@stackbase/notifications` | (none) | `ctx.notifications` | delivery sweep | `/api/notifications/webhooks/` (if a webhook provider is configured) |
+| Auth | `@helipod/auth` | (none) | `ctx.auth` | (none) | `/api/auth/oauth/` (if `oauth` configured) |
+| Authorization | `@helipod/authz` | `auth` | `ctx.authz` | (none) | (none) |
+| Scheduling | `@helipod/scheduler` | (none) | `ctx.scheduler` | dispatch loop | (none) |
+| Workflows | `@helipod/workflow` | `scheduler` | `ctx.workflow` | (via scheduler) | (none) |
+| Triggers | `@helipod/triggers` | (none) | (none) | log-cursor loop | (none) |
+| Notifications | `@helipod/notifications` | (none) | `ctx.notifications` | delivery sweep | `/api/notifications/webhooks/` (if a webhook provider is configured) |
 
 - **[Auth](/docs/components/auth)** (`defineAuth`): password and hardened session authentication.
   Rotation and reuse detection, device management, anonymous sessions with in-place upgrade, email
@@ -153,11 +153,11 @@ name so they can never collide with yours (component schemas may not declare `.g
 that's app-schema-only). `modules` contributes the component's own registered functions, namespaced
 the same way. `context` builds the `ctx.<name>` facade your handlers call, and `buildAction` builds
 its action-mode twin; a facade that writes its own tables during a mutation sets `contextWrite:
-true`, as `@stackbase/scheduler`, `@stackbase/workflow`, and `@stackbase/notifications` do. `boot`
+true`, as `@helipod/scheduler`, `@helipod/workflow`, and `@helipod/notifications` do. `boot`
 runs one-time startup work, `driver` runs a recurring background loop, `httpRoutes` mounts
 reserved-path endpoints, and `policies` attaches row-level authorization rules. A component uses
-whichever subset it needs: `@stackbase/authz` composes tables, a facade, policies, and a boot step;
-`@stackbase/scheduler` adds a driver, an action-mode facade, and a codegen re-export on top.
+whichever subset it needs: `@helipod/authz` composes tables, a facade, policies, and a boot step;
+`@helipod/scheduler` adds a driver, an action-mode facade, and a codegen re-export on top.
 
 For the full field-by-field walkthrough of every seam, with a worked example, see
 [Build a custom component](/docs/contributing/extending/custom-component).
@@ -204,19 +204,19 @@ compose-time errors, never a silent override of one component's contribution by 
 
 <Callout type="warn" title="The component set doesn't hot-swap">
 
-`stackbase deploy` (see [Deploy & build](/docs/deploy/deploy-and-build)) can push a new version of
-your app's own functions and an additive schema change onto an already-running `stackbase serve`,
+`helipod deploy` (see [Deploy & build](/docs/deploy/deploy-and-build)) can push a new version of
+your app's own functions and an additive schema change onto an already-running `helipod serve`,
 atomically, with no restart. But the *set* of composed components is decided once, at process boot,
-from `stackbase.config.ts`, and baked into the running deployment's table numbers, module map,
+from `helipod.config.ts`, and baked into the running deployment's table numbers, module map,
 context providers, and drivers.
 
 Adding `defineNotifications(...)` to your config, or removing `defineTriggers(...)`, requires
-restarting the process (`stackbase serve` again, or a redeploy of a `stackbase build` binary).
+restarting the process (`helipod serve` again, or a redeploy of a `helipod build` binary).
 There's no live "activate this component" admin call.
 
 </Callout>
 
-This mirrors the same boundary `stackbase deploy`'s additive-schema gate draws for your own
+This mirrors the same boundary `helipod deploy`'s additive-schema gate draws for your own
 `schema.ts`: structure that other running state depends on (table numbers, namespaces, which drivers
 are alive) is a boot-time decision. The data and function bodies riding on top of that structure can
 still change live.
@@ -224,8 +224,8 @@ still change live.
 ## The driver seam
 
 A `driver` is how a component does background work that isn't triggered by any single client
-request: the scheduler's job-dispatch loop, `@stackbase/triggers`' cursor over the MVCC log,
-`@stackbase/notifications`' delivery sweep and retry/backoff loop.
+request: the scheduler's job-dispatch loop, `@helipod/triggers`' cursor over the MVCC log,
+`@helipod/notifications`' delivery sweep and retry/backoff loop.
 
 It's a recurring runtime event loop, started once after boot, woken by two things. The commit
 fan-out makes it react to writes immediately, not on a poll interval. A wall-clock timer makes
@@ -257,7 +257,7 @@ interface Driver {
   work." A long-lived host returns `defaultMs` unchanged, while a host where every wake costs a cold
   start can stretch it.
 - **`readLog({ afterTs, tables?, limit? })`**: reads committed changes from the MVCC log after a
-  timestamp, in ascending order. This is the durable change-feed seam `@stackbase/triggers` is built
+  timestamp, in ascending order. This is the durable change-feed seam `@helipod/triggers` is built
   on. `limit` bounds scanned revisions, not matched ones, so a cursor makes progress even over a quiet
   watched table on a busy log. The returned `maxScannedTs` (not the last change's own `ts`) is what a
   cursor should advance to, so scanned-but-unmatched ranges are never rescanned. `limit: 0` peeks the
@@ -265,7 +265,7 @@ interface Driver {
   "now" without paying for a scan just to discover where that is.
 - **`functionKind?(path)`** *(optional)*: resolves a registered path's real kind
   (`query`/`mutation`/`action`/`httpAction`), so a driver can validate a config-supplied function path
-  at start time (`@stackbase/triggers`' `handler` option) and fail with an instructive "unknown path"
+  at start time (`@helipod/triggers`' `handler` option) and fail with an instructive "unknown path"
   or "wrong kind" error before ever calling it, rather than crashing on the first commit.
 
 `Driver.start` is called once, after boot. `Driver.stop`, if present, is called on graceful shutdown.
@@ -295,9 +295,9 @@ their prefixes overlap at all (equal, or one a prefix of the other). Dispatch is
 declaration order, so an ambiguous overlap is a compose-time error rather than silently
 order-dependent behavior.
 
-`@stackbase/auth` mounts `GET`/`POST /api/auth/oauth/` (GET for query-mode OAuth callbacks, POST for
+`@helipod/auth` mounts `GET`/`POST /api/auth/oauth/` (GET for query-mode OAuth callbacks, POST for
 Apple's `form_post` callback: same handler, two methods, no overlap since they're keyed per method).
-`@stackbase/notifications` mounts `POST /api/notifications/webhooks/` when a webhook-capable provider
+`@helipod/notifications` mounts `POST /api/notifications/webhooks/` when a webhook-capable provider
 is configured.
 
 ## Always-on providers vs. opt-in components
@@ -308,9 +308,9 @@ Not everything that adds a `ctx.<name>` facade is a component you compose.
 
 `ctx.storage` is wired directly into every project's boot core. `packages/cli/src/boot.ts` splices
 `storageContextProvider(...)` into the runtime's context providers ahead of whatever your
-`stackbase.config.ts` composes. Every deployment gets
+`helipod.config.ts` composes. Every deployment gets
 `ctx.storage.generateUploadUrl`/`getUrl`/`getMetadata`/`delete`/`store`/`get`, with no entry in
-`stackbase.config.ts` and no way to opt out.
+`helipod.config.ts` and no way to opt out.
 
 It behaves like a component under the hood (its own reserved `_storage` system table, its own
 serve-side HTTP routes, its own background reaper driver), but it is not a `ComponentDefinition`.
@@ -320,7 +320,7 @@ There's no `defineStorage()` to add or remove. See
 </Callout>
 
 Everything else described on this page (auth, authz, scheduler, workflow, triggers, notifications) is
-opt-in. Each is composed by name in `stackbase.config.ts`, absent from a deployment that doesn't list
+opt-in. Each is composed by name in `helipod.config.ts`, absent from a deployment that doesn't list
 it, with zero tables, zero facades, and zero background drivers running for a capability you never
 composed.
 

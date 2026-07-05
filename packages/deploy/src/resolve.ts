@@ -1,4 +1,4 @@
-import type { DeployConfig } from "@stackbase/component";
+import type { DeployConfig } from "@helipod/component";
 import type { ResolvedTarget } from "./types";
 
 export interface ResolveInput {
@@ -18,7 +18,7 @@ export function resolveDeploy(input: ResolveInput): ResolvedTarget | { error: st
     if (targetName === "serve") {
       cfg = { provider: "serve" }; // synthesized default serve target (back-compat)
     } else {
-      return { error: `unknown deploy target "${targetName}" — add it to stackbase.config.ts deploy.targets` };
+      return { error: `unknown deploy target "${targetName}" — add it to helipod.config.ts deploy.targets` };
     }
   }
 

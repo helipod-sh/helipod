@@ -1,6 +1,6 @@
 // components/scheduler/test/reliability.test.ts
 import { describe, it, expect } from "vitest";
-import { mutation, createSeededRandom } from "@stackbase/executor";
+import { mutation, createSeededRandom } from "@helipod/executor";
 import { computeBackoff } from "../src/backoff";
 import { makeRuntimeWithScheduler, readTable } from "./helpers";
 

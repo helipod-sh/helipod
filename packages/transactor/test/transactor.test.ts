@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { newDocumentId, encodeStorageTableId, DEFAULT_SHARD } from "@stackbase/id-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { newDocumentId, encodeStorageTableId, DEFAULT_SHARD } from "@helipod/id-codec";
 import { SingleWriterTransactor, HeadroomExceededError, type OplogDelta } from "../src/index";
 
 const TABLE = 10001;

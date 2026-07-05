@@ -1,12 +1,12 @@
-// This demo composes `@stackbase/auth` with an `email` block whose provider is `consoleEmail()`
-// (see `../stackbase.config.ts`) — a ZERO-CONFIG dev provider that never actually delivers mail.
-// Every verification/reset/magic-link code or link is printed to the `stackbase dev` SERVER
+// This demo composes `@helipod/auth` with an `email` block whose provider is `consoleEmail()`
+// (see `../helipod.config.ts`) — a ZERO-CONFIG dev provider that never actually delivers mail.
+// Every verification/reset/magic-link code or link is printed to the `helipod dev` SERVER
 // console (the terminal running `bun run dev`), not shown anywhere in this browser UI. Watch that
 // terminal, then paste the code/token into the matching field below.
 import { StrictMode, useEffect, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { StackbaseClient, webSocketTransport, createAuthClient, anyApi, type SessionInfo } from "@stackbase/client";
-import { StackbaseProvider, useQuery, useMutation, useAction } from "@stackbase/client/react";
+import { HelipodClient, webSocketTransport, createAuthClient, anyApi, type SessionInfo } from "@helipod/client";
+import { HelipodProvider, useQuery, useMutation, useAction } from "@helipod/client/react";
 
 const api = anyApi as {
   auth: {
@@ -41,7 +41,7 @@ function isNeedsVerification(v: unknown): v is { needsVerification: true } {
 }
 
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const client = new StackbaseClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
+const client = new HelipodClient(webSocketTransport(`${wsProtocol}://${location.host}/api/sync`));
 
 // A1: the token-lifecycle manager — persists the mint result, applies the access token, schedules
 // refresh at ~80% of the access TTL, single-refreshes across tabs, and clears on terminal errors.
@@ -168,7 +168,7 @@ function VerifyBanner({ email, onVerified }: { email: string; onVerified: (resul
       <legend>Verify your email</legend>
       <p>
         A verification code was sent to <strong>{email}</strong> — codes print to the{" "}
-        <code>stackbase dev</code> server console (the zero-config console provider), never here.
+        <code>helipod dev</code> server console (the zero-config console provider), never here.
       </p>
       <form onSubmit={handleVerify}>
         <label>Verification code</label>
@@ -238,7 +238,7 @@ function ForgotPasswordPanel({ onReset }: { onReset: (result: SessionInfo) => vo
       ) : (
         <form onSubmit={handleReset}>
           <p>
-            A reset code for <strong>{email}</strong> printed to the <code>stackbase dev</code> console.
+            A reset code for <strong>{email}</strong> printed to the <code>helipod dev</code> console.
           </p>
           <label>Reset code</label>
           <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste the code" required />
@@ -314,7 +314,7 @@ function PasswordlessPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) =
         <form onSubmit={redeem}>
           <p>
             {sent === "magic" ? "A magic-link token" : "An OTP code"} for <strong>{email}</strong> printed
-            to the <code>stackbase dev</code> console.
+            to the <code>helipod dev</code> console.
           </p>
           <label>{sent === "magic" ? "Token" : "Code"}</label>
           <input type="text" value={code} onChange={(e) => setCode(e.target.value)} placeholder="paste it here" required />
@@ -334,11 +334,11 @@ function PasswordlessPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) =
  *  the provider and come back. So this is a plain full-page redirect to the engine-mounted,
  *  reserved `/api/auth/oauth/:provider/start` route (see `components/auth/src/component.ts`'s
  *  `httpRoutes`), never a fetch/XHR. `redirectTo` is THIS page (origin + pathname, no query/hash) —
- *  it must match `oauth.redirectAllowlist` in `stackbase.config.ts` or `/start` rejects with 400
+ *  it must match `oauth.redirectAllowlist` in `helipod.config.ts` or `/start` rejects with 400
  *  before writing any state. The provider then redirects back here with `#code=<handoff>` in the
  *  URL fragment, picked up by `AuthDemo`'s mount effect below.
  *
- *  Needs REAL credentials in `stackbase.config.ts` (`GOOGLE_CLIENT_ID`/`GITHUB_CLIENT_ID` etc.) to
+ *  Needs REAL credentials in `helipod.config.ts` (`GOOGLE_CLIENT_ID`/`GITHUB_CLIENT_ID` etc.) to
  *  reach a live provider — with this example's unset-env-var placeholder config, clicking a button
  *  will redirect out and fail at the provider, which is expected (see that file's comment). */
 function OAuthButtons() {
@@ -354,7 +354,7 @@ function OAuthButtons() {
         <button type="button" className="secondary" onClick={() => start("github")}>Sign in with GitHub</button>
       </div>
       <p className="hint">
-        Needs real provider credentials in <code>stackbase.config.ts</code> (unset by default in
+        Needs real provider credentials in <code>helipod.config.ts</code> (unset by default in
         this example — see its comment).
       </p>
     </fieldset>
@@ -362,9 +362,9 @@ function OAuthButtons() {
 }
 
 /** A3 external identity, part 2: `signInWithIdToken` — a third-party (Clerk/Auth0/any OIDC issuer)
- *  id_token is verified once (jose live JWKS fetch) and traded DIRECTLY for a Stackbase session, no
+ *  id_token is verified once (jose live JWKS fetch) and traded DIRECTLY for a Helipod session, no
  *  redirect/handoff needed (the client already holds the token and calls this action itself). Paste
- *  an id_token from whatever issuer `stackbase.config.ts`'s `jwt.issuers` names. */
+ *  an id_token from whatever issuer `helipod.config.ts`'s `jwt.issuers` names. */
 function JwtSignInPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) => void }) {
   const signInWithIdToken = useAction<SessionInfo>(api.auth.signInWithIdToken);
   const [idToken, setIdToken] = useState("");
@@ -389,7 +389,7 @@ function JwtSignInPanel({ onSignedIn }: { onSignedIn: (result: SessionInfo) => v
       <legend>Sign in with a third-party token</legend>
       <p className="hint">
         Paste an id_token from a configured issuer (<code>jwt.issuers</code> in{" "}
-        <code>stackbase.config.ts</code>).
+        <code>helipod.config.ts</code>).
       </p>
       <form onSubmit={handleSubmit}>
         <textarea
@@ -476,7 +476,7 @@ function AuthDemo() {
 
   return (
     <div className="app">
-      <h1>🔐 Stackbase Auth Demo</h1>
+      <h1>🔐 Helipod Auth Demo</h1>
 
       <div className="status-box">
         <div className="label">Reactive identity (whoami.get)</div>
@@ -541,9 +541,9 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <StackbaseProvider client={client}>
+      <HelipodProvider client={client}>
         <AuthDemo />
-      </StackbaseProvider>
+      </HelipodProvider>
     </StrictMode>,
   );
 }

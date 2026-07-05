@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
-import { generateApi } from "@stackbase/codegen";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
+import { generateApi } from "@helipod/codegen";
 import { loadProject } from "../src/index";
 
 describe("codegen — argsType derived from the args validator", () => {

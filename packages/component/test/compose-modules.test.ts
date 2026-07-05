@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
+import { defineSchema } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
 import { defineComponent } from "../src/define-component";
 import { composeModules } from "../src/compose";
 

@@ -77,14 +77,14 @@ model above (queue, drain, receipts) is identical regardless of which one you pi
 The browser backend.
 
 ```ts
-import { StackbaseClient, webSocketTransport, indexedDBOutbox } from "@stackbase/client";
+import { HelipodClient, webSocketTransport, indexedDBOutbox } from "@helipod/client";
 
-const client = new StackbaseClient(webSocketTransport(url), {
+const client = new HelipodClient(webSocketTransport(url), {
   outbox: indexedDBOutbox(), // browser, durable; probes IndexedDB, falls back to memory if unavailable
 });
 ```
 
-It keeps everything in one IndexedDB database (`stackbase-outbox`), on purpose: the shared
+It keeps everything in one IndexedDB database (`helipod-outbox`), on purpose: the shared
 mutation queue and the per-`clientId` identity metadata both live there, so a whole-origin storage
 eviction takes both atomically. There's no separate identity store that can drift out of sync with
 the queue.
@@ -108,13 +108,13 @@ const outbox = indexedDBOutbox({
 <Tab value="fsOutbox()">
 
 For Node/Bun processes, Electron main processes, and Tauri sidecars. Imported from the
-`@stackbase/client/outbox-fs` subpath, so browser bundles never see its `node:*` imports:
+`@helipod/client/outbox-fs` subpath, so browser bundles never see its `node:*` imports:
 
 ```ts
-import { StackbaseClient, webSocketTransport } from "@stackbase/client";
-import { fsOutbox } from "@stackbase/client/outbox-fs";
+import { HelipodClient, webSocketTransport } from "@helipod/client";
+import { fsOutbox } from "@helipod/client/outbox-fs";
 
-const client = new StackbaseClient(webSocketTransport(url), {
+const client = new HelipodClient(webSocketTransport(url), {
   outbox: fsOutbox({ dir: "./data/outbox" }),
 });
 ```
@@ -185,7 +185,7 @@ watermark. Don't enable both an outbox and an external retrier for the same muta
 
 ## Identity: clientId, seq, and why they never collide
 
-**One `clientId` per tab session**, minted once at `StackbaseClient` construction and never reused
+**One `clientId` per tab session**, minted once at `HelipodClient` construction and never reused
 across a reload. A fresh page load always mints a fresh one. **One `seq` counter per `clientId`**,
 incrementing serially in memory from wherever it last reached (loaded once from the outbox's
 `meta` store at construction, then tracked purely in memory for the rest of the session, never
@@ -287,7 +287,7 @@ sitting on the stack. Nothing invoked `.withOptimisticUpdate(...)` for it *this*
 closes that gap by supplying the updater after the fact:
 
 ```ts
-const client = new StackbaseClient(webSocketTransport(url), {
+const client = new HelipodClient(webSocketTransport(url), {
   outbox: indexedDBOutbox(),
   optimisticUpdates: {
     "messages:send": (store, args) => {
@@ -330,14 +330,14 @@ A mutation can fail two different ways once the drain actually sends it:
 The default, `poisonPolicy: "skip"`, settles a coded failure terminally (visible via
 `onMutationFailed`/`pendingMutations()`, with `error.code` set) and **keeps draining the rest of
 the queue**. One bad mutation can never wedge everything queued behind it. A codeless failure
-instead backs off (the same jittered-exponential shape `@stackbase/scheduler` uses for its own
+instead backs off (the same jittered-exponential shape `@helipod/scheduler` uses for its own
 retries) and resends starting from the failed unit, never skipping it.
 
 Set `poisonPolicy: "pause"` for the stricter, opt-in posture: halt the whole drain the moment
 *anything* fails, and let the user intervene:
 
 ```ts
-const client = new StackbaseClient(transport, {
+const client = new HelipodClient(transport, {
   outbox: indexedDBOutbox(),
   poisonPolicy: "pause",
   onOutboxPause: (info) => {
@@ -387,7 +387,7 @@ A pending tray built from these pieces is the honest UI affordance for "what's s
 independent of whether any particular query has a cache to render into:
 
 ```tsx
-import { usePendingMutations } from "@stackbase/client/react";
+import { usePendingMutations } from "@helipod/client/react";
 
 function PendingTray() {
   const pending = usePendingMutations();
@@ -502,15 +502,15 @@ Everything above assumes at least one tab is open. If every tab closes with entr
 nothing drains until you reopen the app. The durable queue is unaffected, it just waits.
 
 `drainOutboxOnce` is the headless, store-only version of the same queue-drain-receipts machinery,
-built for a context with no `StackbaseClient` at all, most concretely a Service Worker's one-shot
+built for a context with no `HelipodClient` at all, most concretely a Service Worker's one-shot
 Background Sync handler:
 
 ```ts
 // sw.ts, inside your Service Worker
-import { drainOutboxOnce } from "@stackbase/client";
+import { drainOutboxOnce } from "@helipod/client";
 
 self.addEventListener("sync", (event) => {
-  if (event.tag === "stackbase-outbox-drain") {
+  if (event.tag === "helipod-outbox-drain") {
     event.waitUntil(
       drainOutboxOnce({
         url: "wss://your-deployment.example.com/api/sync",
@@ -549,7 +549,7 @@ self.addEventListener("sync", (event) => {
     },
     getSessionId: {
       description:
-        "Resolves the persisted SessionInfo.sessionId a createAuthClient-managed session wrote (the \"stackbase.session\" storage row), via any SW-reachable channel. With a managed session this is effectively REQUIRED: without it every entry that session stamped looks foreign to the drain and terminal-fails OFFLINE_IDENTITY_CHANGED. When it resolves non-null it takes priority over getAuthToken's token-hash fingerprint (the token still governs SetAuth on the wire). Omit it for a client that never adopted a managed session.",
+        "Resolves the persisted SessionInfo.sessionId a createAuthClient-managed session wrote (the \"helipod.session\" storage row), via any SW-reachable channel. With a managed session this is effectively REQUIRED: without it every entry that session stamped looks foreign to the drain and terminal-fails OFFLINE_IDENTITY_CHANGED. When it resolves non-null it takes priority over getAuthToken's token-hash fingerprint (the token still governs SetAuth on the wire). Omit it for a client that never adopted a managed session.",
       type: "() => Promise<string | null>",
     },
     poisonPolicy: {
@@ -613,11 +613,11 @@ reference a row the first hasn't committed yet.
 Client-supplied ids close that gap. Mint a **real** `Id<"table">` on the client before either
 mutation is sent, and pass it as `_id` on the insert. The engine accepts it (instead of minting its
 own), so the id is valid, and referenceable, the instant it's minted, not the instant it lands.
-`stackbase codegen` emits `_generated/ids.ts` with a typed `mintId<T extends TableNames>(table: T):
+`helipod codegen` emits `_generated/ids.ts` with a typed `mintId<T extends TableNames>(table: T):
 Id<T>` for exactly this:
 
 ```ts
-import { mintId } from "../stackbase/_generated/ids";
+import { mintId } from "../helipod/_generated/ids";
 
 const conversationId = mintId("conversations"); // a REAL Id<"conversations">, minted now
 
@@ -694,7 +694,7 @@ export const createConversationWithFirstMessage = mutation({
 
 ## The conflict taxonomy
 
-Stackbase has **no merge and no CRDT layer**, offline or online. A queued mutation, when it
+Helipod has **no merge and no CRDT layer**, offline or online. A queued mutation, when it
 finally drains, runs against whatever the server's actual state is *at that moment*, not whatever
 it was when you went offline, and exactly one of three things happens:
 
@@ -790,7 +790,7 @@ the exact figures, as the takeaway; they're machine- and load-dependent):
 - [Optimistic updates](/docs/client/optimistic-updates): the live-session reconciliation model the
   outbox's `optimisticUpdates` registry builds on, including `placeholderId()`/`now()` purity and
   the no-flicker guarantee.
-- [Client SDK](/docs/client/client-sdk): constructing `StackbaseClient`, transports, reconnection,
+- [Client SDK](/docs/client/client-sdk): constructing `HelipodClient`, transports, reconnection,
   and the full constructor-option surface.
 - [Mutations](/docs/core-concepts/mutations): writing the handlers a queued entry eventually runs
   against.

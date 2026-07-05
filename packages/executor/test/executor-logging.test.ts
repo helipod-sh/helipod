@@ -1,9 +1,9 @@
 // packages/executor/test/executor-logging.test.ts
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
 import { InlineUdfExecutor, InMemoryLogSink, SimpleIndexCatalog, query } from "../src/index";
 
 async function harness() {

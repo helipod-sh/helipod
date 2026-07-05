@@ -1,8 +1,8 @@
 /**
  * T-crosstab E2E (browser-ux spec Part A, Testing §2) — cross-tab LIVE optimistic rendering driven
- * through a REAL `stackbase dev` server, not `MockTransport`. `packages/client/test/crosstab-render.test.ts`
+ * through a REAL `helipod dev` server, not `MockTransport`. `packages/client/test/crosstab-render.test.ts`
  * proves the mechanism (broadcast -> `addHydratedEntry` -> flicker-free gated drop) against a fake
- * transport; this file proves the same contract end-to-end: two real `StackbaseClient`s sharing one
+ * transport; this file proves the same contract end-to-end: two real `HelipodClient`s sharing one
  * `IDBFactory` (fake-indexeddb, the faithful two-tab model per the spec's Testing note — Node >= 18
  * ships a real `BroadcastChannel`), talking to one real WebSocket sync server.
  *
@@ -19,19 +19,19 @@ import { describe, it, expect } from "vitest";
 import net from "node:net";
 import WebSocket from "ws";
 import { IDBFactory } from "fake-indexeddb";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
 import {
-  StackbaseClient,
+  HelipodClient,
   webSocketTransport,
   indexedDBOutbox,
   type ClientTransport,
   type OutboxLockManager,
   type OptimisticLocalStore,
   type OptimisticUpdateFn,
-} from "@stackbase/client";
+} from "@helipod/client";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -234,12 +234,12 @@ describe("cross-tab live optimistic rendering E2E — no-flicker drop through th
 
     const registry = { "notes:add": makeUpdater() };
 
-    let clientA: StackbaseClient | undefined;
-    let clientB: StackbaseClient | undefined;
+    let clientA: HelipodClient | undefined;
+    let clientB: HelipodClient | undefined;
     try {
       /* ---- Tab A: connect, prime a recognized timeline, arm ---- */
       const outboxA = indexedDBOutbox({ indexedDB: idb });
-      clientA = new StackbaseClient(nodeWsTransport(wsUrlA), {
+      clientA = new HelipodClient(nodeWsTransport(wsUrlA), {
         outbox: outboxA,
         outboxLocks: locks(), // granted immediately — A is the sole leader for the whole test
         outboxDrainIntervalMs: 0,
@@ -250,7 +250,7 @@ describe("cross-tab live optimistic rendering E2E — no-flicker drop through th
       await waitFor(() => clientA!.__outboxArmed, 10_000, "A arm");
 
       /* ---- Tab B: connected straight to the server, subscribed live, shares the idb + registry ---- */
-      clientB = new StackbaseClient(nodeWsTransport(wsUrlB), {
+      clientB = new HelipodClient(nodeWsTransport(wsUrlB), {
         outbox: indexedDBOutbox({ indexedDB: idb }),
         outboxLocks: locks(), // queues behind A's held lock — B never becomes leader, never drains
         outboxDrainIntervalMs: 0,

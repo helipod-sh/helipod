@@ -2,9 +2,9 @@ import type { ReportEntry } from "./source";
 
 /** Unambiguous specifier → target rewrites (applied wherever the quoted specifier appears). */
 const SIMPLE: Record<string, string> = {
-  "convex/values": "@stackbase/values",
-  "convex/react": "@stackbase/client/react",
-  "convex/browser": "@stackbase/client",
+  "convex/values": "@helipod/values",
+  "convex/react": "@helipod/client/react",
+  "convex/browser": "@helipod/client",
 };
 
 const SCHEMA_SYMBOLS = new Set(["defineSchema", "defineTable"]);
@@ -18,7 +18,7 @@ function lineOf(source: string, index: number): number {
 }
 
 /**
- * Rewrite Convex import specifiers to their Stackbase equivalents. Operates on the quoted module
+ * Rewrite Convex import specifiers to their Helipod equivalents. Operates on the quoted module
  * specifier so `import`, `export … from`, `require()`, and dynamic `import()` are all handled.
  * `convex/server` is symbol-aware; `./_generated/server` is left alone.
  */
@@ -46,8 +46,8 @@ export function rewriteImports(source: string, file: string): { output: string; 
     const allSchema = syms.length > 0 && syms.every((s) => SCHEMA_SYMBOLS.has(s));
     const allServer = syms.length > 0 && syms.every((s) => SERVER_SYMBOLS.has(s));
     if (allSchema) {
-      entries.push({ severity: "auto-fixed", file, line, what: `import "convex/server" (schema)`, fix: `rewritten to "@stackbase/values"` });
-      return full.replace(/["']convex\/server["']/, `${q}@stackbase/values${q}`);
+      entries.push({ severity: "auto-fixed", file, line, what: `import "convex/server" (schema)`, fix: `rewritten to "@helipod/values"` });
+      return full.replace(/["']convex\/server["']/, `${q}@helipod/values${q}`);
     }
     if (allServer) {
       entries.push({ severity: "auto-fixed", file, line, what: `import "convex/server" (http)`, fix: `rewritten to "./_generated/server"` });
@@ -55,8 +55,8 @@ export function rewriteImports(source: string, file: string): { output: string; 
     }
     const hasCron = syms.some((s) => CRON_SYMBOLS.has(s));
     const hasOther = syms.some((s) => !CRON_SYMBOLS.has(s));
-    const cronFix = `cronJobs → import from "@stackbase/scheduler" and compose defineScheduler() in stackbase.config.ts`;
-    const genericFix = `defineSchema/defineTable → "@stackbase/values"; httpRouter/httpAction → "./_generated/server"`;
+    const cronFix = `cronJobs → import from "@helipod/scheduler" and compose defineScheduler() in helipod.config.ts`;
+    const genericFix = `defineSchema/defineTable → "@helipod/values"; httpRouter/httpAction → "./_generated/server"`;
     const fix =
       hasCron && hasOther
         ? `${cronFix}; other symbols: map manually: ${genericFix}`
@@ -82,7 +82,7 @@ export function rewriteImports(source: string, file: string): { output: string; 
   let m: RegExpExecArray | null;
   while ((m = residualRe.exec(output)) !== null) {
     if (handledRanges.some(([start, end]) => m!.index >= start && m!.index < end)) continue;
-    entries.push({ severity: "action-needed", file, line: lineOf(output, m.index), what: `import "convex/server"`, fix: `map manually: defineSchema/defineTable → "@stackbase/values"; httpRouter/httpAction → "./_generated/server"` });
+    entries.push({ severity: "action-needed", file, line: lineOf(output, m.index), what: `import "convex/server"`, fix: `map manually: defineSchema/defineTable → "@helipod/values"; httpRouter/httpAction → "./_generated/server"` });
   }
 
   return { output, entries };

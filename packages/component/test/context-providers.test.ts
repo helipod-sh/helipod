@@ -1,6 +1,6 @@
 // packages/component/test/context-providers.test.ts
 import { describe, it, expect } from "vitest";
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 import { defineComponent } from "../src/define-component";
 import { composeComponents } from "../src/compose";
 

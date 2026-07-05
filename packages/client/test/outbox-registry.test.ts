@@ -8,9 +8,9 @@
  * rendering is skipped.
  */
 import { describe, it, expect, vi } from "vitest";
-import type { Value } from "@stackbase/values";
+import type { Value } from "@helipod/values";
 import {
-  StackbaseClient,
+  HelipodClient,
   memoryOutbox,
   OUTBOX_VERSION,
   type OptimisticLocalStore,
@@ -19,7 +19,7 @@ import {
   type OutboxEntry,
   type OutboxStorage,
 } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MockTransport {
   readonly sent: ClientMessage[] = [];
@@ -85,7 +85,7 @@ describe("optimisticUpdates registry — precedence (T5)", () => {
     const t = new MockTransport();
     const registryFn = vi.fn(makeUpdater("registry"));
     const liveFn = makeUpdater("live");
-    const client = new StackbaseClient(t, { optimisticUpdates: { "messages:send": registryFn } });
+    const client = new HelipodClient(t, { optimisticUpdates: { "messages:send": registryFn } });
 
     const seen: unknown[] = [];
     client.subscribe("messages:list", {}, (v) => seen.push(v));
@@ -102,7 +102,7 @@ describe("optimisticUpdates registry — precedence (T5)", () => {
   it("a registered udfPath with NO live optimisticUpdate stays layerless for a live call (the registry doesn't retroactively apply)", () => {
     const t = new MockTransport();
     const registryFn = vi.fn(makeUpdater("registry"));
-    const client = new StackbaseClient(t, { optimisticUpdates: { "messages:send": registryFn } });
+    const client = new HelipodClient(t, { optimisticUpdates: { "messages:send": registryFn } });
 
     const seen: unknown[] = [];
     client.subscribe("messages:list", {}, (v) => seen.push(v));
@@ -119,7 +119,7 @@ describe("optimisticUpdates registry — hydrate-only consultation (T5)", () => 
     await seedOutbox(outbox, "old-client", 0, 0, "hi");
     const t = new MockTransport();
     const registryFn = makeUpdater("registry");
-    const client = new StackbaseClient(t, {
+    const client = new HelipodClient(t, {
       outbox,
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -140,7 +140,7 @@ describe("optimisticUpdates registry — hydrate-only consultation (T5)", () => 
     const registryFn = makeUpdater("registry");
 
     const t1 = new MockTransport();
-    const client1 = new StackbaseClient(t1, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, optimisticUpdates: { "messages:send": registryFn } });
+    const client1 = new HelipodClient(t1, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, optimisticUpdates: { "messages:send": registryFn } });
     const seen1: unknown[] = [];
     client1.subscribe("messages:list", {}, (v) => seen1.push(v));
     await tick();
@@ -149,7 +149,7 @@ describe("optimisticUpdates registry — hydrate-only consultation (T5)", () => 
     // "reload": a FRESH client instance over the SAME durable storage — the seeded entry was never
     // drained/acked (no ConnectAck ever went out), so it's still there, under its ORIGINAL seed.
     const t2 = new MockTransport();
-    const client2 = new StackbaseClient(t2, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, optimisticUpdates: { "messages:send": registryFn } });
+    const client2 = new HelipodClient(t2, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0, optimisticUpdates: { "messages:send": registryFn } });
     const seen2: unknown[] = [];
     client2.subscribe("messages:list", {}, (v) => seen2.push(v));
     await tick();
@@ -166,7 +166,7 @@ describe("optimisticUpdates registry — hydrate-only consultation (T5)", () => 
     await seedOutbox(outbox, "old-client", 2, 2, "c");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 }); // no registry at all
+    const client = new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 }); // no registry at all
     await tick();
 
     const misses = warn.mock.calls.filter((c) => String(c[0]).includes("no optimisticUpdates registered"));
@@ -196,7 +196,7 @@ describe("optimisticUpdates registry — hydrate-only consultation (T5)", () => 
     await outbox.append(entryB);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new MockTransport();
-    new StackbaseClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
+    new HelipodClient(t, { outbox, outboxLocks: null, outboxDrainIntervalMs: 0 });
     await tick();
 
     const misses = warn.mock.calls.filter((c) => String(c[0]).includes("no optimisticUpdates registered"));

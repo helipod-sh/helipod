@@ -11,8 +11,8 @@
  * `indexUpdates` are the exact same row shapes a segment carries; only the envelope (`frontierTs`/
  * `segBase` instead of none) differs.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
+import type { ObjectStore } from "@helipod/objectstore";
+import type { DocumentLogEntry, IndexWrite } from "@helipod/docstore";
 import {
   encodeDocumentLogEntries,
   decodeDocumentLogEntries,

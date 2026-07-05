@@ -1,6 +1,6 @@
 import type { BuiltRuntime } from "./compose";
 
-/** Fully-qualified name of `@stackbase/scheduler`'s jobs table, as it lands in the composed
+/** Fully-qualified name of `@helipod/scheduler`'s jobs table, as it lands in the composed
  * catalog (namespaced `scheduler/*`) — see `components/scheduler/src/schema.ts`. Privileged scans
  * (below) address it directly, mirroring `components/scheduler/test/helpers.ts`'s `_system:scan`. */
 const SCHEDULER_JOBS_TABLE = "scheduler/jobs";
@@ -22,7 +22,7 @@ const STEP_MS = 3_600_000; // 1 hour
 const MAX_ITERATIONS = 100;
 
 /**
- * Privileged raw scan of `@stackbase/scheduler`'s `jobs` table, reusing the SAME `_test:_run`
+ * Privileged raw scan of `@helipod/scheduler`'s `jobs` table, reusing the SAME `_test:_run`
  * plumbing `t.run()` is built on (see `./compose.ts`) rather than registering a bespoke system
  * module — `_test:_run` already runs with a full, privileged (namespace-bypassing) db-writer
  * `ctx`, so a plain `ctx.db.query(fullyQualifiedName, "by_creation").collect()` resolves the
@@ -53,7 +53,7 @@ async function hasOutstandingJobs(built: BuiltRuntime): Promise<boolean> {
  * promise resolves), stopping as soon as a scan of the scheduler's `jobs` table shows nothing left
  * in `"pending"`/`"inProgress"`.
  *
- * A clean no-op if `@stackbase/scheduler` wasn't composed (no `defineScheduler()` in
+ * A clean no-op if `@helipod/scheduler` wasn't composed (no `defineScheduler()` in
  * `opts.components`) — there's nothing to drive.
  *
  * Bounded at `MAX_ITERATIONS` — a recurring cron (or a chain that keeps rescheduling itself
@@ -79,7 +79,7 @@ export async function finishScheduledFunctions(built: BuiltRuntime): Promise<voi
 
 /**
  * Advances the harness's virtual clock by `ms`, then drives one `driver.__tick()` pass if
- * `@stackbase/scheduler` is composed (a no-op tick otherwise — there's no driver to drive).
+ * `@helipod/scheduler` is composed (a no-op tick otherwise — there's no driver to drive).
  * Unlike `finishScheduledFunctions`, this does exactly one pass: it will NOT itself drain a job
  * scheduled further out than `ms`, mirroring a real fake-timer `advanceTimersByTime`.
  *

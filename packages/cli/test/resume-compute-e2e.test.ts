@@ -24,7 +24,7 @@
  * on DELTAS (count-after minus count-before), never absolute values, since the handler legitimately
  * runs once at initial subscribe (a "warmup" execution outside the scope of what's being proven).
  *
- * Two required scenarios, driven through a REAL `stackbase dev` server + a REAL `@stackbase/client`
+ * Two required scenarios, driven through a REAL `helipod dev` server + a REAL `@helipod/client`
  * over a REAL WebSocket (the `resume-e2e.test.ts` tcpProxy idiom — the engine stays alive across the
  * kill, so this is a genuine network blip, not a restart):
  *   (1) unchanged reconnect — kill+reopen the SAME client with no intervening write: the resume
@@ -41,12 +41,12 @@
 import { describe, it, expect } from "vitest";
 import net from "node:net";
 import WebSocket from "ws";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { query, mutation } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi, type ClientTransport } from "@stackbase/client";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { query, mutation } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi, type ClientTransport } from "@helipod/client";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 /* -------------------------------------------------------------------------- */
@@ -260,11 +260,11 @@ describe("resume compute E2E (1) — unchanged reconnect skips the RERUN re-exec
       const wsUrl = `ws://127.0.0.1:${proxy.port}/api/sync`;
       const directUrl = `ws://127.0.0.1:${server.port}/api/sync`;
       const recorded = recordingTransport(nodeWsTransport(wsUrl));
-      const client = new StackbaseClient(recorded.transport);
+      const client = new HelipodClient(recorded.transport);
       // A separate client, connected DIRECTLY (never through the killed proxy), used purely to read
       // the execution counters — a one-shot `query()` (subscribe -> resolve -> unsubscribe) never
       // perturbs the RERUN/diffable subs' own resume-registry entries (different udfPath+args).
-      const reader = new StackbaseClient(webSocketTransport(directUrl, { reconnect: false }));
+      const reader = new HelipodClient(webSocketTransport(directUrl, { reconnect: false }));
       try {
         const countFrames: number[] = [];
         const listFrames: unknown[][] = [];
@@ -346,10 +346,10 @@ describe("resume compute E2E (2) — an intersecting gap write forces a real re-
       const wsUrl = `ws://127.0.0.1:${proxy.port}/api/sync`;
       const directUrl = `ws://127.0.0.1:${server.port}/api/sync`;
       const recorded = recordingTransport(nodeWsTransport(wsUrl));
-      const client = new StackbaseClient(recorded.transport);
+      const client = new HelipodClient(recorded.transport);
       // A SECOND client, connected directly (never through the killed proxy) — both commits the
       // intersecting write during the gap and reads the execution counter before/after.
-      const other = new StackbaseClient(webSocketTransport(directUrl, { reconnect: false }));
+      const other = new HelipodClient(webSocketTransport(directUrl, { reconnect: false }));
       try {
         const countFrames: number[] = [];
         client.subscribe(api.notes.count, { box: "a" }, (v) => countFrames.push(v as number));

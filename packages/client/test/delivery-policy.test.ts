@@ -1,7 +1,7 @@
 /**
  * S4 — `closeDisposition`'s pure-function contract, including Task 2's park swap. See
  * `reconnect.test.ts` and `outbox-enqueue.test.ts` for the through-the-client integration proof
- * (real `StackbaseClient` + a real transport close).
+ * (real `HelipodClient` + a real transport close).
  */
 import { describe, it, expect } from "vitest";
 import { closeDisposition, MutationUndeliveredError } from "../src/delivery-policy";

@@ -11,7 +11,7 @@
  * going offline in one tab never forces a fresh tab offline — that is what makes the durable
  * outbox's reload-survival visible without a Service Worker.
  */
-import { webSocketTransport, type ClientTransport } from "@stackbase/client";
+import { webSocketTransport, type ClientTransport } from "@helipod/client";
 
 type OutboundMessage = Parameters<ClientTransport["send"]>[0];
 type InboundListener = Parameters<ClientTransport["onMessage"]>[0];

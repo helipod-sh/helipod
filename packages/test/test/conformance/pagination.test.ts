@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { createTestStackbase, type TestStackbase } from "../../src";
+import { createTestHelipod, type TestHelipod } from "../../src";
 import { schema, mod } from "../fixtures/conformance-app";
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
-// D2/D3: Stackbase's `paginate` takes `{ cursor?, pageSize, maxScan? }` (not Convex's
+// D2/D3: Helipod's `paginate` takes `{ cursor?, pageSize, maxScan? }` (not Convex's
 // `{ numItems }`) and returns `{ page, nextCursor, hasMore, scanCapped }` (not Convex's
 // `{ isDone, continueCursor }`). `isDone` ≡ `!hasMore`; `continueCursor` ≡ `nextCursor`.
 
@@ -14,10 +14,10 @@ type A = any;
 type Page = { page: Array<{ _id: string }>; nextCursor: string | null; hasMore: boolean; scanCapped: boolean };
 
 describe("conformance — pagination", () => {
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": mod, "schema.ts": { default: schema } } });
   });
 
   afterEach(async () => {
@@ -97,10 +97,10 @@ describe("conformance — pagination scanCapped", () => {
       ctx.db.query("docs", "by_creation").paginate({ cursor: a.cursor, pageSize: a.num, maxScan: a.maxScan })),
   };
 
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": capMod, "schema.ts": { default: capSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": capMod, "schema.ts": { default: capSchema } } });
   });
 
   afterEach(async () => {
@@ -158,10 +158,10 @@ describe("conformance — pagination over an index", () => {
       ctx.db.query("docs", "by_owner_n").eq("owner", a.owner).paginate({ cursor: a.cursor, pageSize: a.num })),
   };
 
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": idxMod, "schema.ts": { default: idxSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": idxMod, "schema.ts": { default: idxSchema } } });
   });
 
   afterEach(async () => {
@@ -205,10 +205,10 @@ describe("conformance — desc-order pagination", () => {
       ctx.db.query("docs", "by_creation").order("desc").paginate({ cursor: a.cursor, pageSize: a.num })),
   };
 
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": descMod, "schema.ts": { default: descSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": descMod, "schema.ts": { default: descSchema } } });
   });
 
   afterEach(async () => {
@@ -247,10 +247,10 @@ describe("conformance — pagination with a delete between pages", () => {
       ctx.db.query("docs", "by_creation").paginate({ cursor: a.cursor, pageSize: a.num })),
   };
 
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": delMod, "schema.ts": { default: delSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": delMod, "schema.ts": { default: delSchema } } });
   });
 
   afterEach(async () => {
@@ -298,10 +298,10 @@ describe("conformance — pagination stability under a concurrent insert", () =>
       ctx.db.query("docs", "by_creation").paginate({ cursor: a.cursor, pageSize: a.num })),
   };
 
-  let t: TestStackbase;
+  let t: TestHelipod;
 
   beforeEach(async () => {
-    t = await createTestStackbase({ modules: { "mod.ts": insMod, "schema.ts": { default: insSchema } } });
+    t = await createTestHelipod({ modules: { "mod.ts": insMod, "schema.ts": { default: insSchema } } });
   });
 
   afterEach(async () => {

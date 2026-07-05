@@ -1,4 +1,4 @@
-import { mutation, query, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@stackbase/executor";
+import { mutation, query, type MutationCtx, type QueryCtx, type RegisteredFunction } from "@helipod/executor";
 import { compact } from "./render";
 
 /** An inbox row as returned to the client. */
@@ -23,7 +23,7 @@ export const DEFAULT_INBOX_LIMIT = 50;
  * client-supplied ARGUMENT — it's always the resolved caller — so a user cannot name another user's
  * inbox in a query/mutation arg.
  *
- * BOUNDARY: per-user isolation is only as strong as the identity is trustworthy. With `@stackbase/
+ * BOUNDARY: per-user isolation is only as strong as the identity is trustworthy. With `@helipod/
  * auth` composed (or an upstream token-verifying proxy), `getUserId()` is a verified id and isolation
  * is enforced. WITHOUT either, the fallback `identity()` is the raw, client-asserted `setAuth(...)`
  * bearer token — an unauthenticated client could assert any user id and read/mutate that inbox. This

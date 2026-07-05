@@ -1,9 +1,9 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Cross-process commit propagation for a Postgres-backed fleet (scale-seam #4, multi-process
  * variant): the in-memory `EmbeddedWriteFanoutAdapter` only fans a commit out within ONE process.
  * `NotifyingFanoutAdapter` (writer side) wraps it so every publish ALSO does
- * `pg_notify('stackbase_commits', …)`; each follower's `ReplicaTailer` (`replica-tailer.ts`)
+ * `pg_notify('helipod_commits', …)`; each follower's `ReplicaTailer` (`replica-tailer.ts`)
  * LISTENs for that channel (plus a wall-clock poll fallback, since NOTIFY delivery is not
  * guaranteed while a listener connection is reconnecting) and, on each wake, verbatim-applies the
  * primary's MVCC log onto its local replica and derives what to invalidate from that same batch —
@@ -14,13 +14,13 @@
  * `ReplicaTailer`. The slice-1 `CommitTailer` (which derived-only, never applied to a replica)
  * was removed in slice 2 once `ReplicaTailer` subsumed it.
  */
-import type { PgQuerier } from "@stackbase/docstore-postgres";
-import type { EmbeddedWriteFanoutAdapter, EmbeddedWriteFanoutPayload, FanoutListener } from "@stackbase/runtime-embedded";
+import type { PgQuerier } from "@helipod/docstore-postgres";
+import type { EmbeddedWriteFanoutAdapter, EmbeddedWriteFanoutPayload, FanoutListener } from "@helipod/runtime-embedded";
 
 /** Exported (not just module-private) so other in-package NOTIFY senders — e.g. `node.ts`'s
  *  `FrontierMonitor` notify-on-advance (T3.5) — target the exact same channel a `ReplicaTailer`
  *  LISTENs on, without re-typing the literal a third time. */
-export const COMMIT_CHANNEL = "stackbase_commits";
+export const COMMIT_CHANNEL = "helipod_commits";
 
 /**
  * The narrow slice of `NodePgClient` this module (and `ReplicaTailer`) depends on (LISTEN/NOTIFY
@@ -36,7 +36,7 @@ export interface CommitChannelClient extends PgQuerier {
 }
 
 /** Writer side: wraps the in-memory adapter; every publish ALSO does
- *  `pg_notify('stackbase_commits', String(commitTs))` so followers wake promptly instead of
+ *  `pg_notify('helipod_commits', String(commitTs))` so followers wake promptly instead of
  *  waiting out the poll interval. NOTIFY is a latency optimization only — the poll fallback in
  *  `CommitTailer` is the correctness path if it's ever dropped or a listener misses it. */
 export class NotifyingFanoutAdapter implements EmbeddedWriteFanoutAdapter {

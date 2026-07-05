@@ -469,16 +469,16 @@ reactive logic run in more than one place:
 ```mermaid
 flowchart LR
     H["SyncProtocolHandler<br/>(subscriptions, classifier, protocol)"]
-    H --- L["Loopback.<br/>In-process, no network<br/>(stackbase dev, single binary)"]
-    H --- W["WebSocket server.<br/>stackbase serve"]
+    H --- L["Loopback.<br/>In-process, no network<br/>(helipod dev, single binary)"]
+    H --- W["WebSocket server.<br/>helipod serve"]
     H --- D["Durable Object socket.<br/>Cloudflare (in progress)"]
 ```
 
 - **Loopback** is a same-process, no-network transport: `send` is just a
-  function call. This is what powers `stackbase dev` and the single-binary
+  function call. This is what powers `helipod dev` and the single-binary
   build, full reactivity with zero sockets, which is also why local
   development feels instant.
-- **A real WebSocket server** is what `stackbase serve` runs for a standalone
+- **A real WebSocket server** is what `helipod serve` runs for a standalone
   deployment.
 - **A Cloudflare Durable Object** socket is the newest of the three, part of
   the ongoing Cloudflare-native hosting work: the same handler, wired into a

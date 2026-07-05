@@ -1,7 +1,7 @@
 /**
- * `R2BlobStore` — a `BlobStore` (`@stackbase/blobstore`) backed by a Cloudflare R2 bucket binding,
- * for the Durable Object host. It is the DO-native analog of `@stackbase/blobstore-fs` (local disk,
- * broken on a DO — no filesystem) and `@stackbase/blobstore-s3` (points at S3 via the heavy AWS SDK +
+ * `R2BlobStore` — a `BlobStore` (`@helipod/blobstore`) backed by a Cloudflare R2 bucket binding,
+ * for the Durable Object host. It is the DO-native analog of `@helipod/blobstore-fs` (local disk,
+ * broken on a DO — no filesystem) and `@helipod/blobstore-s3` (points at S3 via the heavy AWS SDK +
  * `node:stream`, marginal on Workers). This adapter is WORKERS-SAFE by construction:
  *   - NO `node:fs`, NO `node:stream`, NO `node:crypto` — bytes flow as `Uint8Array`/`ReadableStream`
  *     (Web streams), and the content digest is computed with WebCrypto (`crypto.subtle`, a workerd
@@ -26,10 +26,10 @@ import type {
   ByteRange,
   CreateUploadTargetOpts,
   SignUrlOpts,
-} from "@stackbase/blobstore";
+} from "@helipod/blobstore";
 
 /** The engine's own proxied-upload endpoint (the `ctx.storage` context provider appends the
- *  capability `id`/`exp`/`token` params — see `@stackbase/storage`'s `context.ts`). */
+ *  capability `id`/`exp`/`token` params — see `@helipod/storage`'s `context.ts`). */
 const UPLOAD_ENDPOINT = "/api/storage/upload";
 
 /**
@@ -80,7 +80,7 @@ export interface R2BlobStoreOpts {
 }
 
 /** Collect a `Uint8Array` | `ReadableStream<Uint8Array>` into one contiguous `Uint8Array` (mirrors
- *  `@stackbase/blobstore-s3`'s `toBuffer`). We buffer so `size`/`sha256` are known before the R2
+ *  `@helipod/blobstore-s3`'s `toBuffer`). We buffer so `size`/`sha256` are known before the R2
  *  `put` returns — the proxied path always hands us a `Uint8Array` already, so this is a no-op there. */
 async function toBytes(bytes: ReadableStream<Uint8Array> | Uint8Array): Promise<Uint8Array> {
   if (bytes instanceof Uint8Array) return bytes;
@@ -152,7 +152,7 @@ export class R2BlobStore implements BlobStore {
   }
 
   async read(key: string, range?: ByteRange): Promise<ReadableStream<Uint8Array> | null> {
-    // The serve endpoint (`@stackbase/storage`'s `handleServe`) always clamps `end` to `size-1` and
+    // The serve endpoint (`@helipod/storage`'s `handleServe`) always clamps `end` to `size-1` and
     // passes both bounds, so translate `[start, end]` → R2's `{ offset, length }` (inclusive-end →
     // length = end - start + 1). An absent `range` reads the whole object.
     const obj =

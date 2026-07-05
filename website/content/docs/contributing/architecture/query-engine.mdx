@@ -70,7 +70,7 @@ everything else in this page work is that those keys are encoded as bytes in
 a way that **preserves the logical sort order**: comparing two keys as raw
 bytes gives the same answer as comparing the original values.
 
-This lives in the `@stackbase/index-key-codec` package
+This lives in the `@helipod/index-key-codec` package
 (`packages/index-key-codec/src/encode.ts`), and it is the single most
 load-bearing piece of code in the query engine. Every other guarantee in this
 document (correct scan ranges, stable cursors, correct reactivity, correct
@@ -313,7 +313,7 @@ It's evaluated per document, after the row comes back from the scan.
 
 One rule ties this back to everything above: filter comparisons use the same
 canonical value comparison the codec's ordering is built on
-(`compareValues`, from `@stackbase/values`), never JavaScript's native
+(`compareValues`, from `@helipod/values`), never JavaScript's native
 operators. That way a sort order, a cursor position, and a filter's `gt`
 check can never quietly disagree with each other about which of two values is
 "bigger."

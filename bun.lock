@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "stackbase",
+      "name": "helipod",
       "devDependencies": {
         "embedded-postgres": "16.14.0-beta.17",
         "turbo": "^2.3.3",
@@ -12,7 +12,7 @@
       },
     },
     "apps/dashboard": {
-      "name": "@stackbase/dashboard",
+      "name": "@helipod/dashboard",
       "version": "0.0.0",
       "dependencies": {
         "@base-ui-components/react": "^1.0.0-alpha.5",
@@ -39,38 +39,38 @@
       },
     },
     "benchmarks/convex-comparison": {
-      "name": "@stackbase/bench-convex-comparison",
+      "name": "@helipod/bench-convex-comparison",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
     },
     "benchmarks/runner": {
-      "name": "@stackbase/bench",
+      "name": "@helipod/bench",
       "version": "0.0.0",
       "dependencies": {
         "@aws-sdk/client-s3": "catalog:",
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-postgres": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/objectstore": "workspace:*",
-        "@stackbase/objectstore-s3": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/sync": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-postgres": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/objectstore": "workspace:*",
+        "@helipod/objectstore-s3": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/sync": "workspace:*",
+        "@helipod/values": "workspace:*",
         "ws": "^8.18.0",
       },
       "devDependencies": {
-        "@stackbase/codegen": "workspace:*",
+        "@helipod/codegen": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "typescript": "catalog:",
@@ -78,23 +78,23 @@
       },
     },
     "components/auth": {
-      "name": "@stackbase/auth",
+      "name": "@helipod/auth",
       "version": "0.0.0",
       "dependencies": {
+        "@helipod/component": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
         "@simplewebauthn/server": "13.3.2",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
         "hash-wasm": "^4.12.0",
         "jose": "6.2.3",
         "oauth4webapi": "3.8.6",
       },
       "devDependencies": {
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/test": "workspace:*",
         "@levischuck/tiny-cbor": "0.2.11",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/test": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -102,18 +102,18 @@
       },
     },
     "components/authz": {
-      "name": "@stackbase/authz",
+      "name": "@helipod/authz",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/auth": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/auth": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -121,17 +121,17 @@
       },
     },
     "components/notifications": {
-      "name": "@stackbase/notifications",
+      "name": "@helipod/notifications",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
         "jose": "6.2.3",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -139,19 +139,19 @@
       },
     },
     "components/scheduler": {
-      "name": "@stackbase/scheduler",
+      "name": "@helipod/scheduler",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
         "cron-parser": "^4.9.0",
       },
       "devDependencies": {
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -159,17 +159,17 @@
       },
     },
     "components/triggers": {
-      "name": "@stackbase/triggers",
+      "name": "@helipod/triggers",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -177,18 +177,18 @@
       },
     },
     "components/workflow": {
-      "name": "@stackbase/workflow",
+      "name": "@helipod/workflow",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -196,25 +196,25 @@
       },
     },
     "ee/packages/fleet": {
-      "name": "@stackbase/fleet",
+      "name": "@helipod/fleet",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-postgres": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-postgres": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/values": "workspace:*",
         "pg": "^8.13.1",
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/test": "workspace:*",
-        "@stackbase/transactor": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/test": "workspace:*",
+        "@helipod/transactor": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
         "@types/ws": "^8.5.13",
@@ -225,23 +225,23 @@
       },
     },
     "ee/packages/objectstore-substrate": {
-      "name": "@stackbase/objectstore-substrate",
+      "name": "@helipod/objectstore-substrate",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/objectstore": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/objectstore": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
         "@aws-sdk/client-s3": "catalog:",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/objectstore-fs": "workspace:*",
-        "@stackbase/objectstore-s3": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/objectstore-fs": "workspace:*",
+        "@helipod/objectstore-s3": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -249,20 +249,20 @@
       },
     },
     "ee/packages/runtime-cloudflare-shard": {
-      "name": "@stackbase/runtime-cloudflare-shard",
+      "name": "@helipod/runtime-cloudflare-shard",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/runtime-cloudflare": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/runtime-cloudflare": "workspace:*",
       },
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.5.40",
         "@cloudflare/workers-types": "^4.20241127.0",
-        "@stackbase/docstore-d1": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore-d1": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -270,23 +270,23 @@
       },
     },
     "examples/auth-demo": {
-      "name": "@stackbase/example-auth-demo",
+      "name": "@helipod/example-auth-demo",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/auth": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/values": "workspace:*",
-        "@stackbase/workflow": "workspace:*",
+        "@helipod/auth": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/values": "workspace:*",
+        "@helipod/workflow": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/admin": "workspace:*",
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/admin": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
         "@types/react-dom": "^18.3.5",
@@ -297,21 +297,21 @@
       },
     },
     "examples/chat": {
-      "name": "stackbase-example-chat",
+      "name": "helipod-example-chat",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/triggers": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/triggers": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
         "@types/react-dom": "^18.3.5",
@@ -322,20 +322,20 @@
       },
     },
     "examples/offline-demo": {
-      "name": "stackbase-example-offline-demo",
+      "name": "helipod-example-offline-demo",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
         "@types/react-dom": "^18.3.5",
@@ -348,21 +348,21 @@
       },
     },
     "examples/optimistic-demo": {
-      "name": "stackbase-example-optimistic-demo",
+      "name": "helipod-example-optimistic-demo",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/codegen": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/codegen": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
         "@types/react-dom": "^18.3.5",
@@ -375,21 +375,21 @@
       },
     },
     "packages/admin": {
-      "name": "@stackbase/admin",
+      "name": "@helipod/admin",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -397,7 +397,7 @@
       },
     },
     "packages/blobstore": {
-      "name": "@stackbase/blobstore",
+      "name": "@helipod/blobstore",
       "version": "0.0.0",
       "devDependencies": {
         "@types/node": "catalog:",
@@ -407,10 +407,10 @@
       },
     },
     "packages/blobstore-fs": {
-      "name": "@stackbase/blobstore-fs",
+      "name": "@helipod/blobstore-fs",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/blobstore": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -420,10 +420,10 @@
       },
     },
     "packages/blobstore-r2": {
-      "name": "@stackbase/blobstore-r2",
+      "name": "@helipod/blobstore-r2",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/blobstore": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
       },
       "devDependencies": {
         "@cloudflare/workers-types": "^4.20241127.0",
@@ -434,12 +434,12 @@
       },
     },
     "packages/blobstore-s3": {
-      "name": "@stackbase/blobstore-s3",
+      "name": "@helipod/blobstore-s3",
       "version": "0.0.0",
       "dependencies": {
         "@aws-sdk/client-s3": "catalog:",
         "@aws-sdk/s3-request-presigner": "catalog:",
-        "@stackbase/blobstore": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -449,50 +449,50 @@
       },
     },
     "packages/cli": {
-      "name": "@stackbase/cli",
+      "name": "@helipod/cli",
       "version": "0.0.0",
       "bin": {
-        "stackbase": "./dist/bin.js",
+        "helipod": "./dist/bin.js",
       },
       "dependencies": {
-        "@stackbase/admin": "workspace:*",
-        "@stackbase/blobstore": "workspace:*",
-        "@stackbase/blobstore-fs": "workspace:*",
-        "@stackbase/blobstore-s3": "workspace:*",
-        "@stackbase/codegen": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/dashboard": "workspace:*",
-        "@stackbase/deploy": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-postgres": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/objectstore": "workspace:*",
-        "@stackbase/objectstore-fs": "workspace:*",
-        "@stackbase/objectstore-s3": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/receipts": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/storage": "workspace:*",
-        "@stackbase/sync": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/admin": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
+        "@helipod/blobstore-fs": "workspace:*",
+        "@helipod/blobstore-s3": "workspace:*",
+        "@helipod/codegen": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/dashboard": "workspace:*",
+        "@helipod/deploy": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-postgres": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/objectstore": "workspace:*",
+        "@helipod/objectstore-fs": "workspace:*",
+        "@helipod/objectstore-s3": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/receipts": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/storage": "workspace:*",
+        "@helipod/sync": "workspace:*",
+        "@helipod/values": "workspace:*",
         "esbuild": "^0.27.0",
         "ws": "^8.18.0",
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
+        "@helipod/auth": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/fleet": "workspace:*",
+        "@helipod/notifications": "workspace:*",
+        "@helipod/objectstore-substrate": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/triggers": "workspace:*",
+        "@helipod/workflow": "workspace:*",
         "@levischuck/tiny-cbor": "0.2.11",
         "@simplewebauthn/server": "13.3.2",
-        "@stackbase/auth": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/fleet": "workspace:*",
-        "@stackbase/notifications": "workspace:*",
-        "@stackbase/objectstore-substrate": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/triggers": "workspace:*",
-        "@stackbase/workflow": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "fake-indexeddb": "^6.0.0",
@@ -503,19 +503,19 @@
       },
     },
     "packages/client": {
-      "name": "@stackbase/client",
+      "name": "@helipod/client",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/sync": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/sync": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@testing-library/react": "^16.1.0",
         "@types/node": "catalog:",
         "@types/react": "^18.3.18",
@@ -535,10 +535,10 @@
       ],
     },
     "packages/codegen": {
-      "name": "@stackbase/codegen",
+      "name": "@helipod/codegen",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/values": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -548,20 +548,20 @@
       },
     },
     "packages/component": {
-      "name": "@stackbase/component",
+      "name": "@helipod/component",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/transactor": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/transactor": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -569,10 +569,10 @@
       },
     },
     "packages/deploy": {
-      "name": "@stackbase/deploy",
+      "name": "@helipod/deploy",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
+        "@helipod/component": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -582,24 +582,24 @@
       },
     },
     "packages/docstore": {
-      "name": "@stackbase/docstore",
+      "name": "@helipod/docstore",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/index-key-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
       },
     },
     "packages/docstore-d1": {
-      "name": "@stackbase/docstore-d1",
+      "name": "@helipod/docstore-d1",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/values": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
         "@types/better-sqlite3": "^7.6.12",
@@ -612,16 +612,16 @@
       },
     },
     "packages/docstore-do-sqlite": {
-      "name": "@stackbase/docstore-do-sqlite",
+      "name": "@helipod/docstore-do-sqlite",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -629,20 +629,20 @@
       },
     },
     "packages/docstore-postgres": {
-      "name": "@stackbase/docstore-postgres",
+      "name": "@helipod/docstore-postgres",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
         "pg": "^8.13.1",
         "pg-cursor": "^2.21.0",
       },
       "devDependencies": {
         "@electric-sql/pglite": "^0.2.17",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/test": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/test": "workspace:*",
         "@types/node": "catalog:",
         "@types/pg": "^8.11.10",
         "@types/pg-cursor": "^2.7.2",
@@ -653,15 +653,15 @@
       },
     },
     "packages/docstore-sqlite": {
-      "name": "@stackbase/docstore-sqlite",
+      "name": "@helipod/docstore-sqlite",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/index-key-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -669,7 +669,7 @@
       },
     },
     "packages/errors": {
-      "name": "@stackbase/errors",
+      "name": "@helipod/errors",
       "version": "0.0.0",
       "devDependencies": {
         "tsup": "catalog:",
@@ -678,20 +678,20 @@
       },
     },
     "packages/executor": {
-      "name": "@stackbase/executor",
+      "name": "@helipod/executor",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-d1": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/transactor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-d1": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/transactor": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
         "@types/better-sqlite3": "^7.6.12",
         "better-sqlite3": "^11.8.0",
         "tsup": "catalog:",
@@ -700,10 +700,10 @@
       },
     },
     "packages/id-codec": {
-      "name": "@stackbase/id-codec",
+      "name": "@helipod/id-codec",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/index-key-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
       },
       "devDependencies": {
         "tsup": "catalog:",
@@ -712,10 +712,10 @@
       },
     },
     "packages/index-key-codec": {
-      "name": "@stackbase/index-key-codec",
+      "name": "@helipod/index-key-codec",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/values": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
         "tsup": "catalog:",
@@ -724,7 +724,7 @@
       },
     },
     "packages/objectstore": {
-      "name": "@stackbase/objectstore",
+      "name": "@helipod/objectstore",
       "version": "0.0.0",
       "devDependencies": {
         "@types/node": "catalog:",
@@ -734,10 +734,10 @@
       },
     },
     "packages/objectstore-fs": {
-      "name": "@stackbase/objectstore-fs",
+      "name": "@helipod/objectstore-fs",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/objectstore": "workspace:*",
+        "@helipod/objectstore": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -747,11 +747,11 @@
       },
     },
     "packages/objectstore-s3": {
-      "name": "@stackbase/objectstore-s3",
+      "name": "@helipod/objectstore-s3",
       "version": "0.0.0",
       "dependencies": {
         "@aws-sdk/client-s3": "catalog:",
-        "@stackbase/objectstore": "workspace:*",
+        "@helipod/objectstore": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -761,31 +761,31 @@
       },
     },
     "packages/query-engine": {
-      "name": "@stackbase/query-engine",
+      "name": "@helipod/query-engine",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
       },
     },
     "packages/receipts": {
-      "name": "@stackbase/receipts",
+      "name": "@helipod/receipts",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-postgres": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-postgres": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -793,30 +793,30 @@
       },
     },
     "packages/runtime-cloudflare": {
-      "name": "@stackbase/runtime-cloudflare",
+      "name": "@helipod/runtime-cloudflare",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/admin": "workspace:*",
-        "@stackbase/blobstore": "workspace:*",
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-d1": "workspace:*",
-        "@stackbase/docstore-do-sqlite": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/storage": "workspace:*",
-        "@stackbase/sync": "workspace:*",
+        "@helipod/admin": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-d1": "workspace:*",
+        "@helipod/docstore-do-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/storage": "workspace:*",
+        "@helipod/sync": "workspace:*",
       },
       "devDependencies": {
         "@cloudflare/vitest-pool-workers": "0.5.40",
         "@cloudflare/workers-types": "^4.20241127.0",
-        "@stackbase/blobstore-r2": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/blobstore-r2": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -824,23 +824,23 @@
       },
     },
     "packages/runtime-embedded": {
-      "name": "@stackbase/runtime-embedded",
+      "name": "@helipod/runtime-embedded",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-d1": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/sync": "workspace:*",
-        "@stackbase/transactor": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-d1": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/sync": "workspace:*",
+        "@helipod/transactor": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
         "@types/better-sqlite3": "^7.6.12",
         "better-sqlite3": "^11.8.0",
         "tsup": "catalog:",
@@ -849,19 +849,19 @@
       },
     },
     "packages/storage": {
-      "name": "@stackbase/storage",
+      "name": "@helipod/storage",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/blobstore": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/blobstore": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -869,20 +869,20 @@
       },
     },
     "packages/sync": {
-      "name": "@stackbase/sync",
+      "name": "@helipod/sync",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/query-engine": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/query-engine": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/transactor": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/transactor": "workspace:*",
         "@types/node": "catalog:",
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -890,21 +890,21 @@
       },
     },
     "packages/test": {
-      "name": "@stackbase/test",
+      "name": "@helipod/test",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/blobstore-fs": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/component": "workspace:*",
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/docstore-sqlite": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/runtime-embedded": "workspace:*",
-        "@stackbase/scheduler": "workspace:*",
-        "@stackbase/storage": "workspace:*",
-        "@stackbase/sync": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/blobstore-fs": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/component": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/runtime-embedded": "workspace:*",
+        "@helipod/scheduler": "workspace:*",
+        "@helipod/storage": "workspace:*",
+        "@helipod/sync": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "catalog:",
@@ -914,24 +914,24 @@
       },
     },
     "packages/transactor": {
-      "name": "@stackbase/transactor",
+      "name": "@helipod/transactor",
       "version": "0.0.0",
       "dependencies": {
-        "@stackbase/docstore": "workspace:*",
-        "@stackbase/errors": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/index-key-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/docstore": "workspace:*",
+        "@helipod/errors": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/index-key-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
       },
       "devDependencies": {
-        "@stackbase/docstore-sqlite": "workspace:*",
+        "@helipod/docstore-sqlite": "workspace:*",
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
       },
     },
     "packages/values": {
-      "name": "@stackbase/values",
+      "name": "@helipod/values",
       "version": "0.0.0",
       "devDependencies": {
         "tsup": "catalog:",
@@ -940,14 +940,14 @@
       },
     },
     "packages/vite": {
-      "name": "@stackbase/vite",
+      "name": "@helipod/vite",
       "version": "0.0.0",
       "devDependencies": {
-        "@stackbase/cli": "workspace:*",
-        "@stackbase/client": "workspace:*",
-        "@stackbase/executor": "workspace:*",
-        "@stackbase/id-codec": "workspace:*",
-        "@stackbase/values": "workspace:*",
+        "@helipod/cli": "workspace:*",
+        "@helipod/client": "workspace:*",
+        "@helipod/executor": "workspace:*",
+        "@helipod/id-codec": "workspace:*",
+        "@helipod/values": "workspace:*",
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "tsup": "catalog:",
@@ -957,11 +957,11 @@
         "ws": "^8.18.0",
       },
       "peerDependencies": {
-        "@stackbase/cli": "workspace:*",
+        "@helipod/cli": "workspace:*",
         "vite": ">=5.0.0",
       },
       "optionalPeers": [
-        "@stackbase/cli",
+        "@helipod/cli",
       ],
     },
   },
@@ -1180,6 +1180,96 @@
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
 
+    "@helipod/admin": ["@helipod/admin@workspace:packages/admin"],
+
+    "@helipod/auth": ["@helipod/auth@workspace:components/auth"],
+
+    "@helipod/authz": ["@helipod/authz@workspace:components/authz"],
+
+    "@helipod/bench": ["@helipod/bench@workspace:benchmarks/runner"],
+
+    "@helipod/bench-convex-comparison": ["@helipod/bench-convex-comparison@workspace:benchmarks/convex-comparison"],
+
+    "@helipod/blobstore": ["@helipod/blobstore@workspace:packages/blobstore"],
+
+    "@helipod/blobstore-fs": ["@helipod/blobstore-fs@workspace:packages/blobstore-fs"],
+
+    "@helipod/blobstore-r2": ["@helipod/blobstore-r2@workspace:packages/blobstore-r2"],
+
+    "@helipod/blobstore-s3": ["@helipod/blobstore-s3@workspace:packages/blobstore-s3"],
+
+    "@helipod/cli": ["@helipod/cli@workspace:packages/cli"],
+
+    "@helipod/client": ["@helipod/client@workspace:packages/client"],
+
+    "@helipod/codegen": ["@helipod/codegen@workspace:packages/codegen"],
+
+    "@helipod/component": ["@helipod/component@workspace:packages/component"],
+
+    "@helipod/dashboard": ["@helipod/dashboard@workspace:apps/dashboard"],
+
+    "@helipod/deploy": ["@helipod/deploy@workspace:packages/deploy"],
+
+    "@helipod/docstore": ["@helipod/docstore@workspace:packages/docstore"],
+
+    "@helipod/docstore-d1": ["@helipod/docstore-d1@workspace:packages/docstore-d1"],
+
+    "@helipod/docstore-do-sqlite": ["@helipod/docstore-do-sqlite@workspace:packages/docstore-do-sqlite"],
+
+    "@helipod/docstore-postgres": ["@helipod/docstore-postgres@workspace:packages/docstore-postgres"],
+
+    "@helipod/docstore-sqlite": ["@helipod/docstore-sqlite@workspace:packages/docstore-sqlite"],
+
+    "@helipod/errors": ["@helipod/errors@workspace:packages/errors"],
+
+    "@helipod/example-auth-demo": ["@helipod/example-auth-demo@workspace:examples/auth-demo"],
+
+    "@helipod/executor": ["@helipod/executor@workspace:packages/executor"],
+
+    "@helipod/fleet": ["@helipod/fleet@workspace:ee/packages/fleet"],
+
+    "@helipod/id-codec": ["@helipod/id-codec@workspace:packages/id-codec"],
+
+    "@helipod/index-key-codec": ["@helipod/index-key-codec@workspace:packages/index-key-codec"],
+
+    "@helipod/notifications": ["@helipod/notifications@workspace:components/notifications"],
+
+    "@helipod/objectstore": ["@helipod/objectstore@workspace:packages/objectstore"],
+
+    "@helipod/objectstore-fs": ["@helipod/objectstore-fs@workspace:packages/objectstore-fs"],
+
+    "@helipod/objectstore-s3": ["@helipod/objectstore-s3@workspace:packages/objectstore-s3"],
+
+    "@helipod/objectstore-substrate": ["@helipod/objectstore-substrate@workspace:ee/packages/objectstore-substrate"],
+
+    "@helipod/query-engine": ["@helipod/query-engine@workspace:packages/query-engine"],
+
+    "@helipod/receipts": ["@helipod/receipts@workspace:packages/receipts"],
+
+    "@helipod/runtime-cloudflare": ["@helipod/runtime-cloudflare@workspace:packages/runtime-cloudflare"],
+
+    "@helipod/runtime-cloudflare-shard": ["@helipod/runtime-cloudflare-shard@workspace:ee/packages/runtime-cloudflare-shard"],
+
+    "@helipod/runtime-embedded": ["@helipod/runtime-embedded@workspace:packages/runtime-embedded"],
+
+    "@helipod/scheduler": ["@helipod/scheduler@workspace:components/scheduler"],
+
+    "@helipod/storage": ["@helipod/storage@workspace:packages/storage"],
+
+    "@helipod/sync": ["@helipod/sync@workspace:packages/sync"],
+
+    "@helipod/test": ["@helipod/test@workspace:packages/test"],
+
+    "@helipod/transactor": ["@helipod/transactor@workspace:packages/transactor"],
+
+    "@helipod/triggers": ["@helipod/triggers@workspace:components/triggers"],
+
+    "@helipod/values": ["@helipod/values@workspace:packages/values"],
+
+    "@helipod/vite": ["@helipod/vite@workspace:packages/vite"],
+
+    "@helipod/workflow": ["@helipod/workflow@workspace:components/workflow"],
+
     "@hexagon/base64": ["@hexagon/base64@1.1.28", "", {}, "sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw=="],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
@@ -1291,96 +1381,6 @@
     "@smithy/signature-v4": ["@smithy/signature-v4@5.6.2", "", { "dependencies": { "@smithy/core": "^3.29.1", "@smithy/types": "^4.15.1", "tslib": "^2.6.2" } }, "sha512-QgHflghMoPxCJ9axiCVh8KZfbC9fuP6vkXXyK//E3cq7nLaSSyyLj0GAoqVWezYeDQmXIZhmlRvLE16jsqDK6g=="],
 
     "@smithy/types": ["@smithy/types@4.15.1", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-x3L0XSACF6UYzKpa9biqiRMgvH5+wnFFew9Tm/grFYqgaupPwx/+ojDPpPJM8dZON3S9tjz5U+PQYsCBd1Mw5Q=="],
-
-    "@stackbase/admin": ["@stackbase/admin@workspace:packages/admin"],
-
-    "@stackbase/auth": ["@stackbase/auth@workspace:components/auth"],
-
-    "@stackbase/authz": ["@stackbase/authz@workspace:components/authz"],
-
-    "@stackbase/bench": ["@stackbase/bench@workspace:benchmarks/runner"],
-
-    "@stackbase/bench-convex-comparison": ["@stackbase/bench-convex-comparison@workspace:benchmarks/convex-comparison"],
-
-    "@stackbase/blobstore": ["@stackbase/blobstore@workspace:packages/blobstore"],
-
-    "@stackbase/blobstore-fs": ["@stackbase/blobstore-fs@workspace:packages/blobstore-fs"],
-
-    "@stackbase/blobstore-r2": ["@stackbase/blobstore-r2@workspace:packages/blobstore-r2"],
-
-    "@stackbase/blobstore-s3": ["@stackbase/blobstore-s3@workspace:packages/blobstore-s3"],
-
-    "@stackbase/cli": ["@stackbase/cli@workspace:packages/cli"],
-
-    "@stackbase/client": ["@stackbase/client@workspace:packages/client"],
-
-    "@stackbase/codegen": ["@stackbase/codegen@workspace:packages/codegen"],
-
-    "@stackbase/component": ["@stackbase/component@workspace:packages/component"],
-
-    "@stackbase/dashboard": ["@stackbase/dashboard@workspace:apps/dashboard"],
-
-    "@stackbase/deploy": ["@stackbase/deploy@workspace:packages/deploy"],
-
-    "@stackbase/docstore": ["@stackbase/docstore@workspace:packages/docstore"],
-
-    "@stackbase/docstore-d1": ["@stackbase/docstore-d1@workspace:packages/docstore-d1"],
-
-    "@stackbase/docstore-do-sqlite": ["@stackbase/docstore-do-sqlite@workspace:packages/docstore-do-sqlite"],
-
-    "@stackbase/docstore-postgres": ["@stackbase/docstore-postgres@workspace:packages/docstore-postgres"],
-
-    "@stackbase/docstore-sqlite": ["@stackbase/docstore-sqlite@workspace:packages/docstore-sqlite"],
-
-    "@stackbase/errors": ["@stackbase/errors@workspace:packages/errors"],
-
-    "@stackbase/example-auth-demo": ["@stackbase/example-auth-demo@workspace:examples/auth-demo"],
-
-    "@stackbase/executor": ["@stackbase/executor@workspace:packages/executor"],
-
-    "@stackbase/fleet": ["@stackbase/fleet@workspace:ee/packages/fleet"],
-
-    "@stackbase/id-codec": ["@stackbase/id-codec@workspace:packages/id-codec"],
-
-    "@stackbase/index-key-codec": ["@stackbase/index-key-codec@workspace:packages/index-key-codec"],
-
-    "@stackbase/notifications": ["@stackbase/notifications@workspace:components/notifications"],
-
-    "@stackbase/objectstore": ["@stackbase/objectstore@workspace:packages/objectstore"],
-
-    "@stackbase/objectstore-fs": ["@stackbase/objectstore-fs@workspace:packages/objectstore-fs"],
-
-    "@stackbase/objectstore-s3": ["@stackbase/objectstore-s3@workspace:packages/objectstore-s3"],
-
-    "@stackbase/objectstore-substrate": ["@stackbase/objectstore-substrate@workspace:ee/packages/objectstore-substrate"],
-
-    "@stackbase/query-engine": ["@stackbase/query-engine@workspace:packages/query-engine"],
-
-    "@stackbase/receipts": ["@stackbase/receipts@workspace:packages/receipts"],
-
-    "@stackbase/runtime-cloudflare": ["@stackbase/runtime-cloudflare@workspace:packages/runtime-cloudflare"],
-
-    "@stackbase/runtime-cloudflare-shard": ["@stackbase/runtime-cloudflare-shard@workspace:ee/packages/runtime-cloudflare-shard"],
-
-    "@stackbase/runtime-embedded": ["@stackbase/runtime-embedded@workspace:packages/runtime-embedded"],
-
-    "@stackbase/scheduler": ["@stackbase/scheduler@workspace:components/scheduler"],
-
-    "@stackbase/storage": ["@stackbase/storage@workspace:packages/storage"],
-
-    "@stackbase/sync": ["@stackbase/sync@workspace:packages/sync"],
-
-    "@stackbase/test": ["@stackbase/test@workspace:packages/test"],
-
-    "@stackbase/transactor": ["@stackbase/transactor@workspace:packages/transactor"],
-
-    "@stackbase/triggers": ["@stackbase/triggers@workspace:components/triggers"],
-
-    "@stackbase/values": ["@stackbase/values@workspace:packages/values"],
-
-    "@stackbase/vite": ["@stackbase/vite@workspace:packages/vite"],
-
-    "@stackbase/workflow": ["@stackbase/workflow@workspace:components/workflow"],
 
     "@tanstack/history": ["@tanstack/history@1.162.0", "", {}, "sha512-79pf/RkhteYZTRgcR4F9kbk84P2N8rugQJswxfIqovlbRiT3yI7eBE+5QorIrZaOKktsgzRlXh1l/du/xpl4iA=="],
 
@@ -1678,6 +1678,12 @@
 
     "hasown": ["hasown@2.0.4", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A=="],
 
+    "helipod-example-chat": ["helipod-example-chat@workspace:examples/chat"],
+
+    "helipod-example-offline-demo": ["helipod-example-offline-demo@workspace:examples/offline-demo"],
+
+    "helipod-example-optimistic-demo": ["helipod-example-optimistic-demo@workspace:examples/optimistic-demo"],
+
     "html-encoding-sniffer": ["html-encoding-sniffer@4.0.0", "", { "dependencies": { "whatwg-encoding": "^3.1.1" } }, "sha512-Y22oTqIU4uuPgEemfz7NDJz6OeKf12Lsu+QC+s3BVpda64lTiMYCyGwg5ki4vFxkMwQdeZDl2adZoqUgdFuTgQ=="],
 
     "http-proxy-agent": ["http-proxy-agent@7.0.2", "", { "dependencies": { "agent-base": "^7.1.0", "debug": "^4.3.4" } }, "sha512-T1gkAiYYDWYx3V5Bmyu7HcfcvL7mUrTWiM6yOfa3PIphViJ/gFPbvidQ+veqSOHci/PxBcDabeUNCzpOODJZig=="],
@@ -1939,12 +1945,6 @@
     "split2": ["split2@4.2.0", "", {}, "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg=="],
 
     "stackback": ["stackback@0.0.2", "", {}, "sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw=="],
-
-    "stackbase-example-chat": ["stackbase-example-chat@workspace:examples/chat"],
-
-    "stackbase-example-offline-demo": ["stackbase-example-offline-demo@workspace:examples/offline-demo"],
-
-    "stackbase-example-optimistic-demo": ["stackbase-example-optimistic-demo@workspace:examples/optimistic-demo"],
 
     "stacktracey": ["stacktracey@2.2.0", "", { "dependencies": { "as-table": "^1.0.36", "get-source": "^2.0.12" } }, "sha512-ETyQEz+CzXiLjEbyJqpbp+/T79RQD/6wqFucRBIlVNZfYq2Ay7wbretD4cxpbymZlaPWx58aIhPEY1Cr8DlVvg=="],
 

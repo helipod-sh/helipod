@@ -15,8 +15,8 @@
  * `runQueryCalls() === N` assertion below to `=== 1` (and keep the all-N-delivered assertion).
  */
 import { describe, it, expect } from "vitest";
-import { indexKeyspaceId, keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@stackbase/index-key-codec";
-import type { Value } from "@stackbase/values";
+import { indexKeyspaceId, keySuccessor, serializeKeyRange, type SerializedKeyRange } from "@helipod/index-key-codec";
+import type { Value } from "@helipod/values";
 import { SyncProtocolHandler, type SyncUdfExecutor, type SyncWebSocket, type ServerMessage, type WriteInvalidation } from "../src/index";
 
 const KS = indexKeyspaceId("notes", "by_box");

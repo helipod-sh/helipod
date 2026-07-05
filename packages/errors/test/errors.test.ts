@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  StackbaseError,
+  HelipodError,
   UserError,
   SystemError,
   TransientError,
@@ -14,16 +14,16 @@ import {
   RateLimitError,
   TimeoutError,
   InternalError,
-  isStackbaseError,
+  isHelipodError,
   isRetryableError,
   getHttpStatus,
-  toStackbaseError,
+  toHelipodError,
 } from "../src/index";
 
-describe("StackbaseError hierarchy", () => {
+describe("HelipodError hierarchy", () => {
   it("carries code/httpStatus/retryable and the concrete class name", () => {
     const e = new ArgumentValidationError("bad arg");
-    expect(e).toBeInstanceOf(StackbaseError);
+    expect(e).toBeInstanceOf(HelipodError);
     expect(e).toBeInstanceOf(UserError);
     expect(e.name).toBe("ArgumentValidationError");
     expect(e.code).toBe("ARGUMENT_VALIDATION");
@@ -69,7 +69,7 @@ describe("CommitGuardRejection (Receipted Outbox, decision 2)", () => {
   it("is a retryable 409 ConflictError carrying unitIndex/rejectionCode/detail", () => {
     const e = new CommitGuardRejection(2, "FLEET_IDEMPOTENCY_CONFLICT", "key=abc");
     expect(e).toBeInstanceOf(ConflictError);
-    expect(e).toBeInstanceOf(StackbaseError);
+    expect(e).toBeInstanceOf(HelipodError);
     expect(e.name).toBe("CommitGuardRejection");
     expect(e.code).toBe(COMMIT_GUARD_REJECTION_CODE);
     expect(e.httpStatus).toBe(409);
@@ -90,31 +90,31 @@ describe("CommitGuardRejection (Receipted Outbox, decision 2)", () => {
 });
 
 describe("helpers", () => {
-  it("isStackbaseError discriminates", () => {
-    expect(isStackbaseError(new InternalError("x"))).toBe(true);
-    expect(isStackbaseError(new Error("plain"))).toBe(false);
-    expect(isStackbaseError("nope")).toBe(false);
+  it("isHelipodError discriminates", () => {
+    expect(isHelipodError(new InternalError("x"))).toBe(true);
+    expect(isHelipodError(new Error("plain"))).toBe(false);
+    expect(isHelipodError("nope")).toBe(false);
   });
 
-  it("getHttpStatus defaults non-Stackbase errors to 500", () => {
+  it("getHttpStatus defaults non-Helipod errors to 500", () => {
     expect(getHttpStatus(new Error("plain"))).toBe(500);
     expect(getHttpStatus("oops")).toBe(500);
     expect(getHttpStatus(new TimeoutError("t"))).toBe(504);
   });
 
-  it("toStackbaseError normalizes any thrown value", () => {
-    const fromStackbase = new ArgumentValidationError("a");
-    expect(toStackbaseError(fromStackbase)).toBe(fromStackbase);
+  it("toHelipodError normalizes any thrown value", () => {
+    const fromHelipod = new ArgumentValidationError("a");
+    expect(toHelipodError(fromHelipod)).toBe(fromHelipod);
 
-    const fromError = toStackbaseError(new Error("boom"));
+    const fromError = toHelipodError(new Error("boom"));
     expect(fromError).toBeInstanceOf(InternalError);
     expect(fromError.message).toBe("boom");
 
-    const fromString = toStackbaseError("weird");
+    const fromString = toHelipodError("weird");
     expect(fromString).toBeInstanceOf(InternalError);
     expect(fromString.message).toBe("weird");
 
-    const fromObject = toStackbaseError({ nope: 1 });
+    const fromObject = toHelipodError({ nope: 1 });
     expect(fromObject).toBeInstanceOf(InternalError);
     expect(fromObject.data).toEqual({ nope: 1 });
   });

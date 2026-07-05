@@ -1,5 +1,5 @@
-import { mutation, query } from "@stackbase/executor";
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { mutation, query } from "@helipod/executor";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 export const schema = defineSchema({
   docs: defineTable({ owner: v.string(), n: v.number(), tag: v.string(), note: v.optional(v.string()) }).index("by_owner_n", ["owner", "n"]),
@@ -9,7 +9,7 @@ export const schema = defineSchema({
 type A = any;
 export const mod = {
   insert: mutation(async (ctx: A, a: A) => ctx.db.insert("docs", a)),
-  // Stackbase has NO ctx.db.patch — partial update is read-merge-replace (a documented Convex divergence).
+  // Helipod has NO ctx.db.patch — partial update is read-merge-replace (a documented Convex divergence).
   patchViaReplace: mutation(async (ctx: A, a: { id: string; patch: A }) => {
     const cur = await ctx.db.get(a.id);
     await ctx.db.replace(a.id, { ...cur, ...a.patch });

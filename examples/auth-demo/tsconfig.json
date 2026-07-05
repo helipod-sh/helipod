@@ -5,5 +5,5 @@
     "types": ["node"],
     "jsx": "react-jsx"
   },
-  "include": ["stackbase", "stackbase.config.ts", "test", "web"]
+  "include": ["helipod", "helipod.config.ts", "test", "web"]
 }

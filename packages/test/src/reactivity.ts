@@ -1,6 +1,6 @@
-import { StackbaseClient, loopbackTransport, getFunctionPath, type FunctionReference } from "@stackbase/client";
-import type { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import type { Value } from "@stackbase/values";
+import { HelipodClient, loopbackTransport, getFunctionPath, type FunctionReference } from "@helipod/client";
+import type { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import type { Value } from "@helipod/values";
 
 export interface TestSubscription<T> {
   /** Latest computed value, or `undefined` until the first compute arrives. */
@@ -15,7 +15,7 @@ export interface TestSubscription<T> {
  * Lazily-built, harness-shared reactive subscription surface. Exercises the REAL
  * client -> sync protocol -> SubscriptionManager -> engine invalidation path over an in-process
  * loopback connection (`runtime.connect()` + `loopbackTransport`) — the same wiring
- * `examples/chat/test/chat.test.ts` uses. ONE `StackbaseClient` is shared across every
+ * `examples/chat/test/chat.test.ts` uses. ONE `HelipodClient` is shared across every
  * `t.subscribe(...)` call from a given harness instance; it's built on first use and closed via
  * `close()` (called from `BuiltRuntime.cleanup` before `stopDrivers`).
  */
@@ -29,10 +29,10 @@ export interface Reactivity {
 }
 
 export function createReactivity(runtime: EmbeddedRuntime): Reactivity {
-  let client: StackbaseClient | null = null;
+  let client: HelipodClient | null = null;
 
-  function ensureClient(): StackbaseClient {
-    if (!client) client = new StackbaseClient(loopbackTransport(runtime.connect()));
+  function ensureClient(): HelipodClient {
+    if (!client) client = new HelipodClient(loopbackTransport(runtime.connect()));
     return client;
   }
 

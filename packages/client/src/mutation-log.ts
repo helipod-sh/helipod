@@ -7,7 +7,7 @@
  * persists" is true instead of aspirational — the durable-offline slice backs S1 with IndexedDB
  * without reshaping this record.
  */
-import type { JSONValue } from "@stackbase/values";
+import type { JSONValue } from "@helipod/values";
 import type { OptimisticUpdate } from "./layered-store";
 
 /** A single unconfirmed mutation and its optimistic effect. Verbatim from verdict §(b). */
@@ -32,11 +32,11 @@ export interface PendingMutation {
     | { type: "completed"; commitTs: number; completedAt: number } // acked; layer held for the gate
     | { type: "parked" }; // T2: closed with a durable append + the S4 swap armed — awaits a future drain
   /**
-   * Durable-outbox identity (verdict §(d), Task 2) — present ONLY when this `StackbaseClient` was
+   * Durable-outbox identity (verdict §(d), Task 2) — present ONLY when this `HelipodClient` was
    * constructed with a durable `outbox`; a client without one never sets any of the fields below,
    * so `entriesInOrder()` and the wire `Mutation` shape stay byte-identical to before this task for
    * that path. `clientId`/`seq` ride the wire `Mutation`/`MutationBatchEntry` (`clientId`/`seq`,
-   * `@stackbase/sync`'s `protocol.ts`) whenever an outbox is configured — carried for park-safety
+   * `@helipod/sync`'s `protocol.ts`) whenever an outbox is configured — carried for park-safety
    * on every send, not just once the S4 swap is armed (see `client.ts#mutationMessage`).
    */
   clientId?: string;

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * Per-shard placement-hint derivation (`src/location.ts`) — the precedence (a) explicit → (b) opt-in
@@ -52,10 +52,10 @@ describe("deriveLocationHint — precedence a → d", () => {
     expect(r).toEqual({ ok: true, hint: "weur" });
   });
 
-  it("(a) explicit X-Stackbase-Region header wins over the query param", () => {
+  it("(a) explicit X-Helipod-Region header wins over the query param", () => {
     const r = deriveLocationHint({
       url: url("/api/sync?region=weur"),
-      headers: headers({ "x-stackbase-region": "enam" }),
+      headers: headers({ "x-helipod-region": "enam" }),
     });
     expect(r).toEqual({ ok: true, hint: "enam" });
   });

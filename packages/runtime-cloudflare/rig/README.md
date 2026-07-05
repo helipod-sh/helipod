@@ -8,12 +8,12 @@ latency, real hibernation eviction.
 
 ## What's here
 
-- `wrangler.jsonc` — the deploy config: `nodejs_compat`, the `STACKBASE_DO` Durable Object binding, a
+- `wrangler.jsonc` — the deploy config: `nodejs_compat`, the `HELIPOD_DO` Durable Object binding, a
   `new_sqlite_classes` migration (DO-SQLite needs the SQLite-backed class tag), and the
   `STORAGE_BUCKET` **R2 bucket binding** for file storage.
 - `fixture/worker.ts` — the Worker/DO entry (hand-written stand-in for what
   `generateWorkerEntrySource` codegens): static imports of the fixture `convex/`, `export class
-  StackbaseDO extends StackbaseDurableObject`, `export default createWorkerHandler("STACKBASE_DO")`.
+  HelipodDO extends HelipodDurableObject`, `export default createWorkerHandler("HELIPOD_DO")`.
   Constructs an `R2BlobStore` over `env.STORAGE_BUCKET` (exactly what
   `generateWorkerEntrySource({ r2BindingName: "STORAGE_BUCKET" })` emits).
 - `fixture/convex/` — a minimal reactive app (one indexed `messages` table) **plus `files.ts`**
@@ -31,18 +31,18 @@ cd packages/runtime-cloudflare/rig
 npx wrangler login
 
 # 2. set the admin key as a SECRET (do NOT leave the placeholder in wrangler.jsonc)
-npx wrangler secret put STACKBASE_ADMIN_KEY      # paste a strong secret
+npx wrangler secret put HELIPOD_ADMIN_KEY      # paste a strong secret
 
 # 3. create the R2 bucket the file-storage E2E stores blobs in (name matches wrangler.jsonc's
 #    r2_buckets[].bucket_name). One-time; skip if it already exists.
-npx wrangler r2 bucket create stackbase-do-fixture
+npx wrangler r2 bucket create helipod-do-fixture
 
-# 4. deploy — builds fixture/worker.ts into a Worker + the StackbaseDO Durable Object (with the R2 bind)
+# 4. deploy — builds fixture/worker.ts into a Worker + the HelipodDO Durable Object (with the R2 bind)
 npx wrangler deploy
-#    → prints a URL like https://stackbase-do-fixture.<subdomain>.workers.dev
+#    → prints a URL like https://helipod-do-fixture.<subdomain>.workers.dev
 
 # 5. run the E2E against the real deployment (includes the real-R2 file-storage round-trip)
-node e2e.mjs --url https://stackbase-do-fixture.<subdomain>.workers.dev
+node e2e.mjs --url https://helipod-do-fixture.<subdomain>.workers.dev
 
 # 6. hibernation-resume sub-test (the silence IS the test — do NOT poll /api/health while waiting):
 #    - keep a WS subscribed (e2e.mjs leaves the pattern), stay SILENT ~60s so the DO hibernates,
@@ -52,19 +52,19 @@ node e2e.mjs --url https://stackbase-do-fixture.<subdomain>.workers.dev
 
 # 7. tear down when done
 npx wrangler delete
-npx wrangler r2 bucket delete stackbase-do-fixture   # remove the R2 bucket too
+npx wrangler r2 bucket delete helipod-do-fixture   # remove the R2 bucket too
 ```
 
 ## Placement (optional): pin the DO's home region
 
 A Durable Object is **single-homed** — pinned to one data center at creation, and it never moves; by
 default it lands near whoever **first** `get()`s it. To pin this single DO to a specific region, set
-`STACKBASE_DO_LOCATION_HINT` (e.g. `enam`) as a container/Worker env var (alongside
-`STACKBASE_ADMIN_KEY`). The Worker threads it into `get(id, { locationHint })`; only the **first**
+`HELIPOD_DO_LOCATION_HINT` (e.g. `enam`) as a container/Worker env var (alongside
+`HELIPOD_ADMIN_KEY`). The Worker threads it into `get(id, { locationHint })`; only the **first**
 `get()` is honored (pinned thereafter). Unset ⇒ no hint (placed near the first requester — today's
 behavior). An invalid hint fails loudly (500). Valid hints: `wnam enam sam weur eeur apac apac-ne
 apac-se oc afr me`. This is one DO in one region — placing *many* shard-DOs near their own audiences is
-the paid [`@stackbase/runtime-cloudflare-shard`](../../../ee/packages/runtime-cloudflare-shard) router.
+the paid [`@helipod/runtime-cloudflare-shard`](../../../ee/packages/runtime-cloudflare-shard) router.
 
 ## What each assertion proves
 
@@ -85,5 +85,5 @@ by-design single-shard ceiling** (§8.6) — record the number, don't paper over
 | Tier | Runtime | Status |
 |---|---|---|
 | Node API-shape (`test/`) | Node + DO-SQLite stand-in | ✅ passing (`bun run test`) |
-| real workerd (`test-workers/`) | workerd via vitest-pool-workers | ✅ passing (`bun run --filter @stackbase/runtime-cloudflare test:workers`) |
+| real workerd (`test-workers/`) | workerd via vitest-pool-workers | ✅ passing (`bun run --filter @helipod/runtime-cloudflare test:workers`) |
 | real Cloudflare (this rig) | deployed DO | ⏳ **deploy-ready-but-unrun** — needs a Cloudflare login |

@@ -1,15 +1,15 @@
 /**
- * `@stackbase/docstore-do-sqlite` — the MVCC `DocStore` over a **Durable Object's** embedded SQLite
+ * `@helipod/docstore-do-sqlite` — the MVCC `DocStore` over a **Durable Object's** embedded SQLite
  * (`ctx.storage.sql`), via a `DatabaseAdapter` that the DO host injects. The Cloudflare-native Tier 0
  * storage backend; the engine never imports a Cloudflare type — the adapter is handed the DO's SQL
  * surface as constructor input, exactly like the `node`/`bun`/`pg` adapters.
  *
- * The MVCC `DocStore` implementation itself is REUSED verbatim from `@stackbase/docstore-sqlite`
+ * The MVCC `DocStore` implementation itself is REUSED verbatim from `@helipod/docstore-sqlite`
  * (`SqliteDocStore`) — DO-SQLite is SQLite, so only the driver seam differs. Construct as:
  *
  * ```ts
- * import { SqliteDocStore } from "@stackbase/docstore-sqlite";
- * import { DoSqliteAdapter } from "@stackbase/docstore-do-sqlite";
+ * import { SqliteDocStore } from "@helipod/docstore-sqlite";
+ * import { DoSqliteAdapter } from "@helipod/docstore-do-sqlite";
  *
  * // inside a Durable Object:
  * const adapter = new DoSqliteAdapter({
@@ -30,6 +30,6 @@ export type {
 export { DatabaseFullError, isDatabaseFullError } from "./errors";
 
 // Re-exported for ergonomics so a DO host can construct the whole store from one import. The MVCC
-// document-log logic lives in `@stackbase/docstore-sqlite`; DO-SQLite reuses it unchanged.
-export { SqliteDocStore } from "@stackbase/docstore-sqlite";
-export type { DatabaseAdapter, PreparedStatement, RunResult, SqlValue, SqlRow } from "@stackbase/docstore-sqlite";
+// document-log logic lives in `@helipod/docstore-sqlite`; DO-SQLite reuses it unchanged.
+export { SqliteDocStore } from "@helipod/docstore-sqlite";
+export type { DatabaseAdapter, PreparedStatement, RunResult, SqlValue, SqlRow } from "@helipod/docstore-sqlite";

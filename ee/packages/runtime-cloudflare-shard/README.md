@@ -1,8 +1,8 @@
-# @stackbase/runtime-cloudflare-shard (Enterprise)
+# @helipod/runtime-cloudflare-shard (Enterprise)
 
-> Licensed under the **Stackbase Commercial License** — see [`ee/LICENSE`](../../LICENSE). This is a
+> Licensed under the **Helipod Commercial License** — see [`ee/LICENSE`](../../LICENSE). This is a
 > paid-tier (scale-out) package. Single-node Cloudflare self-host stays free forever via the
-> [`@stackbase/runtime-cloudflare`](../../../packages/runtime-cloudflare) package.
+> [`@helipod/runtime-cloudflare`](../../../packages/runtime-cloudflare) package.
 
 **Slice 6, Milestone 1 — multi-shard write scale-out on Cloudflare Durable Objects.** `.shardBy(key)`
 → one Durable Object per shard key. N distinct keys ⇒ N distinct single-threaded DOs ⇒ **N× the
@@ -16,14 +16,14 @@ dependency**.
 ## The routing model
 
 A **stateless Worker** (`createShardWorkerHandler`) resolves each request to the ONE owning shard-DO
-and forwards to it. Each shard-DO is an **unmodified** `StackbaseDurableObject` from the free
-`@stackbase/runtime-cloudflare` package (M1 reuses Slice 3 verbatim — no engine change). The DO **name
+and forwards to it. Each shard-DO is an **unmodified** `HelipodDurableObject` from the free
+`@helipod/runtime-cloudflare` package (M1 reuses Slice 3 verbatim — no engine change). The DO **name
 is the shard key**: there is no shard map, no coordinator, no reshard (a new key just addresses a new
 DO forever).
 
 A request's shard key is sourced, in precedence order:
 
-1. **Explicit envelope** — `X-Stackbase-Shard: <value>` header or `?shard=<value>` query param. The
+1. **Explicit envelope** — `X-Helipod-Shard: <value>` header or `?shard=<value>` query param. The
    primary mechanism, and the only one that works for a WebSocket upgrade (a shard-scoped socket:
    `wss://…/api/sync?shard=<roomId>`) and for a query (queries declare no `shardBy`).
 2. **Derived** — for `POST /api/run`, a mutation declaring `shardBy` has its key extracted from the
@@ -51,7 +51,7 @@ same time, with no shared bottleneck between them. The router derives that hint 
 envelope, in precedence order (each **stable per shard key** where possible, so the one `get()` that
 counts is deterministic):
 
-1. **Explicit** — `?region=<hint>` param or `X-Stackbase-Region: <hint>` header. App-controlled and
+1. **Explicit** — `?region=<hint>` param or `X-Helipod-Region: <hint>` header. App-controlled and
    fully deterministic (mirrors `?shard=`). An invalid explicit hint is a hard `INVALID_REGION_HINT`
    400 at the edge — never passed to `get()`, because a bad hint would mis-place the DO **permanently**.
 2. **Region-prefixed key (opt-in)** — with `regionPrefixedKeys: true`, a shard-key value of the form
@@ -89,7 +89,7 @@ suite proves the hint is threaded and the routing is O(1), not the latency delta
 ## Cross-shard `fanOut` reads (Milestone 2d — shipped)
 
 A **non-reactive, one-shot** cross-shard read: `POST /api/run?fanout=1 { path, args }` (or
-`X-Stackbase-Fanout: true`) fans the SAME request out to every shard-DO, concatenates each shard's
+`X-Helipod-Fanout: true`) fans the SAME request out to every shard-DO, concatenates each shard's
 `{ value: [...] }` array, and returns one merged `{ value }` response. It requires a **fixed shard
 count** — routing mode `"hash"` (`shardIdList(numShards)` is the enumerable shard set); mode `"key"`
 (one DO per arbitrary key, no directory) has no way to enumerate "every shard", so it's rejected

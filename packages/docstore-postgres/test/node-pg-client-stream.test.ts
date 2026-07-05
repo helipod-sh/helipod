@@ -549,8 +549,8 @@ describe("NodePgClient read-pool connections — statement_timeout / idle_in_tra
   });
 });
 
-describe("NodePgClient — STACKBASE_PG_STREAM kill switch", () => {
-  const ENV_KEY = "STACKBASE_PG_STREAM";
+describe("NodePgClient — HELIPOD_PG_STREAM kill switch", () => {
+  const ENV_KEY = "HELIPOD_PG_STREAM";
   let savedValue: string | undefined;
   let hadKey: boolean;
 
@@ -571,19 +571,19 @@ describe("NodePgClient — STACKBASE_PG_STREAM kill switch", () => {
     vi.clearAllMocks();
   });
 
-  it('does NOT advertise queryStream when STACKBASE_PG_STREAM="0"', () => {
+  it('does NOT advertise queryStream when HELIPOD_PG_STREAM="0"', () => {
     process.env[ENV_KEY] = "0";
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     expect(client.queryStream).toBeFalsy();
   });
 
-  it('does NOT advertise queryStream when STACKBASE_PG_STREAM="false"', () => {
+  it('does NOT advertise queryStream when HELIPOD_PG_STREAM="false"', () => {
     process.env[ENV_KEY] = "false";
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     expect(client.queryStream).toBeFalsy();
   });
 
-  it("advertises a working queryStream when STACKBASE_PG_STREAM is unset (default ON)", async () => {
+  it("advertises a working queryStream when HELIPOD_PG_STREAM is unset (default ON)", async () => {
     delete process.env[ENV_KEY];
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     expect(client.queryStream).toBeTruthy();
@@ -593,7 +593,7 @@ describe("NodePgClient — STACKBASE_PG_STREAM kill switch", () => {
     expect(rows).toEqual([{ a: 1 }]);
   });
 
-  it('advertises a working queryStream when STACKBASE_PG_STREAM="1"', async () => {
+  it('advertises a working queryStream when HELIPOD_PG_STREAM="1"', async () => {
     process.env[ENV_KEY] = "1";
     const client = new NodePgClient({ connectionString: "postgres://fake" });
     expect(client.queryStream).toBeTruthy();

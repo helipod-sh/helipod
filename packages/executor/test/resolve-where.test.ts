@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { resolveWhere, compileWhere, type RelationRegistry } from "../src/policy";
-import { evaluateFilter } from "@stackbase/query-engine";
+import { evaluateFilter } from "@helipod/query-engine";
 import type { GuestDatabaseReader } from "../src/guest";
-import type { DocumentValue } from "@stackbase/docstore";
+import type { DocumentValue } from "@helipod/docstore";
 
 const CHILD: Record<string, DocumentValue[]> = {
   document_shares: [

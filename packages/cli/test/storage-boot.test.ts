@@ -6,9 +6,9 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { rmSync } from "node:fs";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation, query, action, type RegisteredFunction } from "@stackbase/executor";
-import { createStorageToken } from "@stackbase/storage";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { mutation, query, action, type RegisteredFunction } from "@helipod/executor";
+import { createStorageToken } from "@helipod/storage";
 import { bootLoaded } from "../src/boot";
 import { startDevServer } from "../src/server";
 import type { LoadedProject } from "../src/project";
@@ -79,7 +79,7 @@ describe("storage wiring (boot smoke)", () => {
     }
   });
 
-  // Fix 1 regression: `stackbase serve`/`dev` on Node reads the storage-route body via
+  // Fix 1 regression: `helipod serve`/`dev` on Node reads the storage-route body via
   // `node:http`'s `req.on("data"/"end")`. Before the fix, that body was decoded to a utf8 STRING
   // (`readBody`) before being handed to `new Request(...)`, so `handleUpload`'s
   // `new Uint8Array(await request.arrayBuffer())` re-encoded the string — mangling any byte

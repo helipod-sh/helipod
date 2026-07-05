@@ -7,8 +7,8 @@
  * the DO-SQLite constraints — synchronous exec, ArrayBuffer blobs, number integers, no bigint
  * bindings, no BEGIN/COMMIT via exec — so a green run proves the adapter speaks the DO SQL contract.
  */
-import { runDocStoreConformance } from "@stackbase/docstore/test-support/conformance";
-import { SqliteDocStore } from "@stackbase/docstore-sqlite";
+import { runDocStoreConformance } from "@helipod/docstore/test-support/conformance";
+import { SqliteDocStore } from "@helipod/docstore-sqlite";
 import { DoSqliteAdapter } from "../src/do-adapter";
 import { MemorySqlStorage } from "./memory-sql-storage";
 

@@ -22,9 +22,9 @@
 // Splitting the table names out into `EventTables` rather than hardcoding either variant is what
 // lets `sendEventImpl`'s two remaining callers (the mutation-mode facade here doc-commented above,
 // and any future privileged caller) share this one function instead of drifting.
-import { mutation, type GuestDatabaseWriter } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
-import type { SchedulerContext } from "@stackbase/scheduler";
+import { mutation, type GuestDatabaseWriter } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
+import type { SchedulerContext } from "@helipod/scheduler";
 import type { JournalRow } from "./replay";
 
 /** An `events` row as read back from the durable journal (`by_workflow_name`, `[workflowId, name]`). */

@@ -1,5 +1,5 @@
 /**
- * `@stackbase/docstore-sqlite` — the MVCC `DocStore` over SQLite, plus the Node
+ * `@helipod/docstore-sqlite` — the MVCC `DocStore` over SQLite, plus the Node
  * (`node:sqlite`) database adapter. The default Tier 0 storage backend.
  */
 export type { DatabaseAdapter, PreparedStatement, RunResult, SqlValue, SqlRow } from "./adapter";

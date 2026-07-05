@@ -5,7 +5,7 @@
  * gated by an optional `deps.checkRead` authz seam (falling back to a capability-token check when
  * authz isn't composed), with public-file/signed-redirect preferred over streaming bytes directly.
  *
- * These are NOT app-authored `httpAction`s routed through `@stackbase/executor`'s
+ * These are NOT app-authored `httpAction`s routed through `@helipod/executor`'s
  * `http-router.ts` (that indirection resolves a project's own `http.ts` handler VALUES to a
  * `path:name` string for the runtime's module map — see `packages/cli/src/project.ts`'s
  * `ResolvedRoute`). The storage endpoints are engine-owned: each handler closes directly over its
@@ -14,11 +14,11 @@
  *
  * `deps.runMutation`/`deps.runQuery` are expected to reach the privileged `_storage:_finalize` /
  * `_storage:_get` built-ins (`./modules.ts`) — e.g. `EmbeddedRuntime.runSystem`, the same
- * trusted entrypoint `@stackbase/admin`'s `_system:*` built-ins use.
+ * trusted entrypoint `@helipod/admin`'s `_system:*` built-ins use.
  */
-import type { BlobStore, ByteRange } from "@stackbase/blobstore";
-import { isValidDocumentId } from "@stackbase/id-codec";
-import { DocumentNotFoundError } from "@stackbase/errors";
+import type { BlobStore, ByteRange } from "@helipod/blobstore";
+import { isValidDocumentId } from "@helipod/id-codec";
+import { DocumentNotFoundError } from "@helipod/errors";
 import { verifyStorageToken, type TokenScope } from "./token";
 import { isReclaimable } from "./context";
 import type { StorageDoc } from "./modules";

@@ -6,7 +6,7 @@ import type { DeployContext } from "../src/types";
 
 function ctxWith(settings: Record<string, unknown>): DeployContext {
   return {
-    cwd: "/tmp", functionsDir: "/tmp/stackbase", env: "production",
+    cwd: "/tmp", functionsDir: "/tmp/helipod", env: "production",
     target: { targetName: "serve", provider: "serve", env: "production", settings },
     interactive: false,
     spawn: { run: async () => ({ code: 0, stdout: "", stderr: "" }) },
@@ -18,7 +18,7 @@ function ctxWith(settings: Record<string, unknown>): DeployContext {
 
 describe("serveTarget", () => {
   let server: Server | undefined;
-  afterEach(() => { server?.close(); server = undefined; delete process.env.STACKBASE_ADMIN_KEY; delete process.env.STACKBASE_DEPLOY_URL; });
+  afterEach(() => { server?.close(); server = undefined; delete process.env.HELIPOD_ADMIN_KEY; delete process.env.HELIPOD_DEPLOY_URL; });
 
   it("preflight throws when url is missing", async () => {
     await expect(serveTarget.preflight(ctxWith({ adminKey: "k" }))).rejects.toBeInstanceOf(DeployError);

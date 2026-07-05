@@ -6,7 +6,7 @@ description: How you read data, and why a query's read set is the heart of react
 {/* diataxis: explanation */}
 
 A query is a function that reads data. It's also the function type your app subscribes to, so how
-well you understand queries is how well you understand why a stackbase app stays live.
+well you understand queries is how well you understand why a helipod app stays live.
 
 This page walks through the whole surface: the query builder, `ctx.db.get`, pagination and cursors,
 `scanCapped`, and exactly which query shapes get the cheap incremental reactivity path versus a full
@@ -17,8 +17,8 @@ re-run.
 `query({ args, returns, handler })` takes a validated argument object and a handler. The handler
 receives a `QueryCtx` whose only capability is `ctx.db`, a **read-only** database handle:
 
-```ts title="stackbase/messages.ts"
-import { v } from "@stackbase/values";
+```ts title="helipod/messages.ts"
+import { v } from "@helipod/values";
 import { query } from "./_generated/server";
 
 export const list = query({
@@ -185,7 +185,7 @@ matching actually happens at commit time.
 
 `.paginate({ cursor, pageSize, maxScan? })` returns one page instead of the whole matching set:
 
-```ts title="stackbase/messages.ts"
+```ts title="helipod/messages.ts"
 export const page = query({
   args: { conversationId: v.id("conversations"), cursor: v.union(v.string(), v.null()), pageSize: v.number() },
   handler: (ctx, args) =>
@@ -318,8 +318,8 @@ load, the same way narrowing the index range in the first place keeps them preci
 On the client, you subscribe with the `useQuery` hook and the generated, typed `api`:
 
 ```tsx
-import { useQuery } from "@stackbase/client/react";
-import { api } from "../stackbase/_generated/server";
+import { useQuery } from "@helipod/client/react";
+import { api } from "../helipod/_generated/server";
 
 function Messages({ conversationId }: { conversationId: string }) {
   const messages = useQuery(api.messages.list, { conversationId });

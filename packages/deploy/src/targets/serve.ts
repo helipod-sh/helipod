@@ -4,8 +4,8 @@ import { partitionModules } from "../module-hash";
 
 /** url/adminKey come from config settings, falling back to the slice-6b env vars (exact back-compat). */
 function creds(ctx: DeployContext): { url: string; adminKey: string } {
-  const url = String(ctx.target.settings.url ?? process.env.STACKBASE_DEPLOY_URL ?? "").trim();
-  const adminKey = String(ctx.target.settings.adminKey ?? process.env.STACKBASE_ADMIN_KEY ?? "").trim();
+  const url = String(ctx.target.settings.url ?? process.env.HELIPOD_DEPLOY_URL ?? "").trim();
+  const adminKey = String(ctx.target.settings.adminKey ?? process.env.HELIPOD_ADMIN_KEY ?? "").trim();
   return { url, adminKey };
 }
 
@@ -13,8 +13,8 @@ export const serveTarget: DeployTarget = {
   name: "serve",
   async preflight(ctx) {
     const { url, adminKey } = creds(ctx);
-    if (!url) throw new DeployError("serve target needs a url — pass --url or set deploy.targets.serve settings / STACKBASE_DEPLOY_URL");
-    if (!adminKey) throw new DeployError("STACKBASE_ADMIN_KEY is required to deploy to a serve target");
+    if (!url) throw new DeployError("serve target needs a url — pass --url or set deploy.targets.serve settings / HELIPOD_DEPLOY_URL");
+    if (!adminKey) throw new DeployError("HELIPOD_ADMIN_KEY is required to deploy to a serve target");
   },
   async package() { /* no artifact to pre-build; files come from ctx.packageApp() at push */ },
   async push(ctx): Promise<DeployResult> {

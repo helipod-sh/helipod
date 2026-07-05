@@ -14,7 +14,7 @@
  * bump is what FENCES any prior owner's cached etag); `heartbeat()` CAS-renews `leaseExpiresAt` alone.
  * See `object-doc-store.ts`'s class doc for the full acquire/heartbeat/commit-gating protocol.
  */
-import type { ObjectStore } from "@stackbase/objectstore";
+import type { ObjectStore } from "@helipod/objectstore";
 
 /** The per-shard commit pointer AND lease. `frontierTs`/`tsCounter` are decimal-string bigints (JSON
  *  has no native bigint) — the highest committed timestamp and the monotone CAS-content counter,
@@ -70,7 +70,7 @@ export async function readManifest(os: ObjectStore, shard: string): Promise<{ ma
 }
 
 /** Create-only initialization of a shard's manifest (`casPut` with `ifMatch: null`). Throws
- *  `CasConflict` (via `@stackbase/objectstore`'s `isCasConflict`) if the manifest already exists —
+ *  `CasConflict` (via `@helipod/objectstore`'s `isCasConflict`) if the manifest already exists —
  *  callers racing to initialize the same shard must treat that as "someone else already did it" and
  *  `readManifest` instead. */
 export async function createManifest(os: ObjectStore, shard: string): Promise<{ manifest: Manifest; etag: string }> {

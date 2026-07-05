@@ -3,7 +3,7 @@
  * one neutral boundary a Durable Object host (Slice 3) must implement WITHOUT dragging in a process
  * primitive; if a host I/O import ever leaks into it, the seam stops being neutral. Source-scan
  * assertions (same style as `packages/cli/test/docker-config.test.ts`) keep it honest:
- *   1. every import in `host.ts` is either `@stackbase/*` or type-only, and none names a forbidden
+ *   1. every import in `host.ts` is either `@helipod/*` or type-only, and none names a forbidden
  *      host primitive (`bun`, `node:*`, `ws`, cloudflare, `DurableObject`);
  *   2. the DO namespace type appears nowhere under `packages/` or `components/` (roadmap gate).
  *
@@ -41,11 +41,11 @@ const FORBIDDEN = [/\bfrom\s+["']bun["']/, /\bfrom\s+["']node:/, /\bfrom\s+["']w
 describe("host.ts is import-neutral (RuntimeHost seam)", () => {
   const hostCode = stripComments(hostSrc);
 
-  it("imports only @stackbase/* or type-only specifiers", () => {
+  it("imports only @helipod/* or type-only specifiers", () => {
     const imports = importStatements(hostCode);
     expect(imports.length).toBeGreaterThan(0); // sanity: the regex actually matched
     for (const { typeOnly, spec } of imports) {
-      const neutral = typeOnly || spec.startsWith("@stackbase/");
+      const neutral = typeOnly || spec.startsWith("@helipod/");
       expect(neutral, `non-neutral import in host.ts: "${spec}" (type-only=${typeOnly})`).toBe(true);
     }
   });
@@ -73,7 +73,7 @@ describe("host.ts is import-neutral (RuntimeHost seam)", () => {
   });
 });
 
-const SKIP_DIRS = new Set(["node_modules", "dist", ".turbo", ".git", "coverage", ".stackbase-deploy"]);
+const SKIP_DIRS = new Set(["node_modules", "dist", ".turbo", ".git", "coverage", ".helipod-deploy"]);
 
 /** Recursively read every `.ts`/`.tsx` source file under `root`, skipping build/vendor dirs. */
 function scanTs(root: string, visit: (file: string, text: string) => void): void {

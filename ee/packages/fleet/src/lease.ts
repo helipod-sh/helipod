@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
-import type { PgClient, PgRow, PgValue } from "@stackbase/docstore-postgres";
-import { DEFAULT_SHARD, type ShardId } from "@stackbase/id-codec";
-import type { JSONValue } from "@stackbase/values";
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
+import type { PgClient, PgRow, PgValue } from "@helipod/docstore-postgres";
+import { DEFAULT_SHARD, type ShardId } from "@helipod/id-codec";
+import type { JSONValue } from "@helipod/values";
 
 /** The default shard every single-shard caller (B1 tests, the writer-election loop) targets when
  *  no explicit `shardId` is passed. B2a generalizes the per-row methods below to any shard id —
@@ -12,7 +12,7 @@ const SHARD_ID: ShardId = DEFAULT_SHARD;
 /** Default TTL a fresh acquisition/heartbeat extends `expires_at` by, in ms. The LeaseMonitor's
  *  probe cadence is derived proportionally (ttl/3 → the historical 5s at this default), leaving
  *  headroom for several missed round-trips before a fencer considers this node wedged (D4). A
- *  deployment can shorten it via `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning) — see
+ *  deployment can shorten it via `HELIPOD_FLEET_LEASE_TTL_MS` (ops/test tuning) — see
  *  `prepareFleetNode` in `node.ts` for the threading. */
 const DEFAULT_LEASE_TTL_MS = 15_000;
 
@@ -67,7 +67,7 @@ export interface LeaseManagerOptions {
   /** How long a fresh acquisition/heartbeat extends `expires_at` by, in ms. Default 15000ms. The
    *  whole failover clock scales with this: a wedged writer's lease expires this long after its last
    *  heartbeat, so a follower's eviction can't fire before then. Shortened by
-   *  `STACKBASE_FLEET_LEASE_TTL_MS` for the wedged-writer E2E (and available to operators as tuning);
+   *  `HELIPOD_FLEET_LEASE_TTL_MS` for the wedged-writer E2E (and available to operators as tuning);
    *  the LeaseMonitor's probe cadence is derived from it so a live writer always renews in time. */
   ttlMs?: number;
 }
@@ -385,7 +385,7 @@ export class LeaseManager {
          epoch = epoch + 1,
          writer_url = NULL,
          writer_app_name = NULL,
-         frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))
+         frontier_ts = GREATEST(frontier_ts, (SELECT nextval('helipod_ts')))
        WHERE shard_id = $1 AND epoch = $2`,
       [shardId, epoch],
     );
@@ -583,9 +583,9 @@ export class LeaseManager {
         if (sel.length === 0) return { fenced: false, oldAppName: null }; // live (or gone) — no-op
         const oldAppName = (sel[0]!.writer_app_name as string | null | undefined) ?? null;
         // BINDING HANDOFF (Task 1 review): `frontier_ts` MUST stay inside the GREATEST —
-        // `frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))`, NEVER `nextval`
+        // `frontier_ts = GREATEST(frontier_ts, (SELECT nextval('helipod_ts')))`, NEVER `nextval`
         // alone. `frontier_ts` is the true high-water mark (the commit guard maintains it >= every
-        // committed ts), while the `stackbase_ts` sequence can LAG reality in a mixed
+        // committed ts), while the `helipod_ts` sequence can LAG reality in a mixed
         // write()/commitWrite store. Architectural invariant: the production primary is pure-
         // commitWrite, so the sequence never lags maxTimestamp there; `frontier_ts` in this GREATEST
         // is what makes eviction safe even if that ever changes. The row is already locked by the
@@ -595,7 +595,7 @@ export class LeaseManager {
              epoch = epoch + 1,
              writer_url = NULL,
              writer_app_name = NULL,
-             frontier_ts = GREATEST(frontier_ts, (SELECT nextval('stackbase_ts')))
+             frontier_ts = GREATEST(frontier_ts, (SELECT nextval('helipod_ts')))
            WHERE shard_id = $1`,
           [shardId],
         );
@@ -743,7 +743,7 @@ export class LeaseManager {
   /**
    * Per-shard idle-shard frontier closing (B2a, D5 — needed the moment N>1: an idle shard pins the
    * fleet's `F = min(frontier_ts)`). Allocate a single fresh `nextval` `N` from the shared
-   * `stackbase_ts` sequence per beat, then for EACH held shard advance its frontier up to `N` —
+   * `helipod_ts` sequence per beat, then for EACH held shard advance its frontier up to `N` —
    * `UPDATE ... SET frontier_ts = GREATEST(frontier_ts, $N) WHERE shard_id=$s AND epoch=$e AND
    * frontier_ts < $N` — but run each shard's UPDATE UNDER THAT SHARD'S COMMIT MUTEX
    * (`runExclusiveOnShard`), skipping any shard currently mid-commit (mutex busy → left for the next
@@ -773,7 +773,7 @@ export class LeaseManager {
     const pairs = this.heldPairs();
     // ONE ceiling per beat. Drawn OUTSIDE any shard mutex — a bare `nextval` is monotone and the
     // `frontier_ts < $N` + `GREATEST` guards below tolerate it lagging or leading a concurrent commit.
-    const tsRows = await this.client.query(`SELECT nextval('stackbase_ts') AS ts`);
+    const tsRows = await this.client.query(`SELECT nextval('helipod_ts') AS ts`);
     const newTs = toBigIntOrZero(tsRows[0]?.ts as PgValue | undefined);
     for (const { shardId, epoch } of pairs) {
       // Skip-if-busy: an in-flight commit holds this shard's mutex, OR a group-commit batch is

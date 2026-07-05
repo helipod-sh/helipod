@@ -1,4 +1,4 @@
-import type { GuestDatabaseWriter } from "@stackbase/executor";
+import type { GuestDatabaseWriter } from "@helipod/executor";
 import { expandRole, type AuthzConfig } from "./roles";
 
 export const MAX_PATTERNS_PER_ROLE = 1000;

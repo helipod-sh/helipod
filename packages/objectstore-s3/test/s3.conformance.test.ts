@@ -3,14 +3,14 @@
  * `minio/minio` container (not a mock), proving the CAS fence (`If-Match`/`If-None-Match` conditional
  * PUT → one-winner semantics) actually holds on an S3-class store, per the Tier-3 substrate design.
  *
- * GATED: only runs when docker is available AND `STACKBASE_OBJECTSTORE_S3=1` is set, so the default
- * `bun run --filter @stackbase/objectstore-s3 test` stays green (skipped) with no docker/env present.
+ * GATED: only runs when docker is available AND `HELIPOD_OBJECTSTORE_S3=1` is set, so the default
+ * `bun run --filter @helipod/objectstore-s3 test` stays green (skipped) with no docker/env present.
  * Mirrors `packages/cli/test/storage-e2e.test.ts`'s MinIO container lifecycle.
  */
 import { spawnSync } from "node:child_process";
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { afterAll, beforeAll, describe } from "vitest";
-import { runObjectStoreConformance } from "@stackbase/objectstore/test-support/conformance";
+import { runObjectStoreConformance } from "@helipod/objectstore/test-support/conformance";
 import { S3ObjectStore } from "../src/s3-objectstore";
 
 function dockerAvailable(): boolean {
@@ -21,13 +21,13 @@ function dockerAvailable(): boolean {
   }
 }
 
-const RUN = dockerAvailable() && process.env.STACKBASE_OBJECTSTORE_S3 === "1";
+const RUN = dockerAvailable() && process.env.HELIPOD_OBJECTSTORE_S3 === "1";
 const maybeDescribe = RUN ? describe : describe.skip;
 
 const MINIO_CONTAINER = `sb-minio-objectstore-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-objectstore-conformance";
+const BUCKET = "helipod-objectstore-conformance";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });

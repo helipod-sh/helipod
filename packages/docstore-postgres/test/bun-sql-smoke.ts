@@ -12,19 +12,19 @@
  * see `testQueryStream`), and the fleet/sharding surface (`commitQuerierFor`/`tryAcquireShardLock`/
  * `releaseShardLock` — see `testFleet`).
  *
- * Run: `STACKBASE_TEST_DATABASE_URL=postgres://sb:pw@localhost:5433/bunsql_smoke bun test/bun-sql-smoke.ts`
+ * Run: `HELIPOD_TEST_DATABASE_URL=postgres://sb:pw@localhost:5433/bunsql_smoke bun test/bun-sql-smoke.ts`
  * (defaults to that same Docker URL if the env var is unset — see `DEFAULT_URL` below).
  */
 import assert from "node:assert/strict";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { BunSqlClient, STREAM_POOL_MAX } from "../src/bun-sql-client";
 import { NodePgClient } from "../src/node-pg-client";
-import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@stackbase/docstore";
+import { newDocumentId, encodeStorageTableId, encodeStorageIndexId } from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, IndexWrite, InternalDocumentId, Interval } from "@helipod/docstore";
 
 const DEFAULT_URL = "postgres://sb:pw@localhost:5433/bunsql_smoke";
-const URL = process.env.STACKBASE_TEST_DATABASE_URL ?? DEFAULT_URL;
+const URL = process.env.HELIPOD_TEST_DATABASE_URL ?? DEFAULT_URL;
 
 const TABLE = 20001;
 const TABLE_ID = encodeStorageTableId(TABLE);
@@ -54,7 +54,7 @@ async function resetDatabase(): Promise<void> {
   await admin.query(
     `DROP TABLE IF EXISTS documents, indexes, persistence_globals, client_mutations, client_floors CASCADE`,
   );
-  await admin.query(`DROP SEQUENCE IF EXISTS stackbase_ts`);
+  await admin.query(`DROP SEQUENCE IF EXISTS helipod_ts`);
   await admin.close();
 }
 
@@ -362,7 +362,7 @@ async function testStreamErrorDiscardsConn(): Promise<void> {
   let threw = false;
   try {
     // The table doesn't exist — fails on the DECLARE ... CURSOR FOR statement itself.
-    for await (const _row of client.queryStream!(`SELECT * FROM stackbase_stream_error_probe_missing_table`)) {
+    for await (const _row of client.queryStream!(`SELECT * FROM helipod_stream_error_probe_missing_table`)) {
       // never reached
     }
   } catch {
@@ -498,35 +498,35 @@ async function testPinnedUnderStreamLoad(): Promise<void> {
   await store.close();
 }
 
-// ── kill switch: STACKBASE_PG_STREAM=0/"false" disables queryStream on the Bun path, mirroring
+// ── kill switch: HELIPOD_PG_STREAM=0/"false" disables queryStream on the Bun path, mirroring
 //    NodePgClient's identical env var ────────────────────────────────────────────────────────────
 async function testKillSwitch(): Promise<void> {
-  const original = process.env.STACKBASE_PG_STREAM;
+  const original = process.env.HELIPOD_PG_STREAM;
   try {
-    process.env.STACKBASE_PG_STREAM = "0";
+    process.env.HELIPOD_PG_STREAM = "0";
     const disabled = new BunSqlClient({ connectionString: URL });
-    assert.equal(disabled.queryStream, undefined, "STACKBASE_PG_STREAM=0 must leave queryStream unassigned");
+    assert.equal(disabled.queryStream, undefined, "HELIPOD_PG_STREAM=0 must leave queryStream unassigned");
     await disabled.close();
 
-    process.env.STACKBASE_PG_STREAM = "false";
+    process.env.HELIPOD_PG_STREAM = "false";
     const disabled2 = new BunSqlClient({ connectionString: URL });
-    assert.equal(disabled2.queryStream, undefined, 'STACKBASE_PG_STREAM="false" must leave queryStream unassigned');
+    assert.equal(disabled2.queryStream, undefined, 'HELIPOD_PG_STREAM="false" must leave queryStream unassigned');
     await disabled2.close();
 
-    delete process.env.STACKBASE_PG_STREAM;
+    delete process.env.HELIPOD_PG_STREAM;
     const enabledUnset = new BunSqlClient({ connectionString: URL });
-    assert.equal(typeof enabledUnset.queryStream, "function", "unset STACKBASE_PG_STREAM must default queryStream ON");
+    assert.equal(typeof enabledUnset.queryStream, "function", "unset HELIPOD_PG_STREAM must default queryStream ON");
     await enabledUnset.close();
 
-    process.env.STACKBASE_PG_STREAM = "1";
+    process.env.HELIPOD_PG_STREAM = "1";
     const enabledOne = new BunSqlClient({ connectionString: URL });
-    assert.equal(typeof enabledOne.queryStream, "function", 'STACKBASE_PG_STREAM="1" (any non-"0"/"false" value) must leave queryStream ON');
+    assert.equal(typeof enabledOne.queryStream, "function", 'HELIPOD_PG_STREAM="1" (any non-"0"/"false" value) must leave queryStream ON');
     await enabledOne.close();
   } finally {
-    if (original === undefined) delete process.env.STACKBASE_PG_STREAM;
-    else process.env.STACKBASE_PG_STREAM = original;
+    if (original === undefined) delete process.env.HELIPOD_PG_STREAM;
+    else process.env.HELIPOD_PG_STREAM = original;
   }
-  ok("kill switch: STACKBASE_PG_STREAM=0/\"false\" disables queryStream; unset/\"1\" leaves it enabled");
+  ok("kill switch: HELIPOD_PG_STREAM=0/\"false\" disables queryStream; unset/\"1\" leaves it enabled");
 }
 
 // ── fleet: commitQuerierFor gives independent per-shard sessions; shard locks are session-scoped

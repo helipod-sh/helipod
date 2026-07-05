@@ -1,13 +1,13 @@
 /**
- * Auth A3 (external identity) — E2E through the real `stackbase dev` server
- * (e2e-through-shipped-entrypoint rule). A REAL `@stackbase/client` over a REAL WebSocket to a REAL
- * server with `@stackbase/auth` composed WITH `oauth`/`jwt` config blocks, mirroring
+ * Auth A3 (external identity) — E2E through the real `helipod dev` server
+ * (e2e-through-shipped-entrypoint rule). A REAL `@helipod/client` over a REAL WebSocket to a REAL
+ * server with `@helipod/auth` composed WITH `oauth`/`jwt` config blocks, mirroring
  * `auth-session-e2e.test.ts`/`auth-email-e2e.test.ts` exactly (`loadProject` + `createEmbeddedRuntime`
  * + `startDevServer` + real client/WebSocket transport, event-driven `waitFor` — no bare sleeps for
  * correctness-critical waits). Two LOOPBACK mock servers stand in for a real provider/issuer (no live
  * third-party network — `packages/cli/test/support/mock-oauth-provider.ts`).
  *
- * Per Task 1, a composed component's reserved routes (`@stackbase/auth`'s `/api/auth/oauth/*`) are
+ * Per Task 1, a composed component's reserved routes (`@helipod/auth`'s `/api/auth/oauth/*`) are
  * NOT dispatched automatically by `startDevServer` — the caller must build the runtime-bound
  * closures and pass them as `componentRoutes`, exactly as `packages/cli/src/boot.ts`'s `bootLoaded`
  * does (see that file's `bearerOf`/`componentRoutes` block, and Task 1's own
@@ -41,12 +41,12 @@
  *      `components/auth/test/oauth-callback.test.ts`.)
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { defineSchema } from "@stackbase/values";
-import { query } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineAuth, oauthProvider, type MintResult } from "@stackbase/auth";
+import { defineSchema } from "@helipod/values";
+import { query } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineAuth, oauthProvider, type MintResult } from "@helipod/auth";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 import { startMockProvider, DEFAULT_CLIENT_ID, type MockProvider } from "./support/mock-oauth-provider";
 
@@ -81,7 +81,7 @@ const REDIRECT_ALLOWLIST = ["http://localhost:5173"];
 const servers: DevServer[] = [];
 afterAll(async () => { for (const s of servers) await s.close(); });
 
-/** Boot the real dev server with `@stackbase/auth` composed WITH both `oauth` (a single "mock"
+/** Boot the real dev server with `@helipod/auth` composed WITH both `oauth` (a single "mock"
  *  provider pointed at the loopback mock) and `jwt` (its issuer pointed at the same mock's `/jwks`).
  *  Builds `componentRoutes` exactly as `boot.ts`'s `bootLoaded` does — see that file's comment. */
 async function startServer(mock: MockProvider): Promise<{ server: DevServer; wsUrl: string }> {
@@ -112,7 +112,7 @@ async function startServer(mock: MockProvider): Promise<{ server: DevServer; wsU
         },
         redirectAllowlist: REDIRECT_ALLOWLIST,
       },
-      jwt: { issuers: [{ issuer: mock.url, audience: "stackbase", jwksUrl: mock.jwksUrl }] },
+      jwt: { issuers: [{ issuer: mock.url, audience: "helipod", jwksUrl: mock.jwksUrl }] },
     }),
   ]);
   const runtime: EmbeddedRuntime = await createEmbeddedRuntime({
@@ -148,7 +148,7 @@ describe("auth A3 external identity — E2E through the real dev server", () => 
     const mock = await startMockProvider();
     try {
       const { server, wsUrl } = await startServer(mock);
-      const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
       try {
         // Live subscription opened BEFORE the sign-in — starts unauthenticated (null).
         const seen: Array<string | null> = [];
@@ -214,7 +214,7 @@ describe("auth A3 external identity — E2E through the real dev server", () => 
     const mock = await startMockProvider();
     try {
       const { wsUrl } = await startServer(mock);
-      const c = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const c = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
       try {
         const seen: Array<string | null> = [];
         c.subscribe(api.whoami.get, {}, (v) => seen.push(v as string | null));
@@ -240,8 +240,8 @@ describe("auth A3 external identity — E2E through the real dev server", () => 
     const mock = await startMockProvider();
     try {
       const { server, wsUrl } = await startServer(mock);
-      const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
-      const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const a = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const b = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
       try {
         const email = "link@ext.com";
         // Password sign-up, no email-verification flow driven — the user is UNVERIFIED, the exact
@@ -291,8 +291,8 @@ describe("auth A3 external identity — E2E through the real dev server", () => 
     const mock = await startMockProvider();
     try {
       const { server, wsUrl } = await startServer(mock);
-      const a = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
-      const b = new StackbaseClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const a = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
+      const b = new HelipodClient(webSocketTransport(wsUrl, { reconnect: false }));
       try {
         // A password user with the SAME email the id_token will carry — unverified, so the flip-gated
         // autolink applies. If identity ever leaked from the POST `user` JSON's (different) email, the

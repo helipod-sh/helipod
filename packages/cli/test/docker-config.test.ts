@@ -17,23 +17,23 @@ describe("docker config", () => {
     // anchored so a prose placeholder that merely mentions "serve" can't false-green this.
     expect(dockerfile).toMatch(/^(ENTRYPOINT|CMD)\s*\[.*"serve"/m);
   });
-  it("the runtime image links workspace @stackbase/* packages into node_modules for bind-mounted apps", () => {
-    // A bind-mounted /app/convex resolves bare `@stackbase/*` imports up to /app/node_modules;
+  it("the runtime image links workspace @helipod/* packages into node_modules for bind-mounted apps", () => {
+    // A bind-mounted /app/convex resolves bare `@helipod/*` imports up to /app/node_modules;
     // turbo-prune keeps workspace links nested per-package, so without these root symlinks every
-    // app's schema.ts `import "@stackbase/values"` fails at load (verified via real docker compose up).
-    expect(dockerfile).toMatch(/node_modules\/@stackbase/);
+    // app's schema.ts `import "@helipod/values"` fails at load (verified via real docker compose up).
+    expect(dockerfile).toMatch(/node_modules\/@helipod/);
     expect(dockerfile).toMatch(/symlinkSync/);
   });
   it("the runtime image makes the deploy scratch dir writable by the non-root user", () => {
-    // `stackbase deploy` writes the pushed tree under /app/.stackbase-deploy; /app's dir node is
+    // `helipod deploy` writes the pushed tree under /app/.helipod-deploy; /app's dir node is
     // root-owned (COPY chowns only its contents), so the runner stage must chown /app + create the
     // deploy dir before USER bun — else deploy fails with EACCES (verified via real docker deploy).
-    expect(dockerfile).toMatch(/\.stackbase-deploy/);
+    expect(dockerfile).toMatch(/\.helipod-deploy/);
     expect(dockerfile).toMatch(/chown bun:bun[^\n]*\/app/);
   });
   it("compose mounts the app dir and a data volume and requires the admin key", () => {
-    expect(compose).toMatch(/\/app\/stackbase/);
-    expect(compose).toMatch(/STACKBASE_ADMIN_KEY/);
+    expect(compose).toMatch(/\/app\/helipod/);
+    expect(compose).toMatch(/HELIPOD_ADMIN_KEY/);
     expect(compose).toMatch(/serve/);
   });
 });

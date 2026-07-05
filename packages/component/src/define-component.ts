@@ -1,13 +1,13 @@
-import type { SchemaDefinition, Validator, JSONValue } from "@stackbase/values";
-import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter, ActionApi } from "@stackbase/executor";
-import type { ComponentContext } from "@stackbase/executor";
-import type { SerializedKeyRange } from "@stackbase/index-key-codec";
+import type { SchemaDefinition, Validator, JSONValue } from "@helipod/values";
+import type { RegisteredFunction, TablePolicy, PolicyContextProvider, GuestDatabaseWriter, ActionApi } from "@helipod/executor";
+import type { ComponentContext } from "@helipod/executor";
+import type { SerializedKeyRange } from "@helipod/index-key-codec";
 
 export interface BootContext { db: GuestDatabaseWriter; now: number }
 
 /**
  * One observed change in the MVCC log, as surfaced by `DriverContext.readLog` (the change-feed seam
- * `@stackbase/triggers` consumes). `op` is derived from the log entry: `value === null` → `"delete"`,
+ * `@helipod/triggers` consumes). `op` is derived from the log entry: `value === null` → `"delete"`,
  * else `prev_ts === null` → `"insert"`, else `"update"`. `oldDoc` is the previous revision reached
  * through the `prev_ts` chain (`null` for an insert, and — the documented edge — `null` for an
  * `"update"` whose `prev_ts` points at a tombstone, i.e. a delete→re-insert reusing the id).
@@ -64,7 +64,7 @@ export interface DriverContext {
   backstopMs(defaultMs: number): number;
   /**
    * Read committed changes from the MVCC log after `afterTs`, in ascending ts order — the durable
-   * change feed (`@stackbase/triggers`). `limit` bounds the number of SCANNED revisions (not matched
+   * change feed (`@helipod/triggers`). `limit` bounds the number of SCANNED revisions (not matched
    * ones), so a quiet watched table on a busy log still makes cursor progress; `tables` filters the
    * returned `changes` to those app tables by name (unset → every app table).
    *
@@ -75,9 +75,9 @@ export interface DriverContext {
    *
    * `limit: 0` — a deliberate, documented escape hatch: "peek the current stable bound without
    * scanning anything." Returns `{ changes: [], maxScannedTs: <the bound> }` at O(1) cost (no
-   * `load_documents` scan at all). This is how `@stackbase/triggers` seeds a NEW (non-`fromStart`)
+   * `load_documents` scan at all). This is how `@helipod/triggers` seeds a NEW (non-`fromStart`)
    * trigger's cursor at the log's current tip cheaply, instead of paying for a scan just to discover
-   * where "now" is — see `@stackbase/triggers`' `src/boot.ts`.
+   * where "now" is — see `@helipod/triggers`' `src/boot.ts`.
    */
   readLog(opts: { afterTs: number; tables?: string[]; limit?: number }): Promise<{
     changes: LogChange[];
@@ -88,12 +88,12 @@ export interface DriverContext {
    * `undefined` if the path isn't registered at all — the same resolver `ComponentContext.
    * functionKind` exposes to an in-transaction facade (see its doc comment in
    * `packages/executor/src/executor.ts`), threaded onto `DriverContext` too so a driver's own
-   * startup can validate a config-supplied function path (e.g. `@stackbase/triggers`' `handler`
+   * startup can validate a config-supplied function path (e.g. `@helipod/triggers`' `handler`
    * option) BEFORE ever calling it — "unknown path" vs "wrong kind" are both fail-fast, instructive
    * errors at driver start, not a confusing runtime crash on the first commit.
    *
    * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
-   * doesn't need path validation (e.g. `@stackbase/scheduler`'s, which dispatches whatever `fnPath`
+   * doesn't need path validation (e.g. `@helipod/scheduler`'s, which dispatches whatever `fnPath`
    * a `jobs` row already carries) can ignore it entirely; existing drivers/fakes are unaffected.
    */
   functionKind?(path: string): "query" | "mutation" | "action" | "httpAction" | undefined;
@@ -101,7 +101,7 @@ export interface DriverContext {
    * M2c: re-run/re-push every live subscription whose read set intersects `inv` — table-level
    * invalidation only (`ranges: []`), the shape a GLOBAL (D1-backed) table's change signal takes
    * (a `.global()` write leaves no local MVCC range to intersect; see
-   * `@stackbase/runtime-cloudflare`'s `GlobalReactivityPoller`). Delegates to
+   * `@helipod/runtime-cloudflare`'s `GlobalReactivityPoller`). Delegates to
    * `SyncProtocolHandler.notifyWrites`, already in scope wherever `DriverContext` is built.
    * Optional (not every `DriverContext` implementation/test fake provides it) — a driver that
    * writes through the normal `runFunction`/transaction path instead (nearly all of them) never
@@ -159,7 +159,7 @@ export interface Driver {
  * routes — overlapping prefixes across components (one a prefix of another, for the same method) are
  * REJECTED at `composeComponents` time (see `assertValidComponentRoutePrefix`'s caller there), so
  * first-match-by-order can never be ambiguous. The handler parses any sub-path (`<provider>/<phase>`)
- * itself, as this repo's routes carry no named params (see `@stackbase/executor`'s `matchRoute`, and
+ * itself, as this repo's routes carry no named params (see `@helipod/executor`'s `matchRoute`, and
  * storage's `handleServe`).
  */
 export interface ComponentHttpRoute {
@@ -185,12 +185,12 @@ export interface ComponentDefinition {
    * instead of `context`'s in-txn facade (an action has no `db`). Must expose the SAME method
    * signatures as `context`'s facade so a function body is portable between a mutation and an
    * action — implemented by delegating to `api.runMutation`/`api.runQuery` of this component's own
-   * (typically `_`-prefixed) modules. See `ContextProvider.buildAction` in `@stackbase/executor`.
+   * (typically `_`-prefixed) modules. See `ContextProvider.buildAction` in `@helipod/executor`.
    */
   buildAction?: (api: ActionApi) => object;
   /**
    * Extra named values this component wants codegen to re-export from `_generated/server.ts`,
-   * sourced from `contextType.import` — e.g. `@stackbase/scheduler` sets `["cronJobs"]` so an
+   * sourced from `contextType.import` — e.g. `@helipod/scheduler` sets `["cronJobs"]` so an
    * app's `crons.ts` can do `import { cronJobs } from "./_generated/server"` unchanged. Requires
    * `contextType` (the import path is shared with it).
    */

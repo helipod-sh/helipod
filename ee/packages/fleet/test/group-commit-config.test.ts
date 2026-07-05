@@ -1,5 +1,5 @@
 /**
- * Fleet B4, Task 4 — `STACKBASE_GROUP_COMMIT` env parsing (`groupCommitEnabled`, mirrors
+ * Fleet B4, Task 4 — `HELIPOD_GROUP_COMMIT` env parsing (`groupCommitEnabled`, mirrors
  * `fleetMultiWriterEnabled`'s shape) and the pure `flushesPerSec` derivation (`deriveFlushesPerSec`)
  * `startFleetNode`'s health closure uses. Both are pure — no Postgres/fleet node needed; the
  * `runtimeOptions.groupCommit` threading through `prepareFleetNode` and the full `/api/health` shape
@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { groupCommitEnabled, deriveFlushesPerSec } from "../src/node";
 
 describe("groupCommitEnabled", () => {
-  const ENV_KEY = "STACKBASE_GROUP_COMMIT";
+  const ENV_KEY = "HELIPOD_GROUP_COMMIT";
   const saved = process.env[ENV_KEY];
   afterEach(() => {
     if (saved === undefined) delete process.env[ENV_KEY];

@@ -1,12 +1,12 @@
 ---
 title: "Build a custom component"
-description: "Author your own @stackbase/*-style component with defineComponent: schema, facade, driver, boot, and HTTP routes."
+description: "Author your own @helipod/*-style component with defineComponent: schema, facade, driver, boot, and HTTP routes."
 ---
 
 {/* diataxis: how-to */}
 
-This is a how-to for building your own component: a package shaped like `@stackbase/scheduler` or
-`@stackbase/auth` that a project opts into from its `stackbase.config.ts`. It assumes you already
+This is a how-to for building your own component: a package shaped like `@helipod/scheduler` or
+`@helipod/auth` that a project opts into from its `helipod.config.ts`. It assumes you already
 know what a component is as a concept and focuses purely on the mechanics of authoring one.
 
 <Callout type="info" title="New to components?">
@@ -29,14 +29,14 @@ Think of a component as a self-contained mini-backend that plugs into the engine
 - and optional HTTP routes at reserved paths.
 
 Every piece is optional except a name, a schema, and a set of functions. A component can be as small
-as a couple of tables and a background loop (`@stackbase/triggers`), or as full-featured as tables, a
-facade, an action-mode facade, HTTP routes, and a boot step (`@stackbase/auth`). The six components
+as a couple of tables and a background loop (`@helipod/triggers`), or as full-featured as tables, a
+facade, an action-mode facade, HTTP routes, and a boot step (`@helipod/auth`). The six components
 that ship today (scheduler, triggers, auth, authz, workflow, notifications) aren't special-cased by
 the engine in any way. They're built on exactly the seam described on this page, so they double as
 the best reference material for building your own.
 
 A component is opt-in per project: it does nothing until a project lists it in its
-`stackbase.config.ts`. Nothing is auto-installed, and nothing about the engine itself needs to change
+`helipod.config.ts`. Nothing is auto-installed, and nothing about the engine itself needs to change
 to add a new component to the ecosystem.
 
 ## The entry point: `defineComponent`
@@ -122,7 +122,7 @@ registers in its own files. The only difference: these are namespaced with `:` i
 
 The convention every built-in component follows: prefix a function name with `_` when it's an
 internal implementation detail that only your own driver or facade should call, not something an app
-or a client is meant to invoke directly. `@stackbase/scheduler`'s own dispatch loop, for example,
+or a client is meant to invoke directly. `@helipod/scheduler`'s own dispatch loop, for example,
 calls three internal mutations in sequence: `_peekDue`, `_claim`, and `_complete`. None of those are
 meant to be called from application code; they exist purely so the driver (seam 4, below) has
 something to run.
@@ -160,7 +160,7 @@ interface ComponentContext {
 ```
 
 By default, `cctx.db` is read-only, even inside a mutation. That's deliberate: most facades (like
-`@stackbase/authz`'s permission checks) only ever need to read. If your facade needs to write (insert
+`@helipod/authz`'s permission checks) only ever need to read. If your facade needs to write (insert
 a job row, record a session), set `contextWrite: true` on your `ComponentDefinition`. With that flag,
 `cctx.db` becomes writable during a mutation call. It stays read-only during a query, since queries
 never write at all.
@@ -177,14 +177,14 @@ live in a subscribed query.
 
 `contextType` and `serverExports` are purely for codegen, not runtime behavior:
 
-- `contextType: { import, type }` tells `stackbase codegen` which package and type name to import so
+- `contextType: { import, type }` tells `helipod codegen` which package and type name to import so
   it can type `ctx.<name>` correctly in the generated `_generated/server.ts`. Declaring `contextType`
   without `context` is rejected by `defineComponent` (see above); the two must travel together.
 - `serverExports: string[]` lets you re-export a helper alongside `query`/`mutation`/`action` from
-  `_generated/server.ts`, sourced from the same `contextType.import` path. `@stackbase/scheduler` sets
+  `_generated/server.ts`, sourced from the same `contextType.import` path. `@helipod/scheduler` sets
   `serverExports: ["cronJobs"]` so an app's `crons.ts` can write
   `` import { cronJobs } from "./_generated/server" `` without a separate import from
-  `@stackbase/scheduler` itself.
+  `@helipod/scheduler` itself.
 
 ### Actions need a second implementation: `buildAction`
 
@@ -210,8 +210,8 @@ interface ActionApi {
 }
 ```
 
-This is exactly the pattern `@stackbase/scheduler`'s `schedulerActionContext` and
-`@stackbase/workflow`'s `workflowActionContext` both use: an action-mode facade delegates to an
+This is exactly the pattern `@helipod/scheduler`'s `schedulerActionContext` and
+`@helipod/workflow`'s `workflowActionContext` both use: an action-mode facade delegates to an
 internal (`_`-prefixed) mutation that does the real work in its own fresh transaction. The payoff:
 `ctx.scheduler.runAfter(...)` reads identically whether the code calling it is a mutation or an
 action, even though two different objects sit behind `ctx.scheduler` depending on which one you're
@@ -248,7 +248,7 @@ gets to actually do things outside of any request:
   client request. This is how a driver actually dispatches work.
 - **`readLog({ afterTs, tables?, limit? })`**: reads committed changes from the underlying change log
   after a given timestamp. This is the seam a "react to every insert/update/delete on a table"
-  component (like `@stackbase/triggers`) is built on, described further below. Each returned change in
+  component (like `@helipod/triggers`) is built on, described further below. Each returned change in
   the batch looks like:
 
   ```ts title="packages/component/src/define-component.ts (shape)"
@@ -297,10 +297,10 @@ subscription watching that data exactly like any other write would.
 No polling loop is scanning a `jobs` table on an interval anywhere in this picture. The whole path is
 either "woken by a commit" or "woken by a wall-clock timer armed to the next due timestamp."
 
-### A simpler driver: `@stackbase/triggers`
+### A simpler driver: `@helipod/triggers`
 
-Not every driver needs a writable facade. `@stackbase/triggers` has no `context` at all: you configure
-it declaratively (`{ table: { handler } }` in `stackbase.config.ts`), and its driver is just a cursor
+Not every driver needs a writable facade. `@helipod/triggers` has no `context` at all: you configure
+it declaratively (`{ table: { handler } }` in `helipod.config.ts`), and its driver is just a cursor
 walking forward through `readLog`, calling your handler function with batches of changes as it goes,
 advancing its own cursor once your handler returns successfully. It's a good second reference
 alongside the scheduler: same `driver` seam, no facade, no HTTP routes. Proof that you don't need
@@ -317,7 +317,7 @@ boot?: (ctx: BootContext) => Promise<void>;
 `boot` runs once per process start, before your driver's `start` is called and before the project
 starts serving requests. `BootContext` gives it `{ db, now }`: a writer scoped to your component's own
 boot-time transaction, and a clock. This is for reconciling some piece of config into a table:
-`@stackbase/scheduler` uses it to read an app's declared `cronJobs()` schedule and write matching rows
+`@helipod/scheduler` uses it to read an app's declared `cronJobs()` schedule and write matching rows
 into its `crons` table (`reconcileCrons`) so the driver has something concrete to dispatch against,
 rather than re-parsing the config file on every tick.
 
@@ -377,7 +377,7 @@ A few more fields round out `ComponentDefinition`, each smaller than the six abo
   type={{
     requires: {
       type: 'string[]',
-      description: 'Names other components yours needs composed alongside it. @stackbase/workflow declares requires: ["scheduler"] because it dispatches its steps through the scheduler\'s job queue. The composing project gets a clear compose-time error (component "widget" requires "scheduler", which is not enabled) instead of a confusing runtime failure the first time your facade is touched.',
+      description: 'Names other components yours needs composed alongside it. @helipod/workflow declares requires: ["scheduler"] because it dispatches its steps through the scheduler\'s job queue. The composing project gets a clear compose-time error (component "widget" requires "scheduler", which is not enabled) instead of a confusing runtime failure the first time your facade is touched.',
     },
     config: {
       type: 'Validator<unknown>',
@@ -389,12 +389,12 @@ A few more fields round out `ComponentDefinition`, each smaller than the six abo
     },
     policies: {
       type: '(paired with policyContext)',
-      description: 'How a component like @stackbase/authz attaches row-level read/write rules to an app\'s own tables, and contributes fields (like the caller\'s identity) into every policy\'s evaluation context. Most components never touch this pair at all.',
+      description: 'How a component like @helipod/authz attaches row-level read/write rules to an app\'s own tables, and contributes fields (like the caller\'s identity) into every policy\'s evaluation context. Most components never touch this pair at all.',
     },
   }}
 />
 
-## Worked example: `@stackbase/scheduler`
+## Worked example: `@helipod/scheduler`
 
 Here's every seam wired up at once, from `defineScheduler()` in `components/scheduler/src/index.ts`:
 
@@ -405,7 +405,7 @@ export function defineScheduler(opts?: { crons?: CronJobs }): ComponentDefinitio
     schema: schedulerSchema,                              // seam 1
     modules: { _peekDue, _claim, _complete, _reclaim, _cronTick, _enqueue, _cancel }, // seam 2
     context: (cctx) => schedulerContext(cctx),             // seam 3
-    contextType: { import: "@stackbase/scheduler", type: "SchedulerContext" },
+    contextType: { import: "@helipod/scheduler", type: "SchedulerContext" },
     serverExports: ["cronJobs"],
     contextWrite: true,                                    // seam 3, writable
     driver: schedulerDriver(),                              // seam 4
@@ -440,24 +440,24 @@ it, and that job's own write fanning out reactively) is the sequence diagram fro
 ## Composing your component into a project
 
 Once your `defineWidget(opts)` factory exists, a project uses it exactly like a built-in component, by
-listing it in `stackbase.config.ts`:
+listing it in `helipod.config.ts`:
 
-```ts title="stackbase.config.ts"
-import { defineConfig } from "@stackbase/component";
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWidget } from "@my-org/stackbase-widget";
+```ts title="helipod.config.ts"
+import { defineConfig } from "@helipod/component";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWidget } from "@my-org/helipod-widget";
 
 export default defineConfig({
   components: [defineScheduler(), defineWidget({ /* your options */ })],
 });
 ```
 
-(This mirrors `examples/auth-demo/stackbase.config.ts`, which composes `auth`, `scheduler`, and
+(This mirrors `examples/auth-demo/helipod.config.ts`, which composes `auth`, `scheduler`, and
 `workflow` together as its own reference pattern.)
 
 ```mermaid
 flowchart TD
-    Cfg["stackbase.config.ts\ndefineConfig({ components: [...] })"]
+    Cfg["helipod.config.ts\ndefineConfig({ components: [...] })"]
     Cfg --> Compose["composeComponents"]
     Compose --> NS["namespace tables + modules\nper component"]
     Compose --> Collect["collect drivers, boot steps,\nhttpRoutes"]
@@ -469,9 +469,9 @@ The CLI runs `composeComponents` (`packages/component/src/compose.ts`) once, at 
 every component's tables and modules, topologically orders components by their `requires` edges, and
 collects every driver/boot-step/HTTP-route into the flat lists the runtime actually wires up.
 
-This composed set is fixed at boot. Adding or removing a component from `stackbase.config.ts` needs a
-restart (`stackbase serve` again, or a fresh `stackbase build`); there's no live "activate this
-component" call. That's a deliberate, narrower boundary than `stackbase deploy`'s live hot-swap of
+This composed set is fixed at boot. Adding or removing a component from `helipod.config.ts` needs a
+restart (`helipod serve` again, or a fresh `helipod build`); there's no live "activate this
+component" call. That's a deliberate, narrower boundary than `helipod deploy`'s live hot-swap of
 your app's own functions and additive schema changes. See [Deploy & build](/docs/deploy/deploy-and-build)
 for exactly where that line is drawn.
 

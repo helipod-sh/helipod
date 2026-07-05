@@ -1,7 +1,7 @@
-import { query, mutation } from "@stackbase/executor";
-import type { QueryCtx, RegisteredFunction } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
-import type { OnCompleteResult, SchedulerContext } from "@stackbase/scheduler";
+import { query, mutation } from "@helipod/executor";
+import type { QueryCtx, RegisteredFunction } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
+import type { OnCompleteResult, SchedulerContext } from "@helipod/scheduler";
 import type { WorkflowRegistry } from "./registry";
 import { runReplay, type JournalRow } from "./replay";
 
@@ -24,7 +24,7 @@ import { runReplay, type JournalRow } from "./replay";
  * freshly-started (still-`"running"`, no `result`/`error` yet) run failed with `QueryFailed`
  * instead of `QueryUpdated` — every prior task's tests called `runtime.run(...)` directly and never
  * exercised the wire-serialization path. Mirrors the `compact()` helper every other component
- * (`@stackbase/scheduler`'s `facade.ts`/`modules.ts`) already uses before a `db.insert`/`replace`;
+ * (`@helipod/scheduler`'s `facade.ts`/`modules.ts`) already uses before a `db.insert`/`replace`;
  * this is the same discipline applied to a QUERY's return value instead.
  */
 export const status = query(async (ctx: QueryCtx, a: { runId: string }) => {
@@ -51,7 +51,7 @@ export const _sleep = mutation(async () => null);
  * is enqueued as an ordinary scheduler job — `ctx.workflow.start`, `_stepDone`'s own re-enqueue at
  * the bottom of this file), so they always run PRIVILEGED (`DriverContext.runFunction` in
  * `packages/runtime-embedded/src/runtime.ts` sets `privileged: true` unconditionally) — exactly
- * like `@stackbase/scheduler`'s own `_cronTick`. Privileged mode bypasses namespace prefixing
+ * like `@helipod/scheduler`'s own `_cronTick`. Privileged mode bypasses namespace prefixing
  * entirely (`requireTable` in `packages/executor/src/kernel.ts`), so their OWN `ctx.db`
  * calls must use fully-qualified table names (`"workflow/workflows"`, `"workflow/steps"`), not the
  * bare names a normal namespaced mutation would use — mirroring `_cronTick`'s `CRON_TABLES`
@@ -83,7 +83,7 @@ function schedulerFacade(ctx: any): SchedulerContext {
   return ctx.scheduler as SchedulerContext;
 }
 
-/** Drop `undefined`-valued keys — the wire codec (`convexToJson`) rejects `undefined`; omit rather than null it out. Mirrors `@stackbase/scheduler`'s `compact` (not exported, so replicated here). */
+/** Drop `undefined`-valued keys — the wire codec (`convexToJson`) rejects `undefined`; omit rather than null it out. Mirrors `@helipod/scheduler`'s `compact` (not exported, so replicated here). */
 function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: Exclude<T[K], undefined> } {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) if (v !== undefined) out[k] = v;
@@ -92,7 +92,7 @@ function compact<T extends Record<string, unknown>>(obj: T): { [K in keyof T]: E
 
 /**
  * If `wf.onComplete` is set, enqueue it with the workflow's terminal outcome — the workflow-level
- * analog of `@stackbase/scheduler`'s `fireOnComplete` (`components/scheduler/src/facade.ts`).
+ * analog of `@helipod/scheduler`'s `fireOnComplete` (`components/scheduler/src/facade.ts`).
  * `wf.context` is round-tripped verbatim (opaque to the workflow component, same contract as the
  * scheduler's). A no-op when `onComplete` is unset — the common case; a full workflow-of-workflows
  * slice (chaining a parent workflow's own `step` off a child's completion) is future work, this is
@@ -306,7 +306,7 @@ export function makeAdvance(workflows: WorkflowRegistry, maxParallelism: number 
  * `workflow:_stepDone` — the scheduler's `onComplete` callback for a step job (dispatched by
  * `makeAdvance` above via `sched.enqueue(..., { onComplete: "workflow:_stepDone", context })`).
  * Receives exactly `{ jobId, context: {workflowId, stepNumber, generationNumber}, result }` —
- * see `fireOnComplete` in `@stackbase/scheduler`'s `facade.ts` for that shape's origin.
+ * see `fireOnComplete` in `@helipod/scheduler`'s `facade.ts` for that shape's origin.
  *
  * Journals the step's terminal result (`"success"`/`"failed"`, canceled maps to `"failed"` with a
  * synthetic error) into its `steps` row, then re-enqueues `workflow:_advance` so the handler is
@@ -470,7 +470,7 @@ export const _compensateDone = mutation(
  * a fresh top-level mutation the trusted `invoke` seam resolves (see `ExecutorDeps.invoke`'s doc
  * comment in `packages/executor/src/executor.ts` — it resolves ANY registered path, `_`-prefixed
  * included, unlike the public `runtime.run`/`runAction`, which block `_` via `isInternalPath`).
- * Mirrors `@stackbase/scheduler`'s `_enqueue`/`_cancel` (`components/scheduler/src/modules.ts`)
+ * Mirrors `@helipod/scheduler`'s `_enqueue`/`_cancel` (`components/scheduler/src/modules.ts`)
  * exactly: both run namespaced (NOT privileged) — the action `invoke` seam
  * (`ActionApi.runMutation`, `packages/executor/src/executor.ts`'s `runActionFn`) never sets
  * `privileged` (defaults `false`), so `ctx.workflow` here is the SAME namespaced, bare-table-name

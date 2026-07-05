@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * Per-shard geographic PLACEMENT derivation (M1 locality). A Durable Object is single-homed — pinned
@@ -11,7 +11,7 @@
  * Precedence (spec-locked; each must be STABLE per shard key so the first `get()` — the only one that
  * counts — is deterministic wherever possible):
  *
- *   (a) EXPLICIT — a `?region=<hint>` param or an `X-Stackbase-Region: <hint>` header. App-controlled
+ *   (a) EXPLICIT — a `?region=<hint>` param or an `X-Helipod-Region: <hint>` header. App-controlled
  *       and fully deterministic; mirrors how the shard key itself is taken from `?shard=`. An invalid
  *       explicit hint is a hard error (the caller asked for a specific placement and got it wrong).
  *   (b) REGION-PREFIXED KEY (opt-in) — if enabled and the shard-key VALUE is a string of the form
@@ -24,10 +24,10 @@
  *       "first-requester-wins", NOT stable across requesters, which is acceptable and documented.
  *   (d) DEFAULT — no hint. `get(id)` with no options bag: byte-identical to the pre-hint behavior.
  */
-import { isValidLocationHint } from "@stackbase/runtime-cloudflare";
+import { isValidLocationHint } from "@helipod/runtime-cloudflare";
 
-/** The explicit-region envelope sources, mirroring the shard-key `?shard=` / `X-Stackbase-Shard` pair. */
-const REGION_HEADER = "x-stackbase-region";
+/** The explicit-region envelope sources, mirroring the shard-key `?shard=` / `X-Helipod-Shard` pair. */
+const REGION_HEADER = "x-helipod-region";
 const REGION_PARAM = "region";
 
 /**
@@ -76,7 +76,7 @@ export interface DeriveLocationHintInput {
   regionPrefixedKeys?: boolean;
 }
 
-/** Read the explicit `?region=` / `X-Stackbase-Region` hint, if any (header wins, mirroring the
+/** Read the explicit `?region=` / `X-Helipod-Region` hint, if any (header wins, mirroring the
  *  shard-key precedence). Empty string counts as "not provided". */
 function explicitRegion(url: URL, headers: Headers): string | null {
   const h = headers.get(REGION_HEADER);

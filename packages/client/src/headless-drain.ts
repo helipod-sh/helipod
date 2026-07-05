@@ -1,14 +1,14 @@
 /**
  * `drainOutboxOnce` — the headless one-shot outbox drain (spec Part B, "The Background Sync seam").
  * A Service Worker (or any UI-less context) can drain the durable queue: one exported function, no
- * `StackbaseClient`, no queries, no optimistic layers. Chromium's one-shot Background Sync then
+ * `HelipodClient`, no queries, no optimistic layers. Chromium's one-shot Background Sync then
  * becomes a documented recipe ON TOP of this (`docs/enduser/offline.md`) — a progressive
  * enhancement on the drain TRIGGER, never the durability story: the portable baseline stays the IDB
  * queue + drain-on-next-visit; this function only improves WHEN the drain runs.
  *
  * Composition (one refactor, zero duplication of the state machine):
  *  - `webSocketTransport(opts.url)` — already SW-compatible (the global `WebSocket`, no DOM deps).
- *  - The SAME `Connect`-handshake helpers `StackbaseClient` uses (`./connect-handshake`), fed from
+ *  - The SAME `Connect`-handshake helpers `HelipodClient` uses (`./connect-handshake`), fed from
  *    the durable STORE instead of a live in-memory log (`outboxHeldFromStore`).
  *  - A ~60-line store-only {@link DrainHost}: no rendering, no promises, no optimistic layer —
  *    `addHydrated` collects into a local array (not `client.ts`'s reactive `MutationLog`);
@@ -17,11 +17,11 @@
  *    shape `client.ts#beginBaselineAwait` already has a branch for).
  *  - The SAME exported {@link OutboxDrain} (`./outbox-drain`) — identity gate, poison policy,
  *    chunking, transient backoff are all reused unchanged, under the SAME deployment-scoped Web
- *    Locks name `client.ts` uses (`stackbase:outbox:<origin>:<deployment>`) — a live tab already
+ *    Locks name `client.ts` uses (`helipod:outbox:<origin>:<deployment>`) — a live tab already
  *    draining makes this call an immediate, cheap no-op (`{drained: 0, failed: 0, remaining}` via a
  *    non-blocking `ifAvailable` probe): "locks are efficiency, not correctness" holds here too.
  *
- * Unlike `StackbaseClient`, this function does NOT implement the `known: true` per-seq classifying
+ * Unlike `HelipodClient`, this function does NOT implement the `known: true` per-seq classifying
  * settle (`client.ts#settleVerdict`) — it doesn't need to: every held seq gets resent regardless via
  * the normal drain flush, and the server's exact-match receipts dedup a resend of an already-settled
  * seq into a harmless replay-ack (`MutationResponse{replayed:true}` for a prior success, or the SAME
@@ -34,7 +34,7 @@
  * `client.ts#onClientReset` does for a live park, while `"unsent"` rows (never sent, safe either
  * way) simply re-enqueue under the fresh identity, store-level (dequeue the old row, append the new).
  */
-import type { ServerMessage } from "@stackbase/sync";
+import type { ServerMessage } from "@helipod/sync";
 import type { PendingMutation } from "./mutation-log";
 import { buildConnectMessage, outboxHeldFromStore } from "./connect-handshake";
 import { OutboxDrain, dropIfNonReplayable, type DrainHost, type OutboxLockManager, type PoisonPolicy } from "./outbox-drain";
@@ -54,7 +54,7 @@ export interface HeadlessDrainOptions {
   deployment?: string;
   /** SW-readable auth (the app owns SW-readable token storage — this function only documents the
    *  constraint, it does not build one). Replayed as `SetAuth` BEFORE `Connect`, exactly as a
-   *  reconnecting `StackbaseClient` replays its last-set token. */
+   *  reconnecting `HelipodClient` replays its last-set token. */
   getAuthToken?: () => Promise<string | null>;
   /** For a `createAuthClient`-managed session (spec decision 9): resolve the PERSISTED
    *  `SessionInfo.sessionId` so this drain computes the outbox `identityFingerprint` the exact same
@@ -62,7 +62,7 @@ export interface HeadlessDrainOptions {
    *  never a token hash) — otherwise every entry a managed session stamped looks "foreign" here and
    *  terminal-fails with `OFFLINE_IDENTITY_CHANGED` on every headless drain, composition the live
    *  client never hits. Read the SAME storage row the auth client persists to — by default
-   *  `SESSION_STORAGE_KEY` (`"stackbase.session"`, exported from `auth-client.ts`) in `localStorage`,
+   *  `SESSION_STORAGE_KEY` (`"helipod.session"`, exported from `auth-client.ts`) in `localStorage`,
    *  or wherever a custom `SessionStorage`/`localStorageSession(key)` was configured to write it; a
    *  Service Worker reads it via `clients.matchAll()`-relayed message, a mirrored IndexedDB copy, or
    *  any other SW-reachable channel the app wires up — this function only documents the contract, it
@@ -97,7 +97,7 @@ export interface HeadlessDrainOptions {
 
 /** The origin component of the drain's Web Locks name — mirrors `client.ts#originTag` verbatim (a
  *  Service Worker's global scope has `location` too; Node/tests share one stable fallback). MUST
- *  compute the SAME value a live tab's `StackbaseClient` would, or the two never contend for the
+ *  compute the SAME value a live tab's `HelipodClient` would, or the two never contend for the
  *  same lock. */
 function originTag(): string {
   const loc = (globalThis as { location?: { origin?: string } }).location;
@@ -155,17 +155,17 @@ function toOutboxEntry(entry: PendingMutation): OutboxEntry {
  * Drain the durable outbox once: connect, hand `Connect`+`MutationBatch` traffic to the SAME
  * {@link OutboxDrain} state machine a live tab uses, and resolve once the queue is empty/terminal
  * or `timeoutMs` elapses — whichever comes first. Safe to call from a Service Worker's `sync` event
- * handler inside `event.waitUntil(...)`, or from any other script with no live `StackbaseClient`.
+ * handler inside `event.waitUntil(...)`, or from any other script with no live `HelipodClient`.
  */
 export async function drainOutboxOnce(opts: HeadlessDrainOptions): Promise<{ drained: number; failed: number; remaining: number }> {
   const outbox = opts.outbox ?? indexedDBOutbox();
   const deployment = opts.deployment ?? "default";
-  const lockName = `stackbase:outbox:${originTag()}:${deployment}`;
+  const lockName = `helipod:outbox:${originTag()}:${deployment}`;
   const timeoutMs = opts.timeoutMs ?? 30_000;
 
   const initial = await outbox.loadAll();
   if (countActive(initial.entries) === 0) {
-    // Nothing to do — mirrors `StackbaseClient`'s own "an EMPTY outbox sends NO first-connect
+    // Nothing to do — mirrors `HelipodClient`'s own "an EMPTY outbox sends NO first-connect
     // Connect" byte-identical short-circuit (`outbox-drain.ts#becomeLeader`'s `drainable().length >
     // 0` gate), just one level up: skip the lock probe and the socket entirely.
     return { drained: 0, failed: 0, remaining: 0 };
@@ -400,7 +400,7 @@ async function runDrain(
             // `setMeta`/`dequeue`/`append` failures inside `handleClientReset` must not become an
             // unhandled rejection (there is no promise chain here for a caller to attach a `.catch`
             // to) — floor it to console and still let the drain settle with whatever counts it has.
-            console.error("[stackbase] outbox: handleClientReset failed", err);
+            console.error("[helipod] outbox: handleClientReset failed", err);
             checkDone();
           });
       }

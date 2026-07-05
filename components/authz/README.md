@@ -1,6 +1,6 @@
-# @stackbase/authz
+# @helipod/authz
 
-**Reactive, typed authorization for Stackbase.** One model that scales from a two-line ownership rule to multi-tenant SaaS with sharing and hierarchies — enforced *inside the engine* so you can't forget a check, and reactive *by construction* so revoking access empties live subscriptions instantly.
+**Reactive, typed authorization for Helipod.** One model that scales from a two-line ownership rule to multi-tenant SaaS with sharing and hierarchies — enforced *inside the engine* so you can't forget a check, and reactive *by construction* so revoking access empties live subscriptions instantly.
 
 > **Status: design target (this README is the spec).** This document describes the complete intended API and behavior. The component is built to match it, layer by layer (see [Build order](#build-order)). The design rationale — why this model beats RBAC-only, Postgres RLS, OpenFGA/Zanzibar, and SpiceDB for a *reactive* backend — is in [`docs/research.md`](./docs/research.md).
 
@@ -8,9 +8,9 @@
 
 ## Why authz is different here
 
-Most authorization is bolted on: a library you call (and forget to call), a database feature that only your DB enforces, or a separate service you sync to. Stackbase authz is **none of those**. It is:
+Most authorization is bolted on: a library you call (and forget to call), a database feature that only your DB enforces, or a separate service you sync to. Helipod authz is **none of those**. It is:
 
-- **Reactive by construction.** A permission check *reads* authorization data, and Stackbase tracks every query's read-set. So when you revoke a role or unshare a document, every affected live query **re-runs and updates in the same instant** — no cache invalidation, no polling, no refetch. No other authorization model gives you this, because none of them runs *inside* a reactive engine.
+- **Reactive by construction.** A permission check *reads* authorization data, and Helipod tracks every query's read-set. So when you revoke a role or unshare a document, every affected live query **re-runs and updates in the same instant** — no cache invalidation, no polling, no refetch. No other authorization model gives you this, because none of them runs *inside* a reactive engine.
 - **O(1) on the hot path.** Roles, relationships, and hierarchies are *flattened into an indexed table at write time*, so a permission check is a single indexed point-read — not a graph traversal. The thing that runs on every request is the cheapest thing in the system.
 - **Engine-enforced, can't-forget.** Row policies run at the `ctx.db` kernel seam, so *every* read — including joins and counts — is filtered, and *every* write is checked. A function that forgets to authorize still cannot leak data.
 - **One TypeScript model, no DSL.** Permissions, roles, conditions, and relationships are all plain typed TypeScript. A typo'd permission is a *compile error*. No `.fga`/`.zed` schema, no CEL, no SQL `CREATE POLICY`. It's fully typed end-to-end through codegen.
@@ -22,12 +22,12 @@ See the full, unbiased comparison and the con-by-con engineering analysis in [`d
 
 ## Install & enable
 
-`@stackbase/authz` is a Stackbase component. Add it to your project's `stackbase.config.ts`:
+`@helipod/authz` is a Helipod component. Add it to your project's `helipod.config.ts`:
 
 ```ts
-// stackbase.config.ts
-import { defineConfig } from "@stackbase/component";
-import { auth } from "@stackbase/auth";
+// helipod.config.ts
+import { defineConfig } from "@helipod/component";
+import { auth } from "@helipod/auth";
 import { authz } from "./authz.config";
 
 export default defineConfig({ components: [auth, authz] });
@@ -43,7 +43,7 @@ The smallest useful authz is one rule — "a user sees only their own rows":
 
 ```ts
 // authz.config.ts
-import { defineAuthz } from "@stackbase/authz";
+import { defineAuthz } from "@helipod/authz";
 
 export const authz = defineAuthz({
   policies: {
@@ -266,7 +266,7 @@ Two things to know when authoring relation predicates:
 
 **Managing roles is itself a permission.** `assignRole`/`revokeRole` require the caller to hold `authz:manage` **in the target scope** (grant it through a role, e.g. `admin: { authz: ["manage"] }`) — so role management can't be used to escalate privilege, and a scope admin can only grant within their own scope. An explicit `scope` must have a non-empty `type` and `id`; `""` is reserved for the global scope (omit `scope` for global).
 
-**Bootstrapping the first admin.** There is deliberately no ungated path to the first role. Seed it out-of-band through the privileged admin surface (the `stackbase` CLI / admin API / dashboard), which writes the first `admin` assignment directly — e.g. `runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId, role: "admin", scopeType: "", scopeId: "" } })`. From then on, that admin manages everyone else through the gated mutations.
+**Bootstrapping the first admin.** There is deliberately no ungated path to the first role. Seed it out-of-band through the privileged admin surface (the `helipod` CLI / admin API / dashboard), which writes the first `admin` assignment directly — e.g. `runSystem("_system:insertDocument", { table: "authz/role_assignments", fields: { userId, role: "admin", scopeType: "", scopeId: "" } })`. From then on, that admin manages everyone else through the gated mutations.
 
 ### Relations & sharing
 
@@ -362,7 +362,7 @@ policies: {
 Policies and permission logic are **pure functions**, testable in isolation with vitest — mirroring production evaluation:
 
 ```ts
-import { expectPolicy } from "@stackbase/authz/testing";
+import { expectPolicy } from "@helipod/authz/testing";
 
 test("owners read their docs; others don't", () => {
   expectPolicy(authz).as({ userId: "alice" }).read("documents")
@@ -413,7 +413,7 @@ This is the deliberate, correct trade for a reactive backend — and it is state
 
 ## Comparison (at a glance)
 
-| | Stackbase authz | OpenFGA / SpiceDB (ReBAC) | Supabase RLS | Plain function checks |
+| | Helipod authz | OpenFGA / SpiceDB (ReBAC) | Supabase RLS | Plain function checks |
 |---|---|---|---|---|
 | Reactive (live revocation) | ✅ by construction | ❌ out-of-process check | ❌ DB can't notify | ⚠️ only if you read authz data |
 | Check cost | O(1) indexed read | graph traversal | row predicate | varies |

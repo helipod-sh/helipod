@@ -27,11 +27,11 @@
  * same reason. A DO's `fetch` IS that boundary, so we match them here — a single seam change that
  * unblocks BOTH file-storage serving (gap 7c) AND auth OAuth callbacks (gap 8c) on the DO.
  */
-import type { EmbeddedRuntime, RuntimeHost, ServeOptions, ServerHandle } from "@stackbase/runtime-embedded";
-import type { AdminApi } from "@stackbase/admin";
-import type { ResolvedRoute } from "@stackbase/cli/project";
-import type { StorageRoute } from "@stackbase/storage";
-import { handleHttpRequest } from "@stackbase/cli/http-handler";
+import type { EmbeddedRuntime, RuntimeHost, ServeOptions, ServerHandle } from "@helipod/runtime-embedded";
+import type { AdminApi } from "@helipod/admin";
+import type { ResolvedRoute } from "@helipod/cli/project";
+import type { StorageRoute } from "@helipod/storage";
+import { handleHttpRequest } from "@helipod/cli/http-handler";
 
 /** The reserved storage-route prefix — a storage route is matched ONLY under it (mirrors
  *  `server.ts`'s `STORAGE_PREFIX` gate), so a user `GET /api/storage/<id>` never collides with an
@@ -75,7 +75,7 @@ export class DurableObjectRuntimeHost implements RuntimeHost<ResolvedRoute, Admi
     this.componentRoutes = options.componentRoutes ?? [];
     return Promise.resolve({
       // A sentinel URL — the Worker owns the real ingress URL; the DO never learns it.
-      url: "do://stackbase",
+      url: "do://helipod",
       // The shipped portless sentinel (`host.ts:34`) — NOT "unbound/failed".
       port: 0,
       // A DO has no shutdown moment; durable work survives without this. No-op by design.

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SimpleIndexCatalog } from "../src/catalog";
-import { v, validate } from "@stackbase/values";
+import { v, validate } from "@helipod/values";
 
 describe("catalog carries the document validator", () => {
   it("builds a validator from documentType when schemaValidation is on", () => {

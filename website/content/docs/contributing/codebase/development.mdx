@@ -1,11 +1,11 @@
 ---
 title: "Development setup"
-description: "Clone, install, build, test, and the inner loop for working on stackbase itself."
+description: "Clone, install, build, test, and the inner loop for working on helipod itself."
 ---
 
 {/* diataxis: how-to */}
 
-This page is for people working on stackbase's own codebase, not people building an app with
+This page is for people working on helipod's own codebase, not people building an app with
 it. If you're building an app, you want the [Quickstart](/docs/get-started/quickstart) instead.
 
 Everything below is real. Every command is copied from an actual `package.json` or `turbo.json`
@@ -14,13 +14,13 @@ in the repo, not aspirational.
 ## Prerequisites
 
 - **Bun >= 1.2.** Bun is both the package manager and the runtime for the day-to-day workflow
-  (`bun install`, `bun run build`, `stackbase dev`). Install it from [bun.sh](https://bun.sh) if
+  (`bun install`, `bun run build`, `helipod dev`). Install it from [bun.sh](https://bun.sh) if
   you don't have it.
 - **Node >= 22** is a fully-supported *target* for the published packages. End users can run
-  stackbase on Node, but as a contributor you develop and run the tooling on Bun.
+  helipod on Node, but as a contributor you develop and run the tooling on Bun.
 
 <Callout title="Why Bun for development but Node as a target?">
-  Stackbase's engine is written to be runtime-agnostic behind small seams (like the storage
+  Helipod's engine is written to be runtime-agnostic behind small seams (like the storage
   adapter), so it genuinely runs on both. Bun is just the faster, single-tool choice for the
   contributor loop: one binary that installs packages, runs scripts, and executes TypeScript
   directly with no separate transpile step.
@@ -30,7 +30,7 @@ in the repo, not aspirational.
 
 ```bash
 git clone <your-fork-url>
-cd stackbase
+cd helipod
 bun install
 ```
 
@@ -58,8 +58,8 @@ bun run dev         # watch-build every package (re-runs build on save)
 Working on one package at a time? Scope any script to it with `--filter`:
 
 ```bash
-bun run --filter @stackbase/values test
-bun run --filter @stackbase/values typecheck
+bun run --filter @helipod/values test
+bun run --filter @helipod/values typecheck
 ```
 
 There's also a separate end-to-end test command, covered in its own section below because it has
@@ -78,7 +78,7 @@ Day to day, the loop looks like this:
 flowchart LR
     A["Edit source in packages/*"] --> B["bun run build"]
     B --> C["bun run typecheck + test + lint"]
-    C --> D["stackbase dev on an example"]
+    C --> D["helipod dev on an example"]
     D --> A
     B -.->|"writes dist/, the ONLY thing tests import"| C
 ```
@@ -93,14 +93,14 @@ yourself an hour of confusion later.
 
 ### 1. Cross-package tests import from `dist/`, not `src/`
 
-When package A depends on package B (say, `@stackbase/cli` depends on `@stackbase/values`), A's
+When package A depends on package B (say, `@helipod/cli` depends on `@helipod/values`), A's
 tests resolve B through B's **built** `dist/` output, the same way a real npm consumer would,
 not through B's `src/`.
 
 That means: if you edit `packages/values/src/index.ts` and immediately run
-`bun run --filter @stackbase/cli test`, your edit is invisible. Nothing breaks, nothing updates.
+`bun run --filter @helipod/cli test`, your edit is invisible. Nothing breaks, nothing updates.
 The test just silently keeps running against whatever was in `dist/` before your edit. You have
-to `bun run build` (or `bun run --filter @stackbase/values build`) first to refresh `dist/`.
+to `bun run build` (or `bun run --filter @helipod/values build`) first to refresh `dist/`.
 
 <Callout title="git checkout won't save you either" type="warn">
 
@@ -137,21 +137,21 @@ bun run dev
 That `dev` script is really:
 
 ```bash
-bun ../../packages/cli/dist/bin.js dev --dir stackbase --web web --port 3210
+bun ../../packages/cli/dist/bin.js dev --dir helipod --web web --port 3210
 ```
 
 Here's what happens when it starts:
 
 1. It boots the **embedded runtime**, an in-process engine (storage, transaction manager, query
    engine, WebSocket sync server), all in one Bun process. No separate database to start.
-2. It watches the `stackbase/` folder (`--dir stackbase`) for function and schema changes.
+2. It watches the `helipod/` folder (`--dir helipod`) for function and schema changes.
 3. On every save, it re-bundles your functions, re-runs codegen (regenerating the typed
    `_generated/api` your app code imports), and pushes the new code into the running engine,
    without dropping open WebSocket subscriptions. A page with a live query just updates.
 4. It serves the sync WebSocket, the HTTP API, and the dashboard, all on one port
    (`--port 3210`), and serves the example's static frontend (`--web web`).
 
-If you only changed a function in `stackbase/` you don't need to do anything else. The watch loop
+If you only changed a function in `helipod/` you don't need to do anything else. The watch loop
 picks it up. If you changed a package under `packages/` that the example depends on, remember
 gotcha #1: rebuild that package first, or the example keeps running the old code.
 
@@ -167,7 +167,7 @@ See [the CLI reference](/docs/reference/cli) for the full flag list, and
 ## E2E tests and the cardinal testing rule
 
 `packages/cli/test/*-e2e.test.ts` are a different animal from ordinary unit tests. Each one boots
-a **real** `stackbase dev` (or `stackbase serve`) server, the actual CLI entrypoint an end user
+a **real** `helipod dev` (or `helipod serve`) server, the actual CLI entrypoint an end user
 runs, and drives it over a real WebSocket or HTTP connection.
 
 ```bash
@@ -179,7 +179,7 @@ The project's cardinal testing rule follows directly from this:
 <Callout title="Any cross-package feature must be proven through the real CLI server">
 
   A mechanism that only passes in isolation, a unit test exercising some internal class directly
-  and never wired through `stackbase dev`/`serve` the way a real user's request would travel, has
+  and never wired through `helipod dev`/`serve` the way a real user's request would travel, has
   repeatedly hidden real bugs in this project's history. Things like a feature built correctly
   but never actually plumbed into the command that's supposed to use it, or a privilege check
   that only fires on one of two code paths into the same functionality. If your change crosses a
@@ -199,13 +199,13 @@ Don't jump straight to coding a new slice. The spec is where architectural mista
 cheaply, before they're locked into shipped code.
 
 **DX is the feature, not polish.** Error messages from the CLI and SDK, the quality of type
-inference, and how fast `stackbase dev` starts up are treated as core product surface. If a
+inference, and how fast `helipod dev` starts up are treated as core product surface. If a
 change makes an error message vaguer, or slows down startup, or blunts a generated type, weigh
 that cost explicitly. Don't treat it as an acceptable side effect of an unrelated fix.
 
 **Two documentation audiences, never mixed.** `docs/enduser/` is the public, end-user product
-documentation (this site): how someone *uses* stackbase. `docs/dev/` and `docs/superpowers/` are
-internal engineering docs (specs, architecture decisions, plans): how stackbase itself is
+documentation (this site): how someone *uses* helipod. `docs/dev/` and `docs/superpowers/` are
+internal engineering docs (specs, architecture decisions, plans): how helipod itself is
 *built*. A change to one should never leak into the other.
 
 **Storage-seam purity.** The engine must never know which database it's running on. Anything

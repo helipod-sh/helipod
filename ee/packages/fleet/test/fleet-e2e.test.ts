@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
- * Fleet slice ship gate: proves the EXACT production Tier-2 path — multiple REAL `stackbase serve
+ * Fleet slice ship gate: proves the EXACT production Tier-2 path — multiple REAL `helipod serve
  * --fleet` processes (spawned under `bun`, the primary runtime, driving `packages/cli/dist/bin.js`)
  * over a REAL native PostgreSQL 16 postmaster (embedded-postgres — no Docker). Nothing in-process:
  * writer/sync roles, write forwarding, cross-process reactive fan-out, and live failover are all
@@ -32,17 +32,17 @@ import { createServer } from "node:net";
 import type { Readable } from "node:stream";
 import WebSocket from "ws";
 import { Client } from "pg";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
 // Pure helper — reconstructs a node's `application_name` from its advertise URL, the exact
 // discriminator `prepareFleetNode` stamps on that node's Postgres backends. Imported from `src`
 // (not `dist`) only to compute the string in-test; the spawned `serve` children run the BUILT fleet
 // code (via `packages/cli/dist/bin.js`), so both sides must agree — rebuild before running.
 import { fleetApplicationName } from "../src/node";
 // The exported shard router — the ONE source of truth both this test and the running engine share
-// for mapping a shard-key value to its shard id. Imported from `@stackbase/id-codec`'s built `dist`
+// for mapping a shard-key value to its shard id. Imported from `@helipod/id-codec`'s built `dist`
 // (the spawned `serve` children run the same built code), so the shard a channelId routes to here is
 // exactly the shard the kernel guards + commit pool route it to in the child processes.
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 
 /* -------------------------------------------------------------------------- */
 /* Embedded-Postgres availability + cluster lifecycle                          */
@@ -185,7 +185,7 @@ const REPLICA_DB_FILENAME = "fleet-replica.db";
  *  instead of replaying); when omitted, a fresh per-node dir is minted (nodes must not share one).
  *  Caller-provided dirs are the caller's to track/clean; freshly-minted ones are tracked here.
  *  `extraEnv` layers additional environment onto the child — the wedged-writer scenario passes
- *  `STACKBASE_FLEET_LEASE_TTL_MS` to shrink the failover clock; unset (the existing scenarios) is
+ *  `HELIPOD_FLEET_LEASE_TTL_MS` to shrink the failover clock; unset (the existing scenarios) is
  *  byte-for-byte the old behavior. */
 function spawnFleetServe(
   databaseUrl: string,
@@ -211,7 +211,7 @@ function spawnFleetServe(
       "--fleet",
       "--advertise-url", advertiseUrl,
     ],
-    { env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] },
+    { env: { ...process.env, HELIPOD_ADMIN_KEY: ADMIN_KEY, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] },
   );
   allSpawnedProcesses.push(proc);
   return proc;
@@ -418,7 +418,7 @@ async function assertDenseChain(pg: Client): Promise<{ violations: number; multi
 /* Sharded-scenario helpers (B2a cross-shard ship gate)                        */
 /* -------------------------------------------------------------------------- */
 
-/** NUM_SHARDS this suite's sharded scenario pins (via `STACKBASE_FLEET_SHARDS`) so the in-test
+/** NUM_SHARDS this suite's sharded scenario pins (via `HELIPOD_FLEET_SHARDS`) so the in-test
  *  router `shardIdForKeyValue(value, NUM_SHARDS)` agrees with the child processes' routing exactly,
  *  independent of the fleet default. Matches the fleet default (8) so the density/frontier shape is
  *  the real N-shard layout the existing scenarios exercise. */
@@ -465,7 +465,7 @@ function bodiesOf(value: unknown): string[] {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Multi-writer scenario helpers (B2b — STACKBASE_FLEET_MULTI_WRITER=1)          */
+/* Multi-writer scenario helpers (B2b — HELIPOD_FLEET_MULTI_WRITER=1)          */
 /* -------------------------------------------------------------------------- */
 
 /** The live per-shard ownership partition the balancer maintains under multi-writer mode: every
@@ -583,7 +583,7 @@ function startCommitLoop(
 /* Test                                                                        */
 /* -------------------------------------------------------------------------- */
 
-maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postgres, real processes, failover)", () => {
+maybeDescribe("helipod serve --fleet — Tier-2 ship gate (real embedded postgres, real processes, failover)", () => {
   afterAll(async () => {
     // Belt-and-braces: kill any still-alive spawned processes BEFORE stopping the cluster.
     // This ensures cleanup even if the test hangs or errors out, bypassing the try/finally.
@@ -1090,12 +1090,12 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const advB = `http://127.0.0.1:${portB}`;
 
       // Shrink the whole failover clock so a wedged-writer fence + takeover completes in a test's
-      // timescale: lease TTL 4s (⇒ probe ~1.33s, acquire-retry ~0.53s inside @stackbase/fleet). A
+      // timescale: lease TTL 4s (⇒ probe ~1.33s, acquire-retry ~0.53s inside @helipod/fleet). A
       // frozen writer's lease then expires ~3-4s after the freeze — comfortably before its own 5s
       // idle-in-transaction / 10s statement server timeouts, so the FOLLOWER's eviction is what fires,
       // never the writer self-releasing its advisory lock (which would take over with only ONE epoch
       // bump instead of the eviction-fence + acquisition pair this scenario proves).
-      const FLEET_TTL = { STACKBASE_FLEET_LEASE_TTL_MS: "4000" };
+      const FLEET_TTL = { HELIPOD_FLEET_LEASE_TTL_MS: "4000" };
 
       const pg = new Client({ connectionString: databaseUrl });
       await pg.connect();
@@ -1317,7 +1317,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const advA = `http://127.0.0.1:${portA}`;
 
       // Pin NUM_SHARDS explicitly so the in-test router matches the child processes' routing exactly.
-      const SHARDS_ENV = { STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+      const SHARDS_ENV = { HELIPOD_FLEET_SHARDS: String(NUM_SHARDS) };
 
       // Two channelId values routing to DIFFERENT non-"default" shards — the whole point of this
       // scenario. Computed with the SAME exported router the engine uses (assert they differ; neither
@@ -1500,15 +1500,15 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const advB = `http://127.0.0.1:${portB}`;
       const advD = `http://127.0.0.1:${portD}`;
 
-      // Multi-writer scale-out is OPT-IN behind STACKBASE_FLEET_MULTI_WRITER (default OFF keeps the
+      // Multi-writer scale-out is OPT-IN behind HELIPOD_FLEET_MULTI_WRITER (default OFF keeps the
       // single-writer + sync-replica byte-identical path the other scenarios exercise). Short TTL 6000
       // ⇒ balancer beat ~800ms (`fleetAcquireRetryMs`), probe ~2000ms — fast rendezvous convergence
       // and failover in a test's timescale, while leaving ample presence-heartbeat headroom under
       // container load. NUM_SHARDS pinned so the in-test router matches the children exactly.
       const MW_ENV = {
-        STACKBASE_FLEET_MULTI_WRITER: "1",
-        STACKBASE_FLEET_SHARDS: String(NUM_SHARDS),
-        STACKBASE_FLEET_LEASE_TTL_MS: "6000",
+        HELIPOD_FLEET_MULTI_WRITER: "1",
+        HELIPOD_FLEET_SHARDS: String(NUM_SHARDS),
+        HELIPOD_FLEET_LEASE_TTL_MS: "6000",
       };
 
       const pg = new Client({ connectionString: databaseUrl });
@@ -1839,12 +1839,12 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const advA = `http://127.0.0.1:${portA}`;
       const advB = `http://127.0.0.1:${portB}`;
 
-      // Multi-writer at the DEFAULT 15s lease TTL (NO STACKBASE_FLEET_LEASE_TTL_MS). This is
+      // Multi-writer at the DEFAULT 15s lease TTL (NO HELIPOD_FLEET_LEASE_TTL_MS). This is
       // load-bearing: under a paused primary a writer's LeaseMonitor probe HANGS and the node self-
       // demotes only ~TTL later — at the 6s TTL the other multi-writer scenario uses a writer would
       // exit ~8s into the pause, but the default 15s leaves ample headroom for a <=10s pause, which is
       // exactly what lets us assert the node did NOT exit while reads kept flowing off its replica.
-      const MW_ENV = { STACKBASE_FLEET_MULTI_WRITER: "1", STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+      const MW_ENV = { HELIPOD_FLEET_MULTI_WRITER: "1", HELIPOD_FLEET_SHARDS: String(NUM_SHARDS) };
 
       const pg = new Client({ connectionString: databaseUrl });
       await pg.connect();
@@ -1979,14 +1979,14 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const portA = await freePort();
       const advA = `http://127.0.0.1:${portA}`;
 
-      // Single-writer fleet (A owns every shard). `STACKBASE_FLEET_SHARDS=1` pins every write to the
+      // Single-writer fleet (A owns every shard). `HELIPOD_FLEET_SHARDS=1` pins every write to the
       // "default" shard so the raw `/_fleet/run` body carries a deterministic, always-owned shardId.
       const pg = new Client({ connectionString: databaseUrl });
       await pg.connect();
 
       let nodeA: ServeProcess | undefined;
       try {
-        nodeA = spawnFleetServe(databaseUrl, portA, undefined, { STACKBASE_FLEET_SHARDS: "1" });
+        nodeA = spawnFleetServe(databaseUrl, portA, undefined, { HELIPOD_FLEET_SHARDS: "1" });
         const bootA = await waitForReadyOrExit(nodeA);
         if (!bootA.ready) throw new Error(`node A failed to boot: exit=${bootA.exitCode} stderr=${bootA.stderr}`);
         expect(bootA.ready.role).toBe("writer");
@@ -2066,9 +2066,9 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       const advA = `http://127.0.0.1:${portA}`;
       const advB = `http://127.0.0.1:${portB}`;
       const MW_ENV = {
-        STACKBASE_FLEET_MULTI_WRITER: "1",
-        STACKBASE_FLEET_SHARDS: String(NUM_SHARDS),
-        STACKBASE_FLEET_LEASE_TTL_MS: "6000",
+        HELIPOD_FLEET_MULTI_WRITER: "1",
+        HELIPOD_FLEET_SHARDS: String(NUM_SHARDS),
+        HELIPOD_FLEET_LEASE_TTL_MS: "6000",
       };
 
       const pg = new Client({ connectionString: databaseUrl });
@@ -2140,7 +2140,7 @@ maybeDescribe("stackbase serve --fleet — Tier-2 ship gate (real embedded postg
       // agrees with the children exactly. Writer A owns every shard; B is sync. The 64 clients hammer
       // the SYNC node B, so every write forwards B→A and A's per-shard two-buffer committers see
       // genuinely concurrent commits to batch — the condition `maxBatchSize > 1` requires.
-      const GC_ENV = { STACKBASE_GROUP_COMMIT: "1", STACKBASE_FLEET_SHARDS: String(NUM_SHARDS) };
+      const GC_ENV = { HELIPOD_GROUP_COMMIT: "1", HELIPOD_FLEET_SHARDS: String(NUM_SHARDS) };
 
       const pg = new Client({ connectionString: databaseUrl });
       await pg.connect();

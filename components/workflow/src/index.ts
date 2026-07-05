@@ -1,4 +1,4 @@
-import { defineComponent, type ComponentDefinition } from "@stackbase/component";
+import { defineComponent, type ComponentDefinition } from "@helipod/component";
 import { workflowSchema } from "./schema";
 import { workflowContext, workflowActionContext } from "./facade";
 import { status, makeAdvance, _stepDone, _sleep, _start, _cancel, _compensate, _compensateDone } from "./modules";
@@ -16,7 +16,7 @@ export { runReplay } from "./replay";
 export const workflow = { define };
 
 /**
- * `defineWorkflow({ workflows })` — the `@stackbase/workflow` component: the `workflows`/`steps`/
+ * `defineWorkflow({ workflows })` — the `@helipod/workflow` component: the `workflows`/`steps`/
  * `events` journal schema, the `ctx.workflow` facade (`start`/`cancel`), and the internal
  * `workflow:_advance` mutation the scheduler dispatches to drive a run forward.
  *
@@ -25,7 +25,7 @@ export const workflow = { define };
  * `defineWorkflow()` must also compose `defineScheduler()` (`composeComponents` throws otherwise —
  * see `packages/component/src/compose.ts`'s `requires` check).
  *
- * `contextWrite: true` is load-bearing the same way it is for `@stackbase/scheduler`: it's what
+ * `contextWrite: true` is load-bearing the same way it is for `@helipod/scheduler`: it's what
  * lets `start` write (via the calling mutation's own transaction) instead of only reading — see
  * `workflowContext` in `./facade.ts`.
  *
@@ -82,11 +82,11 @@ export function defineWorkflow(opts: { workflows: WorkflowRegistry; maxParalleli
       status,
     },
     context: (cctx) => workflowContext(cctx),
-    contextType: { import: "@stackbase/workflow", type: "WorkflowContext" },
+    contextType: { import: "@helipod/workflow", type: "WorkflowContext" },
     contextWrite: true,
     // Task 7: the action-mode `ctx.workflow` — `start`/`cancel`/`sendEvent` each delegate to one
     // of the internal `_start`/`_cancel`/`_sendEvent` mutations above via `api.runMutation`,
-    // mirroring `@stackbase/scheduler`'s `schedulerActionContext` — see `workflowActionContext`'s
+    // mirroring `@helipod/scheduler`'s `schedulerActionContext` — see `workflowActionContext`'s
     // doc comment in `./facade.ts`.
     buildAction: (api) => workflowActionContext(api),
   });

@@ -3,7 +3,7 @@
  * Workers / Durable Objects. The 2026-07-17 CF audit (gap 8b) showed node:crypto's
  * `createCipheriv("aes-256-gcm")` is `not a function` under `nodejs_compat`, breaking TOTP-secret
  * storage on a DO; `components/auth/src/mfa/secret-crypto.ts` was ported to WebCrypto
- * (`crypto.subtle` AES-GCM) as the fix. `@stackbase/auth` is not a dependency of this package (its
+ * (`crypto.subtle` AES-GCM) as the fix. `@helipod/auth` is not a dependency of this package (its
  * hash-wasm transitive dep won't resolve under the vitest esbuild bundler — the same harness
  * artifact the audit noted for argon2id), so this replicates the port's EXACT crypto operations
  * inline — import-raw AES-GCM key, `getRandomValues` IV, `subtle.encrypt` with `additionalData`

@@ -6,7 +6,7 @@
  *     compareKeyBytes(encodeIndexKey(a), encodeIndexKey(b)) === compareValues(a, b)
  *
  * i.e. lexicographic byte comparison of encoded keys equals the canonical value order
- * from `@stackbase/values`. This lets the storage layer keep keys in a plain ordered
+ * from `@helipod/values`. This lets the storage layer keep keys in a plain ordered
  * byte index and get correct range scans for free.
  *
  * Each element is `[tag, payload]` where tags are assigned in type order, so different

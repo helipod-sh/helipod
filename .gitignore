@@ -14,12 +14,12 @@ dist/
 !.env.example
 .DS_Store
 
-# stackbase local data (Tier 0 embedded db)
+# helipod local data (Tier 0 embedded db)
 *.db
 *.db-wal
 *.db-shm
-.stackbase/
-.stackbase-deploy/
+.helipod/
+.helipod-deploy/
 
 # benchmark results
 benchmarks/results/
@@ -28,7 +28,7 @@ benchmarks/results/
 examples/*/web/main.js
 examples/*/web/*.js.map
 
-# built dashboard SPA bundle (run `pnpm --filter @stackbase/dashboard build`)
+# built dashboard SPA bundle (run `pnpm --filter @helipod/dashboard build`)
 apps/*/dist/
 
 # local agent / tooling / verification artifacts
@@ -36,7 +36,7 @@ apps/*/dist/
 .workflows/
 .remember/
 .claude/
-stackbase-chat-working.png
+helipod-chat-working.png
 
 # SDD scratch (progress ledger, briefs, reports)
 .superpowers/

@@ -1,9 +1,9 @@
 /**
- * `stackbase objectstore <subcommand>` — object-storage maintenance tools.
+ * `helipod objectstore <subcommand>` — object-storage maintenance tools.
  *
  * `objectstore reshard --object-store <url> --dir <functionsDir> --shards M` changes a STOPPED
  * object-storage deployment's shard count N→M: it loads the schema (for each table's shard key),
- * dynamic-imports + gates `@stackbase/objectstore-substrate`, and runs `reshardObjectStore` — which
+ * dynamic-imports + gates `@helipod/objectstore-substrate`, and runs `reshardObjectStore` — which
  * physically re-partitions every doc's current state to `shardIdForKeyValue(doc[shardKey], M)`'s lane
  * (see that function's doc for the offline, non-atomic, back-up-first contract). Errors — a live
  * deployment, a bad URL, missing args — surface as a clean `✗ <message>` + exit 1.
@@ -21,7 +21,7 @@ export async function objectstoreCommand(args: string[]): Promise<number> {
   if (sub !== "reshard") {
     process.stderr.write(
       `✗ unknown \`objectstore\` subcommand '${sub ?? ""}' — usage: ` +
-        `stackbase objectstore reshard --object-store <url> --dir <functionsDir> --shards M\n`,
+        `helipod objectstore reshard --object-store <url> --dir <functionsDir> --shards M\n`,
     );
     return 1;
   }
@@ -29,7 +29,7 @@ export async function objectstoreCommand(args: string[]): Promise<number> {
 }
 
 async function reshardCommand(args: string[]): Promise<number> {
-  let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
+  let objectStoreUrl = process.env.HELIPOD_OBJECT_STORE;
   let dirFlag: string | undefined;
   let shards: number | undefined;
   const VALUE_FLAGS = new Set(["--object-store", "--dir", "--shards"]);
@@ -49,7 +49,7 @@ async function reshardCommand(args: string[]): Promise<number> {
     else shards = Number(val);
   }
   if (!objectStoreUrl) {
-    process.stderr.write("✗ objectstore reshard requires --object-store <url> (or STACKBASE_OBJECT_STORE).\n");
+    process.stderr.write("✗ objectstore reshard requires --object-store <url> (or HELIPOD_OBJECT_STORE).\n");
     return 1;
   }
   if (shards === undefined || !Number.isInteger(shards) || shards < 1) {
@@ -97,7 +97,7 @@ async function reshardCommand(args: string[]): Promise<number> {
       `✓ resharded ${result.fromShards} → ${result.toShards} shard(s) ` +
         `(moved ${result.movedDocs} doc(s); per-lane: ${perLane}). ` +
         `A node booting this bucket now uses ${result.toShards} shard(s) — set --shards ${result.toShards} ` +
-        `(or STACKBASE_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).\n`,
+        `(or HELIPOD_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).\n`,
     );
     return 0;
   } catch (e) {

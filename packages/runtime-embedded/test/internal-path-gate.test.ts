@@ -10,10 +10,10 @@
 // (`x:_secret`) alongside a legitimate public path (`x:public`), and asserting the gate
 // rejects the former and allows the latter through.
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { query } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { query } from "@helipod/executor";
 import { EmbeddedRuntime } from "../src/index";
 
 async function makeRuntime(modules: Record<string, any>) {

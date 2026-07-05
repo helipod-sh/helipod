@@ -1,11 +1,11 @@
 ---
 title: Testing
-description: Test functions against the real engine with @stackbase/test.
+description: Test functions against the real engine with @helipod/test.
 ---
 
 {/* diataxis: how-to */}
 
-Most test harnesses mock the database and hope the mock behaves like the real thing. `@stackbase/test`
+Most test harnesses mock the database and hope the mock behaves like the real thing. `@helipod/test`
 skips the hope. It runs your queries, mutations, and actions against a real `EmbeddedRuntime`: the
 same MVCC SQLite storage, the same single-writer OCC transactor, and the same query engine that ships
 in production. Compose a component and you get its real drivers too.
@@ -14,7 +14,7 @@ There's no mocked `ctx.db` and no simulated reactivity. `t.subscribe` drives the
 sync protocol, `SubscriptionManager`, engine), all over an in-process loopback connection. A passing
 test here is a claim about the shipped engine's real behavior, not about a stand-in for it.
 
-This page is the complete reference for the harness. It covers every option `createTestStackbase`
+This page is the complete reference for the harness. It covers every option `createTestHelipod`
 takes, every method on the object it returns, how to test reactivity and time-based (scheduler and
 cron) code, how to compose components, and the specific harness behaviors worth knowing before you
 write assertions.
@@ -26,7 +26,7 @@ write assertions.
 ### Install the package
 
 ```bash
-npm install -D @stackbase/test
+npm install -D @helipod/test
 ```
 
 </Step>
@@ -35,20 +35,20 @@ npm install -D @stackbase/test
 
 ### Write and run a test
 
-```ts title="stackbase/messages.test.ts"
+```ts title="helipod/messages.test.ts"
 import { afterEach, expect, test } from "vitest";
-import { createTestStackbase, type TestStackbase } from "@stackbase/test";
+import { createTestHelipod, type TestHelipod } from "@helipod/test";
 import * as messages from "./messages";
 import schema from "./schema";
 
-let t: TestStackbase;
+let t: TestHelipod;
 
 afterEach(async () => {
   await t.close();
 });
 
 test("send then list", async () => {
-  t = await createTestStackbase({
+  t = await createTestHelipod({
     modules: { "messages.ts": messages, "schema.ts": { default: schema } },
   });
 
@@ -59,7 +59,7 @@ test("send then list", async () => {
 });
 ```
 
-`createTestStackbase` is async. Always `await` it, since it boots a real runtime: schema setup,
+`createTestHelipod` is async. Always `await` it, since it boots a real runtime: schema setup,
 component composition, and driver `start()`.
 
 Every call runs under plain vitest. There's no special CI setup beyond what your monorepo already has
@@ -74,7 +74,7 @@ for the rest of its tests.
 
 </Steps>
 
-## `createTestStackbase(opts)`
+## `createTestHelipod(opts)`
 
 ```ts
 interface CreateTestOptions {
@@ -85,7 +85,7 @@ interface CreateTestOptions {
   store?: DocStore;
 }
 
-function createTestStackbase(opts: CreateTestOptions): Promise<TestStackbase>;
+function createTestHelipod(opts: CreateTestOptions): Promise<TestHelipod>;
 ```
 
 <TypeTable
@@ -95,7 +95,7 @@ function createTestStackbase(opts: CreateTestOptions): Promise<TestStackbase>;
       type: "Record<string, unknown>",
     },
     components: {
-      description: "Components to compose, the same ones your app opts into via stackbase.config.ts.",
+      description: "Components to compose, the same ones your app opts into via helipod.config.ts.",
       type: "ComponentDefinition[]",
       default: "[]",
     },
@@ -127,7 +127,7 @@ import * as messages from "./messages";
 import * as users from "./users";
 import schema from "./schema";
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: {
     "messages.ts": messages,
     "users.ts": users,
@@ -139,13 +139,13 @@ const t = await createTestStackbase({
 ```ts
 // Or let your bundler enumerate the directory: the non-eager form (a map of lazy
 // loaders) works as-is; each entry is awaited before use.
-const t = await createTestStackbase({
-  modules: import.meta.glob("./stackbase/**/*.ts"),
+const t = await createTestHelipod({
+  modules: import.meta.glob("./helipod/**/*.ts"),
 });
 ```
 
-Keys from `import.meta.glob` come back with leading path segments, like `./stackbase/messages.ts`. The
-harness normalizes them: it strips `./`/`../` prefixes, a leading `stackbase/` root, and the file
+Keys from `import.meta.glob` come back with leading path segments, like `./helipod/messages.ts`. The
+harness normalizes them: it strips `./`/`../` prefixes, a leading `helipod/` root, and the file
 extension, landing on the same `module:export` path your codegen'd `api`/bare-string refs already use.
 A glob-sourced module registers under the exact path an explicit `{ "messages.ts": messages }` entry
 would.
@@ -163,13 +163,13 @@ specially (see below and [`t.fetch`](#tfetch)). Everything else in a module is i
 - **`false`:** no schema at all, an empty schema where only `_storage` (see below) exists.
 
 ```ts
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 const testSchema = defineSchema({
   docs: defineTable({ owner: v.string(), n: v.number() }).index("by_owner", ["owner", "n"]),
 });
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { "mod.ts": mod },
   schema: testSchema, // explicit, no schema.ts needed in `modules` at all
 });
@@ -181,14 +181,14 @@ harness, exactly as it is in production. It's never opt-in.
 
 ### `components`
 
-If your app opts into a component in `stackbase.config.ts` (the scheduler, workflow, triggers,
+If your app opts into a component in `helipod.config.ts` (the scheduler, workflow, triggers,
 notifications, auth, and so on), list it the same way here. The harness composes it through the same
 `composeComponents` the CLI's boot path uses:
 
 ```ts
-import { defineScheduler } from "@stackbase/scheduler";
+import { defineScheduler } from "@helipod/scheduler";
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { /* ... */ },
   components: [defineScheduler()],
 });
@@ -204,7 +204,7 @@ Supplies your own clock function instead of the harness's own virtual clock:
 
 ```ts
 let fakeNow = 1_700_000_000_000;
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { /* ... */ },
   now: () => fakeNow,
 });
@@ -223,30 +223,30 @@ The document store to run the real engine against. Defaults to an in-memory `Sql
 the exact same conformance assertions against a different backend:
 
 ```ts
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { /* ... */ },
   store: new PostgresDocStore(/* ... */),
 });
 ```
 
 The store must start empty. The harness calls its `setupSchema()` and owns its lifecycle from there,
-closing it in `t.close()`. This is how Stackbase's own suite proves read-your-own-writes parity on
+closing it in `t.close()`. This is how Helipod's own suite proves read-your-own-writes parity on
 Postgres (`packages/docstore-postgres/test/ryow-runtime.test.ts`). It's not a hypothetical: the
 harness genuinely doesn't care which `DocStore` it's driving.
 
-## `TestStackbase`, the returned object
+## `TestHelipod`, the returned object
 
 ```ts
-interface TestStackbase {
+interface TestHelipod {
   query<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
   mutation<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
   action<T = unknown>(ref: FunctionReference | string, args?: Args): Promise<T>;
   run<T>(fn: (ctx: any) => Promise<T>): Promise<T>;
   fetch(request: Request): Promise<Response>;
   subscribe<T = any>(ref: FunctionReference | string, args?: Args): TestSubscription<T>;
-  withIdentity(identity: string): TestStackbase;
+  withIdentity(identity: string): TestHelipod;
   finishScheduledFunctions(): Promise<void>;
   advanceTimers(ms: number): Promise<void>;
   close(): Promise<void>;
@@ -260,7 +260,7 @@ interchangeably (your codegen'd `api`/`internal`, or an `anyApi` cast when you d
 types in the test). They resolve to the exact same dispatchable path:
 
 ```ts
-import { anyApi } from "@stackbase/client";
+import { anyApi } from "@helipod/client";
 
 await t.query("messages:list", {});
 await t.query((anyApi as any).messages.list, {});
@@ -292,7 +292,7 @@ called on. It's a setup/assertion escape hatch, not a way to test identity-scope
 
 ### `t.fetch(request)`
 
-Routes a `Request` through your app's `http.ts` router exactly as the real `stackbase dev`/`serve`
+Routes a `Request` through your app's `http.ts` router exactly as the real `helipod dev`/`serve`
 HTTP handler dispatches to an `httpAction`, returning a `Response`. An unmatched method and path gets
 a plain 404, never a throw:
 
@@ -318,7 +318,7 @@ const res2 = await t.fetch(
 ); // httpAction sees identity "raw-token"
 ```
 
-`http.ts`'s default export (an `HttpRouter`) is resolved once at `createTestStackbase` time; a route
+`http.ts`'s default export (an `HttpRouter`) is resolved once at `createTestHelipod` time; a route
 handler that isn't an exported function from one of your `modules` entries throws immediately, at
 harness-build time, rather than silently 404ing later.
 
@@ -332,7 +332,7 @@ const asAda = t.withIdentity("some-token");
 await asAda.mutation("messages:send", { body: "hi" });
 ```
 
-The identity reaches function code only through a context provider (for example `@stackbase/auth`'s
+The identity reaches function code only through a context provider (for example `@helipod/auth`'s
 `ctx.auth`, or any component that reads `cctx.identity` off the composed context). It's never a bare
 `ctx.identity` on a plain UDF's context. What the token actually resolves to (a user document, a
 session record, nothing) is entirely up to whatever context provider your composed components wire
@@ -366,7 +366,7 @@ uses, not a simulated re-render:
 
 ```mermaid
 flowchart LR
-  Test["t.subscribe(...)"] -->|"loopback"| Client["StackbaseClient"]
+  Test["t.subscribe(...)"] -->|"loopback"| Client["HelipodClient"]
   Client --> Sync["Sync protocol"]
   Sync --> Sub["SubscriptionManager"]
   Sub --> Engine["Engine (real invalidation)"]
@@ -410,7 +410,7 @@ await waitFor(() => sub.value()?.length === 1);
 expect(fires).toBe(1);
 ```
 
-One `StackbaseClient` is shared across every `t.subscribe(...)` call on a backend and all of its
+One `HelipodClient` is shared across every `t.subscribe(...)` call on a backend and all of its
 `withIdentity` views. This is a v1 limitation: `subscribe` always uses the base, no-identity client
 regardless of which view it's called from, since there is no per-identity subscription yet. It's
 built lazily on first use and closed in `t.close()`, before the runtime's drivers are stopped, so no
@@ -422,15 +422,15 @@ subscription exactly the same way a direct `t.mutation(...)` call would.
 
 ### Time control: `t.finishScheduledFunctions()` / `t.advanceTimers(ms)`
 
-Deterministic time control for `@stackbase/scheduler` jobs and crons, with no real timers or sleeps
+Deterministic time control for `@helipod/scheduler` jobs and crons, with no real timers or sleeps
 involved. Both are driven by the harness's own virtual clock (starting at a fixed epoch millisecond,
-mutable only through these two calls). Both are also clean no-ops if no `@stackbase/scheduler`
+mutable only through these two calls). Both are also clean no-ops if no `@helipod/scheduler`
 component was composed via `opts.components`, since there's simply nothing to drive.
 
 ```ts
-import { defineScheduler } from "@stackbase/scheduler";
+import { defineScheduler } from "@helipod/scheduler";
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { /* ... */ },
   components: [defineScheduler()],
 });
@@ -457,13 +457,13 @@ await t.finishScheduledFunctions();  // drains EVERYTHING due (incl. cascades) t
   > virtual clock by 3600000ms each time). Check for a cron or a runAfter chain that keeps
   > rescheduling itself forever.`
 
-- **Both throw if `opts.now` was supplied** to `createTestStackbase`. With a custom clock, the caller
+- **Both throw if `opts.now` was supplied** to `createTestHelipod`. With a custom clock, the caller
   owns time, and the harness has no internal clock left to mutate. Omit `opts.now` (the default) to
   use time control.
 
 ```ts
 // Throws immediately: the harness doesn't own the clock here:
-const t = await createTestStackbase({ modules: { /* ... */ }, now: () => Date.now() });
+const t = await createTestHelipod({ modules: { /* ... */ }, now: () => Date.now() });
 await t.advanceTimers(1000); // Error: advanceClock/advanceTimers/finishScheduledFunctions require...
 ```
 
@@ -477,13 +477,13 @@ long test run.
 
 ## Isolation
 
-Every `createTestStackbase()` call is a fully independent backend: its own SQLite `:memory:` database
+Every `createTestHelipod()` call is a fully independent backend: its own SQLite `:memory:` database
 (or its own `store`, if supplied), its own temp file-storage directory, its own set of component
 drivers. Two instances in the same test file never see each other's writes:
 
 ```ts
-const a = await createTestStackbase({ modules /* ... */ });
-const b = await createTestStackbase({ modules /* ... */ });
+const a = await createTestHelipod({ modules /* ... */ });
+const b = await createTestHelipod({ modules /* ... */ });
 
 await a.mutation("messages:send", { body: "only in a" });
 expect(await a.query("messages:list", {})).toHaveLength(1);
@@ -495,14 +495,14 @@ loop leaves no leaked handles, temp dirs, or drivers behind, as long as every in
 
 ## Composing components in a test
 
-Any component your app opts into via `stackbase.config.ts` (the scheduler, workflow, triggers,
+Any component your app opts into via `helipod.config.ts` (the scheduler, workflow, triggers,
 notifications, auth, or a component you wrote yourself) composes into a test the same way:
 
 ```ts
-import { defineScheduler } from "@stackbase/scheduler";
-import { defineWorkflow } from "@stackbase/workflow";
+import { defineScheduler } from "@helipod/scheduler";
+import { defineWorkflow } from "@helipod/workflow";
 
-const t = await createTestStackbase({
+const t = await createTestHelipod({
   modules: { /* ... */ },
   components: [defineScheduler(), defineWorkflow()], // workflow requires scheduler, same as production
 });
@@ -510,14 +510,14 @@ const t = await createTestStackbase({
 
 Composition goes through the exact same `composeComponents` the CLI's own boot path uses, so a
 component's tables, context providers, drivers, and boot steps all wire up identically to how they
-would under `stackbase dev`/`serve`. File storage (`ctx.storage`, the `_storage` table, the orphan
+would under `helipod dev`/`serve`. File storage (`ctx.storage`, the `_storage` table, the orphan
 reaper driver) is composed unconditionally, without needing to be listed. It's always-on in
 production too.
 
 ## Conformance suite
 
-Stackbase's own repository ships a conformance suite: a large body of tests, all written against
-`@stackbase/test`, whose entire purpose is to pin down and regression-guard the shipped engine's
+Helipod's own repository ships a conformance suite: a large body of tests, all written against
+`@helipod/test`, whose entire purpose is to pin down and regression-guard the shipped engine's
 actual behavior across ten behavioral areas: db CRUD, index reads, pagination, validators, identity,
 scheduler, ids, errors, reactivity, and the HTTP router. Every assertion in it runs through the same
 harness this page documents. There's no separate, lower-fidelity mechanism-only test path.
@@ -551,7 +551,7 @@ const asAda = t.withIdentity("some-token");
 ```
 
 The token is surfaced to function code only through a context provider (for example
-`@stackbase/auth`'s `ctx.auth`, or a component reading `cctx.identity`). There is no bare
+`@helipod/auth`'s `ctx.auth`, or a component reading `cctx.identity`). There is no bare
 `ctx.identity` populated from JWT claims on a plain UDF context. What the token resolves to is
 entirely up to your composed auth component.
 
@@ -615,8 +615,8 @@ one field with `v.any()`.
 
 </Accordions>
 
-`stackbase migrate` rewrites your Convex import specifiers automatically, but it does **not**
-translate `convex-test` calls to `@stackbase/test`. See
+`helipod migrate` rewrites your Convex import specifiers automatically, but it does **not**
+translate `convex-test` calls to `@helipod/test`. See
 [Migrate from Convex](/docs/reference/migrate-from-convex) for what it does and doesn't handle.
 
 ## Other error shapes worth knowing
@@ -642,19 +642,19 @@ tests to call out directly:
 
 ## E2E testing against a running server
 
-`@stackbase/test`'s in-process harness (everything above) is the right tool for function and
+`@helipod/test`'s in-process harness (everything above) is the right tool for function and
 reactivity logic. It's fast (in-memory, no process boundary) and exercises the real engine.
 
 For transport- or process-level behavior it structurally can't reach (hot reload, the raw wire
-protocol, Docker boot, `stackbase deploy`'s live hot-swap, cross-runtime Bun vs. Node behavior), start
-a real `stackbase dev`/`serve` as a child process and drive it with `@stackbase/client` over a real
-WebSocket, or `POST /api/run` over HTTP. This is exactly the pattern Stackbase's own end-to-end tests
+protocol, Docker boot, `helipod deploy`'s live hot-swap, cross-runtime Bun vs. Node behavior), start
+a real `helipod dev`/`serve` as a child process and drive it with `@helipod/client` over a real
+WebSocket, or `POST /api/run` over HTTP. This is exactly the pattern Helipod's own end-to-end tests
 use. See `packages/cli/test/*-e2e.test.ts` in the repo for worked examples (scheduler, actions,
 workflow, `httpAction`s, deploy, storage, and more), each proven against the real shipped CLI
 entrypoint rather than a mechanism-only unit test.
 
-There is no `stackbase run` command and no separate `createStackbase` testing API. Use
-`@stackbase/test` for in-process tests, and `POST /api/run`, the dashboard's function runner, or the
+There is no `helipod run` command and no separate `createHelipod` testing API. Use
+`@helipod/test` for in-process tests, and `POST /api/run`, the dashboard's function runner, or the
 client SDK for driving a real running server.
 
 ## See also
@@ -669,5 +669,5 @@ client SDK for driving a real running server.
 - [Configuration](/docs/reference/configuration): the full `v.*` validator list referenced above.
 - [Schema & tables](/docs/core-concepts/schema-and-tables): `defineSchema`, indexes, and
   `schemaValidation`.
-- [Migrate from Convex](/docs/reference/migrate-from-convex): what `stackbase migrate` rewrites
+- [Migrate from Convex](/docs/reference/migrate-from-convex): what `helipod migrate` rewrites
   automatically, and what it leaves for you (including porting `convex-test` calls by hand).

@@ -1,5 +1,5 @@
-import type { Driver, DriverContext } from "@stackbase/component";
-import type { DocStore } from "@stackbase/docstore";
+import type { Driver, DriverContext } from "@helipod/component";
+import type { DocStore } from "@helipod/docstore";
 
 /** Default sweep interval: 24h. Records live for 30 days (`DEFAULT_TTL_MS`), so a much-finer
  *  cadence than `storageReaper`'s 60s (which reclaims short-TTL pending uploads) buys nothing —

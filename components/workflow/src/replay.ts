@@ -1,6 +1,6 @@
-import type { JSONValue, Value } from "@stackbase/values";
-import { valuesEqual } from "@stackbase/values";
-import { getFunctionPath, type FnRef } from "@stackbase/scheduler";
+import type { JSONValue, Value } from "@helipod/values";
+import { valuesEqual } from "@helipod/values";
+import { getFunctionPath, type FnRef } from "@helipod/scheduler";
 import type { WorkflowHandler } from "./registry";
 
 /**
@@ -10,7 +10,7 @@ import type { WorkflowHandler } from "./registry";
  * `runAction` dispatches a `kind:"action"` scheduler job — same journal/dispatch mechanism as
  * `runMutation`/`runQuery`, just a different target kind. Actions are AT-MOST-ONCE (the
  * scheduler's contract for `kind:"action"` jobs — a crash mid-flight dead-letters rather than
- * blind-retries, see `@stackbase/scheduler`'s `_reclaim`), so a step built on it inherits that
+ * blind-retries, see `@helipod/scheduler`'s `_reclaim`), so a step built on it inherits that
  * same at-most-once guarantee; nothing in this file adds action-specific retry-on-crash logic.
  *
  * `sleep`/`sleepUntil` are durable timers: a `NewStep` with `kind:"sleep"` whose dispatched
@@ -118,7 +118,7 @@ const SLEEP_FN = "workflow:_sleep";
 /**
  * Structural equality for journal-arg validation (a cached step's replayed call must match the
  * journaled one exactly, or the handler has gone non-deterministic — see `requestStep` below).
- * Reuses `@stackbase/values`'s `valuesEqual` (the same canonical-order deep comparison the query
+ * Reuses `@helipod/values`'s `valuesEqual` (the same canonical-order deep comparison the query
  * engine and OCC conflict detection use) rather than hand-rolling a second one.
  */
 function deepEqual(a: JSONValue | undefined, b: JSONValue | undefined): boolean {

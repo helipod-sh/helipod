@@ -13,8 +13,8 @@
  * the shape `OutboxClosedError` has).
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { StackbaseClient, type MutationFailedInfo, type OutboxEntry, type OutboxMeta, type OutboxStorage } from "../src/index";
-import type { ClientMessage, ServerMessage } from "@stackbase/sync";
+import { HelipodClient, type MutationFailedInfo, type OutboxEntry, type OutboxMeta, type OutboxStorage } from "../src/index";
+import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 class MockTransport {
   readonly sent: ClientMessage[] = [];
@@ -91,7 +91,7 @@ describe("client.ts — fire-and-forget outbox writes must never become an unhan
 
     const t = new MockTransport();
     const onMutationFailed = vi.fn<(info: MutationFailedInfo) => void>();
-    const client = new StackbaseClient(t, {
+    const client = new HelipodClient(t, {
       outbox: failStoppedOutbox(),
       outboxLocks: null,
       outboxDrainIntervalMs: 0,
@@ -122,7 +122,7 @@ describe("client.ts — fire-and-forget outbox writes must never become an unhan
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const t = new MockTransport();
-    const client = new StackbaseClient(t, { outbox: failStoppedOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
+    const client = new HelipodClient(t, { outbox: failStoppedOutbox(), outboxLocks: null, outboxDrainIntervalMs: 0 });
     client.mutation("messages:send", { body: "hi" }).catch(() => {});
 
     await tick();

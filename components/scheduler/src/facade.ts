@@ -1,11 +1,11 @@
-import type { ComponentContext, ActionApi } from "@stackbase/executor";
-import { GuestDatabaseWriter } from "@stackbase/executor";
-import type { JSONValue } from "@stackbase/values";
+import type { ComponentContext, ActionApi } from "@helipod/executor";
+import { GuestDatabaseWriter } from "@helipod/executor";
+import type { JSONValue } from "@helipod/values";
 
 /**
  * A function reference as produced by codegen's `api`/`internal` proxy (see
- * `@stackbase/client`'s `FunctionReference`/`getFunctionPath`). Replicated here (rather than
- * depending on `@stackbase/client`, a client-facing SDK package) since a server component
+ * `@helipod/client`'s `FunctionReference`/`getFunctionPath`). Replicated here (rather than
+ * depending on `@helipod/client`, a client-facing SDK package) since a server component
  * needs only this one-field shape.
  */
 export interface FunctionReference {
@@ -14,7 +14,7 @@ export interface FunctionReference {
 
 export type FnRef = FunctionReference | string;
 
-/** Resolve a `fnRef` (string path or codegen ref) to its string path. Mirrors `@stackbase/client`'s `getFunctionPath`. */
+/** Resolve a `fnRef` (string path or codegen ref) to its string path. Mirrors `@helipod/client`'s `getFunctionPath`. */
 export function getFunctionPath(ref: FnRef): string {
   return typeof ref === "string" ? ref : ref.__path;
 }
@@ -165,7 +165,7 @@ export async function enqueueInternal(
       // action (its own code threw after possibly running partway) must NOT be blindly re-run:
       // default 1, i.e. dead-letter on the first failure (`_complete`'s `attempts >= maxFailures`
       // check). An explicit `opts.retry` is the author's opt-in that the target is safe to re-run
-      // (e.g. `@stackbase/workflow` threading a step's declared `maxAttempts` through here) and is
+      // (e.g. `@helipod/workflow` threading a step's declared `maxAttempts` through here) and is
       // honored as-is for both kinds.
       maxFailures: opts.retry?.maxFailures ?? (kind === "action" ? 1 : 4),
       leaseHolder: undefined,
@@ -311,7 +311,7 @@ export interface SchedulerActionContext {
  *
  * `Date.now()` below (converting `runAfter`'s relative `delayMs` to an absolute `runAtMs`) is fine
  * here even though queries/mutations must stay deterministic: an action is non-deterministic by
- * design (see `ActionCtx`'s doc comment in `@stackbase/executor`), and the scheduler never
+ * design (see `ActionCtx`'s doc comment in `@helipod/executor`), and the scheduler never
  * recomputes anything from this timestamp — `scheduler:_enqueue` just stores it as `nextTs`.
  */
 export function schedulerActionContext(api: ActionApi): SchedulerActionContext {

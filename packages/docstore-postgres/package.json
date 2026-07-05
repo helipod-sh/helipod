@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/docstore-postgres",
+  "name": "@helipod/docstore-postgres",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -25,16 +25,16 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/values": "workspace:*",
+    "@helipod/docstore": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/values": "workspace:*",
     "pg": "^8.13.1",
     "pg-cursor": "^2.21.0"
   },
   "devDependencies": {
-    "@stackbase/test": "workspace:*",
-    "@stackbase/executor": "workspace:*",
+    "@helipod/test": "workspace:*",
+    "@helipod/executor": "workspace:*",
     "@electric-sql/pglite": "^0.2.17",
     "embedded-postgres": "16.14.0-beta.17",
     "@types/pg": "^8.11.10",

@@ -1,6 +1,6 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
- * Overhead ladder — an apples-to-apples answer to "how much does Stackbase's transaction layer cost
+ * Overhead ladder — an apples-to-apples answer to "how much does Helipod's transaction layer cost
  * OVER raw Postgres?". Same container, same `pg` driver, same measurement loop; three rungs of
  * increasing work, one document write each:
  *
@@ -20,18 +20,18 @@
  * explodes flags a hidden inefficiency. Pairs with the reactivity fan-out finding that the engine is
  * I/O-bound on PG (low CPU) — this ladder shows where the I/O goes.
  *
- * embedded-postgres-gated + opt-in (STACKBASE_BENCH_OVERHEAD=1). Single-client sequential
+ * embedded-postgres-gated + opt-in (HELIPOD_BENCH_OVERHEAD=1). Single-client sequential
  * (clients=1) — the ladder isolates PER-OP overhead, not concurrency. See
  * docs/dev/research/overhead-ladder.md.
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { performance } from "node:perf_hooks";
-import { PostgresDocStore, NodePgClient } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import type { DocumentValue } from "@stackbase/docstore";
-import { createEmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@stackbase/executor";
-import { newDocumentId, shardIdList } from "@stackbase/id-codec";
+import { PostgresDocStore, NodePgClient } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import type { DocumentValue } from "@helipod/docstore";
+import { createEmbeddedRuntime } from "@helipod/runtime-embedded";
+import { SimpleIndexCatalog, mutation, type RegisteredFunction } from "@helipod/executor";
+import { newDocumentId, shardIdList } from "@helipod/id-codec";
 
 const BENCH_TABLE = 40701;
 
@@ -89,10 +89,10 @@ async function measure(op: () => Promise<void>, seconds = 3, warmupMs = 1000): P
   return { opsPerSec: ops / seconds, p50Ms: percentile(lat, 0.5), p99Ms: percentile(lat, 0.99), elu: elu.utilization };
 }
 
-const RUN = embeddedPgAvailable() && process.env["STACKBASE_BENCH_OVERHEAD"] === "1";
+const RUN = embeddedPgAvailable() && process.env["HELIPOD_BENCH_OVERHEAD"] === "1";
 const maybe = RUN ? describe : describe.skip;
 
-maybe("bench-overhead — raw PG vs store commit vs full mutation (opt-in: STACKBASE_BENCH_OVERHEAD=1)", () => {
+maybe("bench-overhead — raw PG vs store commit vs full mutation (opt-in: HELIPOD_BENCH_OVERHEAD=1)", () => {
   afterAll(async () => {
     await pgServer?.stop();
     pgServer = undefined;
@@ -103,7 +103,7 @@ maybe("bench-overhead — raw PG vs store commit vs full mutation (opt-in: STACK
     const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
     const client = new NodePgClient({
       connectionString: databaseUrl,
-      applicationName: "stackbase-overhead-bench",
+      applicationName: "helipod-overhead-bench",
       commitPool: { shards: shardIdList(1) },
     });
     const store = new PostgresDocStore(client);

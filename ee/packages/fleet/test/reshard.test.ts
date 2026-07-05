@@ -1,13 +1,13 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * `reshardFleet` (B5 Part 1, Task 9.1) against a REAL native PostgreSQL 16 postmaster
  * (embedded-postgres — no Docker), per the 3-tier substrate rule for lease semantics. Covers the
  * plan's three gate scenarios: grow (9.1a), shrink (9.1b), and refuse-on-live (9.1c).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { NodePgClient, PostgresDocStore } from "@stackbase/docstore-postgres";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
-import { shardIdList } from "@stackbase/id-codec";
+import { NodePgClient, PostgresDocStore } from "@helipod/docstore-postgres";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
+import { shardIdList } from "@helipod/id-codec";
 import { LeaseManager } from "../src/lease";
 import {
   reshardFleet,
@@ -234,7 +234,7 @@ maybeDescribe("reshardFleet (embedded PostgreSQL 16)", () => {
     }
     expect(caught).toBeInstanceOf(ReshardNotAFleetError);
     expect((caught as Error).message).toContain("not a fleet store");
-    expect((caught as Error).message).toContain("stackbase serve --fleet");
+    expect((caught as Error).message).toContain("helipod serve --fleet");
     expect((caught as Error).message).not.toContain("relation");
   });
 });

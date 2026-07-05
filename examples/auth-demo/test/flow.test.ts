@@ -7,14 +7,14 @@
  *   3. signOut + setAuth(null) → the subscription reactively becomes null
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, loopbackTransport, anyApi } from "@stackbase/client";
-import { query } from "@stackbase/executor";
-import { defineSchema } from "@stackbase/values";
-import { composeComponents } from "@stackbase/component";
-import { auth } from "@stackbase/auth";
-import { systemModules } from "@stackbase/admin";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, loopbackTransport, anyApi } from "@helipod/client";
+import { query } from "@helipod/executor";
+import { defineSchema } from "@helipod/values";
+import { composeComponents } from "@helipod/component";
+import { auth } from "@helipod/auth";
+import { systemModules } from "@helipod/admin";
 
 // ---------------------------------------------------------------------------
 // Typed API references
@@ -83,7 +83,7 @@ beforeEach(async () => {
 
 describe("auth-demo — reactive auth flow", () => {
   it("signUp returns a token and userId", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("t0")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("t0")));
     const result = await c.mutation(api.auth.signUp, { email: "alice@example.com", password: "hunter2!" }) as {
       token: string;
       userId: string;
@@ -95,7 +95,7 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("after signUp + setAuth, whoami.get reactively returns the userId", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("t1")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("t1")));
 
     // Sign up and capture the token
     const { token, userId } = await c.mutation(api.auth.signUp, {
@@ -118,7 +118,7 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("signOut → whoami.get reactively becomes null", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("t2")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("t2")));
 
     // Sign up
     const { token, userId } = await c.mutation(api.auth.signUp, {
@@ -150,8 +150,8 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("two clients: sign-up on one, other subscribing to whoami stays isolated", async () => {
-    const a = new StackbaseClient(loopbackTransport(runtime.connect("a")));
-    const b = new StackbaseClient(loopbackTransport(runtime.connect("b")));
+    const a = new HelipodClient(loopbackTransport(runtime.connect("a")));
+    const b = new HelipodClient(loopbackTransport(runtime.connect("b")));
 
     // B subscribes first (unauthenticated)
     const bSeen: Array<string | null> = [];
@@ -176,7 +176,7 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("signIn after signUp returns a fresh token and the same userId", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("t5")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("t5")));
 
     const { userId } = await c.mutation(api.auth.signUp, {
       email: "dave@example.com",
@@ -194,7 +194,7 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("anonymous → signUp upgrade preserves the userId", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("anon1")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("anon1")));
     const anon = await c.mutation(api.auth.signInAnonymously, {}) as { userId: string; token: string; sessionId: string };
     c.setAuth(anon.token);
     const seen: Array<string | null> = [];
@@ -205,8 +205,8 @@ describe("auth-demo — reactive auth flow", () => {
   });
 
   it("revokeSession on one connection flips another connection's whoami subscription to null", async () => {
-    const c = new StackbaseClient(loopbackTransport(runtime.connect("revoke1")));
-    const admin = new StackbaseClient(loopbackTransport(runtime.connect("revoke2")));
+    const c = new HelipodClient(loopbackTransport(runtime.connect("revoke1")));
+    const admin = new HelipodClient(loopbackTransport(runtime.connect("revoke2")));
 
     const s = await c.mutation(api.auth.signUp, {
       email: "erin@example.com",

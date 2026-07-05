@@ -1,5 +1,5 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
-import { v, defineSchema, defineTable } from "@stackbase/values";
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
+import { v, defineSchema, defineTable } from "@helipod/values";
 
 // A COMBINED app: a SHARDED table AND a GLOBAL table, in one deployment.
 //   - `messages` is `.shardKey("roomId")`: one DO per room (per-shard DO-SQLite MVCC store).

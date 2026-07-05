@@ -1,11 +1,11 @@
 /**
- * `stackbase migrate export` / `stackbase migrate import` — move an app's DATA between the two
+ * `helipod migrate export` / `helipod migrate import` — move an app's DATA between the two
  * storage topologies (portable container+R2 / SQLite / Postgres ⇄ Cloudflare DO-native DO-SQLite).
  * Slice 5 of the DO-native host program.
  *
  * These are HTTP clients (modelled on `deploy.ts`) that hit a RUNNING source/target deployment's
  * admin endpoints — `GET /_admin/export` and `POST /_admin/import`, bearer-gated by
- * `STACKBASE_ADMIN_KEY`. Both the container `serve` path and the Cloudflare DO host expose those
+ * `HELIPOD_ADMIN_KEY`. Both the container `serve` path and the Cloudflare DO host expose those
  * routes (both funnel `/_admin/*` through the same handler), so one client migrates in either
  * direction; the DO can ONLY be reached over HTTP, which is why an HTTP-first client is the coherent
  * shape. A stopped plain-SQLite source is exported by pointing a throwaway `serve`/`dev` at it first.
@@ -25,7 +25,7 @@ function resolveOptions(
 ): DataMigrateOptions | { error: string } {
   let url = "";
   let file = "";
-  let adminKey = env.STACKBASE_ADMIN_KEY?.trim() ?? "";
+  let adminKey = env.HELIPOD_ADMIN_KEY?.trim() ?? "";
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--url" && args[i + 1]) url = args[++i]!;
@@ -34,11 +34,11 @@ function resolveOptions(
   }
   if (!url) return { error: "missing target URL — pass --url <url>" };
   if (!file) return { error: `missing ${fileFlag} <file>` };
-  if (!adminKey) return { error: "STACKBASE_ADMIN_KEY is required (or pass --admin-key)" };
+  if (!adminKey) return { error: "HELIPOD_ADMIN_KEY is required (or pass --admin-key)" };
   return { url, file, adminKey };
 }
 
-/** `stackbase migrate export --url <src> --out dump.json` — pull the source's full state to a file. */
+/** `helipod migrate export --url <src> --out dump.json` — pull the source's full state to a file. */
 export async function migrateExportCommand(args: string[]): Promise<number> {
   const opts = resolveOptions(args, process.env, "--out");
   if ("error" in opts) {
@@ -56,7 +56,7 @@ export async function migrateExportCommand(args: string[]): Promise<number> {
     return 1;
   }
   if (res.status === 401) {
-    process.stderr.write("✗ unauthorized — check STACKBASE_ADMIN_KEY / --admin-key\n");
+    process.stderr.write("✗ unauthorized — check HELIPOD_ADMIN_KEY / --admin-key\n");
     return 1;
   }
   if (!res.ok) {
@@ -73,7 +73,7 @@ export async function migrateExportCommand(args: string[]): Promise<number> {
   return 0;
 }
 
-/** `stackbase migrate import --url <dst> --in dump.json` — push a dump into the target (fresh). */
+/** `helipod migrate import --url <dst> --in dump.json` — push a dump into the target (fresh). */
 export async function migrateImportCommand(args: string[]): Promise<number> {
   const opts = resolveOptions(args, process.env, "--in");
   if ("error" in opts) {
@@ -99,7 +99,7 @@ export async function migrateImportCommand(args: string[]): Promise<number> {
     return 1;
   }
   if (res.status === 401) {
-    process.stderr.write("✗ unauthorized — check STACKBASE_ADMIN_KEY / --admin-key\n");
+    process.stderr.write("✗ unauthorized — check HELIPOD_ADMIN_KEY / --admin-key\n");
     return 1;
   }
   const body = (await res.json().catch(() => ({}))) as {

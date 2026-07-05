@@ -1,12 +1,12 @@
 /**
- * `stackbase serve` — the production server. Unlike `dev`: requires a persistent admin key,
+ * `helipod serve` — the production server. Unlike `dev`: requires a persistent admin key,
  * binds 0.0.0.0, never writes codegen (the mounted functions directory must already contain
  * _generated/), and shuts down gracefully on SIGTERM/SIGINT. Shares the boot core with dev via
  * bootProject().
  */
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { PostgresDocStore } from "@stackbase/docstore-postgres";
+import { PostgresDocStore } from "@helipod/docstore-postgres";
 import type { DevServer } from "./server";
 import { ProcessRuntimeHost } from "./server";
 import {
@@ -22,14 +22,14 @@ import { applyDeploy } from "./deploy-apply";
 import { httpWakeHost } from "./wake-host";
 import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import type { DeploySchema } from "./schema-diff";
-import type { SchemaJsonLike } from "@stackbase/admin";
-import type { DocStore } from "@stackbase/docstore";
-import type { EmbeddedRuntime, WriteRouter, EmbeddedWriteFanoutAdapter } from "@stackbase/runtime-embedded";
+import type { SchemaJsonLike } from "@helipod/admin";
+import type { DocStore } from "@helipod/docstore";
+import type { EmbeddedRuntime, WriteRouter, EmbeddedWriteFanoutAdapter } from "@helipod/runtime-embedded";
 import type { FleetHandles } from "./http-handler";
 
 /**
- * Structural mirrors of `@stackbase/fleet`'s public surface. Declared locally (not imported) so
- * core `packages/cli` keeps ZERO static dependency on the enterprise `@stackbase/fleet` package —
+ * Structural mirrors of `@helipod/fleet`'s public surface. Declared locally (not imported) so
+ * core `packages/cli` keeps ZERO static dependency on the enterprise `@helipod/fleet` package —
  * it's loaded only via dynamic `import()` in fleet mode. Keep these in sync with `ee/packages/fleet`.
  * The engine seam types (`WriteRouter`/`EmbeddedWriteFanoutAdapter`) ARE core, so they're imported;
  * `FleetHandles` lives in `./http-handler` (where the proxy consumes it).
@@ -53,8 +53,8 @@ export interface FleetRuntimeOptions {
   /** Fleet B3 hybrid RYOW: awaited in the runtime's fan-out drain before a local commit's
    *  subscription re-runs (wired to the fleet forwarder's replica-catch-up wait). */
   beforeNotify?: (commitTs: bigint) => Promise<void>;
-  /** Fleet B4 (T4): group commit — resolved fleet-side from `STACKBASE_GROUP_COMMIT` (mirrors how
-   *  `@stackbase/fleet`'s `node.ts` resolves `STACKBASE_FLEET_MULTI_WRITER`), threaded straight
+  /** Fleet B4 (T4): group commit — resolved fleet-side from `HELIPOD_GROUP_COMMIT` (mirrors how
+   *  `@helipod/fleet`'s `node.ts` resolves `HELIPOD_FLEET_MULTI_WRITER`), threaded straight
    *  into `createEmbeddedRuntime` via `bootProject`'s `fleet.groupCommit`. Unset → `false`. */
   groupCommit?: boolean;
   /** Triggers D1: the stable-prefix accessor for `DriverContext.readLog` — `min(shard_leases.frontier_ts)`
@@ -73,7 +73,7 @@ export interface FleetPrep {
   switchable?: unknown;
   /** Sync only: `replica`'s on-disk path — threaded through to `startFleetNode`, which now runs the
    *  C7 deployment-id reconcile (deferred there from `prepareFleetNode` so it reads Postgres only
-   *  after THIS node's own boot has run — see `@stackbase/fleet`'s `node.ts`). */
+   *  after THIS node's own boot has run — see `@helipod/fleet`'s `node.ts`). */
   replicaPath?: string;
   lease: unknown;
   forwarder: unknown;
@@ -84,15 +84,15 @@ export interface FleetPrep {
   runtimeOptions: FleetRuntimeOptions;
 }
 
-/** The slice of `@stackbase/fleet` serve consumes (via dynamic import). */
+/** The slice of `@helipod/fleet` serve consumes (via dynamic import). */
 export interface FleetModule {
   prepareFleetNode(deps: {
     databaseUrl: string;
     advertiseUrl: string;
     adminKey: string;
     dataDir: string;
-    /** Lease TTL in ms — the failover-clock knob (see `@stackbase/fleet`'s `node.ts`). Threaded from
-     *  `STACKBASE_FLEET_LEASE_TTL_MS`; undefined → the fleet default (15000). Ops/test tuning. */
+    /** Lease TTL in ms — the failover-clock knob (see `@helipod/fleet`'s `node.ts`). Threaded from
+     *  `HELIPOD_FLEET_LEASE_TTL_MS`; undefined → the fleet default (15000). Ops/test tuning. */
     leaseTtlMs?: number;
     /** Shards B2a: shard count (default 8 in the fleet package). T5 owns the persist-once/env story;
      *  serve threads a plain number (undefined → fleet default). */
@@ -123,10 +123,10 @@ export interface ServeOptions {
    *  frontend on the SAME origin as its sync WebSocket, so a `location.host`-relative client needs no
    *  backend-URL config and never makes a cross-origin `/api/sync` connection. */
   webDir?: string;
-  /** Enable `POST /_admin/deploy` (`stackbase deploy`'s hot-swap target). Off by default — a running
+  /** Enable `POST /_admin/deploy` (`helipod deploy`'s hot-swap target). Off by default — a running
    * `serve` only accepts live code changes when explicitly opted in. */
   allowDeploy: boolean;
-  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  /** Postgres connection string (flag wins over `HELIPOD_DATABASE_URL`); unset → SQLite. */
   databaseUrl?: string;
   /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
   storageBucket?: string;
@@ -147,33 +147,33 @@ export interface ServeOptions {
    *  see `objectstore-select.ts`'s grammar doc. Mutually exclusive with `fleet`. Flag wins over env. */
   objectStoreUrl?: string;
   /** Tier 3 Slice 7, Task 7.3: the object-store writer's gc-driver sweep cadence (ms), from
-   *  `STACKBASE_OBJECTSTORE_GC_MS`. Unset → `boot.ts`'s `DEFAULT_OBJECTSTORE_GC_MS` (~60s). Ignored
+   *  `HELIPOD_OBJECTSTORE_GC_MS`. Unset → `boot.ts`'s `DEFAULT_OBJECTSTORE_GC_MS` (~60s). Ignored
    *  unless `objectStoreUrl` is set. */
   objectStoreGcMs?: number;
   /** Tier 3 multi-shard single-node serve: the number of object-storage lanes a `--object-store`
-   *  WRITER owns (`--shards N`, or `STACKBASE_FLEET_SHARDS`). Unset / `1` → single-shard (shard "0"),
+   *  WRITER owns (`--shards N`, or `HELIPOD_FLEET_SHARDS`). Unset / `1` → single-shard (shard "0"),
    *  unchanged. `> 1` → this node owns all `shardIdList(N)` lanes. Requires `--object-store`; invalid
    *  with `--replica` (replicas are single-shard) or `--fleet` (its own shard resolution). Validated
-   *  in `serveCommand`. Flag (`--shards`) wins over `STACKBASE_FLEET_SHARDS` env. */
+   *  in `serveCommand`. Flag (`--shards`) wins over `HELIPOD_FLEET_SHARDS` env. */
   objectStoreShards?: number;
   /** Tier 3 Slice 8, Task 8.2: boot this node as a READ-ONLY REPLICA of `objectStoreUrl`'s shard
    *  (materialize + tail, no write lease — every mutation is rejected) instead of a writer. REQUIRES
    *  `objectStoreUrl` (validated in `serveCommand`, before `startServe` is ever called). Optional so
    *  existing (non-replica) `ServeOptions` literals need no change; `resolveServeOptions` always
-   *  sets it. Flag (`--replica`) wins over `STACKBASE_REPLICA` env. */
+   *  sets it. Flag (`--replica`) wins over `HELIPOD_REPLICA` env. */
   replica?: boolean;
   /** Tier 3 Slice 8 follow-on (replica write-forwarding): the writer node's URL — when set on a
    *  `--replica` boot, every mutation/action FORWARDS here instead of being rejected. Ignored
-   *  unless `replica` is also set. Flag (`--writer-url`) wins over `STACKBASE_WRITER_URL` env. */
+   *  unless `replica` is also set. Flag (`--writer-url`) wins over `HELIPOD_WRITER_URL` env. */
   writerUrl?: string;
-  /** The wake seam's host endpoint (`--wake-url`, wins over `STACKBASE_WAKE_URL`) — for a host that
+  /** The wake seam's host endpoint (`--wake-url`, wins over `HELIPOD_WAKE_URL`) — for a host that
    *  STOPS THE PROCESS between requests, so `setTimeout` never fires and every driver goes dead.
    *  Set → `serve` builds an HTTP `WakeHost` that POSTs the next wake's absolute `atMs` here (on
    *  Cloudflare, the container's Outbound-Worker hostname, which the Worker turns into a Durable
    *  Object alarm). Unset (every existing deployment) → no wake host, plain `setTimeout`. */
   wakeUrl?: string;
   /** Floor for every driver's BACKSTOP poll cadence, ms (`--backstop-min-ms`, wins over
-   *  `STACKBASE_BACKSTOP_MIN_MS`) — `backstopMs = (d) => Math.max(d, n)`. Unset → identity (the
+   *  `HELIPOD_BACKSTOP_MIN_MS`) — `backstopMs = (d) => Math.max(d, n)`. Unset → identity (the
    *  drivers' own 30s/60s). Set where each wake costs a cold start: on Cloudflare a 30s backstop is
    *  a container boot every 30s forever. */
   backstopMinMs?: number;
@@ -226,11 +226,11 @@ export const OBJECTSTORE_RELINQUISH_TIMEOUT_MS = 2000;
 
 /** Fail-fast messages for `--fleet` misconfiguration (asserted verbatim by `fleet-flags.test.ts`). */
 export const FLEET_ERR_NO_DB =
-  "fleet mode requires --database-url (Postgres) — set --database-url postgres://… or STACKBASE_DATABASE_URL.";
+  "fleet mode requires --database-url (Postgres) — set --database-url postgres://… or HELIPOD_DATABASE_URL.";
 export const FLEET_ERR_NO_ADVERTISE =
-  "fleet mode requires --advertise-url (or STACKBASE_ADVERTISE_URL) — the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000";
+  "fleet mode requires --advertise-url (or HELIPOD_ADVERTISE_URL) — the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000";
 export const FLEET_ERR_NO_PACKAGE =
-  "fleet mode requires @stackbase/fleet — install it (bun add @stackbase/fleet).";
+  "fleet mode requires @helipod/fleet — install it (bun add @helipod/fleet).";
 
 /**
  * Validate `--fleet` prerequisites. Pure — no I/O; the dynamic-import check (FLEET_ERR_NO_PACKAGE)
@@ -247,8 +247,8 @@ export function validateFleetOptions(opts: {
   return { ok: true, databaseUrl: opts.databaseUrl!, advertiseUrl };
 }
 
-/** Parse `STACKBASE_FLEET_LEASE_TTL_MS` — a positive finite integer of ms, else undefined (the fleet
- *  default applies). Kept here (not in `@stackbase/fleet`) so the env read stays at serve's config
+/** Parse `HELIPOD_FLEET_LEASE_TTL_MS` — a positive finite integer of ms, else undefined (the fleet
+ *  default applies). Kept here (not in `@helipod/fleet`) so the env read stays at serve's config
  *  boundary, alongside the other fleet flags; the fleet package receives a validated number. */
 function parseLeaseTtlMs(raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
@@ -263,7 +263,7 @@ function parseLeaseTtlMs(raw: string | undefined): number | undefined {
  * `setupSchema()` on the real runtime store. Opens its own short-lived PgClient (via `makePgClient` —
  * `BunSqlClient` under Bun, `NodePgClient` elsewhere; no commit pool — this is a one-shot KV
  * read/maybe-write, not a shard writer) against the SAME database
- * `--database-url`/`STACKBASE_DATABASE_URL` names, runs `setupSchema()` (idempotent DDL only —
+ * `--database-url`/`HELIPOD_DATABASE_URL` names, runs `setupSchema()` (idempotent DDL only —
  * `readOnly: true` skips just the writer-lock/ts-seq seeding, not the DDL, so `persistence_globals`
  * is guaranteed to exist afterward even on a brand-new database) and delegates to the shared
  * `resolveNumShards` (same persist-once/mismatch-fail-fast contract non-fleet boot uses in
@@ -284,38 +284,38 @@ async function resolveFleetNumShards(databaseUrl: string, envValue: number | und
 export function resolveServeOptions(args: string[]): ServeOptions {
   // The raw `--dir` flag value, captured but NOT defaulted here — "" means "not given", handled
   // identically to `undefined` by `resolveFunctionsDir` (called later, in `serveCommand`, which also
-  // consults `functionsDir` in stackbase.config.ts). Resolving eagerly here would bake a literal
+  // consults `functionsDir` in helipod.config.ts). Resolving eagerly here would bake a literal
   // default in before the config file is ever consulted, silently winning over it — see T3 controller
   // note on the `codegenCommand` gap this whole task exists to close.
   let functionsDir = "";
-  let dataPath = process.env.STACKBASE_DATA_DIR ? join(process.env.STACKBASE_DATA_DIR, "db.sqlite") : "./data/db.sqlite";
+  let dataPath = process.env.HELIPOD_DATA_DIR ? join(process.env.HELIPOD_DATA_DIR, "db.sqlite") : "./data/db.sqlite";
   let ip = "0.0.0.0";
   let port = process.env.PORT ? Number(process.env.PORT) : 3000;
-  let dashboard = process.env.STACKBASE_DASHBOARD?.trim().toLowerCase() !== "off";
-  let allowDeploy = process.env.STACKBASE_ALLOW_DEPLOY === "1";
-  let webDir = process.env.STACKBASE_WEB_DIR;
-  let databaseUrl = process.env.STACKBASE_DATABASE_URL;
+  let dashboard = process.env.HELIPOD_DASHBOARD?.trim().toLowerCase() !== "off";
+  let allowDeploy = process.env.HELIPOD_ALLOW_DEPLOY === "1";
+  let webDir = process.env.HELIPOD_WEB_DIR;
+  let databaseUrl = process.env.HELIPOD_DATABASE_URL;
   let storageBucket: string | undefined;
   let storageEndpoint: string | undefined;
-  let fleet = process.env.STACKBASE_FLEET === "1" || process.env.STACKBASE_FLEET?.trim().toLowerCase() === "true";
-  let advertiseUrl = process.env.STACKBASE_ADVERTISE_URL;
-  let objectStoreUrl = process.env.STACKBASE_OBJECT_STORE;
-  let replica = /^(1|true|yes)$/i.test(process.env.STACKBASE_REPLICA ?? "");
-  let writerUrl = process.env.STACKBASE_WRITER_URL;
+  let fleet = process.env.HELIPOD_FLEET === "1" || process.env.HELIPOD_FLEET?.trim().toLowerCase() === "true";
+  let advertiseUrl = process.env.HELIPOD_ADVERTISE_URL;
+  let objectStoreUrl = process.env.HELIPOD_OBJECT_STORE;
+  let replica = /^(1|true|yes)$/i.test(process.env.HELIPOD_REPLICA ?? "");
+  let writerUrl = process.env.HELIPOD_WRITER_URL;
   // The wake seam (both env-or-flag, flag wins — `objectStoreUrl`'s exact shape above). Unset →
   // no wake host + identity backstops, i.e. byte-for-byte today's behavior.
-  let wakeUrl = process.env.STACKBASE_WAKE_URL;
-  let backstopMinMs = parseLeaseTtlMs(process.env.STACKBASE_BACKSTOP_MIN_MS);
+  let wakeUrl = process.env.HELIPOD_WAKE_URL;
+  let backstopMinMs = parseLeaseTtlMs(process.env.HELIPOD_BACKSTOP_MIN_MS);
   // Tier 3 multi-shard single-node serve: object-storage writer lane count. Set ONLY by the
-  // `--shards` flag here; the `STACKBASE_FLEET_SHARDS` env fallback is applied AFTER the flag loop
+  // `--shards` flag here; the `HELIPOD_FLEET_SHARDS` env fallback is applied AFTER the flag loop
   // and ONLY when `--object-store` is present — otherwise a plain `--fleet` boot (which legitimately
-  // reads `STACKBASE_FLEET_SHARDS` for its OWN shard count via `resolveFleetNumShards`) would trip
+  // reads `HELIPOD_FLEET_SHARDS` for its OWN shard count via `resolveFleetNumShards`) would trip
   // the object-store-only `--shards` validation below.
   let objectStoreShards: number | undefined;
   // Tier 3 Slice 7, Task 7.3: gc-driver cadence — env-only (no CLI flag), mirroring how
-  // STACKBASE_FLEET_LEASE_TTL_MS is a pure ops/test tuning knob with no flag equivalent.
+  // HELIPOD_FLEET_LEASE_TTL_MS is a pure ops/test tuning knob with no flag equivalent.
   // `parseLeaseTtlMs`'s "positive finite number, else undefined" parse is generic, not lease-specific.
-  const objectStoreGcMs = parseLeaseTtlMs(process.env.STACKBASE_OBJECTSTORE_GC_MS);
+  const objectStoreGcMs = parseLeaseTtlMs(process.env.HELIPOD_OBJECTSTORE_GC_MS);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--dir" && args[i + 1]) functionsDir = args[++i] as string;
@@ -337,10 +337,10 @@ export function resolveServeOptions(args: string[]): ServeOptions {
     else if (a === "--backstop-min-ms" && args[i + 1]) backstopMinMs = parseLeaseTtlMs(args[++i]);
     else if (a === "--web" && args[i + 1]) webDir = args[++i] as string;
   }
-  // `STACKBASE_FLEET_SHARDS` env fallback — ONLY for an object-store boot (never a fleet boot; see
+  // `HELIPOD_FLEET_SHARDS` env fallback — ONLY for an object-store boot (never a fleet boot; see
   // the `objectStoreShards` declaration above). The `--shards` flag, if given, always wins.
   if (objectStoreShards === undefined && objectStoreUrl !== undefined) {
-    objectStoreShards = parseNumShards(process.env.STACKBASE_FLEET_SHARDS);
+    objectStoreShards = parseNumShards(process.env.HELIPOD_FLEET_SHARDS);
   }
   return {
     functionsDir,
@@ -381,7 +381,7 @@ function toDeploySchema(schemaJson: SchemaJsonLike): DeploySchema["schemaJson"] 
 }
 
 /** Testable core: boot + start the server. No signals, no exit, does not block. In fleet mode the
- *  caller injects the dynamically-imported `@stackbase/fleet` module + resolved config so this core
+ *  caller injects the dynamically-imported `@helipod/fleet` module + resolved config so this core
  *  stays free of the enterprise dependency. */
 export async function startServe(
   opts: ServeOptions & {
@@ -489,7 +489,7 @@ export async function startServe(
                 const live = adminApi.getSchema();
                 return { schemaJson: toDeploySchema(live.schemaJson), tableNumbers: live.tableNumbers };
               },
-              deployRoot: join(process.cwd(), ".stackbase-deploy"),
+              deployRoot: join(process.cwd(), ".helipod-deploy"),
               currentModules: currentPushedModules,
             },
             payload,
@@ -525,15 +525,15 @@ export async function startServe(
 /** CLI wrapper: flags → fail-fast → startServe → signal handlers → run forever. */
 export async function serveCommand(args: string[]): Promise<number> {
   const opts = resolveServeOptions(args);
-  const adminKey = process.env.STACKBASE_ADMIN_KEY?.trim();
+  const adminKey = process.env.HELIPOD_ADMIN_KEY?.trim();
   // Admin key first: an operator missing BOTH the key and the functions directory should see the
   // key error, not have it masked by a directory error — this is the more fundamental misconfiguration
   // and was already serve's first fail-fast check before this task.
   if (!adminKey) {
-    process.stderr.write("✗ STACKBASE_ADMIN_KEY is required for `serve` — set it to a strong secret.\n");
+    process.stderr.write("✗ HELIPOD_ADMIN_KEY is required for `serve` — set it to a strong secret.\n");
     return 1;
   }
-  // Resolve the functions directory (flag > stackbase.config.ts `functionsDir` > DEFAULT_FUNCTIONS_DIR)
+  // Resolve the functions directory (flag > helipod.config.ts `functionsDir` > DEFAULT_FUNCTIONS_DIR)
   // and fail loudly — with the migrate hint — if it doesn't exist at all, before falling through to
   // the narrower "_generated/ missing" check below (which assumes the directory itself is real).
   const { functionsDir } = await resolveFunctionsDir(opts.functionsDir || undefined, process.cwd());
@@ -541,7 +541,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   opts.functionsDir = functionsDir;
   if (!existsSync(join(opts.functionsDir, "_generated", "server.ts"))) {
     process.stderr.write(
-      `✗ ${opts.functionsDir}/_generated not found — run \`stackbase codegen --dir ${opts.functionsDir}\` and commit _generated/ before deploying.\n`,
+      `✗ ${opts.functionsDir}/_generated not found — run \`helipod codegen --dir ${opts.functionsDir}\` and commit _generated/ before deploying.\n`,
     );
     return 1;
   }
@@ -559,7 +559,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   if (opts.replica && opts.objectStoreUrl === undefined) {
     process.stderr.write(
       "✗ --replica requires --object-store — a replica materializes from an object-storage bucket; " +
-        "set --object-store <url> (or STACKBASE_OBJECT_STORE).\n",
+        "set --object-store <url> (or HELIPOD_OBJECT_STORE).\n",
     );
     return 1;
   }
@@ -593,7 +593,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   if (opts.writerUrl !== undefined && !opts.replica) {
     process.stderr.write(
       "✗ --writer-url only applies to --replica (it's the writer this replica forwards mutations/" +
-        "actions to) — pass --replica too, or drop --writer-url (or STACKBASE_WRITER_URL).\n",
+        "actions to) — pass --replica too, or drop --writer-url (or HELIPOD_WRITER_URL).\n",
     );
     return 1;
   }
@@ -610,33 +610,33 @@ export async function serveCommand(args: string[]): Promise<number> {
     }
     try {
       // Indirect specifier (typed `string`, not a literal) so tsc does NOT statically resolve
-      // `@stackbase/fleet` — core cli has no static/type dependency on the enterprise package; it's
+      // `@helipod/fleet` — core cli has no static/type dependency on the enterprise package; it's
       // resolved at runtime via the workspace link. See package.json (fleet is deliberately absent).
-      const fleetSpecifier: string = "@stackbase/fleet";
+      const fleetSpecifier: string = "@helipod/fleet";
       fleetModule = (await import(fleetSpecifier)) as unknown as FleetModule;
     } catch {
       process.stderr.write(`✗ ${FLEET_ERR_NO_PACKAGE}\n`);
       return 1;
     }
-    // `STACKBASE_FLEET_SHARDS` (Shards B2a, T5): NUM_SHARDS, persisted once at first boot and
+    // `HELIPOD_FLEET_SHARDS` (Shards B2a, T5): NUM_SHARDS, persisted once at first boot and
     // immutable after — resolved BEFORE `prepareFleetNode` (which needs the final count up front
     // to size the per-shard commit pool). A mismatch against the persisted count fails boot fast.
     let numShards: number;
     try {
-      numShards = await resolveFleetNumShards(v.databaseUrl, parseNumShards(process.env.STACKBASE_FLEET_SHARDS));
+      numShards = await resolveFleetNumShards(v.databaseUrl, parseNumShards(process.env.HELIPOD_FLEET_SHARDS));
     } catch (e) {
       process.stderr.write(`✗ ${e instanceof Error ? e.message : String(e)}\n`);
       return 1;
     }
-    // `STACKBASE_FLEET_LEASE_TTL_MS` (ops/test tuning): the lease TTL in ms, the single knob the
-    // whole failover clock scales from inside `@stackbase/fleet` (heartbeat + acquire cadences are
+    // `HELIPOD_FLEET_LEASE_TTL_MS` (ops/test tuning): the lease TTL in ms, the single knob the
+    // whole failover clock scales from inside `@helipod/fleet` (heartbeat + acquire cadences are
     // derived from it). Unset → the fleet default (15000ms, behavior-identical to the historical
     // constants). Only a positive finite number is honored; anything else falls through to the
     // default. The wedged-writer E2E sets this to 4000 so failover completes in a test's timescale.
     fleetConfig = {
       databaseUrl: v.databaseUrl,
       advertiseUrl: v.advertiseUrl,
-      leaseTtlMs: parseLeaseTtlMs(process.env.STACKBASE_FLEET_LEASE_TTL_MS),
+      leaseTtlMs: parseLeaseTtlMs(process.env.HELIPOD_FLEET_LEASE_TTL_MS),
       numShards,
     };
   }
@@ -675,7 +675,7 @@ export async function serveCommand(args: string[]): Promise<number> {
   process.stdout.write(
     JSON.stringify({
       level: "info",
-      msg: "stackbase serve",
+      msg: "helipod serve",
       url: server.url,
       dir: opts.functionsDir,
       data: opts.dataPath,

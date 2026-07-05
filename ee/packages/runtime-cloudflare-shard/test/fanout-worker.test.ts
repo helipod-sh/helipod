@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 import { describe, it, expect } from "vitest";
 import { createShardWorkerHandler } from "../src/worker";
 
@@ -49,8 +49,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(200, { value: [rowB] }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { value: unknown[]; partial?: unknown };
     expect(body.value).toEqual([rowA, rowB]);
@@ -65,8 +65,8 @@ describe("createShardWorkerHandler — fanOut", () => {
         throw new Error("boom");
       },
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       value: unknown[];
@@ -85,8 +85,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(500, { error: "internal" }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       value: unknown[];
@@ -102,8 +102,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(200, { value: { not: "an array" } }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       value: unknown[];
@@ -123,8 +123,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(401, { error: "unauthorized" }),
       s1: () => jsonRes(401, { error: "unauthorized" }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(502);
     const body = (await res.json()) as {
       value: unknown[];
@@ -142,8 +142,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       default: () => jsonRes(200, { value: [rowA] }),
       s1: () => jsonRes(500, { error: "internal" }),
     });
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: 2, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: 2, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       value: unknown[];
@@ -169,8 +169,8 @@ describe("createShardWorkerHandler — fanOut", () => {
       };
     }
     const { ns } = scriptedNamespace(script);
-    const handler = createShardWorkerHandler("STACKBASE_DO", { mode: "hash", numShards: N, loaded });
-    const res = await handler.fetch(fanoutReq(), { STACKBASE_DO: ns });
+    const handler = createShardWorkerHandler("HELIPOD_DO", { mode: "hash", numShards: N, loaded });
+    const res = await handler.fetch(fanoutReq(), { HELIPOD_DO: ns });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { value: unknown[] };
     expect(body.value).toHaveLength(N);

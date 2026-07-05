@@ -1,5 +1,5 @@
 /**
- * `@stackbase/transactor` — the single-writer, OCC transaction engine: the reactive write
+ * `@helipod/transactor` — the single-writer, OCC transaction engine: the reactive write
  * path. Runs a function as a serializable transaction, validates its read set against
  * concurrent commits, applies staged writes to the `DocStore`, and emits an `OplogDelta`
  * for the sync tier.

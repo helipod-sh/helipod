@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/blobstore-s3",
+  "name": "@helipod/blobstore-s3",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,7 +21,7 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/blobstore": "workspace:*",
+    "@helipod/blobstore": "workspace:*",
     "@aws-sdk/client-s3": "catalog:",
     "@aws-sdk/s3-request-presigner": "catalog:"
   },

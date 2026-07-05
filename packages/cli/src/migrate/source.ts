@@ -1,7 +1,7 @@
 /**
  * The migration source-adapter seam. A `MigrationSource` inspects a project of some origin
  * backend and produces a `MigrationPlan` — the file edits, scaffold, and divergence report that
- * turn it into a Stackbase project. v1 ships only a Convex source; Supabase/Firebase are future
+ * turn it into a Helipod project. v1 ships only a Convex source; Supabase/Firebase are future
  * sources registered the same way.
  */
 export interface FileEdit {
@@ -21,7 +21,7 @@ export interface ReportEntry {
   line?: number;
   /** What was found, e.g. `.withIndex(...) query`. */
   what: string;
-  /** The concrete Stackbase equivalent or next step. */
+  /** The concrete Helipod equivalent or next step. */
   fix: string;
 }
 export interface MigrationPlan {

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema, defineTable, v } from "@stackbase/values";
-import { mutation, query, type RegisteredFunction } from "@stackbase/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema, defineTable, v } from "@helipod/values";
+import { mutation, query, type RegisteredFunction } from "@helipod/executor";
 import { browseTableModule } from "../src/browse";
 
 function systemModules(): Record<string, RegisteredFunction> {

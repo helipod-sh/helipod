@@ -1,6 +1,6 @@
 /**
  * `ctx.storage` — the app-facing file-storage facade, wired as a `ContextProvider` (see
- * `@stackbase/executor`). Mirrors `components/scheduler/src/facade.ts`: a `build(cctx)` in-txn
+ * `@helipod/executor`). Mirrors `components/scheduler/src/facade.ts`: a `build(cctx)` in-txn
  * facade that writes `_storage` metadata through the CALLING mutation's own transaction (via
  * `cctx.db`, requiring `write: true`), plus a `buildAction(api)` action-mode facade that has no
  * `db` and instead does native byte I/O against the `BlobStore` and delegates every metadata
@@ -28,9 +28,9 @@
  * `./token.ts`'s `verifyStorageToken` — the same function `./http.ts`'s `authorize` calls
  * directly; there is no separate `verifyUploadToken` wrapper here, it had zero callers.)
  */
-import type { ComponentContext, ActionApi, ContextProvider } from "@stackbase/executor";
-import { GuestDatabaseWriter } from "@stackbase/executor";
-import type { BlobStore, UploadTarget, BlobMetadata } from "@stackbase/blobstore";
+import type { ComponentContext, ActionApi, ContextProvider } from "@helipod/executor";
+import { GuestDatabaseWriter } from "@helipod/executor";
+import type { BlobStore, UploadTarget, BlobMetadata } from "@helipod/blobstore";
 import { STORAGE_TABLE } from "./system-table";
 import type { StorageDoc } from "./modules";
 import { createStorageToken } from "./token";
@@ -170,7 +170,7 @@ export function isReclaimable(doc: StorageDoc, now: number): boolean {
  * `StorageRouteDeps.signingKey` on the endpoint side (Task 7/8), or issued tokens won't verify.
  *
  * `write: true` is load-bearing: without it `cctx.db` is a read-only reader and every write in
- * `build` throws (see `ContextProvider.write` in `@stackbase/executor`). With it, and only during a
+ * `build` throws (see `ContextProvider.write` in `@helipod/executor`). With it, and only during a
  * mutation, `cctx.db` is a `GuestDatabaseWriter` scoped to the calling mutation's transaction — so
  * `generateUploadUrl`/`delete` are transactional and fan out reactively on commit like any write.
  */

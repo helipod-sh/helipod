@@ -1,5 +1,5 @@
 /**
- * The additive-schema gate for `stackbase deploy`. A deploy may add tables and add OPTIONAL fields
+ * The additive-schema gate for `helipod deploy`. A deploy may add tables and add OPTIONAL fields
  * (tableNumbers must stay stable); anything destructive — a dropped/renamed table, a changed
  * tableNumber, a removed field, an incompatible field-type change, or a new REQUIRED field on an
  * existing table — is rejected so the running deployment is never left with a schema its data

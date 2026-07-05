@@ -1,7 +1,7 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Multi-node DISTRIBUTED write-throughput benchmark. Spawns N real `serve --fleet` writer nodes
- * (STACKBASE_FLEET_MULTI_WRITER) against a SHARED Postgres, waits for the balancer to partition the
+ * (HELIPOD_FLEET_MULTI_WRITER) against a SHARED Postgres, waits for the balancer to partition the
  * shards across them, then drives concurrent sharded writes ROUTED TO EACH SHARD'S OWNER node and
  * measures aggregate mut/s.
  *
@@ -10,7 +10,7 @@
  * (engine/event-loop was the bottleneck), or is the shared Postgres the ceiling (flat)? Either is an
  * honest result. Reuses the fleet-e2e spawn/converge pattern (self-contained here, per the benchmark
  * house style — bench-commit et al.). embedded-postgres-gated + opt-in
- * (STACKBASE_BENCH_MULTINODE=1).
+ * (HELIPOD_BENCH_MULTINODE=1).
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -21,8 +21,8 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "pg";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
-import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@stackbase/docstore-postgres/test-support/embedded-pg";
+import { shardIdForKeyValue } from "@helipod/id-codec";
+import { startEmbeddedPg, embeddedPgAvailable, type EmbeddedPg } from "@helipod/docstore-postgres/test-support/embedded-pg";
 
 const SHARDS_PER_NODE = 4;
 const NODE_COUNTS = [1, 2, 3];
@@ -60,7 +60,7 @@ function spawnFleetServe(databaseUrl: string, port: number, numShards: number): 
       "--database-url", databaseUrl, "--fleet", "--advertise-url", `http://127.0.0.1:${port}`,
     ],
     {
-      env: { ...process.env, STACKBASE_ADMIN_KEY: ADMIN_KEY, STACKBASE_FLEET_MULTI_WRITER: "1", STACKBASE_FLEET_SHARDS: String(numShards) },
+      env: { ...process.env, HELIPOD_ADMIN_KEY: ADMIN_KEY, HELIPOD_FLEET_MULTI_WRITER: "1", HELIPOD_FLEET_SHARDS: String(numShards) },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -153,10 +153,10 @@ interface CellResult {
   errors: number;
 }
 
-const RUN = embeddedPgAvailable() && process.env["STACKBASE_BENCH_MULTINODE"] === "1";
+const RUN = embeddedPgAvailable() && process.env["HELIPOD_BENCH_MULTINODE"] === "1";
 const maybe = RUN ? describe : describe.skip;
 
-maybe("bench-multinode — distributed write throughput (opt-in: STACKBASE_BENCH_MULTINODE=1 + embedded-postgres)", () => {
+maybe("bench-multinode — distributed write throughput (opt-in: HELIPOD_BENCH_MULTINODE=1 + embedded-postgres)", () => {
   afterAll(async () => {
     for (const p of allProcs) p.kill("SIGKILL");
     for (const s of servers) await s.stop();

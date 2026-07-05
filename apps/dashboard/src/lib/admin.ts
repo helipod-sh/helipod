@@ -8,7 +8,7 @@ function resolveKey(): string {
   if (typeof injected === "string" && injected) return injected;
   const stored = sessionStorage.getItem("sb_admin_key");
   if (stored) return stored;
-  const entered = window.prompt("Stackbase admin key (STACKBASE_ADMIN_KEY):") ?? "";
+  const entered = window.prompt("Helipod admin key (HELIPOD_ADMIN_KEY):") ?? "";
   if (entered) sessionStorage.setItem("sb_admin_key", entered);
   return entered;
 }

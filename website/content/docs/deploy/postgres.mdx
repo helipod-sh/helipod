@@ -1,11 +1,11 @@
 ---
 title: Postgres
-description: Point stackbase at a Postgres database instead of SQLite, with no code changes.
+description: Point helipod at a Postgres database instead of SQLite, with no code changes.
 ---
 
 {/* diataxis: how-to */}
 
-SQLite is the zero-config default for `stackbase serve`. It's a single file, and it needs nothing
+SQLite is the zero-config default for `helipod serve`. It's a single file, and it needs nothing
 else installed. Postgres is the opt-in alternative: the same reactive engine, the same app code, no
 code changes, but your data lands in a database your infrastructure already backs up, replicates,
 and monitors.
@@ -16,45 +16,45 @@ single-writer guarantee, group commit, and how to think about its performance.
 ## Turning it on
 
 Point `serve` (or `dev`) at a Postgres database with `--database-url`, or set the
-`STACKBASE_DATABASE_URL` environment variable instead. The flag wins if both are set. Leave both
+`HELIPOD_DATABASE_URL` environment variable instead. The flag wins if both are set. Leave both
 unset and you get SQLite exactly as before.
 
 <Tabs items={['Flag', 'Environment variable']}>
 
 ```bash tab="Flag"
-stackbase serve --dir stackbase --database-url postgres://user:pass@host:5432/db
+helipod serve --dir helipod --database-url postgres://user:pass@host:5432/db
 ```
 
 ```bash tab="Environment variable"
-STACKBASE_DATABASE_URL=postgres://user:pass@host:5432/db stackbase serve --dir stackbase
+HELIPOD_DATABASE_URL=postgres://user:pass@host:5432/db helipod serve --dir helipod
 ```
 
 </Tabs>
 
 Any string matching `postgres://` or `postgresql://` selects the Postgres backend. Anything else,
-including unset, falls back to SQLite. The same flag and env var work for `stackbase dev` and for a
-compiled `stackbase build` binary too: the storage backend is a boot-time choice, not something
+including unset, falls back to SQLite. The same flag and env var work for `helipod dev` and for a
+compiled `helipod build` binary too: the storage backend is a boot-time choice, not something
 baked into your app code.
 
 ## Docker Compose with a `postgres:16` service
 
 Add a `postgres` service to `docker-compose.yml` and swap the SQLite volume for
-`STACKBASE_DATABASE_URL`:
+`HELIPOD_DATABASE_URL`:
 
 ```yaml title="docker-compose.yml"
 services:
-  stackbase:
+  helipod:
     build:
       context: .
       target: runner
     ports:
       - "3000:3000"
     volumes:
-      - ./stackbase:/app/stackbase:ro
+      - ./helipod:/app/helipod:ro
     environment:
-      STACKBASE_ADMIN_KEY: ${STACKBASE_ADMIN_KEY}
-      STACKBASE_DATABASE_URL: postgres://stackbase:stackbase@postgres:5432/stackbase
-    command: serve --dir /app/stackbase
+      HELIPOD_ADMIN_KEY: ${HELIPOD_ADMIN_KEY}
+      HELIPOD_DATABASE_URL: postgres://helipod:helipod@postgres:5432/helipod
+    command: serve --dir /app/helipod
     depends_on:
       - postgres
 
@@ -62,9 +62,9 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: stackbase
-      POSTGRES_PASSWORD: stackbase
-      POSTGRES_DB: stackbase
+      POSTGRES_USER: helipod
+      POSTGRES_PASSWORD: helipod
+      POSTGRES_DB: helipod
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -72,7 +72,7 @@ volumes:
   postgres-data:
 ```
 
-`docker compose up` now persists to the `postgres-data` named volume instead of `stackbase-data`.
+`docker compose up` now persists to the `postgres-data` named volume instead of `helipod-data`.
 Everything else in [Self-hosting](/docs/deploy/self-hosting), the admin key, the dashboard, restart
 persistence, works the same way.
 
@@ -95,26 +95,26 @@ run yourself. Pointing `serve` at a blank Postgres database is enough.
 
 ## The single-writer invariant
 
-Exactly one stackbase engine may be connected to a given Postgres database at a time. On boot,
+Exactly one helipod engine may be connected to a given Postgres database at a time. On boot,
 inside `setupSchema()`, the engine takes a `pg_advisory_lock`, a session-level Postgres lock tied to
 that one pinned connection. A second `serve` or `dev` process pointed at the same database fails
 fast instead of silently corrupting state:
 
 ```bash
-$ stackbase serve --dir stackbase --database-url postgres://...   # already running elsewhere
-Error: another Stackbase engine is already connected to this database (advisory lock held)
+$ helipod serve --dir helipod --database-url postgres://...   # already running elsewhere
+Error: another Helipod engine is already connected to this database (advisory lock held)
 ```
 
 This is a single-node durability story: Postgres as a stronger, externally-managed database for one
 writer, not clustering or multi-node write scale-out. Running two engines against the same Postgres
 database for high availability isn't supported on this path. See [Scaling](/docs/deploy/scaling) for
-`stackbase serve --fleet`, the multi-node story built on top of this same adapter.
+`helipod serve --fleet`, the multi-node story built on top of this same adapter.
 
 <Callout type="warn" title="Known limitations">
   **Single pinned connection, no automatic reconnect.** The engine holds exactly one Postgres
   connection for its lifetime, the same connection the single-writer lock and transaction pinning
   depend on. If that connection drops (a network blip, a Postgres restart, a failover), the engine
-  does not transparently reconnect. Restart the stackbase process to re-establish it.
+  does not transparently reconnect. Restart the helipod process to re-establish it.
 
   **An unclean process kill can briefly hold the lock.** A graceful shutdown (`SIGTERM`) releases the
   advisory lock immediately, but an unclean kill (`SIGKILL`, a crash) may leave an immediate restart
@@ -131,7 +131,7 @@ database for high availability isn't supported on this path. See [Scaling](/docs
 
 <Accordion title="Architecture: the PgClient seam">
 
-`@stackbase/docstore-postgres` implements `PostgresDocStore`, the Postgres analogue of the SQLite
+`@helipod/docstore-postgres` implements `PostgresDocStore`, the Postgres analogue of the SQLite
 adapter's `DatabaseAdapter`: the same `DocStore` contract, a different storage substrate underneath.
 The engine itself never imports a Postgres driver directly. `PostgresDocStore` sits on a narrow,
 driver-agnostic `PgClient` seam whose core surface is `query`, `transaction`, `acquireWriterLock`,
@@ -203,7 +203,7 @@ engine stops consuming, because the page is full or the limit is hit, the cursor
 Measured at 100k rows on the paginated shape, that's about a 92% cut in p50 wall-clock and roughly
 1000x fewer rows fetched: the win is work avoided on the server, not just bytes saved on the wire.
 
-This is on by default and needs no configuration. Set `STACKBASE_PG_STREAM=0` (or `false`) to
+This is on by default and needs no configuration. Set `HELIPOD_PG_STREAM=0` (or `false`) to
 disable it; the adapter then falls back to the buffered read path, which returns identical results
 (the full docstore conformance suite runs over both paths to prove that). Under the hood,
 `NodePgClient` streams via `pg-cursor` with adaptive fetch batching, and `BunSqlClient` uses
@@ -221,16 +221,16 @@ Postgres means its own `fsync`. Group commit batches multiple concurrent commits
 same short window into one shared transaction: one `fsync` amortized across all of them, without
 changing the atomicity or ordering guarantees of any individual commit.
 
-Group commit defaults on for single-node Postgres and off for SQLite. `STACKBASE_GROUP_COMMIT`
+Group commit defaults on for single-node Postgres and off for SQLite. `HELIPOD_GROUP_COMMIT`
 overrides that default in either direction (`1`/`true`/`yes`, case-insensitive, forces it on; any
 other value, including `0`/`false`, forces it off):
 
 ```bash
 # force it off even against Postgres
-STACKBASE_GROUP_COMMIT=0 stackbase serve --database-url postgres://... --dir stackbase
+HELIPOD_GROUP_COMMIT=0 helipod serve --database-url postgres://... --dir helipod
 
 # force it on even against SQLite (rarely useful, see the measured cost below)
-STACKBASE_GROUP_COMMIT=1 stackbase serve --dir stackbase
+HELIPOD_GROUP_COMMIT=1 helipod serve --dir helipod
 ```
 
 The store-conditional default exists because the win is store-dependent, not universal. Measured on
@@ -261,7 +261,7 @@ network round trip or fsync-per-commit cost.
 Postgres is the right choice when you want durability, backups, monitoring, and replicas managed by
 infrastructure you already operate, or when you're headed toward the multi-node fleet in
 [Scaling](/docs/deploy/scaling) (which requires Postgres as its shared substrate). It's still a
-single-writer store at this tier. Postgres doesn't make stackbase's transactor multi-writer by
+single-writer store at this tier. Postgres doesn't make helipod's transactor multi-writer by
 itself. You scale writes by sharding or by adding fleet nodes (Tier 2), never by adding threads
 against one Postgres connection.
 
@@ -293,7 +293,7 @@ an in-process PGlite Postgres for fast, hermetic runs), so the two backends are 
 interchangeable, not just similar by inspection.
 
 On top of that, a real-container ship gate spins up an actual `postgres:16` Docker container and
-drives the real `stackbase serve` production entrypoint (spawned as the real CLI binary, not an
+drives the real `helipod serve` production entrypoint (spawned as the real CLI binary, not an
 in-process harness) through: a mutation commit, its reactive fan-out to a WebSocket subscription
 opened before the write, a read-back via a second query, a second `serve` process rejected fast by
 the single-writer lock while the first is still up, and, after stopping the first, a third `serve`
@@ -308,9 +308,9 @@ entrypoint, not just unit-tested in isolation.
 
 ## Related
 
-- [Self-hosting with Docker](/docs/deploy/self-hosting): the baseline `stackbase serve` and
+- [Self-hosting with Docker](/docs/deploy/self-hosting): the baseline `helipod serve` and
   `docker compose up` this backend swaps into, unchanged: admin key, dashboard, restart persistence.
-- [Scaling](/docs/deploy/scaling): `stackbase serve --fleet`, multiple nodes sharing this same
+- [Scaling](/docs/deploy/scaling): `helipod serve --fleet`, multiple nodes sharing this same
   Postgres backend for multi-node write scale-out and live failover.
 - [Configuration reference](/docs/reference/configuration): the full flag/env table, including
-  `STACKBASE_DATABASE_URL` and `STACKBASE_GROUP_COMMIT` alongside every other setting.
+  `HELIPOD_DATABASE_URL` and `HELIPOD_GROUP_COMMIT` alongside every other setting.

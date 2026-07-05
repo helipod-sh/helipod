@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { DeployError, type DeployTarget } from "../src/index";
 
-describe("@stackbase/deploy seam types", () => {
+describe("@helipod/deploy seam types", () => {
   it("a minimal object satisfies DeployTarget and DeployError is an Error", async () => {
     const noop: DeployTarget = {
       name: "noop",

@@ -1,18 +1,18 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime, type IndexSpec } from "@stackbase/query-engine";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
-import { writtenTablesFromRanges, serializeKeyRange } from "@stackbase/index-key-codec";
-import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime, type IndexSpec } from "@helipod/query-engine";
+import { encodeStorageIndexId } from "@helipod/id-codec";
+import { writtenTablesFromRanges, serializeKeyRange } from "@helipod/index-key-codec";
+import { jsonToConvex, type JSONValue, type Value } from "@helipod/values";
 import {
   InlineUdfExecutor,
   SimpleIndexCatalog,
   query,
   mutation,
   type RegisteredFunction,
-} from "@stackbase/executor";
+} from "@helipod/executor";
 import {
   SyncProtocolHandler,
   createClientState,

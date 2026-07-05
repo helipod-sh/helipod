@@ -5,7 +5,7 @@ description: "The North Star: why the engine is shaped the way it is, and how th
 
 {/* diataxis: explanation */}
 
-This page is the map. It explains the one idea that everything else in Stackbase's engine is built around, and how that one idea lets a tiny single-binary app and a large distributed one share the exact same code.
+This page is the map. It explains the one idea that everything else in Helipod's engine is built around, and how that one idea lets a tiny single-binary app and a large distributed one share the exact same code.
 
 The other pages under **Architecture** each zoom into one piece of this picture in depth: [reactivity & sync](/docs/contributing/architecture/reactivity), [transactions](/docs/contributing/architecture/transactions), [storage](/docs/contributing/architecture/storage), [query engine](/docs/contributing/architecture/query-engine), [execution](/docs/contributing/architecture/execution), and [runtimes & topology](/docs/contributing/architecture/runtimes).
 
@@ -13,15 +13,15 @@ The other pages under **Architecture** each zoom into one piece of this picture 
 
 Think about a typical backend: an app server, a database, a cache, a message queue, and a realtime/pub-sub broker, each a separate process talking to the others over the network. Most of the latency you feel and most of the complexity you maintain lives in those network seams, not in your actual business logic.
 
-Stackbase's bet is simple: **remove the seams.** Your query and mutation functions run *in the same process* as the storage engine, hidden behind one narrow interface instead of a database driver. There's no separate cache to invalidate and no message broker to wire up. When data changes, the engine already knows exactly which subscribed clients care, and pushes them an update directly.
+Helipod's bet is simple: **remove the seams.** Your query and mutation functions run *in the same process* as the storage engine, hidden behind one narrow interface instead of a database driver. There's no separate cache to invalidate and no message broker to wire up. When data changes, the engine already knows exactly which subscribed clients care, and pushes them an update directly.
 
 ## Five goals that don't obviously fit together
 
-Stackbase is trying to be all of these at once:
+Helipod is trying to be all of these at once:
 
 | Goal | What it means in practice |
 |---|---|
-| **Great developer experience** | Reactive `useQuery`, end-to-end TypeScript types, a fast `stackbase dev` loop |
+| **Great developer experience** | Reactive `useQuery`, end-to-end TypeScript types, a fast `helipod dev` loop |
 | **Lightweight** | One binary, an embedded database, no sidecar services. Runs on a cheap VPS or a laptop |
 | **Fastest realtime** | Updates are pushed the instant they happen, never polled for |
 | **Deploy anywhere** | The same artifact runs on Docker, Bun, Node, or as a compiled standalone binary |
@@ -29,7 +29,7 @@ Stackbase is trying to be all of these at once:
 
 Read that list again and notice the tension. "One lightweight binary" and "horizontally scalable distributed system" sound like opposite designs. Most backends pick one lane: a scrappy single-binary tool that hits a wall, or a scalable platform that's heavy to run on day one.
 
-Stackbase's answer is not to pick a lane. It makes both **the same system at two different operating points**, connected by a handful of stable internal interfaces. Growing from one to the other is a deployment and configuration change, never a rewrite of your functions.
+Helipod's answer is not to pick a lane. It makes both **the same system at two different operating points**, connected by a handful of stable internal interfaces. Growing from one to the other is a deployment and configuration change, never a rewrite of your functions.
 
 Each goal maps to a concrete mechanism:
 
@@ -67,7 +67,7 @@ This whole diagram is **storage-independent**. It talks about timestamps and ran
 
 ## Three kinds of functions, and why one of them can't touch the database directly
 
-Stackbase functions come in three flavors, and the difference between them is entirely about determinism:
+Helipod functions come in three flavors, and the difference between them is entirely about determinism:
 
 | Kind | Deterministic? | Can read/write the database? | Can call `fetch`, read the clock, use randomness? |
 |---|---|---|---|
@@ -106,7 +106,7 @@ flowchart LR
   T0["Tier 0\nsingle binary, embedded SQLite\nloopback connection"] -->|"swap in Postgres"| T1["Tier 1\nsame process\nexternal Postgres"] -->|"split components apart"| T2["Tier 2\ndistributed: executor pool,\nper-shard writer, sync fleet, replicas"]
 ```
 
-- **Tier 0, the default.** One executable: the transactor, executors, sync tier, and dashboard all run in the same process, over embedded SQLite. A client on the same machine talks to the engine over an in-memory loopback connection instead of a real network socket, so there's no network hop at all. This is what makes `stackbase dev`, a self-contained Docker container, and a compiled single-file binary all possible.
+- **Tier 0, the default.** One executable: the transactor, executors, sync tier, and dashboard all run in the same process, over embedded SQLite. A client on the same machine talks to the engine over an in-memory loopback connection instead of a real network socket, so there's no network hop at all. This is what makes `helipod dev`, a self-contained Docker container, and a compiled single-file binary all possible.
 - **Tier 1, same process, real database.** Identical to Tier 0 except the adapter underneath is Postgres instead of SQLite. Still one writer, still one process. This is usually the "we outgrew a single SQLite file" step, with no code changes.
 - **Tier 2, split apart.** The executors become a stateless, horizontally-scaled pool. The transactor stays a single logical writer, but now *per shard* (a shard is just a slice of the data with its own single writer, so you add write capacity by adding slices instead of by weakening consistency). Write throughput scales by adding shards, not by weakening consistency. The sync tier becomes its own standalone service, so connection count and query-recompute load can scale independently of storage. Postgres gains read replicas (read-only copies that stay in sync with the writer, so read traffic can be spread across them instead of all hitting one database).
 
@@ -120,7 +120,7 @@ Being straight about this matters more than making the diagram look complete:
 - **Tier 2 exists and runs**, but it's a newer, still-maturing part of the system (parts of it live in the commercial `ee/` tree rather than the open-core engine). A log-fed fleet of writers coordinates through Postgres-backed leases, and replicas tail the commit log to stay current. Measured multi-node throughput on a shared Postgres backing store tops out around **1.75x at 3 nodes** today. That's useful, but it means the practical path to real write scale is adding *shards* (each with its own single writer), not just adding more nodes against one shared store.
 - **The wire protocol is JSON, not a custom binary format.** An early sketch of this design considered a compact binary delta protocol. What actually shipped instead is JSON carrying *differential* updates (only what changed, not the whole result set again). See [Reactivity & sync](/docs/contributing/architecture/reactivity) for how that differential path works. It gets most of the bandwidth win without the complexity of a bespoke wire format.
 
-## What Stackbase deliberately does not do
+## What Helipod deliberately does not do
 
 - **No sprawl of a dozen containers.** One engine process with pluggable adapters, not a ring of microservices each needing its own deploy story.
 - **No hidden single-node ceiling.** The in-process Tier 0 design is one configuration of a system built to scale, not a wall you hit later.

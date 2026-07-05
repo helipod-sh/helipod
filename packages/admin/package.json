@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/admin",
+  "name": "@helipod/admin",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,18 +12,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/errors": "workspace:*",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
-    "@stackbase/runtime-embedded": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/docstore": "workspace:*",
+    "@helipod/errors": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/component": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/query-engine": "workspace:*",
+    "@helipod/component": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/query-engine": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

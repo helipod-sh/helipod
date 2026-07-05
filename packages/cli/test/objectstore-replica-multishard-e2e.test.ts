@@ -1,6 +1,6 @@
 /**
  * Multi-shard replicas Task 2 — the HEADLINE multi-shard E2E: a 3-SHARD WRITER + a 3-SHARD REPLICA
- * over ONE object-store bucket, each a real `stackbase serve` boot through `startServe` (real HTTP +
+ * over ONE object-store bucket, each a real `helipod serve` boot through `startServe` (real HTTP +
  * WebSocket, real per-lane `ObjectStoreDocStore`s behind the `ShardedObjectStoreDocStore` composite,
  * real bucket I/O). The read-scaled sibling of `objectstore-serve-e2e.test.ts` (multi-shard writer
  * takeover) and `objectstore-replica-e2e.test.ts` (single-shard replica), fs (always) + real MinIO
@@ -25,12 +25,12 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import WebSocket from "ws";
-import { shardIdForKeyValue } from "@stackbase/id-codec";
+import { shardIdForKeyValue } from "@helipod/id-codec";
 import { startServe } from "../src/serve";
 import { resolveObjectStore } from "../src/objectstore-select";
-import { readConsumerWatermarks } from "@stackbase/objectstore-substrate";
+import { readConsumerWatermarks } from "@helipod/objectstore-substrate";
 
-const FUNCTIONS_DIR = "test/fixtures/shard-dev/stackbase";
+const FUNCTIONS_DIR = "test/fixtures/shard-dev/helipod";
 
 /* ── WS + HTTP helpers (mirror objectstore-replica-e2e.test.ts) ───────────────────────────────── */
 
@@ -244,7 +244,7 @@ async function scenario(objectStoreUrl: string, label: string): Promise<void> {
 
 /* ── fs arm — hermetic, always on ─────────────────────────────────────────────────────────────── */
 
-describe("stackbase serve --object-store --shards 3 --replica — end-to-end (fs, real server)", () => {
+describe("helipod serve --object-store --shards 3 --replica — end-to-end (fs, real server)", () => {
   it(
     "3-shard writer + 3-shard replica over one bucket: per-lane bootstrap, non-default-lane reactive fan-out, write reject, per-lane watermarks + removal",
     async () => {
@@ -266,13 +266,13 @@ function dockerAvailable(): boolean {
   }
 }
 
-const RUN_MINIO = dockerAvailable() && process.env.STACKBASE_OBJECTSTORE_S3 === "1";
+const RUN_MINIO = dockerAvailable() && process.env.HELIPOD_OBJECTSTORE_S3 === "1";
 const maybeDescribe = RUN_MINIO ? describe : describe.skip;
 
 const MINIO_CONTAINER = `sb-minio-objstore-replica-ms-e2e-${process.pid}`;
 const MINIO_USER = "minioadmin";
 const MINIO_PASS = "minioadmin";
-const BUCKET = "stackbase-objstore-replica-ms-e2e";
+const BUCKET = "helipod-objstore-replica-ms-e2e";
 
 function runDocker(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync("docker", args, { encoding: "utf8" });
@@ -281,7 +281,7 @@ function runDocker(args: string[]): { status: number | null; stdout: string; std
 
 function loadS3Sdk(): { S3Client: any; CreateBucketCommand: any } {
   const reqRoot = createRequire(import.meta.url);
-  const reqS3 = createRequire(reqRoot.resolve("@stackbase/objectstore-s3"));
+  const reqS3 = createRequire(reqRoot.resolve("@helipod/objectstore-s3"));
   return reqS3("@aws-sdk/client-s3");
 }
 
@@ -337,7 +337,7 @@ function stopMinio(): void {
   runDocker(["rm", "-f", MINIO_CONTAINER]);
 }
 
-maybeDescribe("stackbase serve --object-store --shards 3 --replica — end-to-end (real MinIO, gated)", () => {
+maybeDescribe("helipod serve --object-store --shards 3 --replica — end-to-end (real MinIO, gated)", () => {
   afterAll(() => stopMinio());
 
   it(

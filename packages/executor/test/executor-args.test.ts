@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { MonotonicTimestampOracle } from "@stackbase/docstore";
-import { SingleWriterTransactor } from "@stackbase/transactor";
-import { QueryRuntime } from "@stackbase/query-engine";
-import { v } from "@stackbase/values";
-import { ArgumentValidationError } from "@stackbase/errors";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { MonotonicTimestampOracle } from "@helipod/docstore";
+import { SingleWriterTransactor } from "@helipod/transactor";
+import { QueryRuntime } from "@helipod/query-engine";
+import { v } from "@helipod/values";
+import { ArgumentValidationError } from "@helipod/errors";
 import { InlineUdfExecutor, SimpleIndexCatalog, mutation, action, type UdfResult } from "../src/index";
 
 let exec: InlineUdfExecutor;

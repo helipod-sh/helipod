@@ -1,5 +1,5 @@
-/** The one method auth calls on a composed `@stackbase/notifications` (duck-typed from the action
- *  ctx as `ctx.notifications`). Auth does NOT depend on `@stackbase/notifications`; this is a
+/** The one method auth calls on a composed `@helipod/notifications` (duck-typed from the action
+ *  ctx as `ctx.notifications`). Auth does NOT depend on `@helipod/notifications`; this is a
  *  structural shape so an auth deployment WITHOUT notifications composed falls back to its own
  *  `EmailProvider`. `critical: true` guarantees the transactional email bypasses the recipient's
  *  notification preferences. */

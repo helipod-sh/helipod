@@ -1,10 +1,10 @@
 // components/scheduler/test/helpers.ts
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { composeComponents } from "@stackbase/component";
-import { EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { defineSchema } from "@stackbase/values";
-import { query, mutation, type RegisteredFunction } from "@stackbase/executor";
-import type { JSONValue, Value } from "@stackbase/values";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { composeComponents } from "@helipod/component";
+import { EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { defineSchema } from "@helipod/values";
+import { query, mutation, type RegisteredFunction } from "@helipod/executor";
+import type { JSONValue, Value } from "@helipod/values";
 import { defineScheduler, type SchedulerDriver, type CronJobs } from "../src/index";
 
 // Privileged raw-table scan — reads a fully-qualified table name (e.g. "scheduler/jobs")
@@ -86,7 +86,7 @@ function systemModules(): Record<string, RegisteredFunction> {
 }
 
 /**
- * Composes an `EmbeddedRuntime` with `@stackbase/scheduler` enabled. `opts.now` injects a
+ * Composes an `EmbeddedRuntime` with `@helipod/scheduler` enabled. `opts.now` injects a
  * controllable virtual clock (flows through to both `ctx.scheduler`'s facade and the driver's
  * internal `_peekDue`/`_claim`/`_complete` modules — see `executor.ts`'s `this.deps.now`), and the
  * returned `tick()` drives exactly one deterministic loop iteration via the scheduler driver's

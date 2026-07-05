@@ -2,7 +2,7 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   // `http-handler` and `project` are additionally built as standalone subpath entries so a
-  // Cloudflare-Worker/Durable-Object bundle (`@stackbase/runtime-cloudflare`, Slice 3) can reuse the
+  // Cloudflare-Worker/Durable-Object bundle (`@helipod/runtime-cloudflare`, Slice 3) can reuse the
   // SHIPPED pure HTTP dispatcher (`handleHttpRequest`) and project-compose (`loadProject`) WITHOUT
   // pulling `server.ts`'s `node:http`/`ws` — which workerd cannot load. The `.` index still re-exports
   // both, so every existing importer is unchanged; the subpaths are purely additive. The `bin.ts`

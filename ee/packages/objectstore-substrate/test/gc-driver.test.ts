@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Task 7.2a — the gc-driver, over a REAL `ObjectStoreDocStore` on an fs bucket (per `test/gc.test.ts`'s
  * own harness) + a controllable fake `DriverContext` (per `heartbeat-driver.test.ts`'s harness). Three
@@ -10,11 +10,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { newDocumentId, encodeStorageTableId, type InternalDocumentId } from "@stackbase/id-codec";
-import type { DocumentLogEntry } from "@stackbase/docstore";
-import type { DriverContext } from "@stackbase/component";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
+import { newDocumentId, encodeStorageTableId, type InternalDocumentId } from "@helipod/id-codec";
+import type { DocumentLogEntry } from "@helipod/docstore";
+import type { DriverContext } from "@helipod/component";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { gcDriver, type GcDriver } from "../src/gc-driver";
 

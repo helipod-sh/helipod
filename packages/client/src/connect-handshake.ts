@@ -3,15 +3,15 @@
  * durable `(clientId, seq)` still awaiting a verdict) and `ackedThrough` (the contiguous
  * settled-prefix per clientId, for server-side retention pruning), plus the wire message itself.
  *
- * Extracted from `client.ts` (T3) so a SECOND caller with no `StackbaseClient` can send the SAME
+ * Extracted from `client.ts` (T3) so a SECOND caller with no `HelipodClient` can send the SAME
  * handshake shape — the headless drain (`headless-drain.ts`, the Background Sync seam). A Service
  * Worker has no live in-memory `MutationLog`, only the durable `OutboxStorage` rows, so
  * {@link outboxHeldFromStore} computes `held` straight from those instead of a live
- * `PendingMutation` log ({@link outboxHeldFromLog}, `StackbaseClient`'s own source). Both feed the
+ * `PendingMutation` log ({@link outboxHeldFromLog}, `HelipodClient`'s own source). Both feed the
  * SAME {@link outboxAckedThrough}/{@link buildConnectMessage} — the wire shape is identical either
  * way, only the source of `held` differs.
  */
-import type { ClientMessage, ClientMutationRef } from "@stackbase/sync";
+import type { ClientMessage, ClientMutationRef } from "@helipod/sync";
 import type { PendingMutation } from "./mutation-log";
 import type { OutboxEntry } from "./outbox-storage";
 
@@ -22,7 +22,7 @@ import type { OutboxEntry } from "./outbox-storage";
  *  caller (re)sends them; only `completed`/`failed` (a settled fate) are never held. */
 const HELD_STATUSES: ReadonlySet<string> = new Set(["unsent", "inflight", "parked"]);
 
-/** `held` from a LIVE `StackbaseClient`'s in-memory log — every entry with a recorded `(clientId,
+/** `held` from a LIVE `HelipodClient`'s in-memory log — every entry with a recorded `(clientId,
  *  seq)` whose status is still unsettled. */
 export function outboxHeldFromLog(entries: Iterable<PendingMutation>): ClientMutationRef[] {
   const refs: ClientMutationRef[] = [];

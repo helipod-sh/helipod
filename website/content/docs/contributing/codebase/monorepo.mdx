@@ -1,11 +1,11 @@
 ---
 title: "The monorepo"
-description: "A tour of the packages, components, and ee/ modules that make up the Stackbase repo, and how they depend on each other."
+description: "A tour of the packages, components, and ee/ modules that make up the Helipod repo, and how they depend on each other."
 ---
 
 {/* diataxis: explanation */}
 
-Stackbase lives in one repository. That's not an accident: it's the same "everything in one place, split into small pieces" idea as the reactive engine itself.
+Helipod lives in one repository. That's not an accident: it's the same "everything in one place, split into small pieces" idea as the reactive engine itself.
 
 This page is the map. It covers what's in the repo, why it's split the way it is, and the one rule that keeps it from turning into a ball of mud as it grows.
 
@@ -22,7 +22,7 @@ Think of the repo as four buckets, each with a different job:
 | `ee/packages/` | Paid, scale-out features under a separate license | 3 packages | Yes, and separately licensed |
 | `apps/` + `examples/` | The dashboard app, and runnable sample apps | 1 app, 4 examples | n/a |
 
-`apps/dashboard` is the live data browser, logs viewer, and function runner you get with every `stackbase dev`/`serve`. `examples/` (`chat`, `auth-demo`, `offline-demo`, `optimistic-demo`) double as end-to-end integration tests that run against the real CLI. A regression in wiring the pieces together shows up there, not just in unit tests.
+`apps/dashboard` is the live data browser, logs viewer, and function runner you get with every `helipod dev`/`serve`. `examples/` (`chat`, `auth-demo`, `offline-demo`, `optimistic-demo`) double as end-to-end integration tests that run against the real CLI. A regression in wiring the pieces together shows up there, not just in unit tests.
 
 Here's the real `packages/` list, as of this writing, grouped by role:
 
@@ -125,13 +125,13 @@ Here's the real `packages/` list, as of this writing, grouped by role:
 That's 32 packages. Most are small on purpose, a few hundred lines each. A small package is easy to read start to finish, and it's also the only thing a dependency-direction rule (below) needs to check.
 
 <Callout title="A note if you've read the old design docs" type="warn">
-An earlier internal design note (`docs/dev/architecture/foundation/monorepo-tooling-skeleton.md`) describes a single `@stackbase/contracts` package holding all the cross-package interfaces. **That package was never built.** The repo evolved differently as it grew. What actually shipped:
+An earlier internal design note (`docs/dev/architecture/foundation/monorepo-tooling-skeleton.md`) describes a single `@helipod/contracts` package holding all the cross-package interfaces. **That package was never built.** The repo evolved differently as it grew. What actually shipped:
 
 - The storage interface (`DocStore`) lives in **`packages/docstore`**, not `contracts`.
 - The value/validator/schema system (`Value`, `v`, `defineSchema`) lives in **`packages/values`**.
-- The error hierarchy (`StackbaseError`) lives in **`packages/errors`**.
+- The error hierarchy (`HelipodError`) lives in **`packages/errors`**.
 
-If you're reading an internal doc that mentions `@stackbase/contracts`, mentally substitute the real names above. The *idea* (pure, dependency-free contracts at the bottom of the graph) is exactly what shipped, just under different package names.
+If you're reading an internal doc that mentions `@helipod/contracts`, mentally substitute the real names above. The *idea* (pure, dependency-free contracts at the bottom of the graph) is exactly what shipped, just under different package names.
 </Callout>
 
 ## The mental model: layers, bottom to top
@@ -148,7 +148,7 @@ From the bottom up:
 6. **`sync`**: the reactive tier. It holds live subscriptions, matches a commit's write set against them, and decides who gets pushed an update.
 7. **`runtime-embedded`** (and the newer **`runtime-cloudflare`**): a host that wires the layers above into one running process, over a chosen transport (loopback, WebSocket, or a Cloudflare Durable Object).
 8. **`component`**: the composition layer that lets optional features (below) plug into a running app.
-9. **The top**: `client` (SDK + React hooks), `cli` (the `stackbase` command), `codegen` (typed `Doc`/`Id`/`api`), `admin` (the dashboard's API).
+9. **The top**: `client` (SDK + React hooks), `cli` (the `helipod` command), `codegen` (typed `Doc`/`Id`/`api`), `admin` (the dashboard's API).
 
 `components/` (auth, scheduler, workflow, ...) and `ee/packages/` (fleet, ...) both sit *above* this stack. They're built using `component` and `executor`, never the other way around.
 
@@ -194,7 +194,7 @@ flowchart LR
 
 *A leak out of an adapter is a design bug, caught in CI, not a code-review hope.*
 
-Why this matters more than it might seem: **package boundaries are the tier-split points.** Want to run Stackbase on Postgres instead of SQLite? That's a new leaf package (`docstore-postgres`), not an edit to `transactor`. Want to run on Cloudflare Durable Objects instead of an embedded process? That's a new leaf (`runtime-cloudflare`, `docstore-do-sqlite`), not a rewrite of `query-engine`.
+Why this matters more than it might seem: **package boundaries are the tier-split points.** Want to run Helipod on Postgres instead of SQLite? That's a new leaf package (`docstore-postgres`), not an edit to `transactor`. Want to run on Cloudflare Durable Objects instead of an embedded process? That's a new leaf (`runtime-cloudflare`, `docstore-do-sqlite`), not a rewrite of `query-engine`.
 
 The engine never learns which database or host it's running on. Because it structurally *can't* learn that (it never imports the packages that would tell it), the "engine is portable" property survives contributors who don't happen to remember the rule.
 
@@ -207,7 +207,7 @@ You won't need all of these on day one, but here's what to reach for when you ne
 | Package | What it's for |
 |---|---|
 | `values` | The value system: `Value`, `v` validators, `defineSchema`/`defineTable` |
-| `errors` | The `StackbaseError` hierarchy: every thrown error knows its HTTP status |
+| `errors` | The `HelipodError` hierarchy: every thrown error knows its HTTP status |
 | `id-codec` | Encodes/decodes document ids (`Id<"table">` `<->` the stored bytes) |
 | `index-key-codec` | Order-preserving key encoding, the interval-index matcher, and cursors |
 | `docstore` | The storage seam: the `DocStore` interface everything above it relies on |
@@ -216,20 +216,20 @@ You won't need all of these on day one, but here's what to reach for when you ne
 | `executor` | The sandboxed runtime that calls your query/mutation/action functions |
 | `sync` | The reactive tier and the WebSocket wire protocol |
 | `runtime-embedded` | The Tier 0 host: wires engine + adapter + transport into one running process |
-| `component` | Composition: namespaced tables, the driver seam, `stackbase.config.ts` wiring |
+| `component` | Composition: namespaced tables, the driver seam, `helipod.config.ts` wiring |
 | `codegen` | Generates the typed `Doc`/`Id`/`api` your app code imports |
 | `client` | The framework-agnostic client, plus React hooks (`useQuery`, `useMutation`) |
-| `cli` | The `stackbase` command: `dev`, `serve`, `deploy`, `build`, `codegen` |
-| `deploy` | The pluggable `DeployTarget` seam (`serve`/`cloudflare`/`docker`) behind `stackbase deploy` |
+| `cli` | The `helipod` command: `dev`, `serve`, `deploy`, `build`, `codegen` |
+| `deploy` | The pluggable `DeployTarget` seam (`serve`/`cloudflare`/`docker`) behind `helipod deploy` |
 | `blobstore` + `storage` | The byte-storage seam and the always-on `ctx.storage` file API |
 | `admin` | The API the dashboard app talks to |
 | `receipts` | The Receipted Outbox's server-side TTL reaper: sweeps expired dedup rows off `DocStore` |
 
-If a name isn't in this table, it's either a leaf adapter (`docstore-postgres`, `blobstore-s3`, ...) whose job is obvious from its name, test-only scaffolding (`test`), or a tooling integration (`vite`, the `@stackbase/vite` plugin that boots the stackbase dev backend alongside a Vite dev server).
+If a name isn't in this table, it's either a leaf adapter (`docstore-postgres`, `blobstore-s3`, ...) whose job is obvious from its name, test-only scaffolding (`test`), or a tooling integration (`vite`, the `@helipod/vite` plugin that boots the helipod dev backend alongside a Vite dev server).
 
 ## Components: opt-in mini-backends
 
-`components/` holds six packages: **auth**, **authz**, **scheduler**, **workflow**, **triggers**, **notifications**. Each is a self-contained feature with its own tables, functions, and (where relevant) background work. None of them are on by default; a project turns one on by composing it in `stackbase.config.ts`. Under the hood, every one of them is built the same way, on top of the `component` package's composition seam and the `executor`'s function-calling machinery. Nothing about them is special-cased in the engine.
+`components/` holds six packages: **auth**, **authz**, **scheduler**, **workflow**, **triggers**, **notifications**. Each is a self-contained feature with its own tables, functions, and (where relevant) background work. None of them are on by default; a project turns one on by composing it in `helipod.config.ts`. Under the hood, every one of them is built the same way, on top of the `component` package's composition seam and the `executor`'s function-calling machinery. Nothing about them is special-cased in the engine.
 
 If you want to build your own, [Building a custom component](/docs/contributing/extending/custom-component) walks through the seams (`schema`, `context`, `modules`, `driver`, `boot`, `httpRoutes`) that `defineComponent` gives you. They're the same ones auth and friends use.
 
@@ -244,7 +244,7 @@ Three packages live under `ee/packages/`: **fleet** (distributed Tier 2 scale-ou
 - **vitest, run under Node**: even though Bun is the primary runtime, the test suite runs under Node via vitest. That means a test that only works with a Bun-specific API won't get caught by the normal `bun run test`, worth knowing if you're testing something Bun-only.
 
 <Callout title="Rebuild after editing a dependency" type="warn">
-Cross-package tests import their dependencies from the built `dist/` output, not from `src/`. If you edit `packages/values/src/...` and then run `packages/query-engine`'s tests without rebuilding, you're testing against the *old* compiled `values`. Run `bun run build` (or `bun run --filter @stackbase/values build`) after editing a package other tests depend on.
+Cross-package tests import their dependencies from the built `dist/` output, not from `src/`. If you edit `packages/values/src/...` and then run `packages/query-engine`'s tests without rebuilding, you're testing against the *old* compiled `values`. Run `bun run build` (or `bun run --filter @helipod/values build`) after editing a package other tests depend on.
 </Callout>
 
 Common commands:
@@ -254,7 +254,7 @@ bun install                              # bootstrap the whole workspace
 bun run build                            # build every package, topologically
 bun run test                             # run all tests (vitest, under Node)
 bun run typecheck                        # tsc --noEmit across every package
-bun run --filter @stackbase/values test  # just one package's tests
+bun run --filter @helipod/values test  # just one package's tests
 ```
 
 See [Development setup](/docs/contributing/codebase/development) for the full clone-to-running-tests walkthrough, and [System design](/docs/contributing/architecture/system-design) for why the engine is shaped this way in the first place.

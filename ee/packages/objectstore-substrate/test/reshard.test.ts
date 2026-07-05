@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Unit tests for `reshardObjectStore` (offline object-storage reshard). Seeds a bucket the way
  * `boot.ts`'s multi-shard writer does — lane bucket prefix = the `shardIdList` id (`sdefault/`,
@@ -15,12 +15,12 @@ import {
   encodeStorageIndexId,
   shardIdForKeyValue,
   type InternalDocumentId,
-} from "@stackbase/id-codec";
-import { encodeIndexKey } from "@stackbase/index-key-codec";
-import type { DocumentLogEntry, IndexWrite, DatabaseIndexUpdate } from "@stackbase/docstore";
-import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@stackbase/docstore-sqlite";
-import { FsObjectStore } from "@stackbase/objectstore-fs";
-import type { ObjectStore } from "@stackbase/objectstore";
+} from "@helipod/id-codec";
+import { encodeIndexKey } from "@helipod/index-key-codec";
+import type { DocumentLogEntry, IndexWrite, DatabaseIndexUpdate } from "@helipod/docstore";
+import { BunSqliteAdapter, NodeSqliteAdapter, SqliteDocStore } from "@helipod/docstore-sqlite";
+import { FsObjectStore } from "@helipod/objectstore-fs";
+import type { ObjectStore } from "@helipod/objectstore";
 import { ObjectStoreDocStore } from "../src/object-doc-store";
 import { readManifest } from "../src/manifest";
 import { readGlobals, ensureGlobals } from "../src/globals";

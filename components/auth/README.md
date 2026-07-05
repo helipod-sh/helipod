@@ -1,6 +1,6 @@
-# @stackbase/auth
+# @helipod/auth
 
-First-party authentication for Stackbase: email + password accounts (argon2id hashing, per-call
+First-party authentication for Helipod: email + password accounts (argon2id hashing, per-call
 random salt, constant-time verification, legacy-scrypt migration), a hardened session model (short
 access tokens + rotating refresh tokens with reuse detection, all hashed at rest), device
 management (`listSessions`/`revokeSession`/`revokeOtherSessions`), anonymous sign-in with
@@ -40,7 +40,7 @@ attestation-format / MDS verification, and SMS-based second factor.
    require a DB-level unique constraint.
 2. **Sessions in one browser context** — the client single-refresher serializes rotation across tabs
    via Web Locks; two independent *processes* sharing one refresh token is unsupported.
-3. **No httpOnly-cookie / CSRF mode** — Stackbase is WebSocket-first; identity flows over `SetAuth`,
+3. **No httpOnly-cookie / CSRF mode** — Helipod is WebSocket-first; identity flows over `SetAuth`,
    not headers. The session model (short access TTL + rotation + reuse detection) is the theft
    mitigation. See the auth doc's "localStorage vs. cookies" note.
 4. **No SMS-based OTP** — the OTP flow is email-only; there's no phone/SMS channel.
@@ -48,11 +48,11 @@ attestation-format / MDS verification, and SMS-based second factor.
    composing its own would need to handle re-verification itself.
 6. **No per-IP rate limiting** on the email flows — abuse defense is per-`(email, flow)` cooldown
    plus a deployment-global send throttle, not per-source; see the auth doc's "Abuse defense" table.
-7. **External identity is not a general SSO/IdP surface** — Stackbase is an OAuth/OIDC *client* and a
-   third-party-JWT *verifier*, never an identity *provider*: no SAML, and Stackbase never issues
+7. **External identity is not a general SSO/IdP surface** — Helipod is an OAuth/OIDC *client* and a
+   third-party-JWT *verifier*, never an identity *provider*: no SAML, and Helipod never issues
    tokens another service could verify.
 8. **No provider access-token storage/refresh** — `signInWithIdToken`/the OAuth flow trade the
-   external identity for a Stackbase session and then discard the provider's own
+   external identity for a Helipod session and then discard the provider's own
    access/refresh/id token; there is no facility for later calling the provider's own API on the
    user's behalf (e.g. re-fetching their Google Drive files). A project needing that stores and
    refreshes those tokens itself.

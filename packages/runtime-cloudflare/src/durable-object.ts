@@ -1,5 +1,5 @@
 /**
- * `StackbaseDurableObject` — the UNIFIED single-shard Durable Object host (Slice 3, decision 1).
+ * `HelipodDurableObject` — the UNIFIED single-shard Durable Object host (Slice 3, decision 1).
  *
  * ONE object owns EVERYTHING for the shard: the OCC writer (its single thread IS the mutex), the
  * DO-SQLite store (`ctx.storage.sql`), the hibernatable WebSockets (`ctx.acceptWebSocket`), the
@@ -18,10 +18,10 @@
  * swap, not a rewrite); file-storage byte I/O on a DO (§8.9); the sinceTs/fingerprint OUTBOUND capture
  * that would make rehydrate a `QueryUnchanged` rather than a full re-send (see `webSocketMessage`).
  */
-import type { LoadedProject } from "@stackbase/cli/project";
-import type { ComponentDefinition } from "@stackbase/component";
-import type { BlobStore } from "@stackbase/blobstore";
-import type { D1Client } from "@stackbase/docstore-d1";
+import type { LoadedProject } from "@helipod/cli/project";
+import type { ComponentDefinition } from "@helipod/component";
+import type { BlobStore } from "@helipod/blobstore";
+import type { D1Client } from "@helipod/docstore-d1";
 import { bootDurableObjectRuntime, type DurableObjectBoot } from "./boot";
 import { DurableObjectRuntimeHost } from "./host";
 import { DoAlarmWakeHost } from "./wake";
@@ -32,7 +32,7 @@ import {
   wouldExceedCap,
   TooManySubscriptionsError,
   MAX_SUBSCRIPTIONS_PER_SOCKET,
-  type StackbaseSocketAttachment,
+  type HelipodSocketAttachment,
 } from "./attachment";
 import type { DurableObjectStateLike, DoWebSocketLike } from "./cf-types";
 
@@ -41,12 +41,12 @@ export interface DurableObjectAppConfig {
   loaded: LoadedProject;
   components?: ComponentDefinition[];
   adminKey: string;
-  /** File-storage byte backend (`env.R2` → `@stackbase/blobstore-r2`), supplied by the concrete DO
+  /** File-storage byte backend (`env.R2` → `@helipod/blobstore-r2`), supplied by the concrete DO
    *  subclass. Injected, never imported — the engine stays blob-store-neutral. Absent → file storage
    *  is inert (`ctx.storage` has no provider; `/api/storage/*` 404s), everything else unchanged. */
   blobStore?: BlobStore;
   /** M2b: the Cloudflare D1 binding (`env.DB`) for `.global()` tables, supplied by the concrete DO
-   *  subclass (wrapping its raw `env.DB` with `@stackbase/docstore-d1`'s `bindingD1Client`). Injected,
+   *  subclass (wrapping its raw `env.DB` with `@helipod/docstore-d1`'s `bindingD1Client`). Injected,
    *  never imported from a raw Cloudflare type here — mirrors `blobStore` (env.R2). Absent → `.global()`
    *  tables are unavailable: a schema declaring one fails DO boot fast (see `bootDurableObjectRuntime`),
    *  rather than letting a `.global()` op fail confusingly deep inside some later mutation. */
@@ -69,7 +69,7 @@ export interface DurableObjectAppConfig {
 
 const SYNC_PATH = "/api/sync";
 
-export abstract class StackbaseDurableObject {
+export abstract class HelipodDurableObject {
   /** Supplied by the concrete (codegen'd) subclass: the bundled app + admin key from `env`. */
   protected abstract appConfig(env: unknown): DurableObjectAppConfig;
 
@@ -154,7 +154,7 @@ export abstract class StackbaseDurableObject {
    * absent (post-hibernation). Idempotent: a socket with a live session is left untouched. Reuses the
    * shipped `handler.connect`/`setAuth` + `Subscribe` replay — the DO adds only the orchestration.
    */
-  private ensureSession(ws: DoWebSocketLike): StackbaseSocketAttachment | null {
+  private ensureSession(ws: DoWebSocketLike): HelipodSocketAttachment | null {
     const att = readAttachment(ws.deserializeAttachment());
     if (!att) {
       // An un-rehydratable socket (garbled/absent attachment) — loud-log and close it; the client's
@@ -201,7 +201,7 @@ export abstract class StackbaseDurableObject {
   async fetch(request: Request): Promise<Response> {
     await this.bootDone;
     if (this.bootError) {
-      return jsonResponse(500, { error: "stackbase: Durable Object failed to boot", detail: String(this.bootError) });
+      return jsonResponse(500, { error: "helipod: Durable Object failed to boot", detail: String(this.bootError) });
     }
 
     const url = new URL(request.url);
@@ -316,7 +316,7 @@ export abstract class StackbaseDurableObject {
    * stripped from it (and answered with a `QueryFailed`) so the handler never subscribes past the cap.
    * Non-subscription frames (Mutation/Action/Connect/…) are returned verbatim.
    */
-  private updateAttachmentFromMessage(ws: DoWebSocketLike, att: StackbaseSocketAttachment, text: string): string {
+  private updateAttachmentFromMessage(ws: DoWebSocketLike, att: HelipodSocketAttachment, text: string): string {
     let msg: {
       type?: string;
       token?: unknown;
@@ -372,7 +372,7 @@ export abstract class StackbaseDurableObject {
   /** Persist the attachment, degrading (not crashing) on a `serializeAttachment` throw (§3.3): the
    *  subscription still works THIS turn; it just won't survive the next hibernation, and the client's
    *  normal reconnect-resume re-establishes it. */
-  private persistAttachment(ws: DoWebSocketLike, att: StackbaseSocketAttachment): void {
+  private persistAttachment(ws: DoWebSocketLike, att: HelipodSocketAttachment): void {
     try {
       ws.serializeAttachment(att);
     } catch (e) {

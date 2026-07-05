@@ -1,11 +1,11 @@
 /**
- * `stackbase` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
+ * `helipod` CLI. `dev` loads the project, generates `_generated/`, boots the embedded
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
 import { watch as fsWatch } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { writeGenerated } from "@stackbase/codegen";
-import { generateAdminKey } from "@stackbase/admin";
+import { writeGenerated } from "@helipod/codegen";
+import { generateAdminKey } from "@helipod/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
 import { loadFunctionsDir } from "./load-modules";
 import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
@@ -48,10 +48,10 @@ export async function devCommand(args: string[]): Promise<number> {
 
   const config = await loadConfig(projectRoot);
 
-  // Treat an empty/whitespace STACKBASE_ADMIN_KEY as unset (a blank key would 401 everything).
-  const envKey = process.env.STACKBASE_ADMIN_KEY?.trim();
-  if (process.env.STACKBASE_ADMIN_KEY !== undefined && !envKey) {
-    process.stderr.write("⚠ STACKBASE_ADMIN_KEY is set but empty — generating an ephemeral key instead.\n");
+  // Treat an empty/whitespace HELIPOD_ADMIN_KEY as unset (a blank key would 401 everything).
+  const envKey = process.env.HELIPOD_ADMIN_KEY?.trim();
+  if (process.env.HELIPOD_ADMIN_KEY !== undefined && !envKey) {
+    process.stderr.write("⚠ HELIPOD_ADMIN_KEY is set but empty — generating an ephemeral key instead.\n");
   }
   const adminKey = envKey || generateAdminKey();
   const ephemeralKey = !envKey; // a generated per-run key, not the operator's persistent secret
@@ -67,7 +67,7 @@ export async function devCommand(args: string[]): Promise<number> {
   writeGenerated(generated.files, generatedDir);
 
   // Only inject the key into the (unauthenticated) dashboard HTML when it's an ephemeral key on a
-  // loopback bind — never embed a persistent STACKBASE_ADMIN_KEY where any network client can read
+  // loopback bind — never embed a persistent HELIPOD_ADMIN_KEY where any network client can read
   // it. Otherwise serve the SPA without a key so it prompts the operator (stored client-side).
   const dashboard = loadDashboard(ephemeralKey && loopback ? adminKey : undefined);
   // Reach serving through the RuntimeHost seam (Slice 1) — the CLI never touches Bun.serve/node:http.
@@ -76,8 +76,8 @@ export async function devCommand(args: string[]): Promise<number> {
     runtime,
     { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes, storageRoutes },
   );
-  process.stdout.write(`stackbase dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
-  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @stackbase/dashboard build\`)\n`);
+  process.stdout.write(`helipod dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
+  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @helipod/dashboard build\`)\n`);
   process.stdout.write(`admin key → ${adminKey}\n`);
   if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
 
@@ -111,7 +111,7 @@ export async function devCommand(args: string[]): Promise<number> {
 
 export async function codegenCommand(args: string[]): Promise<number> {
   const flags = parseFlags(args);
-  // Same two-step resolve as `devCommand`: consult `functionsDir` in stackbase.config.ts when
+  // Same two-step resolve as `devCommand`: consult `functionsDir` in helipod.config.ts when
   // `--dir` isn't given, instead of `resolveDevOptions`'s own bare `?? DEFAULT_FUNCTIONS_DIR`
   // fallback (which never reads the config file) — otherwise `codegen` and `dev` could disagree
   // about where the functions live on a project that sets the config key.
@@ -129,16 +129,16 @@ export async function codegenCommand(args: string[]): Promise<number> {
 function printHelp(): void {
   process.stdout.write(
     [
-      "stackbase - the reactive backend you self-host",
+      "helipod - the reactive backend you self-host",
       "",
-      "Usage: stackbase <command> [options]",
+      "Usage: helipod <command> [options]",
       "",
       "Commands:",
       "  dev        Run the engine with hot reload + dashboard",
-      "  serve      Run the production server (requires STACKBASE_ADMIN_KEY)",
+      "  serve      Run the production server (requires HELIPOD_ADMIN_KEY)",
       "  deploy     Deploy the app: --target <serve|cloudflare|docker|railway|fly|aws> --env <name> [--dry-run] [--check]",
       "  build      Compile the app to a self-contained executable (bun build --compile)",
-      "  migrate    Migrate a Convex project into Stackbase (imports + report)",
+      "  migrate    Migrate a Convex project into Helipod (imports + report)",
       "  migrate export --url <src> --out dump.json   Export app data to a portable dump",
       "  migrate import --url <dst> --in  dump.json   Import a dump into a deployment",
       "  codegen    Regenerate <functionsDir>/_generated types",

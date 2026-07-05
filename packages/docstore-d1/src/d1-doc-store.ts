@@ -1,4 +1,4 @@
-import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@stackbase/values";
+import type { SchemaDefinitionJSON, TableDefinitionJSON } from "@helipod/values";
 import type { D1Client } from "./d1-client";
 import { UniqueConstraintError } from "./d1-client";
 import { schemaDdl, GLOBAL_VERSIONS_DDL } from "./ddl";
@@ -130,7 +130,7 @@ export class D1DocStore {
     const where = keys.length ? `WHERE ${keys.map((k) => `${q(k)} = ?`).join(" AND ")}` : "";
     const limit = range.limit ? ` LIMIT ${Number(range.limit)}` : "";
     const bound = keys.map((k) => {
-      const def = (fieldDefs as Record<string, { fieldType: import("@stackbase/values").ValidatorJSON; optional: boolean }>)[k];
+      const def = (fieldDefs as Record<string, { fieldType: import("@helipod/values").ValidatorJSON; optional: boolean }>)[k];
       return def ? encodeColumnValue(def.fieldType, eq[k]) : eq[k]; // system columns (_id/_creationTime) pass raw
     });
     const { results } = await this.client

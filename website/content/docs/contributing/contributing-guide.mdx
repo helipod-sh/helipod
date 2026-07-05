@@ -1,16 +1,16 @@
 ---
 title: "Contributing guide"
-description: "How stackbase changes get proposed, reviewed, tested, and landed."
+description: "How helipod changes get proposed, reviewed, tested, and landed."
 icon: GitPullRequest
 ---
 
 {/* diataxis: how-to */}
 
-This page is the process guide: how an idea becomes a shipped change in stackbase. If you're
+This page is the process guide: how an idea becomes a shipped change in helipod. If you're
 looking for *what the codebase looks like*, see [The codebase](/docs/contributing/codebase/monorepo)
 instead. This page is about the workflow around the code, not the code's layout.
 
-The short version: stackbase treats "how we build" as seriously as "what we build." Every
+The short version: helipod treats "how we build" as seriously as "what we build." Every
 non-trivial change goes through **brainstorm -> spec -> plan -> implement**, in that order,
 before any code lands. That might sound heavyweight for an open-source project, but it's what
 lets a small team ship a system this size (session auth, durable workflows, a Postgres adapter,
@@ -119,7 +119,7 @@ API, or touches more than one package should have a spec first.
 
 ## Where does my change fit? The build-order rule
 
-Stackbase isn't built feature-by-feature in a random order. It's built in **slices**, each one a
+Helipod isn't built feature-by-feature in a random order. It's built in **slices**, each one a
 complete, working vertical: foundation (the reactive engine) first, then the dashboard, then auth,
 then file storage, then actions/scheduler/HTTP, then production deploy tooling, and so on.
 Distributed multi-node scale-out is deliberately last.
@@ -149,7 +149,7 @@ These aren't style nitpicks. They're the things a reviewer checks before anythin
 ### DX is the feature
 
 The CLI's error messages, the quality of type inference in the client SDK, and how fast
-`stackbase dev` starts up aren't polish on top of the "real" product. They are the product. A
+`helipod dev` starts up aren't polish on top of the "real" product. They are the product. A
 change that adds a capability but produces a confusing error message, degrades type inference, or
 slows down dev startup isn't done yet. Weigh every change against this before calling it
 finished.
@@ -167,14 +167,14 @@ an adapter package, that's a design bug, not a shortcut. See
 ### Two doc audiences, never mixed
 
 `docs/enduser/` (and this fumadocs site) is the public, product-facing documentation: how someone
-*uses* stackbase. `docs/dev/` and `docs/superpowers/` are internal engineering material:
+*uses* helipod. `docs/dev/` and `docs/superpowers/` are internal engineering material:
 architecture notes, specs, plans. If you're documenting a change, write it into the audience it
 belongs to, not both at once.
 
-### Canonical imports are `@stackbase/*`
+### Canonical imports are `@helipod/*`
 
-Even though stackbase's runtime is Convex-shaped and a `stackbase migrate` on-ramp exists for
-Convex users, `@stackbase/*` is the one documented, canonical import surface. `convex/*`
+Even though helipod's runtime is Convex-shaped and a `helipod migrate` on-ramp exists for
+Convex users, `@helipod/*` is the one documented, canonical import surface. `convex/*`
 compatibility is a migration convenience, never something you write new code or new docs against.
 
 Here's roughly what a reviewer checks, in order:
@@ -196,7 +196,7 @@ flowchart TD
 
 Unit tests that exercise a mechanism in isolation are necessary but **not sufficient**. The
 cardinal rule for anything that crosses package boundaries: **prove it end-to-end through the
-real `stackbase dev` or `stackbase serve` server**, not just an isolated mechanism test. These
+real `helipod dev` or `helipod serve` server**, not just an isolated mechanism test. These
 live in `packages/cli/test/*-e2e.test.ts`. There are dozens of these already (auth flows,
 workflows, triggers, deploy, storage, and more), and they catch the bugs an isolated unit test
 structurally can't see: two components wiring together wrong, or a feature working against a
@@ -225,7 +225,7 @@ bun run lint
 
 ## Review discipline
 
-Beyond a normal code review, stackbase uses staged reviews at each pipeline step: a plan review,
+Beyond a normal code review, helipod uses staged reviews at each pipeline step: a plan review,
 an engineering review, a design review where relevant, and, importantly, a **whole-branch final
 review** before a multi-slice or multi-package change lands. This isn't ceremony: across many
 shipped slices, the whole-branch review has caught real blocker-class bugs that the smaller,
@@ -235,8 +235,8 @@ asking for it to be merged. It has a track record of finding things worth findin
 
 ## Licensing: a CLA or DCO is required
 
-Stackbase's core is licensed under **FSL-1.1-Apache-2.0** (free to use, modify, and self-host,
-including commercially, but you may not offer stackbase itself as a competing hosted service;
+Helipod's core is licensed under **FSL-1.1-Apache-2.0** (free to use, modify, and self-host,
+including commercially, but you may not offer helipod itself as a competing hosted service;
 each release converts to Apache 2.0 two years after it ships). Full detail on why, and on the
 free-forever guarantees, lives on the [Licensing page](/docs/contributing/licensing).
 
@@ -275,6 +275,6 @@ A few basics that keep the history clean and the project easy to pick back up:
   build/run it locally.
 - [Architecture: system design](/docs/contributing/architecture/system-design): the reactive
   engine's design, for anyone about to touch it.
-- [Extending stackbase](/docs/contributing/extending/custom-component): building a new component,
+- [Extending helipod](/docs/contributing/extending/custom-component): building a new component,
   storage adapter, or provider.
 - [Licensing](/docs/contributing/licensing): the full FSL-1.1-Apache-2.0 and `ee/` story.

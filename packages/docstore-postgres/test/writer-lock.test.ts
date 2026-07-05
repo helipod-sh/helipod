@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { PostgresDocStore } from "../src/postgres-docstore";
 import { NodePgClient } from "../src/node-pg-client";
 
-const REAL_PG = process.env.STACKBASE_TEST_DATABASE_URL;
+const REAL_PG = process.env.HELIPOD_TEST_DATABASE_URL;
 const d = REAL_PG ? describe : describe.skip;
 
 d("single-writer advisory lock (real Postgres)", () => {

@@ -7,8 +7,8 @@
 // its result, and re-enqueues `workflow:_advance` — the commit fan-out wakes the driver and replay
 // resolves the now-cached step. See `./helpers.ts` for the runtime harness and `tick()`.
 import { describe, it, expect } from "vitest";
-import { mutation } from "@stackbase/executor";
-import { workflow } from "@stackbase/workflow"; // the authoring surface: workflow.define
+import { mutation } from "@helipod/executor";
+import { workflow } from "@helipod/workflow"; // the authoring surface: workflow.define
 import { makeRuntimeWithWorkflow } from "./helpers";
 
 describe("workflow step.waitForEvent + ctx.workflow.sendEvent", () => {

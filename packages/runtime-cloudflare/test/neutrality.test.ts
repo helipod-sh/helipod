@@ -10,8 +10,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { RuntimeHost } from "@stackbase/runtime-embedded";
-import type { StorageRoute } from "@stackbase/storage";
+import type { RuntimeHost } from "@helipod/runtime-embedded";
+import type { StorageRoute } from "@helipod/storage";
 import { DurableObjectRuntimeHost } from "../src/index";
 
 const repoRoot = join(import.meta.dirname, "../../..");

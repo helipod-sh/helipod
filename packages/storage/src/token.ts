@@ -1,5 +1,5 @@
 /**
- * The shared HMAC capability-token helper for `@stackbase/storage`'s upload/download surface.
+ * The shared HMAC capability-token helper for `@helipod/storage`'s upload/download surface.
  * `./context.ts`'s `signUploadToken`/`privateGetUrl` (the create side, called inside a mutation via
  * `generateUploadUrl`/`getUrl`) and `./http.ts`'s upload/confirm/serve endpoints (the verify side,
  * called at the HTTP boundary, via `verifyStorageToken` directly) both build on this ONE module,

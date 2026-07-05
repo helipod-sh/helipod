@@ -1,6 +1,6 @@
 /**
  * `FunctionArgs`/`FunctionReturnType` — extract the typed args/return generics from a
- * codegen-generated function reference (see `@stackbase/codegen`'s `FUNCTION_REFERENCE_TYPE`,
+ * codegen-generated function reference (see `@helipod/codegen`'s `FUNCTION_REFERENCE_TYPE`,
  * emitted verbatim into every app's `_generated/api.d.ts` as `FunctionReference<Type, Vis, Args,
  * Returns>`). The `__args`/`__returns` fields are phantom — they exist purely at the type level
  * (the actual runtime value behind e.g. `api.messages.send` is the untyped `anyApi` proxy from

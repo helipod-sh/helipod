@@ -1,4 +1,4 @@
-# Pulse — the Stackbase optimistic-updates demo
+# Pulse — the Helipod optimistic-updates demo
 
 A live poll board that exists to make optimistic updates *visible*. Optimistic UI is invisible
 when it works — so this demo gives you a latency slider and an optimistic ON/OFF switch, and lets
@@ -11,7 +11,7 @@ From the repo root (once): `bun install && bun run build`. Then:
 ```bash
 cd examples/optimistic-demo
 bun run web:build   # bundle the SPA (web/main.js is gitignored)
-bun run dev         # stackbase dev on http://localhost:3230
+bun run dev         # helipod dev on http://localhost:3230
 ```
 
 Open <http://localhost:3230>. Create a poll first (question + comma-separated options).

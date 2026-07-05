@@ -19,7 +19,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { SyncProtocolHandler, type SyncUdfExecutor, type ServerMessage } from "../src/index";
-import { COMMITTED_TS_ERROR_KEY, committedTsOfError } from "@stackbase/executor";
+import { COMMITTED_TS_ERROR_KEY, committedTsOfError } from "@helipod/executor";
 
 type Transition = Extract<ServerMessage, { type: "Transition" }>;
 
@@ -59,9 +59,9 @@ function raceTimeout(p: Promise<unknown>, ms: number): Promise<"done" | "timeout
 
 describe("origin-response-gate leak — commitThenThrow must not wedge node-wide reactivity", () => {
   it("cross-package contract: the executor's stamped key IS the Symbol.for registry key the handler reads", () => {
-    // The handler reads the ts via its own `Symbol.for("stackbase.executor.committedTs")` (kept
+    // The handler reads the ts via its own `Symbol.for("helipod.executor.committedTs")` (kept
     // type-only-coupled to the executor). Pin the two sides to the same global-registry symbol.
-    expect(COMMITTED_TS_ERROR_KEY).toBe(Symbol.for("stackbase.executor.committedTs"));
+    expect(COMMITTED_TS_ERROR_KEY).toBe(Symbol.for("helipod.executor.committedTs"));
     expect(committedTsOfError(commitThenThrowError("x", 7))).toBe(7);
     expect(committedTsOfError(new Error("no ts"))).toBeUndefined();
   });

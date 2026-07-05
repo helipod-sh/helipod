@@ -1,33 +1,33 @@
 ---
 title: CLI
-description: Every stackbase command and its flags.
+description: Every helipod command and its flags.
 ---
 
 {/* diataxis: reference */}
 
-Every stackbase project runs on one binary: `stackbase` (package `@stackbase/cli`). This page covers
+Every helipod project runs on one binary: `helipod` (package `@helipod/cli`). This page covers
 every command it ships, exactly as implemented in `packages/cli/src/cli.ts` and its command modules:
 every flag, every environment-variable equivalent, and every fail-fast check each command performs.
 
 ```bash
-stackbase <command> [options]
+helipod <command> [options]
 ```
 
 ## Commands at a glance
 
 | Command | Purpose |
 |---|---|
-| [`dev`](#stackbase-dev) | Run the engine locally with hot reload, codegen, and the dashboard |
-| [`serve`](#stackbase-serve) | Run the production server, single-node, fleet (Tier 2), or object-storage (Tier 3) |
-| [`deploy`](#stackbase-deploy) | Deploy the app to a target: `serve` (live hot-swap), `cloudflare`, `docker`, `railway`, `fly`, or `aws` |
-| [`build`](#stackbase-build) | Compile the app to a self-contained executable |
-| [`migrate`](#stackbase-migrate) | Migrate a Convex project into stackbase (imports + divergence report) |
-| [`migrate export`](#stackbase-migrate-export--stackbase-migrate-import) | Dump a deployment's data to a file |
-| [`migrate import`](#stackbase-migrate-export--stackbase-migrate-import) | Load a data dump into a (fresh) deployment |
-| [`codegen`](#stackbase-codegen) | Regenerate `stackbase/_generated/` types only, no server |
-| [`fleet reshard`](#stackbase-fleet-reshard) | Change a **stopped** Postgres fleet's shard count |
-| [`objectstore reshard`](#stackbase-objectstore-reshard) | Change a **stopped** object-storage deployment's shard count |
-| [`help`](#stackbase-help----help--h) / `--help` / `-h` | Print usage |
+| [`dev`](#helipod-dev) | Run the engine locally with hot reload, codegen, and the dashboard |
+| [`serve`](#helipod-serve) | Run the production server, single-node, fleet (Tier 2), or object-storage (Tier 3) |
+| [`deploy`](#helipod-deploy) | Deploy the app to a target: `serve` (live hot-swap), `cloudflare`, `docker`, `railway`, `fly`, or `aws` |
+| [`build`](#helipod-build) | Compile the app to a self-contained executable |
+| [`migrate`](#helipod-migrate) | Migrate a Convex project into helipod (imports + divergence report) |
+| [`migrate export`](#helipod-migrate-export--helipod-migrate-import) | Dump a deployment's data to a file |
+| [`migrate import`](#helipod-migrate-export--helipod-migrate-import) | Load a data dump into a (fresh) deployment |
+| [`codegen`](#helipod-codegen) | Regenerate `helipod/_generated/` types only, no server |
+| [`fleet reshard`](#helipod-fleet-reshard) | Change a **stopped** Postgres fleet's shard count |
+| [`objectstore reshard`](#helipod-objectstore-reshard) | Change a **stopped** object-storage deployment's shard count |
+| [`help`](#helipod-help----help--h) / `--help` / `-h` | Print usage |
 
 <Callout type="info" title="How flags get parsed">
 
@@ -37,35 +37,35 @@ absent, falling back to its default, unless a command says otherwise.
 
 </Callout>
 
-## `stackbase dev`
+## `helipod dev`
 
-Loads `stackbase/`, generates `_generated/`, boots the embedded engine over local SQLite (or Postgres,
+Loads `helipod/`, generates `_generated/`, boots the embedded engine over local SQLite (or Postgres,
 if configured), serves HTTP + WebSocket + the dashboard, and watches the directory for changes to
 hot-reload functions and schema. This is the command you run while building an app.
 
 ```bash
-stackbase dev
+helipod dev
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `stackbase` | The app directory to load |
+| `--dir <path>` | `helipod` | The app directory to load |
 | `--port <n>` | `3000` | HTTP/WebSocket port |
 | `--ip <addr>` | `127.0.0.1` | Bind address |
-| `--data <path>` | `.stackbase/data.db` | SQLite file path (ignored if `--database-url` is set) |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` env, else unset (SQLite) | Postgres connection string, see [Postgres](/docs/deploy/postgres) |
-| `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` env, else unset (filesystem) | Select the S3-compatible file-storage backend, see [File storage](/docs/core-concepts/file-storage) |
-| `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` env, else unset | S3-compatible endpoint (MinIO, R2, …) |
+| `--data <path>` | `.helipod/data.db` | SQLite file path (ignored if `--database-url` is set) |
+| `--database-url <url>` | `HELIPOD_DATABASE_URL` env, else unset (SQLite) | Postgres connection string, see [Postgres](/docs/deploy/postgres) |
+| `--storage-bucket <name>` | `HELIPOD_STORAGE_BUCKET` env, else unset (filesystem) | Select the S3-compatible file-storage backend, see [File storage](/docs/core-concepts/file-storage) |
+| `--storage-endpoint <url>` | `HELIPOD_STORAGE_ENDPOINT` env, else unset | S3-compatible endpoint (MinIO, R2, …) |
 | `--web <dir>` | unset | Serve a static web UI directory at the site root, alongside the API |
 
 The database and storage settings fall back to the same environment variables under `dev` as under
-`serve`: `STACKBASE_DATABASE_URL`, `STACKBASE_STORAGE_BUCKET`, and `STACKBASE_STORAGE_ENDPOINT`
-(plus the rest of the `STACKBASE_STORAGE_*` family) all work, with the flag winning when both are
+`serve`: `HELIPOD_DATABASE_URL`, `HELIPOD_STORAGE_BUCKET`, and `HELIPOD_STORAGE_ENDPOINT`
+(plus the rest of the `HELIPOD_STORAGE_*` family) all work, with the flag winning when both are
 set. Both commands resolve storage through the same boot path.
 
 ### Admin key handling
 
-`dev` reads `STACKBASE_ADMIN_KEY` if set (blank/whitespace-only counts as unset, with a warning).
+`dev` reads `HELIPOD_ADMIN_KEY` if set (blank/whitespace-only counts as unset, with a warning).
 If it's unset, `dev` **generates an ephemeral key for this run only**. That generated key gets
 embedded directly into the (otherwise unauthenticated) dashboard HTML, but **only** when the key is
 ephemeral *and* the bind address is loopback (`127.0.0.1`, `::1`, or `localhost`). A persistent
@@ -75,31 +75,31 @@ it instead.
 ### Startup output
 
 ```
-stackbase dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
+helipod dev → http://127.0.0.1:3000  (dashboard: http://127.0.0.1:3000/_dashboard)
 admin key → u3K9xQ1vZ8pL5mW2rT7cY4bN6dF0hJsG
 web UI → http://127.0.0.1:3000/        (only if --web was passed)
 ```
 
 If the dashboard package isn't built, `dev` still starts and prints a note to run
-`bun run --filter @stackbase/dashboard build`.
+`bun run --filter @helipod/dashboard build`.
 
 ### Hot reload
 
 `dev` watches `--dir` recursively (`fs.watch`, ignoring changes under `_generated`) and on any
-change: reloads `stackbase/`, re-runs codegen, replaces the runtime's function modules
+change: reloads `helipod/`, re-runs codegen, replaces the runtime's function modules
 (`runtime.setModules`, which also re-applies the always-on `_storage:*` built-ins), and updates
 `httpAction` routes. All of this happens without restarting the process or dropping WebSocket
 connections. It prints `↻ pushed (N functions)` on success, or `✗ reload failed: <message>` on a
 load/type error (the previous, still-working version keeps serving in that case).
 
-The function loader is **top-level only**: it does not recurse into subdirectories of `stackbase/`.
-Keep query/mutation/action modules directly under `stackbase/*.ts` (e.g. `stackbase/items.ts`), not
-nested under a subfolder (e.g. `stackbase/lib/items.ts`); nested modules are silently not loaded. This applies
+The function loader is **top-level only**: it does not recurse into subdirectories of `helipod/`.
+Keep query/mutation/action modules directly under `helipod/*.ts` (e.g. `helipod/items.ts`), not
+nested under a subfolder (e.g. `helipod/lib/items.ts`); nested modules are silently not loaded. This applies
 to `dev`, `serve`, and `deploy` alike.
 
 `dev` runs until killed (`Ctrl-C`); there's no `--once`/exit mode.
 
-## `stackbase serve`
+## `helipod serve`
 
 The production entrypoint. Unlike `dev`: requires a persistent admin key, binds `0.0.0.0` by
 default, never generates codegen (an app's `_generated/` must already exist and be committed
@@ -108,45 +108,45 @@ before you `serve` it), and shuts down gracefully on `SIGTERM`/`SIGINT`. See
 [Postgres](/docs/deploy/postgres) for the Postgres backend.
 
 ```bash
-STACKBASE_ADMIN_KEY=<secret> stackbase serve
+HELIPOD_ADMIN_KEY=<secret> helipod serve
 ```
 
 ### Fail-fast checks (before anything boots)
 
 | Condition | Result |
 |---|---|
-| `STACKBASE_ADMIN_KEY` unset or blank | ``✗ STACKBASE_ADMIN_KEY is required for `serve`: set it to a strong secret.`` (exit 1) |
-| `<dir>/_generated/server.ts` missing | ``✗ <dir>/_generated not found: run `stackbase codegen --dir <dir>` and commit _generated/ before deploying.`` (exit 1) |
+| `HELIPOD_ADMIN_KEY` unset or blank | ``✗ HELIPOD_ADMIN_KEY is required for `serve`: set it to a strong secret.`` (exit 1) |
+| `<dir>/_generated/server.ts` missing | ``✗ <dir>/_generated not found: run `helipod codegen --dir <dir>` and commit _generated/ before deploying.`` (exit 1) |
 | `--fleet` and `--object-store` both set | `✗ --object-store cannot be combined with --fleet (Tier 2): pick one write-scaling story.` (exit 1) |
 | `--replica` without `--object-store` | `✗ --replica requires --object-store: …` (exit 1) |
 | `--shards > 1` without `--object-store` | `✗ --shards N (N>1) requires --object-store: …` (exit 1) |
 | `--shards > 1` with `--replica` | `✗ --shards cannot be combined with --replica: a replica is single-shard …` (exit 1) |
 | `--shards` not a positive integer | `✗ --shards must be a positive integer, got "<value>".` (exit 1) |
 | `--writer-url` without `--replica` | `✗ --writer-url only applies to --replica: …` (exit 1) |
-| `--fleet` set but `@stackbase/fleet` not installed | `✗ fleet mode requires @stackbase/fleet: install it (bun add @stackbase/fleet).` (exit 1) |
-| `--fleet` without `--database-url`/`STACKBASE_DATABASE_URL` (Postgres) | `✗ fleet mode requires --database-url (Postgres): …` (exit 1) |
-| `--fleet` without `--advertise-url`/`STACKBASE_ADVERTISE_URL` | `✗ fleet mode requires --advertise-url: the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` (exit 1) |
+| `--fleet` set but `@helipod/fleet` not installed | `✗ fleet mode requires @helipod/fleet: install it (bun add @helipod/fleet).` (exit 1) |
+| `--fleet` without `--database-url`/`HELIPOD_DATABASE_URL` (Postgres) | `✗ fleet mode requires --database-url (Postgres): …` (exit 1) |
+| `--fleet` without `--advertise-url`/`HELIPOD_ADVERTISE_URL` | `✗ fleet mode requires --advertise-url: the URL other fleet nodes reach this node at, e.g. --advertise-url http://10.0.0.2:3000` (exit 1) |
 
 ### Core flags
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--dir <path>` | none | `stackbase` | The app directory (must already contain `_generated/`) |
-| `--data <path>` | `STACKBASE_DATA_DIR` | `./data/db.sqlite` | SQLite file path (`STACKBASE_DATA_DIR` sets the *containing directory*; the filename `db.sqlite` is fixed) |
+| `--dir <path>` | none | `helipod` | The app directory (must already contain `_generated/`) |
+| `--data <path>` | `HELIPOD_DATA_DIR` | `./data/db.sqlite` | SQLite file path (`HELIPOD_DATA_DIR` sets the *containing directory*; the filename `db.sqlite` is fixed) |
 | `--ip <addr>` | none | `0.0.0.0` | Bind address |
 | `--port <n>` | `PORT` | `3000` | HTTP/WebSocket port |
-| `--no-dashboard` | `STACKBASE_DASHBOARD=off` | dashboard on | Disable the dashboard entirely |
-| `--allow-deploy` | `STACKBASE_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy` for `stackbase deploy` |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` | unset (SQLite) | Postgres connection string (flag wins if both set) |
-| `--storage-bucket <name>` | `STACKBASE_STORAGE_BUCKET` | unset (filesystem) | Selects the S3-compatible file-storage backend |
-| `--storage-endpoint <url>` | `STACKBASE_STORAGE_ENDPOINT` | unset | S3-compatible endpoint (MinIO, R2, …) |
-| `--web <dir>` | `STACKBASE_WEB_DIR` | unset | Serve a static web UI at the site root, on the same origin as the sync WebSocket |
+| `--no-dashboard` | `HELIPOD_DASHBOARD=off` | dashboard on | Disable the dashboard entirely |
+| `--allow-deploy` | `HELIPOD_ALLOW_DEPLOY=1` | off | Enable `POST /_admin/deploy` for `helipod deploy` |
+| `--database-url <url>` | `HELIPOD_DATABASE_URL` | unset (SQLite) | Postgres connection string (flag wins if both set) |
+| `--storage-bucket <name>` | `HELIPOD_STORAGE_BUCKET` | unset (filesystem) | Selects the S3-compatible file-storage backend |
+| `--storage-endpoint <url>` | `HELIPOD_STORAGE_ENDPOINT` | unset | S3-compatible endpoint (MinIO, R2, …) |
+| `--web <dir>` | `HELIPOD_WEB_DIR` | unset | Serve a static web UI at the site root, on the same origin as the sync WebSocket |
 
 <Callout type="info" title="Why there's no --admin-key flag">
 
-`STACKBASE_ADMIN_KEY` (required, no default, no flag) is read directly from the environment. There
+`HELIPOD_ADMIN_KEY` (required, no default, no flag) is read directly from the environment. There
 is deliberately no `--admin-key` flag, so the secret never shows up in `ps`/shell history. S3
-storage settings present (`--storage-endpoint`/`STACKBASE_STORAGE_ENDPOINT`/`_REGION`/`_PUBLIC_URL`)
+storage settings present (`--storage-endpoint`/`HELIPOD_STORAGE_ENDPOINT`/`_REGION`/`_PUBLIC_URL`)
 without a bucket fail boot fast: this is treated as a durability misconfiguration (uploads would
 otherwise silently land on ephemeral local disk), not a fallback.
 
@@ -159,24 +159,24 @@ applies to you.
 
 <Accordion title="Multi-node fleet flags (Tier 2: Postgres write scale-out)">
 
-Requires the separately-installed `@stackbase/fleet` package. See
+Requires the separately-installed `@helipod/fleet` package. See
 [Scaling](/docs/deploy/scaling) for the model (writer/sync roles, sharding, failover); this table
 is the exhaustive flag reference.
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--fleet` | `STACKBASE_FLEET` (`1` or `true`, case-insensitive on `true` only) | off | Run this node as part of a symmetric fleet sharing one Postgres database |
-| `--advertise-url <url>` | `STACKBASE_ADVERTISE_URL` | none (required with `--fleet`) | The URL other fleet nodes reach *this* node at (recorded on the write lease; sync nodes forward writes/proxy `httpAction`s here when this node is the writer) |
-| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (also read fleet-side, decided once at first boot) | `8` | Shard count. Persisted at first boot and **immutable** after: a later boot with a disagreeing env value fails fast, naming both counts |
-| none | `STACKBASE_FLEET_LEASE_TTL_MS` | `15000` | The write-lease TTL in ms: the single knob the whole failover clock scales from (heartbeat/acquire cadences derive from it). No CLI flag, ops/test tuning only |
-| none | `STACKBASE_GROUP_COMMIT` | **off** when unset in fleet mode | Batch concurrent commits into one fsync. An explicit `1`/`true`/`yes` (case-insensitive) forces it on; any other explicit value forces it off. Note the default is topology-dependent: a fleet node defaults off, while single-node (non-fleet) is store-conditional, on for Postgres and off for SQLite |
+| `--fleet` | `HELIPOD_FLEET` (`1` or `true`, case-insensitive on `true` only) | off | Run this node as part of a symmetric fleet sharing one Postgres database |
+| `--advertise-url <url>` | `HELIPOD_ADVERTISE_URL` | none (required with `--fleet`) | The URL other fleet nodes reach *this* node at (recorded on the write lease; sync nodes forward writes/proxy `httpAction`s here when this node is the writer) |
+| `--shards <n>` | `HELIPOD_FLEET_SHARDS` (also read fleet-side, decided once at first boot) | `8` | Shard count. Persisted at first boot and **immutable** after: a later boot with a disagreeing env value fails fast, naming both counts |
+| none | `HELIPOD_FLEET_LEASE_TTL_MS` | `15000` | The write-lease TTL in ms: the single knob the whole failover clock scales from (heartbeat/acquire cadences derive from it). No CLI flag, ops/test tuning only |
+| none | `HELIPOD_GROUP_COMMIT` | **off** when unset in fleet mode | Batch concurrent commits into one fsync. An explicit `1`/`true`/`yes` (case-insensitive) forces it on; any other explicit value forces it off. Note the default is topology-dependent: a fleet node defaults off, while single-node (non-fleet) is store-conditional, on for Postgres and off for SQLite |
 
-`STACKBASE_FLEET_MULTI_WRITER` (spreading shard *ownership* across nodes so write throughput scales
-with node count) is a `@stackbase/fleet`-side setting, not a `packages/cli` flag. See
+`HELIPOD_FLEET_MULTI_WRITER` (spreading shard *ownership* across nodes so write throughput scales
+with node count) is a `@helipod/fleet`-side setting, not a `packages/cli` flag. See
 [Scaling](/docs/deploy/scaling).
 
 Changing the shard count of an already-running fleet requires stopping it and running
-[`fleet reshard`](#stackbase-fleet-reshard) first.
+[`fleet reshard`](#helipod-fleet-reshard) first.
 
 </Accordion>
 
@@ -187,19 +187,19 @@ Changing the shard count of an already-running fleet requires stopping it and ru
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | unset | Run this node's store on an object-storage bucket instead of SQLite/Postgres, see the URL grammar below |
-| `--shards <n>` | `STACKBASE_FLEET_SHARDS` (only consulted when `--object-store` is set and no fleet flag is) | `1` | Number of object-storage lanes this **writer** node owns. The bucket's own persisted shard count (set by [`objectstore reshard`](#stackbase-objectstore-reshard)) is authoritative: a `--shards` that disagrees with it fails boot fast |
-| `--replica` | `STACKBASE_REPLICA` (`1`/`true`/`yes`, case-insensitive) | off | Boot as a **read-only replica** of the bucket's shard(s) instead of a writer: materializes + tails, never acquires the write lease, every mutation is rejected unless `--writer-url` is also set. Requires `--object-store` |
-| `--writer-url <url>` | `STACKBASE_WRITER_URL` | unset | Only meaningful with `--replica`: forward every mutation/action here instead of rejecting it locally. Not yet supported on a multi-shard bucket (fails fast with a clear message if the bucket has `numShards > 1`) |
-| none | `STACKBASE_OBJECTSTORE_GC_MS` | `60000` | Sweep cadence (ms) for the writer's garbage-collection driver. Env-only, no flag |
+| `--object-store <url>` | `HELIPOD_OBJECT_STORE` | unset | Run this node's store on an object-storage bucket instead of SQLite/Postgres, see the URL grammar below |
+| `--shards <n>` | `HELIPOD_FLEET_SHARDS` (only consulted when `--object-store` is set and no fleet flag is) | `1` | Number of object-storage lanes this **writer** node owns. The bucket's own persisted shard count (set by [`objectstore reshard`](#helipod-objectstore-reshard)) is authoritative: a `--shards` that disagrees with it fails boot fast |
+| `--replica` | `HELIPOD_REPLICA` (`1`/`true`/`yes`, case-insensitive) | off | Boot as a **read-only replica** of the bucket's shard(s) instead of a writer: materializes + tails, never acquires the write lease, every mutation is rejected unless `--writer-url` is also set. Requires `--object-store` |
+| `--writer-url <url>` | `HELIPOD_WRITER_URL` | unset | Only meaningful with `--replica`: forward every mutation/action here instead of rejecting it locally. Not yet supported on a multi-shard bucket (fails fast with a clear message if the bucket has `numShards > 1`) |
+| none | `HELIPOD_OBJECTSTORE_GC_MS` | `60000` | Sweep cadence (ms) for the writer's garbage-collection driver. Env-only, no flag |
 
-Object-store URL grammar for `--object-store`/`STACKBASE_OBJECT_STORE`:
+Object-store URL grammar for `--object-store`/`HELIPOD_OBJECT_STORE`:
 
 | Form | Resolves to |
 |---|---|
 | unset / empty | not requested, falls through to the normal SQLite/Postgres selection |
 | a bare filesystem path, e.g. `./objects` | `FsObjectStore` rooted at that directory |
-| `file:///var/lib/stackbase/objects` | same, `FsObjectStore` rooted at the given path |
+| `file:///var/lib/helipod/objects` | same, `FsObjectStore` rooted at the given path |
 | `s3://[key:secret@]host[:port]/bucket[?region=…&endpoint=…&forcePathStyle=…]` | `S3ObjectStore`. Bucket is required (the URL's path). A bare host is assumed `http://`, which is right for MinIO/R2 run locally/in-cluster. An **empty** host (`s3:///bucket`, three slashes) means real AWS S3 via the SDK's own region-routed endpoint |
 | `s3+http://…` / `s3+https://…` | Same as `s3://`, but the scheme itself pins the host-derived endpoint's protocol (an explicit `?endpoint=` always wins over either) |
 
@@ -210,8 +210,8 @@ env-supplied secret works). Any other `<scheme>://` (a typo like `S3://`, or an 
 backend. Examples:
 
 ```
-s3://minioadmin:minioadmin@localhost:9000/stackbase-objects?region=us-east-1
-s3+https://minioadmin:minioadmin@objects.example.com/stackbase-objects
+s3://minioadmin:minioadmin@localhost:9000/helipod-objects?region=us-east-1
+s3+https://minioadmin:minioadmin@objects.example.com/helipod-objects
 s3:///my-prod-bucket?region=us-west-2      # real AWS S3, credentials from env
 file:///data/objects
 ./objects
@@ -226,8 +226,8 @@ plain `setTimeout` for a driver's next wake never fires). See [Cloudflare](/docs
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--wake-url <url>` | `STACKBASE_WAKE_URL` | unset (plain `setTimeout`) | POSTs the next driver wake's absolute timestamp here instead of arming an in-process timer |
-| `--backstop-min-ms <n>` | `STACKBASE_BACKSTOP_MIN_MS` | unset (identity, drivers' own 30s/60s cadence) | Floor applied to every driver's backstop poll cadence: `backstopMs = max(defaultMs, n)` |
+| `--wake-url <url>` | `HELIPOD_WAKE_URL` | unset (plain `setTimeout`) | POSTs the next driver wake's absolute timestamp here instead of arming an in-process timer |
+| `--backstop-min-ms <n>` | `HELIPOD_BACKSTOP_MIN_MS` | unset (identity, drivers' own 30s/60s cadence) | Floor applied to every driver's backstop poll cadence: `backstopMs = max(defaultMs, n)` |
 
 Both unset (every non-Cloudflare deployment) is byte-for-byte today's `setTimeout`-based behavior.
 
@@ -241,7 +241,7 @@ On success, `serve` prints one JSON line to stdout (fields beyond `level`/`msg`/
 in the relevant mode):
 
 ```json
-{"level":"info","msg":"stackbase serve","url":"http://0.0.0.0:3000","dir":"stackbase","data":"./data/db.sqlite","dashboard":true,"allowDeploy":false}
+{"level":"info","msg":"helipod serve","url":"http://0.0.0.0:3000","dir":"helipod","data":"./data/db.sqlite","dashboard":true,"allowDeploy":false}
 ```
 
 A fleet node adds `"fleet":true,"role":"writer"|"sync"`; an object-storage node adds
@@ -255,10 +255,10 @@ lease if held (best-effort, bounded to 2s so an unreachable bucket can't hang sh
 container's grace period), close the store, then `process.exit(0)`, printing
 `{"level":"info","msg":"shutting down"}` first.
 
-## `stackbase deploy`
+## `helipod deploy`
 
 Deploys the app through a pluggable target adapter. The default target, `serve`, pushes the local
-`stackbase/` tree to an already-running `serve --allow-deploy` and hot-swaps it live, no restart. The
+`helipod/` tree to an already-running `serve --allow-deploy` and hot-swaps it live, no restart. The
 other targets (`cloudflare`, `docker`, `railway`, `fly`, `aws`) provision or shell out to their
 platform's own CLI. See [Deploy & build](/docs/deploy/deploy-and-build) for the full mechanism
 (what `applyDeploy` validates, exactly which schema changes are additive, the atomic-swap order)
@@ -266,32 +266,32 @@ and [Cloudflare](/docs/deploy/cloudflare) for that target's setup; this is the f
 reference.
 
 ```bash
-STACKBASE_ADMIN_KEY=<secret> stackbase deploy --url https://my-deployment.example.com
+HELIPOD_ADMIN_KEY=<secret> helipod deploy --url https://my-deployment.example.com
 ```
 
 | Flag | Env equivalent | Default | Meaning |
 |---|---|---|---|
-| `--target <name>` | none | `deploy.defaultTarget` in `stackbase.config.ts`, else `serve` | One of `serve`, `cloudflare`, `docker`, `railway`, `fly`, `aws` |
+| `--target <name>` | none | `deploy.defaultTarget` in `helipod.config.ts`, else `serve` | One of `serve`, `cloudflare`, `docker`, `railway`, `fly`, `aws` |
 | `--env <name>` | none | `production` | Selects a per-environment settings block from `deploy.targets.<name>.environments` |
-| `--url <url>` | `STACKBASE_DEPLOY_URL` | none (required for `serve` unless set in config) | Target `serve` deployment's base URL |
-| `--dir <path>` | none | `stackbase` | The app directory to push |
+| `--url <url>` | `HELIPOD_DEPLOY_URL` | none (required for `serve` unless set in config) | Target `serve` deployment's base URL |
+| `--dir <path>` | none | `helipod` | The app directory to push |
 | `--dry-run` | none | off | Run `preflight` and `package`, skip the actual push |
-| `--check` | none | off | Fail (exit 1) if committed `stackbase/_generated/` has drifted from a fresh codegen run. Never pushes; combine with `--dry-run` to also run preflight and packaging |
+| `--check` | none | off | Fail (exit 1) if committed `helipod/_generated/` has drifted from a fresh codegen run. Never pushes; combine with `--dry-run` to also run preflight and packaging |
 
 An unknown `--target` value fails with `no deploy adapter for provider "<name>" (v1 supports:
 serve, cloudflare, docker, railway, fly, aws)`. Target credentials and settings can live in the
-`deploy` block of `stackbase.config.ts` (see
+`deploy` block of `helipod.config.ts` (see
 [Configuration](/docs/reference/configuration#the-deploy-block)) instead of flags.
 
 ### The `serve` target
 
-`STACKBASE_ADMIN_KEY` is required (bearer-authenticates the request; the config's
+`HELIPOD_ADMIN_KEY` is required (bearer-authenticates the request; the config's
 `deploy.targets.serve.adminKey` setting can supply it instead). Unlike `migrate export`/`migrate
 import`, `deploy` has **no** `--admin-key` flag. The target must have been started with
-`--allow-deploy` (or `STACKBASE_ALLOW_DEPLOY=1`).
+`--allow-deploy` (or `HELIPOD_ALLOW_DEPLOY=1`).
 
 What it does, in order: (1) transpiles every `.ts` file under `--dir` with esbuild's `transform`
-(types stripped, import specifiers untouched: bare `@stackbase/*` imports resolve against the
+(types stripped, import specifiers untouched: bare `@helipod/*` imports resolve against the
 *target's* `node_modules`, relative imports resolve within the pushed tree); (2) probes
 `GET /_admin/deploy/modules` for the server's current per-module hashes; (3) if the probe answers,
 `POST`s a delta payload (`{changed, unchanged}`) to `/_admin/deploy` with `Authorization: Bearer
@@ -301,7 +301,7 @@ stale base.
 <Callout type="warn" title="The serve target does not run codegen">
 
 Unlike every other target, which regenerates `_generated/` as part of the deploy, the `serve`
-target pushes your tree as-is. Run `stackbase codegen` yourself (and commit the result) before
+target pushes your tree as-is. Run `helipod codegen` yourself (and commit the result) before
 deploying if your schema or functions changed. `--check` verifies exactly this.
 
 </Callout>
@@ -324,15 +324,15 @@ verbatim:
 
 ```text
 ✗ deploy failed: deploy not enabled on target (start serve with --allow-deploy)
-✗ serve target needs a url — pass --url or set deploy.targets.serve settings / STACKBASE_DEPLOY_URL
-✗ STACKBASE_ADMIN_KEY is required to deploy to a serve target
+✗ serve target needs a url — pass --url or set deploy.targets.serve settings / HELIPOD_DEPLOY_URL
+✗ HELIPOD_ADMIN_KEY is required to deploy to a serve target
 ✗ deploy failed: could not reach <url>: <error>
 ✗ deploy failed: <server-reported reason, e.g. a rejected schema change>
 ```
 
-The component set (e.g. `@stackbase/scheduler`, `@stackbase/workflow`) is fixed at `serve` boot.
+The component set (e.g. `@helipod/scheduler`, `@helipod/workflow`) is fixed at `serve` boot.
 `deploy` can push new functions and additive schema against that fixed set, but adding/removing a
-component from `stackbase.config.ts` requires a restart.
+component from `helipod.config.ts` requires a restart.
 
 ### The other targets
 
@@ -342,20 +342,20 @@ to their platform CLIs, which must be installed. Every non-`serve` target runs c
 (`ctx.codegen()`) before packaging, so a fresh `_generated/` is part of what ships. Provider CLIs
 are never bundled; a missing one fails `preflight` with a clear message.
 
-## `stackbase build`
+## `helipod build`
 
 Compiles the app (engine, composed components, schema, functions, and by default the dashboard)
 into one self-contained executable via `bun build --compile`. See
 [Deploy & build](/docs/deploy/deploy-and-build) for the full entrypoint-codegen mechanism.
 
 ```bash
-stackbase build --target linux-x64
+helipod build --target linux-x64
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `stackbase` | The app directory to compile |
-| `--outfile <path>` | `./stackbase-server` | Output executable path (`.exe` is appended automatically when `--target windows-x64` is used and the given path doesn't already end in `.exe`) |
+| `--dir <path>` | `helipod` | The app directory to compile |
+| `--outfile <path>` | `./helipod-server` | Output executable path (`.exe` is appended automatically when `--target windows-x64` is used and the given path doesn't already end in `.exe`) |
 | `--target <name>` | host platform | Cross-compile target, see the table below |
 | `--no-dashboard` | dashboard included | Exclude the dashboard from the binary |
 | `--verbose` | off | Stream the underlying `bun build` process's own output |
@@ -384,9 +384,9 @@ reads its own, separate flag set (not `serve`'s flag names):
 | `--port <n>` | `PORT` env, else `3000` | HTTP/WebSocket port |
 | `--hostname <addr>` | `0.0.0.0` | Bind address |
 | `--data-dir <dir>` | `./data` | Directory for `db.sqlite` |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` env | Postgres connection string; unset → SQLite |
+| `--database-url <url>` | `HELIPOD_DATABASE_URL` env | Postgres connection string; unset → SQLite |
 
-`STACKBASE_ADMIN_KEY` is still required (fails fast if unset, same message as `serve`). On success
+`HELIPOD_ADMIN_KEY` is still required (fails fast if unset, same message as `serve`). On success
 the binary prints one machine-readable line and then runs until `SIGTERM`/`SIGINT`:
 
 ```json
@@ -395,19 +395,19 @@ the binary prints one machine-readable line and then runs until `SIGTERM`/`SIGIN
 
 That line is meant for a parent process (Electron/Tauri sidecars, an orchestrator) to detect
 readiness. There is no live hot-swap path for a compiled binary: functions, schema, and the
-component set are fixed at compile time. Use `stackbase deploy` against a `serve` process instead
+component set are fixed at compile time. Use `helipod deploy` against a `serve` process instead
 if you need that.
 
-## `stackbase migrate`
+## `helipod migrate`
 
-Turns an existing Convex project into a stackbase project: rewrites Convex import specifiers to
-their `@stackbase/*` equivalents, scans for API divergences it can't auto-fix, writes
+Turns an existing Convex project into a helipod project: rewrites Convex import specifiers to
+their `@helipod/*` equivalents, scans for API divergences it can't auto-fix, writes
 `MIGRATION-REPORT.md` at the project root, and regenerates `_generated/`. See
 [Migrate from Convex](/docs/reference/migrate-from-convex) for the complete behavior (every
 rewritten import, every detected pattern, the report format); this is the flag reference.
 
 ```bash
-stackbase migrate --from convex
+helipod migrate --from convex
 ```
 
 | Flag | Default | Meaning |
@@ -429,16 +429,16 @@ on `--dry-run`, `[dry-run] <n> files would change, <m> scaffolded. See MIGRATION
 import rewrite succeeds but the subsequent codegen fails, exit code 1 with `imports migrated, but
 codegen failed: <error>`. The report is still written, since it's written before codegen runs.
 
-## `stackbase migrate export` / `stackbase migrate import`
+## `helipod migrate export` / `helipod migrate import`
 
 Move an app's **data** (not code) between two running deployments (e.g. a portable SQLite/Postgres
 deployment and a Cloudflare DO-native one). Both are plain HTTP clients against a running
 deployment's bearer-gated admin endpoints (`GET /_admin/export`, `POST /_admin/import`); they don't
-touch `stackbase/` at all.
+touch `helipod/` at all.
 
 ```bash
-stackbase migrate export --url <source-url> --out dump.json
-stackbase migrate import --url <target-url> --in dump.json
+helipod migrate export --url <source-url> --out dump.json
+helipod migrate import --url <target-url> --in dump.json
 ```
 
 | Flag | Applies to | Default | Meaning |
@@ -446,77 +446,77 @@ stackbase migrate import --url <target-url> --in dump.json
 | `--url <url>` | both | none (required) | The deployment to export from / import into |
 | `--out <file>` | `export` | none (required) | Where to write the dump |
 | `--in <file>` | `import` | none (required) | The dump file to read |
-| `--admin-key <key>` | both | `STACKBASE_ADMIN_KEY` | Overrides the environment variable, unlike `deploy`, these two subcommands **do** have a flag for the admin key |
+| `--admin-key <key>` | both | `HELIPOD_ADMIN_KEY` | Overrides the environment variable, unlike `deploy`, these two subcommands **do** have a flag for the admin key |
 
 On success, `export` prints `✓ exported <n> documents, <m> index rows → <file>`; `import` prints
 `✓ imported <n> documents, <m> index rows`. A `401` from the target prints
-`✗ unauthorized: check STACKBASE_ADMIN_KEY / --admin-key`; a table-number collision or malformed
+`✗ unauthorized: check HELIPOD_ADMIN_KEY / --admin-key`; a table-number collision or malformed
 dump on import surfaces as `✗ import failed: <reason>`. Missing `--url`/file flag/admin key each
 produce their own `✗ missing …` message and exit 1 before any network call is made.
 
-## `stackbase codegen`
+## `helipod codegen`
 
-Regenerates `stackbase/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
+Regenerates `helipod/_generated/` (typed `api`, `Doc`, `Id`, server helpers) without starting the
 engine or serving anything. Useful in CI to verify generated types are committed and current, or
-before `stackbase serve` (which never generates codegen itself).
+before `helipod serve` (which never generates codegen itself).
 
 ```bash
-stackbase codegen --dir stackbase
+helipod codegen --dir helipod
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <path>` | `stackbase` | The app directory to load and generate types for |
+| `--dir <path>` | `helipod` | The app directory to load and generate types for |
 
 Prints `generated <dir>/_generated` on success.
 
-## `stackbase fleet reshard`
+## `helipod fleet reshard`
 
 Changes a **stopped** Postgres fleet's shard count. This is an offline maintenance tool, not a
 live-resharding feature. Every fleet node must be stopped first (an in-flight fleet leaves the
-lease/shard bookkeeping inconsistent with a reshard in progress). Requires the `@stackbase/fleet`
+lease/shard bookkeeping inconsistent with a reshard in progress). Requires the `@helipod/fleet`
 package (dynamic-imported; core `packages/cli` has zero static dependency on it, mirroring
 `serve --fleet`'s own gate).
 
 ```bash
-stackbase fleet reshard --shards 4 --database-url postgres://...
+helipod fleet reshard --shards 4 --database-url postgres://...
 ```
 
 | Flag | Env equivalent | Meaning |
 |---|---|---|
 | `--shards <n>` | none | Target shard count. Required; must be an integer ≥ 1 |
-| `--database-url <url>` | `STACKBASE_DATABASE_URL` | Required; must be a Postgres URL, this command is Postgres-only |
+| `--database-url <url>` | `HELIPOD_DATABASE_URL` | Required; must be a Postgres URL, this command is Postgres-only |
 
 On success:
 
 ```
-✓ resharded 8 → 4 shards (created: none, deleted: s4, s5, s6, s7; frontier floor: 000000000012ab34); update STACKBASE_FLEET_SHARDS to 4 (or unset) before restarting the fleet
+✓ resharded 8 → 4 shards (created: none, deleted: s4, s5, s6, s7; frontier floor: 000000000012ab34); update HELIPOD_FLEET_SHARDS to 4 (or unset) before restarting the fleet
 ```
 
 Failure modes surface as `✗ <message>`, exit 1: a missing/non-integer `--shards`, a missing/
-non-Postgres `--database-url`, the `@stackbase/fleet` package not installed, or an error thrown by
+non-Postgres `--database-url`, the `@helipod/fleet` package not installed, or an error thrown by
 the reshard itself (e.g. the fleet is still live, or a post-reshard verification pass fails).
 
-## `stackbase objectstore reshard`
+## `helipod objectstore reshard`
 
 Changes a **stopped** object-storage deployment's shard count N→M: physically re-partitions every
 document's current state to its new shard lane based on the table's `.shardKey()`. Also an offline,
 non-atomic tool: back up the bucket first, and make sure no writer/replica is running against it.
 
 ```bash
-stackbase objectstore reshard --object-store <url> --dir stackbase --shards 4
+helipod objectstore reshard --object-store <url> --dir helipod --shards 4
 ```
 
 | Flag | Env equivalent | Meaning |
 |---|---|---|
-| `--object-store <url>` | `STACKBASE_OBJECT_STORE` | Required, the bucket URL (same grammar as `serve --object-store`, above) |
-| `--dir <path>` | none | Default `stackbase`. Loaded only to read each table's `.shardKey()` off the schema, this is the reshard's only schema dependency |
+| `--object-store <url>` | `HELIPOD_OBJECT_STORE` | Required, the bucket URL (same grammar as `serve --object-store`, above) |
+| `--dir <path>` | none | Default `helipod`. Loaded only to read each table's `.shardKey()` off the schema, this is the reshard's only schema dependency |
 | `--shards <n>` | none | Required, target shard count, a positive integer |
 
 On success:
 
 ```
-✓ resharded 1 → 4 shard(s) (moved 128 doc(s); per-lane: 0=0, s1=40, s2=44, s3=44). A node booting this bucket now uses 4 shard(s): set --shards 4 (or STACKBASE_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).
+✓ resharded 1 → 4 shard(s) (moved 128 doc(s); per-lane: 0=0, s1=40, s2=44, s3=44). A node booting this bucket now uses 4 shard(s): set --shards 4 (or HELIPOD_FLEET_SHARDS), or drop it (the bucket's persisted count is authoritative).
 ```
 
 If the bucket is already at the requested count: `✓ bucket is already at <n> shard(s): nothing to
@@ -525,22 +525,22 @@ backend) surfaces as `✗ <message>`, exit 1. A missing `--shards`/`--object-sto
 was given (e.g. a trailing `--dir` with nothing after it) is rejected explicitly
 (`✗ --dir requires a value.`) rather than silently falling back to a default.
 
-## `stackbase help` / `--help` / `-h`
+## `helipod help` / `--help` / `-h`
 
 Prints usage and exits 0. Also the fallback for no command at all, and (with exit 1 instead) for an
 unrecognized command:
 
 ```text
-stackbase - the reactive backend you self-host
+helipod - the reactive backend you self-host
 
-Usage: stackbase <command> [options]
+Usage: helipod <command> [options]
 
 Commands:
   dev        Run the engine with hot reload + dashboard
-  serve      Run the production server (requires STACKBASE_ADMIN_KEY)
+  serve      Run the production server (requires HELIPOD_ADMIN_KEY)
   deploy     Deploy the app: --target <serve|cloudflare|docker|railway|fly|aws> --env <name> [--dry-run] [--check]
   build      Compile the app to a self-contained executable (bun build --compile)
-  migrate    Migrate a Convex project into Stackbase (imports + report)
+  migrate    Migrate a Convex project into Helipod (imports + report)
   migrate export --url <src> --out dump.json   Export app data to a portable dump
   migrate import --url <dst> --in  dump.json   Import a dump into a deployment
   codegen    Regenerate <functionsDir>/_generated types
@@ -560,27 +560,27 @@ Flags always win over their environment-variable equivalent when a command accep
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `STACKBASE_ADMIN_KEY` | `serve`, `dev`, `deploy`, `migrate export/import`, compiled `build` binaries | Bearer token for the dashboard and admin/deploy/export/import endpoints. **Required** for `serve`/`build` binaries (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
+| `HELIPOD_ADMIN_KEY` | `serve`, `dev`, `deploy`, `migrate export/import`, compiled `build` binaries | Bearer token for the dashboard and admin/deploy/export/import endpoints. **Required** for `serve`/`build` binaries (fails fast if unset/blank); `dev` generates an ephemeral one if unset |
 | `PORT` | `serve`, compiled `build` binaries | HTTP/WebSocket port (default `3000`). `dev` uses `--port` only, no env fallback |
-| `STACKBASE_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
-| `STACKBASE_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | Postgres connection string. Unset selects SQLite. Not read by `deploy` (a deploy pushes code, it never touches the database). See [Postgres](/docs/deploy/postgres) |
-| `STACKBASE_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads), falling back to buffered reads. Default: streaming on. See [Postgres](/docs/deploy/postgres) |
-| `STACKBASE_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
-| `STACKBASE_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
-| `STACKBASE_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
-| `STACKBASE_DEPLOY_URL` | `deploy` | Default target URL (overridden by `--url`) |
+| `HELIPOD_DATA_DIR` | `serve` | Directory for the SQLite data file (`<dir>/db.sqlite`) |
+| `HELIPOD_DATABASE_URL` | `dev`, `serve`, compiled `build` binaries, `fleet reshard` | Postgres connection string. Unset selects SQLite. Not read by `deploy` (a deploy pushes code, it never touches the database). See [Postgres](/docs/deploy/postgres) |
+| `HELIPOD_PG_STREAM` | any process on the Postgres backend | `0` or `false` disables the Postgres adapter's streaming index scans (server-side cursors for paginated/limited reads), falling back to buffered reads. Default: streaming on. See [Postgres](/docs/deploy/postgres) |
+| `HELIPOD_DASHBOARD` | `serve` | Set to `off` to disable the dashboard (equivalent to `--no-dashboard`) |
+| `HELIPOD_ALLOW_DEPLOY` | `serve` | Set to `1` to enable `POST /_admin/deploy` (equivalent to `--allow-deploy`) |
+| `HELIPOD_WEB_DIR` | `serve` | Static web UI directory to serve at the site root |
+| `HELIPOD_DEPLOY_URL` | `deploy` | Default target URL (overridden by `--url`) |
 
 ### File storage
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_STORAGE_BUCKET` | Selects the S3-compatible backend (any bucket name set → S3 instead of the filesystem default) |
-| `STACKBASE_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, …) |
-| `STACKBASE_STORAGE_REGION` | S3 region |
-| `STACKBASE_STORAGE_PUBLIC_URL` | Public base URL for `"public"`-visibility files |
+| `HELIPOD_STORAGE_BUCKET` | Selects the S3-compatible backend (any bucket name set → S3 instead of the filesystem default) |
+| `HELIPOD_STORAGE_ENDPOINT` | S3-compatible endpoint URL (MinIO, R2, …) |
+| `HELIPOD_STORAGE_REGION` | S3 region |
+| `HELIPOD_STORAGE_PUBLIC_URL` | Public base URL for `"public"`-visibility files |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Standard AWS-style credentials for the S3 backend |
 
-Any of the last three set without `STACKBASE_STORAGE_BUCKET` fails `serve` boot fast (S3 settings
+Any of the last three set without `HELIPOD_STORAGE_BUCKET` fails `serve` boot fast (S3 settings
 imply S3 intent; without a bucket that's an unambiguous misconfiguration, not a case for silently
 falling back to local disk). Unset bucket → files live under `<data dir>/storage`. See
 [File storage](/docs/core-concepts/file-storage).
@@ -594,11 +594,11 @@ hosts, expand whichever applies to you.
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_FLEET` | `1` or `true` → run as a fleet node (equivalent to `--fleet`) |
-| `STACKBASE_ADVERTISE_URL` | This node's URL, as reachable by other fleet nodes (equivalent to `--advertise-url`) |
-| `STACKBASE_FLEET_SHARDS` | Shard count, persisted at first boot, immutable after (equivalent to `--shards`; also consulted by `fleet reshard`'s companion, and by an `--object-store` boot when no `--shards` flag is given) |
-| `STACKBASE_FLEET_LEASE_TTL_MS` | Write-lease TTL in ms (default `15000`), no CLI flag |
-| `STACKBASE_GROUP_COMMIT` | `1`/`true`/`yes` forces group-commit on, any other explicit value forces it off. Unset: off on a fleet node; on single-node it's store-conditional (on for Postgres, off for SQLite) |
+| `HELIPOD_FLEET` | `1` or `true` → run as a fleet node (equivalent to `--fleet`) |
+| `HELIPOD_ADVERTISE_URL` | This node's URL, as reachable by other fleet nodes (equivalent to `--advertise-url`) |
+| `HELIPOD_FLEET_SHARDS` | Shard count, persisted at first boot, immutable after (equivalent to `--shards`; also consulted by `fleet reshard`'s companion, and by an `--object-store` boot when no `--shards` flag is given) |
+| `HELIPOD_FLEET_LEASE_TTL_MS` | Write-lease TTL in ms (default `15000`), no CLI flag |
+| `HELIPOD_GROUP_COMMIT` | `1`/`true`/`yes` forces group-commit on, any other explicit value forces it off. Unset: off on a fleet node; on single-node it's store-conditional (on for Postgres, off for SQLite) |
 
 </Accordion>
 
@@ -606,10 +606,10 @@ hosts, expand whichever applies to you.
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_OBJECT_STORE` | The bucket URL (equivalent to `--object-store`). See the URL grammar above |
-| `STACKBASE_OBJECTSTORE_GC_MS` | Writer garbage-collection sweep cadence in ms (default `60000`), no CLI flag |
-| `STACKBASE_REPLICA` | `1`/`true`/`yes` (case-insensitive) → boot as a read-only replica (equivalent to `--replica`) |
-| `STACKBASE_WRITER_URL` | The writer node's URL, for a replica to forward mutations to (equivalent to `--writer-url`) |
+| `HELIPOD_OBJECT_STORE` | The bucket URL (equivalent to `--object-store`). See the URL grammar above |
+| `HELIPOD_OBJECTSTORE_GC_MS` | Writer garbage-collection sweep cadence in ms (default `60000`), no CLI flag |
+| `HELIPOD_REPLICA` | `1`/`true`/`yes` (case-insensitive) → boot as a read-only replica (equivalent to `--replica`) |
+| `HELIPOD_WRITER_URL` | The writer node's URL, for a replica to forward mutations to (equivalent to `--writer-url`) |
 
 </Accordion>
 
@@ -617,21 +617,21 @@ hosts, expand whichever applies to you.
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_WAKE_URL` | Host endpoint to POST the next driver wake to, instead of `setTimeout` (equivalent to `--wake-url`) |
-| `STACKBASE_BACKSTOP_MIN_MS` | Floor for every driver's backstop poll cadence (equivalent to `--backstop-min-ms`) |
+| `HELIPOD_WAKE_URL` | Host endpoint to POST the next driver wake to, instead of `setTimeout` (equivalent to `--wake-url`) |
+| `HELIPOD_BACKSTOP_MIN_MS` | Floor for every driver's backstop poll cadence (equivalent to `--backstop-min-ms`) |
 
 </Accordion>
 
 <Accordion title="Cloudflare Durable-Object host">
 
-These are read by `@stackbase/runtime-cloudflare`'s Worker itself (via `wrangler.jsonc`
+These are read by `@helipod/runtime-cloudflare`'s Worker itself (via `wrangler.jsonc`
 vars/bindings), not by `packages/cli`. They don't apply to `dev`/`serve`/`build`. See
 [Cloudflare](/docs/deploy/cloudflare).
 
 | Variable | Meaning |
 |---|---|
-| `STACKBASE_DO` | The `durable_objects` binding name in `wrangler.jsonc` that routes every request (HTTP and WebSocket upgrade alike) to the one stackbase Durable Object |
-| `STACKBASE_DO_LOCATION_HINT` | Pins the DO's home region to one of Cloudflare's location-hint codes, so its first cold instantiation lands near your users instead of near whichever edge first reaches it |
+| `HELIPOD_DO` | The `durable_objects` binding name in `wrangler.jsonc` that routes every request (HTTP and WebSocket upgrade alike) to the one helipod Durable Object |
+| `HELIPOD_DO_LOCATION_HINT` | Pins the DO's home region to one of Cloudflare's location-hint codes, so its first cold instantiation lands near your users instead of near whichever edge first reaches it |
 
 </Accordion>
 
@@ -639,11 +639,11 @@ vars/bindings), not by `packages/cli`. They don't apply to `dev`/`serve`/`build`
 
 ## See also
 
-- [Configuration](/docs/reference/configuration): `stackbase.config.ts`, the `v.*` validator
+- [Configuration](/docs/reference/configuration): `helipod.config.ts`, the `v.*` validator
   catalog, and this same environment-variable list presented alongside schema configuration.
 - [Local dev & dashboard](/docs/deploy/local-dev), [Self-hosting](/docs/deploy/self-hosting),
   [Postgres](/docs/deploy/postgres), [Scaling](/docs/deploy/scaling),
   [Deploy & build](/docs/deploy/deploy-and-build), [Cloudflare](/docs/deploy/cloudflare): task-oriented
   walkthroughs for each of these deployment shapes.
-- [Migrate from Convex](/docs/reference/migrate-from-convex): the full `stackbase migrate` codemod
+- [Migrate from Convex](/docs/reference/migrate-from-convex): the full `helipod migrate` codemod
   and divergence report.

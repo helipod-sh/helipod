@@ -1,5 +1,5 @@
 /**
- * Resolve `stackbase dev` options from CLI flags + defaults.
+ * Resolve `helipod dev` options from CLI flags + defaults.
  */
 import { DEFAULT_FUNCTIONS_DIR } from "./functions-dir";
 
@@ -13,7 +13,7 @@ export interface DevOptions {
   runtime?: RuntimeKind;
   /** Optional static web UI directory to serve alongside the API/WebSocket. */
   webDir?: string;
-  /** Postgres connection string (flag wins over `STACKBASE_DATABASE_URL`); unset → SQLite. */
+  /** Postgres connection string (flag wins over `HELIPOD_DATABASE_URL`); unset → SQLite. */
   databaseUrl?: string;
   /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
   storageBucket?: string;
@@ -37,10 +37,10 @@ export function resolveDevOptions(options: DevOptions = {}): ResolvedDevOptions 
     port: options.port ?? 3000,
     ip: options.ip ?? "127.0.0.1",
     functionsDir: options.functionsDir ?? DEFAULT_FUNCTIONS_DIR,
-    dataPath: options.dataPath ?? ".stackbase/data.db",
+    dataPath: options.dataPath ?? ".helipod/data.db",
     runtime: options.runtime ?? "auto",
     webDir: options.webDir,
-    databaseUrl: options.databaseUrl ?? process.env.STACKBASE_DATABASE_URL,
+    databaseUrl: options.databaseUrl ?? process.env.HELIPOD_DATABASE_URL,
     storageBucket: options.storageBucket,
     storageEndpoint: options.storageEndpoint,
   };

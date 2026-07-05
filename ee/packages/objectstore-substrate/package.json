@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/objectstore-substrate",
+  "name": "@helipod/objectstore-substrate",
   "version": "0.0.0",
   "type": "module",
   "license": "SEE LICENSE IN ../../LICENSE",
@@ -24,20 +24,20 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/component": "workspace:*",
-    "@stackbase/docstore": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
-    "@stackbase/id-codec": "workspace:*",
-    "@stackbase/index-key-codec": "workspace:*",
-    "@stackbase/objectstore": "workspace:*",
-    "@stackbase/values": "workspace:*"
+    "@helipod/component": "workspace:*",
+    "@helipod/docstore": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/id-codec": "workspace:*",
+    "@helipod/index-key-codec": "workspace:*",
+    "@helipod/objectstore": "workspace:*",
+    "@helipod/values": "workspace:*"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "catalog:",
-    "@stackbase/executor": "workspace:*",
-    "@stackbase/objectstore-fs": "workspace:*",
-    "@stackbase/objectstore-s3": "workspace:*",
-    "@stackbase/runtime-embedded": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/objectstore-fs": "workspace:*",
+    "@helipod/objectstore-s3": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

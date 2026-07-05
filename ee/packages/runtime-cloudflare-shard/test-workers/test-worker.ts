@@ -1,11 +1,11 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 
 /**
  * The test Worker loaded into workerd by the vitest-pool-workers project. This is the real M1 stack:
  *   - `export default` — the MULTI-SHARD router (`createShardWorkerHandler`) from THIS ee package. It
  *     resolves each request's owning shard-DO name and forwards to it. Driving it via `SELF.fetch`
  *     exercises the full Worker→shard-DO path.
- *   - `export class FixtureStackbaseDO extends StackbaseDurableObject` — a shard-DO: the UNMODIFIED
+ *   - `export class FixtureHelipodDO extends HelipodDurableObject` — a shard-DO: the UNMODIFIED
  *     free host class (M1 reuses Slice 3 verbatim). N distinct shard keys ⇒ N distinct instances of
  *     this class, each with its own DO-SQLite.
  *
@@ -14,10 +14,10 @@
  * runs at `numShards: 1` (each DO IS one shard), so the kernel's shard guards short-circuit — the
  * physical partition is the DO boundary, not an in-engine ring.
  */
-import { query, mutation } from "@stackbase/executor";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import type { LoadedProject } from "@stackbase/cli/project";
-import { StackbaseDurableObject, createShardWorkerHandler, type DurableObjectAppConfig } from "@stackbase/runtime-cloudflare-shard";
+import { query, mutation } from "@helipod/executor";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import type { LoadedProject } from "@helipod/cli/project";
+import { HelipodDurableObject, createShardWorkerHandler, type DurableObjectAppConfig } from "@helipod/runtime-cloudflare-shard";
 
 const schema = defineSchema({
   messages: defineTable({ roomId: v.string(), body: v.string() })
@@ -38,7 +38,7 @@ const messages = {
 
 const loaded: LoadedProject = { schema, modules: { messages } };
 
-export class FixtureStackbaseDO extends StackbaseDurableObject {
+export class FixtureHelipodDO extends HelipodDurableObject {
   protected appConfig(): DurableObjectAppConfig {
     return { loaded, adminKey: "workerd-test-admin-key" };
   }
@@ -46,4 +46,4 @@ export class FixtureStackbaseDO extends StackbaseDurableObject {
 
 // The Worker's default export IS the multi-shard router — `loaded` lets a POST /api/run derive a
 // sharded mutation's key from its args. `SELF.fetch(...)` in the tests drives this real routing.
-export default createShardWorkerHandler("STACKBASE_DO", { mode: "key", loaded });
+export default createShardWorkerHandler("HELIPOD_DO", { mode: "key", loaded });

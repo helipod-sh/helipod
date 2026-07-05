@@ -7,13 +7,13 @@
  * deterministic replay come for free. Actions run OUTSIDE any transaction (see `runActionFn`)
  * with native capabilities and no `ctx.db` — they reach data only via `ctx.runQuery`/`runMutation`.
  */
-import type { OplogDelta, Transactor } from "@stackbase/transactor";
-import type { QueryRuntime, FilterExpr } from "@stackbase/query-engine";
-import type { KeyRange, SerializedKeyRange } from "@stackbase/index-key-codec";
-import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@stackbase/values";
-import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@stackbase/id-codec";
-import { ArgumentValidationError } from "@stackbase/errors";
-import type { D1DocStore } from "@stackbase/docstore-d1";
+import type { OplogDelta, Transactor } from "@helipod/transactor";
+import type { QueryRuntime, FilterExpr } from "@helipod/query-engine";
+import type { KeyRange, SerializedKeyRange } from "@helipod/index-key-codec";
+import { convexToJson, jsonToConvex, validate, type JSONValue, type Value } from "@helipod/values";
+import { DEFAULT_SHARD, shardIdForKeyValue, type ShardId } from "@helipod/id-codec";
+import { ArgumentValidationError } from "@helipod/errors";
+import type { D1DocStore } from "@helipod/docstore-d1";
 import { COLLECT_BRAND, createKernelRouter, InlineSyscallChannel, type CollectTrace, type KernelContext, type PaginateTrace, type SyscallRouter } from "./kernel";
 import { GlobalTxn, type GlobalWriteOp } from "./global-txn";
 import { profileFor } from "./profile";
@@ -443,7 +443,7 @@ export function commitThenThrow(message: string): CommitThenThrow {
  * unresolved and wedge the whole node's reactive drain forever (DLR 2b review). `Symbol.for` keeps it
  * stable across duplicate module instances (tests resolve workspace deps via each package's `dist`).
  */
-export const COMMITTED_TS_ERROR_KEY = Symbol.for("stackbase.executor.committedTs");
+export const COMMITTED_TS_ERROR_KEY = Symbol.for("helipod.executor.committedTs");
 
 /** Read the committed-ts the executor stamped onto a post-commit error, or `undefined` (a pre-commit
  *  throw — no commit happened, so no gate was ever registered). */

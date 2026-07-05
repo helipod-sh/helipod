@@ -1,6 +1,6 @@
 /**
- * `@stackbase/client` — the framework-agnostic reactive client: the `api` proxy, transports
- * (loopback + WebSocket), and `StackbaseClient`. React bindings are at `@stackbase/client/react`.
+ * `@helipod/client` — the framework-agnostic reactive client: the `api` proxy, transports
+ * (loopback + WebSocket), and `HelipodClient`. React bindings are at `@helipod/client/react`.
  */
 export type { FunctionReference, AnyFunctionRef } from "./api";
 export { anyApi, getFunctionPath } from "./api";
@@ -11,7 +11,7 @@ export type { ClientTransport, LoopbackLike, WebSocketTransportOptions } from ".
 export { loopbackTransport, webSocketTransport, reconnectDelayMs } from "./transport";
 
 export type { QueryListener, QueryErrorListener } from "./client";
-export { StackbaseClient } from "./client";
+export { HelipodClient } from "./client";
 
 // T5 — the durable-outbox registry, R9 observability (verdict §(d) "Observability").
 export type { MutationFailedInfo, OutboxBroadcastLike, OutboxBroadcastMessage, PendingMutationEntry, PendingSummary } from "./client";
@@ -50,15 +50,15 @@ export {
 // these — see the file doc for why a single copy matters).
 export { sha256Hex, sessionFingerprintKey } from "./identity-fingerprint";
 
-// The Connect-handshake helpers shared between `StackbaseClient` and the headless drain below.
+// The Connect-handshake helpers shared between `HelipodClient` and the headless drain below.
 export { buildConnectMessage, outboxAckedThrough, outboxHeldFromLog, outboxHeldFromStore } from "./connect-handshake";
 
 // The browser-ux pair, Part B — the headless one-shot outbox drain (the Background Sync seam): a
-// Service Worker (or any UI-less context) can drain the durable queue with no `StackbaseClient`.
+// Service Worker (or any UI-less context) can drain the durable queue with no `HelipodClient`.
 export type { HeadlessDrainOptions } from "./headless-drain";
 export { drainOutboxOnce } from "./headless-drain";
 
-// Auth slice A1 — the token-lifecycle manager over a `StackbaseClient` (rotation, refresh
+// Auth slice A1 — the token-lifecycle manager over a `HelipodClient` (rotation, refresh
 // scheduling, single-refresher, cross-tab pair broadcast, sessionId-based outbox fingerprint).
 export type {
   AuthClient,
@@ -73,4 +73,4 @@ export { createAuthClient, localStorageSession, memorySession, SESSION_STORAGE_K
 
 /** Untyped core of client-side id minting — prefer the codegen-typed `mintId` from your app's
  *  `_generated/ids`. Exists for hosts without codegen output at hand. */
-export { mintEncodedDocumentId as mintDocumentId } from "@stackbase/id-codec";
+export { mintEncodedDocumentId as mintDocumentId } from "@helipod/id-codec";

@@ -1,5 +1,5 @@
 /**
- * Notifications N4 — digest E2E through the real `stackbase dev` server (e2e-through-shipped-
+ * Notifications N4 — digest E2E through the real `helipod dev` server (e2e-through-shipped-
  * entrypoint rule, mirroring `notifications-e2e.test.ts`'s N1 boot — no `componentRoutes` wiring,
  * since digest adds no `httpRoutes`).
  *
@@ -13,12 +13,12 @@
  * rolling window, which isn't available over the wire, so it's out of scope here.
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { v, defineSchema, defineTable } from "@stackbase/values";
-import { mutation, query } from "@stackbase/executor";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { createEmbeddedRuntime, type EmbeddedRuntime } from "@stackbase/runtime-embedded";
-import { StackbaseClient, webSocketTransport, anyApi } from "@stackbase/client";
-import { defineNotifications, type EmailMessage, type EmailProvider } from "@stackbase/notifications";
+import { v, defineSchema, defineTable } from "@helipod/values";
+import { mutation, query } from "@helipod/executor";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { createEmbeddedRuntime, type EmbeddedRuntime } from "@helipod/runtime-embedded";
+import { HelipodClient, webSocketTransport, anyApi } from "@helipod/client";
+import { defineNotifications, type EmailMessage, type EmailProvider } from "@helipod/notifications";
 import { loadProject, startDevServer, type DevServer } from "../src/index";
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000, label = "waitFor"): Promise<void> {
@@ -93,7 +93,7 @@ describe("notifications N4 — digest E2E", () => {
     const server = await startDevServer(runtime, { port: 0, ip: "127.0.0.1" });
     servers.push(server);
 
-    const c = new StackbaseClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
+    const c = new HelipodClient(webSocketTransport(`ws://127.0.0.1:${server.port}/api/sync`, { reconnect: false }));
     try {
       c.setAuth("user-1");
       const buffers: Array<Array<{ email: string; category: string; subject: string }>> = [];

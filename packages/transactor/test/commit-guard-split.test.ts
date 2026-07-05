@@ -15,10 +15,10 @@
  * uses).
  */
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import type { CommitUnit } from "@stackbase/docstore";
-import { CommitGuardRejection, isRetryableError } from "@stackbase/errors";
-import { newDocumentId, documentIdKey, type ShardId, type InternalDocumentId } from "@stackbase/id-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import type { CommitUnit } from "@helipod/docstore";
+import { CommitGuardRejection, isRetryableError } from "@helipod/errors";
+import { newDocumentId, documentIdKey, type ShardId, type InternalDocumentId } from "@helipod/id-codec";
 import { ShardedTransactor, type OplogDelta } from "../src/index";
 
 const TABLE = 20011;

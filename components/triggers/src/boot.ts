@@ -1,8 +1,8 @@
-import type { DriverContext } from "@stackbase/component";
+import type { DriverContext } from "@helipod/component";
 import type { TriggersOpts } from "./driver";
 
 /**
- * Boot-time work for `@stackbase/triggers`: handler-path validation (fail-fast) and cursor
+ * Boot-time work for `@helipod/triggers`: handler-path validation (fail-fast) and cursor
  * initialization (tip or `fromStart`). Both are called from `driver.ts`'s `start()`, NOT wired as
  * a `ComponentDefinition.boot` step — despite the file name, matching the brief's file layout.
  * Here's why, spelled out so a future reader doesn't wonder:
@@ -44,29 +44,29 @@ function isInternalPath(path: string): boolean {
 export function validateHandlers(ctx: DriverContext, opts: TriggersOpts): void {
   if (!ctx.functionKind) {
     throw new Error(
-      "@stackbase/triggers: the runtime's DriverContext does not provide functionKind — handler validation " +
-        "cannot run. This means the composed runtime is older than @stackbase/component's triggers support; " +
-        "upgrade @stackbase/runtime-embedded.",
+      "@helipod/triggers: the runtime's DriverContext does not provide functionKind — handler validation " +
+        "cannot run. This means the composed runtime is older than @helipod/component's triggers support; " +
+        "upgrade @helipod/runtime-embedded.",
     );
   }
   for (const [table, cfg] of Object.entries(opts)) {
     const kind = ctx.functionKind(cfg.handler);
     if (kind === undefined) {
       throw new Error(
-        `@stackbase/triggers: trigger "${table}" references handler "${cfg.handler}", which is not a registered ` +
+        `@helipod/triggers: trigger "${table}" references handler "${cfg.handler}", which is not a registered ` +
           `function. Check the path matches an exported mutation or action (e.g. "notifications:_onMessage").`,
       );
     }
     if (!isInternalPath(cfg.handler)) {
       throw new Error(
-        `@stackbase/triggers: trigger "${table}"'s handler "${cfg.handler}" must be an internal function — a ` +
+        `@helipod/triggers: trigger "${table}"'s handler "${cfg.handler}" must be an internal function — a ` +
           `module or function name segment prefixed with "_" (e.g. "notifications:_onMessage"). Trigger handlers ` +
           `are driven only by the trigger loop and must not be directly client-callable.`,
       );
     }
     if (kind !== "mutation" && kind !== "action") {
       throw new Error(
-        `@stackbase/triggers: trigger "${table}"'s handler "${cfg.handler}" is a ${kind}, not a mutation or ` +
+        `@helipod/triggers: trigger "${table}"'s handler "${cfg.handler}" is a ${kind}, not a mutation or ` +
           `action. Trigger handlers must be an internal mutation or action.`,
       );
     }
@@ -78,7 +78,7 @@ export function validateHandlers(ctx: DriverContext, opts: TriggersOpts): void {
  * `fromStart` seeds `cursorTs: 0` (replay every existing revision — see the design spec's D3
  * cost note); otherwise seeds at `tipIfNew` — the log's tip AS OF BEFORE this call, already
  * peeked by the caller (`driver.ts`'s `runPass`, via the `limit: 0` "peek the bound, don't scan"
- * idiom — `DriverContext.readLog`'s doc comment, `@stackbase/component`).
+ * idiom — `DriverContext.readLog`'s doc comment, `@helipod/component`).
  *
  * `tipIfNew` is a CALLER-supplied value, not peeked again in here, on purpose: `runPass` peeks
  * its own `targetBound` (the ceiling this pass will drain up to) BEFORE calling this function, and

@@ -1,10 +1,10 @@
 /**
- * The push pipeline: load the project → run codegen → return artifacts. `stackbase dev` runs
+ * The push pipeline: load the project → run codegen → return artifacts. `helipod dev` runs
  * this on startup and on every file change (hot reload re-runs `push` and re-registers the
  * module map with the running engine — no restart).
  */
-import { generateAll, type GeneratedBundle } from "@stackbase/codegen";
-import type { ComponentDefinition } from "@stackbase/component";
+import { generateAll, type GeneratedBundle } from "@helipod/codegen";
+import type { ComponentDefinition } from "@helipod/component";
 import { loadProject, type LoadedProject, type ProjectArtifacts } from "./project";
 
 export interface PushResult {

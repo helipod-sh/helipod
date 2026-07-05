@@ -1,4 +1,4 @@
-import type { D1DocStore } from "@stackbase/docstore-d1";
+import type { D1DocStore } from "@helipod/docstore-d1";
 
 export type GlobalWriteOp =
   | { kind: "insert"; table: string; doc: Record<string, unknown> }

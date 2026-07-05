@@ -14,8 +14,8 @@ function makeTmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sbcfg-"));
   const nm = join(dir, "node_modules");
   mkdirSync(nm);
-  // Symlink each required @stackbase scoped dir entry from cli's local node_modules
-  symlinkSync(join(cliNodeModules(), "@stackbase"), join(nm, "@stackbase"));
+  // Symlink each required @helipod scoped dir entry from cli's local node_modules
+  symlinkSync(join(cliNodeModules(), "@helipod"), join(nm, "@helipod"));
   return dir;
 }
 
@@ -24,12 +24,12 @@ describe("loadConfig", () => {
     const dir = mkdtempSync(join(tmpdir(), "sbcfg-"));
     expect((await loadConfig(dir)).components).toEqual([]);
   });
-  it("loads components from stackbase.config.ts", async () => {
+  it("loads components from helipod.config.ts", async () => {
     const dir = makeTmpDir();
     // a self-contained config that defines an inline component (avoids needing a built dep)
-    writeFileSync(join(dir, "stackbase.config.ts"), `
-      import { defineConfig, defineComponent } from "@stackbase/component";
-      import { defineSchema } from "@stackbase/values";
+    writeFileSync(join(dir, "helipod.config.ts"), `
+      import { defineConfig, defineComponent } from "@helipod/component";
+      import { defineSchema } from "@helipod/values";
       export default defineConfig({ components: [defineComponent({ name: "demo", schema: defineSchema({}), modules: {} })] });
     `);
     const cfg = await loadConfig(dir);

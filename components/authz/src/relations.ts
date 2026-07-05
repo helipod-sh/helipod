@@ -1,4 +1,4 @@
-import type { GuestDatabaseReader, GuestDatabaseWriter } from "@stackbase/executor";
+import type { GuestDatabaseReader, GuestDatabaseWriter } from "@helipod/executor";
 
 export interface RelSubject { type: string; id: string; relation?: string }
 export interface RelObject { type: string; id: string }

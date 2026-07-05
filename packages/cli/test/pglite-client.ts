@@ -1,12 +1,12 @@
 import { PGlite } from "@electric-sql/pglite";
-import type { PgClient, PgQuerier, PgRow, PgValue } from "@stackbase/docstore-postgres";
-import { ADVISORY_LOCK_KEY } from "@stackbase/docstore-postgres";
+import type { PgClient, PgQuerier, PgRow, PgValue } from "@helipod/docstore-postgres";
+import { ADVISORY_LOCK_KEY } from "@helipod/docstore-postgres";
 
 /**
  * Test-only `PgClient` over PGlite (real Postgres in WASM, in-process, single connection) — mirrors
  * `ee/packages/fleet/test/pglite-client.ts` (see there for the OID 20 bigint parser rationale).
  * Used ONLY by `fleet-idempotency-route.test.ts`, which needs a REAL `PostgresDocStore` +
- * `LeaseManager` + `installCommitGuard` (from `@stackbase/fleet`, already a devDependency here) to
+ * `LeaseManager` + `installCommitGuard` (from `@helipod/fleet`, already a devDependency here) to
  * exercise the effectively-once forwarding concurrent-race scenario through the real `/_fleet/run`
  * handler — a fake in-memory idempotency store can't reproduce the guard's actual atomic-INSERT
  * conflict, which is the whole point of that test.

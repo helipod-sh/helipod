@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { SqliteDocStore, NodeSqliteAdapter } from "@stackbase/docstore-sqlite";
-import { SimpleIndexCatalog, mutation, query } from "@stackbase/executor";
-import { encodeStorageIndexId } from "@stackbase/id-codec";
+import { SqliteDocStore, NodeSqliteAdapter } from "@helipod/docstore-sqlite";
+import { SimpleIndexCatalog, mutation, query } from "@helipod/executor";
+import { encodeStorageIndexId } from "@helipod/id-codec";
 import { EmbeddedRuntime } from "../src/index";
 
 function makeCatalog(): SimpleIndexCatalog {

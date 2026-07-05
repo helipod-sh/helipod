@@ -7,10 +7,10 @@ const emptySchema = { tables: {} } as never;
 describe("generateServer — ctx augmentation", () => {
   it("emits a typed ctx.<component> augmentation for components with a contextType", () => {
     const out = generateServer(emptySchema, {
-      components: [{ name: "auth", contextType: { import: "@stackbase/auth", type: "AuthContext" } }],
+      components: [{ name: "auth", contextType: { import: "@helipod/auth", type: "AuthContext" } }],
     });
-    expect(out.content).toContain('declare module "@stackbase/executor"');
-    expect(out.content).toContain('auth: import("@stackbase/auth").AuthContext');
+    expect(out.content).toContain('declare module "@helipod/executor"');
+    expect(out.content).toContain('auth: import("@helipod/auth").AuthContext');
     expect(out.content).toContain("interface QueryCtx");
     expect(out.content).toContain("interface MutationCtx");
   });
@@ -28,13 +28,13 @@ describe("generateServer — ctx augmentation", () => {
   it("emits augmentation for multiple components", () => {
     const out = generateServer(emptySchema, {
       components: [
-        { name: "auth", contextType: { import: "@stackbase/auth", type: "AuthContext" } },
-        { name: "storage", contextType: { import: "@stackbase/storage", type: "StorageContext" } },
+        { name: "auth", contextType: { import: "@helipod/auth", type: "AuthContext" } },
+        { name: "storage", contextType: { import: "@helipod/storage", type: "StorageContext" } },
         { name: "noCtx" },
       ],
     });
-    expect(out.content).toContain('auth: import("@stackbase/auth").AuthContext');
-    expect(out.content).toContain('storage: import("@stackbase/storage").StorageContext');
+    expect(out.content).toContain('auth: import("@helipod/auth").AuthContext');
+    expect(out.content).toContain('storage: import("@helipod/storage").StorageContext');
     expect(out.content).not.toContain("noCtx");
   });
 });

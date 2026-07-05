@@ -3,7 +3,7 @@
  * app root (unlike component tables, which are namespaced `component/*`). These are the single
  * source of truth for the built-in document shapes: codegen merges them into the generated
  * `DataModel` (so `Id<"_storage">`/`Doc<"_storage">`/`v.id("_storage")` type-check in user
- * schemas) and the feature packages that own them (`@stackbase/storage`) build their live
+ * schemas) and the feature packages that own them (`@helipod/storage`) build their live
  * `TableDefinition` from the SAME field validators — no duplicated shape.
  *
  * `_storage` (the file-storage feature's document table, spec §4.3): a `pending` row is created
@@ -26,7 +26,7 @@ export const storageDocumentFields = {
 
 /**
  * The live field validators for every built-in app-namespace system table, keyed by table
- * name. Feature packages import the fields they own (e.g. `@stackbase/storage` reads
+ * name. Feature packages import the fields they own (e.g. `@helipod/storage` reads
  * `storageDocumentFields`) so the shape never diverges from what codegen emits.
  */
 export const SYSTEM_TABLE_FIELDS = {

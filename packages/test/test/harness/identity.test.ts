@@ -1,10 +1,10 @@
 import { it, expect } from "vitest";
-import { createTestStackbase } from "../../src";
+import { createTestHelipod } from "../../src";
 import { me, identityProbe } from "../fixtures/whoami";
-import { defineSchema } from "@stackbase/values";
+import { defineSchema } from "@helipod/values";
 
 it("withIdentity sets the ambient identity token on the same backend (via a context provider — the real path)", async () => {
-  const t = await createTestStackbase({
+  const t = await createTestHelipod({
     modules: { "whoami.ts": { me }, "schema.ts": { default: defineSchema({}) } },
     components: [identityProbe],
   });

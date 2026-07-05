@@ -1,7 +1,7 @@
-import { defineSchema, defineTable, v } from "@stackbase/values";
+import { defineSchema, defineTable, v } from "@helipod/values";
 
 /**
- * The `@stackbase/workflow` component schema (namespaced `workflow/*` when composed).
+ * The `@helipod/workflow` component schema (namespaced `workflow/*` when composed).
  *
  * - `workflows`: one row per `ctx.workflow.start(...)` call — the journal's root. `state` starts
  *   `"running"`; Task 2's replay loop drives it to `"completed"`/`"failed"` (the saga slice adds a
@@ -9,7 +9,7 @@ import { defineSchema, defineTable, v } from "@stackbase/values";
  *   `generationNumber` is the replay-from-scratch counter (bumped each time `_advance` re-executes
  *   the handler from step 0 to reach the next not-yet-durable step — see the design spec).
  *   `onComplete`/`context` mirror the scheduler's workflow-ready round-trip primitives
- *   (`fireOnComplete` in `@stackbase/scheduler`), reserved here for the workflow-of-workflows
+ *   (`fireOnComplete` in `@helipod/scheduler`), reserved here for the workflow-of-workflows
  *   slice. `compensationTarget` (saga slice, Task 2+) is the terminal state (`"failed"` or
  *   `"canceled"`) the unwind should reach once compensation finishes — recorded but unused until
  *   the unwind loop is built.

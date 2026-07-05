@@ -62,14 +62,14 @@ describe("NodePgClient — session-timeout SETs issued at connect", () => {
   it("issues both timeout SETs on the pinned connection before the first user query", async () => {
     const client = new NodePgClient({
       connectionString: "postgres://fake",
-      applicationName: "stackbase-fleet-4000",
+      applicationName: "helipod-fleet-4000",
       sessionTimeouts: { idleInTransactionMs: 5000, statementMs: 10000 },
     });
     // First real query triggers ensure() → connect() → the SETs are chained into the connect promise.
     await client.query("SELECT 1");
 
     const main = state.instances[0]!;
-    expect(main.opts.application_name).toBe("stackbase-fleet-4000");
+    expect(main.opts.application_name).toBe("helipod-fleet-4000");
     // The two SETs precede the user query, in order.
     expect(main.queries.slice(0, 3)).toEqual([
       "SET idle_in_transaction_session_timeout = 5000",

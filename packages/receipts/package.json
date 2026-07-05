@@ -1,5 +1,5 @@
 {
-  "name": "@stackbase/receipts",
+  "name": "@helipod/receipts",
   "version": "0.0.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -21,12 +21,12 @@
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "@stackbase/component": "workspace:*",
-    "@stackbase/docstore": "workspace:*"
+    "@helipod/component": "workspace:*",
+    "@helipod/docstore": "workspace:*"
   },
   "devDependencies": {
-    "@stackbase/docstore-postgres": "workspace:*",
-    "@stackbase/docstore-sqlite": "workspace:*",
+    "@helipod/docstore-postgres": "workspace:*",
+    "@helipod/docstore-sqlite": "workspace:*",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",

@@ -1,4 +1,4 @@
-import type { SchemaDefinitionJSON, TableDefinitionJSON, ValidatorJSON } from "@stackbase/values";
+import type { SchemaDefinitionJSON, TableDefinitionJSON, ValidatorJSON } from "@helipod/values";
 
 const JSON_TYPES = new Set(["array", "record", "object", "union", "any"]);
 

@@ -1,4 +1,4 @@
-/* Stackbase Enterprise. Licensed under the Stackbase Commercial License — see ee/LICENSE. */
+/* Helipod Enterprise. Licensed under the Helipod Commercial License — see ee/LICENSE. */
 /**
  * Offline object-storage reshard (`docs/superpowers/plans/2026-02-20-objectstore-reshard.md`).
  *
@@ -19,10 +19,10 @@
  * is OFFLINE, against a BACKED-UP bucket, don't interrupt. (The whole current state is read into memory
  * in step 2 first, so the destructive window is as short as possible and never races the read.)
  */
-import type { ObjectStore } from "@stackbase/objectstore";
-import type { SqliteDocStore } from "@stackbase/docstore-sqlite";
-import type { DocumentLogEntry, IndexWrite } from "@stackbase/docstore";
-import { shardIdList, shardIdForKeyValue, DEFAULT_SHARD, documentIdKey, type ShardId } from "@stackbase/id-codec";
+import type { ObjectStore } from "@helipod/objectstore";
+import type { SqliteDocStore } from "@helipod/docstore-sqlite";
+import type { DocumentLogEntry, IndexWrite } from "@helipod/docstore";
+import { shardIdList, shardIdForKeyValue, DEFAULT_SHARD, documentIdKey, type ShardId } from "@helipod/id-codec";
 import { ObjectStoreDocStore } from "./object-doc-store";
 import { readManifest } from "./manifest";
 import { readGlobals, writeGlobals } from "./globals";

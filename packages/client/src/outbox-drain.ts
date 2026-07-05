@@ -3,7 +3,7 @@
  * state machine that turns the durable queue (`OutboxStorage`) into exactly-once server effects.
  *
  * Shape (verdict §(d)):
- *  - **Web Locks leader** (`stackbase:outbox:<origin>:<deployment>`) — probe `navigator.locks`,
+ *  - **Web Locks leader** (`helipod:outbox:<origin>:<deployment>`) — probe `navigator.locks`,
  *    single-tab fallback when it's absent. Locks are *efficiency*, not correctness: two drainers
  *    double-sending is harmless because Plan A's exact-match receipts replay-ack the loser (verdict
  *    §(d): "locks are efficiency; correctness is the records"). Mid-drain lock loss (the tab killed,
@@ -35,8 +35,8 @@
  * every settlement routes back through `client.ts` via {@link DrainHost} so the T3 seam
  * (`settleVerdict`'s primitives — resolve/reject, dequeue, the drop rule) is reused, not forked.
  */
-import { jsonToConvex, type JSONValue, type Value } from "@stackbase/values";
-import type { MutationBatchEntry, ServerMessage } from "@stackbase/sync";
+import { jsonToConvex, type JSONValue, type Value } from "@helipod/values";
+import type { MutationBatchEntry, ServerMessage } from "@helipod/sync";
 import type { PendingMutation } from "./mutation-log";
 import type { OutboxEntry, OutboxStorage } from "./outbox-storage";
 
@@ -54,8 +54,8 @@ export type PoisonPolicy =
 /* -------------------------------------------------------------------------------------------------
  * Backoff — a LOCAL MIRROR of `computeBackoff` from `components/scheduler/src/backoff.ts`.
  *
- * The client is a browser SDK; it must NOT depend on the server-side `@stackbase/scheduler`
- * component (which pulls in `@stackbase/executor` and the whole engine). So the formula is
+ * The client is a browser SDK; it must NOT depend on the server-side `@helipod/scheduler`
+ * component (which pulls in `@helipod/executor` and the whole engine). So the formula is
  * duplicated here with attribution — keep the two in sync. `attempts` is the transient-failure
  * count AFTER this failure is recorded (call with the already-incremented count), matching the
  * scheduler's contract exactly. Jitter is 50–100% of the raw backoff; capped so a long offline
@@ -187,7 +187,7 @@ export const NON_REPLAYABLE_MUTATION_DROPPED = "NON_REPLAYABLE_MUTATION_DROPPED"
 export function dropIfNonReplayable(outbox: OutboxStorage, entry: OutboxEntry): boolean {
   if (entry.udfPath !== AUTH_REFRESH_UDF_PATH) return false;
   console.error(
-    `[stackbase] outbox: dropping a queued "${entry.udfPath}" entry at hydrate — replaying an auth ` +
+    `[helipod] outbox: dropping a queued "${entry.udfPath}" entry at hydrate — replaying an auth ` +
       "refresh is never safe (a stale rotation would trip reuse-detection and force-sign-out an " +
       "honest user); this entry predates the client's transient-mutation fix",
   );
@@ -201,7 +201,7 @@ export function dropIfNonReplayable(outbox: OutboxStorage, entry: OutboxEntry): 
 }
 
 export interface OutboxDrainOptions {
-  /** The Web Locks lock name — `stackbase:outbox:<origin>:<deployment>`. */
+  /** The Web Locks lock name — `helipod:outbox:<origin>:<deployment>`. */
   lockName: string;
   /** `undefined` → probe `navigator.locks`; `null` → force single-tab; an object → use it (tests). */
   locks?: OutboxLockManager | null;
@@ -466,7 +466,7 @@ export class OutboxDrain {
       // Identity gate (hazard 9): a mutation queued under a different auth identity must never flush.
       if (entry.identityFingerprint !== undefined && entry.identityFingerprint !== currentFingerprint) {
         console.error(
-          `[stackbase] outbox: dropping mutation "${entry.udfPath}" — it was queued under a different ` +
+          `[helipod] outbox: dropping mutation "${entry.udfPath}" — it was queued under a different ` +
             `identity than the current session (${OFFLINE_IDENTITY_CHANGED})`,
         );
         this.host.settleTerminal(
@@ -513,7 +513,7 @@ export class OutboxDrain {
       if (this.poisonPolicy === "pause") {
         this.paused = true;
         console.error(
-          `[stackbase] outbox drain PAUSED on a coded failure of "${entry.udfPath}" (${msg.code}); ` +
+          `[helipod] outbox drain PAUSED on a coded failure of "${entry.udfPath}" (${msg.code}); ` +
             `poisonPolicy="pause" — the queue is halted until resumed`,
         );
         this.onPause?.({ requestId: msg.requestId, udfPath: entry.udfPath, code: msg.code });
