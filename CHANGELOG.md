@@ -33,7 +33,7 @@ they are kept as development history.
   Postgres, Cloudflare D1/DO; MVCC transactor; reactive sync; executor;
   file storage; offline outbox).
 
-## [1.7.0] — 2026-06-06
+## [0.0.8] — 2026-06-06
 
 **Postgres read performance and a native Bun.SQL client.** The Postgres adapter's
 read path now streams, and a second driver — Bun's native `Bun.SQL` — ships as the
@@ -52,7 +52,7 @@ Validated end-to-end against real PostgreSQL 16.
 - **`BunSqlClient.close()` shutdown hang** — an in-flight `queryStream` reservation is now tracked and force-released on `close()`, so graceful shutdown can't block indefinitely on `sql.end()`.
 - **Real-Postgres conformance isolation** — the docstore conformance suite's per-test reset now truncates the Receipted-Outbox tables (`client_mutations`/`client_floors`) too. Their omission had let state accumulate across tests on a persistent server, breaking the table-wide `sweepExpiredClientMutations`/`pruneClientMutations` count assertions — surfaced the first time the suite ran against a real PostgreSQL server rather than in-process PGlite (the production reaper code was correct).
 
-## [1.6.0] — 2026-06-06
+## [0.0.7] — 2026-06-06
 
 **Cloudflare deployment tier — validated on real Cloudflare.** Helipod now runs
 natively on Cloudflare's Durable-Object platform, from a single global DO up to a
@@ -81,7 +81,7 @@ real Cloudflare**, not just the local `workerd`/miniflare emulator.
 - **`fanOut` read-only enforcement** — the guard now permits only `query` functions to fan out and fails closed when a function's type can't be classified, closing a hole where a non-sharded mutation or an action sent with `?fanout=1` would have been committed on every shard (N-way write/side-effect amplification).
 - **Shard deploy-E2E assertion** — the multi-shard rig's E2E expected the pre-M2d `CROSS_SHARD_UNSUPPORTED`; a mode-`"key"` `?fanout=1` now correctly returns `FANOUT_REQUIRES_FIXED_SHARDS` (caught by the first real-Cloudflare run of the rig).
 
-## [1.5.0] — 2026-05-15
+## [0.0.6] — 2026-05-15
 
 Authentication hardening and notification delivery. `@helipod/auth` gains TOTP
 two-factor and passkeys/WebAuthn; `@helipod/notifications` gains multi-provider
@@ -102,7 +102,7 @@ before. Each shipped through an adversarial whole-branch security review.
 - **The notification delivery webhook fails closed.** It writes only after a provider's signature verifies, 401s before any write when none do, and treats a provider `verify()` that *throws* (rather than returning false) as "did not verify" — so a misbehaving provider can't 500 the endpoint or let one fallback's throw swallow another's legitimately-signed callback.
 - **Push delivery never silently strands a device.** Because push provider groups are disjoint device sets (unlike email/SMS fallback alternates), a retryable failure in any group re-queues the whole message rather than marking it sent on a partial success; permanently-invalid tokens are pruned even on a failed attempt, and device tokens are cleared from terminal message rows.
 
-## [1.4.0] — 2025-12-25
+## [0.0.5] — 2025-12-25
 
 ### Changed
 
@@ -112,7 +112,7 @@ before. Each shipped through an adversarial whole-branch security review.
 
 - **`bun run bench:writes`** — a write/commit-throughput benchmark axis (`--axis writes`): commit latency + throughput at 1/8/64 concurrent writers, contended read-modify-write (OCC) cost, and group-commit OFF-vs-ON, over SQLite and Postgres. Surfaced that write throughput is single-writer-bound (flat across concurrency; scale by sharding, not threads) and that Postgres is fsync-bound — the ceiling the reactive-path optimizations can't move.
 
-## [1.3.0] — 2025-12-25
+## [0.0.4] — 2025-12-25
 
 **DLR Stage 3 — compute-saving reconnect resume.** Reconnect resume now saves
 server CPU, not just bandwidth: when the server can prove a subscribed query's
@@ -139,7 +139,7 @@ was fully re-run and re-hashed on reconnect (only the bandwidth half of
 
 - Single-node only: the registry is per-node in-memory, so a cross-node reconnect in a fleet finds no entry and safely re-runs. Fleet per-shard resume fragments remain a future DLR stage.
 
-## [1.2.0] — 2025-12-25
+## [0.0.3] — 2025-12-25
 
 **DLR Stage 2c — the key-range-pinned pagination differ.** The third and final
 query-shape slice of Differential Log-Tail Reactivity: a `.paginate()` query's
@@ -164,7 +164,7 @@ page now receives incremental row diffs instead of a full re-send.
 
 - Page rebalancing (`splitCursor`) for an unboundedly-growing page, and later DLR stages (Stage 3 log-tail catch-up, Stage 4 optimistic-over-diffs, Stage 5 fleet per-shard fragments).
 
-## [1.1.0] — 2025-12-25
+## [0.0.2] — 2025-12-25
 
 **DLR Stage 2b — the single-index-range `collect()` differ.** The second stage of
 Differential Log-Tail Reactivity: list subscriptions now receive incremental row
@@ -194,7 +194,7 @@ diffs instead of a full re-send on every write.
 
 - Pagination-boundary diffs (Stage 2c), log-tail catch-up (Stage 3), optimistic-over-diffs (Stage 4), and fleet per-shard fragments (Stage 5) remain future DLR stages.
 
-## [1.0.0] — 2025-12-25
+## [0.0.1] — 2025-12-25
 
 First tagged release. An open-source, self-hostable reactive Backend-as-a-Service:
 write TypeScript query/mutation/action functions, run them server-side and
@@ -257,9 +257,9 @@ Bun-primary with full Node support; deploy anywhere. Licensed FSL-1.1-Apache-2.0
 - **`@helipod/test`** — Layer-1 `createTestHelipod` over the real engine + a conformance suite.
 - **`@helipod/bench`** — reactive benchmark harness (`bun run bench:reactive`/`bench:compare`).
 
-[1.5.0]: https://example.com/releases/tag/v1.5.0
-[1.4.0]: https://example.com/releases/tag/v1.4.0
-[1.3.0]: https://example.com/releases/tag/v1.3.0
-[1.2.0]: https://example.com/releases/tag/v1.2.0
-[1.1.0]: https://example.com/releases/tag/v1.1.0
-[1.0.0]: https://example.com/releases/tag/v1.0.0
+[0.0.6]: https://example.com/releases/tag/v1.5.0
+[0.0.5]: https://example.com/releases/tag/v1.4.0
+[0.0.4]: https://example.com/releases/tag/v1.3.0
+[0.0.3]: https://example.com/releases/tag/v1.2.0
+[0.0.2]: https://example.com/releases/tag/v1.1.0
+[0.0.1]: https://example.com/releases/tag/v1.0.0

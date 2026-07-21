@@ -68,7 +68,7 @@ The gap from raw to store commit (about 3.5x) is the cost of never overwriting. 
 
 **Group commit** batches concurrent commits into shared fsyncs on Postgres, where the fsync dominates each commit's cost: **+39% throughput at 8 clients, +58% at 64**, neutral at 1 client. It's on by default on Postgres and off by default on SQLite, where there's no fsync to amortize and it's a net loss.
 
-**Streaming reads on Postgres** (added in 1.7.0): paginated and limited reads (`.paginate()`, `.take(n)`) stream from a server-side cursor that stops fetching the moment the query engine has enough, instead of materializing the whole index range. Measured at 100k rows on the paginated shape: **−92% p50 wall-clock** and roughly 1000x fewer rows fetched. On by default, with a `HELIPOD_PG_STREAM=0` kill switch.
+**Streaming reads on Postgres** (added in 0.0.8): paginated and limited reads (`.paginate()`, `.take(n)`) stream from a server-side cursor that stops fetching the moment the query engine has enough, instead of materializing the whole index range. Measured at 100k rows on the paginated shape: **−92% p50 wall-clock** and roughly 1000x fewer rows fetched. On by default, with a `HELIPOD_PG_STREAM=0` kill switch.
 
 </Tab>
 

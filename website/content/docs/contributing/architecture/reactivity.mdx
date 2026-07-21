@@ -133,7 +133,7 @@ produced no ranges can never under-report and silently miss a write.)
 
 Measured, same machine, before and after the indexed matcher:
 `fanout-selective-10000` propagation p50 went from **6.72 ms to 0.24 ms**
-(`CHANGELOG.md` 1.0.0).
+(`CHANGELOG.md` 0.0.1).
 
 ## The subscribe/notify race: one serial tail
 
@@ -214,7 +214,7 @@ flowchart TD
 Measured: `diffbytes-scan` went from **2,647 to 482 bytes/update** (an 82%
 cut), and `diffbytes-paginate` lands at **475 bytes/update**. In both cases
 the per-update cost is proportional to the change, not the collection size,
-so the saving grows with list size (`CHANGELOG.md` 1.1.0 and 1.2.0).
+so the saving grows with list size (`CHANGELOG.md` 0.0.2 and 0.0.3).
 
 ## The `Change` vocabulary and the drift checksum
 
@@ -306,7 +306,7 @@ fingerprint (`"sha256:" +` hex over the JSON-serialized value, minted in
 identically, it answers with a tiny `QueryUnchanged` marker instead of the
 value. This fires only from `ModifyQuerySet` handling (a resubscribe), never
 from a live push. Measured at the all-unchanged ceiling: roughly 99% less
-reconnect bandwidth (`CHANGELOG.md` 1.0.0). An old server that predates the
+reconnect bandwidth (`CHANGELOG.md` 0.0.1). An old server that predates the
 field simply never sees an echoed hash and sends full results.
 
 **The compute half (DLR Stage 3).** The bandwidth half still pays for the
@@ -361,7 +361,7 @@ re-upserts the registry entry, and `SetAuth` re-keys it to the new identity.
 
 Measured: 50 unchanged RERUN subscriptions re-execute **0** handlers on
 reconnect with the skip on, versus 50 with it off; a partial-change variant
-re-executes exactly 1 (`CHANGELOG.md` 1.3.0).
+re-executes exactly 1 (`CHANGELOG.md` 0.0.4).
 
 ## The wire protocol: versions, not just messages
 
