@@ -1,0 +1,56 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
+  "changelog": [
+    "@changesets/changelog-github",
+    {
+      "repo": "helipod-sh/helipod"
+    }
+  ],
+  "commit": false,
+  "fixed": [
+    [
+      "@helipod/dashboard",
+      "@helipod/fleet",
+      "@helipod/objectstore-substrate",
+      "@helipod/runtime-cloudflare-shard",
+      "@helipod/admin",
+      "@helipod/blobstore",
+      "@helipod/blobstore-fs",
+      "@helipod/blobstore-r2",
+      "@helipod/blobstore-s3",
+      "@helipod/cli",
+      "@helipod/client",
+      "@helipod/codegen",
+      "@helipod/component",
+      "@helipod/deploy",
+      "@helipod/docstore",
+      "@helipod/docstore-d1",
+      "@helipod/docstore-do-sqlite",
+      "@helipod/docstore-postgres",
+      "@helipod/docstore-sqlite",
+      "@helipod/errors",
+      "@helipod/executor",
+      "helipod",
+      "@helipod/id-codec",
+      "@helipod/index-key-codec",
+      "@helipod/objectstore",
+      "@helipod/objectstore-fs",
+      "@helipod/objectstore-s3",
+      "@helipod/query-engine",
+      "@helipod/receipts",
+      "@helipod/runtime-cloudflare",
+      "@helipod/runtime-embedded",
+      "@helipod/storage",
+      "@helipod/sync",
+      "@helipod/test",
+      "@helipod/transactor",
+      "@helipod/values",
+      "@helipod/vite"
+    ]
+  ],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": []
+}
