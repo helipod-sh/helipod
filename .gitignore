@@ -44,3 +44,4 @@ helipod-chat-working.png
 # local-only (excluded from public repo)
 /benchmarks/
 /docs_old/
+.gstack/
