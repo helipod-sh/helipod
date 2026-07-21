@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Public releases are versioned from `0.1.0` (the first npm publish). Entries below
+`0.1.0` predate publication and used an internal milestone numbering (`1.x`);
+they are kept as development history.
+
+## [0.1.1] — 2026-07-22
+
+- `@helipod/cli` exposes a `./bin` subpath export so the `helipod` umbrella
+  package can ship the CLI as its own `helipod` command.
+
+## [0.1.0] — 2026-07-21
+
+**Initial public release.** The whole platform, published to npm:
+
+- **`helipod`** — the one-package install: client SDK (`helipod`), React hooks
+  (`helipod/react`), server function authoring (`helipod/server`), schema +
+  validators (`helipod/values`), component composition (`helipod/config`), and
+  the `helipod` CLI (`dev`, `serve`, `deploy`, `build`, `migrate`).
+- **Components** (opt-in): `@helipod/auth` (OAuth, passkeys, TOTP MFA, email
+  flows), `@helipod/scheduler` (scheduled functions + crons),
+  `@helipod/workflow` (durable workflows with saga compensation),
+  `@helipod/triggers`, `@helipod/notifications`, `@helipod/authz`.
+- **Enterprise** (source-available, commercial license, free in this phase):
+  `@helipod/fleet` (multi-node scale-out), `@helipod/objectstore-substrate`,
+  `@helipod/runtime-cloudflare-shard`.
+- Engine internals published as `@helipod/*` (storage adapters for SQLite,
+  Postgres, Cloudflare D1/DO; MVCC transactor; reactive sync; executor;
+  file storage; offline outbox).
+
 ## [1.7.0] — 2026-06-06
 
 **Postgres read performance and a native Bun.SQL client.** The Postgres adapter's
