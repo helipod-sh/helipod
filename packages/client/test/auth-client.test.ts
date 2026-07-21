@@ -10,6 +10,7 @@ import {
 } from "../src/auth-client"; // own-package tests import via src, per the existing client test idiom
 import { HelipodClient } from "../src/client";
 import { memoryOutbox } from "../src/outbox-storage";
+import { sha256Hex, sessionFingerprintKey } from "../src/identity-fingerprint";
 import type { ClientMessage, ServerMessage } from "@helipod/sync";
 
 // A minimal transport for the fingerprint-switch tests below (same shape as the existing
@@ -360,8 +361,11 @@ describe("outbox identityFingerprint switch — raw setAuth vs managed sessionId
 
     client.setAuth("tok-A");
     client.setSessionFingerprint("sess-1"); // now managed — token-hash recompute suppressed
-    await waitFor(() => client.__outboxFingerprint !== "anon");
-    const managedFp = client.__outboxFingerprint;
+    // Wait for the EXACT managed fingerprint: `setAuth`'s tok-A digest and the session digest
+    // race on the crypto threadpool, and "any non-anon value" can capture the tok-A hash on a
+    // slow runner — pinning the expected value makes the capture deterministic.
+    const managedFp = await sha256Hex(sessionFingerprintKey("sess-1"));
+    await waitFor(() => client.__outboxFingerprint === managedFp);
 
     client.setAuth("tok-B"); // rotation while managed: must NOT move the fingerprint
     await new Promise((r) => setTimeout(r, 20));
