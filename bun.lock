@@ -411,7 +411,7 @@
     },
     "packages/cli": {
       "name": "@helipod/cli",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "bin": {
         "helipod": "./dist/bin.js",
       },
@@ -658,6 +658,24 @@
         "tsup": "catalog:",
         "typescript": "catalog:",
         "vitest": "catalog:",
+      },
+    },
+    "packages/helipod": {
+      "name": "helipod",
+      "version": "0.1.0",
+      "bin": {
+        "helipod": "./bin/helipod.js",
+      },
+      "dependencies": {
+        "@helipod/cli": "0.1.1",
+        "@helipod/client": "0.1.0",
+        "@helipod/component": "0.1.0",
+        "@helipod/executor": "0.1.0",
+        "@helipod/values": "0.1.0",
+      },
+      "devDependencies": {
+        "tsup": "catalog:",
+        "typescript": "catalog:",
       },
     },
     "packages/id-codec": {
@@ -1634,6 +1652,8 @@
     "hash-wasm": ["hash-wasm@4.12.0", "", {}, "sha512-+/2B2rYLb48I/evdOIhP+K/DD2ca2fgBjp6O+GBEnCDk2e4rpeXIK8GvIyRPjTezgmWn9gmKwkQjjx6BtqDHVQ=="],
 
     "hasown": ["hasown@2.0.4", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A=="],
+
+    "helipod": ["helipod@workspace:packages/helipod"],
 
     "helipod-example-chat": ["helipod-example-chat@workspace:examples/chat"],
 

@@ -1,6 +1,6 @@
 {
   "name": "@helipod/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "bin": {
@@ -21,6 +21,9 @@
     "./project": {
       "types": "./dist/project.d.ts",
       "default": "./dist/project.js"
+    },
+    "./bin": {
+      "default": "./dist/bin.js"
     }
   },
   "files": [

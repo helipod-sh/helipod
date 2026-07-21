@@ -1,0 +1,73 @@
+{
+  "name": "helipod",
+  "version": "0.1.0",
+  "description": "The reactive backend you self-host — one package: server functions, typed client, React hooks, and the helipod CLI.",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "bin": {
+    "helipod": "./bin/helipod.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./values": {
+      "types": "./dist/values.d.ts",
+      "default": "./dist/values.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./outbox-fs": {
+      "types": "./dist/outbox-fs.d.ts",
+      "default": "./dist/outbox-fs.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@helipod/cli": "0.1.1",
+    "@helipod/client": "0.1.0",
+    "@helipod/component": "0.1.0",
+    "@helipod/executor": "0.1.0",
+    "@helipod/values": "0.1.0"
+  },
+  "devDependencies": {
+    "tsup": "catalog:",
+    "typescript": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "packages/helipod"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod",
+  "keywords": [
+    "backend",
+    "baas",
+    "reactive",
+    "realtime",
+    "typescript",
+    "self-hosted"
+  ]
+}
