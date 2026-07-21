@@ -36,7 +36,7 @@ jobs:
       - name: create Version Packages PR, or publish on its merge
         uses: changesets/action@v1
         with:
-          version: bunx changeset version && bun install --no-frozen-lockfile
+          version: bun run version-packages
           publish: bun run release
           commit: "chore(release): version packages"
           title: "chore(release): version packages"

@@ -37,7 +37,8 @@
     "dev": "turbo run dev",
     "clean": "turbo run clean && rm -rf node_modules",
     "changeset": "changeset",
-    "release": "turbo run build && bun scripts/release.mjs"
+    "release": "turbo run build && bun scripts/release.mjs",
+    "version-packages": "changeset version && bun install --no-frozen-lockfile"
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-arm64",
