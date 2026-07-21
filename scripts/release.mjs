@@ -69,7 +69,18 @@ for (const [name, { dir, version }] of order) {
     continue;
   }
   console.log(`publish ${name}@${version} ...`);
-  execFileSync("bun", ["publish"], { cwd: dir, stdio: "inherit" });
+  // Pack with bun (rewrites workspace:* ranges to real versions), publish the
+  // tarball with npm (speaks OIDC trusted publishing; falls back to token auth
+  // when NPM_CONFIG_TOKEN / npm config auth is present).
+  const packOut = execFileSync("bun", ["pm", "pack"], { cwd: dir, encoding: "utf8" });
+  const tarball = packOut
+    .split("\n")
+    .map((l) => l.trim())
+    .findLast((l) => l.endsWith(".tgz"));
+  if (!tarball) throw new Error(`could not find tarball name in bun pm pack output for ${name}`);
+  const publishArgs = ["publish", tarball, "--access", "public"];
+  if (process.env.NPM_CONFIG_PROVENANCE === "true") publishArgs.push("--provenance");
+  execFileSync("npm", publishArgs, { cwd: dir, stdio: "inherit" });
   publishedCount++;
 }
 

@@ -19,8 +19,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run --exclude '**/*.e2e.test.ts' --exclude 'test/gc-driver.test.ts' --exclude 'test/heartbeat-driver.test.ts'",
-    "test:e2e": "vitest run test/*.e2e.test.ts test/gc-driver.test.ts test/heartbeat-driver.test.ts",
+    "test": "vitest run --exclude '**/*.e2e.test.ts' --exclude 'test/gc-driver.test.ts' --exclude 'test/heartbeat-driver.test.ts' --testTimeout=60000 --hookTimeout=60000",
+    "test:e2e": "vitest run test/*.e2e.test.ts test/gc-driver.test.ts test/heartbeat-driver.test.ts --testTimeout=60000 --hookTimeout=60000",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },

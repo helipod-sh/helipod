@@ -9,7 +9,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --testTimeout=60000 --hookTimeout=60000"
   },
   "dependencies": {
     "@base-ui-components/react": "^1.0.0-alpha.5",

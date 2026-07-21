@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=60000 --hookTimeout=60000",
     "test:workers": "vitest run --config vitest.workers.config.ts && vitest run --config vitest.workers.hash.config.ts",
     "typecheck": "tsc --noEmit --project tsconfig.json",
     "clean": "rm -rf dist .turbo"

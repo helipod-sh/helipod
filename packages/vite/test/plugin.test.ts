@@ -28,7 +28,9 @@ describe("helipod() plugin — config hook", () => {
 });
 
 describe("DEFAULT_FUNCTIONS_DIR guard", () => {
-  it("the module-local literal (deliberately not imported, see src/index.ts) has not drifted from @helipod/cli's own constant", async () => {
+  // 30s timeout: this dynamic import pulls the whole CLI dependency graph, which on a
+  // cold-cache CI runner legitimately exceeds vitest's 5s default.
+  it("the module-local literal (deliberately not imported, see src/index.ts) has not drifted from @helipod/cli's own constant", { timeout: 30_000 }, async () => {
     // A test file may import @helipod/cli freely — only the shipped proxy path (src/index.ts)
     // must avoid a static top-level import of it, to preserve the optional-peer-dependency
     // contract for proxy-mode-only consumers. See packages/vite/src/index.ts's DEFAULT_FUNCTIONS_DIR

@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --testTimeout=60000 --hookTimeout=60000",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },

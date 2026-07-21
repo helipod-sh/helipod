@@ -20,6 +20,10 @@ describe("@helipod/triggers — circuit breaker", () => {
       // call per message), so the breaker's "N deliveries in the window" count is exercised
       // directly rather than needing to reason about batch grouping.
       { messages: { handler: "notifications:_onMessage", batchSize: 1, maxDeliveriesPerWindow: 1000 } },
+      // Frozen clock: every delivery lands at the same instant, so "all 1001 within the 10s
+      // window" holds by construction — on a slow machine a wall clock would let early
+      // deliveries age out of the sliding window and the breaker would never trip.
+      { now: () => 1_000_000 },
     );
 
     // 1001 separate commits, all well within the breaker's 10s window (no virtual clock advance —
@@ -49,6 +53,7 @@ describe("@helipod/triggers — circuit breaker", () => {
         "app:insert": mutation(async (ctx: any, a: { body: string }) => ctx.db.insert("messages", { body: a.body })), // eslint-disable-line @typescript-eslint/no-explicit-any
       },
       { messages: { handler: "notifications:_onMessage", batchSize: 1, maxDeliveriesPerWindow: 5 } },
+      { now: () => 1_000_000 }, // frozen clock — same determinism as the test above
     );
 
     for (let i = 0; i < 10; i++) await runtime.run("app:insert", { body: `m${i}` });
@@ -70,6 +75,7 @@ describe("@helipod/triggers — circuit breaker", () => {
         "app:insert": mutation(async (ctx: any, a: { body: string }) => ctx.db.insert("messages", { body: a.body })), // eslint-disable-line @typescript-eslint/no-explicit-any
       },
       { messages: { handler: "notifications:_onMessage", batchSize: 1, maxDeliveriesPerWindow: 5 } },
+      { now: () => 1_000_000 }, // frozen clock — same determinism as the test above
     );
 
     for (let i = 0; i < 3; i++) await runtime.run("app:insert", { body: `m${i}` });
