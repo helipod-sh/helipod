@@ -9,6 +9,13 @@ Public releases are versioned from `0.1.0` (the first npm publish). Entries belo
 `0.1.0` predate publication and used an internal milestone numbering (`1.x`);
 they are kept as development history.
 
+## [0.1.2] — 2026-07-22
+
+- READMEs for every published package: a full guide on the `helipod` npm page,
+  install/enable/usage guides for the components, package notices for engine
+  internals, and license framing for the enterprise packages.
+- All packages move to a single lockstep version.
+
 ## [0.1.1] — 2026-07-22
 
 - `@helipod/cli` exposes a `./bin` subpath export so the `helipod` umbrella
