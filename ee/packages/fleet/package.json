@@ -1,8 +1,8 @@
 {
   "name": "@helipod/fleet",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
-  "license": "SEE LICENSE IN ../../LICENSE",
+  "license": "SEE LICENSE IN LICENSE",
   "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -13,7 +13,10 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "LICENSE",
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run --exclude 'test/fleet-e2e.test.ts'",
@@ -45,5 +48,13 @@
     "typescript": "catalog:",
     "vitest": "catalog:",
     "ws": "^8.18.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "ee/packages/fleet"
   }
 }

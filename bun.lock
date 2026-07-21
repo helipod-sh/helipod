@@ -158,7 +158,7 @@
     },
     "ee/packages/fleet": {
       "name": "@helipod/fleet",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/docstore-postgres": "workspace:*",
@@ -187,7 +187,7 @@
     },
     "ee/packages/objectstore-substrate": {
       "name": "@helipod/objectstore-substrate",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/docstore": "workspace:*",
@@ -211,7 +211,7 @@
     },
     "ee/packages/runtime-cloudflare-shard": {
       "name": "@helipod/runtime-cloudflare-shard",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@helipod/cli": "workspace:*",
         "@helipod/id-codec": "workspace:*",
