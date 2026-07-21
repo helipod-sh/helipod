@@ -26,7 +26,7 @@ Configure via `defineAuth(options?)`; `export const auth = defineAuth()` uses th
 Session/token details, the client `createAuthClient`, and the full external-identity setup +
 security model are documented in `docs/enduser/build/auth.md`.
 
-Reference implementations consulted: convex-auth (Apache-2.0) and better-auth (MIT) — adapted with
+Reference implementations consulted: better-auth (MIT) and other open-source auth libraries — adapted with
 attribution, never copied. The arc (A1 session core, A2 email flows, A3 external identity) is
 complete, extended with TOTP two-factor authentication and passkeys/WebAuthn. Reserved follow-ons:
 a passkey **satisfying** an MFA step-up (today a passkey is strictly a first factor), WebAuthn
@@ -57,7 +57,7 @@ attestation-format / MDS verification, and SMS-based second factor.
    user's behalf (e.g. re-fetching their Google Drive files). A project needing that stores and
    refreshes those tokens itself.
 9. **Per-request-stateless-JWT is a deliberate non-goal** — `signInWithIdToken` is an *exchange*
-   (verify once, mint a real DB-backed session), not Convex's per-request-JWT-is-identity model; see
+   (verify once, mint a real DB-backed session), not a per-request-JWT-is-identity model; see
    the auth doc's "Third-party JWT / OIDC setup" section for the rationale.
 10. **Abandoned WebAuthn challenges are not reaped** — a passkey `begin*` ceremony that is never
     finished (or expires unconsumed) leaves a single-use `webauthnChallenge` row behind. This is

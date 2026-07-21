@@ -6,7 +6,7 @@ an in-memory SQLite database, so your query/mutation/action tests exercise real 
 a mocked `ctx.db`.
 
 See **[`docs/enduser/testing.md`](../../docs/enduser/testing.md)** for the full guide (the 3-layer
-testing model, usage, and the documented differences from Convex's testing tooling).
+testing model, usage, and documented behavioral notes).
 
 ## Public API
 

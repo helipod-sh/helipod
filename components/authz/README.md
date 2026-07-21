@@ -60,7 +60,7 @@ export const authz = defineAuthz({
 That's it. Now **every** query on `documents` — including ones that forgot to filter, and including `documents` hydrated through a join — returns only rows the caller owns, and any write to a `documents` row the caller doesn't own throws `Forbidden`. And it's reactive: if you later change `ownerId`, every subscriber's view updates live.
 
 ```ts
-// convex/documents.ts — no manual authz call needed; the policy is enforced by the engine
+// helipod/documents.ts — no manual authz call needed; the policy is enforced by the engine
 export const list = query(async (ctx) => ctx.db.query("documents").collect()); // already filtered
 ```
 
@@ -413,7 +413,7 @@ This is the deliberate, correct trade for a reactive backend — and it is state
 
 ## Comparison (at a glance)
 
-| | Helipod authz | OpenFGA / SpiceDB (ReBAC) | Supabase RLS | Plain function checks |
+| | Helipod authz | OpenFGA / SpiceDB (ReBAC) | SQL row-level security | Plain function checks |
 |---|---|---|---|---|
 | Reactive (live revocation) | ✅ by construction | ❌ out-of-process check | ❌ DB can't notify | ⚠️ only if you read authz data |
 | Check cost | O(1) indexed read | graph traversal | row predicate | varies |
