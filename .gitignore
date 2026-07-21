@@ -40,3 +40,7 @@ helipod-chat-working.png
 
 # SDD scratch (progress ledger, briefs, reports)
 .superpowers/
+
+# local-only (excluded from public repo)
+/benchmarks/
+/docs_old/

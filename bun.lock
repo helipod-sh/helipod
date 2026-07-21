@@ -38,45 +38,6 @@
         "vitest": "catalog:",
       },
     },
-    "benchmarks/convex-comparison": {
-      "name": "@helipod/bench-convex-comparison",
-      "version": "0.0.0",
-      "dependencies": {
-        "@helipod/cli": "workspace:*",
-        "@helipod/client": "workspace:*",
-        "@helipod/docstore-sqlite": "workspace:*",
-        "@helipod/executor": "workspace:*",
-        "@helipod/runtime-embedded": "workspace:*",
-        "@helipod/values": "workspace:*",
-      },
-    },
-    "benchmarks/runner": {
-      "name": "@helipod/bench",
-      "version": "0.0.0",
-      "dependencies": {
-        "@aws-sdk/client-s3": "catalog:",
-        "@helipod/cli": "workspace:*",
-        "@helipod/client": "workspace:*",
-        "@helipod/docstore": "workspace:*",
-        "@helipod/docstore-postgres": "workspace:*",
-        "@helipod/docstore-sqlite": "workspace:*",
-        "@helipod/executor": "workspace:*",
-        "@helipod/id-codec": "workspace:*",
-        "@helipod/objectstore": "workspace:*",
-        "@helipod/objectstore-s3": "workspace:*",
-        "@helipod/runtime-embedded": "workspace:*",
-        "@helipod/sync": "workspace:*",
-        "@helipod/values": "workspace:*",
-        "ws": "^8.18.0",
-      },
-      "devDependencies": {
-        "@helipod/codegen": "workspace:*",
-        "@types/node": "catalog:",
-        "@types/ws": "^8.5.13",
-        "typescript": "catalog:",
-        "vitest": "catalog:",
-      },
-    },
     "components/auth": {
       "name": "@helipod/auth",
       "version": "0.0.0",
@@ -1185,10 +1146,6 @@
     "@helipod/auth": ["@helipod/auth@workspace:components/auth"],
 
     "@helipod/authz": ["@helipod/authz@workspace:components/authz"],
-
-    "@helipod/bench": ["@helipod/bench@workspace:benchmarks/runner"],
-
-    "@helipod/bench-convex-comparison": ["@helipod/bench-convex-comparison@workspace:benchmarks/convex-comparison"],
 
     "@helipod/blobstore": ["@helipod/blobstore@workspace:packages/blobstore"],
 

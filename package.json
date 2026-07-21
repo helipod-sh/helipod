@@ -16,9 +16,7 @@
       "components/*",
       "examples/*",
       "apps/*",
-      "ee/packages/*",
-      "benchmarks/convex-comparison",
-      "benchmarks/runner"
+      "ee/packages/*"
     ],
     "catalog": {
       "typescript": "^5.7.2",
@@ -37,19 +35,7 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "dev": "turbo run dev",
-    "clean": "turbo run clean && rm -rf node_modules",
-    "bench:reactive": "bun benchmarks/runner/src/cli.ts run --axis reactive",
-    "bench:writes": "bun benchmarks/runner/src/cli.ts run --axis writes",
-    "bench:sharded": "bun benchmarks/runner/src/cli.ts run --axis sharded --store pg",
-    "bench:connections": "bun benchmarks/runner/src/cli.ts run --axis connections --store sqlite",
-    "bench:fleetconn": "bun benchmarks/runner/src/cli.ts run --axis fleet-connections --store sqlite",
-    "bench:dockerfleet": "bun benchmarks/runner/src/cli.ts run --axis docker-fleet --store sqlite",
-    "bench:compare": "bun benchmarks/runner/src/cli.ts compare",
-    "bench:objectstore": "bun benchmarks/runner/src/objectstore-bench.ts",
-    "bench:pgbench": "bun benchmarks/runner/src/pgbench-baseline.ts",
-    "bench:wswrite": "bun benchmarks/runner/src/ws-write-bench.ts",
-    "bench:broadcast": "bun benchmarks/runner/src/broadcast-dedup-bench.ts",
-    "bench:pgstream": "bun packages/docstore-postgres/bench/index-scan-stream-bench.ts"
+    "clean": "turbo run clean && rm -rf node_modules"
   },
   "trustedDependencies": [
     "@embedded-postgres/darwin-arm64",
