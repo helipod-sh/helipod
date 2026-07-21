@@ -1,9 +1,45 @@
 {
-  "name": "@helipod/triggers", "version": "0.0.0", "private": true,
-  "license": "FSL-1.1-Apache-2.0", "type": "module",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "main": "./dist/index.js", "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsup", "typecheck": "tsc --noEmit", "test": "vitest run" },
-  "dependencies": { "@helipod/component": "workspace:*", "@helipod/executor": "workspace:*", "@helipod/scheduler": "workspace:*", "@helipod/values": "workspace:*" },
-  "devDependencies": { "@helipod/docstore-sqlite": "workspace:*", "@helipod/runtime-embedded": "workspace:*", "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+  "name": "@helipod/triggers",
+  "version": "0.1.0",
+  "license": "FSL-1.1-Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@helipod/component": "workspace:*",
+    "@helipod/executor": "workspace:*",
+    "@helipod/scheduler": "workspace:*",
+    "@helipod/values": "workspace:*"
+  },
+  "devDependencies": {
+    "@helipod/docstore-sqlite": "workspace:*",
+    "@helipod/runtime-embedded": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "components/triggers"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }

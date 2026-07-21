@@ -1,9 +1,13 @@
 {
   "name": "@helipod/vite",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
@@ -13,7 +17,10 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
-  "peerDependencies": { "vite": ">=5.0.0", "@helipod/cli": "workspace:*" },
+  "peerDependencies": {
+    "vite": ">=5.0.0",
+    "@helipod/cli": "workspace:*"
+  },
   "peerDependenciesMeta": {
     "@helipod/cli": {
       "optional": true
@@ -32,5 +39,18 @@
     "vite": "^6.0.7",
     "vitest": "catalog:",
     "ws": "^8.18.0"
-  }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "packages/vite"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }

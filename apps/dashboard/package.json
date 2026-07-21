@@ -1,9 +1,10 @@
 {
   "name": "@helipod/dashboard",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "exports": { "./dist": "./dist/index.html" },
+  "exports": {
+    "./dist": "./dist/index.html"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -32,5 +33,18 @@
     "typescript": "catalog:",
     "vite": "^6.0.7",
     "vitest": "catalog:"
-  }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "apps/dashboard"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }

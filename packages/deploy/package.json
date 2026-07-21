@@ -1,9 +1,13 @@
 {
   "name": "@helipod/deploy",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
@@ -21,5 +25,18 @@
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "packages/deploy"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }

@@ -1,13 +1,21 @@
 {
   "name": "@helipod/auth",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "license": "FSL-1.1-Apache-2.0",
   "type": "module",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": { "build": "tsup", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
   "dependencies": {
     "@helipod/component": "workspace:*",
     "@helipod/errors": "workspace:*",
@@ -23,6 +31,21 @@
     "@helipod/runtime-embedded": "workspace:*",
     "@helipod/test": "workspace:*",
     "@levischuck/tiny-cbor": "0.2.11",
-    "@types/node": "catalog:", "tsup": "catalog:", "typescript": "catalog:", "vitest": "catalog:"
-  }
+    "@types/node": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "components/auth"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }

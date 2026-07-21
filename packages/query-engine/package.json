@@ -1,6 +1,6 @@
 {
   "name": "@helipod/query-engine",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "sideEffects": false,
@@ -13,7 +13,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -31,5 +33,14 @@
     "tsup": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "packages/query-engine"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
 }
