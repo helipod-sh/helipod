@@ -63,6 +63,7 @@ while (order.length < pkgs.size) {
 }
 
 let publishedCount = 0;
+const failures = [];
 for (const [name, { dir, version }] of order) {
   if (await published(name, version)) {
     console.log(`skip ${name}@${version} (already on registry)`);
@@ -72,19 +73,31 @@ for (const [name, { dir, version }] of order) {
   // Pack with bun (rewrites workspace:* ranges to real versions), publish the
   // tarball with npm (speaks OIDC trusted publishing; falls back to token auth
   // when NPM_CONFIG_TOKEN / npm config auth is present).
-  const packOut = execFileSync("bun", ["pm", "pack"], { cwd: dir, encoding: "utf8" });
-  const tarball = packOut
-    .split("\n")
-    .map((l) => l.trim())
-    .findLast((l) => l.endsWith(".tgz"));
-  if (!tarball) throw new Error(`could not find tarball name in bun pm pack output for ${name}`);
-  const publishArgs = ["publish", tarball, "--access", "public"];
-  if (process.env.NPM_CONFIG_PROVENANCE === "true") publishArgs.push("--provenance");
-  execFileSync("npm", publishArgs, { cwd: dir, stdio: "inherit" });
-  publishedCount++;
+  try {
+    const packOut = execFileSync("bun", ["pm", "pack"], { cwd: dir, encoding: "utf8" });
+    const tarball = packOut
+      .split("\n")
+      .map((l) => l.trim())
+      .findLast((l) => l.endsWith(".tgz"));
+    if (!tarball) throw new Error(`could not find tarball name in bun pm pack output`);
+    const publishArgs = ["publish", tarball, "--access", "public"];
+    if (process.env.NPM_CONFIG_PROVENANCE === "true") publishArgs.push("--provenance");
+    execFileSync("npm", publishArgs, { cwd: dir, stdio: "inherit" });
+    publishedCount++;
+  } catch (err) {
+    // Keep going: a per-package auth failure (e.g. missing trusted-publisher
+    // config) must not strand the packages after it in topo order. The script
+    // is re-runnable — fix the config and run again to finish the release.
+    failures.push(name);
+    console.error(`PUBLISH FAILED ${name}@${version}: ${err.message ?? err}`);
+  }
 }
 
 console.log(`published ${publishedCount} package(s)`);
+if (failures.length > 0) {
+  console.error(`FAILED (${failures.length}): ${failures.join(", ")}`);
+}
 if (publishedCount > 0) {
   execFileSync("bunx", ["changeset", "tag"], { stdio: "inherit" });
 }
+if (failures.length > 0) process.exit(1);
