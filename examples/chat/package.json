@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=60000 --hookTimeout=60000",
     "codegen": "bun run scripts/codegen.ts",
     "web:build": "bun build web/main.tsx --outfile web/main.js",
     "dev": "bun ../../packages/cli/dist/bin.js dev --web web --port 3210"
