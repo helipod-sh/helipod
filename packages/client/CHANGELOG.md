@@ -1,0 +1,11 @@
+# @helipod/client
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/id-codec@0.1.3
+  - @helipod/index-key-codec@0.1.3
+  - @helipod/sync@0.1.3
+  - @helipod/values@0.1.3

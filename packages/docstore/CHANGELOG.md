@@ -1,0 +1,9 @@
+# @helipod/docstore
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/id-codec@0.1.3
+  - @helipod/values@0.1.3
