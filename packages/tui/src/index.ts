@@ -17,11 +17,13 @@ export interface DashboardHandle {
 }
 
 export async function runDashboard(bridge: TuiBridge): Promise<DashboardHandle> {
-  const [{ createCliRenderer }, { createRoot }, { mount }] = await Promise.all([
-    import("@opentui/core"),
-    import("@opentui/react"),
-    import("./app"),
-  ]);
+  // SEQUENTIAL, not Promise.all: @opentui/react's module graph reaches back into
+  // @opentui/core, and initializing both concurrently loses the race —
+  // "Cannot access 'TextNodeRenderable' before initialization". Core must be fully
+  // evaluated before the React binding (and our components) are loaded.
+  const { createCliRenderer } = await import("@opentui/core");
+  const { createRoot } = await import("@opentui/react");
+  const { mount } = await import("./app");
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false });
   const root = createRoot(renderer);
