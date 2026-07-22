@@ -119,12 +119,13 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
   );
 
   const d = bridge.deployment;
-  const cardWidth = Math.max(26, Math.floor((width - 6) / 3) - 1);
+  // Cards flex-share the row (see the `grow` prop added to the vendored Card).
+  const cardInner = Math.max(20, Math.floor((width - 8) / 3));
 
   return (
     <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
       <box flexDirection="row" flexShrink={0}>
-        <Card title="deployment" width={cardWidth} borderColor={theme.colors.primary}>
+        <Card title="deployment" grow borderColor={theme.colors.primary}>
           <text>
             <span fg={theme.colors.mutedForeground}>{"api        "}</span>
             <span fg={theme.colors.info}>{d.url}</span>
@@ -144,7 +145,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
           </text>
         </Card>
 
-        <Card title="project" width={cardWidth}>
+        <Card title="project" grow>
           <text>
             <span fg={theme.colors.mutedForeground}>{"functions  "}</span>
             <span fg={theme.colors.foreground}>{String(counts.functions).padEnd(6)}</span>
@@ -171,7 +172,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
           ) : null}
         </Card>
 
-        <Card title="engine" width={cardWidth} borderColor={metrics.errors ? theme.colors.error : undefined}>
+        <Card title="engine" grow borderColor={metrics.errors ? theme.colors.error : undefined}>
           <text>
             <span fg={theme.colors.mutedForeground}>{"runs       "}</span>
             <span fg={theme.colors.foreground}>{String(metrics.total).padEnd(6)}</span>
@@ -194,7 +195,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
               // The chart palette is a named set, not free-form hex; "pink" is the
               // closest to the helipod crimson.
               color="pink"
-              width={Math.max(8, cardWidth - 6)}
+              width={Math.max(8, cardInner - 4)}
               height={2}
             />
           ) : (

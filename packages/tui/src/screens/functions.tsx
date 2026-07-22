@@ -11,6 +11,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { Card } from "@/components/ui/card";
 import { useTheme } from "@/components/ui/theme-provider";
 import { coerce, objectFields, type ValidatorJSON } from "@/lib/validator";
 import type { TuiBridge } from "../bridge";
@@ -136,46 +137,39 @@ export function FunctionsScreen({ bridge, active }: { bridge: TuiBridge; active:
 
       {/* runner */}
       <box flexDirection="column" flexGrow={1}>
-        <text fg={pane === "form" ? theme.colors.primary : theme.colors.mutedForeground}>
-          {fn ? `run  ${fn.path}` : "run"}
-        </text>
-        {args.length === 0 ? (
-          <text fg={theme.colors.border}>{"(no arguments)"}</text>
-        ) : (
-          args.map((a, i) => (
-            <box key={a.name} flexDirection="column">
-              <text>
-                <span fg={theme.colors.mutedForeground}>{`${a.name}${a.optional ? "?" : ""}  `}</span>
-                <span fg={theme.colors.border}>{a.type}</span>
-              </text>
-              <text>
-                <span fg={pane === "form" && i === field ? theme.colors.primary : theme.colors.border}>
-                  {pane === "form" && i === field ? " ▸ " : "   "}
-                </span>
-                <span fg={theme.colors.foreground}>
-                  {`${values[a.name] ?? ""}${pane === "form" && i === field ? "█" : ""}`}
-                </span>
-              </text>
-            </box>
-          ))
-        )}
-        <text fg={theme.colors.border}>
-          {pane === "form" ? "  ⏎ run · ↑↓ field · esc back" : "  tab or ⏎ to fill arguments"}
-        </text>
-        {running ? <text fg={theme.colors.warning}>{"  running…"}</text> : null}
-        {result ? (
-          <box flexDirection="column">
+        <Card title={fn ? `run  ${fn.path}` : "run"} grow
+              borderColor={pane === "form" ? theme.colors.primary : undefined}>
+          {args.length === 0 ? (
+            <text fg={theme.colors.border}>{"(no arguments)"}</text>
+          ) : (
+            args.map((a, i) => {
+              const focused = pane === "form" && i === field;
+              return (
+                <text key={a.name}>
+                  <span fg={focused ? theme.colors.primary : theme.colors.border}>{focused ? "▸ " : "  "}</span>
+                  <span fg={theme.colors.mutedForeground}>{`${a.name}${a.optional ? "?" : ""}`.padEnd(16)}</span>
+                  <span fg={theme.colors.border}>{a.type.padEnd(24).slice(0, 24)}</span>
+                  <span fg={theme.colors.foreground}>{`${values[a.name] ?? ""}${focused ? "█" : ""}`}</span>
+                </text>
+              );
+            })
+          )}
+          <text fg={theme.colors.border}>
+            {pane === "form" ? "  ⏎ run · ↑↓ field · esc back" : "  tab or ⏎ to fill arguments"}
+          </text>
+          {running ? <text fg={theme.colors.warning}>{"  running…"}</text> : null}
+          {result ? (
             <text>
               <span fg={result.ok ? theme.colors.success : theme.colors.error}>
-                {result.ok ? "  ✓ ok" : "  ✗ failed"}
+                {result.ok ? "  ✓ " : "  ✗ "}
               </span>
-              <span fg={theme.colors.border}>{`  ${result.ms}ms${result.committed ? " · committed" : ""}`}</span>
+              <span fg={theme.colors.border}>{`${result.ms}ms${result.committed ? " · committed  " : "  "}`}</span>
+              <span fg={result.ok ? theme.colors.foreground : theme.colors.error}>
+                {String((result.ok ? JSON.stringify(result.value) : result.error) ?? "").slice(0, 60)}
+              </span>
             </text>
-            <text fg={result.ok ? theme.colors.foreground : theme.colors.error}>
-              {`  ${(result.ok ? JSON.stringify(result.value) : result.error) ?? "undefined"}`.slice(0, 200)}
-            </text>
-          </box>
-        ) : null}
+          ) : null}
+        </Card>
       </box>
     </box>
   );
