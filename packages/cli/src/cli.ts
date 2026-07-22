@@ -34,6 +34,7 @@ function parseFlags(args: string[]): DevOptions {
     else if (a === "--database-url" && args[i + 1]) out.databaseUrl = args[++i];
     else if (a === "--storage-bucket" && args[i + 1]) out.storageBucket = args[++i];
     else if (a === "--storage-endpoint" && args[i + 1]) out.storageEndpoint = args[++i];
+    else if (a === "--no-ui") out.noUi = true;
   }
   return out;
 }
@@ -101,6 +102,34 @@ export async function devCommand(args: string[]): Promise<number> {
     if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
   }
 
+  // The interactive terminal dashboard (@helipod/tui, OpenTUI): Bun + TTY only, dynamic
+  // import so @helipod/cli carries no static dependency on it (the @helipod/fleet seam
+  // pattern). Any failure — package absent, Node without FFI — falls back silently to
+  // the styled plain output above.
+  type TuiEmit = (e: import("./tui-bridge").AnyTuiEvent) => void;
+  let tuiEmit: TuiEmit | null = null;
+  const wantTui =
+    ui.styled && !flags.noUi && process.env.HELIPOD_TUI !== "0" && typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+  if (wantTui) {
+    try {
+      const { attachTui } = await import("./tui-bridge");
+      tuiEmit = await attachTui({
+        url: server.url,
+        dashboardUrl: dashboard ? `${server.url}/_dashboard` : null,
+        adminKeyPreview: `${adminKey.slice(0, 7)}…${adminKey.slice(-4)}`,
+        functionsDir: opts.functionsDir,
+        storage: opts.databaseUrl ? "postgres" : "sqlite",
+        counts: () => ({
+          functions: Object.keys(project.moduleMap).length,
+          tables: Object.keys(project.tableNumbers).length,
+          components: config.components.length,
+        }),
+      });
+    } catch {
+      tuiEmit = null; // plain styled output remains active
+    }
+  }
+
   const watcher = createWatchLoop({
     subscribe: (onChange) => {
       const w = fsWatch(resolve(opts.functionsDir), { recursive: true }, (_e, file) => {
@@ -110,6 +139,7 @@ export async function devCommand(args: string[]): Promise<number> {
     },
     onTrigger: async (reason) => {
       if (reason === "initial") return; // already pushed above
+      const reloadStart = Date.now();
       try {
         const next = push(await loadFunctionsDir(opts.functionsDir), config.components);
         writeGenerated(next.generated.files, generatedDir);
@@ -121,18 +151,26 @@ export async function devCommand(args: string[]): Promise<number> {
         // Mirrors the live-deploy path (deploy-apply.ts).
         adminApi.setSchema(next.project.schemaJson, next.project.tableNumbers, next.project.manifest);
         const fnTotal = Object.keys(next.project.moduleMap).length;
-        process.stdout.write(
-          ui.styled
-            ? `  ${ui.sym.reload} ${ui.green("reloaded")} ${ui.dim(`(${fnTotal} functions)`)}\n`
-            : `↻ pushed (${fnTotal} functions)\n`,
-        );
+        if (tuiEmit) {
+          tuiEmit({ kind: "reload", ok: true, durationMs: Date.now() - reloadStart, functions: fnTotal, at: Date.now() });
+        } else {
+          process.stdout.write(
+            ui.styled
+              ? `  ${ui.sym.reload} ${ui.green("reloaded")} ${ui.dim(`(${fnTotal} functions)`)}\n`
+              : `↻ pushed (${fnTotal} functions)\n`,
+          );
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        process.stderr.write(
-          ui.styled
-            ? ui.errorBlock("reload failed", msg, "serving the last good version — fix the file to reload") + "\n"
-            : `✗ reload failed: ${msg}\n`,
-        );
+        if (tuiEmit) {
+          tuiEmit({ kind: "reload", ok: false, message: msg, at: Date.now() });
+        } else {
+          process.stderr.write(
+            ui.styled
+              ? ui.errorBlock("reload failed", msg, "serving the last good version — fix the file to reload") + "\n"
+              : `✗ reload failed: ${msg}\n`,
+          );
+        }
       }
     },
   });
