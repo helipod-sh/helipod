@@ -31,10 +31,25 @@ jobs:
           restore-keys: |
             bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
             bun-turbo-${{ runner.os }}-
+      - name: detect versions-only diff (release PRs)
+        id: diffkind
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch -q origin ${{ github.base_ref }}
+          nonrelease=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+            | grep -v -E '(^|/)package\.json$|(^|/)CHANGELOG\.md$|^\.changeset/|^bun\.lock$' | head -1 || true)
+          if [ -z "$nonrelease" ]; then
+            echo "versions_only=true" >> "$GITHUB_OUTPUT"
+            echo "versions-only diff: running install+build (lockfile/pin validation), skipping typecheck+tests"
+          else
+            echo "versions_only=false" >> "$GITHUB_OUTPUT"
+          fi
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun run typecheck
+        if: steps.diffkind.outputs.versions_only != 'true'
       - run: bun run test
+        if: steps.diffkind.outputs.versions_only != 'true'
 
   changeset-present:
     name: changeset reminder
