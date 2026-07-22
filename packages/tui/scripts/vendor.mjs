@@ -1,5 +1,10 @@
 #!/usr/bin/env bun
 /**
+ * WARNING: this OVERWRITES the files it vendors, including local patches. Some
+ * components carry helipod fixes (see the "helipod patch" comments — Card's
+ * unapplied `width`, Sidebar's global key handler). After re-running this,
+ * `git diff` and restore those hunks.
+ *
  * Vendors termcn (https://termcn.dev) OpenTUI components into src/ — the shadcn
  * "own your code" model, resolved from the registry non-interactively so the
  * vendored set is reproducible. Re-run to refresh; review the diff like any code.
@@ -16,6 +21,7 @@ const WANT = [
   "opentui/app-shell", "opentui/dither-sparkline", "opentui/dither-bar-chart",
   "opentui/table", "opentui/card", "opentui/panel",
   "opentui/tabs", "opentui/progress-bar", "opentui/definition", "opentui/tree",
+  "opentui/sidebar", "opentui/command-palette", "opentui/pagination", "opentui/breadcrumb",
 ];
 
 const seen = new Set();

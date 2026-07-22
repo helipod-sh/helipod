@@ -15,6 +15,7 @@ import { useTheme } from "@/components/ui/theme-provider";
 import { Activity, type ActivityRow } from "@/components/activity";
 import type { TuiBridge, TuiEvent, TuiLogEntry } from "../bridge";
 
+const SIDEBAR_ALLOWANCE = 20; // sidebar (16) + content padding
 const RING_MAX = 500;
 const CHROME_ROWS = 18;
 const BUCKETS = 24;
@@ -120,73 +121,84 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
 
   const d = bridge.deployment;
   // Cards flex-share the row (see the `grow` prop added to the vendored Card).
-  const cardInner = Math.max(20, Math.floor((width - 8) / 3));
+  // Values are truncated to the card's inner width: OpenTUI wraps long text, and
+  // a wrapped URL pushed every row below it out of alignment.
+  // Explicit widths: flexGrow did not resolve through the sidebar/content nesting,
+  // leaving the cards short of the right edge. The terminal width is known, so
+  // computing the split is both simpler and exact (last card absorbs the remainder).
+  const usable = width - SIDEBAR_ALLOWANCE;
+  const cardW = Math.max(18, Math.floor(usable / 3));
+  const lastW = Math.max(18, usable - cardW * 2);
+  const cardInner = cardW - 4;
+  const val = (s: string) => (s.length > cardInner - 12 ? `${s.slice(0, cardInner - 13)}…` : s);
 
   return (
     <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
-      <box flexDirection="row" flexShrink={0}>
-        <Card title="deployment" grow borderColor={theme.colors.primary}>
+      {/* `width="100%"` — a row inside a column sizes to its content in this
+          layout engine, which left the cards short of the right edge. */}
+      <box flexDirection="row" flexShrink={0} width="100%">
+        <Card title="deployment" width={cardW} borderColor={theme.colors.primary}>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"api        "}</span>
-            <span fg={theme.colors.info}>{d.url}</span>
+            <span fg={theme.colors.mutedForeground}>{"api   "}</span>
+            <span fg={theme.colors.info}>{val(d.url)}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"web        "}</span>
+            <span fg={theme.colors.mutedForeground}>{"web   "}</span>
             <span fg={theme.colors.info}>{d.dashboardUrl ? "/_dashboard" : "—"}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"key        "}</span>
+            <span fg={theme.colors.mutedForeground}>{"key   "}</span>
             <span fg={theme.colors.foreground}>{d.adminKeyPreview}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"storage    "}</span>
+            <span fg={theme.colors.mutedForeground}>{"store "}</span>
             <span fg={theme.colors.foreground}>{d.storage}</span>
             <span fg={theme.colors.border}>{`   v${d.version}`}</span>
           </text>
         </Card>
 
-        <Card title="project" grow>
+        <Card title="project" width={cardW}>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"functions  "}</span>
+            <span fg={theme.colors.mutedForeground}>{"fns   "}</span>
             <span fg={theme.colors.foreground}>{String(counts.functions).padEnd(6)}</span>
-            <span fg={theme.colors.mutedForeground}>{"tables  "}</span>
+            <span fg={theme.colors.mutedForeground}>{"tbl "}</span>
             <span fg={theme.colors.foreground}>{String(counts.tables)}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"components "}</span>
+            <span fg={theme.colors.mutedForeground}>{"comps "}</span>
             <span fg={theme.colors.foreground}>{String(counts.components).padEnd(6)}</span>
-            <span fg={theme.colors.mutedForeground}>{"runtime "}</span>
+            <span fg={theme.colors.mutedForeground}>{"rt "}</span>
             <span fg={theme.colors.foreground}>{"bun"}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"watching   "}</span>
-            <span fg={theme.colors.foreground}>{d.functionsDir}</span>
+            <span fg={theme.colors.mutedForeground}>{"watch "}</span>
+            <span fg={theme.colors.foreground}>{val(d.functionsDir)}</span>
           </text>
           {metrics.byKind.length ? (
             <text>
-              <span fg={theme.colors.mutedForeground}>{"calls      "}</span>
+              <span fg={theme.colors.mutedForeground}>{"calls "}</span>
               <span fg={theme.colors.foreground}>
-                {metrics.byKind.map(([k, n]) => `${k.slice(0, 8)} ${n}`).join("  ")}
+                {val(metrics.byKind.map(([k, n]) => `${k.slice(0, 8)} ${n}`).join("  "))}
               </span>
             </text>
           ) : null}
         </Card>
 
-        <Card title="engine" grow borderColor={metrics.errors ? theme.colors.error : undefined}>
+        <Card title="engine" width={lastW} borderColor={metrics.errors ? theme.colors.error : undefined}>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"runs       "}</span>
+            <span fg={theme.colors.mutedForeground}>{"runs  "}</span>
             <span fg={theme.colors.foreground}>{String(metrics.total).padEnd(6)}</span>
-            <span fg={theme.colors.mutedForeground}>{"errors  "}</span>
+            <span fg={theme.colors.mutedForeground}>{"err "}</span>
             <span fg={metrics.errors ? theme.colors.error : theme.colors.foreground}>{String(metrics.errors)}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"p50        "}</span>
+            <span fg={theme.colors.mutedForeground}>{"p50   "}</span>
             <span fg={theme.colors.foreground}>{`${metrics.p50}ms`.padEnd(6)}</span>
-            <span fg={theme.colors.mutedForeground}>{"p95     "}</span>
+            <span fg={theme.colors.mutedForeground}>{"p95 "}</span>
             <span fg={theme.colors.foreground}>{`${metrics.p95}ms`}</span>
           </text>
           <text>
-            <span fg={theme.colors.mutedForeground}>{"last 2m    "}</span>
+            <span fg={theme.colors.mutedForeground}>{"2m    "}</span>
             <span fg={theme.colors.foreground}>{`${metrics.recent} calls`}</span>
           </text>
           {metrics.recent > 0 ? (
@@ -195,7 +207,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
               // The chart palette is a named set, not free-form hex; "pink" is the
               // closest to the helipod crimson.
               color="pink"
-              width={Math.max(8, cardInner - 4)}
+              width={Math.max(8, lastW - 6)}
               height={2}
             />
           ) : (

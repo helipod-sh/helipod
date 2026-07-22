@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { DataTable } from "@/components/data-table";
+import { Pagination } from "@/components/ui/pagination";
 import { useTheme } from "@/components/ui/theme-provider";
 import type { TuiBridge, TuiPage, TuiTable } from "../bridge";
 
@@ -46,6 +47,9 @@ export function DataScreen({
   const [inspecting, setInspecting] = useState(false);
   const [filtering, setFiltering] = useState(false);
   const [filter, setFilter] = useState("");
+  // Cursor stack: index N holds the cursor that opened page N+1, so `[` can walk back.
+  const [cursors, setCursors] = useState<Array<string | null>>([]);
+  const [pageNo, setPageNo] = useState(1);
 
   const data = bridge.data;
 
@@ -83,7 +87,7 @@ export function DataScreen({
   }, [active, data]);
 
   const load = useCallback(
-    (name: string, expr = "") => {
+    (name: string, expr = "", cursor: string | null = null) => {
       if (!data) return;
       setPage(null);
       setRow(0);
@@ -93,7 +97,7 @@ export function DataScreen({
       const eq = expr.match(/^\s*([A-Za-z_][\w.]*)\s*=\s*(.+?)\s*$/);
       const filterArg = eq ? [{ field: eq[1]!, op: "eq", value: eq[2]! }] : undefined;
       data
-        .getTableData(name, { pageSize: PAGE_SIZE, filter: filterArg })
+        .getTableData(name, { pageSize: PAGE_SIZE, filter: filterArg, cursor })
         .then(setPage)
         .catch((e) => setError(String(e?.message ?? e)));
     },
@@ -108,6 +112,8 @@ export function DataScreen({
   }, [jumpTo, ordered.all]);
 
   useEffect(() => {
+    setCursors([]);
+    setPageNo(1);
     if (active && table) load(table.name, filter);
     // `filter` is applied explicitly on submit, not on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -143,6 +149,17 @@ export function DataScreen({
     }
 
     if (key.name === "f" || key.name === "/") return setFiltering(true);
+    if (key.sequence === "]" && page?.cursor && table) {
+      setCursors((c) => [...c, page.cursor]);
+      setPageNo((n) => n + 1);
+      return void load(table.name, filter, page.cursor);
+    }
+    if (key.sequence === "[" && pageNo > 1 && table) {
+      const prev = cursors.slice(0, -1);
+      setCursors(prev);
+      setPageNo((n) => n - 1);
+      return void load(table.name, filter, prev[prev.length - 1] ?? null);
+    }
     if (key.name === "return" || key.name === "i") return setInspecting(docsRef.length > 0);
     if (key.name === "J") return setRow((r) => Math.min(docsRef.length - 1, r + 1));
     if (key.name === "K") return setRow((r) => Math.max(0, r - 1));
@@ -222,6 +239,12 @@ export function DataScreen({
               selected={row}
               maxRows={Math.max(1, rowsVisible - 4)}
             />
+            {page.cursor || pageNo > 1 ? (
+              <box flexDirection="row">
+                <Pagination total={page.cursor ? pageNo + 1 : pageNo} current={pageNo} siblings={1} />
+                <text fg={theme.colors.border}>{"   [ prev · ] next"}</text>
+              </box>
+            ) : null}
             {page.scanCapped ? (
               <text fg={theme.colors.warning}>{"⚠ scan capped — narrow the filter to see the tail"}</text>
             ) : null}

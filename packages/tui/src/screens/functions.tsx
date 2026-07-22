@@ -28,7 +28,7 @@ interface RunResult {
 
 export function FunctionsScreen({ bridge, active }: { bridge: TuiBridge; active: boolean }) {
   const theme = useTheme();
-  const { height } = useTerminalDimensions();
+  const { height, width } = useTerminalDimensions();
   const fns = useMemo(() => bridge.data?.listFunctions() ?? [], [bridge]);
 
   const [selected, setSelected] = useState(0);
@@ -137,8 +137,11 @@ export function FunctionsScreen({ bridge, active }: { bridge: TuiBridge; active:
 
       {/* runner */}
       <box flexDirection="column" flexGrow={1}>
-        <Card title={fn ? `run  ${fn.path}` : "run"} grow
-              borderColor={pane === "form" ? theme.colors.primary : undefined}>
+        <Card
+            title={fn ? `run  ${fn.path}` : "run"}
+            width={Math.max(30, width - listWidth - 22)}
+            borderColor={pane === "form" ? theme.colors.primary : undefined}
+          >
           {args.length === 0 ? (
             <text fg={theme.colors.border}>{"(no arguments)"}</text>
           ) : (
