@@ -145,7 +145,7 @@ Misconfiguration fails fast with a specific message in every case: a missing Pos
 missing advertise URL, `@helipod/fleet` not installed, or `--fleet` combined with
 `--object-store` each name exactly what to fix and exit 1 before anything binds. No `--fleet` at
 all is unchanged single-node behavior. The exact messages, and every fleet flag and environment
-variable, are in [the CLI reference](/docs/reference/cli#helipod-serve).
+variable, are in [the CLI reference](/docs/core-concepts/cli#helipod-serve).
 
 `serve`'s machine-readable startup line gains two additive fields in fleet mode:
 `{"fleet":true,"role":"writer"}` (or `"sync"`), printed once at boot. Watch logs or the dashboard,
@@ -576,7 +576,7 @@ HELIPOD_ADMIN_KEY=secret helipod serve --dir helipod \
   often than necessary. Unset, both are a no-op: drivers use their own default 30s/60s cadence.
 
 The full `--object-store` URL grammar (schemes, credential resolution, worked examples) lives in
-[the CLI reference](/docs/reference/cli#helipod-serve).
+[the CLI reference](/docs/core-concepts/cli#helipod-serve).
 
 ### What's actually shipped
 

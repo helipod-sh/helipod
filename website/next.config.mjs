@@ -19,6 +19,12 @@ const config = {
         destination: '/docs/get-started/what-is-helipod',
         permanent: false,
       },
+      // The CLI page moved from Reference into the Build group.
+      {
+        source: '/docs/reference/cli',
+        destination: '/docs/core-concepts/cli',
+        permanent: true,
+      },
     ];
   },
 };

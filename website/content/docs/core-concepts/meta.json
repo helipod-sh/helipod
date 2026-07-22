@@ -1,1 +1,1 @@
-{ "title": "Core Concepts", "icon": "Braces", "pages": ["schema-and-tables", "queries", "mutations", "actions", "reactivity", "http-and-webhooks", "file-storage"] }
+{"title": "Core Concepts", "icon": "Braces", "pages": ["schema-and-tables", "queries", "mutations", "actions", "reactivity", "http-and-webhooks", "file-storage", "cli"]}

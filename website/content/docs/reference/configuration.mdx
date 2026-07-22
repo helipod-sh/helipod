@@ -265,7 +265,7 @@ export function defineConfig(config: HelipodConfig): HelipodConfig; // identity,
 
 `functionsDir` overrides where your schema and functions live, relative to the project root
 (default `"helipod"`). An explicit `--dir` flag on any command wins over this value, which in turn
-wins over the default. See [CLI](/docs/reference/cli) for the full `--dir` precedence.
+wins over the default. See [CLI](/docs/core-concepts/cli) for the full `--dir` precedence.
 
 Each `components` entry is a component's own `define*()` call: `defineScheduler()`,
 `defineWorkflow()`, `defineAuth()`, `defineAuthz()`, `defineTriggers()`, `defineNotifications()`.
@@ -318,7 +318,7 @@ export default defineConfig({
 });
 ```
 
-See [`helipod deploy`](/docs/reference/cli#helipod-deploy) for the flags this block feeds and
+See [`helipod deploy`](/docs/core-concepts/cli#helipod-deploy) for the flags this block feeds and
 [Deploy & build](/docs/deploy/deploy-and-build) for each target's own settings.
 
 See each component's own page under [Components](/docs/components/overview) for its `define*()`
@@ -618,7 +618,7 @@ or a plain `.env` loaded before `helipod serve` starts. See [Auth](/docs/compone
   validators and the schema builder serve, in prose.
 - [Queries](/docs/core-concepts/queries): how an index declared here actually shapes a read set.
 - [Components overview](/docs/components/overview): every component's own `define*()` reference.
-- [CLI](/docs/reference/cli): every command and flag that reads `helipod.config.ts` and the
+- [CLI](/docs/core-concepts/cli): every command and flag that reads `helipod.config.ts` and the
   environment variables above.
 - [Scaling](/docs/deploy/scaling) and [Cloudflare](/docs/deploy/cloudflare): the fleet,
   object-storage, and DO-native deployment stories the multi-node variables belong to.
