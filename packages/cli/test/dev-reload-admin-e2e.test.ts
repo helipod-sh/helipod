@@ -68,6 +68,7 @@ beforeAll(async () => {
   child.stderr!.on("data", (d) => (out += String(d)));
 
   const m = await waitForOutput(/helipod dev → (http:\/\/[^\s]+)/);
+  if (!m[1]) throw new Error(`could not parse dev server url from: ${m[0]}`);
   baseUrl = m[1];
 }, 60_000);
 
