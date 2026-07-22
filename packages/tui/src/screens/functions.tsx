@@ -110,7 +110,7 @@ export function FunctionsScreen({ bridge, active }: { bridge: TuiBridge; active:
   let lastModule = "";
 
   return (
-    <box flexDirection="row" flexGrow={1}>
+    <box flexDirection="row" flexGrow={1} paddingLeft={1} paddingRight={1}>
       {/* list */}
       <box flexDirection="column" width={listWidth} flexShrink={0}>
         <text fg={pane === "list" ? theme.colors.primary : theme.colors.mutedForeground}>

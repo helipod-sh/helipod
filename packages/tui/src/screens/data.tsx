@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { Table } from "@/components/ui/table";
 import { useTheme } from "@/components/ui/theme-provider";
 import type { TuiBridge, TuiPage, TuiTable } from "../bridge";
 
@@ -86,7 +87,7 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
   const colWidth = Math.max(10, Math.floor((width - listWidth - 6) / Math.max(1, columns.length)) - 2);
 
   return (
-    <box flexDirection="row" flexGrow={1}>
+    <box flexDirection="row" flexGrow={1} paddingLeft={1} paddingRight={1}>
       {/* table list */}
       <box flexDirection="column" width={listWidth} flexShrink={0}>
         <text fg={theme.colors.mutedForeground}>{`tables  ${tables.length}`}</text>
@@ -116,12 +117,16 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
           <text fg={theme.colors.border}>{"(empty table)"}</text>
         ) : (
           <box flexDirection="column">
-            <text fg={theme.colors.border}>{columns.map((c) => cell(c, colWidth)).join(" ")}</text>
-            {docs.slice(0, rowsVisible - 1).map((d, i) => (
-              <text key={String(d._id ?? i)} fg={theme.colors.foreground}>
-                {columns.map((c) => cell(d[c], colWidth)).join(" ")}
-              </text>
-            ))}
+            <Table
+              data={docs.map((doc) => {
+                const row: Record<string, unknown> = {};
+                for (const c of columns) row[c] = cell(doc[c], colWidth);
+                return row;
+              })}
+              columns={columns.map((c) => ({ key: c, header: c, width: colWidth }))}
+              maxRows={Math.max(1, rowsVisible - 3)}
+              borderColor={theme.colors.border}
+            />
             {page.scanCapped ? (
               <text fg={theme.colors.warning}>{"⚠ scan capped — narrow the query to see the tail"}</text>
             ) : null}

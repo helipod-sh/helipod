@@ -80,7 +80,7 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
       </box>
       {/* content — the only growing row */}
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
-        {screen === "overview" && <OverviewScreen bridge={bridge} />}
+        {screen === "overview" && <OverviewScreen bridge={bridge} active={screen === "overview"} />}
         {screen === "data" && <DataScreen bridge={bridge} active={screen === "data"} />}
         {screen === "functions" && <FunctionsScreen bridge={bridge} active={screen === "functions"} />}
         {screen === "logs" && <LogsScreen bridge={bridge} active={screen === "logs"} />}

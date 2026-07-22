@@ -61,7 +61,7 @@ export function LogsScreen({ bridge, active }: { bridge: TuiBridge; active: bool
   const msgWidth = Math.max(12, width - 59);
 
   return (
-    <box flexDirection="column" flexGrow={1}>
+    <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
       <text>
         <span fg={theme.colors.mutedForeground}>{`logs  ${entries.length}`}</span>
         <span fg={errorsOnly ? theme.colors.error : theme.colors.border}>

@@ -34,7 +34,7 @@ export function SchemaScreen({ bridge }: { bridge: TuiBridge }) {
 
   let budget = Math.max(1, height - 6);
   return (
-    <box flexDirection="column" flexGrow={1}>
+    <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
       <text fg={theme.colors.mutedForeground}>{`schema  ${tables.length} tables`}</text>
       {tables.map(([name, def]) => {
         if (budget <= 0) return null;

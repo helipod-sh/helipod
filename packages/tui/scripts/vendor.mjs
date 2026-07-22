@@ -13,7 +13,9 @@ const WANT = [
   "opentui/types", "opentui/theme-provider", "opentui/theme-default",
   "opentui/box", "opentui/badge", "opentui/spinner",
   "opentui/key-value", "opentui/info-box", "opentui/log",
-  "opentui/app-shell", "opentui/dither-sparkline",
+  "opentui/app-shell", "opentui/dither-sparkline", "opentui/dither-bar-chart",
+  "opentui/table", "opentui/card", "opentui/panel",
+  "opentui/tabs", "opentui/progress-bar", "opentui/definition", "opentui/tree",
 ];
 
 const seen = new Set();
