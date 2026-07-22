@@ -20,11 +20,9 @@ import { DataScreen } from "./screens/data";
 import { FunctionsScreen } from "./screens/functions";
 import { LogsScreen } from "./screens/logs";
 import { SchemaScreen } from "./screens/schema";
-import { Sidebar, type SidebarItem } from "@/components/ui/sidebar";
 import { CommandPalette, type Command } from "@/components/ui/command-palette";
 import type { TuiBridge } from "./bridge";
 
-const SIDEBAR_W = 16;
 const SCREENS = ["overview", "data", "functions", "logs", "schema"] as const;
 type Screen = (typeof SCREENS)[number];
 
@@ -40,30 +38,46 @@ const HINTS: Array<[key: string, label: string]> = [
 ];
 
 /**
- * The status bar drops labels (keeping the keys) when the terminal is too narrow
- * to hold them — the full row is ~95 cells, and it used to wrap onto a second
- * line on an 100-column terminal, pushing itself off the bottom.
+ * The status bar: one button per destination. Each is a clickable target
+ * (OpenTUI delivers real terminal mouse events) as well as a keyboard shortcut,
+ * and the active screen is drawn filled. Labels drop on narrow terminals — the
+ * full row is ~95 cells and used to wrap itself off the bottom line.
  */
-function StatusBar({ screen, width }: { screen: Screen; width: number }) {
+function StatusBar({
+  screen,
+  width,
+  onPick,
+}: {
+  screen: Screen;
+  width: number;
+  onPick: (h: string) => void;
+}) {
   const theme = useTheme();
-  const full = HINTS.reduce((n, [k, l]) => n + k.length + l.length + 4, 2);
+  const full = HINTS.reduce((n, [k, l]) => n + k.length + l.length + 5, 2);
   const labelled = full <= width;
   return (
-    <box flexDirection="row" paddingLeft={1} paddingRight={1} flexShrink={0}>
-      <text>
-        {HINTS.map(([key, label], i) => {
-          const isActive = label === screen;
-          return (
-            <span key={key}>
-              {i > 0 ? <span fg={theme.colors.border}>{labelled ? "   " : " "}</span> : null}
-              <span fg={isActive ? theme.colors.foreground : theme.colors.primary}>{key}</span>
+    <box flexDirection="row" paddingLeft={1} flexShrink={0}>
+      {HINTS.map(([key, label]) => {
+        const isActive = label === screen;
+        return (
+          <box
+            key={key}
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={isActive ? theme.colors.primary : undefined}
+            onMouseDown={() => onPick(label)}
+          >
+            <text>
+              <span fg={isActive ? theme.colors.primaryForeground : theme.colors.primary}>{key}</span>
               {labelled ? (
-                <span fg={isActive ? theme.colors.foreground : theme.colors.mutedForeground}>{` ${label}`}</span>
+                <span fg={isActive ? theme.colors.primaryForeground : theme.colors.mutedForeground}>
+                  {` ${label}`}
+                </span>
               ) : null}
-            </span>
-          );
-        })}
-      </text>
+            </text>
+          </box>
+        );
+      })}
     </box>
   );
 }
@@ -129,8 +143,6 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
     else if (key.name === "5") setScreen("schema");
   });
 
-  const navItems: SidebarItem[] = SCREENS.map((s, i) => ({ key: s, label: s, icon: String(i + 1) }));
-
   return (
     <box flexDirection="column" height={height} backgroundColor={theme.colors.background}>
       {/* header */}
@@ -140,10 +152,8 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
           <span fg={theme.colors.mutedForeground}>{`  dev  ·  ${bridge.deployment.url}`}</span>
         </text>
       </box>
-      {/* nav sidebar + content */}
-      <box flexDirection="row" flexGrow={1} width="100%">
-        <Sidebar items={navItems} activeKey={screen} width={SIDEBAR_W} onSelect={(k) => setScreen(k as Screen)} />
-        <box flexDirection="column" flexGrow={1} flexBasis={0} paddingLeft={1} paddingRight={1}>
+      {/* content — the only growing row */}
+      <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
         {screen === "overview" && <OverviewScreen bridge={bridge} active={screen === "overview"} />}
         {screen === "data" && (
           <DataScreen bridge={bridge} active={screen === "data" && !palette} jumpTo={jumpTable} />
@@ -151,7 +161,6 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
         {screen === "functions" && <FunctionsScreen bridge={bridge} active={screen === "functions" && !palette} />}
         {screen === "logs" && <LogsScreen bridge={bridge} active={screen === "logs" && !palette} />}
         {screen === "schema" && <SchemaScreen bridge={bridge} />}
-        </box>
       </box>
       {palette ? (
         <box paddingLeft={1} paddingRight={1} flexShrink={0}>
@@ -159,7 +168,16 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
         </box>
       ) : null}
       {/* status bar, pinned to the bottom */}
-      <StatusBar screen={screen} width={width} />
+      <StatusBar
+        screen={screen}
+        width={width}
+        onPick={(label) => {
+          if (label === "quit") return bridge.requestQuit();
+          if (label === "palette") return setPalette(true);
+          if (label === "browser") return bridge.openUrl?.(bridge.deployment.dashboardUrl ?? bridge.deployment.url);
+          if ((SCREENS as readonly string[]).includes(label)) setScreen(label as Screen);
+        }}
+      />
     </box>
   );
 }
