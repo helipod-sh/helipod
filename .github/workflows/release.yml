@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
+    paths:
+      - ".changeset/**"
+      - "**/package.json"
+      - "**/CHANGELOG.md"
+      - "scripts/release.mjs"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
 
 # Never cancel a release mid-flight: tags and npm publishes must complete as a
 # unit, and the publish script is re-runnable if a run dies. Queue instead.
@@ -32,6 +39,15 @@ jobs:
           node-version: 24
       # OIDC trusted publishing requires npm >= 11.5
       - run: npm install -g npm@latest
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            .turbo
+          key: bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ github.sha }}
+          restore-keys: |
+            bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
+            bun-turbo-${{ runner.os }}-
       - run: bun install --frozen-lockfile
       - name: create Version Packages PR, or publish on its merge
         uses: changesets/action@v1

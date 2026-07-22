@@ -3,6 +3,11 @@ name: E2E
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "website/**"
+      - ".agents/**"
+      - ".changeset/**"
   workflow_dispatch:
 
 concurrency:
@@ -27,8 +32,10 @@ jobs:
           path: |
             ~/.bun/install/cache
             .turbo
-          key: bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-turbo-${{ runner.os }}-
+          key: bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ github.sha }}
+          restore-keys: |
+            bun-turbo-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
+            bun-turbo-${{ runner.os }}-
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun run test:e2e
