@@ -89,6 +89,24 @@ Before designing engine changes, read the architecture docs at
   `functionsDir` in `helipod.config.ts` > default). `helipod migrate` converts
   apps from other BaaS platforms; nothing is adopted silently.
 
+## How changes ship — non-negotiable workflow
+
+`main` is protected. **Never commit or push to `main` directly** — every fix,
+feature, and doc change goes through a pull request, even trivial ones.
+
+1. Branch: `git checkout -b <type>/<slug>` (`feat/`, `fix/`, `docs/`, `test/`,
+   `refactor/`, `ci/`, `chore/`).
+2. If the change affects a published package's behavior, add a changeset
+   (`bunx changeset`) — patch/minor/major plus a changelog paragraph. Skip for
+   docs/test/CI-only changes.
+3. PR title must be a conventional commit — it becomes the squash commit on
+   `main`. A bot rejects non-conforming titles.
+4. CI (build + typecheck + fast tests) gates the merge. Use
+   `gh pr merge <n> --squash --auto` to land when green.
+5. Releases happen ONLY by merging the bot's "Version Packages" PR — never run
+   a manual npm publish. Publishing is tokenless (OIDC trusted publishing)
+   from the release workflow.
+
 ## Working conventions
 
 - **Two test lanes — keep them honest.** `bun run test` is the fast parallel
