@@ -1,5 +1,15 @@
 # helipod-example-chat
 
+## 0.0.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/component@0.1.4
+  - @helipod/executor@0.1.4
+  - @helipod/values@0.1.4
+  - @helipod/triggers@0.1.4
+
 ## 0.0.1
 
 ### Patch Changes

@@ -1,5 +1,23 @@
 # @helipod/test
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/blobstore-fs@0.1.4
+  - @helipod/client@0.1.4
+  - @helipod/component@0.1.4
+  - @helipod/docstore@0.1.4
+  - @helipod/docstore-sqlite@0.1.4
+  - @helipod/executor@0.1.4
+  - @helipod/id-codec@0.1.4
+  - @helipod/runtime-embedded@0.1.4
+  - @helipod/storage@0.1.4
+  - @helipod/sync@0.1.4
+  - @helipod/values@0.1.4
+  - @helipod/scheduler@0.1.4
+
 ## 0.1.3
 
 ### Patch Changes

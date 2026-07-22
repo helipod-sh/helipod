@@ -1,5 +1,15 @@
 # @helipod/triggers
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/component@0.1.4
+  - @helipod/executor@0.1.4
+  - @helipod/values@0.1.4
+  - @helipod/scheduler@0.1.4
+
 ## 0.1.3
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "helipod",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "The reactive backend you self-host — one package: server functions, typed client, React hooks, and the helipod CLI.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
@@ -43,11 +43,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@helipod/cli": "0.1.3",
-    "@helipod/client": "0.1.3",
-    "@helipod/component": "0.1.3",
-    "@helipod/executor": "0.1.3",
-    "@helipod/values": "0.1.3"
+    "@helipod/cli": "0.1.4",
+    "@helipod/client": "0.1.4",
+    "@helipod/component": "0.1.4",
+    "@helipod/executor": "0.1.4",
+    "@helipod/values": "0.1.4"
   },
   "devDependencies": {
     "tsup": "catalog:",
