@@ -27,6 +27,34 @@ export type TuiEvent =
   | { kind: "reload"; ok: false; message: string; at: number }
   | { kind: "log"; level: "info" | "warn" | "error"; source: string; message: string; at: number };
 
+/** A table as the data browser sees it. */
+export interface TuiTable {
+  name: string;
+  documentCount: number;
+  indexes: string[];
+  shardKey?: string;
+}
+
+export interface TuiPage {
+  documents: Array<Record<string, unknown>>;
+  cursor: string | null;
+  isDone: boolean;
+  scanCapped?: boolean;
+}
+
+export interface TuiFunction {
+  path: string;
+  kind: string;
+}
+
+/** Optional data surface — present when the host has an admin API (i.e. `helipod dev`). */
+export interface TuiData {
+  listTables: () => Promise<TuiTable[]>;
+  getTableData: (table: string, opts?: { cursor?: string | null; pageSize?: number }) => Promise<TuiPage>;
+  listFunctions: () => TuiFunction[];
+  schema: () => { tables: Record<string, { fields?: unknown; indexes?: Array<{ indexDescriptor: string }> }> };
+}
+
 export interface TuiBridge {
   deployment: TuiDeployment;
   counts: () => TuiCounts;
@@ -36,4 +64,6 @@ export interface TuiBridge {
   requestQuit: () => void;
   /** Open a URL in the local browser, if the host knows how. */
   openUrl?: (url: string) => void;
+  /** Admin data access; absent hosts render the data screens as unavailable. */
+  data?: TuiData;
 }

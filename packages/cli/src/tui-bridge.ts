@@ -22,6 +22,13 @@ export interface AttachOptions {
   /** helipod's own version — never the host app's `npm_package_version`. */
   version: string;
   counts: () => { functions: number; tables: number; components: number };
+  /** The live admin API — the same surface the web dashboard consumes. */
+  admin: {
+    listTables: () => Promise<Array<{ name: string; documentCount: number; indexes: string[]; shardKey?: string }>>;
+    getTableData: (t: string, o?: { cursor?: string | null; pageSize?: number }) => Promise<unknown>;
+    listFunctions: () => Array<{ path: string; kind: string }>;
+    getSchema: () => { schemaJson: unknown };
+  };
 }
 
 export async function attachTui(opts: AttachOptions): Promise<(e: AnyTuiEvent) => void> {
@@ -52,6 +59,12 @@ export async function attachTui(opts: AttachOptions): Promise<(e: AnyTuiEvent) =
       version: opts.version,
     },
     counts: opts.counts,
+    data: {
+      listTables: () => opts.admin.listTables(),
+      getTableData: (t, o) => opts.admin.getTableData(t, o) as Promise<never>,
+      listFunctions: () => opts.admin.listFunctions(),
+      schema: () => opts.admin.getSchema().schemaJson as never,
+    },
     onEvent: (cb) => {
       listeners.add(cb);
       return () => listeners.delete(cb);

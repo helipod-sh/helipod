@@ -16,14 +16,18 @@ import { useKeyboard, useTerminalDimensions, type createRoot } from "@opentui/re
 import { ThemeProvider, useTheme } from "@/components/ui/theme-provider";
 import { helipodTheme } from "@/lib/terminal-themes/helipod";
 import { OverviewScreen } from "./screens/overview";
+import { DataScreen } from "./screens/data";
+import { FunctionsScreen } from "./screens/functions";
 import type { TuiBridge } from "./bridge";
 
-const SCREENS = ["overview"] as const;
+const SCREENS = ["overview", "data", "functions"] as const;
 type Screen = (typeof SCREENS)[number];
 
 const HINTS: Array<[key: string, label: string]> = [
   ["1", "overview"],
-  ["o", "open dashboard"],
+  ["2", "data"],
+  ["3", "functions"],
+  ["o", "browser"],
   ["q", "quit"],
 ];
 
@@ -55,6 +59,8 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
     if (key.name === "q" || (key.ctrl && key.name === "c")) bridge.requestQuit();
     else if (key.name === "o") bridge.openUrl?.(bridge.deployment.dashboardUrl ?? bridge.deployment.url);
     else if (key.name === "1") setScreen("overview");
+    else if (key.name === "2") setScreen("data");
+    else if (key.name === "3") setScreen("functions");
   });
 
   return (
@@ -69,6 +75,8 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
       {/* content — the only growing row */}
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
         {screen === "overview" && <OverviewScreen bridge={bridge} />}
+        {screen === "data" && <DataScreen bridge={bridge} active={screen === "data"} />}
+        {screen === "functions" && <FunctionsScreen bridge={bridge} />}
       </box>
       {/* status bar, pinned to the bottom */}
       <StatusBar screen={screen} />

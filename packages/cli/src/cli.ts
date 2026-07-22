@@ -110,7 +110,8 @@ export async function devCommand(args: string[]): Promise<number> {
   type TuiEmit = (e: import("./tui-bridge").AnyTuiEvent) => void;
   let tuiEmit: TuiEmit | null = null;
   const wantTui =
-    ui.styled && !flags.noUi && process.env.HELIPOD_TUI !== "0" && typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+    process.env.HELIPOD_TUI === "1" ||
+    (ui.styled && !flags.noUi && process.env.HELIPOD_TUI !== "0" && typeof (globalThis as { Bun?: unknown }).Bun !== "undefined");
   if (wantTui) {
     try {
       const { attachTui } = await import("./tui-bridge");
@@ -121,14 +122,25 @@ export async function devCommand(args: string[]): Promise<number> {
         functionsDir: relative(process.cwd(), opts.functionsDir) || opts.functionsDir,
         storage: opts.databaseUrl ? "postgres" : "sqlite",
         version: CLI_VERSION,
+        admin: {
+          listTables: () => adminApi.listTables(),
+          getTableData: (t, o) => adminApi.getTableData(t, o),
+          listFunctions: () => adminApi.listFunctions(),
+          getSchema: () => adminApi.getSchema(),
+        },
         counts: () => ({
           functions: Object.keys(project.moduleMap).length,
           tables: Object.keys(project.tableNumbers).length,
           components: config.components.length,
         }),
       });
-    } catch {
-      tuiEmit = null; // plain styled output remains active
+    } catch (e) {
+      // Never fatal: the styled plain output above stays active. Set
+      // HELIPOD_TUI_DEBUG=1 to see why the dashboard did not attach.
+      tuiEmit = null;
+      if (process.env.HELIPOD_TUI_DEBUG) {
+        process.stderr.write(`  ${ui.dim("tui unavailable:")} ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
+      }
     }
   }
 
