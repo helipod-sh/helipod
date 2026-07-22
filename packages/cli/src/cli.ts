@@ -141,6 +141,7 @@ export async function devCommand(args: string[]): Promise<number> {
             }),
           runFunction: (p, a) => adminApi.runFunction(p, a as never),
           queryLogs: (f) => adminApi.queryLogs(f),
+          stats: () => adminApi.stats(),
           // The engine's reactive fan-out — every committed write announces the
           // tables it touched, which is exactly what the dashboard needs to stay
           // live without polling.

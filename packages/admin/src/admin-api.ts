@@ -52,6 +52,7 @@ export interface TableDataPage {
 }
 
 export class AdminApi {
+  private readonly startedAt = Date.now();
   constructor(private readonly deps: AdminDeps) {}
 
   private tableId(table: string): string {
@@ -102,6 +103,13 @@ export class AdminApi {
     return this.deps.manifest.flatMap((m) =>
       m.functions.map((f) => ({ path: `${m.path}:${f.name}`, kind: f.type })),
     );
+  }
+
+  /** Live deployment stats: open sync connections, active subscriptions, uptime. */
+  stats(): { connections: number; subscriptions: number; uptimeMs: number } {
+    const live = (this.deps.runtime as { handler?: { liveStats?: () => { connections: number; subscriptions: number } } })
+      .handler?.liveStats?.() ?? { connections: 0, subscriptions: 0 };
+    return { ...live, uptimeMs: Date.now() - this.startedAt };
   }
 
   queryLogs(filter?: LogFilter): ExecutionLogEntry[] {

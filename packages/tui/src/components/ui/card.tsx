@@ -11,6 +11,8 @@ export interface CardProps {
   footer?: ReactNode;
   borderColor?: string;
   width?: number;
+  /** helipod addition: lets a card claim remaining vertical space. */
+  height?: number;
   borderStyle?: BorderStyle;
   paddingX?: number;
   paddingY?: number;
@@ -24,6 +26,7 @@ export const Card = ({
   footer,
   borderColor,
   width,
+  height,
   borderStyle = "rounded",
   paddingX = 1,
   paddingY = 0,
@@ -36,6 +39,7 @@ export const Card = ({
     <box
       flexDirection="column"
       width={width}
+      height={height}
       borderColor={resolvedBorderColor}
       paddingLeft={paddingX}
       paddingRight={paddingX}

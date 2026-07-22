@@ -404,6 +404,11 @@ export class SyncProtocolHandler {
 
   /** @internal test/debug only — the live SubscriptionManager (M2c), for tests to assert
    *  registration wiring (e.g. `globalTables`) without duplicating its internals. */
+  /** Connection/subscription counts for the admin surface and dashboards. */
+  liveStats(): { connections: number; subscriptions: number } {
+    return { connections: this.sessions.size, subscriptions: this.subscriptions.size };
+  }
+
   get __subscriptions(): SubscriptionManager {
     return this.subscriptions;
   }
