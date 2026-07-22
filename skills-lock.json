@@ -30,6 +30,12 @@
       "skillPath": "plugins/droid-evolved/skills/human-writing/SKILL.md",
       "computedHash": "a5c8f7e609a3cd321437e0f745778b23cacd2a0dfb48aa46ab07cdde22ad146e"
     },
+    "opentui": {
+      "source": "anomalyco/opentui",
+      "sourceType": "github",
+      "skillPath": "packages/web/src/content/SKILL.md",
+      "computedHash": "0eb401cbe2107653670fb7e534703370e7a0cdff3996bb26c25466c94c2f904b"
+    },
     "workers-best-practices": {
       "source": "cloudflare/skills",
       "sourceType": "github",

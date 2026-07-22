@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { writeGenerated } from "@helipod/codegen";
 import { generateAdminKey } from "@helipod/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
+import * as ui from "./ui";
 import { loadFunctionsDir } from "./load-modules";
 import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import { loadConfig } from "./load-config";
@@ -76,10 +77,29 @@ export async function devCommand(args: string[]): Promise<number> {
     runtime,
     { port: opts.port, ip: opts.ip, webDir: opts.webDir, admin: { api: adminApi, key: adminKey }, dashboard, routes: project.routes, storageRoutes },
   );
-  process.stdout.write(`helipod dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
-  if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @helipod/dashboard build\`)\n`);
-  process.stdout.write(`admin key → ${adminKey}\n`);
-  if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
+  if (ui.styled) {
+    const fnCount = Object.keys(project.moduleMap).length;
+    const tableCount = Object.keys(project.tableNumbers).length;
+    const componentCount = config.components.length;
+    const rows: Array<[string, string]> = [
+      ["API", ui.cyan(server.url)],
+      ["Dashboard", ui.cyan(`${server.url}/_dashboard`)],
+      ["Admin key", `${adminKey.slice(0, 7)}…${adminKey.slice(-4)} ${ui.dim("(full key: HELIPOD_ADMIN_KEY or plain output)")}`],
+    ];
+    if (opts.webDir) rows.push(["Web UI", ui.cyan(`${server.url}/`)]);
+    process.stdout.write(`\n${ui.banner("dev")}\n\n${ui.keyValues(rows)}\n\n`);
+    process.stdout.write(
+      ui.status("ok", `${fnCount} functions · ${tableCount} tables · ${componentCount} components`) + "\n",
+    );
+    if (!dashboard) process.stdout.write(ui.status("warn", "dashboard SPA not built", "bun run --filter @helipod/dashboard build") + "\n");
+    process.stdout.write(`  ${ui.dim(`watching ${opts.functionsDir} for changes…`)}\n\n`);
+  } else {
+    // Plain mode is a byte-stable contract: scripts and our own e2e tests scrape these lines.
+    process.stdout.write(`helipod dev → ${server.url}  (dashboard: ${server.url}/_dashboard)\n`);
+    if (!dashboard) process.stdout.write(`  (dashboard SPA not built — run \`bun run --filter @helipod/dashboard build\`)\n`);
+    process.stdout.write(`admin key → ${adminKey}\n`);
+    if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
+  }
 
   const watcher = createWatchLoop({
     subscribe: (onChange) => {
@@ -100,9 +120,19 @@ export async function devCommand(args: string[]): Promise<number> {
         // `/_admin/functions` and the dashboard keep serving the boot-time manifest/schema.
         // Mirrors the live-deploy path (deploy-apply.ts).
         adminApi.setSchema(next.project.schemaJson, next.project.tableNumbers, next.project.manifest);
-        process.stdout.write(`↻ pushed (${Object.keys(next.project.moduleMap).length} functions)\n`);
+        const fnTotal = Object.keys(next.project.moduleMap).length;
+        process.stdout.write(
+          ui.styled
+            ? `  ${ui.sym.reload} ${ui.green("reloaded")} ${ui.dim(`(${fnTotal} functions)`)}\n`
+            : `↻ pushed (${fnTotal} functions)\n`,
+        );
       } catch (e) {
-        process.stderr.write(`✗ reload failed: ${e instanceof Error ? e.message : String(e)}\n`);
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(
+          ui.styled
+            ? ui.errorBlock("reload failed", msg, "serving the last good version — fix the file to reload") + "\n"
+            : `✗ reload failed: ${msg}\n`,
+        );
       }
     },
   });
