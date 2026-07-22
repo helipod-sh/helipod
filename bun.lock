@@ -15,7 +15,7 @@
     },
     "apps/dashboard": {
       "name": "@helipod/dashboard",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@base-ui-components/react": "^1.0.0-alpha.5",
         "@tanstack/react-query": "^5.62.7",
@@ -42,7 +42,7 @@
     },
     "components/auth": {
       "name": "@helipod/auth",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/errors": "workspace:*",
@@ -66,7 +66,7 @@
     },
     "components/authz": {
       "name": "@helipod/authz",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/auth": "workspace:*",
         "@helipod/component": "workspace:*",
@@ -85,7 +85,7 @@
     },
     "components/notifications": {
       "name": "@helipod/notifications",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -103,7 +103,7 @@
     },
     "components/scheduler": {
       "name": "@helipod/scheduler",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/errors": "workspace:*",
@@ -123,7 +123,7 @@
     },
     "components/triggers": {
       "name": "@helipod/triggers",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -141,7 +141,7 @@
     },
     "components/workflow": {
       "name": "@helipod/workflow",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -160,7 +160,7 @@
     },
     "ee/packages/fleet": {
       "name": "@helipod/fleet",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/docstore-postgres": "workspace:*",
@@ -189,7 +189,7 @@
     },
     "ee/packages/objectstore-substrate": {
       "name": "@helipod/objectstore-substrate",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/docstore": "workspace:*",
@@ -213,7 +213,7 @@
     },
     "ee/packages/runtime-cloudflare-shard": {
       "name": "@helipod/runtime-cloudflare-shard",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/cli": "workspace:*",
         "@helipod/id-codec": "workspace:*",
@@ -234,7 +234,7 @@
     },
     "examples/auth-demo": {
       "name": "@helipod/example-auth-demo",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@helipod/auth": "workspace:*",
         "@helipod/component": "workspace:*",
@@ -261,7 +261,7 @@
     },
     "examples/chat": {
       "name": "helipod-example-chat",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -286,7 +286,7 @@
     },
     "examples/offline-demo": {
       "name": "helipod-example-offline-demo",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@helipod/errors": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -312,7 +312,7 @@
     },
     "examples/optimistic-demo": {
       "name": "helipod-example-optimistic-demo",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@helipod/errors": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -339,7 +339,7 @@
     },
     "packages/admin": {
       "name": "@helipod/admin",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/errors": "workspace:*",
@@ -361,7 +361,7 @@
     },
     "packages/blobstore": {
       "name": "@helipod/blobstore",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "devDependencies": {
         "@types/node": "catalog:",
         "tsup": "catalog:",
@@ -371,7 +371,7 @@
     },
     "packages/blobstore-fs": {
       "name": "@helipod/blobstore-fs",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/blobstore": "workspace:*",
       },
@@ -384,7 +384,7 @@
     },
     "packages/blobstore-r2": {
       "name": "@helipod/blobstore-r2",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/blobstore": "workspace:*",
       },
@@ -398,7 +398,7 @@
     },
     "packages/blobstore-s3": {
       "name": "@helipod/blobstore-s3",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@aws-sdk/client-s3": "catalog:",
         "@aws-sdk/s3-request-presigner": "catalog:",
@@ -413,7 +413,7 @@
     },
     "packages/cli": {
       "name": "@helipod/cli",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "bin": {
         "helipod": "./dist/bin.js",
       },
@@ -467,7 +467,7 @@
     },
     "packages/client": {
       "name": "@helipod/client",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/id-codec": "workspace:*",
         "@helipod/index-key-codec": "workspace:*",
@@ -499,7 +499,7 @@
     },
     "packages/codegen": {
       "name": "@helipod/codegen",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/values": "workspace:*",
       },
@@ -512,7 +512,7 @@
     },
     "packages/component": {
       "name": "@helipod/component",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/errors": "workspace:*",
         "@helipod/executor": "workspace:*",
@@ -533,7 +533,7 @@
     },
     "packages/deploy": {
       "name": "@helipod/deploy",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
       },
@@ -546,7 +546,7 @@
     },
     "packages/docstore": {
       "name": "@helipod/docstore",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/id-codec": "workspace:*",
         "@helipod/values": "workspace:*",
@@ -560,7 +560,7 @@
     },
     "packages/docstore-d1": {
       "name": "@helipod/docstore-d1",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/values": "workspace:*",
       },
@@ -576,7 +576,7 @@
     },
     "packages/docstore-do-sqlite": {
       "name": "@helipod/docstore-do-sqlite",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore-sqlite": "workspace:*",
       },
@@ -593,7 +593,7 @@
     },
     "packages/docstore-postgres": {
       "name": "@helipod/docstore-postgres",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/id-codec": "workspace:*",
@@ -617,7 +617,7 @@
     },
     "packages/docstore-sqlite": {
       "name": "@helipod/docstore-sqlite",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/id-codec": "workspace:*",
@@ -633,7 +633,7 @@
     },
     "packages/errors": {
       "name": "@helipod/errors",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "devDependencies": {
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -642,7 +642,7 @@
     },
     "packages/executor": {
       "name": "@helipod/executor",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/docstore-d1": "workspace:*",
@@ -664,7 +664,7 @@
     },
     "packages/helipod": {
       "name": "helipod",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "bin": {
         "helipod": "./bin/helipod.js",
       },
@@ -682,7 +682,7 @@
     },
     "packages/id-codec": {
       "name": "@helipod/id-codec",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/index-key-codec": "workspace:*",
       },
@@ -694,7 +694,7 @@
     },
     "packages/index-key-codec": {
       "name": "@helipod/index-key-codec",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/values": "workspace:*",
       },
@@ -706,7 +706,7 @@
     },
     "packages/objectstore": {
       "name": "@helipod/objectstore",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "devDependencies": {
         "@types/node": "catalog:",
         "tsup": "catalog:",
@@ -716,7 +716,7 @@
     },
     "packages/objectstore-fs": {
       "name": "@helipod/objectstore-fs",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/objectstore": "workspace:*",
       },
@@ -729,7 +729,7 @@
     },
     "packages/objectstore-s3": {
       "name": "@helipod/objectstore-s3",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@aws-sdk/client-s3": "catalog:",
         "@helipod/objectstore": "workspace:*",
@@ -743,7 +743,7 @@
     },
     "packages/query-engine": {
       "name": "@helipod/query-engine",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/id-codec": "workspace:*",
@@ -759,7 +759,7 @@
     },
     "packages/receipts": {
       "name": "@helipod/receipts",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/docstore": "workspace:*",
@@ -775,7 +775,7 @@
     },
     "packages/runtime-cloudflare": {
       "name": "@helipod/runtime-cloudflare",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/admin": "workspace:*",
         "@helipod/blobstore": "workspace:*",
@@ -806,7 +806,7 @@
     },
     "packages/runtime-embedded": {
       "name": "@helipod/runtime-embedded",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/component": "workspace:*",
         "@helipod/docstore": "workspace:*",
@@ -831,7 +831,7 @@
     },
     "packages/storage": {
       "name": "@helipod/storage",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/blobstore": "workspace:*",
         "@helipod/component": "workspace:*",
@@ -851,7 +851,7 @@
     },
     "packages/sync": {
       "name": "@helipod/sync",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/errors": "workspace:*",
         "@helipod/index-key-codec": "workspace:*",
@@ -872,7 +872,7 @@
     },
     "packages/test": {
       "name": "@helipod/test",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/blobstore-fs": "workspace:*",
         "@helipod/client": "workspace:*",
@@ -896,7 +896,7 @@
     },
     "packages/transactor": {
       "name": "@helipod/transactor",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "dependencies": {
         "@helipod/docstore": "workspace:*",
         "@helipod/errors": "workspace:*",
@@ -913,7 +913,7 @@
     },
     "packages/values": {
       "name": "@helipod/values",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "devDependencies": {
         "tsup": "catalog:",
         "typescript": "catalog:",
@@ -922,7 +922,7 @@
     },
     "packages/vite": {
       "name": "@helipod/vite",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "devDependencies": {
         "@helipod/cli": "workspace:*",
         "@helipod/client": "workspace:*",
