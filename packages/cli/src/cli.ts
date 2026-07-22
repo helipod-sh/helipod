@@ -103,6 +103,10 @@ export async function devCommand(args: string[]): Promise<number> {
     if (opts.webDir) process.stdout.write(`web UI → ${server.url}/\n`);
   }
 
+  // The live module map, refreshed on every hot reload — the runner reads each
+  // function's args validator from here.
+  let currentModules: Record<string, unknown> = project.moduleMap as Record<string, unknown>;
+
   // The interactive terminal dashboard (@helipod/tui, OpenTUI): Bun + TTY only, dynamic
   // import so @helipod/cli carries no static dependency on it (the @helipod/fleet seam
   // pattern). Any failure — package absent, Node without FFI — falls back silently to
@@ -125,7 +129,17 @@ export async function devCommand(args: string[]): Promise<number> {
         admin: {
           listTables: () => adminApi.listTables(),
           getTableData: (t, o) => adminApi.getTableData(t, o),
-          listFunctions: () => adminApi.listFunctions(),
+          // Enrich the manifest listing with each function's own args validator
+          // (the module map holds the real `argsJson`; the manifest carries only
+          // name+type), so the runner's form is generated from the same metadata
+          // codegen types against and can never drift from the code.
+          listFunctions: () =>
+            adminApi.listFunctions().map((f) => {
+              const mod = currentModules[f.path] as { argsJson?: unknown } | undefined;
+              return mod?.argsJson ? { ...f, argsType: mod.argsJson } : f;
+            }),
+          runFunction: (p, a) => adminApi.runFunction(p, a as never),
+          queryLogs: (f) => adminApi.queryLogs(f),
           getSchema: () => adminApi.getSchema(),
         },
         counts: () => ({
@@ -159,6 +173,7 @@ export async function devCommand(args: string[]): Promise<number> {
         writeGenerated(next.generated.files, generatedDir);
         // Re-apply the always-on `_storage:*` built-ins: `setModules` replaces `modules` wholesale.
         runtime.setModules(withStorageModules(next.project.moduleMap));
+        currentModules = next.project.moduleMap as Record<string, unknown>;
         server.setRoutes(next.project.routes);
         // The admin API is the third consumer of the reloaded project (issue #1): without this,
         // `/_admin/functions` and the dashboard keep serving the boot-time manifest/schema.

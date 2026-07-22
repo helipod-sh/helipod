@@ -45,6 +45,18 @@ export interface TuiPage {
 export interface TuiFunction {
   path: string;
   kind: string;
+  /** The function's own `args` validator, as JSON — what codegen types from. */
+  argsType?: unknown;
+}
+
+export interface TuiLogEntry {
+  id: number;
+  path: string;
+  kind: string;
+  ts: number;
+  durationMs: number;
+  status: "ok" | "error";
+  error?: string;
 }
 
 /** Optional data surface — present when the host has an admin API (i.e. `helipod dev`). */
@@ -52,6 +64,8 @@ export interface TuiData {
   listTables: () => Promise<TuiTable[]>;
   getTableData: (table: string, opts?: { cursor?: string | null; pageSize?: number }) => Promise<TuiPage>;
   listFunctions: () => TuiFunction[];
+  runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
+  queryLogs: (filter?: { limit?: number }) => TuiLogEntry[];
   schema: () => { tables: Record<string, { fields?: unknown; indexes?: Array<{ indexDescriptor: string }> }> };
 }
 

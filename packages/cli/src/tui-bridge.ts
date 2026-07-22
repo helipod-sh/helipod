@@ -26,7 +26,9 @@ export interface AttachOptions {
   admin: {
     listTables: () => Promise<Array<{ name: string; documentCount: number; indexes: string[]; shardKey?: string }>>;
     getTableData: (t: string, o?: { cursor?: string | null; pageSize?: number }) => Promise<unknown>;
-    listFunctions: () => Array<{ path: string; kind: string }>;
+    listFunctions: () => Array<{ path: string; kind: string; argsType?: unknown }>;
+    runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
+    queryLogs: (f?: { limit?: number }) => ReadonlyArray<unknown>;
     getSchema: () => { schemaJson: unknown };
   };
 }
@@ -63,6 +65,8 @@ export async function attachTui(opts: AttachOptions): Promise<(e: AnyTuiEvent) =
       listTables: () => opts.admin.listTables(),
       getTableData: (t, o) => opts.admin.getTableData(t, o) as Promise<never>,
       listFunctions: () => opts.admin.listFunctions(),
+      runFunction: (p, a) => opts.admin.runFunction(p, a),
+      queryLogs: (f) => opts.admin.queryLogs(f) as never,
       schema: () => opts.admin.getSchema().schemaJson as never,
     },
     onEvent: (cb) => {

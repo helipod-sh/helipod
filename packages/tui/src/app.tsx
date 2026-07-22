@@ -18,15 +18,19 @@ import { helipodTheme } from "@/lib/terminal-themes/helipod";
 import { OverviewScreen } from "./screens/overview";
 import { DataScreen } from "./screens/data";
 import { FunctionsScreen } from "./screens/functions";
+import { LogsScreen } from "./screens/logs";
+import { SchemaScreen } from "./screens/schema";
 import type { TuiBridge } from "./bridge";
 
-const SCREENS = ["overview", "data", "functions"] as const;
+const SCREENS = ["overview", "data", "functions", "logs", "schema"] as const;
 type Screen = (typeof SCREENS)[number];
 
 const HINTS: Array<[key: string, label: string]> = [
   ["1", "overview"],
   ["2", "data"],
   ["3", "functions"],
+  ["4", "logs"],
+  ["5", "schema"],
   ["o", "browser"],
   ["q", "quit"],
 ];
@@ -61,6 +65,8 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
     else if (key.name === "1") setScreen("overview");
     else if (key.name === "2") setScreen("data");
     else if (key.name === "3") setScreen("functions");
+    else if (key.name === "4") setScreen("logs");
+    else if (key.name === "5") setScreen("schema");
   });
 
   return (
@@ -76,7 +82,9 @@ function Frame({ bridge }: { bridge: TuiBridge }) {
       <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1}>
         {screen === "overview" && <OverviewScreen bridge={bridge} />}
         {screen === "data" && <DataScreen bridge={bridge} active={screen === "data"} />}
-        {screen === "functions" && <FunctionsScreen bridge={bridge} />}
+        {screen === "functions" && <FunctionsScreen bridge={bridge} active={screen === "functions"} />}
+        {screen === "logs" && <LogsScreen bridge={bridge} active={screen === "logs"} />}
+        {screen === "schema" && <SchemaScreen bridge={bridge} />}
       </box>
       {/* status bar, pinned to the bottom */}
       <StatusBar screen={screen} />
