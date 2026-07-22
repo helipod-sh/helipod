@@ -19,6 +19,8 @@ export interface AttachOptions {
   adminKeyPreview: string;
   functionsDir: string;
   storage: string;
+  /** helipod's own version — never the host app's `npm_package_version`. */
+  version: string;
   counts: () => { functions: number; tables: number; components: number };
 }
 
@@ -47,7 +49,7 @@ export async function attachTui(opts: AttachOptions): Promise<(e: AnyTuiEvent) =
       adminKeyPreview: opts.adminKeyPreview,
       functionsDir: opts.functionsDir,
       storage: opts.storage,
-      version: process.env.npm_package_version ?? "dev",
+      version: opts.version,
     },
     counts: opts.counts,
     onEvent: (cb) => {

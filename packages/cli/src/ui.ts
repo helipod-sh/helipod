@@ -43,8 +43,7 @@ export const sym = {
 } as const;
 
 /** `◆ helipod v0.1.4` header for run-and-exit commands. */
-export function banner(subtitle?: string): string {
-  const version = process.env.npm_package_version ?? "";
+export function banner(subtitle?: string, version = ""): string {
   const parts = [`${sym.mark} ${bold("helipod")}`, version ? dim(`v${version}`) : "", subtitle ? dim(subtitle) : ""];
   return parts.filter(Boolean).join(" ");
 }

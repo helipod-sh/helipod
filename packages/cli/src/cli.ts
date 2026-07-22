@@ -3,11 +3,12 @@
  * engine, serves HTTP, and hot-reloads on change. `codegen` just regenerates types.
  */
 import { watch as fsWatch } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { writeGenerated } from "@helipod/codegen";
 import { generateAdminKey } from "@helipod/admin";
 import { resolveDevOptions, type DevOptions } from "./dev-options";
 import * as ui from "./ui";
+import { CLI_VERSION } from "./version";
 import { loadFunctionsDir } from "./load-modules";
 import { resolveFunctionsDir, ensureFunctionsDirExists } from "./functions-dir";
 import { loadConfig } from "./load-config";
@@ -88,7 +89,7 @@ export async function devCommand(args: string[]): Promise<number> {
       ["Admin key", `${adminKey.slice(0, 7)}…${adminKey.slice(-4)} ${ui.dim("(full key: HELIPOD_ADMIN_KEY or plain output)")}`],
     ];
     if (opts.webDir) rows.push(["Web UI", ui.cyan(`${server.url}/`)]);
-    process.stdout.write(`\n${ui.banner("dev")}\n\n${ui.keyValues(rows)}\n\n`);
+    process.stdout.write(`\n${ui.banner("dev", CLI_VERSION)}\n\n${ui.keyValues(rows)}\n\n`);
     process.stdout.write(
       ui.status("ok", `${fnCount} functions · ${tableCount} tables · ${componentCount} components`) + "\n",
     );
@@ -117,8 +118,9 @@ export async function devCommand(args: string[]): Promise<number> {
         url: server.url,
         dashboardUrl: dashboard ? `${server.url}/_dashboard` : null,
         adminKeyPreview: `${adminKey.slice(0, 7)}…${adminKey.slice(-4)}`,
-        functionsDir: opts.functionsDir,
+        functionsDir: relative(process.cwd(), opts.functionsDir) || opts.functionsDir,
         storage: opts.databaseUrl ? "postgres" : "sqlite",
+        version: CLI_VERSION,
         counts: () => ({
           functions: Object.keys(project.moduleMap).length,
           tables: Object.keys(project.tableNumbers).length,
