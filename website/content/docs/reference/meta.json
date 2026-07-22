@@ -1,1 +1,1 @@
-{ "title": "Reference", "icon": "BookText", "pages": ["cli", "testing", "migrate-from-convex", "configuration", "faq", "glossary"] }
+{"title": "Reference", "icon": "BookText", "pages": ["testing", "migrate-from-convex", "configuration", "faq", "glossary"]}
