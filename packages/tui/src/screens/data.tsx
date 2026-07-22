@@ -121,6 +121,19 @@ export function DataScreen({
 
   const docsRef = page?.documents ?? [];
 
+  // Live: the engine announces every commit and the tables it touched. A write to
+  // the table on screen reloads its page; any write refreshes the row counts.
+  // This is the same fan-out that pushes updates to subscribed clients — the
+  // dashboard is a reactive client of its own engine, not a poller.
+  useEffect(() => {
+    if (!active || !data?.onCommit) return;
+    return data.onCommit((written) => {
+      void data.listTables().then(setTables).catch(() => {});
+      if (table && written.includes(table.name)) load(table.name, filter, cursors[cursors.length - 1] ?? null);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, data, table?.name, filter, cursors]);
+
   useKeyboard((key) => {
     if (!active) return;
 

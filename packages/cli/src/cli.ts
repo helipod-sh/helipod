@@ -106,6 +106,7 @@ export async function devCommand(args: string[]): Promise<number> {
   // The live module map, refreshed on every hot reload — the runner reads each
   // function's args validator from here.
   let currentModules: Record<string, unknown> = project.moduleMap as Record<string, unknown>;
+  let currentTableNumbers: Record<string, number> = project.tableNumbers;
 
   // The interactive terminal dashboard (@helipod/tui, OpenTUI): Bun + TTY only, dynamic
   // import so @helipod/cli carries no static dependency on it (the @helipod/fleet seam
@@ -140,6 +141,20 @@ export async function devCommand(args: string[]): Promise<number> {
             }),
           runFunction: (p, a) => adminApi.runFunction(p, a as never),
           queryLogs: (f) => adminApi.queryLogs(f),
+          // The engine's reactive fan-out — every committed write announces the
+          // tables it touched, which is exactly what the dashboard needs to stay
+          // live without polling.
+          // The fan-out identifies tables by NUMBER (verified against the real
+          // engine); the dashboard speaks names, so translate here using the
+          // live table-number map, which the hot-reload swap keeps current.
+          onCommit: (cb) =>
+            runtime.writeFanoutAdapter.subscribe((p) => {
+              const byNumber = new Map(
+                Object.entries(currentTableNumbers).map(([name, n]) => [String(n), name]),
+              );
+              const names = (p.tables ?? []).map((t) => byNumber.get(String(t)) ?? String(t));
+              cb(names, Number(p.commitTs ?? 0));
+            }),
           getSchema: () => adminApi.getSchema(),
         },
         counts: () => ({
@@ -174,6 +189,7 @@ export async function devCommand(args: string[]): Promise<number> {
         // Re-apply the always-on `_storage:*` built-ins: `setModules` replaces `modules` wholesale.
         runtime.setModules(withStorageModules(next.project.moduleMap));
         currentModules = next.project.moduleMap as Record<string, unknown>;
+        currentTableNumbers = next.project.tableNumbers;
         server.setRoutes(next.project.routes);
         // The admin API is the third consumer of the reloaded project (issue #1): without this,
         // `/_admin/functions` and the dashboard keep serving the boot-time manifest/schema.

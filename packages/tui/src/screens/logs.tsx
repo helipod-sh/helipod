@@ -10,7 +10,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useTheme } from "@/components/ui/theme-provider";
 import type { TuiBridge, TuiLogEntry } from "../bridge";
 
-const POLL_MS = 700;
+const POLL_MS = 2_000; // safety tick for read-only traffic; commits push instantly
 const CHROME_ROWS = 7;
 
 function clock(ts: number): string {
@@ -39,9 +39,11 @@ export function LogsScreen({ bridge, active }: { bridge: TuiBridge; active: bool
     };
     tick();
     const id = setInterval(tick, POLL_MS);
+    const off = bridge.data.onCommit?.(() => tick());
     return () => {
       alive = false;
       clearInterval(id);
+      off?.();
     };
   }, [active, bridge.data]);
 

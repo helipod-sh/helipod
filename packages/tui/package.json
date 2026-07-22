@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'test/*.tsx' --exclude 'test/load.test.ts' --passWithNoTests --testTimeout=60000 --hookTimeout=60000 && bun test ./test/frame.test.tsx ./test/load.test.ts ./test/data-default.test.tsx ./test/interactions.test.tsx",
+    "test": "vitest run --exclude 'test/*.tsx' --exclude 'test/load.test.ts' --passWithNoTests --testTimeout=60000 --hookTimeout=60000 && bun test ./test/frame.test.tsx ./test/load.test.ts ./test/data-default.test.tsx ./test/interactions.test.tsx ./test/live.test.tsx",
     "vendor": "bun scripts/vendor.mjs",
     "clean": "rm -rf dist"
   },

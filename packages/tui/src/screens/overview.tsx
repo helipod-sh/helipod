@@ -20,7 +20,7 @@ const RING_MAX = 500;
 const CHROME_ROWS = 18;
 const BUCKETS = 24;
 const BUCKET_MS = 5_000;
-const METRICS_MS = 1_000;
+const METRICS_MS = 3_000; // safety tick — reads do not commit, so they need one
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
@@ -54,7 +54,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
     });
     return () => {
       if (timer) clearTimeout(timer);
-      off();
+      off?.();
     };
   }, [bridge]);
 
@@ -72,9 +72,13 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
     };
     tick();
     const id = setInterval(tick, METRICS_MS);
+    // Every commit updates the metrics immediately; the interval only catches
+    // read-only traffic, which never reaches the write fan-out.
+    const off = bridge.data.onCommit?.(() => tick());
     return () => {
       alive = false;
       clearInterval(id);
+      off?.();
     };
   }, [active, bridge.data]);
 

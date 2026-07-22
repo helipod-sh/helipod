@@ -73,6 +73,13 @@ export interface TuiData {
   listFunctions: () => TuiFunction[];
   runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
   queryLogs: (filter?: { limit?: number }) => TuiLogEntry[];
+  /**
+   * Live commit notifications: fires after every committed write with the tables
+   * it touched. This is the engine's own reactive fan-out — the same signal that
+   * pushes updates to subscribed clients — so the dashboard refreshes when data
+   * actually changes instead of polling.
+   */
+  onCommit?: (cb: (tables: string[], commitTs: number) => void) => () => void;
   schema: () => { tables: Record<string, { fields?: unknown; indexes?: Array<{ indexDescriptor: string }> }> };
 }
 

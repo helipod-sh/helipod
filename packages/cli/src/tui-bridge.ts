@@ -29,6 +29,8 @@ export interface AttachOptions {
     listFunctions: () => Array<{ path: string; kind: string; argsType?: unknown }>;
     runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
     queryLogs: (f?: { limit?: number }) => ReadonlyArray<unknown>;
+    /** Subscribe to the engine's write fan-out (tables touched per commit). */
+    onCommit: (cb: (tables: string[], commitTs: number) => void) => () => void;
     getSchema: () => { schemaJson: unknown };
   };
 }
@@ -67,6 +69,7 @@ export async function attachTui(opts: AttachOptions): Promise<(e: AnyTuiEvent) =
       listFunctions: () => opts.admin.listFunctions(),
       runFunction: (p, a) => opts.admin.runFunction(p, a),
       queryLogs: (f) => opts.admin.queryLogs(f) as never,
+      onCommit: (cb) => opts.admin.onCommit(cb),
       schema: () => opts.admin.getSchema().schemaJson as never,
     },
     onEvent: (cb) => {
