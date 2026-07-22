@@ -96,6 +96,10 @@ export async function devCommand(args: string[]): Promise<number> {
         // Re-apply the always-on `_storage:*` built-ins: `setModules` replaces `modules` wholesale.
         runtime.setModules(withStorageModules(next.project.moduleMap));
         server.setRoutes(next.project.routes);
+        // The admin API is the third consumer of the reloaded project (issue #1): without this,
+        // `/_admin/functions` and the dashboard keep serving the boot-time manifest/schema.
+        // Mirrors the live-deploy path (deploy-apply.ts).
+        adminApi.setSchema(next.project.schemaJson, next.project.tableNumbers, next.project.manifest);
         process.stdout.write(`↻ pushed (${Object.keys(next.project.moduleMap).length} functions)\n`);
       } catch (e) {
         process.stderr.write(`✗ reload failed: ${e instanceof Error ? e.message : String(e)}\n`);
