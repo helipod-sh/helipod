@@ -6,7 +6,7 @@
  * Only one server-side page is ever held in memory; navigating tables discards
  * the previous page rather than accumulating them.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { DataTable } from "@/components/data-table";
 import { useTheme } from "@/components/ui/theme-provider";
@@ -35,7 +35,17 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
   const [error, setError] = useState<string | null>(null);
 
   const data = bridge.data;
-  const table = tables[selected];
+
+  // App tables first, then component/system tables (`_storage`, `triggers/cursors`).
+  // Sorting raw table names put underscore-prefixed internals at the top, so the
+  // screen opened on an empty system table and looked broken.
+  const ordered = useMemo(() => {
+    const isInternal = (n: string) => n.startsWith("_") || n.includes("/");
+    const app = tables.filter((t) => !isInternal(t.name));
+    const internal = tables.filter((t) => isInternal(t.name));
+    return { app, internal, all: [...app, ...internal] };
+  }, [tables]);
+  const table = ordered.all[selected];
 
   // Table list: refreshed whenever this screen becomes active (counts move as
   // mutations commit) — not polled, so an idle dashboard is idle.
@@ -44,7 +54,15 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
     let alive = true;
     data
       .listTables()
-      .then((t) => alive && setTables(t))
+      .then((t) => {
+        if (!alive) return;
+        setTables(t);
+        // Open on something worth looking at: the first app table with rows.
+        const isInternal = (n: string) => n.startsWith("_") || n.includes("/");
+        const app = t.filter((x) => !isInternal(x.name));
+        const firstWithRows = app.findIndex((x) => x.documentCount > 0);
+        setSelected(firstWithRows >= 0 ? firstWithRows : 0);
+      })
       .catch((e) => alive && setError(String(e?.message ?? e)));
     return () => {
       alive = false;
@@ -68,8 +86,8 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
   }, [active, table, load]);
 
   useKeyboard((key) => {
-    if (!active || tables.length === 0) return;
-    if (key.name === "j" || key.name === "down") setSelected((i) => Math.min(tables.length - 1, i + 1));
+    if (!active || ordered.all.length === 0) return;
+    if (key.name === "j" || key.name === "down") setSelected((i) => Math.min(ordered.all.length - 1, i + 1));
     else if (key.name === "k" || key.name === "up") setSelected((i) => Math.max(0, i - 1));
     else if (key.name === "r" && table) load(table.name);
   });
@@ -95,13 +113,21 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
       {/* table list */}
       <box flexDirection="column" width={listWidth} flexShrink={0}>
         <text fg={theme.colors.mutedForeground}>{`tables  ${tables.length}`}</text>
-        {tables.slice(0, rowsVisible).map((t, i) => (
-          <text key={t.name}>
-            <span fg={i === selected ? theme.colors.primary : theme.colors.foreground}>
-              {`${i === selected ? "▸ " : "  "}${t.name.slice(0, 16).padEnd(17)}`}
-            </span>
-            <span fg={theme.colors.border}>{String(t.documentCount)}</span>
-          </text>
+        {ordered.app.length ? <text fg={theme.colors.border}>{"app"}</text> : null}
+        {ordered.all.slice(0, rowsVisible).map((t, i) => (
+          <box key={t.name} flexDirection="column">
+            {i === ordered.app.length && ordered.internal.length ? (
+              <text fg={theme.colors.border}>{"system"}</text>
+            ) : null}
+            <text>
+              <span fg={i === selected ? theme.colors.primary : theme.colors.foreground}>
+                {`${i === selected ? " ▸ " : "   "}${t.name.slice(0, 16).padEnd(17)}`}
+              </span>
+              <span fg={t.documentCount ? theme.colors.mutedForeground : theme.colors.border}>
+                {String(t.documentCount)}
+              </span>
+            </text>
+          </box>
         ))}
       </box>
 
@@ -118,7 +144,9 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
         ) : !page ? (
           <text fg={theme.colors.border}>{"loading…"}</text>
         ) : docs.length === 0 ? (
-          <text fg={theme.colors.border}>{"(empty table)"}</text>
+          <text fg={theme.colors.border}>
+            {`no documents in ${table?.name ?? "this table"} yet — write one from your app or the runner`}
+          </text>
         ) : (
           <box flexDirection="column">
             <DataTable
