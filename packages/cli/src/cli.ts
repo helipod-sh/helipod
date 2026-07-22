@@ -128,7 +128,7 @@ export async function devCommand(args: string[]): Promise<number> {
         version: CLI_VERSION,
         admin: {
           listTables: () => adminApi.listTables(),
-          getTableData: (t, o) => adminApi.getTableData(t, o),
+          getTableData: (t, o) => adminApi.getTableData(t, o as never),
           // Enrich the manifest listing with each function's own args validator
           // (the module map holds the real `argsJson`; the manifest carries only
           // name+type), so the runner's form is generated from the same metadata

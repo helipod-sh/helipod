@@ -62,7 +62,14 @@ export interface TuiLogEntry {
 /** Optional data surface — present when the host has an admin API (i.e. `helipod dev`). */
 export interface TuiData {
   listTables: () => Promise<TuiTable[]>;
-  getTableData: (table: string, opts?: { cursor?: string | null; pageSize?: number }) => Promise<TuiPage>;
+  getTableData: (
+    table: string,
+    opts?: {
+      cursor?: string | null;
+      pageSize?: number;
+      filter?: Array<{ field: string; op: string; value: unknown }>;
+    },
+  ) => Promise<TuiPage>;
   listFunctions: () => TuiFunction[];
   runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
   queryLogs: (filter?: { limit?: number }) => TuiLogEntry[];

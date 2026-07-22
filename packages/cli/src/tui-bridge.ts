@@ -25,7 +25,7 @@ export interface AttachOptions {
   /** The live admin API — the same surface the web dashboard consumes. */
   admin: {
     listTables: () => Promise<Array<{ name: string; documentCount: number; indexes: string[]; shardKey?: string }>>;
-    getTableData: (t: string, o?: { cursor?: string | null; pageSize?: number }) => Promise<unknown>;
+    getTableData: (t: string, o?: { cursor?: string | null; pageSize?: number; filter?: unknown }) => Promise<unknown>;
     listFunctions: () => Array<{ path: string; kind: string; argsType?: unknown }>;
     runFunction: (path: string, args: Record<string, unknown>) => Promise<{ value: unknown; committed: boolean }>;
     queryLogs: (f?: { limit?: number }) => ReadonlyArray<unknown>;

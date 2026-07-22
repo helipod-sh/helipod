@@ -26,13 +26,26 @@ function cell(v: unknown, width: number): string {
   return flat.length > width ? `${flat.slice(0, width - 1)}…` : flat.padEnd(width);
 }
 
-export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: boolean }) {
+export function DataScreen({
+  bridge,
+  active,
+  jumpTo,
+}: {
+  bridge: TuiBridge;
+  active: boolean;
+  /** Table the command palette asked for. */
+  jumpTo?: string | null;
+}) {
   const theme = useTheme();
   const { height, width } = useTerminalDimensions();
   const [tables, setTables] = useState<TuiTable[]>([]);
   const [selected, setSelected] = useState(0);
   const [page, setPage] = useState<TuiPage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [row, setRow] = useState(0);
+  const [inspecting, setInspecting] = useState(false);
+  const [filtering, setFiltering] = useState(false);
+  const [filter, setFilter] = useState("");
 
   const data = bridge.data;
 
@@ -70,26 +83,73 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
   }, [active, data]);
 
   const load = useCallback(
-    (name: string) => {
+    (name: string, expr = "") => {
       if (!data) return;
       setPage(null);
+      setRow(0);
+      setError(null);
+      // `field=value` — equality is what the admin browse query supports; anything
+      // else is treated as a free-text match applied to the returned page.
+      const eq = expr.match(/^\s*([A-Za-z_][\w.]*)\s*=\s*(.+?)\s*$/);
+      const filterArg = eq ? [{ field: eq[1]!, op: "eq", value: eq[2]! }] : undefined;
       data
-        .getTableData(name, { pageSize: PAGE_SIZE })
+        .getTableData(name, { pageSize: PAGE_SIZE, filter: filterArg })
         .then(setPage)
         .catch((e) => setError(String(e?.message ?? e)));
     },
     [data],
   );
 
+  // A palette jump selects that table once the list is loaded.
   useEffect(() => {
-    if (active && table) load(table.name);
+    if (!jumpTo) return;
+    const i = ordered.all.findIndex((t) => t.name === jumpTo);
+    if (i >= 0) setSelected(i);
+  }, [jumpTo, ordered.all]);
+
+  useEffect(() => {
+    if (active && table) load(table.name, filter);
+    // `filter` is applied explicitly on submit, not on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, table, load]);
 
+  const docsRef = page?.documents ?? [];
+
   useKeyboard((key) => {
-    if (!active || ordered.all.length === 0) return;
+    if (!active) return;
+
+    // Filter entry captures typing until submitted or cancelled.
+    if (filtering) {
+      if (key.name === "return") {
+        setFiltering(false);
+        if (table) load(table.name, filter);
+      } else if (key.name === "escape") {
+        setFiltering(false);
+        setFilter("");
+        if (table) load(table.name, "");
+      } else if (key.name === "backspace") {
+        setFilter((f) => f.slice(0, -1));
+      } else if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        setFilter((f) => f + key.sequence);
+      }
+      return;
+    }
+
+    if (inspecting) {
+      if (key.name === "escape" || key.name === "return" || key.name === "i") setInspecting(false);
+      else if (key.name === "j" || key.name === "down") setRow((r) => Math.min(docsRef.length - 1, r + 1));
+      else if (key.name === "k" || key.name === "up") setRow((r) => Math.max(0, r - 1));
+      return;
+    }
+
+    if (key.name === "f" || key.name === "/") return setFiltering(true);
+    if (key.name === "return" || key.name === "i") return setInspecting(docsRef.length > 0);
+    if (key.name === "J") return setRow((r) => Math.min(docsRef.length - 1, r + 1));
+    if (key.name === "K") return setRow((r) => Math.max(0, r - 1));
+    if (ordered.all.length === 0) return;
     if (key.name === "j" || key.name === "down") setSelected((i) => Math.min(ordered.all.length - 1, i + 1));
     else if (key.name === "k" || key.name === "up") setSelected((i) => Math.max(0, i - 1));
-    else if (key.name === "r" && table) load(table.name);
+    else if (key.name === "r" && table) load(table.name, filter);
   });
 
   if (!data) {
@@ -138,6 +198,13 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
           <span fg={theme.colors.border}>
             {table ? `   ${table.documentCount} rows${table.shardKey ? ` · shardBy ${table.shardKey}` : ""}` : ""}
           </span>
+          {filtering || filter ? (
+            <span fg={filtering ? theme.colors.primary : theme.colors.warning}>
+              {`   filter: ${filter}${filtering ? "█" : ""}`}
+            </span>
+          ) : (
+            <span fg={theme.colors.border}>{"   f filter · ⏎ inspect · J/K row"}</span>
+          )}
         </text>
         {error ? (
           <text fg={theme.colors.error}>{error}</text>
@@ -152,10 +219,26 @@ export function DataScreen({ bridge, active }: { bridge: TuiBridge; active: bool
             <DataTable
               columns={columns.map((c) => ({ key: c, header: c, width: colWidth }))}
               rows={docs}
+              selected={row}
               maxRows={Math.max(1, rowsVisible - 4)}
             />
             {page.scanCapped ? (
-              <text fg={theme.colors.warning}>{"⚠ scan capped — narrow the query to see the tail"}</text>
+              <text fg={theme.colors.warning}>{"⚠ scan capped — narrow the filter to see the tail"}</text>
+            ) : null}
+            {inspecting && docs[row] ? (
+              <box flexDirection="column" borderColor={theme.colors.primary} paddingLeft={1} paddingRight={1}>
+                <text fg={theme.colors.mutedForeground}>
+                  {`document ${row + 1}/${docs.length}   esc close · J/K row`}
+                </text>
+                {Object.entries(docs[row]!).map(([k, val]) => (
+                  <text key={k}>
+                    <span fg={theme.colors.info}>{`${k}`.padEnd(18)}</span>
+                    <span fg={theme.colors.foreground}>
+                      {(typeof val === "object" && val !== null ? JSON.stringify(val) : String(val)).slice(0, 70)}
+                    </span>
+                  </text>
+                ))}
+              </box>
             ) : null}
           </box>
         )}
