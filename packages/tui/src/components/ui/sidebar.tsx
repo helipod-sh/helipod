@@ -17,10 +17,6 @@ export interface SidebarProps {
   activeKey?: string;
   onSelect?: (key: string) => void;
   collapsed?: boolean;
-  /** helipod addition: the component registers a GLOBAL key handler that owns
-   *  ↑/↓/⏎, which stole Enter from the focused screen (the row inspector never
-   *  opened). Off by default here; navigation is driven by number keys. */
-  keyboard?: boolean;
   width?: number;
   title?: string;
 }
@@ -50,7 +46,6 @@ export const Sidebar = ({
   items,
   activeKey,
   onSelect,
-  keyboard = false,
   collapsed = false,
   width = 20,
   title,
@@ -75,7 +70,6 @@ export const Sidebar = ({
   };
 
   useKeyboard((key) => {
-    if (!keyboard) return;
     if (key.name === "up") {
       setFocusIndex((prev) => Math.max(0, prev - 1));
     } else if (key.name === "down") {

@@ -22,6 +22,7 @@ const WANT = [
   "opentui/table", "opentui/card", "opentui/panel",
   "opentui/tabs", "opentui/progress-bar", "opentui/definition", "opentui/tree",
   "opentui/sidebar", "opentui/command-palette", "opentui/pagination", "opentui/breadcrumb",
+  "opentui/bar-chart", "opentui/line-chart", "opentui/gauge",
 ];
 
 const seen = new Set();

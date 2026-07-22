@@ -11,13 +11,17 @@ import { useEffect, useMemo, useState } from "react";
 import { useTerminalDimensions } from "@opentui/react";
 import { Card } from "@/components/ui/card";
 import { Sparkline } from "@/components/ui/dither-sparkline";
+import { BarChart } from "@/components/ui/bar-chart";
+import { LineChart } from "@/components/ui/line-chart";
+import { Gauge } from "@/components/ui/gauge";
 import { useTheme } from "@/components/ui/theme-provider";
 import { Activity, type ActivityRow } from "@/components/activity";
 import type { TuiBridge, TuiEvent, TuiLogEntry } from "../bridge";
 
 const SIDEBAR_ALLOWANCE = 20; // sidebar (16) + content padding
 const RING_MAX = 500;
-const CHROME_ROWS = 18;
+const CHROME_BASE = 18; // header + info cards + labels + status bar
+const CHART_ROWS = 9; // the chart row, when it is shown
 const BUCKETS = 24;
 const BUCKET_MS = 5_000;
 const METRICS_MS = 3_000; // safety tick — reads do not commit, so they need one
@@ -99,7 +103,18 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
       if (l.status === "error") errors++;
     }
     durations.sort((a, b) => a - b);
+    // Latency buckets for the histogram — fixed edges so the shape is comparable
+    // between refreshes rather than rescaling on every sample.
+    const edges = [1, 5, 10, 25, 50, Infinity];
+    const labels = ["<1", "<5", "<10", "<25", "<50", "50+"];
+    const buckets = edges.map(() => 0);
+    for (const d of durations) {
+      const i = edges.findIndex((e) => d < e);
+      buckets[i === -1 ? edges.length - 1 : i]! += 1;
+    }
     return {
+      histogram: labels.map((label, i) => ({ label, value: buckets[i] ?? 0 })),
+      successRate: logs.length ? Math.round(((logs.length - errors) / logs.length) * 100) : 100,
       series,
       byKind: [...byKind.entries()].sort((a, b) => b[1] - a[1]),
       p50: percentile(durations, 0.5),
@@ -130,6 +145,8 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
   // Explicit widths: flexGrow did not resolve through the sidebar/content nesting,
   // leaving the cards short of the right edge. The terminal width is known, so
   // computing the split is both simpler and exact (last card absorbs the remainder).
+  // Charts need vertical room; on a short terminal the activity feed wins.
+  const showCharts = metrics.total > 0 && height >= 30;
   const usable = width - SIDEBAR_ALLOWANCE;
   const cardW = Math.max(18, Math.floor(usable / 3));
   const lastW = Math.max(18, usable - cardW * 2);
@@ -206,19 +223,34 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
             <span fg={theme.colors.foreground}>{`${metrics.recent} calls`}</span>
           </text>
           {metrics.recent > 0 ? (
-            <Sparkline
-              data={metrics.series}
-              // The chart palette is a named set, not free-form hex; "pink" is the
-              // closest to the helipod crimson.
-              color="pink"
-              width={Math.max(8, lastW - 6)}
-              height={2}
-            />
+            <Sparkline data={metrics.series} color="pink" width={Math.max(8, lastW - 6)} height={2} />
           ) : (
             <text fg={theme.colors.border}>{"no calls in the last 2 minutes"}</text>
           )}
         </Card>
       </box>
+
+      {showCharts ? (
+        <box flexDirection="row" flexShrink={0} paddingTop={1}>
+          <Card title="calls / 5s" width={cardW}>
+            <LineChart
+              data={metrics.series}
+              width={cardW - 6}
+              height={5}
+              color={theme.colors.primary}
+              showAxes
+            />
+          </Card>
+          <Card title="latency (ms)" width={cardW}>
+            <BarChart data={metrics.histogram} width={cardW - 6} height={5} showValues />
+          </Card>
+          <Card title="success rate" width={lastW}>
+            <Gauge value={metrics.successRate} min={0} max={100} label={`${metrics.successRate}%`}
+                   color={metrics.successRate === 100 ? theme.colors.success : theme.colors.warning} />
+            <text fg={theme.colors.border}>{`${metrics.total - metrics.errors}/${metrics.total} ok`}</text>
+          </Card>
+        </box>
+      ) : null}
 
       <box flexDirection="column" flexGrow={1} paddingTop={1}>
         <text>
@@ -228,7 +260,7 @@ export function OverviewScreen({ bridge, active }: { bridge: TuiBridge; active: 
         {rows.length === 0 ? (
           <text fg={theme.colors.border}>{"waiting — save a file in the functions dir to hot-reload…"}</text>
         ) : (
-          <Activity rows={rows} height={Math.max(1, height - CHROME_ROWS)} />
+          <Activity rows={rows} height={Math.max(1, height - CHROME_BASE - (showCharts ? CHART_ROWS : 0))} />
         )}
       </box>
     </box>

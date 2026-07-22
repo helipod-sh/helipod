@@ -5,8 +5,6 @@ import { useTheme } from "@/components/ui/theme-provider";
 import type { BorderStyle } from "@/components/ui/types";
 
 export interface CardProps {
-  /** helipod patch: upstream declares `width` but never applies it, so cards
-   *  sized to their content and left a gap at the right edge. */
   title?: string;
   subtitle?: string;
   children: ReactNode;

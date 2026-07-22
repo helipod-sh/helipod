@@ -6,6 +6,10 @@
     "jsx": "react-jsx",
     "jsxImportSource": "@opentui/react",
     "moduleResolution": "bundler",
+    // Vendored termcn components index arrays directly (`data[i]`), which this
+    // flag rejects. Relaxed for this package only; our own modules still run
+    // under every other strict check.
+    "noUncheckedIndexedAccess": false,
     "types": ["node"],
     "paths": { "@/*": ["./src/*"] }
   },
