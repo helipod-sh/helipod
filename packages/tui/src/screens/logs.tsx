@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useTheme } from "@/components/ui/theme-provider";
+import { coalesce } from "@/lib/coalesce";
 import type { TuiBridge, TuiLogEntry } from "../bridge";
 
 const POLL_MS = 2_000; // safety tick for read-only traffic; commits push instantly
@@ -39,10 +40,12 @@ export function LogsScreen({ bridge, active }: { bridge: TuiBridge; active: bool
     };
     tick();
     const id = setInterval(tick, POLL_MS);
-    const off = bridge.data.onCommit?.(() => tick());
+    const commit = coalesce(tick, 200);
+    const off = bridge.data.onCommit?.(commit.call);
     return () => {
       alive = false;
       clearInterval(id);
+      commit.cancel();
       off?.();
     };
   }, [active, bridge.data]);

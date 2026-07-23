@@ -11,6 +11,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { DataTable } from "@/components/data-table";
 import { Pagination } from "@/components/ui/pagination";
 import { useTheme } from "@/components/ui/theme-provider";
+import { coalesce } from "@/lib/coalesce";
 import type { TuiBridge, TuiPage, TuiTable } from "../bridge";
 
 const PAGE_SIZE = 50;
@@ -127,10 +128,22 @@ export function DataScreen({
   // dashboard is a reactive client of its own engine, not a poller.
   useEffect(() => {
     if (!active || !data?.onCommit) return;
-    return data.onCommit((written) => {
+    // Coalesce a write burst: the row counts always refresh, and the visible
+    // table reloads if any suppressed commit touched it.
+    let touchedVisible = false;
+    const refresh = coalesce(() => {
       void data.listTables().then(setTables).catch(() => {});
-      if (table && written.includes(table.name)) load(table.name, filter, cursors[cursors.length - 1] ?? null);
+      if (touchedVisible && table) load(table.name, filter, cursors[cursors.length - 1] ?? null);
+      touchedVisible = false;
+    }, 200);
+    const off = data.onCommit((written) => {
+      if (table && written.includes(table.name)) touchedVisible = true;
+      refresh.call();
     });
+    return () => {
+      refresh.cancel();
+      off();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, data, table?.name, filter, cursors]);
 

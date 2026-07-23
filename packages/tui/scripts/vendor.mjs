@@ -16,13 +16,13 @@ const BASE = "https://www.termcn.dev/r";
 const ROOT = new URL("../src", import.meta.url).pathname;
 const WANT = [
   "opentui/types", "opentui/theme-provider", "opentui/theme-default",
-  "opentui/box", "opentui/badge", "opentui/spinner",
+  "opentui/badge", "opentui/spinner",
   "opentui/key-value", "opentui/info-box", "opentui/log",
   "opentui/app-shell", "opentui/dither-sparkline", "opentui/dither-bar-chart",
   "opentui/table", "opentui/card", "opentui/panel",
   "opentui/tabs", "opentui/progress-bar", "opentui/definition", "opentui/tree",
   "opentui/sidebar", "opentui/command-palette", "opentui/pagination", "opentui/breadcrumb",
-  "opentui/bar-chart", "opentui/line-chart", "opentui/gauge",
+  "opentui/bar-chart", "opentui/line-chart", "opentui/gauge", "opentui/dither-area-chart", "opentui/dither-line-chart",
 ];
 
 const seen = new Set();
