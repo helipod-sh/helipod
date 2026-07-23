@@ -6,35 +6,30 @@
  * Safe to re-run: already-published versions are skipped, so a release that
  * fails halfway can simply be run again.
  *
- * Auth: expects NPM_CONFIG_TOKEN in the environment (CI: the NPM_TOKEN secret).
+ * Auth model — OIDC primary, token only as a bootstrap crutch:
+ *   - Each package publishes via npm **trusted publishing (OIDC)** first, which
+ *     is tokenless and needs no secret in the environment.
+ *   - A brand-NEW package has no trusted publisher configured on npm yet, so
+ *     OIDC can't authenticate it (chicken-and-egg). If OIDC fails and
+ *     HELIPOD_NPM_FALLBACK_TOKEN is set (CI: the NPM_TOKEN secret), we retry
+ *     that one package with token auth. Existing packages never touch the token.
+ *   The token is passed as its own env var — NOT as NPM_TOKEN — so the
+ *   changesets action doesn't switch every package to token auth and OIDC stays
+ *   primary. After the new package's first publish, run
+ *   scripts/trust-publishers.sh to give it a trusted publisher; the token is
+ *   then unused again.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { publishablePackages } from "./list-publishable.mjs";
 
-const list = (base) =>
-  existsSync(base) ? readdirSync(base).map((d) => join(base, d)) : [];
-const dirs = [
-  ...list("packages"),
-  ...list("components"),
-  ...list("ee/packages"),
-  "apps/dashboard",
-].sort();
-
+// Shared with scripts/trust-publishers.sh so the published set and the
+// trusted-publisher set can never drift.
 const pkgs = new Map(); // name -> { dir, version, deps }
-for (const dir of dirs) {
-  const pj = join(dir, "package.json");
-  if (!existsSync(pj)) continue;
-  const p = JSON.parse(readFileSync(pj, "utf8"));
-  if (p.private) continue;
-  if (p.name !== "helipod" && !p.name?.startsWith("@helipod/")) continue;
-  const deps = new Set();
-  for (const k of ["dependencies", "devDependencies", "peerDependencies"]) {
-    for (const d of Object.keys(p[k] ?? {})) {
-      if (d === "helipod" || d.startsWith("@helipod/")) deps.add(d);
-    }
-  }
-  pkgs.set(p.name, { dir, version: p.version, deps });
+for (const p of publishablePackages()) {
+  pkgs.set(p.name, { dir: p.dir, version: p.version, deps: p.deps });
 }
 
 async function published(name, version) {
@@ -70,26 +65,53 @@ for (const [name, { dir, version }] of order) {
     continue;
   }
   console.log(`publish ${name}@${version} ...`);
-  // Pack with bun (rewrites workspace:* ranges to real versions), publish the
-  // tarball with npm (speaks OIDC trusted publishing; falls back to token auth
-  // when NPM_CONFIG_TOKEN / npm config auth is present).
+  // Pack with bun (rewrites workspace:* ranges to real versions), then publish
+  // the tarball with npm.
+  let tarball;
   try {
     const packOut = execFileSync("bun", ["pm", "pack"], { cwd: dir, encoding: "utf8" });
-    const tarball = packOut
+    tarball = packOut
       .split("\n")
       .map((l) => l.trim())
       .findLast((l) => l.endsWith(".tgz"));
     if (!tarball) throw new Error(`could not find tarball name in bun pm pack output`);
-    const publishArgs = ["publish", tarball, "--access", "public"];
-    if (process.env.NPM_CONFIG_PROVENANCE === "true") publishArgs.push("--provenance");
+  } catch (err) {
+    failures.push(name);
+    console.error(`PACK FAILED ${name}@${version}: ${err.message ?? err}`);
+    continue;
+  }
+
+  const publishArgs = ["publish", tarball, "--access", "public"];
+  if (process.env.NPM_CONFIG_PROVENANCE === "true") publishArgs.push("--provenance");
+
+  try {
+    // Primary: OIDC trusted publishing (tokenless). Works for every package that
+    // already has a trusted publisher configured on npm.
     execFileSync("npm", publishArgs, { cwd: dir, stdio: "inherit" });
     publishedCount++;
-  } catch (err) {
-    // Keep going: a per-package auth failure (e.g. missing trusted-publisher
-    // config) must not strand the packages after it in topo order. The script
-    // is re-runnable — fix the config and run again to finish the release.
-    failures.push(name);
-    console.error(`PUBLISH FAILED ${name}@${version}: ${err.message ?? err}`);
+  } catch (oidcErr) {
+    // OIDC couldn't authenticate — the usual cause is a brand-new package with
+    // no trusted publisher yet. Retry once with the bootstrap token if present.
+    const token = process.env.HELIPOD_NPM_FALLBACK_TOKEN;
+    if (!token) {
+      failures.push(name);
+      console.error(
+        `PUBLISH FAILED ${name}@${version} (OIDC failed, no HELIPOD_NPM_FALLBACK_TOKEN): ${oidcErr.message ?? oidcErr}`,
+      );
+      continue;
+    }
+    const rc = join(tmpdir(), `helipod-publish-${process.pid}.npmrc`);
+    try {
+      writeFileSync(rc, `//registry.npmjs.org/:_authToken=${token}\n`, { mode: 0o600 });
+      console.log(`  OIDC failed; retrying ${name} with the bootstrap token …`);
+      execFileSync("npm", [...publishArgs, "--userconfig", rc], { cwd: dir, stdio: "inherit" });
+      publishedCount++;
+    } catch (tokenErr) {
+      failures.push(name);
+      console.error(`PUBLISH FAILED ${name}@${version} (token fallback): ${tokenErr.message ?? tokenErr}`);
+    } finally {
+      rmSync(rc, { force: true });
+    }
   }
 }
 

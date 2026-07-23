@@ -107,6 +107,19 @@ feature, and doc change goes through a pull request, even trivial ones.
    a manual npm publish. Publishing is tokenless (OIDC trusted publishing)
    from the release workflow.
 
+**Adding a NEW published package** has a one-time bootstrap, because npm can't
+configure a trusted publisher for a package that doesn't exist on the registry
+yet. It's handled by two things — see `docs/dev/publishing.md` for the full flow:
+
+- The `NPM_TOKEN` repo secret lets `scripts/release.mjs` first-publish any new
+  package automatically (it falls back to token auth, continues past failures,
+  and is re-runnable) — **so the new package self-publishes on merge**.
+- Then run `scripts/trust-publishers.sh --apply` to add its trusted publisher so
+  future releases are tokenless again. The published set is derived from
+  `scripts/list-publishable.mjs` (shared with `release.mjs`), so it always covers
+  exactly what ships — never hand-maintain a package list. Folder layout is
+  irrelevant to publishing; npm sees names, not directories.
+
 ## Working conventions
 
 - **Two test lanes — keep them honest.** `bun run test` is the fast parallel

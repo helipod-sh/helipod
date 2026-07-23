@@ -58,5 +58,11 @@ jobs:
           title: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Publishing is OIDC-first (tokenless trusted publishing). We deliberately
+          # do NOT set NPM_TOKEN here: setting it makes the changesets action switch
+          # every package to token auth. Instead scripts/release.mjs reads this
+          # fallback var and uses the token ONLY to bootstrap a brand-new package
+          # that has no trusted publisher yet. (NPM_CONFIG_TOKEN — the old value —
+          # is not an auth var npm actually reads, so it was inert.)
+          HELIPOD_NPM_FALLBACK_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
