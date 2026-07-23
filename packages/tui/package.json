@@ -1,0 +1,45 @@
+{
+  "name": "@helipod/tui",
+  "version": "0.1.4",
+  "description": "The helipod terminal dashboard \u2014 OpenTUI-rendered, vendored termcn components, helipod dark theme.",
+  "type": "module",
+  "license": "FSL-1.1-Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude 'test/*.tsx' --exclude 'test/load.test.ts' --exclude 'test/coalesce.test.ts' --passWithNoTests --testTimeout=60000 --hookTimeout=60000 && bun test ./test/frame.test.tsx ./test/load.test.ts ./test/data-default.test.tsx ./test/interactions.test.tsx ./test/live.test.tsx ./test/coalesce.test.ts",
+    "vendor": "bun scripts/vendor.mjs",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.4.5",
+    "@opentui/react": "^0.4.5",
+    "react": "^19.0.0",
+    "cli-spinners": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "@types/node": "catalog:"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helipod-sh/helipod.git",
+    "directory": "packages/tui"
+  },
+  "homepage": "https://github.com/helipod-sh/helipod"
+}

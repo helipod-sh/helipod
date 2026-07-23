@@ -81,7 +81,8 @@
     "jose": "6.2.3",
     "tsup": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@helipod/tui": "workspace:*"
   },
   "publishConfig": {
     "access": "public"

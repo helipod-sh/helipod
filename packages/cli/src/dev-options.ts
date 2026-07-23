@@ -18,6 +18,8 @@ export interface DevOptions {
   /** File-storage backend flag overrides (`--storage-bucket`/`--storage-endpoint`; win over env). */
   storageBucket?: string;
   storageEndpoint?: string;
+  /** `--no-ui`: opt out of the interactive terminal dashboard in `dev`. */
+  noUi?: boolean;
 }
 
 export interface ResolvedDevOptions {

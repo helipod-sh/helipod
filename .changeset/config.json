@@ -45,7 +45,8 @@
       "@helipod/test",
       "@helipod/transactor",
       "@helipod/values",
-      "@helipod/vite"
+      "@helipod/vite",
+      "@helipod/tui"
     ]
   ],
   "linked": [],
