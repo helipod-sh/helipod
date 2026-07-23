@@ -1,5 +1,12 @@
 # @helipod/blobstore-s3
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/blobstore@0.1.5
+
 ## 0.1.4
 
 ### Patch Changes

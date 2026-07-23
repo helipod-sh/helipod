@@ -1,7 +1,7 @@
 {
   "name": "@helipod/tui",
-  "version": "0.1.4",
-  "description": "The helipod terminal dashboard \u2014 OpenTUI-rendered, vendored termcn components, helipod dark theme.",
+  "version": "0.1.5",
+  "description": "The helipod terminal dashboard — OpenTUI-rendered, vendored termcn components, helipod dark theme.",
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
   "exports": {

@@ -1,5 +1,24 @@
 # helipod
 
+## 0.1.5
+
+### Patch Changes
+
+- [#13](https://github.com/helipod-sh/helipod/pull/13) [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac) Thanks [@dbjpanda](https://github.com/dbjpanda)! - The helipod terminal dashboard (phase 1): a new `@helipod/tui` package —
+  OpenTUI-rendered, with vendored termcn components and the helipod dark theme
+  (the website's palette) — attaches automatically to `helipod dev` on an
+  interactive terminal under Bun. Ships the Overview screen (deployment facts,
+  project summary, live reload activity) with `o` open-dashboard and `q` quit
+  keys. Opt out with `--no-ui` or `HELIPOD_TUI=0`; non-TTY, CI, and Node hosts
+  keep the plain/styled output unchanged.
+- Updated dependencies [[`f171b07`](https://github.com/helipod-sh/helipod/commit/f171b07bb4cfb8ca76b3a0903ab0ed458354e281), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac), [`6e857cd`](https://github.com/helipod-sh/helipod/commit/6e857cd3338a8b9604ab1e4014740ab91567c6ac)]:
+  - @helipod/cli@0.1.5
+  - @helipod/executor@0.1.5
+  - @helipod/tui@0.1.5
+  - @helipod/client@0.1.5
+  - @helipod/component@0.1.5
+  - @helipod/values@0.1.5
+
 ## 0.1.4
 
 ### Patch Changes

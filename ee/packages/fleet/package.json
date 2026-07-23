@@ -1,6 +1,6 @@
 {
   "name": "@helipod/fleet",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "sideEffects": false,
