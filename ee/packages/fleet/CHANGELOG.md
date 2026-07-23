@@ -1,5 +1,19 @@
 # @helipod/fleet
 
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @helipod/docstore-postgres@0.1.5
+  - @helipod/runtime-embedded@0.1.5
+  - @helipod/docstore@0.1.5
+  - @helipod/docstore-sqlite@0.1.5
+  - @helipod/errors@0.1.5
+  - @helipod/id-codec@0.1.5
+  - @helipod/index-key-codec@0.1.5
+  - @helipod/values@0.1.5
+
 ## 0.1.4
 
 ### Patch Changes
